@@ -5,6 +5,7 @@
 //! the **event** store only, not the ANN backend.
 
 use super::drain::TemplateInfo;
+use super::parse::{ActiveTimestampBasis, TimestampProvenance};
 use super::redact_log::RedactedOriginal;
 use crate::error::{CoreError, CoreResult};
 use crate::vector_index::{backend_name, select_backend, VectorIndex};
@@ -17,7 +18,7 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use uuid::Uuid;
 
 /// Corpus identifier (UUIDv7 string).
@@ -38,6 +39,22 @@ const MAX_CORPUS_META_BYTES: u64 = 8 * 1024 * 1024;
 /// Keeping this cache deliberately small prevents count optimization from
 /// becoming a second corpus-sized store.
 const EVENT_COUNT_CACHE_CAP: usize = 64;
+
+/// All handles for one corpus database share one process-local revision clock.
+///
+/// Event-level publication can happen through a different `LogCorpus` handle
+/// than an already-open Explorer or tool host. A shared clock makes those
+/// handles reject cached facts from the prior DuckDB transaction immediately.
+static EVENT_REVISION_CLOCKS: LazyLock<Mutex<HashMap<PathBuf, Weak<AtomicU64>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Reopened handles for one corpus share one serialized DuckDB connection.
+///
+/// A separately opened DuckDB connection can retain the snapshot from before
+/// another connection commits an event revision. Sharing the connection keeps
+/// already-open query handles on the same publication boundary.
+static CORPUS_CONNECTIONS: LazyLock<Mutex<HashMap<PathBuf, Weak<Mutex<Connection>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Fixed-size identity for an exact event-count predicate.
 ///
@@ -138,6 +155,12 @@ pub struct CorpusStats {
     /// Counts by parse format (json/logfmt/syslog/plain).
     #[serde(default)]
     pub format_counts: std::collections::BTreeMap<String, u64>,
+    /// Counts by explicit timestamp provenance.
+    #[serde(default)]
+    pub timestamp_provenance_counts: std::collections::BTreeMap<String, u64>,
+    /// Counts by reversible active timestamp basis.
+    #[serde(default)]
+    pub active_timestamp_basis_counts: std::collections::BTreeMap<String, u64>,
 }
 
 /// Top template row saved at end of ingest for UI without full template load.
@@ -287,6 +310,15 @@ pub struct LogEvent {
     pub seq: u64,
     /// Unix seconds.
     pub ts: i64,
+    /// Durable origin of `ts`; never inferred from its numeric magnitude.
+    #[serde(default)]
+    pub timestamp_provenance: TimestampProvenance,
+    /// Reversible active interpretation of `ts`.
+    #[serde(default)]
+    pub active_timestamp_basis: ActiveTimestampBasis,
+    /// Exact validated local timestamp awaiting an explicit timezone decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unresolved_local_timestamp: Option<String>,
     /// Normalized level.
     pub level: String,
     /// Optional service.
@@ -303,6 +335,77 @@ pub struct LogEvent {
     pub message: String,
     /// Source file relative path.
     pub source: String,
+}
+
+impl LogEvent {
+    pub(crate) fn validate_timestamp_provenance(&self) -> CoreResult<()> {
+        const MAX_LOCAL_TIMESTAMP_BYTES: usize = 256;
+        match (
+            self.timestamp_provenance,
+            self.active_timestamp_basis,
+            self.unresolved_local_timestamp.as_deref(),
+        ) {
+            (
+                TimestampProvenance::UnresolvedLocal,
+                ActiveTimestampBasis::OrderOnly | ActiveTimestampBasis::ResolvedLocal,
+                Some(value),
+            ) if !value.is_empty()
+                && value.len() <= MAX_LOCAL_TIMESTAMP_BYTES
+                && !value.contains('\0') =>
+            {
+                Ok(())
+            }
+            (TimestampProvenance::UnresolvedLocal, _, _) => Err(CoreError::Message(
+                "unresolved-local event requires a bounded timestamp value".into(),
+            )),
+            (TimestampProvenance::ExplicitWallClock, ActiveTimestampBasis::ExplicitWall, None)
+            | (TimestampProvenance::OrderOnly, ActiveTimestampBasis::OrderOnly, None)
+            | (
+                TimestampProvenance::LegacyUnknown,
+                ActiveTimestampBasis::LegacyUnknown | ActiveTimestampBasis::OrderOnly,
+                None,
+            ) => Ok(()),
+            (_, _, Some(_)) => Err(CoreError::Message(
+                "only unresolved-local events may retain a local timestamp".into(),
+            )),
+            _ => Err(CoreError::Message(
+                "event timestamp origin and active basis are inconsistent".into(),
+            )),
+        }
+    }
+
+    /// Apply one explicit source-timezone decision to retained local evidence.
+    ///
+    /// The immutable parser provenance/text remain unchanged.
+    pub fn apply_resolved_local_timestamp(&mut self, resolved_ts: i64) -> CoreResult<()> {
+        if self.timestamp_provenance != TimestampProvenance::UnresolvedLocal
+            || self.unresolved_local_timestamp.is_none()
+        {
+            return Err(CoreError::Message(
+                "only unresolved-local events can receive a resolved timestamp".into(),
+            ));
+        }
+        self.ts = resolved_ts;
+        self.active_timestamp_basis = ActiveTimestampBasis::ResolvedLocal;
+        self.validate_timestamp_provenance()
+    }
+
+    /// Clear a prior local-time resolution and restore the ingest-order value.
+    ///
+    /// Retained local timestamp evidence is intentionally preserved for a
+    /// corrected declaration or later re-apply.
+    pub fn clear_resolved_local_timestamp(&mut self) -> CoreResult<()> {
+        if self.timestamp_provenance != TimestampProvenance::UnresolvedLocal {
+            return Err(CoreError::Message(
+                "only unresolved-local events can clear a resolved timestamp".into(),
+            ));
+        }
+        self.ts = i64::try_from(self.seq).map_err(|_| {
+            CoreError::Message("event sequence exceeds signed storage range".into())
+        })?;
+        self.active_timestamp_basis = ActiveTimestampBasis::OrderOnly;
+        self.validate_timestamp_provenance()
+    }
 }
 
 /// Ingest-only event envelope carrying the separately bounded source view.
@@ -332,7 +435,7 @@ pub struct LogCorpus {
     name: String,
     root: PathBuf,
     meta: Mutex<CorpusMeta>,
-    db: Mutex<Connection>,
+    db: Arc<Mutex<Connection>>,
     templates: Mutex<HashMap<u64, TemplateRow>>,
     /// Vector index over template ids (Exact or Hnsw by size) — pure Rust.
     index: Mutex<Box<dyn VectorIndex>>,
@@ -340,8 +443,8 @@ pub struct LogCorpus {
     index_backend: Mutex<&'static str>,
     /// Exact event counts keyed by cursor-independent filter predicate.
     event_count_cache: Mutex<EventCountCache>,
-    /// Changes only after a successful event append.
-    event_revision: AtomicU64,
+    /// Changes only after a successful event append or revision publication.
+    event_revision: Arc<AtomicU64>,
     /// Test instrumentation: physical `COUNT(*)` scans, not cache reads.
     #[cfg(test)]
     event_count_scans: AtomicUsize,
@@ -371,19 +474,19 @@ impl LogCorpus {
         };
         write_meta_file(&root, &meta)?;
         let db_path = root.join("events.duckdb");
-        let conn = Connection::open(&db_path).map_err(duck_err)?;
-        init_schema(&conn)?;
+        let db = shared_corpus_connection(&db_path)?;
+        let event_revision = shared_event_revision_clock(&db_path, 0);
         Ok(Self {
             id,
             name: name_s,
             root,
             meta: Mutex::new(meta),
-            db: Mutex::new(conn),
+            db,
             templates: Mutex::new(HashMap::new()),
             index: Mutex::new(select_backend(0)),
             index_backend: Mutex::new(backend_name(0)),
             event_count_cache: Mutex::new(EventCountCache::default()),
-            event_revision: AtomicU64::new(0),
+            event_revision,
             #[cfg(test)]
             event_count_scans: AtomicUsize::new(0),
         })
@@ -434,8 +537,13 @@ impl LogCorpus {
                 "corpus {metadata_id} missing events.duckdb"
             )));
         }
-        let conn = Connection::open(&db_path).map_err(duck_err)?;
-        init_schema(&conn)?;
+        let db = shared_corpus_connection(&db_path)?;
+        let durable_revision = db
+            .lock()
+            .ok()
+            .and_then(|connection| persisted_event_revision(&connection))
+            .unwrap_or(0);
+        let event_revision = shared_event_revision_clock(&db_path, durable_revision);
 
         let mut templates = HashMap::new();
         let t_path = root.join("templates.json");
@@ -457,12 +565,12 @@ impl LogCorpus {
             name,
             root,
             meta: Mutex::new(meta),
-            db: Mutex::new(conn),
+            db,
             templates: Mutex::new(templates),
             index: Mutex::new(idx),
             index_backend: Mutex::new(backend_name(n_tpl)),
             event_count_cache: Mutex::new(EventCountCache::default()),
-            event_revision: AtomicU64::new(0),
+            event_revision,
             #[cfg(test)]
             event_count_scans: AtomicUsize::new(0),
         })
@@ -648,42 +756,60 @@ impl LogCorpus {
         if batch_is_empty {
             return Ok(());
         }
+        for (event, _) in &rows {
+            event.validate_timestamp_provenance()?;
+        }
         let conn = self.db.lock().map_err(|_| lock_err())?;
         conn.execute_batch("BEGIN").map_err(duck_err)?;
-        {
-            let mut app = conn
-                .appender("events")
-                .map_err(|e| CoreError::Message(format!("duckdb appender: {e}")))?;
-            for (e, original) in rows {
-                let params_json = serde_json::to_string(&e.params).unwrap_or_else(|_| "[]".into());
-                app.append_row(params![
-                    e.seq as i64,
-                    e.ts,
-                    e.level.as_str(),
-                    e.service.as_deref(),
-                    e.host.as_deref(),
-                    e.template_id as i64,
-                    params_json.as_str(),
-                    e.trace_id.as_deref(),
-                    e.message.as_str(),
-                    e.source.as_str(),
-                    original.map(|value| value.text.as_str()),
-                    original.map(|value| value.source_byte_count as i64),
-                    original.map(|value| value.redacted_char_count as i64),
-                    original.map(|value| value.truncated),
-                    original.map(|value| value.encoding_normalized),
-                    original.map(|value| value.redaction_applied),
-                ])
-                .map_err(|e| CoreError::Message(format!("duckdb append: {e}")))?;
+        let result = (|| {
+            {
+                let mut app = conn
+                    .appender("events")
+                    .map_err(|e| CoreError::Message(format!("duckdb appender: {e}")))?;
+                for (e, original) in rows {
+                    let params_json =
+                        serde_json::to_string(&e.params).unwrap_or_else(|_| "[]".into());
+                    app.append_row(params![
+                        e.seq as i64,
+                        e.ts,
+                        e.level.as_str(),
+                        e.service.as_deref(),
+                        e.host.as_deref(),
+                        e.template_id as i64,
+                        params_json.as_str(),
+                        e.trace_id.as_deref(),
+                        e.message.as_str(),
+                        e.source.as_str(),
+                        original.map(|value| value.text.as_str()),
+                        original.map(|value| value.source_byte_count as i64),
+                        original.map(|value| value.redacted_char_count as i64),
+                        original.map(|value| value.truncated),
+                        original.map(|value| value.encoding_normalized),
+                        original.map(|value| value.redaction_applied),
+                        e.timestamp_provenance.as_storage_str(),
+                        e.active_timestamp_basis.as_storage_str(),
+                        e.unresolved_local_timestamp.as_deref(),
+                    ])
+                    .map_err(|e| CoreError::Message(format!("duckdb append: {e}")))?;
+                }
+                app.flush()
+                    .map_err(|e| CoreError::Message(format!("duckdb flush: {e}")))?;
             }
-            app.flush()
-                .map_err(|e| CoreError::Message(format!("duckdb flush: {e}")))?;
-        }
-        conn.execute_batch("COMMIT").map_err(duck_err)?;
+            let revision = advance_event_revision_after_append(&conn)?;
+            conn.execute_batch("COMMIT").map_err(duck_err)?;
+            Ok(revision)
+        })();
+        let revision = match result {
+            Ok(revision) => revision,
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(error);
+            }
+        };
         // Publish the new revision while the database lock is still held. A
         // concurrent count that started before this commit will then refuse to
         // cache its result under the obsolete revision.
-        self.event_revision.fetch_add(1, Ordering::SeqCst);
+        self.event_revision.store(revision, Ordering::SeqCst);
         drop(conn);
         self.event_count_cache
             .lock()
@@ -697,13 +823,35 @@ impl LogCorpus {
         self.event_revision.load(Ordering::SeqCst)
     }
 
+    /// Read the durable event revision while the caller already holds the
+    /// corpus connection lock.
+    ///
+    /// Event-level re-analysis publishes this value in the same DuckDB
+    /// transaction as the active event changes. Keeping this variant separate
+    /// avoids recursively locking `db` in count queries.
+    pub(crate) fn event_revision_with_connection(&self, conn: &Connection) -> u64 {
+        let fallback = self.event_revision.load(Ordering::SeqCst);
+        let revision = persisted_event_revision(conn).unwrap_or(fallback);
+        let observed = self.event_revision.fetch_max(revision, Ordering::SeqCst);
+        observed.max(revision)
+    }
+
+    /// Publish a committed durable revision to every in-process corpus handle.
+    pub(super) fn publish_event_revision(&self, revision: u64) {
+        self.event_revision.store(revision, Ordering::SeqCst);
+        self.event_count_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
     /// Return an exact cached count only when it belongs to the current events.
     pub(crate) fn cached_event_count(
         &self,
         key: &EventCountCacheKey,
         revision: u64,
     ) -> Option<u64> {
-        if self.event_revision() != revision {
+        if self.event_revision.load(Ordering::SeqCst) != revision {
             return None;
         }
         self.event_count_cache
@@ -719,14 +867,14 @@ impl LogCorpus {
         revision: u64,
         count: u64,
     ) -> bool {
-        if self.event_revision() != revision {
+        if self.event_revision.load(Ordering::SeqCst) != revision {
             return false;
         }
         self.event_count_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(key, CachedEventCount { revision, count });
-        self.event_revision() == revision
+        self.event_revision.load(Ordering::SeqCst) == revision
     }
 
     #[cfg(test)]
@@ -851,30 +999,76 @@ impl LogCorpus {
         let conn = self.db.lock().map_err(|_| lock_err())?;
         let mut stmt = conn
             .prepare(
-                "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source FROM events ORDER BY seq",
+                "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source, \
+                        timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp \
+                 FROM events ORDER BY seq",
             )
             .map_err(duck_err)?;
         let rows = stmt
             .query_map([], |r| {
                 let params_s: String = r.get(6)?;
                 let params: Vec<String> = serde_json::from_str(&params_s).unwrap_or_default();
-                Ok(LogEvent {
-                    seq: r.get::<_, i64>(0)? as u64,
-                    ts: r.get(1)?,
-                    level: r.get(2)?,
-                    service: r.get(3)?,
-                    host: r.get(4)?,
-                    template_id: r.get::<_, i64>(5)? as u64,
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, i64>(5)?,
                     params,
-                    trace_id: r.get(7)?,
-                    message: r.get(8)?,
-                    source: r.get(9)?,
-                })
+                    r.get::<_, Option<String>>(7)?,
+                    r.get::<_, String>(8)?,
+                    r.get::<_, String>(9)?,
+                    r.get::<_, Option<String>>(10)?,
+                    r.get::<_, Option<String>>(11)?,
+                    r.get::<_, Option<String>>(12)?,
+                ))
             })
             .map_err(duck_err)?;
         let mut out = Vec::new();
         for row in rows {
-            out.push(row.map_err(duck_err)?);
+            let (
+                seq,
+                ts,
+                level,
+                service,
+                host,
+                template_id,
+                params,
+                trace_id,
+                message,
+                source,
+                stored_provenance,
+                stored_active_basis,
+                unresolved_local_timestamp,
+            ) = row.map_err(duck_err)?;
+            let timestamp_provenance = TimestampProvenance::from_storage_str(
+                stored_provenance.as_deref(),
+            )
+            .ok_or_else(|| CoreError::Message("event has invalid timestamp provenance".into()))?;
+            let active_timestamp_basis = ActiveTimestampBasis::from_storage_str(
+                stored_active_basis.as_deref(),
+            )
+            .ok_or_else(|| CoreError::Message("event has invalid active timestamp basis".into()))?;
+            let event = LogEvent {
+                seq: u64::try_from(seq)
+                    .map_err(|_| CoreError::Message("event sequence is negative".into()))?,
+                ts,
+                timestamp_provenance,
+                active_timestamp_basis,
+                unresolved_local_timestamp,
+                level,
+                service,
+                host,
+                template_id: u64::try_from(template_id)
+                    .map_err(|_| CoreError::Message("event template id is negative".into()))?,
+                params,
+                trace_id,
+                message,
+                source,
+            };
+            event.validate_timestamp_provenance()?;
+            out.push(event);
         }
         Ok(out)
     }
@@ -1159,7 +1353,10 @@ fn init_schema(conn: &Connection) -> CoreResult<()> {
             original_redacted_chars BIGINT,
             original_truncated BOOLEAN,
             original_encoding_normalized BOOLEAN,
-            original_redaction_applied BOOLEAN
+            original_redaction_applied BOOLEAN,
+            timestamp_provenance VARCHAR,
+            active_timestamp_basis VARCHAR,
+            unresolved_local_timestamp VARCHAR
         );
         ALTER TABLE events ADD COLUMN IF NOT EXISTS original_redacted VARCHAR;
         ALTER TABLE events ADD COLUMN IF NOT EXISTS original_source_bytes BIGINT;
@@ -1167,15 +1364,176 @@ fn init_schema(conn: &Connection) -> CoreResult<()> {
         ALTER TABLE events ADD COLUMN IF NOT EXISTS original_truncated BOOLEAN;
         ALTER TABLE events ADD COLUMN IF NOT EXISTS original_encoding_normalized BOOLEAN;
         ALTER TABLE events ADD COLUMN IF NOT EXISTS original_redaction_applied BOOLEAN;
+        ALTER TABLE events ADD COLUMN IF NOT EXISTS timestamp_provenance VARCHAR;
+        ALTER TABLE events ADD COLUMN IF NOT EXISTS active_timestamp_basis VARCHAR;
+        ALTER TABLE events ADD COLUMN IF NOT EXISTS unresolved_local_timestamp VARCHAR;
         CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+        CREATE INDEX IF NOT EXISTS idx_events_timestamp_provenance ON events(timestamp_provenance);
+        CREATE INDEX IF NOT EXISTS idx_events_active_timestamp_basis ON events(active_timestamp_basis);
         CREATE INDEX IF NOT EXISTS idx_events_template ON events(template_id);
         CREATE INDEX IF NOT EXISTS idx_events_level ON events(level);
         CREATE INDEX IF NOT EXISTS idx_events_service ON events(service);
         CREATE INDEX IF NOT EXISTS idx_events_trace ON events(trace_id);
+        CREATE TABLE IF NOT EXISTS event_revision_state (
+            singleton INTEGER PRIMARY KEY,
+            current_revision BIGINT NOT NULL,
+            previous_revision BIGINT,
+            current_metadata_json VARCHAR NOT NULL,
+            previous_metadata_json VARCHAR,
+            event_count BIGINT NOT NULL,
+            wall_event_count BIGINT NOT NULL,
+            ts_min BIGINT,
+            ts_max BIGINT,
+            previous_event_count BIGINT,
+            previous_wall_event_count BIGINT,
+            previous_ts_min BIGINT,
+            previous_ts_max BIGINT
+        );
+        ALTER TABLE event_revision_state
+            ADD COLUMN IF NOT EXISTS wall_event_count BIGINT;
+        ALTER TABLE event_revision_state
+            ADD COLUMN IF NOT EXISTS previous_wall_event_count BIGINT;
+        INSERT INTO event_revision_state
+        SELECT 1, 0, NULL, '{}', NULL,
+               stats.event_count, stats.wall_event_count,
+               stats.ts_min, stats.ts_max,
+               NULL, NULL, NULL, NULL
+        FROM (
+            SELECT COUNT(*) AS event_count,
+                   COALESCE(SUM(
+                       CASE WHEN active_timestamp_basis
+                                      IN ('explicit_wall', 'resolved_local')
+                            THEN 1 ELSE 0 END
+                   ), 0) AS wall_event_count,
+                   MIN(ts) AS ts_min,
+                   MAX(ts) AS ts_max
+            FROM events
+        ) stats
+        WHERE NOT EXISTS (
+            SELECT 1 FROM event_revision_state WHERE singleton = 1
+        );
+        UPDATE event_revision_state
+        SET wall_event_count = (
+            SELECT COALESCE(SUM(
+                CASE WHEN active_timestamp_basis
+                               IN ('explicit_wall', 'resolved_local')
+                     THEN 1 ELSE 0 END
+            ), 0)
+            FROM events
+        )
+        WHERE wall_event_count IS NULL;
         "#,
     )
     .map_err(duck_err)?;
     Ok(())
+}
+
+fn advance_event_revision_after_append(conn: &Connection) -> CoreResult<u64> {
+    let current = persisted_event_revision(conn)
+        .ok_or_else(|| CoreError::Message("event revision state is unavailable".into()))?;
+    let revision = current
+        .checked_add(1)
+        .filter(|value| *value <= i64::MAX as u64)
+        .ok_or_else(|| CoreError::Message("event revision overflow".into()))?;
+    let (event_count, wall_event_count, ts_min, ts_max) = conn
+        .query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(
+                        CASE WHEN active_timestamp_basis
+                                       IN ('explicit_wall', 'resolved_local')
+                             THEN 1 ELSE 0 END
+                    ), 0),
+                    MIN(ts), MAX(ts)
+             FROM events",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            },
+        )
+        .map_err(duck_err)?;
+    if event_count < 0 || wall_event_count < 0 || wall_event_count > event_count {
+        return Err(CoreError::Message(
+            "event time-quality counts are outside supported range".into(),
+        ));
+    }
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS events_previous;
+         DROP TABLE IF EXISTS event_revision_timestamp_changes;",
+    )
+    .map_err(duck_err)?;
+    conn.execute(
+        "UPDATE event_revision_state
+         SET current_revision = ?1,
+             previous_revision = NULL,
+             current_metadata_json = '{}',
+             previous_metadata_json = NULL,
+             event_count = ?2,
+             wall_event_count = ?3,
+             ts_min = ?4,
+             ts_max = ?5,
+             previous_event_count = NULL,
+             previous_wall_event_count = NULL,
+             previous_ts_min = NULL,
+             previous_ts_max = NULL
+         WHERE singleton = 1",
+        params![
+            revision as i64,
+            event_count,
+            wall_event_count,
+            ts_min,
+            ts_max
+        ],
+    )
+    .map_err(duck_err)?;
+    Ok(revision)
+}
+
+fn persisted_event_revision(conn: &Connection) -> Option<u64> {
+    conn.query_row(
+        "SELECT current_revision
+         FROM event_revision_state
+         WHERE singleton = 1",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .ok()
+    .and_then(|revision| u64::try_from(revision).ok())
+}
+
+fn shared_event_revision_clock(db_path: &Path, durable_revision: u64) -> Arc<AtomicU64> {
+    let key = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
+    let mut clocks = EVENT_REVISION_CLOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clocks.retain(|_, clock| clock.strong_count() > 0);
+    if let Some(clock) = clocks.get(&key).and_then(Weak::upgrade) {
+        clock.fetch_max(durable_revision, Ordering::SeqCst);
+        return clock;
+    }
+    let clock = Arc::new(AtomicU64::new(durable_revision));
+    clocks.insert(key, Arc::downgrade(&clock));
+    clock
+}
+
+fn shared_corpus_connection(db_path: &Path) -> CoreResult<Arc<Mutex<Connection>>> {
+    let key = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
+    let mut connections = CORPUS_CONNECTIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    connections.retain(|_, connection| connection.strong_count() > 0);
+    if let Some(connection) = connections.get(&key).and_then(Weak::upgrade) {
+        return Ok(connection);
+    }
+    let connection = Connection::open(db_path).map_err(duck_err)?;
+    init_schema(&connection)?;
+    let connection = Arc::new(Mutex::new(connection));
+    connections.insert(key, Arc::downgrade(&connection));
+    Ok(connection)
 }
 
 fn lock_err() -> CoreError {
@@ -1564,6 +1922,9 @@ mod tests {
         c.push_events(&[LogEvent {
             seq: 0,
             ts: 1,
+            timestamp_provenance: TimestampProvenance::OrderOnly,
+            active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
+            unresolved_local_timestamp: None,
             level: "error".into(),
             service: Some("api".into()),
             host: None,
@@ -1601,6 +1962,349 @@ mod tests {
         assert!(LogCorpus::list_ids(dir.path()).unwrap().is_empty());
     }
 
+    #[test]
+    fn timestamp_provenance_and_unresolved_local_text_survive_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "timestamp provenance").unwrap();
+        let id = corpus.id().to_string();
+        corpus
+            .push_events(&[
+                LogEvent {
+                    seq: 1,
+                    ts: 946_684_799,
+                    timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
+                    level: "error".into(),
+                    service: None,
+                    host: None,
+                    template_id: 1,
+                    params: vec![],
+                    trace_id: None,
+                    message: "pre-2000 explicit".into(),
+                    source: "old.log".into(),
+                },
+                LogEvent {
+                    seq: 2,
+                    ts: 1_000_000_000,
+                    timestamp_provenance: TimestampProvenance::UnresolvedLocal,
+                    active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
+                    unresolved_local_timestamp: Some("2021-03-05 02:53:53,654".into()),
+                    level: "error".into(),
+                    service: None,
+                    host: None,
+                    template_id: 2,
+                    params: vec![],
+                    trace_id: None,
+                    message: "local timestamp".into(),
+                    source: "server.log".into(),
+                },
+                LogEvent {
+                    seq: 3,
+                    ts: 1_000_000_001,
+                    timestamp_provenance: TimestampProvenance::OrderOnly,
+                    active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
+                    unresolved_local_timestamp: None,
+                    level: "unknown".into(),
+                    service: None,
+                    host: None,
+                    template_id: 3,
+                    params: vec![],
+                    trace_id: None,
+                    message: "missing timestamp".into(),
+                    source: "plain.log".into(),
+                },
+            ])
+            .unwrap();
+        corpus.flush().unwrap();
+        drop(corpus);
+
+        let reopened = LogCorpus::open(dir.path(), &id).unwrap();
+        let events = reopened.with_events(ToOwned::to_owned);
+        assert_eq!(events.len(), 3);
+        assert_eq!(
+            events[0].timestamp_provenance,
+            TimestampProvenance::ExplicitWallClock
+        );
+        assert_eq!(
+            events[0].active_timestamp_basis,
+            ActiveTimestampBasis::ExplicitWall
+        );
+        assert_eq!(events[0].ts, 946_684_799);
+        assert_eq!(
+            events[1].timestamp_provenance,
+            TimestampProvenance::UnresolvedLocal
+        );
+        assert_eq!(
+            events[1].active_timestamp_basis,
+            ActiveTimestampBasis::OrderOnly
+        );
+        assert_eq!(
+            events[1].unresolved_local_timestamp.as_deref(),
+            Some("2021-03-05 02:53:53,654")
+        );
+        assert_eq!(
+            events[2].timestamp_provenance,
+            TimestampProvenance::OrderOnly
+        );
+        assert_eq!(
+            events[2].active_timestamp_basis,
+            ActiveTimestampBasis::OrderOnly
+        );
+        assert_eq!(events[2].ts, 1_000_000_001);
+        assert_eq!(events[2].message, "missing timestamp");
+        assert_eq!(events[2].source, "plain.log");
+    }
+
+    #[test]
+    fn timestamp_provenance_active_resolution_apply_and_clear_are_reversible() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "reversible local resolution").unwrap();
+        let id = corpus.id().to_string();
+        let mut event = LogEvent {
+            seq: 42,
+            ts: 42,
+            timestamp_provenance: TimestampProvenance::UnresolvedLocal,
+            active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
+            unresolved_local_timestamp: Some("2021-03-05 02:53:53,654".into()),
+            level: "error".into(),
+            service: None,
+            host: None,
+            template_id: 1,
+            params: vec![],
+            trace_id: None,
+            message: "local event".into(),
+            source: "server.log".into(),
+        };
+        event.apply_resolved_local_timestamp(1_614_910_433).unwrap();
+        assert_eq!(
+            event.timestamp_provenance,
+            TimestampProvenance::UnresolvedLocal
+        );
+        assert_eq!(
+            event.active_timestamp_basis,
+            ActiveTimestampBasis::ResolvedLocal
+        );
+        assert_eq!(
+            event.unresolved_local_timestamp.as_deref(),
+            Some("2021-03-05 02:53:53,654")
+        );
+        corpus.push_events(&[event]).unwrap();
+        drop(corpus);
+
+        let reopened = LogCorpus::open(dir.path(), &id).unwrap();
+        let mut reopened_event = reopened.with_events(|events| events[0].clone());
+        assert_eq!(reopened_event.ts, 1_614_910_433);
+        assert_eq!(
+            reopened_event.timestamp_provenance,
+            TimestampProvenance::UnresolvedLocal
+        );
+        assert_eq!(
+            reopened_event.active_timestamp_basis,
+            ActiveTimestampBasis::ResolvedLocal
+        );
+        reopened_event.clear_resolved_local_timestamp().unwrap();
+        assert_eq!(reopened_event.ts, 42);
+        assert_eq!(
+            reopened_event.active_timestamp_basis,
+            ActiveTimestampBasis::OrderOnly
+        );
+        assert_eq!(
+            reopened_event.unresolved_local_timestamp.as_deref(),
+            Some("2021-03-05 02:53:53,654")
+        );
+    }
+
+    #[test]
+    fn timestamp_provenance_legacy_schema_migrates_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "legacy timestamp schema").unwrap();
+        let id = corpus.id().to_string();
+        corpus
+            .with_connection(|connection| {
+                connection
+                    .execute(
+                        "INSERT INTO events (
+                            seq, ts, level, service, host, template_id, params,
+                            trace_id, message, source
+                         ) VALUES (1, 1700000000, 'error', NULL, NULL, 1, '[]',
+                                   NULL, 'legacy payload', 'legacy.log')",
+                        [],
+                    )
+                    .map_err(duck_err)?;
+                connection
+                    .execute_batch(
+                        "DROP TABLE event_revision_state;
+                         DROP INDEX idx_events_ts;
+                         DROP INDEX idx_events_template;
+                         DROP INDEX idx_events_level;
+                         DROP INDEX idx_events_service;
+                         DROP INDEX idx_events_trace;
+                         DROP INDEX idx_events_timestamp_provenance;
+                         DROP INDEX idx_events_active_timestamp_basis;
+                         ALTER TABLE events DROP COLUMN timestamp_provenance;
+                         ALTER TABLE events DROP COLUMN active_timestamp_basis;
+                         ALTER TABLE events DROP COLUMN unresolved_local_timestamp;",
+                    )
+                    .map_err(duck_err)
+            })
+            .unwrap();
+        drop(corpus);
+
+        let reopened = LogCorpus::open(dir.path(), &id).unwrap();
+        let events = reopened.with_events(ToOwned::to_owned);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].timestamp_provenance,
+            TimestampProvenance::LegacyUnknown
+        );
+        assert_eq!(
+            events[0].active_timestamp_basis,
+            ActiveTimestampBasis::LegacyUnknown
+        );
+        assert_eq!(events[0].ts, 1_700_000_000);
+        assert_eq!(events[0].message, "legacy payload");
+        assert_eq!(events[0].source, "legacy.log");
+        assert_eq!(reopened.event_revision(), 0);
+        reopened
+            .with_connection(|connection| {
+                let (revision, count, min, max) = connection
+                    .query_row(
+                        "SELECT current_revision, event_count, ts_min, ts_max
+                         FROM event_revision_state WHERE singleton = 1",
+                        [],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, Option<i64>>(2)?,
+                                row.get::<_, Option<i64>>(3)?,
+                            ))
+                        },
+                    )
+                    .map_err(duck_err)?;
+                assert_eq!((revision, count), (0, 1));
+                assert_eq!((min, max), (Some(1_700_000_000), Some(1_700_000_000)));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn append_publishes_monotonic_durable_revision_and_clears_stale_undo() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "durable append revision").unwrap();
+        let id = corpus.id().to_string();
+        assert_eq!(corpus.event_revision(), 0);
+        corpus
+            .push_events(&[
+                LogEvent {
+                    seq: 1,
+                    ts: 10,
+                    timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
+                    level: "info".into(),
+                    service: None,
+                    host: None,
+                    template_id: 1,
+                    params: vec![],
+                    trace_id: None,
+                    message: "first".into(),
+                    source: "a.log".into(),
+                },
+                LogEvent {
+                    seq: 2,
+                    ts: 20,
+                    timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
+                    level: "warn".into(),
+                    service: None,
+                    host: None,
+                    template_id: 2,
+                    params: vec![],
+                    trace_id: None,
+                    message: "second".into(),
+                    source: "a.log".into(),
+                },
+            ])
+            .unwrap();
+        assert_eq!(corpus.event_revision(), 1);
+        corpus
+            .with_connection(|connection| {
+                connection
+                    .execute_batch(
+                        "CREATE TABLE events_previous AS SELECT * FROM events;
+                         UPDATE event_revision_state
+                            SET previous_revision = 0,
+                                previous_metadata_json = '{}',
+                                previous_event_count = 2,
+                                previous_ts_min = 10,
+                                previous_ts_max = 20
+                          WHERE singleton = 1;",
+                    )
+                    .map_err(duck_err)
+            })
+            .unwrap();
+        corpus
+            .push_events(&[LogEvent {
+                seq: 3,
+                ts: 5,
+                timestamp_provenance: TimestampProvenance::OrderOnly,
+                active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
+                unresolved_local_timestamp: None,
+                level: "unknown".into(),
+                service: None,
+                host: None,
+                template_id: 3,
+                params: vec![],
+                trace_id: None,
+                message: "third".into(),
+                source: "plain.log".into(),
+            }])
+            .unwrap();
+        assert_eq!(corpus.event_revision(), 2);
+        corpus
+            .with_connection(|connection| {
+                let state = connection
+                    .query_row(
+                        "SELECT current_revision, previous_revision, event_count,
+                                ts_min, ts_max, previous_event_count
+                         FROM event_revision_state WHERE singleton = 1",
+                        [],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, Option<i64>>(1)?,
+                                row.get::<_, i64>(2)?,
+                                row.get::<_, Option<i64>>(3)?,
+                                row.get::<_, Option<i64>>(4)?,
+                                row.get::<_, Option<i64>>(5)?,
+                            ))
+                        },
+                    )
+                    .map_err(duck_err)?;
+                assert_eq!(state, (2, None, 3, Some(5), Some(20), None));
+                let previous_tables = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM information_schema.tables
+                         WHERE table_name = 'events_previous'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(duck_err)?;
+                assert_eq!(previous_tables, 0);
+                Ok(())
+            })
+            .unwrap();
+        drop(corpus);
+
+        let reopened = LogCorpus::open(dir.path(), &id).unwrap();
+        assert_eq!(reopened.event_revision(), 2);
+        assert_eq!(reopened.event_count(), 3);
+    }
+
     /// Default-suite medium scan (keeps CI fast). Multi-million is #[ignore].
     #[test]
     fn duckdb_scan_bench_200k() {
@@ -1614,6 +2318,9 @@ mod tests {
             batch.push(LogEvent {
                 seq: i,
                 ts: (i / 10) as i64,
+                timestamp_provenance: TimestampProvenance::OrderOnly,
+                active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
+                unresolved_local_timestamp: None,
                 level: if i % 10 == 0 { "error" } else { "info" }.into(),
                 service: Some(if i % 3 == 0 { "api" } else { "worker" }.into()),
                 host: Some("h1".into()),
@@ -1674,6 +2381,9 @@ mod tests {
             batch.push(LogEvent {
                 seq: i,
                 ts: (i / 100) as i64,
+                timestamp_provenance: TimestampProvenance::OrderOnly,
+                active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
+                unresolved_local_timestamp: None,
                 level: if i % 20 == 0 {
                     "error"
                 } else if i % 7 == 0 {

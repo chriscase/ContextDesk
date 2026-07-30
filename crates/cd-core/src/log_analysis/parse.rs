@@ -18,16 +18,120 @@ pub enum LogFormat {
     Plain,
 }
 
+/// Durable provenance for the numeric value stored in an event's `ts` column.
+///
+/// The numeric value alone is never evidence that an event has a wall clock.
+/// In particular, order-only ingest positions can grow into ordinary Unix
+/// timestamp ranges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimestampProvenance {
+    /// The parser observed an explicit offset/`Z` timestamp or a bounded epoch.
+    ExplicitWallClock,
+    /// The parser validated a complete local calendar timestamp but no timezone.
+    UnresolvedLocal,
+    /// No usable calendar timestamp was present; `ts` is the ingest position.
+    OrderOnly,
+    /// A legacy stored event predates durable provenance.
+    ///
+    /// This fails closed as order-only. Existing rows must never be upgraded by
+    /// inspecting the magnitude of their numeric `ts`.
+    #[default]
+    LegacyUnknown,
+}
+
+impl TimestampProvenance {
+    /// Stable DuckDB representation.
+    pub const fn as_storage_str(self) -> &'static str {
+        match self {
+            Self::ExplicitWallClock => "explicit_wall",
+            Self::UnresolvedLocal => "unresolved_local",
+            Self::OrderOnly => "order_only",
+            Self::LegacyUnknown => "legacy_unknown",
+        }
+    }
+
+    /// Parse a stored representation. `NULL` is the safe legacy state.
+    pub fn from_storage_str(value: Option<&str>) -> Option<Self> {
+        match value {
+            Some("explicit_wall") => Some(Self::ExplicitWallClock),
+            Some("unresolved_local") => Some(Self::UnresolvedLocal),
+            Some("order_only") => Some(Self::OrderOnly),
+            Some("legacy_unknown") | None => Some(Self::LegacyUnknown),
+            Some(_) => None,
+        }
+    }
+
+    /// Whether this origin proves that `ts` is an instant.
+    pub const fn is_wall_clock(self) -> bool {
+        matches!(self, Self::ExplicitWallClock)
+    }
+}
+
+/// Active interpretation of an event's current `ts` value.
+///
+/// This is deliberately separate from immutable [`TimestampProvenance`].
+/// A timezone-resolution apply changes `ts` plus this basis from `OrderOnly`
+/// to `ResolvedLocal`; clearing that resolution restores `ts = seq` and
+/// `OrderOnly` while retaining the parser's local timestamp evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActiveTimestampBasis {
+    /// Current `ts` came from an explicit parser-proven wall clock.
+    ExplicitWall,
+    /// Current `ts` was resolved from retained local evidence by an explicit policy.
+    ResolvedLocal,
+    /// Current `ts` is the ingest position.
+    OrderOnly,
+    /// A legacy row predates active-basis storage.
+    #[default]
+    LegacyUnknown,
+}
+
+impl ActiveTimestampBasis {
+    /// Stable DuckDB representation.
+    pub const fn as_storage_str(self) -> &'static str {
+        match self {
+            Self::ExplicitWall => "explicit_wall",
+            Self::ResolvedLocal => "resolved_local",
+            Self::OrderOnly => "order_only",
+            Self::LegacyUnknown => "legacy_unknown",
+        }
+    }
+
+    /// Parse a stored representation. `NULL` is the safe legacy state.
+    pub fn from_storage_str(value: Option<&str>) -> Option<Self> {
+        match value {
+            Some("explicit_wall") => Some(Self::ExplicitWall),
+            Some("resolved_local") => Some(Self::ResolvedLocal),
+            Some("order_only") => Some(Self::OrderOnly),
+            Some("legacy_unknown") | None => Some(Self::LegacyUnknown),
+            Some(_) => None,
+        }
+    }
+
+    /// Whether the active `ts` is a wall-clock instant.
+    pub const fn is_wall_clock(self) -> bool {
+        matches!(self, Self::ExplicitWall | Self::ResolvedLocal)
+    }
+}
+
 /// One parsed log record (never drops data — unknown → whole line as message).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ParsedLine {
     /// Unix seconds when known; else ingest-order synthetic.
     pub ts: Option<i64>,
+    /// Explicit origin of the value in `ts`.
+    #[serde(default)]
+    pub timestamp_provenance: TimestampProvenance,
+    /// Active interpretation of `ts`; initially derived from parser provenance.
+    #[serde(default)]
+    pub active_timestamp_basis: ActiveTimestampBasis,
     /// Validated source-local calendar text that lacks a timezone.
     ///
     /// This is parser evidence, not an instant. Consumers must not convert it
-    /// without an explicit source timezone/DST policy. Current event storage
-    /// does not persist this field and keeps the event order-only.
+    /// without an explicit source timezone/DST policy. Event storage persists
+    /// this exact parser evidence while keeping the event order-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unresolved_local_timestamp: Option<String>,
     /// Normalized level: debug/info/warn/error/fatal/unknown.
@@ -342,21 +446,26 @@ fn parse_json(raw: &str, ingest_seq: u64) -> ParsedLine {
         }
         None
     };
-    let ts = obj
+    let timestamp = obj
         .and_then(|o| {
             o.get("ts")
                 .or_else(|| o.get("timestamp"))
                 .or_else(|| o.get("time"))
                 .or_else(|| o.get("@timestamp"))
         })
-        .and_then(parse_ts_value);
+        .map(parse_ts_value)
+        .unwrap_or(ParsedTimestamp::Unusable);
+    let (ts, timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp) =
+        timestamp.into_stored_fields(ingest_seq);
     let level = get_str(&["level", "severity", "lvl"])
         .map(|s| normalize_level(&s))
         .unwrap_or_else(|| "unknown".into());
     let message = get_str(&["message", "msg", "log", "text"]).unwrap_or_else(|| raw.to_string());
     ParsedLine {
-        ts: ts.or(Some(ingest_seq as i64)),
-        unresolved_local_timestamp: None,
+        ts: Some(ts),
+        timestamp_provenance,
+        active_timestamp_basis,
+        unresolved_local_timestamp,
         level,
         service: get_str(&["service", "app", "component"]),
         host: get_str(&["host", "hostname", "node"]),
@@ -367,24 +476,99 @@ fn parse_json(raw: &str, ingest_seq: u64) -> ParsedLine {
     }
 }
 
-fn parse_ts_value(v: &serde_json::Value) -> Option<i64> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ParsedTimestamp {
+    ExplicitWallClock(i64),
+    UnresolvedLocal(String),
+    Unusable,
+}
+
+impl ParsedTimestamp {
+    fn into_stored_fields(
+        self,
+        ingest_seq: u64,
+    ) -> (
+        i64,
+        TimestampProvenance,
+        ActiveTimestampBasis,
+        Option<String>,
+    ) {
+        match self {
+            Self::ExplicitWallClock(ts) => (
+                ts,
+                TimestampProvenance::ExplicitWallClock,
+                ActiveTimestampBasis::ExplicitWall,
+                None,
+            ),
+            Self::UnresolvedLocal(text) => (
+                ingest_seq as i64,
+                TimestampProvenance::UnresolvedLocal,
+                ActiveTimestampBasis::OrderOnly,
+                Some(text),
+            ),
+            Self::Unusable => (
+                ingest_seq as i64,
+                TimestampProvenance::OrderOnly,
+                ActiveTimestampBasis::OrderOnly,
+                None,
+            ),
+        }
+    }
+}
+
+fn parse_ts_value(v: &serde_json::Value) -> ParsedTimestamp {
     if let Some(n) = v.as_i64() {
-        return decode_unix_epoch_to_secs_i64(n);
+        return decode_unix_epoch_to_secs_i64(n)
+            .map(ParsedTimestamp::ExplicitWallClock)
+            .unwrap_or(ParsedTimestamp::Unusable);
     }
     // JSON numbers above i64::MAX arrive as u64; reject rather than f64-round.
     if let Some(n) = v.as_u64() {
         if n > i64::MAX as u64 {
-            return None;
+            return ParsedTimestamp::Unusable;
         }
-        return decode_unix_epoch_to_secs_i64(n as i64);
+        return decode_unix_epoch_to_secs_i64(n as i64)
+            .map(ParsedTimestamp::ExplicitWallClock)
+            .unwrap_or(ParsedTimestamp::Unusable);
     }
     if let Some(f) = v.as_f64() {
-        return decode_unix_epoch_to_secs_f64(f);
+        return decode_unix_epoch_to_secs_f64(f)
+            .map(ParsedTimestamp::ExplicitWallClock)
+            .unwrap_or(ParsedTimestamp::Unusable);
     }
     if let Some(s) = v.as_str() {
-        return parse_explicit_timestamp(s);
+        return parse_timestamp_text(s);
     }
-    None
+    ParsedTimestamp::Unusable
+}
+
+fn parse_timestamp_text(value: &str) -> ParsedTimestamp {
+    let value = value.trim();
+    if let Some(ts) = parse_explicit_timestamp(value) {
+        return ParsedTimestamp::ExplicitWallClock(ts);
+    }
+    if is_complete_local_timestamp(value) {
+        return ParsedTimestamp::UnresolvedLocal(value.to_string());
+    }
+    ParsedTimestamp::Unusable
+}
+
+fn is_complete_local_timestamp(value: &str) -> bool {
+    if value.is_empty() || value.len() > 64 {
+        return false;
+    }
+    let mut canonical = value.to_string();
+    if canonical.as_bytes().get(19) == Some(&b',') {
+        canonical.replace_range(19..20, ".");
+    }
+    [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+    ]
+    .iter()
+    .any(|format| chrono::NaiveDateTime::parse_from_str(&canonical, format).is_ok())
 }
 
 /// Parse an unambiguous timestamp to Unix **whole seconds**.
@@ -547,14 +731,18 @@ fn parse_logfmt(raw: &str, ingest_seq: u64) -> ParsedLine {
         .unwrap_or_else(|| raw.to_string());
     // Explicit-offset RFC3339 and epoch integers become wall seconds; offsetless /
     // malformed values fall back to ingest order (never drop the record).
-    let ts = map
+    let timestamp = map
         .get("ts")
         .or_else(|| map.get("time"))
-        .and_then(|s| parse_explicit_timestamp(s))
-        .or(Some(ingest_seq as i64));
+        .map(|value| parse_timestamp_text(value))
+        .unwrap_or(ParsedTimestamp::Unusable);
+    let (ts, timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp) =
+        timestamp.into_stored_fields(ingest_seq);
     ParsedLine {
-        ts,
-        unresolved_local_timestamp: None,
+        ts: Some(ts),
+        timestamp_provenance,
+        active_timestamp_basis,
+        unresolved_local_timestamp,
         level,
         service: map.get("service").or_else(|| map.get("app")).cloned(),
         host: map.get("host").cloned(),
@@ -673,6 +861,8 @@ fn parse_zone_abbreviated_incomplete_time(raw: &str, ingest_seq: u64) -> Option<
     let parts = parse_zone_abbreviated_incomplete_parts(raw.trim())?;
     Some(ParsedLine {
         ts: Some(ingest_seq as i64),
+        timestamp_provenance: TimestampProvenance::UnresolvedLocal,
+        active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
         unresolved_local_timestamp: Some(parts.source_timestamp.to_string()),
         level: normalize_level(parts.level),
         service: None,
@@ -781,14 +971,25 @@ fn parse_elasticsearch_timestamp(value: &str) -> Option<ElasticsearchTimestamp> 
 
 fn parse_elasticsearch(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
     let parts = parse_elasticsearch_parts(raw.trim())?;
-    let (ts, unresolved_local_timestamp) = match parts.timestamp {
-        ElasticsearchTimestamp::Wall(ts) => (ts, None),
-        ElasticsearchTimestamp::Local => {
-            (ingest_seq as i64, Some(parts.source_timestamp.to_string()))
-        }
-    };
+    let (ts, timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp) =
+        match parts.timestamp {
+            ElasticsearchTimestamp::Wall(ts) => (
+                ts,
+                TimestampProvenance::ExplicitWallClock,
+                ActiveTimestampBasis::ExplicitWall,
+                None,
+            ),
+            ElasticsearchTimestamp::Local => (
+                ingest_seq as i64,
+                TimestampProvenance::UnresolvedLocal,
+                ActiveTimestampBasis::OrderOnly,
+                Some(parts.source_timestamp.to_string()),
+            ),
+        };
     Some(ParsedLine {
         ts: Some(ts),
+        timestamp_provenance,
+        active_timestamp_basis,
         unresolved_local_timestamp,
         level: normalize_level(parts.level),
         service: Some(parts.component.to_string()),
@@ -955,12 +1156,25 @@ fn parse_wildfly(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
         message.push(' ');
         message.push_str(parts.payload);
     }
-    let (ts, unresolved_local_timestamp) = match parts.timestamp {
-        WildflyTimestamp::Wall(ts) => (ts, None),
-        WildflyTimestamp::Local => (ingest_seq as i64, Some(parts.source_timestamp.to_string())),
-    };
+    let (ts, timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp) =
+        match parts.timestamp {
+            WildflyTimestamp::Wall(ts) => (
+                ts,
+                TimestampProvenance::ExplicitWallClock,
+                ActiveTimestampBasis::ExplicitWall,
+                None,
+            ),
+            WildflyTimestamp::Local => (
+                ingest_seq as i64,
+                TimestampProvenance::UnresolvedLocal,
+                ActiveTimestampBasis::OrderOnly,
+                Some(parts.source_timestamp.to_string()),
+            ),
+        };
     Some(ParsedLine {
         ts: Some(ts),
+        timestamp_provenance,
+        active_timestamp_basis,
         unresolved_local_timestamp,
         level: normalize_level(parts.level),
         service: None,
@@ -1008,6 +1222,8 @@ fn parse_syslog(raw: &str, ingest_seq: u64) -> ParsedLine {
     let level = level_from_message_text(&message);
     ParsedLine {
         ts: Some(ingest_seq as i64),
+        timestamp_provenance: TimestampProvenance::OrderOnly,
+        active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
         unresolved_local_timestamp: None,
         level,
         service: None,
@@ -1043,8 +1259,11 @@ fn parse_rfc5424_body(rest: &str, ingest_seq: u64, raw: &str) -> Option<ParsedLi
         return None;
     }
     let (ts_tok, rest) = take_token(rest)?;
-    // Explicit Z / numeric offset → wall seconds; NILVALUE, offsetless, or garbage → order-only.
-    let wall_ts = parse_explicit_timestamp(ts_tok);
+    // Explicit Z / numeric offset → wall seconds; a complete offsetless local
+    // value is retained for a later explicit source-timezone decision.
+    let timestamp = parse_timestamp_text(ts_tok);
+    let (ts, timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp) =
+        timestamp.into_stored_fields(ingest_seq);
     let (host_tok, rest) = take_token(rest)?;
     let (app_tok, rest) = take_token(rest)?;
     let (_procid, rest) = take_token(rest)?;
@@ -1062,8 +1281,10 @@ fn parse_rfc5424_body(rest: &str, ingest_seq: u64, raw: &str) -> Option<ParsedLi
         Some(app_tok.to_string())
     };
     Some(ParsedLine {
-        ts: wall_ts.or(Some(ingest_seq as i64)),
-        unresolved_local_timestamp: None,
+        ts: Some(ts),
+        timestamp_provenance,
+        active_timestamp_basis,
+        unresolved_local_timestamp,
         level,
         service,
         host,
@@ -1137,6 +1358,8 @@ fn parse_plain(raw: &str, ingest_seq: u64) -> ParsedLine {
     };
     ParsedLine {
         ts: Some(ingest_seq as i64),
+        timestamp_provenance: TimestampProvenance::OrderOnly,
+        active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
         unresolved_local_timestamp: None,
         level,
         service: None,
@@ -1201,6 +1424,65 @@ mod tests {
         assert_eq!(p.trace_id.as_deref(), Some("abc"));
         assert!(p.message.contains("connection refused"));
         assert_eq!(p.ts, Some(1_700_000_000));
+        assert_eq!(
+            p.timestamp_provenance,
+            TimestampProvenance::ExplicitWallClock
+        );
+    }
+
+    #[test]
+    fn timestamp_provenance_explicit_pre_2000_remains_wall_clock() {
+        let line =
+            r#"{"timestamp":"1999-12-31T23:59:59Z","level":"error","message":"old failure"}"#;
+        let parsed = parse_line(line, Some(LogFormat::Json), 1_000_000_000);
+        assert_eq!(parsed.ts, Some(946_684_799));
+        assert_eq!(
+            parsed.timestamp_provenance,
+            TimestampProvenance::ExplicitWallClock
+        );
+        assert_eq!(parsed.unresolved_local_timestamp, None);
+        assert_eq!(parsed.raw, line);
+    }
+
+    #[test]
+    fn timestamp_provenance_billion_scale_ingest_position_remains_order_only() {
+        let parsed = parse_line(
+            "ERROR no timestamp despite a large ingest position",
+            Some(LogFormat::Plain),
+            1_000_000_000,
+        );
+        assert_eq!(parsed.ts, Some(1_000_000_000));
+        assert_eq!(parsed.timestamp_provenance, TimestampProvenance::OrderOnly);
+        assert_eq!(parsed.unresolved_local_timestamp, None);
+    }
+
+    #[test]
+    fn timestamp_provenance_retains_local_but_not_missing_or_malformed_values() {
+        let local = parse_line(
+            r#"{"timestamp":"2021-03-05 02:53:53,654","message":"local"}"#,
+            Some(LogFormat::Json),
+            77,
+        );
+        assert_eq!(local.ts, Some(77));
+        assert_eq!(
+            local.timestamp_provenance,
+            TimestampProvenance::UnresolvedLocal
+        );
+        assert_eq!(
+            local.unresolved_local_timestamp.as_deref(),
+            Some("2021-03-05 02:53:53,654")
+        );
+
+        for line in [
+            r#"{"message":"missing"}"#,
+            r#"{"timestamp":"not-a-time","message":"malformed"}"#,
+        ] {
+            let parsed = parse_line(line, Some(LogFormat::Json), 88);
+            assert_eq!(parsed.ts, Some(88));
+            assert_eq!(parsed.timestamp_provenance, TimestampProvenance::OrderOnly);
+            assert_eq!(parsed.unresolved_local_timestamp, None);
+            assert_eq!(parsed.raw, line);
+        }
     }
 
     #[test]

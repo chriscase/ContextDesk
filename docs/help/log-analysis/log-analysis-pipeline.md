@@ -110,6 +110,49 @@ After confirmation, ContextDesk embeds up to 2,048 templates without reparsing
 or duplicating events. Cancellation or failure keeps the previous keyword
 corpus and index. Semantic search is labeled available only after vectors exist.
 
+## Review source-local timestamps
+
+ContextDesk keeps three timestamp facts separate:
+
+- what the parser proved from the record;
+- the currently active wall-time or ingest-order interpretation; and
+- a source timezone that you explicitly declared.
+
+If a supported grammar contains a complete local calendar timestamp but no
+offset, the event stays searchable in ingest order. ContextDesk persists the
+recognized local timestamp text and does not substitute the workstation
+timezone.
+
+To review it:
+
+1. Select the corpus in **Logs**.
+2. In **Time interpretation · Source timezones**, choose the **Review … source**
+   or **Review … sources** control.
+3. Choose **Resolve time…** for one source.
+4. Keep **Leave unresolved — order-only**, or choose **Use an IANA timezone**
+   and enter a regional identifier such as `Europe/Berlin`.
+5. Choose **Preview**. Check the affected, already-explicit, and unchanged
+   record counts; resolved UTC range; DST gaps; DST fold ambiguity; unsupported
+   timestamps; and out-of-range values.
+6. Choose **Apply declaration** only when the preview matches the source.
+
+The preview is tied to the exact corpus revision. Apply recomputes it and fails
+if the corpus, source, timezone, or preview token changed. Parser-proven
+explicit offsets always win and remain unchanged. Apply publishes the event
+timestamps, active time basis, declaration, range, and quality counts
+atomically. The declaration remains visible after reopening the corpus.
+
+To reverse the source rule, reopen **Review timezone**, choose **Remove
+declaration**, and confirm. A new revision returns the affected records to
+ingest order while preserving the parser's timestamp evidence. The core also
+retains one validated prior event revision for one-step undo; stale or tampered
+revision state is refused rather than partially applied.
+
+Source and corpus time quality are recomputed as `wall`, `mixed`, or
+`order-only` from the active event interpretations. A reliable source does not
+silently upgrade another source. Exact alignment and metric correlation
+continue to fail closed when participating time remains unresolved.
+
 ## Support bundles and nested ZIPs
 
 You can select a ZIP directly or select a directory that contains ZIP files.
@@ -154,10 +197,12 @@ remote S3/Loki/Elastic/Kubernetes log-source connectors are not shipped in this
 pipeline. A cloud embedding option, when used, requires an explicit
 content-leaves-this-machine decision and remains separate from local re-analysis.
 Bookmarks are not included in portable package v1. Durable noise/squelch rules
-are not shipped (#671). Per-source timezone/year/DST policy, subsecond
-provenance, and clock-skew correction remain incomplete (#670). Corpora are
-analyzed independently; versioned learned application baselines are not
-shipped (#690).
+are not shipped (#671). The bounded per-source IANA workflow handles only
+parser-recognized complete local calendar timestamps. Storage remains
+whole-second; yearless timestamps, timezone abbreviations, subsecond
+persistence, clock-skew correction, arbitrary custom profiles, and seamless
+arbitrary log formats remain incomplete (#670/#751). Corpora are analyzed
+independently; versioned learned application baselines are not shipped (#690).
 
 > Important:
 > Redaction reduces risk but cannot prove that arbitrary logs contain no

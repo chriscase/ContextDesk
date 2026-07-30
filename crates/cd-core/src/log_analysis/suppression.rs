@@ -5,7 +5,7 @@
 //! a versioned corpus sidecar. Raw corpus events remain authoritative and are
 //! never changed by any operation here.
 
-use super::{classify_ts, LogCorpus, TimeQuality};
+use super::{classify_active_timestamp_basis, ActiveTimestampBasis, LogCorpus, TimeQuality};
 use crate::error::{CoreError, CoreResult};
 use crate::redact::redact_candidate;
 use duckdb::params;
@@ -753,7 +753,7 @@ fn compute_preview_facts(
 
         let mut representative_statement = connection
             .prepare(
-                "SELECT seq, ts, level, message, source FROM events \
+                "SELECT seq, ts, level, message, source, active_timestamp_basis FROM events \
                  WHERE template_id = ? ORDER BY ts, seq LIMIT ?",
             )
             .map_err(suppression_duck_error)?;
@@ -767,13 +767,19 @@ fn compute_preview_facts(
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
                     ))
                 },
             )
             .map_err(suppression_duck_error)?;
         let mut representatives = Vec::new();
         for row in representative_rows {
-            let (seq, timestamp, level, message, source) = row.map_err(suppression_duck_error)?;
+            let (seq, timestamp, level, message, source, stored_provenance) =
+                row.map_err(suppression_duck_error)?;
+            let active_basis = ActiveTimestampBasis::from_storage_str(stored_provenance.as_deref())
+                .ok_or_else(|| {
+                    CoreError::Message("event has invalid active timestamp basis".into())
+                })?;
             let seq = u64::try_from(seq).map_err(|_| {
                 CoreError::Message("suppression representative has negative sequence".into())
             })?;
@@ -787,7 +793,7 @@ fn compute_preview_facts(
                 seq,
                 source,
                 timestamp,
-                time_quality: classify_ts(timestamp),
+                time_quality: classify_active_timestamp_basis(active_basis),
                 level,
                 redacted_excerpt,
             });
@@ -1411,7 +1417,7 @@ mod tests {
     use super::*;
     use crate::log_analysis::drain::TemplateInfo;
     use crate::log_analysis::query::fetch_events_by_seqs;
-    use crate::log_analysis::{LogEvent, TemplateRow};
+    use crate::log_analysis::{LogEvent, TemplateRow, TimestampProvenance};
     use std::process::Command;
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
@@ -1424,6 +1430,9 @@ mod tests {
             .push_events(&[LogEvent {
                 seq: 1,
                 ts: 1_700_000_000,
+                timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                unresolved_local_timestamp: None,
                 level: "info".into(),
                 service: Some("worker".into()),
                 host: Some("host-1".into()),
@@ -1516,6 +1525,9 @@ mod tests {
                 LogEvent {
                     seq: 2,
                     ts: 1_700_000_005,
+                    timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
                     level: "warn".into(),
                     service: None,
                     host: None,
@@ -1528,6 +1540,9 @@ mod tests {
                 LogEvent {
                     seq: 3,
                     ts: 1_700_000_006,
+                    timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
                     level: "error".into(),
                     service: None,
                     host: None,
@@ -1755,6 +1770,9 @@ mod tests {
             .push_events(&[LogEvent {
                 seq: 2,
                 ts: 1_700_000_001,
+                timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                unresolved_local_timestamp: None,
                 level: "info".into(),
                 service: None,
                 host: None,
@@ -2039,6 +2057,9 @@ mod tests {
             .push_events(&[LogEvent {
                 seq: 2,
                 ts: 1_700_000_001,
+                timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                unresolved_local_timestamp: None,
                 level: "info".into(),
                 service: None,
                 host: None,

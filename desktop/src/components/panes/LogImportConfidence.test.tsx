@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { LogImportConfidenceDto } from "../../lib/host";
 import { LogImportConfidence } from "./LogImportConfidence";
 
@@ -96,6 +96,9 @@ describe("LogImportConfidence", () => {
       within(region).getByLabelText("Timestamp examples for edge/server.log")
         .textContent,
     ).toBe("2021-03-05T00:06,350 CET");
+    expect(
+      within(region).queryByRole("button", { name: "Resolve time…" }),
+    ).toBeNull();
   });
 
   it("labels unknown formats without claiming parsing failed", () => {
@@ -130,5 +133,44 @@ describe("LogImportConfidence", () => {
       screen.getByText("No grammar matched — kept as raw lines"),
     ).toBeTruthy();
     expect(screen.getByText("Exact wall clock")).toBeTruthy();
+  });
+
+  it("does not mistake a prototype-shaped source name for a saved declaration", () => {
+    const confidence = report({
+      corpusTimeQuality: "order_only",
+      counts: {
+        wall: 0,
+        orderOnly: 1,
+        mixed: 0,
+        matched: 1,
+        ambiguous: 0,
+        unknown: 0,
+        unresolved: 1,
+      },
+      sources: [
+        {
+          source: "constructor",
+          lines: 4,
+          outcome: "matched",
+          timeQuality: "order_only",
+          unresolvedReasons: ["no_timezone"],
+        },
+      ],
+    });
+    render(
+      <LogImportConfidence
+        confidence={confidence}
+        timezoneScope={{ corpusId: "prototype-source", eventRevision: 2 }}
+        timezoneDeclarations={{}}
+        onPreviewTimezone={vi.fn()}
+        onApplyTimezone={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Review 1 source" }));
+    expect(
+      screen.getByRole("button", { name: "Resolve time…" }),
+    ).toBeTruthy();
+    expect(screen.queryByText(/is active/)).toBeNull();
   });
 });

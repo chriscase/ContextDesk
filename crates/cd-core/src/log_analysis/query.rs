@@ -5,6 +5,7 @@
 
 use super::search::{search_logs_with_excluded_templates, SearchLogsQuery};
 use super::store::{EventCountCacheKey, LogCorpus, LogEvent};
+use super::{ActiveTimestampBasis, TimestampProvenance};
 use crate::embed::EmbedBackend;
 use crate::error::{CoreError, CoreResult};
 use serde::{Deserialize, Serialize};
@@ -60,11 +61,14 @@ pub const SHARED_TIMELINE_SEVERITY_SERIES: usize = 5;
 pub const MAX_SHARED_TIMELINE_COUNT_CELLS: usize =
     MAX_TIMELINE_BUCKETS * (1 + SHARED_TIMELINE_SEVERITY_SERIES + MAX_SHARED_TIMELINE_LANES);
 
-/// Minimum unix ts treated as plausible wall-clock (2000-01-01).
+/// Legacy boundary retained for API compatibility only.
+///
+/// Timestamp truth must not be inferred from this value or any other numeric
+/// magnitude. Use persisted [`TimestampProvenance`] instead.
 pub const MIN_WALL_TS: i64 = 946_684_800;
 
 /// How timestamps should be presented for a corpus or event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TimeQuality {
     /// Parsed / wall-clock timestamps.
@@ -87,27 +91,85 @@ impl TimeQuality {
     }
 }
 
-/// Classify a single timestamp.
-pub fn classify_ts(ts: i64) -> TimeQuality {
-    if ts >= MIN_WALL_TS {
+/// Classify an explicit timestamp provenance.
+pub const fn classify_timestamp_provenance(provenance: TimestampProvenance) -> TimeQuality {
+    if provenance.is_wall_clock() {
         TimeQuality::Wall
     } else {
         TimeQuality::OrderOnly
     }
 }
 
+/// Classify the reversible active timestamp basis used for presentation.
+pub const fn classify_active_timestamp_basis(basis: ActiveTimestampBasis) -> TimeQuality {
+    if basis.is_wall_clock() {
+        TimeQuality::Wall
+    } else {
+        TimeQuality::OrderOnly
+    }
+}
+
+/// Fail-closed compatibility shim for callers that only have a numeric `ts`.
+///
+/// A number cannot prove its own origin. New code must carry and classify
+/// [`TimestampProvenance`] instead.
+pub const fn classify_ts(_ts: i64) -> TimeQuality {
+    TimeQuality::OrderOnly
+}
+
+fn quality_from_counts(total: u64, wall: u64) -> TimeQuality {
+    match (total, wall) {
+        (0, _) | (_, 0) => TimeQuality::OrderOnly,
+        (total, wall) if total == wall => TimeQuality::Wall,
+        _ => TimeQuality::Mixed,
+    }
+}
+
+fn quality_from_persisted_counts(counts: &std::collections::BTreeMap<String, u64>) -> TimeQuality {
+    let wall = counts
+        .get(ActiveTimestampBasis::ExplicitWall.as_storage_str())
+        .copied()
+        .unwrap_or(0)
+        .saturating_add(
+            counts
+                .get(ActiveTimestampBasis::ResolvedLocal.as_storage_str())
+                .copied()
+                .unwrap_or(0),
+        );
+    quality_from_counts(counts.values().copied().sum(), wall)
+}
+
+fn corpus_time_quality_from_revision_state(corpus: &LogCorpus) -> Option<TimeQuality> {
+    corpus
+        .with_connection(|connection| {
+            let (total, wall) = connection
+                .query_row(
+                    "SELECT event_count, wall_event_count
+                     FROM event_revision_state
+                     WHERE singleton = 1",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .map_err(duck_err)?;
+            if total < 0 || wall < 0 || wall > total {
+                return Err(CoreError::Message(
+                    "event revision time-quality counts are invalid".into(),
+                ));
+            }
+            Ok(quality_from_counts(total as u64, wall as u64))
+        })
+        .ok()
+}
+
 /// Classify corpus-level time quality from stats or a sample of events.
 pub fn corpus_time_quality(corpus: &LogCorpus) -> TimeQuality {
+    if let Some(quality) = corpus_time_quality_from_revision_state(corpus) {
+        return quality;
+    }
     if let Ok(meta) = corpus.meta() {
         if let Some(stats) = meta.stats {
-            if let (Some(min), Some(max)) = (stats.ts_min, stats.ts_max) {
-                let min_q = classify_ts(min);
-                let max_q = classify_ts(max);
-                return match (min_q, max_q) {
-                    (TimeQuality::Wall, TimeQuality::Wall) => TimeQuality::Wall,
-                    (TimeQuality::OrderOnly, TimeQuality::OrderOnly) => TimeQuality::OrderOnly,
-                    _ => TimeQuality::Mixed,
-                };
+            if !stats.active_timestamp_basis_counts.is_empty() {
+                return quality_from_persisted_counts(&stats.active_timestamp_basis_counts);
             }
         }
     }
@@ -454,6 +516,13 @@ pub struct ExplorerEvent {
     pub seq: u64,
     /// Stored ts (wall or order).
     pub ts: i64,
+    /// Durable origin of `ts`.
+    pub timestamp_provenance: TimestampProvenance,
+    /// Reversible active interpretation used for presentation.
+    pub active_timestamp_basis: ActiveTimestampBasis,
+    /// Exact unresolved local timestamp, when this row is awaiting a timezone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unresolved_local_timestamp: Option<String>,
     /// How to present `ts`.
     pub time_quality: TimeQuality,
     /// Level.
@@ -477,7 +546,10 @@ impl From<LogEvent> for ExplorerEvent {
         Self {
             seq: e.seq,
             ts: e.ts,
-            time_quality: classify_ts(e.ts),
+            timestamp_provenance: e.timestamp_provenance,
+            active_timestamp_basis: e.active_timestamp_basis,
+            unresolved_local_timestamp: e.unresolved_local_timestamp,
+            time_quality: classify_active_timestamp_basis(e.active_timestamp_basis),
             level: e.level,
             service: e.service,
             host: e.host,
@@ -791,15 +863,22 @@ pub fn query_timeline_summary(
 ) -> CoreResult<TimelineSummary> {
     let max_buckets = q.max_buckets.clamp(1, MAX_TIMELINE_BUCKETS);
     let (where_sql, binds) = build_where(&q.filter)?;
-    let bounds_sql = format!("SELECT MIN(ts), MAX(ts), COUNT(*) FROM events WHERE {where_sql}");
+    let bounds_sql = format!(
+        "SELECT MIN(ts), MAX(ts), COUNT(*), \
+                COALESCE(SUM(CASE WHEN active_timestamp_basis IN ('{}', '{}') THEN 1 ELSE 0 END), 0) \
+         FROM events WHERE {where_sql}",
+        ActiveTimestampBasis::ExplicitWall.as_storage_str(),
+        ActiveTimestampBasis::ResolvedLocal.as_storage_str()
+    );
 
-    let (min_ts, max_ts, total_matched) = corpus.with_connection(|conn| {
+    let (min_ts, max_ts, total_matched, wall_matched) = corpus.with_connection(|conn| {
         let mut stmt = conn.prepare(&bounds_sql).map_err(duck_err)?;
         stmt.query_row(params_ref(&binds).as_slice(), |row| {
             Ok((
                 row.get::<_, Option<i64>>(0)?,
                 row.get::<_, Option<i64>>(1)?,
                 row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
             ))
         })
         .map_err(duck_err)
@@ -881,11 +960,7 @@ pub fn query_timeline_summary(
         bucket.by_level.insert(level, count.max(0) as u64);
     }
 
-    let time_quality = match (classify_ts(min_ts), classify_ts(max_ts)) {
-        (TimeQuality::Wall, TimeQuality::Wall) => TimeQuality::Wall,
-        (TimeQuality::OrderOnly, TimeQuality::OrderOnly) => TimeQuality::OrderOnly,
-        _ => TimeQuality::Mixed,
-    };
+    let time_quality = quality_from_counts(total_matched.max(0) as u64, wall_matched.max(0) as u64);
 
     Ok(TimelineSummary {
         time_quality,
@@ -946,14 +1021,21 @@ pub fn query_shared_timeline_summary(
         })
         .collect::<Vec<_>>();
     let (where_sql, binds) = build_where(&q.filter)?;
-    let bounds_sql = format!("SELECT MIN(ts), MAX(ts), COUNT(*) FROM events WHERE {where_sql}");
-    let (min_ts, max_ts, total_matched) = corpus.with_connection(|conn| {
+    let bounds_sql = format!(
+        "SELECT MIN(ts), MAX(ts), COUNT(*), \
+                COALESCE(SUM(CASE WHEN active_timestamp_basis IN ('{}', '{}') THEN 1 ELSE 0 END), 0) \
+         FROM events WHERE {where_sql}",
+        ActiveTimestampBasis::ExplicitWall.as_storage_str(),
+        ActiveTimestampBasis::ResolvedLocal.as_storage_str()
+    );
+    let (min_ts, max_ts, total_matched, wall_matched) = corpus.with_connection(|conn| {
         let mut stmt = conn.prepare(&bounds_sql).map_err(duck_err)?;
         stmt.query_row(params_ref(&binds).as_slice(), |row| {
             Ok((
                 row.get::<_, Option<i64>>(0)?,
                 row.get::<_, Option<i64>>(1)?,
                 row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
             ))
         })
         .map_err(duck_err)
@@ -1022,11 +1104,7 @@ pub fn query_shared_timeline_summary(
             severity_counts[severity.index()][index].saturating_add(count);
     }
 
-    let time_quality = match (classify_ts(min_ts), classify_ts(max_ts)) {
-        (TimeQuality::Wall, TimeQuality::Wall) => TimeQuality::Wall,
-        (TimeQuality::OrderOnly, TimeQuality::OrderOnly) => TimeQuality::OrderOnly,
-        _ => TimeQuality::Mixed,
-    };
+    let time_quality = quality_from_counts(total_matched.max(0) as u64, wall_matched.max(0) as u64);
     let mut lanes = Vec::with_capacity(lane_scopes.len());
     for (lane_index, scope) in lane_scopes.iter().enumerate() {
         if scope.all_sources {
@@ -1187,9 +1265,12 @@ fn query_shared_timeline_lane(
     let (where_sql, binds) = build_where(&filter)?;
     let lane_sql = format!(
         "SELECT CAST(FLOOR((ts - ?) / CAST(? AS DOUBLE)) AS BIGINT) AS bucket_index, \
-         COUNT(*), MIN(ts), MAX(ts) \
+         COUNT(*), \
+         COALESCE(SUM(CASE WHEN active_timestamp_basis IN ('{}', '{}') THEN 1 ELSE 0 END), 0) \
          FROM events WHERE {where_sql} \
-         GROUP BY bucket_index ORDER BY bucket_index"
+         GROUP BY bucket_index ORDER BY bucket_index",
+        ActiveTimestampBasis::ExplicitWall.as_storage_str(),
+        ActiveTimestampBasis::ResolvedLocal.as_storage_str()
     );
     let mut lane_binds = vec![Value::BigInt(min_ts), Value::BigInt(bucket_width)];
     lane_binds.extend(binds);
@@ -1201,7 +1282,6 @@ fn query_shared_timeline_lane(
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
                 ))
             })
             .map_err(duck_err)?;
@@ -1213,24 +1293,15 @@ fn query_shared_timeline_lane(
     })?;
 
     let mut total_matched = 0_u64;
-    let mut lane_min = None;
-    let mut lane_max = None;
-    for (raw_index, raw_count, bucket_min, bucket_max) in grouped {
+    let mut wall_matched = 0_u64;
+    for (raw_index, raw_count, raw_wall_count) in grouped {
         let index = checked_timeline_bucket(raw_index, bucket_count)?;
         let count = raw_count.max(0) as u64;
         counts[index] = counts[index].saturating_add(count);
         total_matched = total_matched.saturating_add(count);
-        lane_min = Some(lane_min.map_or(bucket_min, |value: i64| value.min(bucket_min)));
-        lane_max = Some(lane_max.map_or(bucket_max, |value: i64| value.max(bucket_max)));
+        wall_matched = wall_matched.saturating_add(raw_wall_count.max(0) as u64);
     }
-    let time_quality = match (lane_min, lane_max) {
-        (Some(min), Some(max)) => match (classify_ts(min), classify_ts(max)) {
-            (TimeQuality::Wall, TimeQuality::Wall) => TimeQuality::Wall,
-            (TimeQuality::OrderOnly, TimeQuality::OrderOnly) => TimeQuality::OrderOnly,
-            _ => TimeQuality::Mixed,
-        },
-        _ => TimeQuality::OrderOnly,
-    };
+    let time_quality = quality_from_counts(total_matched, wall_matched);
 
     Ok(SharedTimelineLaneSummary {
         lane_index: lane_index as u8,
@@ -1392,7 +1463,8 @@ fn query_event_rows_with_additional_keyword(
     // instead of advertising a cursor that requires an empty probe (#640).
     let fetch_limit = limit.saturating_add(1);
     let sql = format!(
-        "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source \
+        "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source, \
+                timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp \
          FROM events WHERE {page_where} ORDER BY {order} LIMIT {fetch_limit}"
     );
 
@@ -1496,7 +1568,7 @@ fn query_event_count_with_post_scan(
         // Event appends publish their revision while holding this same database
         // lock. Reading it here therefore identifies the exact event snapshot
         // counted below.
-        let snapshot_revision = corpus.event_revision();
+        let snapshot_revision = corpus.event_revision_with_connection(conn);
         // Another identical caller may have populated the cache while this
         // request waited for the database lock. Recheck under that lock so
         // concurrent lane/count requests collapse to one exact scan.
@@ -1528,20 +1600,37 @@ fn query_event_count_with_post_scan(
 }
 
 fn corpus_time_quality_from_meta(corpus: &LogCorpus) -> TimeQuality {
+    if let Some(quality) = corpus_time_quality_from_revision_state(corpus) {
+        return quality;
+    }
     if let Ok(meta) = corpus.meta() {
         if let Some(stats) = meta.stats {
-            if let (Some(min), Some(max)) = (stats.ts_min, stats.ts_max) {
-                let a = classify_ts(min);
-                let b = classify_ts(max);
-                return match (a, b) {
-                    (TimeQuality::Wall, TimeQuality::Wall) => TimeQuality::Wall,
-                    (TimeQuality::OrderOnly, TimeQuality::OrderOnly) => TimeQuality::OrderOnly,
-                    _ => TimeQuality::Mixed,
-                };
+            if !stats.active_timestamp_basis_counts.is_empty() {
+                return quality_from_persisted_counts(&stats.active_timestamp_basis_counts);
             }
         }
     }
-    TimeQuality::OrderOnly
+    corpus
+        .with_connection(|connection| {
+            let (total, wall) = connection
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*), \
+                                COALESCE(SUM(CASE WHEN active_timestamp_basis IN ('{}', '{}') THEN 1 ELSE 0 END), 0) \
+                         FROM events",
+                        ActiveTimestampBasis::ExplicitWall.as_storage_str(),
+                        ActiveTimestampBasis::ResolvedLocal.as_storage_str()
+                    ),
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .map_err(duck_err)?;
+            Ok(quality_from_counts(
+                total.max(0) as u64,
+                wall.max(0) as u64,
+            ))
+        })
+        .unwrap_or(TimeQuality::OrderOnly)
 }
 
 fn summarize_event_quality(events: &[ExplorerEvent]) -> TimeQuality {
@@ -2377,7 +2466,8 @@ pub(crate) fn fetch_event_by_seq(
 ) -> CoreResult<Option<ExplorerEvent>> {
     corpus.with_connection(|conn| {
         let sql =
-            "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source \
+            "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source, \
+                    timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp \
                    FROM events WHERE seq = ? LIMIT 1";
         let mut stmt = conn.prepare(sql).map_err(duck_err)?;
         let binds = [Value::BigInt(seq as i64)];
@@ -2403,7 +2493,8 @@ pub(crate) fn fetch_events_by_seqs(
                 .collect::<Vec<_>>()
                 .join(", ");
             let sql = format!(
-                "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source \
+                "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source, \
+                        timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp \
                  FROM events WHERE seq IN ({placeholders})"
             );
             let mut stmt = conn.prepare(&sql).map_err(duck_err)?;
@@ -2659,26 +2750,71 @@ fn bind_and_map_events(
 ) -> CoreResult<Vec<ExplorerEvent>> {
     let rows = stmt
         .query_map(params_ref(values).as_slice(), |r| {
-            Ok(LogEvent {
-                seq: r.get::<_, i64>(0)? as u64,
-                ts: r.get(1)?,
-                level: r.get(2)?,
-                service: r.get(3)?,
-                host: r.get(4)?,
-                template_id: r.get::<_, i64>(5)? as u64,
-                params: {
-                    let s: String = r.get(6)?;
-                    serde_json::from_str(&s).unwrap_or_default()
-                },
-                trace_id: r.get(7)?,
-                message: r.get(8)?,
-                source: r.get(9)?,
-            })
+            let params = {
+                let value: String = r.get(6)?;
+                serde_json::from_str(&value).unwrap_or_default()
+            };
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, i64>(5)?,
+                params,
+                r.get::<_, Option<String>>(7)?,
+                r.get::<_, String>(8)?,
+                r.get::<_, String>(9)?,
+                r.get::<_, Option<String>>(10)?,
+                r.get::<_, Option<String>>(11)?,
+                r.get::<_, Option<String>>(12)?,
+            ))
         })
         .map_err(duck_err)?;
     let mut out = Vec::new();
     for row in rows {
-        out.push(ExplorerEvent::from(row.map_err(duck_err)?));
+        let (
+            seq,
+            ts,
+            level,
+            service,
+            host,
+            template_id,
+            params,
+            trace_id,
+            message,
+            source,
+            stored_provenance,
+            stored_active_basis,
+            unresolved_local_timestamp,
+        ) = row.map_err(duck_err)?;
+        let timestamp_provenance = TimestampProvenance::from_storage_str(
+            stored_provenance.as_deref(),
+        )
+        .ok_or_else(|| CoreError::Message("event has invalid timestamp provenance".into()))?;
+        let active_timestamp_basis = ActiveTimestampBasis::from_storage_str(
+            stored_active_basis.as_deref(),
+        )
+        .ok_or_else(|| CoreError::Message("event has invalid active timestamp basis".into()))?;
+        let event = LogEvent {
+            seq: u64::try_from(seq)
+                .map_err(|_| CoreError::Message("event sequence is negative".into()))?,
+            ts,
+            timestamp_provenance,
+            active_timestamp_basis,
+            unresolved_local_timestamp,
+            level,
+            service,
+            host,
+            template_id: u64::try_from(template_id)
+                .map_err(|_| CoreError::Message("event template id is negative".into()))?,
+            params,
+            trace_id,
+            message,
+            source,
+        };
+        event.validate_timestamp_provenance()?;
+        out.push(ExplorerEvent::from(event));
     }
     Ok(out)
 }
@@ -3741,6 +3877,9 @@ mod tests {
             .push_events(&[LogEvent {
                 seq: 90,
                 ts: 1_700_000_500,
+                timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                unresolved_local_timestamp: None,
                 level: "error".into(),
                 service: Some("api".into()),
                 host: Some("h1".into()),
@@ -3819,6 +3958,9 @@ mod tests {
                 .push_events(&[LogEvent {
                     seq: 90,
                     ts: 1_700_000_500,
+                    timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
                     level: "error".into(),
                     service: Some("api".into()),
                     host: Some("h1".into()),
@@ -4629,10 +4771,83 @@ mod tests {
     }
 
     #[test]
-    fn time_quality_wall_vs_order() {
-        assert_eq!(classify_ts(1_700_000_000), TimeQuality::Wall);
+    fn timestamp_provenance_numeric_value_alone_never_claims_wall_clock() {
+        assert_eq!(classify_ts(1_700_000_000), TimeQuality::OrderOnly);
         assert_eq!(classify_ts(42), TimeQuality::OrderOnly);
         assert_eq!(classify_ts(0), TimeQuality::OrderOnly);
+        assert_eq!(
+            classify_timestamp_provenance(TimestampProvenance::ExplicitWallClock),
+            TimeQuality::Wall
+        );
+        assert_eq!(
+            classify_timestamp_provenance(TimestampProvenance::OrderOnly),
+            TimeQuality::OrderOnly
+        );
+        assert_eq!(
+            classify_active_timestamp_basis(ActiveTimestampBasis::ResolvedLocal),
+            TimeQuality::Wall
+        );
+    }
+
+    #[test]
+    fn timestamp_provenance_event_queries_ignore_numeric_magnitude() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "query provenance").unwrap();
+        corpus
+            .push_events(&[
+                LogEvent {
+                    seq: 1,
+                    ts: 946_684_799,
+                    timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
+                    level: "error".into(),
+                    service: None,
+                    host: None,
+                    template_id: 1,
+                    params: vec![],
+                    trace_id: None,
+                    message: "pre-2000 wall".into(),
+                    source: "old.log".into(),
+                },
+                LogEvent {
+                    seq: 2,
+                    ts: 1_000_000_000,
+                    timestamp_provenance: TimestampProvenance::OrderOnly,
+                    active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
+                    unresolved_local_timestamp: None,
+                    level: "unknown".into(),
+                    service: None,
+                    host: None,
+                    template_id: 2,
+                    params: vec![],
+                    trace_id: None,
+                    message: "billionth order event".into(),
+                    source: "large.log".into(),
+                },
+            ])
+            .unwrap();
+        let page = query_event_rows(&corpus, &EventQuery::default()).unwrap();
+        assert_eq!(page.events.len(), 2);
+        assert_eq!(page.events[0].time_quality, TimeQuality::Wall);
+        assert_eq!(
+            page.events[0].timestamp_provenance,
+            TimestampProvenance::ExplicitWallClock
+        );
+        assert_eq!(
+            page.events[0].active_timestamp_basis,
+            ActiveTimestampBasis::ExplicitWall
+        );
+        assert_eq!(page.events[1].time_quality, TimeQuality::OrderOnly);
+        assert_eq!(
+            page.events[1].timestamp_provenance,
+            TimestampProvenance::OrderOnly
+        );
+        assert_eq!(
+            page.events[1].active_timestamp_basis,
+            ActiveTimestampBasis::OrderOnly
+        );
+        assert_eq!(page.time_quality, TimeQuality::Mixed);
     }
 
     #[test]

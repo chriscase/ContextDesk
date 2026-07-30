@@ -1,8 +1,11 @@
 //! Bounded, privacy-safe format and time-confidence aggregation for log ingest.
 
 use super::format_profile::FormatFingerprintOutcome;
+#[cfg(test)]
+use super::parse::ActiveTimestampBasis;
 use super::parse::FingerprintedParsedLine;
-use super::query::{classify_ts, TimeQuality};
+use super::parse::TimestampProvenance;
+use super::query::TimeQuality;
 use super::redact_log::redact_message;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -149,11 +152,13 @@ impl IngestConfidenceAggregator {
         let source = self.sources.entry(source.to_string()).or_default();
         source.lines = source.lines.saturating_add(1);
 
-        match line.parsed.ts.map(classify_ts).unwrap_or_default() {
-            TimeQuality::Wall => {
+        match line.parsed.timestamp_provenance {
+            TimestampProvenance::ExplicitWallClock => {
                 source.wall_lines = source.wall_lines.saturating_add(1);
             }
-            TimeQuality::Mixed | TimeQuality::OrderOnly => {
+            TimestampProvenance::UnresolvedLocal
+            | TimestampProvenance::OrderOnly
+            | TimestampProvenance::LegacyUnknown => {
                 source.order_only_lines = source.order_only_lines.saturating_add(1);
             }
         }
@@ -347,6 +352,8 @@ mod tests {
         FingerprintedParsedLine {
             parsed: ParsedLine {
                 ts: Some(seq as i64),
+                timestamp_provenance: TimestampProvenance::OrderOnly,
+                active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
                 unresolved_local_timestamp: None,
                 level: "unknown".into(),
                 service: None,

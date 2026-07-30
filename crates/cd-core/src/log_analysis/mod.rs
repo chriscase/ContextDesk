@@ -11,6 +11,7 @@ pub mod bookmarks;
 pub mod diagnostics;
 pub mod drain;
 pub mod embed_policy;
+pub mod event_revision;
 pub mod format_profile;
 pub mod ingest;
 mod ingest_confidence;
@@ -24,6 +25,8 @@ pub mod redact_log;
 pub mod search;
 pub mod store;
 pub mod suppression;
+pub mod timezone_application;
+pub mod timezone_resolution;
 pub mod tools;
 pub mod view_context;
 pub mod why;
@@ -48,6 +51,11 @@ pub use diagnostics::{
 pub use drain::{DrainMiner, TemplateInfo};
 pub use embed_policy::{
     LogEmbedMode, LogEmbedPolicy, CLOUD_LEAVE_MACHINE_CONFIRM, LOCAL_EMBED_DEFER_SOURCE_BYTES,
+};
+pub use event_revision::{
+    apply_event_timestamp_revision, undo_event_revision, EventRevisionMetadata,
+    EventRevisionReport, EventTimestampUpdate, EVENT_REVISION_AUDIT_SCHEMA_VERSION,
+    EVENT_REVISION_METADATA_SCHEMA_VERSION, MAX_EVENT_REVISION_METADATA_BYTES,
 };
 pub use format_profile::{
     fingerprint_format, BuiltInFormatProfile, BuiltInGrammar, FormatFingerprint,
@@ -81,13 +89,14 @@ pub use package::{
     PACKAGE_FORMAT_VERSION, PACKAGE_READERS, PACKAGE_READER_VERSION,
 };
 pub use parse::{
-    detect_format, parse_line, parse_line_with_fingerprint, FingerprintedParsedLine, LogFormat,
-    ParsedLine,
+    detect_format, parse_line, parse_line_with_fingerprint, ActiveTimestampBasis,
+    FingerprintedParsedLine, LogFormat, ParsedLine, TimestampProvenance,
 };
 pub use query::{
-    classify_ts, corpus_time_quality, query_event_count, query_event_neighborhood,
-    query_event_rows, query_events, query_facets, query_shared_timeline_summary,
-    query_source_catalog, query_timeline_summary, search_events, search_events_advanced,
+    classify_active_timestamp_basis, classify_timestamp_provenance, classify_ts,
+    corpus_time_quality, query_event_count, query_event_neighborhood, query_event_rows,
+    query_events, query_facets, query_shared_timeline_summary, query_source_catalog,
+    query_timeline_summary, search_events, search_events_advanced,
     search_events_advanced_with_cancel, EventCount, EventNeighborhood, EventNeighborhoodQuery,
     EventPage, EventQuery, EventRowsPage, EventSearchHit, EventSearchQuery, EventSearchResult,
     ExplorerEvent, LogFacets, LogSourceCatalogEntry, LogSourceCatalogPage, LogSourceCatalogQuery,
@@ -123,6 +132,17 @@ pub use suppression::{
     SuppressionTemplatePredicate, SuppressionTimeSpan, MAX_SUPPRESSION_AUDIT_ENTRIES,
     MAX_SUPPRESSION_LEVEL_BUCKETS, MAX_SUPPRESSION_PREVIEWS, MAX_SUPPRESSION_REPRESENTATIVES,
     MAX_SUPPRESSION_RULES, SUPPRESSION_SCHEMA_VERSION,
+};
+pub use timezone_application::{
+    apply_source_timezone, clear_source_timezone, load_timezone_resolution_state,
+    preview_source_timezone, TimezoneResolutionState, TimezoneSourceStatus,
+};
+pub use timezone_resolution::{
+    SourceTimezoneDeclaration, SourceTimezoneResolver, TimestampResolution,
+    TimestampResolutionProvenance, TimezoneDeclarationBasis, TimezoneResolutionError,
+    TimezoneResolutionPreview, TimezoneResolutionScope, UnresolvedTimestampReason,
+    MAX_IANA_TIMEZONE_BYTES, MAX_RESOLVED_WALL_SECONDS, MAX_TIMEZONE_SOURCE_BYTES,
+    MIN_RESOLVED_WALL_SECONDS, TIMEZONE_DECLARATION_SCHEMA_VERSION,
 };
 pub use tools::{
     anomalies_tool_spec, cluster_problems_tool_spec, correlate_tool_spec, ingest_logs_tool_spec,

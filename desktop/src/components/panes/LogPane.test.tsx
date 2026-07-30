@@ -45,6 +45,10 @@ const hostMocks = vi.hoisted(() => ({
   openDirectory: vi.fn(),
   openFile: vi.fn(),
   listenProgress: vi.fn(),
+  loadTimezoneState: vi.fn(),
+  previewTimezone: vi.fn(),
+  applyTimezone: vi.fn(),
+  clearTimezone: vi.fn(),
 }));
 
 vi.mock("../../lib/host", () => ({
@@ -62,10 +66,14 @@ vi.mock("../../lib/host", () => ({
   hostReleaseLogDiagnosticReport: hostMocks.releaseDiagnostic,
   hostIngestLogPath: hostMocks.ingest,
   hostListLogTemplates: hostMocks.listTemplates,
+  hostLoadLogTimezoneState: hostMocks.loadTimezoneState,
   hostLogClusterProblems: hostMocks.clusterProblems,
   hostLogSearch: hostMocks.search,
   hostLogTimeline: hostMocks.timeline,
   hostOpenLogExplorer: vi.fn(),
+  hostPreviewLogSourceTimezone: hostMocks.previewTimezone,
+  hostApplyLogSourceTimezone: hostMocks.applyTimezone,
+  hostClearLogSourceTimezone: hostMocks.clearTimezone,
   hostReanalyzeLogCorpus: hostMocks.reanalyze,
   hostSaveLogDiagnosticReport: hostMocks.saveDiagnostic,
   hostSetActiveLogCorpus: hostMocks.setActiveCorpus,
@@ -160,6 +168,45 @@ describe("LogPane", () => {
     hostMocks.search.mockResolvedValue([]);
     hostMocks.timeline.mockResolvedValue([]);
     hostMocks.listenProgress.mockResolvedValue(() => {});
+    hostMocks.loadTimezoneState.mockImplementation(async (corpusId: string) => ({
+      corpusId,
+      eventRevision: 0,
+      declarations: {},
+      sources: [],
+    }));
+    hostMocks.previewTimezone.mockResolvedValue({
+      corpusId: "timezone-corpus",
+      eventRevision: 4,
+      source: "app/server.log",
+      ianaZone: "America/Chicago",
+      previewToken: "timezone-preview",
+      affectedRecords: 12,
+      existingWallClockRecords: 0,
+      firstResolvedTs: 1_700_000_000,
+      lastResolvedTs: 1_700_000_120,
+      dstGapRecords: 0,
+      dstFoldAmbiguities: 0,
+      unchangedOrderOnlyRecords: 0,
+      unsupportedTimestampRecords: 0,
+      outOfRangeRecords: 0,
+      precision: "whole_second",
+    });
+    hostMocks.applyTimezone.mockResolvedValue({
+      revision: 5,
+      previousRevision: 4,
+      changedEvents: 12,
+      eventCount: 12,
+      tsMin: 1_700_000_000,
+      tsMax: 1_700_000_120,
+    });
+    hostMocks.clearTimezone.mockResolvedValue({
+      revision: 6,
+      previousRevision: 5,
+      changedEvents: 12,
+      eventCount: 12,
+      tsMin: 1,
+      tsMax: 12,
+    });
     hostMocks.setActiveCorpus.mockResolvedValue(null);
     hostMocks.getFailedIngestDiagnostic.mockResolvedValue(null);
     hostMocks.clearFailedIngestDiagnostic.mockResolvedValue(true);
@@ -2185,5 +2232,247 @@ describe("LogPane", () => {
       updatedAt: 2,
     });
     expect(await screen.findByText(/Local re-analysis complete:/)).toBeTruthy();
+  });
+
+  it("restores, applies, and clears revision-bound source timezone declarations", async () => {
+    const item = corpus("timezone-corpus", "Timezone review corpus");
+    hostMocks.listCorpora.mockResolvedValue([item]);
+    const unresolvedState = {
+      corpusId: item.id,
+      eventRevision: 4,
+      declarations: {},
+      sources: [
+        {
+          source: "app/server.log",
+          unresolvedLocalRecords: 12,
+          resolvedLocalRecords: 0,
+          explicitWallClockRecords: 0,
+          otherOrderOnlyRecords: 0,
+        },
+      ],
+    };
+    const resolvedState = {
+      corpusId: item.id,
+      eventRevision: 5,
+      declarations: {
+        "app/server.log": {
+          source: "app/server.log",
+          ianaZone: "America/Chicago",
+          basis: "user_declared",
+          declaredAt: 1_700_000_000,
+          appliedRevision: 5,
+        },
+      },
+      sources: [
+        {
+          source: "app/server.log",
+          unresolvedLocalRecords: 0,
+          resolvedLocalRecords: 12,
+          explicitWallClockRecords: 0,
+          otherOrderOnlyRecords: 0,
+        },
+      ],
+    };
+    let stateRead = 0;
+    hostMocks.loadTimezoneState.mockImplementation(async () => {
+      const states = [unresolvedState, resolvedState, unresolvedState];
+      return states[Math.min(stateRead++, states.length - 1)];
+    });
+
+    render(<LogPane />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: corpusButtonName(item.name),
+      }),
+    );
+
+    const status = await screen.findByTestId("log-timezone-status");
+    expect(status.textContent).toContain("12 records remain order-only");
+    fireEvent.click(
+      within(status).getByRole("button", { name: "Review 1 source" }),
+    );
+    fireEvent.click(
+      within(status).getByRole("button", { name: "Resolve time…" }),
+    );
+
+    let dialog = await screen.findByRole("dialog", {
+      name: "Review timezone",
+    });
+    fireEvent.click(
+      within(dialog).getByRole("radio", { name: /Use an IANA timezone/ }),
+    );
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /^IANA timezone/ }),
+      { target: { value: "America/Chicago" } },
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "Preview" }));
+    expect(await screen.findByText("12 records resolved")).toBeTruthy();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Apply declaration" }),
+    );
+
+    await waitFor(() =>
+      expect(hostMocks.applyTimezone).toHaveBeenCalledWith({
+        corpusId: item.id,
+        expectedRevision: 4,
+        source: "app/server.log",
+        ianaZone: "America/Chicago",
+        previewToken: "timezone-preview",
+      }),
+    );
+    const restored = await screen.findByTestId("log-timezone-status");
+    expect(restored.textContent).toContain("America/Chicago is active");
+    fireEvent.click(
+      within(restored).getByRole("button", { name: "Review timezone…" }),
+    );
+
+    dialog = await screen.findByRole("dialog", { name: "Review timezone" });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Remove declaration…" }),
+    );
+    fireEvent.click(
+      within(dialog).getByRole("button", {
+        name: "Remove and use order-only",
+      }),
+    );
+    await waitFor(() =>
+      expect(hostMocks.clearTimezone).toHaveBeenCalledWith({
+        corpusId: item.id,
+        expectedRevision: 5,
+        source: "app/server.log",
+        appliedRevision: 5,
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("log-timezone-status").textContent).toContain(
+        "12 records remain order-only",
+      ),
+    );
+    expect(hostMocks.loadTimezoneState).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps the newly selected corpus time state when an older apply finishes late", async () => {
+    const first = corpus("timezone-corpus", "First timezone corpus");
+    const second = corpus("second-timezone-corpus", "Second timezone corpus");
+    hostMocks.listCorpora.mockResolvedValue([first, second]);
+    const secondState = deferred<{
+      corpusId: string;
+      eventRevision: number;
+      declarations: Record<string, never>;
+      sources: Array<{
+        source: string;
+        unresolvedLocalRecords: number;
+        resolvedLocalRecords: number;
+        explicitWallClockRecords: number;
+        otherOrderOnlyRecords: number;
+      }>;
+    }>();
+    hostMocks.loadTimezoneState.mockImplementation(async (corpusId: string) => {
+      if (corpusId === second.id) return secondState.promise;
+      return {
+        corpusId,
+        eventRevision: 4,
+        declarations: {},
+        sources: [
+          {
+            source: "app/server.log",
+            unresolvedLocalRecords: 12,
+            resolvedLocalRecords: 0,
+            explicitWallClockRecords: 0,
+            otherOrderOnlyRecords: 0,
+          },
+        ],
+      };
+    });
+    const lateApply = deferred<{
+      revision: number;
+      previousRevision: number;
+      changedEvents: number;
+      eventCount: number;
+      tsMin: number | null;
+      tsMax: number | null;
+    }>();
+    hostMocks.applyTimezone.mockReturnValueOnce(lateApply.promise);
+
+    render(<LogPane />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: corpusButtonName(first.name),
+      }),
+    );
+    let status = await screen.findByTestId("log-timezone-status");
+    fireEvent.click(
+      within(status).getByRole("button", { name: "Review 1 source" }),
+    );
+    fireEvent.click(
+      within(status).getByRole("button", { name: "Resolve time…" }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "Review timezone",
+    });
+    fireEvent.click(
+      within(dialog).getByRole("radio", { name: /Use an IANA timezone/ }),
+    );
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /^IANA timezone/ }),
+      { target: { value: "America/Chicago" } },
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "Preview" }));
+    await screen.findByText("12 records resolved");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Apply declaration" }),
+    );
+    await waitFor(() => expect(hostMocks.applyTimezone).toHaveBeenCalled());
+
+    fireEvent.click(
+      screen.getByRole("button", { name: corpusButtonName(second.name) }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: second.name }),
+    ).toBeTruthy();
+
+    await act(async () => {
+      lateApply.resolve({
+        revision: 5,
+        previousRevision: 4,
+        changedEvents: 12,
+        eventCount: 12,
+        tsMin: 1_700_000_000,
+        tsMax: 1_700_000_120,
+      });
+      await lateApply.promise;
+    });
+    await act(async () => {
+      secondState.resolve({
+        corpusId: second.id,
+        eventRevision: 9,
+        declarations: {},
+        sources: [
+          {
+            source: "constructor",
+            unresolvedLocalRecords: 3,
+            resolvedLocalRecords: 0,
+            explicitWallClockRecords: 0,
+            otherOrderOnlyRecords: 0,
+          },
+        ],
+      });
+      await secondState.promise;
+    });
+
+    status = await screen.findByTestId("log-timezone-status");
+    fireEvent.click(
+      within(status).getByRole("button", { name: "Review 1 source" }),
+    );
+    expect(within(status).getByText("constructor")).toBeTruthy();
+    expect(
+      within(status).getByRole("button", { name: "Resolve time…" }),
+    ).toBeTruthy();
+    expect(within(status).queryByText(/is active/)).toBeNull();
+    expect(
+      hostMocks.loadTimezoneState.mock.calls.filter(
+        ([corpusId]) => corpusId === first.id,
+      ),
+    ).toHaveLength(1);
   });
 });

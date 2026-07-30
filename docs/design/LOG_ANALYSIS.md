@@ -51,7 +51,9 @@ The heavy row count (10–100M) lives in the **columnar event store**; the vecto
 ## 3. Ingest & templating (the core of it)
 
 **Format fingerprint + parse** per bounded physical record → `{ ts, level,
-service?, host?, trace_id?, message, raw }`. An immutable versioned built-in
+service?, host?, trace_id?, message, raw }` plus immutable parser timestamp
+provenance, the active timestamp basis, and bounded unresolved local timestamp
+text when the parser can defend that evidence. An immutable versioned built-in
 registry identifies the record grammar from strict content clues and reports
 matched, unknown, or ambiguous without declaration-order tie-breaking. A
 possible producer is only a non-authoritative hint. Filename extensions do not
@@ -71,7 +73,9 @@ interpretation remain separate:
   establishes a timezone or product identity.
 - **Time quality** reports exact wall clock, mixed, or order-only. An
   offsetless local timestamp is distinguished from a present-but-unresolved
-  zone abbreviation. Neither is guessed.
+  zone abbreviation. Neither is guessed. Parser timestamp provenance and
+  recognized unresolved local timestamp text persist with the event so a later
+  review does not have to reinterpret the message.
 - A source review may include at most three redacted timestamp-prefix samples.
   It contains a portable source identity, never the selected absolute import
   path or a message payload.
@@ -80,13 +84,31 @@ The Logs pane shows the report after a successful direct import. The collapsed
 summary states how many sources have an exact wall clock and how many need
 review; an accessible, internally bounded disclosure lists only the sources
 that are not both wall-clock and grammar-matched. Unresolved records remain
-searchable, while exact alignment and metric correlation continue to fail
-closed.
+searchable, while exact alignment and metric correlation fail closed until
+every participating source has defensible wall time.
 
-This report is explanatory, not a resolution mechanism. Per-source timezone
-declarations and their preview are tracked by #779; applying those declarations
-requires the atomic event-level corpus revision tracked by #780. Until both
-exist, the product must say that ContextDesk did not guess a timezone.
+For parser-recognized offsetless local calendar timestamps, the user can review
+one portable source and explicitly declare an IANA timezone. Preview is bound
+to the exact corpus event revision and reports affected, already-explicit, and
+unchanged order-only counts; the resulting inclusive UTC range; and records
+rejected because of DST gaps, DST folds, unsupported precision, or the event
+store range. Explicit offsets remain authoritative and are never rewritten by
+the declaration.
+
+Confirmation recomputes the preview and publishes timestamp replacements,
+active timestamp bases, declaration metadata, event counts, wall-event counts,
+and min/max time in one atomic event revision. The declaration and source
+status survive reopen. Clearing it publishes another revision that restores
+the affected records to ingest order while retaining their parser provenance
+and unresolved local text. The revision layer retains one validated prior
+event set for one-step undo and refuses stale or tampered state. Source and
+corpus `wall` / `mixed` / `order_only` quality are recomputed from the active
+event bases rather than numeric timestamp magnitude.
+
+This is the shipped #779/#780 slice, not a complete arbitrary timestamp system.
+Storage remains whole-second. ContextDesk does not infer years for yearless
+records, guess abbreviations, persist subsecond precision, correct clock skew,
+or accept arbitrary custom format profiles. Those residuals keep #670 open.
 
 **Templating (Drain-style):** collapse `"GET /users/8123 200 14ms"` and `"GET /users/9971 200 9ms"` into template `"GET /users/<*> <*> <*>ms"` + extracted params. Maintain a template table: `template_id, pattern, token_count, count, first_seen, last_seen, severity`. This is a 100–1000× reduction in what must be embedded and is itself the "what problems exist" clustering. Use an incremental parse tree (Drain3 algorithm, reimplemented in Rust — small) so ingest is single‑pass and streaming‑ready.
 

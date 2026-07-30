@@ -1,7 +1,9 @@
 //! Hybrid log search (#360).
 
-use super::query::{classify_ts, TimeQuality};
+use super::query::{classify_active_timestamp_basis, TimeQuality};
 use super::store::{LogCorpus, LogEvent};
+#[cfg(test)]
+use super::{ActiveTimestampBasis, TimestampProvenance};
 use crate::embed::EmbedBackend;
 use crate::error::{CoreError, CoreResult};
 use crate::memory::embed_blocking;
@@ -115,17 +117,18 @@ fn bounded_message_excerpt(message: &str, query: Option<&str>) -> String {
 }
 
 fn format_event_exemplar(event: &LogEvent, query: Option<&str>) -> String {
-    let (timestamp, time_quality) = match classify_ts(event.ts) {
-        TimeQuality::Wall => (
-            DateTime::<Utc>::from_timestamp(event.ts, 0)
-                .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
-                .unwrap_or_else(|| format!("unix:{}", event.ts)),
-            "wall",
-        ),
-        TimeQuality::Mixed | TimeQuality::OrderOnly => {
-            (format!("order:{}", event.ts), "order_only")
-        }
-    };
+    let (timestamp, time_quality) =
+        match classify_active_timestamp_basis(event.active_timestamp_basis) {
+            TimeQuality::Wall => (
+                DateTime::<Utc>::from_timestamp(event.ts, 0)
+                    .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
+                    .unwrap_or_else(|| format!("unix:{}", event.ts)),
+                "wall",
+            ),
+            TimeQuality::Mixed | TimeQuality::OrderOnly => {
+                (format!("order:{}", event.ts), "order_only")
+            }
+        };
     format!(
         "seq={} source={} timestamp={} time_quality={} message={}",
         event.seq,
@@ -623,6 +626,9 @@ mod tests {
         .map(|(seq, ts, event_id, source, marker)| LogEvent {
             seq,
             ts,
+            timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+            active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+            unresolved_local_timestamp: None,
             level: "info".into(),
             service: Some("checkout-api".into()),
             host: None,
@@ -702,6 +708,9 @@ mod tests {
                 LogEvent {
                     seq: 1,
                     ts: 100,
+                    timestamp_provenance: TimestampProvenance::OrderOnly,
+                    active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
+                    unresolved_local_timestamp: None,
                     level: "info".into(),
                     service: Some("api".into()),
                     host: None,
@@ -714,6 +723,9 @@ mod tests {
                 LogEvent {
                     seq: 2,
                     ts: 101,
+                    timestamp_provenance: TimestampProvenance::OrderOnly,
+                    active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
+                    unresolved_local_timestamp: None,
                     level: "info".into(),
                     service: Some("api".into()),
                     host: None,
@@ -726,6 +738,9 @@ mod tests {
                 LogEvent {
                     seq: 3,
                     ts: 102,
+                    timestamp_provenance: TimestampProvenance::OrderOnly,
+                    active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
+                    unresolved_local_timestamp: None,
                     level: "error".into(),
                     service: Some("db".into()),
                     host: None,

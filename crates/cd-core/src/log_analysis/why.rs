@@ -304,6 +304,7 @@ mod tests {
     use super::*;
     use crate::log_analysis::drain::TemplateInfo;
     use crate::log_analysis::store::{LogCorpus, LogEvent, TemplateRow};
+    use crate::log_analysis::{ActiveTimestampBasis, TimestampProvenance};
 
     fn seed_incident() -> (tempfile::TempDir, LogCorpus) {
         let dir = tempfile::tempdir().unwrap();
@@ -337,6 +338,9 @@ mod tests {
             events.push(LogEvent {
                 seq: i,
                 ts: i as i64 * 10,
+                timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                unresolved_local_timestamp: None,
                 level: "info".into(),
                 service: Some("api".into()),
                 host: None,
@@ -353,6 +357,9 @@ mod tests {
             events.push(LogEvent {
                 seq,
                 ts: 1000 + i * 5,
+                timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                unresolved_local_timestamp: None,
                 level: "warn".into(),
                 service: Some("api".into()),
                 host: None,
@@ -366,6 +373,9 @@ mod tests {
             events.push(LogEvent {
                 seq,
                 ts: 1000 + i * 5 + 2,
+                timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                unresolved_local_timestamp: None,
                 level: "error".into(),
                 service: Some("api".into()),
                 host: None,
@@ -379,6 +389,9 @@ mod tests {
             events.push(LogEvent {
                 seq,
                 ts: 1000 + i * 5 + 3,
+                timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                unresolved_local_timestamp: None,
                 level: "error".into(),
                 service: Some("db".into()),
                 host: None,

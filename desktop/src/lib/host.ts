@@ -1801,6 +1801,83 @@ export type LogImportConfidenceDto = {
   sources: LogSourceConfidenceDto[];
 };
 
+export type LogTimezoneDeclarationDto = {
+  source: string;
+  ianaZone: string;
+  basis: "user_declared";
+  declaredAt: number;
+  appliedRevision: number;
+};
+
+export type LogTimezoneScopeDto = {
+  corpusId: string;
+  eventRevision: number;
+};
+
+export type LogTimezonePreviewRequestDto = {
+  corpusId: string;
+  eventRevision: number;
+  source: string;
+  ianaZone: string;
+};
+
+export type LogTimezoneResolutionPreviewDto = {
+  corpusId: string;
+  eventRevision: number;
+  source: string;
+  ianaZone: string;
+  previewToken: string;
+  affectedRecords: number;
+  existingWallClockRecords: number;
+  firstResolvedTs: number | null;
+  lastResolvedTs: number | null;
+  dstGapRecords: number;
+  dstFoldAmbiguities: number;
+  unchangedOrderOnlyRecords: number;
+  unsupportedTimestampRecords: number;
+  outOfRangeRecords: number;
+  precision: "whole_second";
+};
+
+export type LogTimezoneApplyRequestDto = {
+  corpusId: string;
+  expectedRevision: number;
+  source: string;
+  ianaZone: string;
+  previewToken: string;
+};
+
+export type LogTimezoneClearRequestDto = {
+  corpusId: string;
+  expectedRevision: number;
+  source: string;
+  appliedRevision: number;
+};
+
+export type LogTimezoneSourceStatusDto = {
+  source: string;
+  unresolvedLocalRecords: number;
+  resolvedLocalRecords: number;
+  explicitWallClockRecords: number;
+  otherOrderOnlyRecords: number;
+};
+
+export type LogTimezoneStateDto = {
+  corpusId: string;
+  eventRevision: number;
+  declarations: Record<string, LogTimezoneDeclarationDto | undefined>;
+  sources: LogTimezoneSourceStatusDto[];
+};
+
+export type LogEventRevisionReportDto = {
+  revision: number;
+  previousRevision: number;
+  changedEvents: number;
+  eventCount: number;
+  tsMin: number | null;
+  tsMax: number | null;
+};
+
 export type LogIngestReportDto = {
   corpusId: string;
   lines: number;
@@ -2064,6 +2141,56 @@ export async function hostDiscardLogCorpus(corpusId: string): Promise<void> {
   await invoke("discard_log_corpus", { corpusId });
 }
 
+export async function hostLoadLogTimezoneState(
+  corpusId: string,
+): Promise<LogTimezoneStateDto> {
+  if (!isTauri()) {
+    return {
+      corpusId,
+      eventRevision: 0,
+      declarations: {},
+      sources: [],
+    };
+  }
+  return invoke<LogTimezoneStateDto>("log_load_timezone_state", { corpusId });
+}
+
+export async function hostPreviewLogSourceTimezone(
+  request: LogTimezonePreviewRequestDto,
+): Promise<LogTimezoneResolutionPreviewDto> {
+  if (!isTauri()) {
+    throw new Error("Timezone review requires the desktop app");
+  }
+  return invoke<LogTimezoneResolutionPreviewDto>(
+    "log_preview_source_timezone",
+    request,
+  );
+}
+
+export async function hostApplyLogSourceTimezone(
+  request: LogTimezoneApplyRequestDto,
+): Promise<LogEventRevisionReportDto> {
+  if (!isTauri()) {
+    throw new Error("Timezone review requires the desktop app");
+  }
+  return invoke<LogEventRevisionReportDto>(
+    "log_apply_source_timezone",
+    request,
+  );
+}
+
+export async function hostClearLogSourceTimezone(
+  request: LogTimezoneClearRequestDto,
+): Promise<LogEventRevisionReportDto> {
+  if (!isTauri()) {
+    throw new Error("Timezone review requires the desktop app");
+  }
+  return invoke<LogEventRevisionReportDto>(
+    "log_clear_source_timezone",
+    request,
+  );
+}
+
 export type OperationalMetricsAttachmentSourceDto =
   | { kind: "manual_load" }
   | {
@@ -2182,12 +2309,14 @@ export async function hostExportLogCorpusPackage(
   return invoke<string>("export_log_corpus_package", { corpusId, path });
 }
 
-export type LogDiagnosticSaveStatus = {
-  status: "saved" | "cancelled";
-} | {
-  status: "saved_with_warning";
-  warning: string;
-};
+export type LogDiagnosticSaveStatus =
+  | {
+      status: "saved" | "cancelled";
+    }
+  | {
+      status: "saved_with_warning";
+      warning: string;
+    };
 
 export type PreparedLogDiagnosticDto = {
   reportId: string;
@@ -2288,17 +2417,11 @@ export type EventQueryDto = {
 };
 
 export type SuppressionRuleOrigin =
-  | "human"
-  | "detector_proposal"
-  | "model_proposal";
+  "human" | "detector_proposal" | "model_proposal";
 export type SuppressionRuleState = "enabled" | "disabled" | "removed";
 export type SuppressionRuleMutation = "disable" | "reenable" | "remove";
 export type SuppressionAuditAction =
-  | "previewed"
-  | "activated"
-  | "disabled"
-  | "reenabled"
-  | "removed";
+  "previewed" | "activated" | "disabled" | "reenabled" | "removed";
 
 export type SuppressionTemplatePredicateDto = {
   templateId: number;

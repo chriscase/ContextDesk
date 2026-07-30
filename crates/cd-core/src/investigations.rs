@@ -13,6 +13,9 @@
 
 use crate::error::{CoreError, CoreResult};
 use crate::log_analysis::bookmarks::canonicalize_exact_event_refs;
+use crate::log_analysis::event_revision::{
+    retained_timestamp_revision_hints, EventReferenceTimestampHint,
+};
 use crate::log_analysis::query::fetch_events_by_seqs;
 use crate::log_analysis::{BookmarkEventRef, ExplorerEvent, LogCorpus, MAX_BOOKMARK_EVENT_REFS};
 use crate::redact::redact_candidate;
@@ -479,7 +482,8 @@ impl From<&InvestigationDocument> for InvestigationSummary {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceReferenceStatus {
-    /// Corpus, sequence, source, timestamp, and time quality still match.
+    /// Corpus, sequence, and source match, and timestamp/time quality either
+    /// match directly or have an exact retained timestamp-only revision proof.
     Verified,
     /// The saved sequence no longer exists in the authoritative corpus.
     Missing,
@@ -1152,10 +1156,14 @@ impl InvestigationStore {
             .into_iter()
             .map(|event| (event.seq, event))
             .collect::<HashMap<_, _>>();
+        let revision_hints = retained_timestamp_revision_hints(
+            corpus,
+            &timestamp_revision_candidates(references.iter().copied(), &actual_by_seq),
+        )?;
         let mut missing_count = 0usize;
         let mut stale_count = 0usize;
         for event_ref in references {
-            match exact_reference_status(event_ref, corpus.id(), &actual_by_seq) {
+            match exact_reference_status(event_ref, corpus.id(), &actual_by_seq, &revision_hints) {
                 EvidenceReferenceStatus::Missing => missing_count += 1,
                 EvidenceReferenceStatus::Stale => stale_count += 1,
                 EvidenceReferenceStatus::Verified => {}
@@ -2269,12 +2277,27 @@ fn resolve_document(
         .into_iter()
         .map(|event| (event.seq, event))
         .collect::<HashMap<_, _>>();
+    let revision_hints = retained_timestamp_revision_hints(
+        corpus,
+        &timestamp_revision_candidates(
+            document
+                .evidence
+                .iter()
+                .flat_map(|item| item.event_refs.iter()),
+            &actual_by_seq,
+        ),
+    )?;
     let evidence = document
         .evidence
         .iter()
         .cloned()
         .map(|item| ResolvedEvidenceItem {
-            references: resolve_references_from_map(&item.event_refs, corpus.id(), &actual_by_seq),
+            references: resolve_references_from_map(
+                &item.event_refs,
+                corpus.id(),
+                &actual_by_seq,
+                &revision_hints,
+            ),
             item,
         })
         .collect();
@@ -2293,24 +2316,51 @@ fn resolve_evidence_references(
         .into_iter()
         .map(|event| (event.seq, event))
         .collect::<HashMap<_, _>>();
+    let revision_hints = retained_timestamp_revision_hints(
+        corpus,
+        &timestamp_revision_candidates(event_refs.iter(), &actual_by_seq),
+    )?;
     Ok(resolve_references_from_map(
         event_refs,
         corpus.id(),
         &actual_by_seq,
+        &revision_hints,
     ))
+}
+
+fn timestamp_revision_candidates<'a>(
+    event_refs: impl Iterator<Item = &'a BookmarkEventRef>,
+    actual_by_seq: &HashMap<u64, ExplorerEvent>,
+) -> Vec<EventReferenceTimestampHint> {
+    event_refs
+        .filter_map(|event_ref| {
+            let actual = actual_by_seq.get(&event_ref.seq)?;
+            (actual.source == event_ref.source
+                && (actual.ts != event_ref.timestamp_hint
+                    || actual.time_quality != event_ref.time_quality_hint))
+                .then_some(EventReferenceTimestampHint {
+                    seq: event_ref.seq,
+                    source: event_ref.source.clone(),
+                    timestamp_hint: event_ref.timestamp_hint,
+                    time_quality_hint: event_ref.time_quality_hint,
+                })
+        })
+        .collect()
 }
 
 fn resolve_references_from_map(
     event_refs: &[BookmarkEventRef],
     corpus_id: &str,
     actual_by_seq: &HashMap<u64, ExplorerEvent>,
+    revision_hints: &HashSet<EventReferenceTimestampHint>,
 ) -> Vec<EvidenceReferenceResolution> {
     event_refs
         .iter()
         .cloned()
         .map(|event_ref| {
             let event = actual_by_seq.get(&event_ref.seq).cloned();
-            let status = exact_reference_status(&event_ref, corpus_id, actual_by_seq);
+            let status =
+                exact_reference_status(&event_ref, corpus_id, actual_by_seq, revision_hints);
             EvidenceReferenceResolution {
                 event_ref,
                 status,
@@ -2324,18 +2374,31 @@ fn exact_reference_status(
     event_ref: &BookmarkEventRef,
     corpus_id: &str,
     actual_by_seq: &HashMap<u64, ExplorerEvent>,
+    revision_hints: &HashSet<EventReferenceTimestampHint>,
 ) -> EvidenceReferenceStatus {
     match actual_by_seq.get(&event_ref.seq) {
         None => EvidenceReferenceStatus::Missing,
-        Some(actual)
-            if event_ref.corpus_id != corpus_id
-                || actual.source != event_ref.source
-                || actual.ts != event_ref.timestamp_hint
-                || actual.time_quality != event_ref.time_quality_hint =>
-        {
-            EvidenceReferenceStatus::Stale
+        Some(actual) => {
+            if event_ref.corpus_id != corpus_id || actual.source != event_ref.source {
+                return EvidenceReferenceStatus::Stale;
+            }
+            if actual.ts == event_ref.timestamp_hint
+                && actual.time_quality == event_ref.time_quality_hint
+            {
+                return EvidenceReferenceStatus::Verified;
+            }
+            let revision_hint = EventReferenceTimestampHint {
+                seq: event_ref.seq,
+                source: event_ref.source.clone(),
+                timestamp_hint: event_ref.timestamp_hint,
+                time_quality_hint: event_ref.time_quality_hint,
+            };
+            if revision_hints.contains(&revision_hint) {
+                EvidenceReferenceStatus::Verified
+            } else {
+                EvidenceReferenceStatus::Stale
+            }
         }
-        Some(_) => EvidenceReferenceStatus::Verified,
     }
 }
 
@@ -2509,7 +2572,7 @@ fn stale_revision_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::log_analysis::{LogEvent, TimeQuality};
+    use crate::log_analysis::{ActiveTimestampBasis, LogEvent, TimeQuality, TimestampProvenance};
 
     const PAYLOAD_SENTINEL: &str = "INVESTIGATION_PAYLOAD_SENTINEL_MUST_NOT_PERSIST";
 
@@ -2520,6 +2583,9 @@ mod tests {
                 LogEvent {
                     seq: 10,
                     ts: 1_700_000_010,
+                    timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
                     level: "error".into(),
                     service: Some("api".into()),
                     host: None,
@@ -2532,6 +2598,9 @@ mod tests {
                 LogEvent {
                     seq: 11,
                     ts: 1_700_000_011,
+                    timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
                     level: "info".into(),
                     service: Some("api".into()),
                     host: None,
@@ -2544,6 +2613,9 @@ mod tests {
                 LogEvent {
                     seq: 12,
                     ts: 1_700_000_012,
+                    timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
                     level: "warn".into(),
                     service: Some("worker".into()),
                     host: None,

@@ -299,9 +299,11 @@ fn broad_triage_time_quality(
 ) -> CoreResult<crate::log_analysis::TimeQuality> {
     let exclusion_sql = broad_triage_exclusion_sql(excluded_template_ids)?;
     let sql = format!(
-        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN ts >= {} THEN 1 ELSE 0 END), 0) \
+        "SELECT COUNT(*), \
+                COALESCE(SUM(CASE WHEN active_timestamp_basis IN ('{}', '{}') THEN 1 ELSE 0 END), 0) \
          FROM events WHERE 1=1{exclusion_sql}",
-        crate::log_analysis::MIN_WALL_TS
+        crate::log_analysis::ActiveTimestampBasis::ExplicitWall.as_storage_str(),
+        crate::log_analysis::ActiveTimestampBasis::ResolvedLocal.as_storage_str()
     );
     corpus.with_connection(|connection| {
         let (total, wall) = connection
@@ -7403,6 +7405,35 @@ mod tests {
                 events.push(crate::log_analysis::LogEvent {
                     seq,
                     ts,
+                    timestamp_provenance: match time_quality {
+                        crate::log_analysis::TimeQuality::Wall => {
+                            crate::log_analysis::TimestampProvenance::ExplicitWallClock
+                        }
+                        crate::log_analysis::TimeQuality::Mixed if template_id == 11 => {
+                            crate::log_analysis::TimestampProvenance::OrderOnly
+                        }
+                        crate::log_analysis::TimeQuality::Mixed => {
+                            crate::log_analysis::TimestampProvenance::ExplicitWallClock
+                        }
+                        crate::log_analysis::TimeQuality::OrderOnly => {
+                            crate::log_analysis::TimestampProvenance::OrderOnly
+                        }
+                    },
+                    active_timestamp_basis: match time_quality {
+                        crate::log_analysis::TimeQuality::Wall => {
+                            crate::log_analysis::ActiveTimestampBasis::ExplicitWall
+                        }
+                        crate::log_analysis::TimeQuality::Mixed if template_id == 11 => {
+                            crate::log_analysis::ActiveTimestampBasis::OrderOnly
+                        }
+                        crate::log_analysis::TimeQuality::Mixed => {
+                            crate::log_analysis::ActiveTimestampBasis::ExplicitWall
+                        }
+                        crate::log_analysis::TimeQuality::OrderOnly => {
+                            crate::log_analysis::ActiveTimestampBasis::OrderOnly
+                        }
+                    },
+                    unresolved_local_timestamp: None,
                     level: if severity >= 4 { "ERROR" } else { "INFO" }.into(),
                     service: Some(
                         if template_id == 22 {
@@ -7630,6 +7661,10 @@ mod tests {
                 events.push(crate::log_analysis::LogEvent {
                     seq,
                     ts: 1_700_000_000 + seq as i64,
+                    timestamp_provenance:
+                        crate::log_analysis::TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: crate::log_analysis::ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
                     level: "ERROR".into(),
                     service: Some(format!("service-{template_id}-{repeated}")),
                     host: Some(format!("host-{template_id}-{repeated}")),
@@ -7722,6 +7757,9 @@ mod tests {
             .map(|index| crate::log_analysis::LogEvent {
                 seq: index + 1,
                 ts: 1_700_000_000 + index as i64,
+                timestamp_provenance: crate::log_analysis::TimestampProvenance::ExplicitWallClock,
+                active_timestamp_basis: crate::log_analysis::ActiveTimestampBasis::ExplicitWall,
+                unresolved_local_timestamp: None,
                 level: if index == 999 { "ERROR" } else { "INFO" }.into(),
                 service: Some("api".into()),
                 host: Some("app-01".into()),
@@ -7861,6 +7899,11 @@ mod tests {
                     .map(|(index, source)| crate::log_analysis::LogEvent {
                         seq: index as u64 + 1,
                         ts: 1_700_000_000 + index as i64,
+                        timestamp_provenance:
+                            crate::log_analysis::TimestampProvenance::ExplicitWallClock,
+                        active_timestamp_basis:
+                            crate::log_analysis::ActiveTimestampBasis::ExplicitWall,
+                        unresolved_local_timestamp: None,
                         level: "INFO".into(),
                         service: Some("api".into()),
                         host: Some("host".into()),
@@ -7981,6 +8024,11 @@ mod tests {
                     .map(|(index, source)| crate::log_analysis::LogEvent {
                         seq: index as u64 + 1,
                         ts: 1_700_000_000 + index as i64,
+                        timestamp_provenance:
+                            crate::log_analysis::TimestampProvenance::ExplicitWallClock,
+                        active_timestamp_basis:
+                            crate::log_analysis::ActiveTimestampBasis::ExplicitWall,
+                        unresolved_local_timestamp: None,
                         level: "ERROR".into(),
                         service: None,
                         host: None,
@@ -8065,6 +8113,9 @@ mod tests {
             .map(|index| crate::log_analysis::LogEvent {
                 seq: index + 2,
                 ts: 1_700_000_000 + (index % 120) as i64,
+                timestamp_provenance: crate::log_analysis::TimestampProvenance::ExplicitWallClock,
+                active_timestamp_basis: crate::log_analysis::ActiveTimestampBasis::ExplicitWall,
+                unresolved_local_timestamp: None,
                 level: "INFO".into(),
                 service: None,
                 host: None,
@@ -8078,6 +8129,9 @@ mod tests {
         events.push(crate::log_analysis::LogEvent {
             seq: 1,
             ts: 1_700_000_060,
+            timestamp_provenance: crate::log_analysis::TimestampProvenance::ExplicitWallClock,
+            active_timestamp_basis: crate::log_analysis::ActiveTimestampBasis::ExplicitWall,
+            unresolved_local_timestamp: None,
             level: "ERROR".into(),
             service: None,
             host: None,
@@ -8622,6 +8676,9 @@ mod tests {
             events.push(crate::log_analysis::LogEvent {
                 seq: index + 1,
                 ts: 1_700_000_000 + index as i64 * 5,
+                timestamp_provenance: crate::log_analysis::TimestampProvenance::ExplicitWallClock,
+                active_timestamp_basis: crate::log_analysis::ActiveTimestampBasis::ExplicitWall,
+                unresolved_local_timestamp: None,
                 level: "info".into(),
                 service: Some("worker".into()),
                 host: Some("host-routine".into()),
@@ -8636,6 +8693,9 @@ mod tests {
             events.push(crate::log_analysis::LogEvent {
                 seq: 100 + index,
                 ts: 1_700_000_002 + index as i64 * 15,
+                timestamp_provenance: crate::log_analysis::TimestampProvenance::ExplicitWallClock,
+                active_timestamp_basis: crate::log_analysis::ActiveTimestampBasis::ExplicitWall,
+                unresolved_local_timestamp: None,
                 level: "error".into(),
                 service: Some("checkout".into()),
                 host: Some("host-signal".into()),
