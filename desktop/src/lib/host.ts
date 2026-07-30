@@ -2500,6 +2500,80 @@ export type SuppressionMutationResultDto = {
   rule: SuppressionRuleDto;
 };
 
+export type NoiseCandidateShape =
+  | "steady"
+  | "bursty"
+  | "insufficient_time";
+
+export type NoiseCandidateReasonCode =
+  | "high_frequency"
+  | "high_corpus_share"
+  | "multi_source_repetition"
+  | "temporally_persistent"
+  | "level_dominated_info"
+  | "level_dominated_warn"
+  | "repetitive_error_risky"
+  | "steady_background"
+  | "already_suppressed";
+
+export type NoiseCandidateRepresentativeDto = {
+  seq: number;
+  source: string;
+  timestamp: number;
+  timeQuality: TimeQuality;
+  level: string;
+  redactedExcerpt: string;
+};
+
+export type NoiseCandidateDto = {
+  templateId: number;
+  templateFingerprint: string;
+  pattern: string;
+  score: number;
+  eventCount: number;
+  corpusShareBps: number;
+  sourceCount: number;
+  timeQuality: TimeQuality;
+  wallTimeSpan: { from: number; to: number } | null;
+  orderSpan: { from: number; to: number } | null;
+  levelCounts: { level: string; count: number }[];
+  otherLevelCount: number;
+  levelCountsTruncated: boolean;
+  errorOrFatalCount: number;
+  warnCount: number;
+  infoCount: number;
+  reasonCodes: NoiseCandidateReasonCode[];
+  explanation: string;
+  alreadySuppressed: boolean;
+  shareBasis: string;
+  proposalKind: string;
+  representatives: NoiseCandidateRepresentativeDto[];
+  shape: NoiseCandidateShape;
+};
+
+export type NoiseCandidateReportDto = {
+  corpusId: string;
+  unsuppressedEventCount: number;
+  corpusEventCount: number;
+  suppressionRevision: number;
+  eventRevision: number;
+  templateAnalysisRevision: number;
+  alreadySuppressedTemplateIds: number[];
+  timeQuality: TimeQuality;
+  rawTimeQuality: TimeQuality;
+  candidates: NoiseCandidateDto[];
+  templatesScanned: number;
+  eligibleCandidateCount: number;
+  truncated: boolean;
+  candidateCapTruncated: boolean;
+  templateScanTruncated: boolean;
+  responseBytesTruncated: boolean;
+  metadataMissingTemplateIds: number[];
+  databaseQueryCount: number;
+  disclaimer: string;
+  cancelled: boolean;
+};
+
 export type EventPageDto = {
   events: ExplorerEventDto[];
   nextCursor: number | null;
@@ -3065,6 +3139,48 @@ export async function hostLogLoadSuppression(
     };
   }
   return invoke<SuppressionDocumentDto>("log_load_suppression", { corpusId });
+}
+
+/** Read-only, bounded exact-template proposals for explicit human review. */
+export async function hostLogProposeNoiseCandidates(
+  corpusId: string,
+  options: {
+    maxCandidates?: number;
+    maxRepresentatives?: number;
+  } = {},
+): Promise<NoiseCandidateReportDto> {
+  if (!isTauri()) {
+    return {
+      corpusId,
+      unsuppressedEventCount: 0,
+      corpusEventCount: 0,
+      suppressionRevision: 0,
+      eventRevision: 0,
+      templateAnalysisRevision: 0,
+      alreadySuppressedTemplateIds: [],
+      timeQuality: "order_only",
+      rawTimeQuality: "order_only",
+      candidates: [],
+      templatesScanned: 0,
+      eligibleCandidateCount: 0,
+      truncated: false,
+      candidateCapTruncated: false,
+      templateScanTruncated: false,
+      responseBytesTruncated: false,
+      metadataMissingTemplateIds: [],
+      databaseQueryCount: 0,
+      disclaimer:
+        "Noise candidates require the packaged desktop host. Nothing was auto-suppressed.",
+      cancelled: false,
+    };
+  }
+  return invoke<NoiseCandidateReportDto>("log_propose_noise_candidates", {
+    args: {
+      corpusId,
+      maxCandidates: options.maxCandidates ?? null,
+      maxRepresentatives: options.maxRepresentatives ?? null,
+    },
+  });
 }
 
 /** Compute and persist a trusted-core preview; the caller supplies no counts. */

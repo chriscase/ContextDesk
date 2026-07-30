@@ -9,12 +9,14 @@ import {
 import {
   hostLogActivateTemplateSuppression,
   hostLogPreviewTemplateSuppression,
+  type NoiseCandidateDto,
   type SuppressionDocumentDto,
   type SuppressionMutationResultDto,
   type SuppressionPreviewDto,
   type SuppressionRuleMutation,
 } from "../../lib/host";
 import { formatCanonicalUtc } from "../../lib/logExplorer/types";
+import { NoiseCandidateReview } from "./NoiseCandidateReview";
 
 type PolicyState = "loading" | "ready" | "error" | "refreshing";
 
@@ -49,6 +51,7 @@ function formatCount(value: number | null): string {
 }
 
 export function NoisePolicyControl({
+  corpusId,
   document: policyDocument,
   hiddenCount,
   state,
@@ -60,7 +63,10 @@ export function NoisePolicyControl({
   onMutate,
   onSuspendAll,
   onResume,
+  onReloadPolicy,
+  onCandidateActivated,
 }: {
+  corpusId: string;
   document: SuppressionDocumentDto | null;
   hiddenCount: number | null;
   state: PolicyState;
@@ -78,12 +84,20 @@ export function NoisePolicyControl({
   onSuspendAll?: () => void;
   /** Resume applying the durable enabled rules. */
   onResume?: () => void;
+  /** Reload the trusted policy and return its new revision. */
+  onReloadPolicy: () => Promise<number>;
+  /** Refresh policy, rows, facets, timeline, and linked context after activation. */
+  onCandidateActivated: () => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
   const [auditOpen, setAuditOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busyRule, setBusyRule] = useState<string | null>(null);
+  const [candidateToSuppress, setCandidateToSuppress] =
+    useState<NoiseCandidateDto | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const candidateSuppressTriggerRef = useRef<HTMLButtonElement>(null);
   const titleId = useId();
   const enabledRules =
     policyDocument?.rules.filter((rule) => rule.state === "enabled") ?? [];
@@ -92,6 +106,8 @@ export function NoisePolicyControl({
 
   const dismiss = () => {
     setOpen(false);
+    setReviewOpen(false);
+    setCandidateToSuppress(null);
     setActionError(null);
     window.setTimeout(() => triggerRef.current?.focus(), 0);
   };
@@ -105,8 +121,12 @@ export function NoisePolicyControl({
     });
     const onClick = (event: MouseEvent) => {
       const target = event.target as Node | null;
+      const branch =
+        target instanceof Element &&
+        target.closest('[data-noise-policy-branch="true"]');
       if (
         target &&
+        !branch &&
         !panelRef.current?.contains(target) &&
         !triggerRef.current?.contains(target)
       ) {
@@ -180,7 +200,7 @@ export function NoisePolicyControl({
           ref={panelRef}
           className={`log-explorer__noise-policy ${
             narrow ? "log-explorer__noise-policy--sheet" : ""
-          }`}
+          } ${reviewOpen ? "log-explorer__noise-policy--review" : ""}`}
           data-testid="noise-policy-panel"
           data-mode={narrow ? "sheet" : "popover"}
           role="dialog"
@@ -190,7 +210,9 @@ export function NoisePolicyControl({
         >
           <div className="log-explorer__noise-policy-header">
             <div>
-              <strong id={titleId}>Noise policy</strong>
+              <strong id={titleId}>
+                {reviewOpen ? "Noise candidate review" : "Noise policy"}
+              </strong>
               <span>
                 Revision {policyDocument?.revision ?? "—"} · exact templates
                 only
@@ -205,7 +227,17 @@ export function NoisePolicyControl({
               Done
             </button>
           </div>
-          {state === "error" ? (
+          {reviewOpen && policyDocument ? (
+            <NoiseCandidateReview
+              corpusId={corpusId}
+              currentSuppressionRevision={policyDocument.revision}
+              onBack={() => setReviewOpen(false)}
+              onSuppress={(candidate, trigger) => {
+                candidateSuppressTriggerRef.current = trigger;
+                setCandidateToSuppress(candidate);
+              }}
+            />
+          ) : state === "error" ? (
             <div className="log-explorer__noise-policy-error" role="alert">
               <span>Policy unavailable: {error}</span>
               <button
@@ -233,6 +265,20 @@ export function NoisePolicyControl({
                       enabledRules.length === 1 ? "rule" : "rules"
                     }). Excluded events are not analyzed. Original evidence remains in the corpus.`}
               </p>
+              <div className="log-explorer__noise-policy-review-action">
+                <button
+                  type="button"
+                  className="log-explorer__btn log-explorer__btn--active"
+                  disabled={state !== "ready"}
+                  onClick={() => setReviewOpen(true)}
+                >
+                  Review suggestions
+                </button>
+                <span className="log-explorer__chat-preview">
+                  Ranked proposals only; nothing is selected or hidden
+                  automatically.
+                </span>
+              </div>
               {enabledRules.length > 0 && onSuspendAll && onResume ? (
                 <div className="log-explorer__noise-policy-lens-actions">
                   {lensSuspended ? (
@@ -357,6 +403,20 @@ export function NoisePolicyControl({
               </div>
             </>
           )}
+        </div>
+      ) : null}
+      {candidateToSuppress ? (
+        <div data-noise-policy-branch="true">
+          <SuppressTemplateDialog
+            corpusId={corpusId}
+            templateId={candidateToSuppress.templateId}
+            policyRevision={policyDocument?.revision ?? 0}
+            narrow={narrow}
+            triggerRef={candidateSuppressTriggerRef}
+            onReloadPolicy={onReloadPolicy}
+            onActivated={onCandidateActivated}
+            onDismiss={() => setCandidateToSuppress(null)}
+          />
         </div>
       ) : null}
     </div>

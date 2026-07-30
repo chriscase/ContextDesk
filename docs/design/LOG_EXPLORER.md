@@ -145,6 +145,7 @@ Per corpus under app cache:
 | `log_facets` | Sources, levels, services, hosts under filter |
 | `log_timeline_summary` | Hard-capped filtered count buckets (+ by level) for the integrated full-width Timeline; no event bodies |
 | `log_search_events` | Keyword/regex + template-semantic → bounded event-hit page; literal/regex Find continues with a composite time/sequence cursor and supports request-scoped cooperative cancellation |
+| `log_propose_noise_candidates` | Read-only bounded exact-template proposals with pinned revisions, exact facts, stable reasons, redacted representatives, and no policy mutation |
 | Noise policy preview/activation/lifecycle | Preview and human-confirm corpus-scoped exact-template rules, then inspect, disable, re-enable, or tombstone them; rule editing and complete creator identity are not implemented |
 | Bookmarks CRUD | Exact bounded event sets on one corpus, with duplicate prevention and legacy line/range reads |
 | Chat link | List/create sessions with `linkedCorpusId` |
@@ -193,6 +194,23 @@ acceptance work includes:
 - suppression-specific measurements on 25k and 100k corpora, plus an opt-in 1M
   proof when practical;
 - optimization beyond the bounded active exact-template rule set.
+
+### Explainable noise suggestions — #818
+
+**Noise → Review suggestions** presents the #815 detector's ranked facts
+without changing its ranking and without selecting or suppressing anything.
+Each bounded candidate shows exact count/share, source breadth, severity
+distribution, honest wall/order time coverage, coarse shape, reason codes,
+core explanation, and redacted examples. The summary states **Showing N of M**
+and distinguishes response/candidate caps from a bounded template scan.
+
+High-severity, bursty, rare, and novel evidence is treated conservatively:
+severity and burstiness are visible, risky proposals are marked, and the UI
+never labels a candidate confirmed noise. **Not noise…** records a reviewed
+reason for only the pinned corpus/template/policy revisions. **Suppress…**
+reuses the separate trusted Preview → Confirm workflow; the proposal detector
+cannot call preview or activation. Revision drift marks the review stale and
+blocks action until refresh.
 
 ### Startup and paging critical path
 

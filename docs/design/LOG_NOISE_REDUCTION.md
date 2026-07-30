@@ -1,13 +1,46 @@
 # Log noise reduction — deterministic single-corpus candidates
 
-**Status:** Implemented core detector contract for issue **#815**.
-**Scope:** Single-corpus, proposal-only, read-only exact-template candidates.
-**Non-scope:** Desktop UI, proposal activation, automatic suppression, and
-cross-corpus learning.
+**Status:** Implemented core detector contract for issue **#815** and
+human-review surface for issue **#818**.
+**Scope:** Single-corpus, proposal-only, read-only exact-template candidates
+with bounded review and an explicit handoff to the existing human suppression
+workflow.
+**Non-scope:** Automatic suppression and cross-corpus learning.
 
 The detector returns bounded evidence for human review. It never calls a
 template “confirmed noise,” writes findings, changes Explorer filters, mutates
 events or templates, or changes the active suppression policy.
+
+## Human review surface
+
+The Explorer's **Noise → Review suggestions** surface invokes the detector
+without changing its ranking or facts. It shows at most 16 candidates per pass
+with:
+
+- exact event count and corpus share;
+- source count, level distribution, time quality and coverage;
+- a coarse **steady**, **bursty**, or **insufficient reliable time** shape;
+- stable reason codes and the core explanation;
+- up to three redacted representatives; and
+- explicit result and scan bounds.
+
+The UI says **Showing N of M eligible suggestions**. It separately distinguishes
+candidate/response truncation from a bounded template scan; a bounded scan does
+not claim that additional eligible candidates definitely exist.
+
+Nothing is preselected and there is no bulk-accept action. **Not noise…**
+requires a reviewed reason and records the dismissal only for the current
+corpus event, template-analysis, and suppression revisions. The dismissal is
+stored in the desktop profile and becomes inapplicable when any pinned revision
+changes. If that record cannot be persisted, the candidate stays visible and
+the failure is shown.
+
+**Suppress…** does not activate the detector result. It opens the existing
+trusted-core **Preview impact → Confirm suppression** workflow for that exact
+template. A revision change marks the displayed proposals stale and disables
+dismissal/suppression actions until the user refreshes. Escape, outside-click
+dismissal, focus restoration, keyboard navigation, and a bounded narrow sheet
+follow the same policy-panel accessibility contract.
 
 ## Facts versus inference
 
@@ -222,11 +255,9 @@ machine-scoped measurement.
 
 ## Residual work belongs to separate issues
 
-- **Desktop UI:** presenting and reviewing candidates is not delivered by
-  #815's core detector.
-- **Activation integration:** connecting a reviewed proposal to #671 preview,
-  explicit approval, activation, disable, and removal is separate work. The
-  detector itself remains read-only.
+- **Suppression lifecycle:** #818 connects reviewed proposals to the existing
+  exact-template Preview → Confirm workflow, but broader predicates, full rule
+  editing/identity, and package lifecycle remain in #671.
 - **Cross-corpus learning:** learning or transferring proposal priors across
   investigations or workspaces is separate, future work. It must be opt-in,
   privacy-reviewed, proposal-only, and must not weaken per-corpus human
@@ -253,6 +284,7 @@ design.
 ## Related
 
 - Issue **#815** — deterministic proposal-only detector
+- Issue **#818** — bounded explainable human review
 - Issue **#671** — durable suppression rules
 - Issue **#745** — broad triage brief; separate and not a replacement for this
   detector
