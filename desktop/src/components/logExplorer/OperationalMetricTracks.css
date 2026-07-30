@@ -11,6 +11,7 @@
   --metric-warning: var(--warning, #e7b341);
   --metric-critical: var(--danger, #f36b7a);
   --metric-plot-height: clamp(4.5rem, 10vh, 7rem);
+  --metric-scale-gutter: clamp(5.5rem, 9vw, 7.5rem);
   --operational-metric-plot-inline-inset: var(--space-3, 12px);
 
   min-width: 0;
@@ -109,9 +110,21 @@
 }
 
 .operational-metric-track__plot {
-  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--metric-scale-gutter);
   height: var(--metric-plot-height);
   margin-block: var(--space-1, 4px);
+  overflow: hidden;
+  background: var(--metric-surface-subtle);
+  border: 1px solid var(--metric-border);
+  border-radius: var(--radius-sm, 6px);
+}
+
+.operational-metric-track__canvas {
+  position: relative;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
   background:
     linear-gradient(
       to bottom,
@@ -120,27 +133,24 @@
       transparent 50.5%
     ),
     var(--metric-surface-subtle);
-  border: 1px solid var(--metric-border);
-  border-radius: var(--radius-sm, 6px);
   cursor: crosshair;
   touch-action: none;
   -webkit-user-select: none;
   user-select: none;
 }
 
-.operational-metric-track__plot:focus-visible {
-  outline: 2px solid var(--metric-line);
-  outline-offset: 2px;
+.operational-metric-track__canvas:focus-visible {
+  outline: 2px solid var(--accent, #64a8ff);
+  outline-offset: -3px;
 }
 
-.operational-metric-track__plot svg {
+.operational-metric-track__canvas svg {
   display: block;
   width: 100%;
   height: 100%;
   overflow: hidden;
 }
 
-.operational-metric-track__scale-label,
 .operational-metric-track__hover-reading {
   position: absolute;
   z-index: 2;
@@ -153,17 +163,27 @@
   pointer-events: none;
 }
 
+.operational-metric-track__scale {
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 0.42rem 0.45rem;
+  color: var(--metric-muted);
+  background: var(--metric-surface);
+  border-left: 1px solid var(--metric-border);
+}
+
 .operational-metric-track__scale-label {
-  right: 0.22rem;
-  padding-inline: 0.15rem;
-}
-
-.operational-metric-track__scale-label--max {
-  top: 0.16rem;
-}
-
-.operational-metric-track__scale-label--min {
-  bottom: 0.16rem;
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.62rem;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .operational-metric-track__hover-reading {
@@ -317,6 +337,7 @@
 }
 
 .operational-metric-tracks--compact-side {
+  --metric-scale-gutter: clamp(5rem, 8vw, 6.5rem);
   --operational-metric-plot-inline-inset: var(--space-2, 8px);
 }
 
@@ -329,6 +350,7 @@
 
 .operational-metric-tracks--density-compact {
   --metric-plot-height: clamp(2rem, 4vh, 2.75rem);
+  --metric-scale-gutter: clamp(4.75rem, 8vw, 5.75rem);
   --operational-metric-plot-inline-inset: 0px;
 }
 
@@ -358,6 +380,15 @@
 .operational-metric-tracks--density-compact .operational-metric-track__plot {
   border-inline: 0;
   border-radius: 0;
+}
+
+.operational-metric-tracks--density-compact .operational-metric-track__scale {
+  padding: 0.2rem 0.35rem;
+}
+
+.operational-metric-tracks--density-compact
+  .operational-metric-track__scale-label {
+  font-size: 0.56rem;
 }
 
 .operational-metric-tracks--density-compact
@@ -414,5 +445,54 @@
 @media (prefers-reduced-motion: reduce) {
   .operational-metric-tracks * {
     scroll-behavior: auto;
+  }
+}
+
+@media (forced-colors: active) {
+  .operational-metric-tracks,
+  .operational-metric-track__plot,
+  .operational-metric-track__canvas,
+  .operational-metric-track__scale,
+  .operational-metric-track__scale-label,
+  .operational-metric-track__hover-reading,
+  .operational-metric-track__gap-popover {
+    color: CanvasText;
+    background: Canvas;
+    border-color: CanvasText;
+  }
+
+  .operational-metric-track__canvas:focus-visible,
+  .operational-metric-track__gaps summary:focus-visible {
+    outline-color: Highlight;
+  }
+
+  .operational-metric-track__line {
+    stroke: CanvasText;
+  }
+
+  .operational-metric-track__crosshair {
+    stroke: Highlight;
+  }
+
+  .operational-metric-track__selection {
+    fill: transparent;
+    stroke: Highlight;
+  }
+
+  .operational-metric-track__gap {
+    fill: Canvas;
+    stroke: GrayText;
+  }
+
+  .operational-metric-track__threshold--info {
+    stroke: CanvasText;
+  }
+
+  .operational-metric-track__threshold--warning {
+    stroke: GrayText;
+  }
+
+  .operational-metric-track__threshold--critical {
+    stroke: Highlight;
   }
 }

@@ -662,11 +662,26 @@ export function TimelineNavigator({
           role="region"
           aria-label="Timeline and aligned metric tracks"
           tabIndex={0}
-          style={{ maxHeight: "min(44vh, 30rem)", overflowY: "auto" }}
           onKeyDown={(event) => {
             if (event.key !== "Escape") return;
-            if (event.target instanceof HTMLSelectElement) return;
+            if (
+              event.target instanceof HTMLSelectElement &&
+              metricSelection == null &&
+              detailIndex == null &&
+              !cursorReadingsVisible
+            ) {
+              return;
+            }
             event.preventDefault();
+            if (metricSelection != null) {
+              setMetricSelection(null);
+              setStatus(
+                metricViewRange
+                  ? "Selection cleared · current zoom preserved"
+                  : "Selection cleared",
+              );
+              return;
+            }
             if (detailIndex != null || cursorReadingsVisible) {
               clearDetail();
               cursorVisibilitySources.current.clear();
@@ -823,17 +838,11 @@ export function TimelineNavigator({
                           count === 0
                             ? "timeline-navigator__bucket--empty"
                             : "",
-                          levels.error > 0
-                            ? "timeline-navigator__bucket--has-error"
-                            : "",
                           residentIndexes.has(index)
                             ? "log-explorer__navigator-bucket--resident"
                             : "",
                           previewIndex === index
                             ? "log-explorer__navigator-bucket--active"
-                            : "",
-                          committedIndex === index
-                            ? "timeline-navigator__bucket--committed"
                             : "",
                         ]
                           .filter(Boolean)
@@ -1023,6 +1032,13 @@ export function TimelineNavigator({
                         type="button"
                         className="timeline-navigator__metric-action"
                         disabled={!canZoomMetricSelection && !metricViewRange}
+                        title={
+                          metricSelection
+                            ? "Zoom to the selected range. Press Escape to clear the selection."
+                            : metricViewRange
+                              ? "Return to the full shared timeline range."
+                              : "Drag across a metric track to select a range."
+                        }
                         onClick={() => {
                           if (metricSelection && canZoomMetricSelection) {
                             setMetricViewRange(metricSelection);

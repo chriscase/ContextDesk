@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   act,
   fireEvent,
@@ -132,9 +134,7 @@ describe("TimelineNavigator", () => {
       />,
     );
 
-    expect(
-      screen.getByText("Waiting for first evidence rows…"),
-    ).toBeTruthy();
+    expect(screen.getByText("Waiting for first evidence rows…")).toBeTruthy();
     expect(host.hostLogSharedTimelineSummary).not.toHaveBeenCalled();
 
     rerender(
@@ -414,12 +414,24 @@ describe("TimelineNavigator", () => {
       /^\d{2}:\d{2}:\d{2}Z · 30 events$/,
     );
     expect(screen.queryByText("Timeline data")).toBeNull();
-    expect(screen.getByTestId("timeline-bucket-0").className).toContain(
+    expect(screen.getByTestId("timeline-bucket-0").className).not.toContain(
       "timeline-navigator__bucket--has-error",
     );
-    expect(screen.getByTestId("timeline-bucket-3").className).toContain(
-      "timeline-navigator__bucket--has-error",
-    );
+    const firstStack = screen
+      .getByTestId("timeline-bucket-0")
+      .querySelector(".timeline-navigator__stack");
+    expect(
+      Number.parseFloat(
+        firstStack?.querySelector<HTMLElement>('i[data-level="error"]')?.style
+          .height ?? "",
+      ),
+    ).toBeCloseTo((1 / 30) * 100);
+    expect(
+      Number.parseFloat(
+        firstStack?.querySelector<HTMLElement>('i[data-level="info"]')?.style
+          .height ?? "",
+      ),
+    ).toBeCloseTo((29 / 30) * 100);
     const scrubber = screen.getByLabelText("Timeline position");
     expect(scrubber.getAttribute("aria-valuetext")).toContain("Error 1");
     moveTimelineTo(3);
@@ -516,9 +528,8 @@ describe("TimelineNavigator", () => {
     const bars = await screen.findByTestId("timeline-navigator-bars");
     await waitFor(() =>
       expect(
-        bars.querySelector<HTMLElement>(
-          ".timeline-navigator__preview-marker",
-        )?.style.left,
+        bars.querySelector<HTMLElement>(".timeline-navigator__preview-marker")
+          ?.style.left,
       ).toBe("12.5%"),
     );
 
@@ -534,9 +545,8 @@ describe("TimelineNavigator", () => {
 
     await waitFor(() =>
       expect(
-        bars.querySelector<HTMLElement>(
-          ".timeline-navigator__preview-marker",
-        )?.style.left,
+        bars.querySelector<HTMLElement>(".timeline-navigator__preview-marker")
+          ?.style.left,
       ).toBe("87.5%"),
     );
     expect(
@@ -606,7 +616,7 @@ describe("TimelineNavigator", () => {
       expect(
         screen
           .getByTestId(`operational-metric-track-${id}`)
-          .querySelector<HTMLElement>(".operational-metric-track__plot")
+          .querySelector<HTMLElement>(".operational-metric-track__canvas")
           ?.style.getPropertyValue("--metric-cursor-position"),
       ).toBe("90%");
     }
@@ -679,9 +689,18 @@ describe("TimelineNavigator", () => {
 
     const body = document.getElementById("log-explorer-timeline-navigator");
     expect(body).toBeTruthy();
-    const style = getComputedStyle(body!);
-    expect(style.overflowY).toBe("auto");
-    expect((body as HTMLElement).style.maxHeight).toBe("min(44vh, 30rem)");
+    expect((body as HTMLElement).style.maxHeight).toBe("");
+    expect((body as HTMLElement).style.overflowY).toBe("");
+    const css = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/logExplorer/TimelineNavigator.css",
+      ),
+      "utf8",
+    );
+    expect(css).toContain("--timeline-body-max: min(44vh, 30rem)");
+    expect(css).toContain("max-height: var(--timeline-body-max)");
+    expect(css).toContain("overflow-y: auto");
     expect(body?.getAttribute("aria-label")).toBe(
       "Timeline and aligned metric tracks",
     );
@@ -777,6 +796,112 @@ describe("TimelineNavigator", () => {
     expect(restoredCpu.getAttribute("aria-valuemax")).toBe("1700000040");
   });
 
+  it("unwinds a zoomed brush before readings and collapse", async () => {
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("timeline-navigator-track");
+    fireEvent.change(screen.getByTestId("timeline-metric-input"), {
+      target: { files: [metricFile(sessionMetrics)] },
+    });
+
+    const brush = (plot: HTMLElement, from: number, to: number) => {
+      Object.defineProperty(plot, "getBoundingClientRect", {
+        configurable: true,
+        value: () => ({
+          bottom: 100,
+          height: 100,
+          left: 0,
+          right: 100,
+          top: 0,
+          width: 100,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        }),
+      });
+      fireEvent.pointerDown(plot, { clientX: from, pointerId: 7 });
+      fireEvent.pointerMove(plot, {
+        buttons: 1,
+        clientX: to,
+        pointerId: 7,
+      });
+      fireEvent.pointerUp(plot, { clientX: to, pointerId: 7 });
+    };
+
+    let cpu = await screen.findByRole("slider", {
+      name: "CPU shared time cursor",
+    });
+    brush(cpu, 20, 80);
+    fireEvent.click(screen.getByRole("button", { name: "Zoom to selection" }));
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("slider", { name: "CPU shared time cursor" })
+          .getAttribute("aria-valuemin"),
+      ).not.toBe("1700000000"),
+    );
+
+    cpu = screen.getByRole("slider", {
+      name: "CPU shared time cursor",
+    });
+    brush(cpu, 25, 75);
+    expect(screen.getByTestId("timeline-selection-range")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Zoom to selection" }),
+    ).toBeTruthy();
+    fireEvent.focus(cpu);
+    expect(
+      screen.getAllByTestId(/operational-metric-hover-reading-/),
+    ).toHaveLength(3);
+
+    fireEvent.keyDown(cpu, { key: "Escape" });
+    expect(screen.queryByTestId("timeline-selection-range")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Reset full range" }),
+    ).toBeTruthy();
+    expect(
+      screen
+        .getByRole("slider", { name: "CPU shared time cursor" })
+        .getAttribute("aria-valuemin"),
+    ).not.toBe("1700000000");
+    expect(
+      screen
+        .getByTestId("timeline-navigator-toggle")
+        .getAttribute("aria-expanded"),
+    ).toBe("true");
+    expect(
+      screen.getAllByTestId(/operational-metric-hover-reading-/),
+    ).toHaveLength(3);
+
+    fireEvent.keyDown(cpu, { key: "Escape" });
+    expect(
+      screen.queryAllByTestId(/operational-metric-hover-reading-/),
+    ).toHaveLength(0);
+    expect(
+      screen
+        .getByTestId("timeline-navigator-toggle")
+        .getAttribute("aria-expanded"),
+    ).toBe("true");
+
+    fireEvent.keyDown(cpu, { key: "Escape" });
+    expect(
+      screen
+        .getByTestId("timeline-navigator-toggle")
+        .getAttribute("aria-expanded"),
+    ).toBe("false");
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByTestId("timeline-navigator-toggle"),
+      ),
+    );
+  });
+
   it("keeps partially overlapping metrics on the exact log timeline domain", async () => {
     const extended = structuredClone(sessionMetrics);
     for (const series of extended.series) {
@@ -848,6 +973,30 @@ describe("TimelineNavigator", () => {
     expect(
       await screen.findByTestId("timeline-committed-position"),
     ).toBeTruthy();
+    expect(
+      screen
+        .getAllByTestId(/^timeline-bucket-/)
+        .every(
+          (bucket) =>
+            !bucket.classList.contains("timeline-navigator__bucket--committed"),
+        ),
+    ).toBe(true);
+  });
+
+  it("defines forced-colors chart encodings in the component stylesheet", () => {
+    const css = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/logExplorer/TimelineNavigator.css",
+      ),
+      "utf8",
+    );
+
+    expect(css).toContain("@media (forced-colors: active)");
+    expect(css).toContain(".timeline-navigator__error-rail i");
+    expect(css).toContain(".timeline-navigator__selection-range");
+    expect(css).toContain(".timeline-navigator__committed-marker");
+    expect(css).toContain('.timeline-navigator__stack i[data-level="error"]');
   });
 
   it("uses concise UTC labels while retaining exact bucket details", async () => {
