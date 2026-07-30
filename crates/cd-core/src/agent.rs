@@ -119,6 +119,7 @@ pub struct LinkedSynthesisCheckpoint {
     event_revision: u64,
     template_analysis_revision: u64,
     suppression_revision: u64,
+    suppression_lens_suspended: bool,
     user_text: String,
     evidence: String,
     identities: HashSet<crate::log_analysis::SearchEvidenceIdentity>,
@@ -133,11 +134,13 @@ impl LinkedSynthesisCheckpoint {
         corpus_id: &str,
         provider_profile_id: Option<&str>,
         model_id: Option<&str>,
+        suppression_lens_suspended: bool,
     ) -> bool {
         self.session_id == session_id
             && self.corpus_id == corpus_id
             && self.provider_profile_id.as_deref() == provider_profile_id
             && self.model_id.as_deref() == model_id
+            && self.suppression_lens_suspended == suppression_lens_suspended
     }
 
     /// Session that owns this checkpoint.
@@ -159,6 +162,7 @@ impl LinkedSynthesisCheckpoint {
             + std::mem::size_of_val(&self.event_revision)
             + std::mem::size_of_val(&self.template_analysis_revision)
             + std::mem::size_of_val(&self.suppression_revision)
+            + std::mem::size_of_val(&self.suppression_lens_suspended)
             + self.user_text.len()
             + self.evidence.len()
             + std::mem::size_of_val(&self.allow_empty_evidence)
@@ -1504,8 +1508,13 @@ fn validate_linked_turn_snapshot(host: &ToolHost, opts: &AgentOptions) -> CoreRe
     if !host.has_pinned_log_suppression_lens() {
         return Ok(());
     }
-    host.pinned_linked_log_revisions(&context.corpus_id)
-        .map(|_| ())
+    let (_, _, _, pinned_suspended) = host.pinned_linked_log_revisions(&context.corpus_id)?;
+    if pinned_suspended != context.noise_lens_suspended {
+        return Err(CoreError::Message(
+            "linked Log Explorer suppression lens mode changed during this turn; retry".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn terminal_linked_snapshot_stale(
@@ -1553,6 +1562,7 @@ async fn run_linked_synthesis_retry(
         &context.corpus_id,
         opts.provider_profile_id.as_deref(),
         opts.model.as_deref(),
+        context.noise_lens_suspended,
     ) {
         out.push(StreamEvent::Error {
             code: "linked_synthesis_retry_stale".into(),
@@ -1570,6 +1580,7 @@ async fn run_linked_synthesis_retry(
         checkpoint.event_revision,
         checkpoint.template_analysis_revision,
         checkpoint.suppression_revision,
+        checkpoint.suppression_lens_suspended,
     ) {
         out.push(StreamEvent::Error {
             code: "linked_synthesis_retry_stale".into(),
@@ -2084,6 +2095,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                 brief.event_revision,
                 brief.template_analysis_revision,
                 brief.suppression_revision,
+                brief.suppression_lens_suspended,
             )?;
             Ok(brief)
         });
@@ -2157,6 +2169,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                             event_revision: brief.event_revision,
                             template_analysis_revision: brief.template_analysis_revision,
                             suppression_revision: brief.suppression_revision,
+                            suppression_lens_suspended: brief.suppression_lens_suspended,
                             user_text: user_text.to_string(),
                             evidence,
                             identities: linked_log_evidence_identities.clone(),
@@ -3162,7 +3175,12 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                     checkpoint_out.as_deref_mut(),
                 ) {
                     match host.pinned_linked_log_revisions(&context.corpus_id) {
-                        Ok((event_revision, template_analysis_revision, suppression_revision)) => {
+                        Ok((
+                            event_revision,
+                            template_analysis_revision,
+                            suppression_revision,
+                            suppression_lens_suspended,
+                        )) => {
                             *slot = Some(LinkedSynthesisCheckpoint {
                                 session_id: opts.session_id.clone(),
                                 corpus_id: context.corpus_id.clone(),
@@ -3171,6 +3189,7 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                                 event_revision,
                                 template_analysis_revision,
                                 suppression_revision,
+                                suppression_lens_suspended,
                                 user_text: user_text.to_string(),
                                 evidence,
                                 identities: linked_log_evidence_identities.clone(),
@@ -6524,6 +6543,7 @@ mod tests {
             event_revision: 0,
             template_analysis_revision: 0,
             suppression_revision: 0,
+            suppression_lens_suspended: false,
             user_text: "question".into(),
             evidence: "redacted bounded evidence".into(),
             identities: HashSet::from([crate::log_analysis::SearchEvidenceIdentity {
@@ -6587,7 +6607,12 @@ mod tests {
         host.set_log_corpus_scope(Some(context.corpus_id.clone()));
         host.pin_log_suppression_lens(&context.corpus_id)
             .expect("pin linked log revisions");
-        let (event_revision, template_analysis_revision, suppression_revision) = host
+        let (
+            event_revision,
+            template_analysis_revision,
+            suppression_revision,
+            suppression_lens_suspended,
+        ) = host
             .pinned_linked_log_revisions(&context.corpus_id)
             .expect("read pinned linked log revisions");
         let checkpoint = LinkedSynthesisCheckpoint {
@@ -6598,6 +6623,7 @@ mod tests {
             event_revision,
             template_analysis_revision,
             suppression_revision,
+            suppression_lens_suspended,
             user_text: "question".into(),
             evidence: "redacted bounded evidence".into(),
             identities: HashSet::from([crate::log_analysis::SearchEvidenceIdentity {
@@ -6654,6 +6680,85 @@ mod tests {
         assert!(
             history.is_empty(),
             "stale evidence must fail before provider-facing history changes"
+        );
+    }
+
+    #[tokio::test]
+    async fn synthesis_checkpoint_rejects_suppression_lens_mode_drift_with_same_revisions() {
+        let (_dir, mut host, context) = linked_timeout_fixture();
+        host.set_log_corpus_scope(Some(context.corpus_id.clone()));
+        host.pin_log_suppression_lens(&context.corpus_id)
+            .expect("pin active linked log lens");
+        let (
+            event_revision,
+            template_analysis_revision,
+            suppression_revision,
+            suppression_lens_suspended,
+        ) = host
+            .pinned_linked_log_revisions(&context.corpus_id)
+            .expect("read active linked log state");
+        assert!(!suppression_lens_suspended);
+        let checkpoint = LinkedSynthesisCheckpoint {
+            session_id: "chat-a".into(),
+            corpus_id: context.corpus_id.clone(),
+            provider_profile_id: Some("provider-a".into()),
+            model_id: Some("model-a".into()),
+            event_revision,
+            template_analysis_revision,
+            suppression_revision,
+            suppression_lens_suspended,
+            user_text: "question".into(),
+            evidence: "redacted bounded evidence".into(),
+            identities: HashSet::from([crate::log_analysis::SearchEvidenceIdentity {
+                seq: 0,
+                source: "worker.log".into(),
+                citation_source: None,
+                template_id: 1,
+            }]),
+            allow_empty_evidence: false,
+        };
+
+        // Suspend all changes the query lens but intentionally leaves the
+        // durable suppression revision and corpus revisions unchanged.
+        host.set_log_corpus_scope(Some(context.corpus_id.clone()));
+        host.pin_log_suppression_lens_suspended(&context.corpus_id)
+            .expect("pin suspended linked log lens");
+        let (_, _, suspended_revision, suspended_mode) = host
+            .pinned_linked_log_revisions(&context.corpus_id)
+            .expect("read suspended linked log state");
+        assert_eq!(suspended_revision, suppression_revision);
+        assert!(suspended_mode);
+
+        let backend = ScriptedBackend::new(Vec::new());
+        let mut history = Vec::new();
+        let events = run_agent_turn(
+            &backend,
+            &mut host,
+            "",
+            &mut history,
+            &AgentOptions {
+                session_id: "chat-a".into(),
+                model: Some("model-a".into()),
+                provider_profile_id: Some("provider-a".into()),
+                log_explorer_context: Some(context),
+                linked_synthesis_retry: Some(checkpoint),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("mode drift is a typed stale retry result");
+
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::Error { code, message }
+                    if code == "linked_synthesis_retry_stale"
+                        && message.contains("suppression lens mode changed")
+            )
+        }));
+        assert!(
+            history.is_empty(),
+            "mode-drift evidence must not reach the provider"
         );
     }
 

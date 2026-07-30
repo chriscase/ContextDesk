@@ -159,6 +159,10 @@ pub struct BroadLogTriageBrief {
     pub event_revision: u64,
     /// Pinned deterministic template-metadata revision used by every section.
     pub template_analysis_revision: u64,
+    /// Whether this brief was built with the Explorer suppression lens
+    /// suspended for this turn. Durable rules remain configured, but none are
+    /// applied to the query results.
+    pub suppression_lens_suspended: bool,
     /// Whether deterministic broad triage completed successfully.
     pub deterministic_complete: bool,
 }
@@ -245,20 +249,44 @@ struct PinnedLogSuppressionLens {
     revision: u64,
     event_revision: u64,
     template_analysis_revision: u64,
+    /// Template ids currently applied to queries in this turn.
     excluded_template_ids: Vec<u64>,
+    /// Enabled durable rules retained for truthful disclosures even while the
+    /// Explorer lens is suspended.
+    configured_template_ids: Vec<u64>,
     suppressed_event_count: u64,
+    suppression_lens_suspended: bool,
+}
+
+impl PinnedLogSuppressionLens {
+    fn suppression_active(&self) -> bool {
+        !self.suppression_lens_suspended && !self.excluded_template_ids.is_empty()
+    }
+
+    fn configured_rule_count(&self) -> usize {
+        self.configured_template_ids.len()
+    }
 }
 
 fn log_suppression_disclosure(lens: &PinnedLogSuppressionLens) -> String {
     format!(
-        "suppression_active: {}\nsuppression_rule_count: {}\n\
+        "suppression_lens_mode: {}\nsuppression_suspended: {}\n\
+         suppression_active: {}\nsuppression_rule_count: {}\n\
+         suppression_applied_rule_count: {}\n\
          suppressed_event_count: {}\nsuppression_revision: {}\n\
          excluded_events_not_analyzed: {}\n",
-        !lens.excluded_template_ids.is_empty(),
+        if lens.suppression_lens_suspended {
+            "suspended"
+        } else {
+            "active"
+        },
+        lens.suppression_lens_suspended,
+        lens.suppression_active(),
+        lens.configured_rule_count(),
         lens.excluded_template_ids.len(),
         lens.suppressed_event_count,
         lens.revision,
-        !lens.excluded_template_ids.is_empty(),
+        lens.suppression_active(),
     )
 }
 
@@ -270,14 +298,23 @@ fn broad_triage_section_disclosure(
 ) -> String {
     format!(
         "result_cap: {result_cap}\npartial: {partial}\ncoarsened: {coarsened}\n\
+         suppression_lens_mode: {}\nsuppression_suspended: {}\n\
          suppression_active: {}\nsuppression_rule_count: {}\n\
+         suppression_applied_rule_count: {}\n\
          suppressed_event_count: {}\nsuppression_revision: {}\n\
          excluded_events_not_analyzed: {}\n",
-        !lens.excluded_template_ids.is_empty(),
+        if lens.suppression_lens_suspended {
+            "suspended"
+        } else {
+            "active"
+        },
+        lens.suppression_lens_suspended,
+        lens.suppression_active(),
+        lens.configured_rule_count(),
         lens.excluded_template_ids.len(),
         lens.suppressed_event_count,
         lens.revision,
-        !lens.excluded_template_ids.is_empty(),
+        lens.suppression_active(),
     )
 }
 
@@ -1753,6 +1790,7 @@ impl ToolHost {
         let mut lens = Self::load_log_suppression_lens(corpus_id, &corpus)?;
         lens.excluded_template_ids.clear();
         lens.suppressed_event_count = 0;
+        lens.suppression_lens_suspended = true;
         self.pinned_log_suppression = Some(lens);
         Ok(())
     }
@@ -1902,12 +1940,20 @@ impl ToolHost {
              deterministic_complete: true\nmodel_facing_byte_cap: {}\nidentity_cap: {}\n\
              exact_unsuppressed_event_count: {unsuppressed_event_count}\n\
              exact_suppressed_event_count: {}\nzero_analyzed_state: {zero_analyzed_state}\n\
+             suppression_lens_mode: {}\n\
+             suppression_suspended: {}\n\
              time_quality: {}\naxis_basis: {}\ntime_honesty: {}\n{}\n",
             serde_json::to_string(&corpus_id).unwrap_or_else(|_| "\"<invalid>\"".into()),
             BROAD_LOG_TRIAGE_BRIEF_MAX_BYTES,
             BROAD_LOG_TRIAGE_IDENTITY_CAP,
             suppression.suppressed_event_count,
             time_quality.label(),
+            if suppression.suppression_lens_suspended {
+                "suspended"
+            } else {
+                "active"
+            },
+            suppression.suppression_lens_suspended,
             match time_quality {
                 crate::log_analysis::TimeQuality::Wall => "unix_wall_clock_seconds",
                 crate::log_analysis::TimeQuality::Mixed => "mixed_timestamp_domains",
@@ -2531,6 +2577,7 @@ impl ToolHost {
             suppression_revision: suppression.revision,
             event_revision,
             template_analysis_revision,
+            suppression_lens_suspended: suppression.suppression_lens_suspended,
             deterministic_complete: true,
         })
     }
@@ -2567,8 +2614,10 @@ impl ToolHost {
             revision: document.revision,
             event_revision,
             template_analysis_revision,
+            configured_template_ids: excluded_template_ids.clone(),
             excluded_template_ids,
             suppressed_event_count,
+            suppression_lens_suspended: false,
         })
     }
 
@@ -2615,6 +2664,7 @@ impl ToolHost {
         event_revision: u64,
         template_analysis_revision: u64,
         suppression_revision: u64,
+        suppression_lens_suspended: bool,
     ) -> CoreResult<()> {
         let lens = self.pinned_log_suppression.as_ref().ok_or_else(|| {
             CoreError::Policy("linked synthesis retry requires a pinned suppression lens".into())
@@ -2623,10 +2673,16 @@ impl ToolHost {
             || lens.event_revision != event_revision
             || lens.template_analysis_revision != template_analysis_revision
             || lens.revision != suppression_revision
+            || lens.suppression_lens_suspended != suppression_lens_suspended
         {
             return Err(CoreError::Message(
-                "preserved linked evidence is stale because the corpus or noise policy changed"
-                    .into(),
+                if lens.suppression_lens_suspended != suppression_lens_suspended {
+                    "preserved linked evidence is stale because the suppression lens mode changed"
+                        .into()
+                } else {
+                    "preserved linked evidence is stale because the corpus or noise policy changed"
+                        .into()
+                },
             ));
         }
         let corpus = self.open_log_corpus(corpus_id)?;
@@ -2636,7 +2692,7 @@ impl ToolHost {
     pub(crate) fn pinned_linked_log_revisions(
         &self,
         corpus_id: &str,
-    ) -> CoreResult<(u64, u64, u64)> {
+    ) -> CoreResult<(u64, u64, u64, bool)> {
         let lens = self.pinned_log_suppression.as_ref().ok_or_else(|| {
             CoreError::Policy("linked log turn has no pinned suppression lens".into())
         })?;
@@ -2651,6 +2707,7 @@ impl ToolHost {
             lens.event_revision,
             lens.template_analysis_revision,
             lens.revision,
+            lens.suppression_lens_suspended,
         ))
     }
 
@@ -8354,7 +8411,13 @@ mod tests {
         host.pin_log_suppression_lens(&corpus_id).unwrap();
         let active = host.build_broad_log_triage_brief().unwrap();
         assert_eq!(active.unsuppressed_event_count, 19);
+        assert!(active.model_text.contains("suppression_lens_mode: active"));
+        assert!(active.model_text.contains("suppression_suspended: false"));
         assert!(active.model_text.contains("suppression_active: true"));
+        assert!(active.model_text.contains("suppression_rule_count: 1"));
+        assert!(active
+            .model_text
+            .contains("suppression_applied_rule_count: 1"));
 
         host.set_log_corpus_scope(Some(corpus_id.clone()));
         host.seed_log_corpus_handle(&corpus_id, Arc::clone(&corpus))
@@ -8366,7 +8429,18 @@ mod tests {
             "suspended lens must restore unsuppressed totals"
         );
         assert_eq!(suspended.suppression_revision, activated.revision);
+        assert!(suspended
+            .model_text
+            .contains("suppression_lens_mode: suspended"));
+        assert!(suspended.model_text.contains("suppression_suspended: true"));
         assert!(suspended.model_text.contains("suppression_active: false"));
+        assert!(suspended.model_text.contains("suppression_rule_count: 1"));
+        assert!(suspended
+            .model_text
+            .contains("suppression_applied_rule_count: 0"));
+        assert!(suspended
+            .model_text
+            .contains("excluded_events_not_analyzed: false"));
         assert!(
             suspended.model_text.contains("routine heartbeat"),
             "suspended lens must not hide the previously suppressed template"
@@ -8394,7 +8468,12 @@ mod tests {
             "resume must restore prior suppressed totals"
         );
         assert_eq!(resumed.suppression_revision, activated.revision);
+        assert!(resumed.model_text.contains("suppression_lens_mode: active"));
+        assert!(resumed.model_text.contains("suppression_suspended: false"));
         assert!(resumed.model_text.contains("suppression_active: true"));
+        assert!(resumed
+            .model_text
+            .contains("suppression_applied_rule_count: 1"));
         let after_resume = crate::log_analysis::load_suppression_document(&corpus).unwrap();
         assert_eq!(after_resume.revision, activated.revision);
         assert_eq!(after_resume.enabled_template_ids().unwrap(), vec![11]);
