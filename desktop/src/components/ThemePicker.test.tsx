@@ -121,23 +121,50 @@ describe("ThemePicker (#638)", () => {
     ).toBeTruthy();
   });
 
-  it("keeps option identifiers unique when both product surfaces are open", () => {
+  it("keeps one appearance peer open across programmatic activation", () => {
     render(
       <>
         <ControlledPicker variant="toolbar" />
         <ControlledPicker variant="settings" />
       </>,
     );
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Appearance, current theme Slate",
-      }),
+    const toolbarTrigger = screen.getByRole("button", {
+      name: "Appearance, current theme Slate",
+    });
+    const settingsTrigger = screen.getByRole("button", {
+      name: /Theme Slate/,
+    });
+    act(() => toolbarTrigger.click());
+    expect(screen.getAllByRole("listbox")).toHaveLength(1);
+
+    act(() => settingsTrigger.click());
+    expect(screen.getAllByRole("listbox")).toHaveLength(1);
+    expect(toolbarTrigger.getAttribute("aria-expanded")).toBe("false");
+    expect(settingsTrigger.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("dismisses outside despite stopped propagation and preserves destination focus", () => {
+    render(
+      <>
+        <ControlledPicker />
+        <button
+          type="button"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+        >
+          Outside destination
+        </button>
+      </>,
     );
     fireEvent.click(screen.getByRole("button", { name: /Theme Slate/ }));
+    const outside = screen.getByRole("button", {
+      name: "Outside destination",
+    });
 
-    const ids = screen
-      .getAllByRole("option")
-      .map((option) => option.getAttribute("id"));
-    expect(new Set(ids).size).toBe(ids.length);
+    fireEvent.pointerDown(outside);
+    outside.focus();
+
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(document.activeElement).toBe(outside);
   });
 });

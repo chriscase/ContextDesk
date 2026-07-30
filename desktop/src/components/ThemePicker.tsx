@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useId,
   useRef,
@@ -13,6 +14,7 @@ import {
   IconSun,
 } from "./icons";
 import { SKINS, skinMeta, type SkinId, type SkinMeta } from "../lib/skins";
+import { useDismissibleLayer } from "../hooks/useDismissibleLayer";
 
 type ThemePickerProps = {
   theme: SkinId;
@@ -57,12 +59,20 @@ export function ThemePicker({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
-  const close = (restoreFocus: boolean) => {
+  const close = useCallback((restoreFocus: boolean) => {
     setOpen(false);
     if (restoreFocus) {
       window.setTimeout(() => triggerRef.current?.focus(), 0);
     }
-  };
+  }, []);
+
+  useDismissibleLayer({
+    open,
+    layerId: listboxId,
+    peerGroup: "appearance-picker",
+    rootRef,
+    onDismiss: close,
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -71,26 +81,6 @@ export function ThemePicker({
       SKINS.findIndex((skin) => skin.id === theme),
     );
     window.requestAnimationFrame(() => optionRefs.current[selectedIndex]?.focus());
-
-    const onPointerDown = (event: PointerEvent) => {
-      if (
-        event.target instanceof Node &&
-        !rootRef.current?.contains(event.target)
-      ) {
-        close(false);
-      }
-    };
-    const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      close(true);
-    };
-    document.addEventListener("pointerdown", onPointerDown, true);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown, true);
-      document.removeEventListener("keydown", onKeyDown);
-    };
   }, [open, theme]);
 
   const moveOptionFocus = (
