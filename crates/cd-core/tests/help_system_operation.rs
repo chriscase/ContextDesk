@@ -2,6 +2,7 @@ use cd_core::help::HelpIndex;
 use std::path::{Path, PathBuf};
 
 const PAGE_ID: &str = "context-selection-model-boundary";
+const LOG_EXPLORER_PAGE_ID: &str = "log-explorer";
 const ASSET_PATHS: [&str; 3] = [
     "assets/context-answer-operation.svg",
     "assets/ordinary-linked-context.svg",
@@ -77,6 +78,33 @@ fn system_operation_help_is_discoverable_by_boundary_questions() {
         assert!(
             hits.iter().any(|hit| hit.page_id == PAGE_ID),
             "query={query:?} hits={hits:?}"
+        );
+    }
+}
+
+#[test]
+fn log_explorer_help_explains_bounded_large_corpus_triage_truthfully() {
+    let index = HelpIndex::load(checked_in_root()).unwrap();
+    let page = index.page(LOG_EXPLORER_PAGE_ID).unwrap();
+
+    for literal in [
+        "deterministic large-corpus triage",
+        "Prepared bounded triage brief",
+        "32 KiB",
+        "128 trusted event",
+        "ERROR/FATAL",
+        "suggestion-only",
+        "never auto-activate durable noise policy",
+        "Mixed and order-only corpora",
+        "synthesis-only retry",
+        "same chat, corpus, provider profile,",
+        "and model.",
+        "250,000+ event broad-triage turn",
+        "universal model quality",
+    ] {
+        assert!(
+            page.body.contains(literal),
+            "Log Explorer Help is missing {literal:?}"
         );
     }
 }

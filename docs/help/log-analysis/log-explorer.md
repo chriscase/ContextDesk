@@ -304,8 +304,13 @@ do not receive wall-clock correlation claims.
 The broad brief uses no semantic/embedding or network backend. Its model-facing
 untrusted text is capped at 32 KiB, and no more than 128 trusted event
 identities travel beside that text through a separate structured channel.
-Those identities—not sequence/source strings copied from the text—are the
-authority used to validate grounding.
+Event rows, template metadata, and the suppression policy are each revision
+pinned for the complete brief and any preserved synthesis retry. If any one
+changes, ContextDesk fails closed and asks for a fresh investigation. Long
+source names receive a stable compact citation alias in model-facing text; the
+host maps that alias back to the exact trusted source before accepting a
+citation. Those identities—not sequence/source strings copied from the text—are
+the authority used to validate grounding.
 
 The brief is a bounded starting point, not a claim that every relevant event
 was selected or that every model will diagnose the incident well. A
@@ -359,6 +364,29 @@ that brief or visibly run one bounded `search_logs` deepening step. A failed or
 truncated brief is disclosed and falls back to the existing staged tools; it is
 not presented as complete evidence.
 
+The host-owned brief is deterministic and bounded (hard model-facing cap,
+identity cap, and per-section result caps). High-cardinality template analysis
+streams ranking metadata and materializes no more than 512 selected template
+payloads rather than cloning the complete inventory. It summarizes
+severity/source distributions, impact plus rare-reserved **ERROR/FATAL** and
+**WARN** templates with first/last occurrence identities, problem clusters,
+wall-quality timeline concentration, and bounded correlations only when time
+quality is wall clock. Mixed and order-only corpora disclose those limits and
+do not invent temporal correlations. Ranking formulas and exact tie-breaks are
+printed in the brief itself.
+
+**Noise suggestions versus suppression:** high-volume non-error templates may
+appear as **suggestion-only** candidates with match counts and a short reason.
+They never auto-activate durable noise policy (#671). Suppression remains an
+explicit human preview-and-activate workflow; the brief reports the pinned
+revision, rule count, and suppressed event count, and never implies excluded
+events were analyzed.
+
+Interpret a broad answer as grounded only when it cites trusted `seq`/`source`
+identities from the brief or a later successful log tool. Progress labels show
+whether the host prepared a deterministic brief and whether optional tool
+deepening ran; do not treat synthesis prose alone as proof of search.
+
 The complete cross-source and provider-boundary explanation is available at
 help://context-selection-model-boundary.
 
@@ -376,7 +404,8 @@ appear eligible.
 Exact packaged acceptance for a 250,000+ event broad-triage turn with a real
 tools-enabled provider remains open on #745. The deterministic brief reduces
 the first-step burden on small and private models, but ContextDesk does not
-claim universal model quality.
+claim universal model quality. Synthetic Log Lab 250k proof is one-machine
+evidence only.
 
 ## Cross-computer diagnostic feedback
 

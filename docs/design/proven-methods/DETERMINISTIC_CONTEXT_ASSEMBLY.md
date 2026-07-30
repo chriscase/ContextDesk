@@ -123,14 +123,18 @@ problems in the linked logs takes a stronger path: the trusted host computes the
 first evidence brief before model participation, so success does not depend on
 the model inventing a search/cluster/timeline sequence.
 
-That brief uses one pinned corpus and one pinned suppression-policy revision.
-It contains bounded level, source, service, and host distributions; structured
-ERROR templates with capacity reserved for rare candidates; problem clusters;
-timeline concentration; and bounded correlations only when time quality is
-reliably wall-clock-safe. It does not invoke a semantic/embedding backend or a
-network backend. The model-facing untrusted text is capped at 32 KiB, while at
-most 128 structured event identities travel separately through the trusted
-identity channel.
+That brief pins the event revision, template-analysis revision, and
+suppression-policy revision for one corpus. It contains bounded level, source,
+service, and host distributions; structured ERROR and WARN templates with
+capacity reserved for rare candidates; problem clusters; timeline
+concentration; and bounded correlations only when time quality is reliably
+wall-clock-safe. High-cardinality template analysis streams ranking metadata
+and materializes at most 512 selected template payloads. It does not invoke a
+semantic/embedding backend or a network backend. The model-facing untrusted
+text is capped at 32 KiB, while at most 128 structured event identities travel
+separately through the trusted identity channel. Long source names use a stable
+compact citation alias whose mapping to the exact trusted source remains
+host-owned.
 
 The broad brief is a starting evidence package, not an exhaustive diagnosis.
 When the request explicitly needs another eligible read source, the host may
@@ -231,14 +235,17 @@ brief before the first provider request. Its portable contract is:
 | Field / section | Contract |
 | --------------- | -------- |
 | corpus binding | Exactly the host-resolved linked corpus |
-| suppression lens | One revision pinned before assembly and reused by every section |
+| revision lens | Event, template-analysis, and suppression revisions pinned before assembly and revalidated before provider use or synthesis retry |
 | distributions | Bounded level, source, service, and host counts |
-| ERROR templates | Structured candidates, including a reserved rare-candidate slice |
+| severe templates | Structured ERROR/FATAL and WARN candidates with reserved rare-candidate slices and first/last identities |
 | clusters | Bounded deterministic problem clusters |
 | timeline | Bounded concentration summary with explicit wall/mixed/order-only quality |
 | correlations | Bounded and present only when wall-clock time is safe |
+| high-cardinality bound | Stream ranking metadata; materialize at most 512 selected template payloads |
 | model-facing text | Complete untrusted-data envelope, no more than 32 KiB UTF-8 |
 | evidence identity | At most 128 trusted event identities carried separately from text |
+| long source identity | Stable compact model-facing alias; exact alias-to-source validation remains host-owned |
+| noise proposals | Suggestion-only; never activate or mutate durable suppression policy |
 | external dependency | No semantic/embedding or network backend |
 
 The text can describe an identity, but only the separate structured identity
@@ -269,7 +276,12 @@ string found in untrusted content into trusted evidence.
 10. **Write authority is separate.** Read-only context assembly never implies
     permission to persist memory, change a view, or mutate a remote system.
 11. **Broad triage is revision-consistent.** Every section of one broad-log
-    brief uses the same corpus and pinned suppression-policy revision.
+    brief uses the same corpus event, template-analysis, and suppression-policy
+    revisions. They are revalidated before provider participation and before a
+    synthesis-only retry.
+12. **Cancellation stops deterministic work.** A cancelled or expired broad
+    scan interrupts the database operation and joins its worker; it does not
+    leave a detached corpus scan consuming resources.
 
 ```mermaid
 flowchart TB
@@ -497,7 +509,7 @@ synthesis step.
 | Layer            | Required proof                                                                                                                                                                                   |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Contract/unit    | Source ranking and caps; context fitting; capability matrix; binding serialization; untrusted wrapper cannot forge delimiters                                                                    |
-| Core integration | Linked turn requires successful log evidence; a broad prompt receives its deterministic brief before the first provider call; one corpus/revision is pinned; ordinary turn excludes log tools; requested workspace search is staged; tools-disabled linked turn fails before provider; structured identity required |
+| Core integration | Linked turn requires successful log evidence; a broad prompt receives its deterministic brief before the first provider call; one corpus with event/template/suppression revisions is pinned; ordinary turn excludes log tools; requested workspace search is staged; tools-disabled linked turn fails before provider; structured identity required |
 | Adversarial      | Model prints call-shaped JSON; wrapper metadata appears in output; user asks to reveal evaluator truth; malicious tool text asks for permissions                                                 |
 | Host/session     | Empty-chat link persists; stale/corrupt corpus fails before capability/provider handling; attach failure leaves durable state unchanged; ordinary session has no log scope; cancellation targets exact session |
 | Component UI     | Add context attaches/detaches one corpus; availability/event count/Open Explorer remain visible; Return/Shift+Return/IME; errors remain visible; autoscroll/unread semantics |
