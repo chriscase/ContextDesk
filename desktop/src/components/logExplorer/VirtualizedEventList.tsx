@@ -27,6 +27,7 @@ import {
   formatEventTimeTitle,
 } from "../../lib/logExplorer/types";
 import type { AlignedLaneRow } from "../../lib/logExplorer/alignment";
+import type { LinkedScrollCoordinator } from "../../lib/logExplorer/linkedScrollCoordinator";
 import "./VirtualizedEventList.css";
 
 const DEFAULT_ROW = 28;
@@ -67,9 +68,9 @@ type Props = {
   colWidths?: [number, number, number, number];
   /** Shared time-slot model used only by fail-closed wall-clock Align mode. */
   alignedRows?: AlignedLaneRow<ExplorerEventDto>[];
-  /** Shared scroll coordinate for aligned lanes. */
-  linkedScrollTop?: number;
-  onLinkedScrollTop?: (scrollTop: number) => void;
+  /** Same-task resident scroll coordinator used only by exact-time Align. */
+  linkedScrollCoordinator?: LinkedScrollCoordinator;
+  linkedScrollId?: string;
   /** First visible authoritative event used as a logical, durable view anchor. */
   onViewportAnchor?: (event: ExplorerEventDto) => void;
   /** Keep the lane-local column heading aligned with horizontal row scroll. */
@@ -321,8 +322,8 @@ export function VirtualizedEventList({
   previewLines = 4,
   colWidths = [7.25, 2.5, 6, 1],
   alignedRows,
-  linkedScrollTop,
-  onLinkedScrollTop,
+  linkedScrollCoordinator,
+  linkedScrollId,
   onViewportAnchor,
   onHorizontalScroll,
   alignedLaneId,
@@ -449,10 +450,12 @@ export function VirtualizedEventList({
   const onScroll = useCallback(
     (e: UIEvent<HTMLDivElement>) => {
       const el = e.currentTarget;
+      if (linkedScrollCoordinator && linkedScrollId) {
+        linkedScrollCoordinator.syncFrom(linkedScrollId, el.scrollTop);
+      }
       setScrollTop(el.scrollTop);
       setViewportH(el.clientHeight);
       reportViewportAnchor(el.scrollTop);
-      onLinkedScrollTop?.(el.scrollTop);
       onHorizontalScroll?.(el.scrollLeft);
       const now = Date.now();
       if (now - edgeCooldown.current < 200) return;
@@ -468,10 +471,11 @@ export function VirtualizedEventList({
     },
     [
       onHorizontalScroll,
-      onLinkedScrollTop,
       onNearBottom,
       onNearTop,
       edgeRowH,
+      linkedScrollCoordinator,
+      linkedScrollId,
       reportViewportAnchor,
     ],
   );
@@ -582,6 +586,9 @@ export function VirtualizedEventList({
       // dispatching a scroll event. Keep React's windowing coordinate in sync
       // with the actual element so a populated lane cannot paint blank.
       setScrollTop(el.scrollTop);
+      if (linkedScrollCoordinator && linkedScrollId) {
+        linkedScrollCoordinator.syncFrom(linkedScrollId, el.scrollTop);
+      }
     }
     previousLayout.current = {
       keys: displayRows.map((row) => row.key),
@@ -589,15 +596,31 @@ export function VirtualizedEventList({
       offsets: [...offsets],
       heights: [...heights],
     };
-  }, [displayRows, offsets, heights, compactH, totalH]);
+  }, [
+    displayRows,
+    offsets,
+    heights,
+    compactH,
+    linkedScrollCoordinator,
+    linkedScrollId,
+    totalH,
+  ]);
 
   useLayoutEffect(() => {
-    const el = parentRef.current;
-    if (el == null || linkedScrollTop == null) return;
-    if (Math.abs(el.scrollTop - linkedScrollTop) <= 1) return;
-    el.scrollTop = linkedScrollTop;
-    setScrollTop(linkedScrollTop);
-  }, [linkedScrollTop]);
+    if (!linkedScrollCoordinator || !linkedScrollId) return;
+    return linkedScrollCoordinator.register(linkedScrollId, {
+      readTop: () => parentRef.current?.scrollTop ?? 0,
+      applyTop: (nextTop) => {
+        const el = parentRef.current;
+        if (!el) return 0;
+        el.scrollTop = nextTop;
+        const actualTop = el.scrollTop;
+        setScrollTop(actualTop);
+        reportViewportAnchor(actualTop);
+        return actualTop;
+      },
+    });
+  }, [linkedScrollCoordinator, linkedScrollId, reportViewportAnchor]);
 
   const lastScrollSeq = useRef<number | null>(null);
   useLayoutEffect(() => {
@@ -610,8 +633,18 @@ export function VirtualizedEventList({
     const top = Math.max(0, (offsets[idx] ?? 0) - viewportH / 3);
     el.scrollTop = top;
     setScrollTop(top);
+    if (linkedScrollCoordinator && linkedScrollId) {
+      linkedScrollCoordinator.syncFrom(linkedScrollId, el.scrollTop);
+    }
     lastScrollSeq.current = scrollToSeq;
-  }, [displayRows, offsets, scrollToSeq, viewportH]);
+  }, [
+    displayRows,
+    linkedScrollCoordinator,
+    linkedScrollId,
+    offsets,
+    scrollToSeq,
+    viewportH,
+  ]);
 
   let start = 0;
   {

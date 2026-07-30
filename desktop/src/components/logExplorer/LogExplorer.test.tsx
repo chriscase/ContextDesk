@@ -1663,6 +1663,87 @@ describe("LogExplorer shell", () => {
     await waitFor(() => expect(document.activeElement).toBe(columnsTrigger));
   });
 
+  it("dismisses toolbar peers in capture while preserving portaled help branches", async () => {
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+
+    const lanesTrigger = screen.getByTestId("lane-editor-toggle");
+    for (const [testId, menuName] of [
+      ["time-link-picker", "Time options"],
+      ["lane-count-picker", "Lanes options"],
+      ["row-mode-picker", "Rows options"],
+      ["density-picker", "Density options"],
+      ["columns-menu", "Columns actions"],
+    ] as const) {
+      const trigger = openToolbarPicker(testId);
+      const menu = screen.getByRole("menu", { name: menuName });
+      await waitFor(() =>
+        expect(menu.contains(document.activeElement)).toBe(true),
+      );
+      fireEvent.pointerDown(screen.getByTestId("log-explorer"));
+      expect(screen.queryByRole("menu", { name: menuName })).toBeNull();
+      await waitFor(() => expect(document.activeElement).toBe(trigger));
+    }
+
+    openToolbarPicker("time-link-picker");
+    const stopOutsidePointer = (event: Event) => event.stopPropagation();
+    lanesTrigger.addEventListener("pointerdown", stopOutsidePointer);
+    fireEvent.pointerDown(lanesTrigger);
+    lanesTrigger.removeEventListener("pointerdown", stopOutsidePointer);
+    lanesTrigger.focus();
+    expect(screen.queryByRole("menu", { name: "Time options" })).toBeNull();
+    expect(document.activeElement).toBe(lanesTrigger);
+
+    openToolbarPicker("density-picker");
+    const densityMenu = screen.getByRole("menu", {
+      name: "Density options",
+    });
+    await waitFor(() =>
+      expect(densityMenu.contains(document.activeElement)).toBe(true),
+    );
+    act(() => lanesTrigger.focus());
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("menu", { name: "Density options" }),
+      ).toBeNull(),
+    );
+    expect(document.activeElement).toBe(lanesTrigger);
+
+    const columnsTrigger = openToolbarPicker("columns-menu");
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole("menuitem", { name: /^Auto-fit columns\b/ }),
+      ),
+    );
+    fireEvent.pointerDown(screen.getByTestId("log-explorer"));
+    await waitFor(() => expect(document.activeElement).toBe(columnsTrigger));
+
+    openToolbarPicker("time-link-picker");
+    fireEvent.click(screen.getByTestId("row-mode-picker"));
+    expect(screen.queryByRole("menu", { name: "Time options" })).toBeNull();
+    const rowsMenu = screen.getByRole("menu", { name: "Rows options" });
+
+    const helpTrigger = within(rowsMenu).getByRole("button", {
+      name: "Help: Long-line reading help",
+    });
+    fireEvent.click(helpTrigger);
+    const helpPanel = await screen.findByTestId("help-tip-popover");
+    fireEvent.pointerDown(helpPanel);
+    expect(screen.getByRole("menu", { name: "Rows options" })).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByTestId("help-tip-popover")).toBeNull(),
+    );
+    expect(screen.getByRole("menu", { name: "Rows options" })).toBeTruthy();
+    expect(document.activeElement).toBe(helpTrigger);
+
+    fireEvent.keyDown(helpTrigger, { key: "Escape" });
+    const rowsTrigger = screen.getByTestId("row-mode-picker");
+    await waitFor(() => expect(document.activeElement).toBe(rowsTrigger));
+    expect(screen.queryByRole("menu", { name: "Rows options" })).toBeNull();
+  });
+
   it("starts new investigations with compact payload-first rows", async () => {
     render(<LogExplorer corpusId="c1" />);
     await screen.findByText(/auth failure/);
@@ -2348,10 +2429,11 @@ describe("LogExplorer shell", () => {
         filtersDrawer.contains(screen.getByLabelText("Sequence start filter")),
       ).toBe(true);
 
-      const errorFacet = within(screen.getByTestId("log-explorer-filters"))
-        .getByText("error")
-        .closest("label");
-      fireEvent.click(within(errorFacet!).getByRole("checkbox"));
+      fireEvent.click(
+        await within(
+          screen.getByTestId("log-explorer-filters"),
+        ).findByRole("checkbox", { name: /error/i }),
+      );
       expect(await screen.findByTestId("clear-all-filters")).toBeTruthy();
       fireEvent.click(screen.getByTestId("clear-all-filters"));
       await waitFor(() =>
@@ -2958,10 +3040,12 @@ describe("LogExplorer shell", () => {
       expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledTimes(1),
     );
 
-    const errorFacet = within(screen.getByTestId("log-explorer-filters"))
-      .getByText("error")
-      .closest("label");
-    fireEvent.click(within(errorFacet!).getByRole("checkbox"));
+    fireEvent.click(
+      await within(screen.getByTestId("log-explorer-filters")).findByRole(
+        "checkbox",
+        { name: /error/i },
+      ),
+    );
     await waitFor(() =>
       expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledTimes(2),
     );
@@ -4572,9 +4656,25 @@ describe("LogExplorer shell", () => {
       (document.querySelector('[data-seq="21"]') as HTMLElement).style.top,
     );
 
-    lists[0]!.scrollTop = 42;
-    fireEvent.scroll(lists[0]!);
-    await waitFor(() => expect(lists[1]!.scrollTop).toBe(42));
+    act(() => {
+      lists[0]!.scrollTop = 42;
+      lists[0]!.dispatchEvent(new Event("scroll"));
+      expect(lists[1]!.scrollTop).toBe(42);
+    });
+
+    act(() => {
+      lists[1]!.scrollTop = 64;
+      lists[1]!.dispatchEvent(new Event("scroll"));
+      expect(lists[0]!.scrollTop).toBe(64);
+    });
+
+    chooseTimeMode("Independent");
+    const independentPeerTop = lists[1]!.scrollTop;
+    act(() => {
+      lists[0]!.scrollTop = 84;
+      lists[0]!.dispatchEvent(new Event("scroll"));
+      expect(lists[1]!.scrollTop).toBe(independentPeerTop);
+    });
   });
 
   it("refuses exact Align for mixed time while retaining approximate Follow", async () => {
@@ -4894,7 +4994,7 @@ describe("LogExplorer shell", () => {
 
     const filtersPanel = screen.getByTestId("log-explorer-filters");
     fireEvent.click(
-      within(filtersPanel).getByRole("checkbox", { name: /api\.log/i }),
+      await within(filtersPanel).findByRole("checkbox", { name: /api\.log/i }),
     );
     await screen.findByRole("button", { name: "source:api.log ×" });
     await waitFor(() =>
@@ -5736,9 +5836,12 @@ describe("LogExplorer shell", () => {
       }),
     );
 
-    const errorFacet = screen.getByText("error").closest("label");
-    expect(errorFacet).toBeTruthy();
-    fireEvent.click(within(errorFacet!).getByRole("checkbox"));
+    fireEvent.click(
+      await within(screen.getByTestId("log-explorer-filters")).findByRole(
+        "checkbox",
+        { name: /error/i },
+      ),
+    );
     await waitFor(() =>
       expect(host.hostLogSearchEventsAdvanced).toHaveBeenLastCalledWith(
         "c1",
@@ -6284,8 +6387,12 @@ describe("LogExplorer shell", () => {
       ),
     );
 
-    const errorFacet = screen.getByText("error").closest("label");
-    fireEvent.click(within(errorFacet!).getByRole("checkbox"));
+    fireEvent.click(
+      await within(screen.getByTestId("log-explorer-filters")).findByRole(
+        "checkbox",
+        { name: /error/i },
+      ),
+    );
     await waitFor(() =>
       expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledTimes(2),
     );

@@ -5,6 +5,7 @@
  */
 import {
   useCallback,
+  useContext,
   useEffect,
   useId,
   useLayoutEffect,
@@ -14,6 +15,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
+import { DismissibleLayerContext } from "../hooks/useDismissibleLayer";
 import { IconHelp } from "./icons";
 import { parseHelpLocator, requestHelpAcrossWindows } from "../lib/help";
 
@@ -184,6 +186,7 @@ export function HelpTip({
   const closeRef = useRef<HTMLButtonElement>(null);
   const panelId = useId();
   const instanceId = useId();
+  const parentDismissibleLayer = useContext(DismissibleLayerContext);
 
   const close = useCallback(() => setOpen(false), []);
 
@@ -296,6 +299,9 @@ export function HelpTip({
               <div
                 className="help-tip__backdrop"
                 data-testid="help-tip-backdrop"
+                data-dismissible-layer-branch={
+                  parentDismissibleLayer ?? undefined
+                }
                 aria-hidden="true"
               />
             ) : null}
@@ -313,6 +319,9 @@ export function HelpTip({
               aria-modal={narrow ? "true" : "false"}
               aria-label={heading}
               data-testid="help-tip-popover"
+              data-dismissible-layer-branch={
+                parentDismissibleLayer ?? undefined
+              }
               data-presentation={narrow ? "sheet" : "popover"}
               style={pos}
             >
