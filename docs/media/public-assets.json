@@ -14,13 +14,13 @@
     },
     {
       "path": "docs/media/gallery/log-explorer-investigation.png",
-      "gitBlob": "ef9caf4acb15303d1f4c6c0ff3ef7062c8b2ff8a",
-      "sourceSha": "4cbdf664a794af3f424cd5bba8a4c621c3df3bae",
+      "gitBlob": "963b9429d21808836204c30d9f9acf8731bd2471",
+      "sourceSha": "fb30c99638a7c443c0d6acd23f914f865b9577eb",
       "privacyReview": "publishable",
       "modelInventoryVisible": false,
-      "fixture": "Synthetic seven-day 25,000-event Log Lab behavior-scale corpus",
+      "fixture": "Synthetic 250,000-event triage-stress corpus with the bundled seven-day operational-metrics fixture",
       "theme": "Slate",
-      "claim": "Two exact-time evidence lanes with aligned CPU, heap, and client tracks, source provenance, payload-focused rows, and the linked-chat rail collapsed",
+      "claim": "Two exact-time evidence lanes with a durable corpus attachment, aligned CPU, heap, and client tracks, source provenance, payload-focused rows, and both side rails collapsed",
       "reviewedBy": "Agent: Codex · Model: gpt-5.6-sol"
     },
     {
