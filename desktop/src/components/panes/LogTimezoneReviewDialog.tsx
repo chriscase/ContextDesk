@@ -112,10 +112,12 @@ export function LogTimezoneReviewDialog({
   const busy = status !== "idle";
   const trimmedZone = zone.trim();
   const validZone = mode === "iana" && isValidIanaZone(trimmedZone);
-  const previewIsCurrent =
+  const previewMatchesCurrent =
     preview?.source === source.source &&
     preview.ianaZone === trimmedZone &&
     preview.previewToken.trim().length > 0;
+  const previewCanApply =
+    previewMatchesCurrent && (preview?.affectedRecords ?? 0) > 0;
 
   const dismiss = () => {
     if (busy) return;
@@ -178,7 +180,7 @@ export function LogTimezoneReviewDialog({
   };
 
   const applyPreview = async () => {
-    if (!previewIsCurrent || !preview || busy) return;
+    if (!previewCanApply || !preview || busy) return;
     setError(null);
     setStatus("applying");
     try {
@@ -365,7 +367,7 @@ export function LogTimezoneReviewDialog({
             </dl>
           </details>
 
-          {previewIsCurrent && preview ? (
+          {previewMatchesCurrent && preview ? (
             <section
               id={resultId}
               className="log-timezone-review__preview"
@@ -433,6 +435,13 @@ export function LogTimezoneReviewDialog({
                 Alignment is currently stored at coarse whole-second precision.
                 Fractional source digits are not claimed in this preview.
               </p>
+              {preview.affectedRecords === 0 ? (
+                <p role="note">
+                  No records can be resolved by this declaration, so there is
+                  nothing to apply. Leave the source order-only or choose a
+                  different zone after confirming the source’s time rules.
+                </p>
+              ) : null}
             </section>
           ) : null}
 
@@ -449,7 +458,7 @@ export function LogTimezoneReviewDialog({
                 ? "Applying timezone declaration"
                 : status === "clearing"
                   ? "Removing timezone declaration"
-                  : previewIsCurrent
+                  : previewMatchesCurrent
                     ? "Timezone preview ready"
                     : ""}
           </span>
@@ -519,8 +528,8 @@ export function LogTimezoneReviewDialog({
           <button
             type="button"
             className="btn btn--primary"
-            disabled={!previewIsCurrent || busy}
-            aria-describedby={previewIsCurrent ? resultId : undefined}
+            disabled={!previewCanApply || busy}
+            aria-describedby={previewMatchesCurrent ? resultId : undefined}
             onClick={() => void applyPreview()}
           >
             {status === "applying" ? "Applying…" : "Apply declaration"}

@@ -300,6 +300,38 @@ describe("LogTimezoneReviewDialog", () => {
     ).toBe(true);
   });
 
+  it("shows an honest zero-change preview without enabling Apply", async () => {
+    const onPreview = vi.fn(async ({ source, ianaZone }) => ({
+      ...preview(source, ianaZone),
+      affectedRecords: 0,
+      unchangedOrderOnlyRecords: 24,
+    }));
+    const { dialog } = await openReview({ onPreview });
+    fireEvent.click(
+      within(dialog).getByRole("radio", {
+        name: /Use an IANA timezone/,
+      }),
+    );
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /^IANA timezone/ }),
+      { target: { value: "Europe/Berlin" } },
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "Preview" }));
+
+    expect(
+      await within(dialog).findByText(
+        /No records can be resolved by this declaration/,
+      ),
+    ).toBeTruthy();
+    expect(
+      (
+        within(dialog).getByRole("button", {
+          name: "Apply declaration",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+  });
+
   it("discards a preview when the reviewed source changes", async () => {
     const onPreview = vi.fn(
       async ({ source, ianaZone }) => preview(source, ianaZone),
