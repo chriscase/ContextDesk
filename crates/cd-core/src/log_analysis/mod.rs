@@ -88,13 +88,14 @@ pub use package::{
     PACKAGE_FORMAT_VERSION, PACKAGE_READERS, PACKAGE_READER_VERSION,
 };
 pub use parse::{
-    detect_format, parse_line, parse_line_with_fingerprint, FingerprintedParsedLine, LogFormat,
-    ParsedLine,
+    detect_format, parse_line, parse_line_with_fingerprint, ActiveTimestampBasis,
+    FingerprintedParsedLine, LogFormat, ParsedLine, TimestampProvenance,
 };
 pub use query::{
-    classify_ts, corpus_time_quality, query_event_count, query_event_neighborhood,
-    query_event_rows, query_events, query_facets, query_shared_timeline_summary,
-    query_source_catalog, query_timeline_summary, search_events, search_events_advanced,
+    classify_active_timestamp_basis, classify_timestamp_provenance, classify_ts,
+    corpus_time_quality, query_event_count, query_event_neighborhood, query_event_rows,
+    query_events, query_facets, query_shared_timeline_summary, query_source_catalog,
+    query_timeline_summary, search_events, search_events_advanced,
     search_events_advanced_with_cancel, EventCount, EventNeighborhood, EventNeighborhoodQuery,
     EventPage, EventQuery, EventRowsPage, EventSearchHit, EventSearchQuery, EventSearchResult,
     ExplorerEvent, LogFacets, LogSourceCatalogEntry, LogSourceCatalogPage, LogSourceCatalogQuery,

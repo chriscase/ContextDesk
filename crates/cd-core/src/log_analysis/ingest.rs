@@ -73,6 +73,12 @@ pub struct IngestStats {
     /// Counts by parse format.
     #[serde(default)]
     pub format_counts: std::collections::BTreeMap<String, u64>,
+    /// Counts by explicit timestamp provenance.
+    #[serde(default)]
+    pub timestamp_provenance_counts: std::collections::BTreeMap<String, u64>,
+    /// Counts by active timestamp basis.
+    #[serde(default)]
+    pub active_timestamp_basis_counts: std::collections::BTreeMap<String, u64>,
 }
 
 impl IngestStats {
@@ -97,6 +103,8 @@ impl IngestStats {
             ts_min: self.ts_min,
             ts_max: self.ts_max,
             format_counts: self.format_counts.clone(),
+            timestamp_provenance_counts: self.timestamp_provenance_counts.clone(),
+            active_timestamp_basis_counts: self.active_timestamp_basis_counts.clone(),
         }
     }
 
@@ -1488,6 +1496,14 @@ fn ingest_lines_from_reader(
         let fingerprinted = parse_line_with_fingerprint(line, file_hint, *seq);
         confidence.observe(source_label, &fingerprinted);
         let parsed = fingerprinted.parsed;
+        *stats
+            .timestamp_provenance_counts
+            .entry(parsed.timestamp_provenance.as_storage_str().into())
+            .or_insert(0) += 1;
+        *stats
+            .active_timestamp_basis_counts
+            .entry(parsed.active_timestamp_basis.as_storage_str().into())
+            .or_insert(0) += 1;
         let fmt_key = match parsed.format {
             LogFormat::Json => "json",
             LogFormat::Logfmt => "logfmt",
@@ -1507,6 +1523,9 @@ fn ingest_lines_from_reader(
             event: LogEvent {
                 seq: *seq,
                 ts,
+                timestamp_provenance: parsed.timestamp_provenance,
+                active_timestamp_basis: parsed.active_timestamp_basis,
+                unresolved_local_timestamp: parsed.unresolved_local_timestamp,
                 level: parsed.level,
                 service: parsed.service,
                 host: parsed.host,

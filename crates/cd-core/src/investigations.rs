@@ -2574,7 +2574,7 @@ fn stale_revision_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::log_analysis::{LogEvent, TimeQuality};
+    use crate::log_analysis::{ActiveTimestampBasis, LogEvent, TimeQuality, TimestampProvenance};
 
     const PAYLOAD_SENTINEL: &str = "INVESTIGATION_PAYLOAD_SENTINEL_MUST_NOT_PERSIST";
 
@@ -2585,6 +2585,9 @@ mod tests {
                 LogEvent {
                     seq: 10,
                     ts: 1_700_000_010,
+                    timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
                     level: "error".into(),
                     service: Some("api".into()),
                     host: None,
@@ -2597,6 +2600,9 @@ mod tests {
                 LogEvent {
                     seq: 11,
                     ts: 1_700_000_011,
+                    timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
                     level: "info".into(),
                     service: Some("api".into()),
                     host: None,
@@ -2609,6 +2615,9 @@ mod tests {
                 LogEvent {
                     seq: 12,
                     ts: 1_700_000_012,
+                    timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
                     level: "warn".into(),
                     service: Some("worker".into()),
                     host: None,

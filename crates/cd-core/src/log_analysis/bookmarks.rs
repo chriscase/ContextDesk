@@ -682,6 +682,7 @@ pub fn bookmark_summaries(corpus: &LogCorpus, cap: usize) -> CoreResult<Vec<Book
 mod tests {
     use super::*;
     use crate::log_analysis::store::LogEvent;
+    use crate::log_analysis::{ActiveTimestampBasis, TimestampProvenance};
 
     fn evidence_corpus(dir: &tempfile::TempDir) -> LogCorpus {
         let corpus = LogCorpus::create(dir.path(), "evidence").unwrap();
@@ -690,6 +691,9 @@ mod tests {
                 LogEvent {
                     seq: 10,
                     ts: 1_700_000_010,
+                    timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
                     level: "error".into(),
                     service: None,
                     host: None,
@@ -702,6 +706,9 @@ mod tests {
                 LogEvent {
                     seq: 11,
                     ts: 1_700_000_011,
+                    timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
                     level: "info".into(),
                     service: None,
                     host: None,
@@ -714,6 +721,9 @@ mod tests {
                 LogEvent {
                     seq: 12,
                     ts: 1_700_000_010,
+                    timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
                     level: "warn".into(),
                     service: None,
                     host: None,
@@ -769,6 +779,9 @@ mod tests {
             LogEvent {
                 seq: 1,
                 ts: 1_700_000_000,
+                timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                unresolved_local_timestamp: None,
                 level: "error".into(),
                 service: None,
                 host: None,
@@ -781,6 +794,9 @@ mod tests {
             LogEvent {
                 seq: 2,
                 ts: 1_700_000_001,
+                timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                unresolved_local_timestamp: None,
                 level: "info".into(),
                 service: None,
                 host: None,
