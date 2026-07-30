@@ -90,7 +90,7 @@ describe("ProcessProgressPanel", () => {
   });
 
   it("does not invent a determinate value for terminal host state", () => {
-    const { rerender } = render(
+    const { container, rerender } = render(
       <ProcessProgressPanel
         progress={progress({
           phase: "failed",
@@ -99,13 +99,14 @@ describe("ProcessProgressPanel", () => {
         })}
       />,
     );
-    const bar = screen.getByRole("progressbar", {
-      name: "Process progress",
-    });
-
-    expect(bar.hasAttribute("value")).toBe(false);
-    expect(bar.hasAttribute("aria-valuenow")).toBe(false);
-    expect(bar.getAttribute("data-indeterminate")).toBe("false");
+    expect(
+      screen.queryByRole("progressbar", { name: "Process progress" }),
+    ).toBeNull();
+    expect(
+      container
+        .querySelector(".process-progress__bar-track")
+        ?.getAttribute("aria-hidden"),
+    ).toBe("true");
 
     rerender(
       <ProcessProgressPanel
@@ -116,9 +117,14 @@ describe("ProcessProgressPanel", () => {
         })}
       />,
     );
-    expect(bar.hasAttribute("value")).toBe(false);
-    expect(bar.hasAttribute("aria-valuenow")).toBe(false);
-    expect(bar.getAttribute("data-indeterminate")).toBe("false");
+    expect(
+      screen.queryByRole("progressbar", { name: "Process progress" }),
+    ).toBeNull();
+    expect(
+      container
+        .querySelector(".process-progress__bar-track")
+        ?.getAttribute("data-indeterminate"),
+    ).toBe("false");
   });
 
   it("stops indeterminate activity when an error is displayed", () => {

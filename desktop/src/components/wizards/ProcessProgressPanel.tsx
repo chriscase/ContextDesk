@@ -105,16 +105,24 @@ export function ProcessProgressPanel({
         })}
       </ol>
 
-      <progress
-        className="process-progress__bar-track"
-        aria-label="Process progress"
-        max={100}
-        {...(fractionPercent == null ? {} : { value: fractionPercent })}
-        {...(fractionPercent == null
-          ? {}
-          : { "aria-valuenow": fractionPercent })}
-        data-indeterminate={indeterminate ? "true" : "false"}
-      />
+      {running ? (
+        <progress
+          className="process-progress__bar-track"
+          aria-label="Process progress"
+          max={100}
+          {...(fractionPercent == null ? {} : { value: fractionPercent })}
+          {...(fractionPercent == null
+            ? {}
+            : { "aria-valuenow": fractionPercent })}
+          data-indeterminate={indeterminate ? "true" : "false"}
+        />
+      ) : (
+        <div
+          className="process-progress__bar-track"
+          data-indeterminate="false"
+          aria-hidden="true"
+        />
+      )}
 
       <p className="process-progress__message">
         {error
