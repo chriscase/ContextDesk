@@ -1407,7 +1407,6 @@ impl ToolHost {
             return Err(CoreError::Policy("log analysis disabled".into()));
         }
         let corpus_id = self.resolve_log_corpus(&json!({}), "broad_log_triage_brief")?;
-        let corpus = self.open_log_corpus(&corpus_id)?;
         let suppression = self.pinned_log_suppression.as_ref().ok_or_else(|| {
             CoreError::Policy(
                 "broad log triage requires a suppression revision pinned before model participation"
@@ -1419,6 +1418,7 @@ impl ToolHost {
                 "pinned log suppression belongs to a different corpus".into(),
             ));
         }
+        let corpus = self.open_log_corpus(&corpus_id)?;
         Ok(BroadLogTriageBuildJob {
             corpus_id,
             corpus,
