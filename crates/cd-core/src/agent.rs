@@ -6125,53 +6125,135 @@ mod tests {
             .any(|event| matches!(event, StreamEvent::TextDelta { .. })));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn broad_host_brief_mid_build_deadline_interrupts_and_joins_worker() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+
+        struct WorkerCleanup {
+            force_abort: Arc<AtomicBool>,
+            release: Arc<AtomicBool>,
+            abort_handle:
+                Arc<std::sync::Mutex<Option<crate::tool_host::BroadLogTriageAbortHandle>>>,
+        }
+
+        impl Drop for WorkerCleanup {
+            fn drop(&mut self) {
+                self.force_abort.store(true, Ordering::SeqCst);
+                self.release.store(true, Ordering::SeqCst);
+                if let Ok(abort_handle) = self.abort_handle.lock() {
+                    if let Some(abort_handle) = abort_handle.as_ref() {
+                        abort_handle.abort();
+                    }
+                }
+            }
+        }
 
         let (_dir, mut host, context) = linked_timeout_fixture();
         host.set_log_corpus_scope(Some(context.corpus_id.clone()));
         host.pin_log_suppression_lens(&context.corpus_id)
             .expect("pin broad triage lens");
         let entered = Arc::new(AtomicBool::new(false));
+        let abort_observed = Arc::new(AtomicBool::new(false));
         let exited = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let force_abort = Arc::new(AtomicBool::new(false));
+        let abort_handle = Arc::new(std::sync::Mutex::new(None));
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (abort_tx, abort_rx) = std::sync::mpsc::sync_channel(1);
         let entered_hook = Arc::clone(&entered);
+        let abort_observed_hook = Arc::clone(&abort_observed);
         let exited_hook = Arc::clone(&exited);
+        let release_hook = Arc::clone(&release);
+        let force_abort_hook = Arc::clone(&force_abort);
+        let abort_handle_hook = Arc::clone(&abort_handle);
         host.set_broad_triage_phase_hook(Some(Arc::new(move |phase, abort| {
+            if phase == "start" {
+                *abort_handle_hook.lock().expect("abort handle lock") = Some(abort.clone());
+                if force_abort_hook.load(Ordering::SeqCst) {
+                    abort.abort();
+                }
+                return;
+            }
             if phase != "facets" {
                 return;
             }
             entered_hook.store(true, Ordering::SeqCst);
-            while !abort.is_aborted() {
+            let _ = entered_tx.try_send(());
+            while !abort.is_aborted() && !force_abort_hook.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+            let saw_abort = abort.is_aborted();
+            abort_observed_hook.store(saw_abort, Ordering::SeqCst);
+            let _ = abort_tx.try_send(saw_abort);
+            while !release_hook.load(Ordering::SeqCst) && !force_abort_hook.load(Ordering::SeqCst) {
                 std::thread::yield_now();
             }
             exited_hook.store(true, Ordering::SeqCst);
         })));
+        let _cleanup = WorkerCleanup {
+            force_abort: Arc::clone(&force_abort),
+            release: Arc::clone(&release),
+            abort_handle,
+        };
 
-        let mut history = Vec::new();
-        let events = run_agent_turn(
-            &FirstCallProviderFailureBackend,
-            &mut host,
-            "What problems do you see in these logs?",
-            &mut history,
-            &AgentOptions {
-                session_id: "broad-mid-build-deadline".into(),
-                deadline_ms: 25,
-                log_explorer_context: Some(context),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("mid-build deadline is a typed terminal turn");
+        let mut turn = tokio::spawn(async move {
+            let mut history = Vec::new();
+            run_agent_turn(
+                &FirstCallProviderFailureBackend,
+                &mut host,
+                "What problems do you see in these logs?",
+                &mut history,
+                &AgentOptions {
+                    session_id: "broad-mid-build-deadline".into(),
+                    deadline_ms: 25,
+                    log_explorer_context: Some(context),
+                    ..Default::default()
+                },
+            )
+            .await
+        });
+
+        let entered_wait =
+            tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(5)));
+        let entered_result = tokio::select! {
+            result = entered_wait => result.expect("entry watchdog task"),
+            _ = &mut turn => panic!("deadline turn completed before the worker entered"),
+        };
+        entered_result.expect("blocking worker must enter before the watchdog");
+
+        tokio::time::advance(Duration::from_millis(25)).await;
+        let abort_wait =
+            tokio::task::spawn_blocking(move || abort_rx.recv_timeout(Duration::from_secs(5)));
+        let saw_abort = tokio::select! {
+            result = abort_wait => result
+                .expect("abort watchdog task")
+                .expect("blocking worker must observe abort before the watchdog"),
+            _ = &mut turn => panic!("deadline turn returned before the worker observed abort"),
+        };
+        assert!(saw_abort, "the worker must observe the real deadline abort");
+        assert!(
+            !turn.is_finished(),
+            "the deadline turn must remain pending until the blocking worker is released"
+        );
+
+        release.store(true, Ordering::SeqCst);
+        let events = turn
+            .await
+            .expect("deadline turn task")
+            .expect("mid-build deadline is a typed terminal turn");
 
         assert!(entered.load(Ordering::SeqCst));
+        assert!(abort_observed.load(Ordering::SeqCst));
         assert!(
             exited.load(Ordering::SeqCst),
             "the blocking worker must finish before the deadline turn returns"
         );
         assert!(events.iter().any(
             |event| matches!(event, StreamEvent::Error { code, .. } if code == "budget_time")
+        ));
+        assert!(events.iter().any(
+            |event| matches!(event, StreamEvent::TurnCompleted { reason } if reason == "budget_time")
         ));
         assert!(!events
             .iter()
