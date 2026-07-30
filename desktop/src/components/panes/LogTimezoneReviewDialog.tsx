@@ -381,6 +381,12 @@ export function LogTimezoneReviewDialog({
                   <dd>{countLabel(preview.affectedRecords, "record")}</dd>
                 </div>
                 <div>
+                  <dt>Already exact</dt>
+                  <dd>
+                    {countLabel(preview.existingWallClockRecords, "record")}
+                  </dd>
+                </div>
+                <div>
                   <dt>First resolved</dt>
                   <dd>
                     {preview.firstResolvedTs == null
@@ -411,6 +417,16 @@ export function LogTimezoneReviewDialog({
                   <dd>
                     {countLabel(preview.unchangedOrderOnlyRecords, "record")}
                   </dd>
+                </div>
+                <div>
+                  <dt>Unsupported shape</dt>
+                  <dd>
+                    {countLabel(preview.unsupportedTimestampRecords, "record")}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Outside supported range</dt>
+                  <dd>{countLabel(preview.outOfRangeRecords, "record")}</dd>
                 </div>
               </dl>
               <p>

@@ -55,11 +55,14 @@ function preview(
     ianaZone,
     previewToken: `preview:${source}:${ianaZone}`,
     affectedRecords: 21,
+    existingWallClockRecords: 4,
     firstResolvedTs: Date.parse("2021-03-05T00:00:05Z") / 1000,
     lastResolvedTs: Date.parse("2021-03-05T01:00:05Z") / 1000,
     dstGapRecords: 1,
     dstFoldAmbiguities: 2,
     unchangedOrderOnlyRecords: 3,
+    unsupportedTimestampRecords: 1,
+    outOfRangeRecords: 0,
     precision: "whole_second",
   };
 }

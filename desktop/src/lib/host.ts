@@ -1804,7 +1804,7 @@ export type LogImportConfidenceDto = {
 export type LogTimezoneDeclarationDto = {
   source: string;
   ianaZone: string;
-  basis: "user_declared" | "saved_hint" | "bundle_hint";
+  basis: "user_declared";
   declaredAt: number;
   appliedRevision: number;
 };
@@ -1819,11 +1819,14 @@ export type LogTimezoneResolutionPreviewDto = {
   ianaZone: string;
   previewToken: string;
   affectedRecords: number;
+  existingWallClockRecords: number;
   firstResolvedTs: number | null;
   lastResolvedTs: number | null;
   dstGapRecords: number;
   dstFoldAmbiguities: number;
   unchangedOrderOnlyRecords: number;
+  unsupportedTimestampRecords: number;
+  outOfRangeRecords: number;
   precision: "whole_second";
 };
 
