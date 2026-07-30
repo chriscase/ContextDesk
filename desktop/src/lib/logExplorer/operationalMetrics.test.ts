@@ -146,6 +146,24 @@ describe("operational metrics schema", () => {
     );
   });
 
+  it("rejects shared invalid-empty-series fixture", () => {
+    const doc = JSON.parse(
+      readFileSync(
+        resolve(
+          process.cwd(),
+          "../fixtures/incident-evidence/metrics-parity/invalid-empty-series.json",
+        ),
+        "utf8",
+      ),
+    ) as unknown;
+    const result = validateOperationalMetricsDocument(doc);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected empty series to fail");
+    expect(result.issues.map((issue) => issue.path)).toEqual(
+      expect.arrayContaining(["$.series"]),
+    );
+  });
+
   it("accepts logs-plus-metrics operational-metrics.v1.json from IEB fixtures", () => {
     const doc = JSON.parse(
       readFileSync(

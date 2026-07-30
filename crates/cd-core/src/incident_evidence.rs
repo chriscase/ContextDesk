@@ -283,39 +283,11 @@ fn non_empty_str(v: Option<&serde_json::Value>) -> bool {
         .is_some_and(|s| !s.trim().is_empty())
 }
 
-/// Shared manifest+payload validation used by directory transport.
+/// Shared manifest header/policy checks for directory **and** archive transports.
 ///
-/// When `archive_entries` is `None`, payloads are read from the directory root
-/// with TOCTOU-safe regular-file opens. Callers for archive transport validate
-/// components against pre-streamed entry bytes via [`validate_metrics_document`]
-/// and their own streaming path.
-fn validate_manifest_and_payloads(
-    root: &Path,
-    root_display: &str,
-    raw: &str,
-    // When Some, skip filesystem payload I/O (archive path supplies hashes).
-    skip_fs_payloads: Option<()>,
-) -> ValidationReport {
-    let mut diagnostics = Vec::new();
-
-    // Case-insensitive sentinel scan on full manifest text.
-    scan_forbidden_sentinels(raw, "manifest.json", &mut diagnostics);
-
-    let manifest: Manifest = match serde_json::from_str(raw) {
-        Ok(m) => m,
-        Err(e) => {
-            diagnostics.push(Diagnostic::new(
-                "manifest_json_invalid",
-                "manifest.json",
-                format!("manifest.json is not valid JSON for the v1 shape: {e}"),
-            ));
-            return finish(false, root_display.to_string(), None, None, diagnostics);
-        }
-    };
-
-    let schema_id = Some(manifest.schema_id.clone());
-    let bundle_id = Some(manifest.bundle_id.clone());
-
+/// Covers schemaId, minReaderVersion, bundleId, createdAt offset/length, producer,
+/// privacy, timeBasis, and component count — so transports cannot diverge.
+pub fn validate_manifest_header(manifest: &Manifest, diagnostics: &mut Vec<Diagnostic>) {
     if manifest.schema_id != SCHEMA_ID {
         diagnostics.push(Diagnostic::new(
             "unsupported_schema_id",
@@ -399,10 +371,9 @@ fn validate_manifest_and_payloads(
                 format!("privacy.notes exceeds {MAX_PRIVACY_NOTES_CHARS} characters"),
             ));
         }
-        scan_forbidden_sentinels(notes, "$.privacy.notes", &mut diagnostics);
+        scan_forbidden_sentinels(notes, "$.privacy.notes", diagnostics);
     }
-    validate_time_basis(&manifest.time_basis, "$.timeBasis", &mut diagnostics);
-
+    validate_time_basis(&manifest.time_basis, "$.timeBasis", diagnostics);
     if manifest.components.len() > MAX_COMPONENTS {
         diagnostics.push(Diagnostic::new(
             "too_many_components",
@@ -410,6 +381,43 @@ fn validate_manifest_and_payloads(
             format!("components exceed MAX_COMPONENTS ({MAX_COMPONENTS})"),
         ));
     }
+}
+
+/// Shared manifest+payload validation used by directory transport.
+///
+/// When `archive_entries` is `None`, payloads are read from the directory root
+/// with TOCTOU-safe regular-file opens. Callers for archive transport validate
+/// components against pre-streamed entry bytes via [`validate_metrics_document`]
+/// and their own streaming path.
+fn validate_manifest_and_payloads(
+    root: &Path,
+    root_display: &str,
+    raw: &str,
+    // When Some, skip filesystem payload I/O (archive path supplies hashes).
+    skip_fs_payloads: Option<()>,
+) -> ValidationReport {
+    let mut diagnostics = Vec::new();
+
+    // Case-insensitive sentinel scan on full manifest text.
+    scan_forbidden_sentinels(raw, "manifest.json", &mut diagnostics);
+
+    let manifest: Manifest = match serde_json::from_str(raw) {
+        Ok(m) => m,
+        Err(e) => {
+            diagnostics.push(Diagnostic::new(
+                "manifest_json_invalid",
+                "manifest.json",
+                format!("manifest.json is not valid JSON for the v1 shape: {e}"),
+            ));
+            return finish(false, root_display.to_string(), None, None, diagnostics);
+        }
+    };
+
+    let schema_id = Some(manifest.schema_id.clone());
+    let bundle_id = Some(manifest.bundle_id.clone());
+
+    // Shared structural rules — identical for directory and archive transports.
+    validate_manifest_header(&manifest, &mut diagnostics);
 
     // --- Pass 1: inventory integrity before any payload I/O ---
     let mut seen_ids = HashSet::new();
@@ -1183,6 +1191,9 @@ pub fn validate_metrics_document_text(text: &str, path_label: &str, out: &mut Ve
 }
 
 /// Validate a parsed operational-metrics v1 value.
+///
+/// Parity target: desktop `validateOperationalMetricsDocument` (labels, provenance
+/// optional string fields, point-level provenance/timeQuality, thresholds, gaps).
 pub fn validate_metrics_document_value(
     value: &serde_json::Value,
     path_label: &str,
@@ -1290,31 +1301,10 @@ pub fn validate_metrics_document_value(
                 "must be non-empty",
             ));
         }
-        // Required series provenance (parity with TS validateProvenance).
-        match sobj.get("provenance").and_then(|v| v.as_object()) {
-            Some(p) => {
-                if !non_empty_str(p.get("source")) {
-                    out.push(Diagnostic::new(
-                        "metrics_provenance_invalid",
-                        format!("{sp}.provenance"),
-                        "must include a non-empty source",
-                    ));
-                }
-            }
-            None => out.push(Diagnostic::new(
-                "metrics_provenance_missing",
-                format!("{sp}.provenance"),
-                "must include a non-empty source",
-            )),
-        }
-        match sobj.get("timeQuality").and_then(|v| v.as_str()) {
-            Some("wall" | "mixed" | "order_only") => {}
-            _ => out.push(Diagnostic::new(
-                "metrics_time_quality_invalid",
-                format!("{sp}.timeQuality"),
-                "must be wall, mixed, or order_only",
-            )),
-        }
+        validate_metrics_labels(sobj.get("labels"), &format!("{sp}.labels"), out);
+        validate_metrics_provenance(sobj.get("provenance"), &format!("{sp}.provenance"), out);
+        validate_metrics_time_quality(sobj.get("timeQuality"), &format!("{sp}.timeQuality"), out);
+
         let points = match sobj.get("points").and_then(|v| v.as_array()) {
             Some(p) if !p.is_empty() => p,
             _ => {
@@ -1323,6 +1313,13 @@ pub fn validate_metrics_document_value(
                     format!("{sp}.points"),
                     "must contain at least one point",
                 ));
+                // Still validate optional thresholds/gaps when present.
+                validate_metrics_thresholds(
+                    sobj.get("thresholds"),
+                    &format!("{sp}.thresholds"),
+                    out,
+                );
+                validate_metrics_gaps(sobj.get("gaps"), &format!("{sp}.gaps"), out);
                 continue;
             }
         };
@@ -1373,6 +1370,194 @@ pub fn validate_metrics_document_value(
                     format!("{pp}.value"),
                     "must be a finite number",
                 )),
+            }
+            validate_metrics_labels(pobj.get("labels"), &format!("{pp}.labels"), out);
+            if pobj.contains_key("provenance") {
+                validate_metrics_provenance(
+                    pobj.get("provenance"),
+                    &format!("{pp}.provenance"),
+                    out,
+                );
+            }
+            if pobj.contains_key("timeQuality") {
+                validate_metrics_time_quality(
+                    pobj.get("timeQuality"),
+                    &format!("{pp}.timeQuality"),
+                    out,
+                );
+            }
+        }
+        validate_metrics_thresholds(sobj.get("thresholds"), &format!("{sp}.thresholds"), out);
+        validate_metrics_gaps(sobj.get("gaps"), &format!("{sp}.gaps"), out);
+    }
+}
+
+fn validate_metrics_labels(
+    value: Option<&serde_json::Value>,
+    path: &str,
+    out: &mut Vec<Diagnostic>,
+) {
+    let Some(value) = value else {
+        return;
+    };
+    let Some(obj) = value.as_object() else {
+        out.push(Diagnostic::new(
+            "metrics_labels_invalid",
+            path,
+            "must be an object of string values",
+        ));
+        return;
+    };
+    for (key, label_value) in obj {
+        if key.trim().is_empty() || !label_value.is_string() {
+            out.push(Diagnostic::new(
+                "metrics_labels_invalid",
+                format!("{path}.{key}"),
+                "must be a string",
+            ));
+        }
+    }
+}
+
+fn validate_metrics_provenance(
+    value: Option<&serde_json::Value>,
+    path: &str,
+    out: &mut Vec<Diagnostic>,
+) {
+    let Some(value) = value else {
+        out.push(Diagnostic::new(
+            "metrics_provenance_missing",
+            path,
+            "must include a non-empty source",
+        ));
+        return;
+    };
+    let Some(obj) = value.as_object() else {
+        out.push(Diagnostic::new(
+            "metrics_provenance_invalid",
+            path,
+            "must include a non-empty source",
+        ));
+        return;
+    };
+    if !non_empty_str(obj.get("source")) {
+        out.push(Diagnostic::new(
+            "metrics_provenance_invalid",
+            path,
+            "must include a non-empty source",
+        ));
+    }
+    for key in ["collector", "query"] {
+        if let Some(v) = obj.get(key) {
+            if !v.is_string() {
+                out.push(Diagnostic::new(
+                    "metrics_provenance_field_type",
+                    format!("{path}.{key}"),
+                    "must be a string",
+                ));
+            }
+        }
+    }
+}
+
+fn validate_metrics_time_quality(
+    value: Option<&serde_json::Value>,
+    path: &str,
+    out: &mut Vec<Diagnostic>,
+) {
+    match value.and_then(|v| v.as_str()) {
+        Some("wall" | "mixed" | "order_only") => {}
+        _ => out.push(Diagnostic::new(
+            "metrics_time_quality_invalid",
+            path,
+            "must be wall, mixed, or order_only",
+        )),
+    }
+}
+
+fn validate_metrics_thresholds(
+    value: Option<&serde_json::Value>,
+    path: &str,
+    out: &mut Vec<Diagnostic>,
+) {
+    let Some(value) = value else {
+        return;
+    };
+    let Some(arr) = value.as_array() else {
+        out.push(Diagnostic::new(
+            "metrics_thresholds_invalid",
+            path,
+            "must be an array",
+        ));
+        return;
+    };
+    for (i, threshold) in arr.iter().enumerate() {
+        let tp = format!("{path}[{i}]");
+        let Some(obj) = threshold.as_object() else {
+            out.push(Diagnostic::new(
+                "metrics_threshold_invalid",
+                tp,
+                "must include id, label, finite value, and a supported severity",
+            ));
+            continue;
+        };
+        let sev = obj.get("severity").and_then(|v| v.as_str()).unwrap_or("");
+        let ok = non_empty_str(obj.get("id"))
+            && non_empty_str(obj.get("label"))
+            && obj
+                .get("value")
+                .and_then(|v| v.as_f64())
+                .is_some_and(|n| n.is_finite())
+            && matches!(sev, "info" | "warning" | "critical");
+        if !ok {
+            out.push(Diagnostic::new(
+                "metrics_threshold_invalid",
+                tp,
+                "must include id, label, finite value, and a supported severity",
+            ));
+        }
+    }
+}
+
+fn validate_metrics_gaps(value: Option<&serde_json::Value>, path: &str, out: &mut Vec<Diagnostic>) {
+    let Some(value) = value else {
+        return;
+    };
+    let Some(arr) = value.as_array() else {
+        out.push(Diagnostic::new(
+            "metrics_gaps_invalid",
+            path,
+            "must be an array",
+        ));
+        return;
+    };
+    for (i, gap) in arr.iter().enumerate() {
+        let gp = format!("{path}[{i}]");
+        let Some(obj) = gap.as_object() else {
+            out.push(Diagnostic::new(
+                "metrics_gap_invalid",
+                gp,
+                "must include finite from/to with to greater than from",
+            ));
+            continue;
+        };
+        let from = obj.get("from").and_then(|v| v.as_f64());
+        let to = obj.get("to").and_then(|v| v.as_f64());
+        match (from, to) {
+            (Some(f), Some(t)) if f.is_finite() && t.is_finite() && t > f => {}
+            _ => out.push(Diagnostic::new(
+                "metrics_gap_invalid",
+                gp.clone(),
+                "must include finite from/to with to greater than from",
+            )),
+        }
+        if let Some(reason) = obj.get("reason") {
+            if !reason.is_string() {
+                out.push(Diagnostic::new(
+                    "metrics_gap_reason_type",
+                    format!("{gp}.reason"),
+                    "must be a string",
+                ));
             }
         }
     }
@@ -1471,7 +1656,8 @@ pub fn sanitize_report_path(path: &str) -> String {
     path.to_string()
 }
 
-fn sanitize_report_message(message: &str) -> String {
+/// Redact absolute machine path fragments from diagnostic messages (CLI-safe).
+pub fn sanitize_report_message(message: &str) -> String {
     // Never echo absolute machine paths from OS errors.
     let mut out = message.to_string();
     for marker in ["/Users/", "/home/", "Documents/GitHub", "C:\\Users\\"] {
@@ -1821,6 +2007,84 @@ mod tests {
         validate_metrics_document_text(&text, "metrics/bad.json", &mut diags);
         assert!(
             diags.iter().any(|d| d.code == "metrics_provenance_missing"),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn metrics_empty_series_parity_fixture_rejected() {
+        let path = fixture_root().join("metrics-parity/invalid-empty-series.json");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut diags = Vec::new();
+        validate_metrics_document_text(&text, "metrics/empty.json", &mut diags);
+        assert!(
+            diags.iter().any(|d| d.code == "metrics_series_missing"),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn metrics_rejects_non_string_labels_and_provenance_fields() {
+        let doc = serde_json::json!({
+            "schemaVersion": 1,
+            "id": "x",
+            "name": "x",
+            "series": [{
+                "id": "s",
+                "name": "S",
+                "unit": "%",
+                "timeQuality": "wall",
+                "provenance": { "source": "ok", "collector": 99 },
+                "labels": { "env": 1 },
+                "points": [{ "timestamp": 1.0, "value": 1.0 }]
+            }]
+        });
+        let mut diags = Vec::new();
+        validate_metrics_document_value(&doc, "m.json", &mut diags);
+        assert!(
+            diags.iter().any(|d| d.code == "metrics_labels_invalid"),
+            "{diags:?}"
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == "metrics_provenance_field_type"),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn metrics_rejects_invalid_point_provenance_and_time_quality() {
+        let doc = serde_json::json!({
+            "schemaVersion": 1,
+            "id": "x",
+            "name": "x",
+            "series": [{
+                "id": "s",
+                "name": "S",
+                "unit": "%",
+                "timeQuality": "wall",
+                "provenance": { "source": "host" },
+                "points": [{
+                    "timestamp": 1.0,
+                    "value": 1.0,
+                    "provenance": { "source": "" },
+                    "timeQuality": "not-a-quality"
+                }]
+            }]
+        });
+        let mut diags = Vec::new();
+        validate_metrics_document_value(&doc, "m.json", &mut diags);
+        assert!(
+            diags.iter().any(|d| d.code == "metrics_provenance_invalid"
+                || d.code == "metrics_provenance_missing"),
+            "{diags:?}"
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == "metrics_time_quality_invalid"
+                    && d.path.contains("points[0].timeQuality")),
             "{diags:?}"
         );
     }

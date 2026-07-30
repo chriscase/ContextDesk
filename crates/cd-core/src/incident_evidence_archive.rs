@@ -6,10 +6,10 @@
 
 use crate::incident_evidence::{
     contains_forbidden_sentinel, is_known_role, is_lowercase_sha256, redacted_root_label,
-    stream_sha256_hex_bounded, validate_directory, validate_metrics_document_text,
-    validate_relative_path, validate_time_basis, Diagnostic, Manifest, ValidationReport,
+    stream_sha256_hex_bounded, validate_directory, validate_manifest_header,
+    validate_metrics_document_text, validate_relative_path, Diagnostic, Manifest, ValidationReport,
     HASH_BUFFER_BYTES, MAX_AGGREGATE_BYTES, MAX_COMPONENTS, MAX_MANIFEST_BYTES,
-    MAX_METRICS_DOC_BYTES, MAX_PER_FILE_BYTES, MAX_RELATIVE_PATH_BYTES, READER_VERSION, SCHEMA_ID,
+    MAX_METRICS_DOC_BYTES, MAX_PER_FILE_BYTES, MAX_RELATIVE_PATH_BYTES, SCHEMA_ID,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -672,49 +672,8 @@ pub fn validate_archive(path: &Path) -> ValidationReport {
     let schema_id = Some(manifest.schema_id.clone());
     let bundle_id = Some(manifest.bundle_id.clone());
 
-    // Structural + component policy (shared rules with directory form).
-    if manifest.schema_id != SCHEMA_ID {
-        diagnostics.push(Diagnostic::new(
-            "unsupported_schema_id",
-            "$.schemaId",
-            format!(
-                "unsupported schemaId `{}` (expected `{SCHEMA_ID}`)",
-                manifest.schema_id
-            ),
-        ));
-    }
-    if manifest.min_reader_version > READER_VERSION {
-        diagnostics.push(Diagnostic::new(
-            "reader_too_old",
-            "$.minReaderVersion",
-            format!(
-                "minReaderVersion {} exceeds this reader ({READER_VERSION})",
-                manifest.min_reader_version
-            ),
-        ));
-    }
-    if manifest.bundle_id.trim().is_empty() || manifest.bundle_id.len() > 256 {
-        diagnostics.push(Diagnostic::new(
-            "bundle_id_invalid",
-            "$.bundleId",
-            "bundleId must be non-empty and <= 256 characters",
-        ));
-    }
-    if manifest.privacy.contains_credentials {
-        diagnostics.push(Diagnostic::new(
-            "privacy_credentials_not_shareable",
-            "$.privacy.containsCredentials",
-            "shareable bundles MUST set containsCredentials=false",
-        ));
-    }
-    validate_time_basis(&manifest.time_basis, "$.timeBasis", &mut diagnostics);
-    if manifest.components.len() > MAX_COMPONENTS {
-        diagnostics.push(Diagnostic::new(
-            "too_many_components",
-            "$.components",
-            format!("components exceed MAX_COMPONENTS ({MAX_COMPONENTS})"),
-        ));
-    }
+    // Structural + component policy — same header rules as directory form.
+    validate_manifest_header(&manifest, &mut diagnostics);
 
     let mut declared_paths: HashSet<String> = HashSet::new();
     declared_paths.insert(ARCHIVE_MANIFEST_PATH.to_string());
@@ -2042,5 +2001,71 @@ mod tests {
         let text = crate::incident_evidence::format_report_text(&r);
         assert!(!text.contains("/Users/"));
         assert!(!text.contains("var/folders"));
+    }
+
+    #[test]
+    fn archive_rejects_created_at_without_offset_like_directory() {
+        // Regression: archive form previously accepted createdAt without Z/offset
+        // while directory form returned created_at_offset_required.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("logs")).unwrap();
+        std::fs::write(root.join("logs/app.log"), b"x\n").unwrap();
+        let hex = stream_sha256_hex(&root.join("logs/app.log")).unwrap();
+        let bytes = std::fs::metadata(root.join("logs/app.log")).unwrap().len();
+        let manifest = format!(
+            r#"{{
+  "schemaId":"contextdesk.incident_evidence.v1",
+  "minReaderVersion":1,
+  "bundleId":"no-offset",
+  "createdAt":"2024-01-15T12:00:00",
+  "producer":{{"name":"t","version":"1"}},
+  "privacy":{{"redactionDeclared":true,"containsCredentials":false,"containsPii":false}},
+  "timeBasis":{{"timezone":"UTC","timezoneResolved":true}},
+  "components":[{{
+    "id":"l","role":"log","path":"logs/app.log","mediaType":"text/plain",
+    "bytes":{bytes},"sha256":"{hex}"
+  }}]
+}}"#
+        );
+        std::fs::write(root.join("manifest.json"), manifest).unwrap();
+        let dir_r = validate_directory(root);
+        assert!(
+            dir_r
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "created_at_offset_required"),
+            "directory: {:?}",
+            dir_r.diagnostics
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        // Force-pack by temporarily writing a valid createdAt, packing is blocked by validate —
+        // build zip manually with the bad manifest.
+        let zip_path = tmp.path().join("bad-created.zip");
+        {
+            let f = File::create(&zip_path).unwrap();
+            let mut z = ZipWriter::new(f);
+            let opts = pack_options();
+            z.start_file("manifest.json", opts).unwrap();
+            z.write_all(
+                std::fs::read(root.join("manifest.json"))
+                    .unwrap()
+                    .as_slice(),
+            )
+            .unwrap();
+            z.start_file("logs/app.log", opts).unwrap();
+            z.write_all(b"x\n").unwrap();
+            z.finish().unwrap();
+        }
+        let arch_r = validate_archive(&zip_path);
+        assert!(!arch_r.ok, "{:?}", arch_r.diagnostics);
+        assert!(
+            arch_r
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "created_at_offset_required"),
+            "archive must match directory: {:?}",
+            arch_r.diagnostics
+        );
     }
 }

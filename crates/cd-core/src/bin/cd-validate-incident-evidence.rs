@@ -8,7 +8,9 @@
 //! Exit codes: 0 success; 1 validation/pack failure; 2 usage error.
 //! No network. Does not publish product state.
 
-use cd_core::incident_evidence::{format_report_text, validate_directory};
+use cd_core::incident_evidence::{
+    format_report_text, sanitize_report_message, sanitize_report_path, validate_directory,
+};
 use cd_core::incident_evidence_archive::{format_pack_report, pack_directory, validate_archive};
 use std::env;
 use std::path::PathBuf;
@@ -97,7 +99,12 @@ fn main() -> ExitCode {
                 Err(diags) => {
                     eprintln!("incident-evidence-pack ok=false");
                     for d in diags {
-                        eprintln!("{} | {} | {}", d.code, d.path, d.message);
+                        eprintln!(
+                            "{} | {} | {}",
+                            d.code,
+                            sanitize_report_path(&d.path),
+                            sanitize_report_message(&d.message)
+                        );
                     }
                     ExitCode::from(1)
                 }
