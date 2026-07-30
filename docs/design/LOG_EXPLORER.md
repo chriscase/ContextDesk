@@ -145,11 +145,54 @@ Per corpus under app cache:
 | `log_facets` | Sources, levels, services, hosts under filter |
 | `log_timeline_summary` | Hard-capped filtered count buckets (+ by level) for the integrated full-width Timeline; no event bodies |
 | `log_search_events` | Keyword/regex + template-semantic → bounded event-hit page; literal/regex Find continues with a composite time/sequence cursor and supports request-scoped cooperative cancellation |
+| Noise policy preview/activation/lifecycle | Preview and human-confirm corpus-scoped exact-template rules, then inspect, disable, re-enable, or tombstone them; rule editing and complete creator identity are not implemented |
 | Bookmarks CRUD | Exact bounded event sets on one corpus, with duplicate prevention and legacy line/range reads |
 | Chat link | List/create sessions with `linkedCorpusId` |
 | View context snapshot | Serialize filters/lanes/selection for agent |
 
 **Semantic search remains template-first** (see `LOG_ANALYSIS.md`). Do not embed every raw line in v1.
+
+### Noise suppression — #671 Slice 1
+
+Slice 1 adds a durable, corpus-scoped **exact-template** suppression lens. A
+person selects an event, names the rule, supplies a rationale, and requests a
+trusted-core preview. The preview derives the exact affected-event count,
+incremental hidden count, level distribution, source count, time span, and a
+bounded set of redacted representatives from the corpus. Only an explicit
+human confirmation can enable the rule; detector/model origins remain proposals
+and cannot self-activate.
+
+The implementation exposes enable, disable, re-enable, and
+remove-to-tombstone lifecycle operations with optimistic document revisions and
+audit entries. Cross-process publication locking, no-follow sidecar reads,
+enabled/re-enabled fingerprint revalidation, and reserved terminal-operation
+audit capacity make this exact-template lifecycle fail closed and reversible.
+Enabled template identities are routed through one bounded lens for event rows,
+exact counts, facets, timeline summaries, Find, analysis, and linked log tools.
+A linked turn pins one policy revision and discloses that revision and the
+number of hidden events. Adapter-level tests prove every tool excludes the same
+identities and restores them after the rule is disabled.
+
+The raw corpus, source catalog, bounded **Original (redacted)** record, and
+direct exact-evidence resolution remain authoritative. If a bookmark or other
+exact identity points to suppressed evidence, Explorer offers a clearly marked
+temporary reveal and restoration of the suppression lens. Suppression never
+rewrites the stored event or makes the source disappear.
+
+This is deliberately Slice 1, not full #671, and #671 remains open. Remaining
+acceptance work includes:
+
+- source/service/host, level-plus-template, and explicitly reviewed-text
+  predicates;
+- rule editing and complete durable creator identity;
+- Investigation and saved-view rule references with honest stale handling;
+- package import/export lifecycle;
+- baseline-driven proposals;
+- one global temporary **include suppressed** action;
+- an explicit visible, auditable tool option to include suppressed evidence;
+- suppression-specific measurements on 25k and 100k corpora, plus an opt-in 1M
+  proof when practical;
+- optimization beyond the bounded active exact-template rule set.
 
 ### Startup and paging critical path
 
@@ -303,7 +346,11 @@ Help/package disclosures—are implemented.
 Current residuals are tracked explicitly:
 
 - #670 timestamp provenance and per-source timezone/year/DST/skew rules;
-- #671 durable, auditable noise policy;
+- #671 remains open/partial: additional predicates; rule editing and creator
+  identity; Investigation/saved-view and package lifecycle; baseline proposals;
+  global temporary and auditable tool include-suppressed controls;
+  suppression-specific 25k/100k/optional-1M measurements; larger-rule-set
+  optimization; and the Slice 1 hardening listed in its design section;
 - #690 versioned cross-corpus application baselines;
 - #646 model finding proposals and review lifecycle;
 - #532 fuller report assembly; and

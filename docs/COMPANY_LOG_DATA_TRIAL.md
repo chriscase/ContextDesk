@@ -8,7 +8,8 @@ This document is a trial runbook, not a blanket capability claim. ContextDesk
 normalizes timestamps only when an explicit offset makes the instant
 unambiguous and provides a bounded **Original (redacted)** inspector view.
 Per-source timezone/year/DST policy and clock-skew diagnostics remain #670;
-durable known-noise suppression remains #671. Synthetic Log Lab scenarios
+exact-template known-noise suppression is #671 Slice 1, while broader rule
+types and lifecycle portability remain open. Synthetic Log Lab scenarios
 under `fixtures/log-lab/scenarios/company-*` encode the same concerns for
 automated tests; prefer those for offline proof, and this runbook for a live
 company-data session.
@@ -69,6 +70,7 @@ Work through each row. Mark pass / fail / skip and a one-line note.
 | Bidirectional paging      | Scroll substantially down and back up                              | Older and newer pages load automatically without paging buttons or losing the logical position |
 | Lanes / sources           | Open more than one source                                          | You can tell which file a line came from; basename collisions do not merge unrelated hosts |
 | Timeline                  | Scroll/seek around the incident window                             | Order is usable; mixed or order-only data is not presented as perfect wall-clock certainty |
+| Noise policy (disposable/reproducible corpus only while #671 is open) | Preview one reviewed repetitive template, confirm it, then exercise its lifecycle | Record whether preview counts/examples and rows/counts/facets/Timeline/Find/tools agree; do not interpret this trial as proof of unconditional reversibility |
 | Bookmarks / investigation | Save 2–3 exact events and one finding; close and reopen Explorer    | Saved evidence resolves to the same events or visibly reports stale/missing identities     |
 | Linked chat               | Ask a narrow question using a model marked “linked tools available” | A real log tool runs and every cited `seq` and `source` resolves to the claimed evidence    |
 
@@ -93,6 +95,30 @@ A useful first linked-chat prompt is:
 > Without assuming a cause, identify the three most suspicious patterns in
 > these logs. For each, distinguish observation from inference, cite the exact
 > `seq` and `source`, and suggest a safe view I can open.
+
+## Trial an exact-template noise rule safely
+
+Start with a repetitive template whose operational meaning you already know.
+Select and inspect an event, choose **Suppress exact template…**, provide a
+specific rationale, and review **Preview impact** before confirming. Record the
+exact total, incremental hidden count, levels, source count, time span, and
+redacted examples.
+
+After confirmation, on a disposable or reproducible corpus:
+
+1. compare rows, matched count, facets, Timeline, and the same Find;
+2. run one tools-enabled linked question and verify it reports the pinned
+   suppression revision and hidden count;
+3. open a saved bookmark or direct evidence identity for a hidden event, use
+   the temporary reveal, and restore the policy; and
+4. attempt disable, re-enable, then remove on a disposable test rule and
+   inspect the audit; record any refusal rather than assuming every terminal
+   operation is guaranteed.
+
+The event must never disappear from the raw corpus, source catalog, bounded
+**Original (redacted)**, or direct evidence resolution. Do not infer that a
+frequent template is noise, and do not use this Slice 1 control for a
+source-wide or free-text exclusion.
 
 ## What to capture (safe)
 
@@ -167,8 +193,15 @@ OS profile when policy requires a guaranteed clean environment.
 
 ## Known trial boundaries
 
-- #671: filters are temporary; durable, auditable noise-suppression rules are
-  not yet shipped.
+- #671 remains open/partial. Slice 1 is exact-template, corpus-scoped,
+  fail-closed, cross-process serialized, and directly proven across tool
+  adapters.
+- Literal #671 residuals also include source/service/host,
+  level-plus-template, and reviewed-text predicates; rule editing and complete
+  creator identity; Investigation/saved-view/package lifecycle; a global
+  temporary include-suppressed action; a visible auditable tool
+  include-suppressed option; suppression-specific 25k/100k and optional-1M
+  measurements; baseline proposals; and larger-rule-set optimization.
 - #690: each corpus is analyzed independently; cross-corpus learned application
   baselines are not yet shipped.
 - #670: per-source timezone/year/DST configuration, subsecond provenance, and
@@ -176,7 +209,8 @@ OS profile when policy requires a guaranteed clean environment.
 - Tools-disabled profiles cannot perform a linked log investigation. Their
   honest refusal is expected behavior.
 - Portable package v1 does not include corpus bookmarks, while durable
-  Investigation records are persisted separately from the corpus.
+  Investigation records are persisted separately from the corpus. It also
+  does not carry the corpus noise-policy sidecar.
 
 ## Related synthetic fixtures
 

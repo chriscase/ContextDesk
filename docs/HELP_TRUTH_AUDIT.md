@@ -31,6 +31,7 @@ blanket claim that every future product change is automatically documented.
 | #541 | Typed rich contextual help | `HELP_CENTER.md#contextual-help-decision-rule` | Portal, narrow sheet, canonical locator, and cross-window full-Help handoff documented |
 | #542 | Deterministic behavior-rich scale profiles | `log-explorer#log-lab-scale-profiles-synthetic` | Explicit 100k command and one-machine measurement disclaimer documented |
 | #543 | Compact corpus-chat switcher and collapsed technical context | `log-explorer#agent-context` plus linked-chat popover | Privacy disclosure remains available without exposing debug UI by default |
+| #671 Slice 1 (partial; issue open) | Human-confirmed exact-template noise-policy candidate and shared evidence lens | `log-explorer#noise-policy-exact-template-slice-1` plus Noise policy dialogs | Preview, reversible lifecycle/audit, cross-process and stale-fingerprint hardening, exact-reference reveal, and pinned linked-tool exclusion are documented without claiming full-issue completion; rule editing/creator identity, global and tool include-suppressed controls, scale proof, and broader predicates/lifecycle remain explicit |
 
 ## Page-by-page production audit
 
@@ -43,9 +44,9 @@ blanket claim that every future product change is automatically documented.
 | `workspace-indexing` | allowlist, exclusions, caps, local index | Aligned; exclusion callout repaired |
 | `permission-tiers` | Read / SoftWrite / HardWrite and audit | Aligned; confirmation labels repaired |
 | `memory-overview` | candidate review, durable store, bounded recall | Aligned; no automatic-durable-capture claim |
-| `log-analysis-pipeline` | ingest, redact, templates, DuckDB, local embedding, tools | Aligned; live tail remains explicitly unshipped |
+| `log-analysis-pipeline` | ingest, redact, templates, DuckDB, local embedding, tools, exact-template noise lens | Aligned to partial #671 Slice 1; no deletion, unconditional reversibility, automatic learning, package portability, or full-issue claim |
 | `demo-log-datasets` | checked-in input roots, manifest-backed counts, pinned scale corpus, optional session metrics | Aligned; truth/evaluator paths are explicitly excluded from ingest and chat |
-| `log-explorer` | search/filter, lanes, paging, navigator, chat, long lines | Aligned to this branch; packaged visual proof remains #525 |
+| `log-explorer` | search/filter, partial exact-template noise policy, lanes, paging, navigator, chat, long lines | Aligned to this branch; #671 explicitly remains open for literal residuals and suppression-specific scale proof; packaged visual proof also remains open |
 | `portable-package` | package validation/import/export boundaries | Aligned; no restore/sync claim |
 | `connectors-and-confluence` | config/keychain, host policy, confirmed writes | Aligned |
 | `s3-backup` | explicit Phase A confirmation/export only | Aligned; no restore/delete/index-source claim |

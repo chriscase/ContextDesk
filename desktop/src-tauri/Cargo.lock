@@ -571,6 +571,7 @@ dependencies = [
  "futures-util",
  "http-body-util",
  "keyring",
+ "libc",
  "notify",
  "object_store",
  "regex",

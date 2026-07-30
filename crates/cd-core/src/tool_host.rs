@@ -86,6 +86,27 @@ type LogSearchToolRunResult = (
     usize,
 );
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PinnedLogSuppressionLens {
+    corpus_id: String,
+    revision: u64,
+    excluded_template_ids: Vec<u64>,
+    suppressed_event_count: u64,
+}
+
+fn log_suppression_disclosure(lens: &PinnedLogSuppressionLens) -> String {
+    format!(
+        "suppression_active: {}\nsuppression_rule_count: {}\n\
+         suppressed_event_count: {}\nsuppression_revision: {}\n\
+         excluded_events_not_analyzed: {}\n",
+        !lens.excluded_template_ids.is_empty(),
+        lens.excluded_template_ids.len(),
+        lens.suppressed_event_count,
+        lens.revision,
+        !lens.excluded_template_ids.is_empty(),
+    )
+}
+
 /// Host context for tools.
 pub struct ToolHost {
     /// Workspace allowlist.
@@ -172,6 +193,11 @@ pub struct ToolHost {
     active_log_corpus: Option<String>,
     /// Turn-scoped corpus that provider-generated arguments cannot override.
     scoped_log_corpus: Option<String>,
+    /// Exact suppression policy pinned before a linked log turn begins.
+    ///
+    /// This prevents sequential tool calls in one turn from observing different
+    /// rule revisions. Unpinned direct/test calls load a live snapshot per tool.
+    pinned_log_suppression: Option<PinnedLogSuppressionLens>,
     /// Restrict the advertised/executable model surface to read-only log tools.
     ///
     /// Used by the desktop's turn-local linked-log fallback when the optional
@@ -311,6 +337,7 @@ impl ToolHost {
             log_corpus_handle: std::sync::Mutex::new(None),
             active_log_corpus: None,
             scoped_log_corpus: None,
+            pinned_log_suppression: None,
             log_only_tool_surface: false,
             router_budget: crate::router::RouterBudget::default(),
             model_context_budgets: crate::model_context::ModelContextBudgets::default(),
@@ -915,6 +942,7 @@ impl ToolHost {
             .log_corpus_handle
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        self.pinned_log_suppression = None;
     }
 
     /// Whether log analysis tools are registered.
@@ -937,6 +965,7 @@ impl ToolHost {
                 .log_corpus_handle
                 .get_mut()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            self.pinned_log_suppression = None;
         }
         self.active_log_corpus = next;
     }
@@ -952,6 +981,7 @@ impl ToolHost {
             .log_corpus_handle
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        self.pinned_log_suppression = None;
         self.scoped_log_corpus = corpus_id.and_then(|s| {
             let t = s.trim().to_string();
             if t.is_empty() {
@@ -995,6 +1025,55 @@ impl ToolHost {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) =
             Some((corpus_id.to_string(), corpus));
         Ok(())
+    }
+
+    /// Pin one exact suppression revision for every log tool in the current turn.
+    pub fn pin_log_suppression_lens(&mut self, corpus_id: &str) -> CoreResult<()> {
+        let corpus = self.open_log_corpus(corpus_id)?;
+        self.pinned_log_suppression = Some(Self::load_log_suppression_lens(corpus_id, &corpus)?);
+        Ok(())
+    }
+
+    fn load_log_suppression_lens(
+        corpus_id: &str,
+        corpus: &crate::log_analysis::LogCorpus,
+    ) -> CoreResult<PinnedLogSuppressionLens> {
+        let document = crate::log_analysis::load_suppression_document(corpus)?;
+        let excluded_template_ids = document.enabled_template_ids()?;
+        let suppressed_event_count = if excluded_template_ids.is_empty() {
+            0
+        } else {
+            crate::log_analysis::query_event_count(
+                corpus,
+                &crate::log_analysis::EventQuery {
+                    template_ids: excluded_template_ids.clone(),
+                    ..Default::default()
+                },
+            )?
+            .total_matched
+        };
+        Ok(PinnedLogSuppressionLens {
+            corpus_id: corpus_id.to_string(),
+            revision: document.revision,
+            excluded_template_ids,
+            suppressed_event_count,
+        })
+    }
+
+    fn log_suppression_lens(
+        &self,
+        corpus_id: &str,
+        corpus: &crate::log_analysis::LogCorpus,
+    ) -> CoreResult<PinnedLogSuppressionLens> {
+        if let Some(lens) = self.pinned_log_suppression.as_ref() {
+            if lens.corpus_id != corpus_id {
+                return Err(CoreError::Policy(
+                    "pinned log suppression belongs to a different corpus".into(),
+                ));
+            }
+            return Ok(lens.clone());
+        }
+        Self::load_log_suppression_lens(corpus_id, corpus)
     }
 
     /// Current turn-scoped log corpus, when a linked Explorer turn is active.
@@ -2292,6 +2371,7 @@ impl ToolHost {
         let (time_from, time_to) = validated_search_log_time_bounds(args)?;
         let cid = self.resolve_log_corpus(args, "search_logs")?;
         let corpus = self.open_log_corpus(&cid)?;
+        let suppression = self.log_suppression_lens(&cid, &corpus)?;
         let time_quality = crate::log_analysis::corpus_time_quality(&corpus);
         if time_from.is_some() && time_quality == crate::log_analysis::TimeQuality::OrderOnly {
             return Err(CoreError::Message(
@@ -2335,8 +2415,12 @@ impl ToolHost {
             k: (args.get("k").and_then(|v| v.as_u64()).unwrap_or(8) as usize)
                 .min(self.max_results_per_source),
         };
-        let hits =
-            crate::log_analysis::search_logs(&corpus, &q, self.log_embed_backend().as_deref())?;
+        let hits = crate::log_analysis::search::search_logs_with_excluded_templates(
+            &corpus,
+            &q,
+            self.log_embed_backend().as_deref(),
+            &suppression.excluded_template_ids,
+        )?;
         let evidence = hits
             .iter()
             .flat_map(|hit| hit.evidence.iter().cloned())
@@ -2355,7 +2439,8 @@ impl ToolHost {
         raw.insert_str(
             0,
             &format!(
-                "source_kind: log_templates\ntime_quality: {}\ntime_from: {}\ntime_to: {}\nquery: {}\nresult_count: {}\nresult_cap: {}\n---\n",
+                "source_kind: log_templates\n{}time_quality: {}\ntime_from: {}\ntime_to: {}\nquery: {}\nresult_count: {}\nresult_cap: {}\n---\n",
+                log_suppression_disclosure(&suppression),
                 time_quality.label(),
                 q.time_from
                     .map(|value| value.to_string())
@@ -2392,12 +2477,17 @@ impl ToolHost {
         }
         let cid = self.resolve_log_corpus(args, "cluster_problems")?;
         let corpus = self.open_log_corpus(&cid)?;
+        let suppression = self.log_suppression_lens(&cid, &corpus)?;
         let max = args
             .get("max_clusters")
             .and_then(|v| v.as_u64())
             .unwrap_or(10) as usize;
         let max = max.min(self.max_results_per_source);
-        let clusters = crate::log_analysis::cluster_problems(&corpus, max)?;
+        let clusters = crate::log_analysis::analysis::cluster_problems_with_excluded_templates(
+            &corpus,
+            max,
+            &suppression.excluded_template_ids,
+        )?;
         let mut raw = String::new();
         for c in &clusters {
             let template_id_sample = c
@@ -2444,10 +2534,11 @@ impl ToolHost {
         raw.insert_str(
             0,
             &format!(
-                "source_kind: log_clusters\nresult_count: {}\nresult_cap: {}\n\
+                "source_kind: log_clusters\n{}result_count: {}\nresult_cap: {}\n\
                  partial: {partial}\ntemplates_considered: {templates_considered}\n\
                  templates_available: {templates_available}\n\
                  count_scope: {}\n---\n",
+                log_suppression_disclosure(&suppression),
                 clusters.len(),
                 self.max_results_per_source,
                 if partial {
@@ -2477,24 +2568,31 @@ impl ToolHost {
         }
         let cid = self.resolve_log_corpus(args, "timeline")?;
         let corpus = self.open_log_corpus(&cid)?;
+        let suppression = self.log_suppression_lens(&cid, &corpus)?;
         let width = args
             .get("width_secs")
             .and_then(|v| v.as_i64())
             .unwrap_or(60);
         let level = args.get("level").and_then(|v| v.as_str());
         let service = args.get("service").and_then(|v| v.as_str());
-        let timeline =
-            crate::log_analysis::analysis::timeline_summary(&corpus, width, level, service)?;
+        let timeline = crate::log_analysis::analysis::timeline_summary_with_excluded_templates(
+            &corpus,
+            width,
+            level,
+            service,
+            &suppression.excluded_template_ids,
+        )?;
         let buckets = &timeline.buckets;
         let total = buckets.len();
         let sample_indices = bounded_sample_indices(total, self.max_results_per_source);
         let sampled = total > sample_indices.len();
         let mut raw = String::new();
         raw.push_str(&format!(
-            "source_kind: log_timeline\nresult_count: {}\nresult_cap: {}\n\
+            "source_kind: log_timeline\n{}result_count: {}\nresult_cap: {}\n\
              total_available: {total}\nsampled: {sampled}\n\
              requested_width: {}\neffective_width: {}\ncoarsened: {}\n\
              total_events: {}\naxis_bucket_cap: {}\n---\n",
+            log_suppression_disclosure(&suppression),
             sample_indices.len(),
             self.max_results_per_source,
             timeline.requested_width,
@@ -2566,7 +2664,15 @@ impl ToolHost {
         let k = (args.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as usize)
             .min(self.max_results_per_source);
         let corpus = self.open_log_corpus(&cid)?;
-        let hits = crate::log_analysis::correlate(&corpus, focus, around, window, k)?;
+        let suppression = self.log_suppression_lens(&cid, &corpus)?;
+        let hits = crate::log_analysis::why::correlate_with_excluded_templates(
+            &corpus,
+            focus,
+            around,
+            window,
+            k,
+            &suppression.excluded_template_ids,
+        )?;
         let mut raw = String::new();
         for h in &hits {
             raw.push_str(&format!(
@@ -2577,7 +2683,8 @@ impl ToolHost {
         raw.insert_str(
             0,
             &format!(
-                "source_kind: log_correlation\nresult_count: {}\nresult_cap: {}\n---\n",
+                "source_kind: log_correlation\n{}result_count: {}\nresult_cap: {}\n---\n",
+                log_suppression_disclosure(&suppression),
                 hits.len(),
                 self.max_results_per_source
             ),
@@ -2622,7 +2729,16 @@ impl ToolHost {
         let k = (args.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as usize)
             .min(self.max_results_per_source);
         let corpus = self.open_log_corpus(&cid)?;
-        let hits = crate::log_analysis::anomalies(&corpus, bf, bt, inf, ito, k)?;
+        let suppression = self.log_suppression_lens(&cid, &corpus)?;
+        let hits = crate::log_analysis::why::anomalies_with_excluded_templates(
+            &corpus,
+            bf,
+            bt,
+            inf,
+            ito,
+            k,
+            &suppression.excluded_template_ids,
+        )?;
         let mut raw = String::new();
         for h in &hits {
             raw.push_str(&format!(
@@ -2633,7 +2749,8 @@ impl ToolHost {
         raw.insert_str(
             0,
             &format!(
-                "source_kind: log_anomalies\nresult_count: {}\nresult_cap: {}\n---\n",
+                "source_kind: log_anomalies\n{}result_count: {}\nresult_cap: {}\n---\n",
+                log_suppression_disclosure(&suppression),
                 hits.len(),
                 self.max_results_per_source
             ),
@@ -2661,14 +2778,20 @@ impl ToolHost {
             .and_then(|v| v.as_str())
             .ok_or_else(|| CoreError::Message("trace_logs requires trace_id".into()))?;
         let corpus = self.open_log_corpus(&cid)?;
-        let events = crate::log_analysis::trace(&corpus, tid)?;
+        let suppression = self.log_suppression_lens(&cid, &corpus)?;
+        let events = crate::log_analysis::why::trace_with_excluded_templates(
+            &corpus,
+            tid,
+            &suppression.excluded_template_ids,
+        )?;
         let total = events.len();
         let sample_indices = bounded_sample_indices(total, self.max_results_per_source);
         let sampled = total > sample_indices.len();
         let mut raw = String::new();
         raw.push_str(&format!(
-            "source_kind: log_trace\nresult_count: {}\nresult_cap: {}\n\
+            "source_kind: log_trace\n{}result_count: {}\nresult_cap: {}\n\
              total_available: {total}\nsampled: {sampled}\n---\n",
+            log_suppression_disclosure(&suppression),
             sample_indices.len(),
             self.max_results_per_source
         ));
@@ -6777,6 +6900,327 @@ mod tests {
             "{}",
             trace.detail_raw
         );
+    }
+
+    #[tokio::test]
+    async fn linked_log_tools_pin_and_disclose_one_suppression_revision() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let corpus = Arc::new(
+            crate::log_analysis::LogCorpus::create(&cache, "suppression adapter parity").unwrap(),
+        );
+        let suppressed_template_id = 41;
+        let signal_template_id = 42;
+        corpus
+            .upsert_templates([
+                crate::log_analysis::TemplateRow {
+                    info: crate::log_analysis::TemplateInfo {
+                        template_id: suppressed_template_id,
+                        pattern: "SUPPRESSED_SENTINEL routine heartbeat".into(),
+                        token_count: 3,
+                        count: 12,
+                        first_seen: 1_700_000_000,
+                        last_seen: 1_700_000_055,
+                        severity: 1,
+                        example: "SUPPRESSED_SENTINEL routine heartbeat".into(),
+                    },
+                    content_hash: "suppressed-sentinel-hash".into(),
+                    vector: None,
+                },
+                crate::log_analysis::TemplateRow {
+                    info: crate::log_analysis::TemplateInfo {
+                        template_id: signal_template_id,
+                        pattern: "SIGNAL_SENTINEL checkout failure".into(),
+                        token_count: 3,
+                        count: 4,
+                        first_seen: 1_700_000_002,
+                        last_seen: 1_700_000_047,
+                        severity: 4,
+                        example: "SIGNAL_SENTINEL checkout failure".into(),
+                    },
+                    content_hash: "signal-sentinel-hash".into(),
+                    vector: None,
+                },
+            ])
+            .unwrap();
+        let mut events = Vec::new();
+        for index in 0..12 {
+            events.push(crate::log_analysis::LogEvent {
+                seq: index + 1,
+                ts: 1_700_000_000 + index as i64 * 5,
+                level: "info".into(),
+                service: Some("worker".into()),
+                host: Some("host-routine".into()),
+                template_id: suppressed_template_id,
+                params: vec![],
+                trace_id: Some("adapter-parity-trace".into()),
+                message: "SUPPRESSED_SENTINEL routine heartbeat".into(),
+                source: "routine.log".into(),
+            });
+        }
+        for index in 0..4 {
+            events.push(crate::log_analysis::LogEvent {
+                seq: 100 + index,
+                ts: 1_700_000_002 + index as i64 * 15,
+                level: "error".into(),
+                service: Some("checkout".into()),
+                host: Some("host-signal".into()),
+                template_id: signal_template_id,
+                params: vec![],
+                trace_id: Some("adapter-parity-trace".into()),
+                message: "SIGNAL_SENTINEL checkout failure".into(),
+                source: "signal.log".into(),
+            });
+        }
+        corpus.push_events(&events).unwrap();
+        corpus.flush().unwrap();
+        let corpus_id = corpus.id().to_string();
+        let preview = crate::log_analysis::preview_template_suppression(
+            &corpus,
+            0,
+            crate::log_analysis::NewSuppressionPreview {
+                name: "Routine heartbeat".into(),
+                rationale: "Reviewed repetitive health signal".into(),
+                template_id: suppressed_template_id,
+                origin: crate::log_analysis::SuppressionRuleOrigin::Human,
+            },
+        )
+        .unwrap();
+        let activated = crate::log_analysis::activate_template_suppression(
+            &corpus,
+            preview.rule_revision,
+            crate::log_analysis::ActivateSuppressionPreview {
+                preview_token: preview.token,
+            },
+        )
+        .unwrap();
+
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut host = ToolHost::new(
+            Workspace::new("suppression", vec![workspace]),
+            KeywordIndex::new(),
+            None,
+        );
+        host.set_log_analysis(true, Some(cache));
+        host.set_log_corpus_scope(Some(corpus_id.clone()));
+        host.set_active_log_corpus(Some(corpus_id.clone()));
+        host.seed_log_corpus_handle(&corpus_id, Arc::clone(&corpus))
+            .unwrap();
+        host.pin_log_suppression_lens(&corpus_id).unwrap();
+
+        // A concurrent UI mutation must not change the policy inside this turn.
+        let disabled = crate::log_analysis::mutate_template_suppression_rule(
+            &corpus,
+            activated.revision,
+            &activated.rule.id,
+            crate::log_analysis::SuppressionRuleMutation::Disable,
+        )
+        .unwrap();
+
+        for (tool, args) in [
+            (
+                crate::log_analysis::SEARCH_LOGS,
+                json!({"query": "", "semantic": false}),
+            ),
+            (
+                crate::log_analysis::CLUSTER_PROBLEMS,
+                json!({"max_clusters": 10}),
+            ),
+            (crate::log_analysis::TIMELINE, json!({"width_secs": 1})),
+            (
+                crate::log_analysis::CORRELATE,
+                json!({
+                    "focus_template_id": signal_template_id,
+                    "around_ts": 1_700_000_030_i64,
+                    "window_secs": 60
+                }),
+            ),
+            (
+                crate::log_analysis::ANOMALIES,
+                json!({
+                    "baseline_from": 1_699_999_900_i64,
+                    "baseline_to": 1_700_000_000_i64,
+                    "incident_from": 1_700_000_000_i64,
+                    "incident_to": 1_700_000_100_i64
+                }),
+            ),
+            (
+                crate::log_analysis::TRACE,
+                json!({"trace_id": "adapter-parity-trace"}),
+            ),
+        ] {
+            let result = host.execute(tool, &args, None).await.unwrap();
+            assert!(result.ok, "{tool}: {}", result.summary);
+            assert!(
+                result.detail_raw.contains("suppression_active: true")
+                    && result.detail_raw.contains("suppression_rule_count: 1")
+                    && result.detail_raw.contains("suppressed_event_count: 12")
+                    && result
+                        .detail_raw
+                        .contains(&format!("suppression_revision: {}", activated.revision))
+                    && result
+                        .detail_raw
+                        .contains("excluded_events_not_analyzed: true"),
+                "{tool}: {}",
+                result.detail_raw
+            );
+            let evidence_body = result
+                .detail_raw
+                .split_once("---\n")
+                .map(|(_, body)| body)
+                .expect("log tool output should delimit disclosure from evidence");
+            assert!(
+                !evidence_body.contains("SUPPRESSED_SENTINEL"),
+                "{tool} leaked a suppressed pattern or event: {}",
+                result.detail_raw
+            );
+            match tool {
+                crate::log_analysis::SEARCH_LOGS => {
+                    assert_eq!(result.log_result_count, Some(1));
+                    assert!(evidence_body.contains(&format!("- t{signal_template_id} ")));
+                    assert!(
+                        result
+                            .log_evidence
+                            .iter()
+                            .all(|identity| identity.template_id == signal_template_id),
+                        "search returned suppressed event identities: {:?}",
+                        result.log_evidence
+                    );
+                }
+                crate::log_analysis::CLUSTER_PROBLEMS => {
+                    assert!(result.detail_raw.contains("result_count: 1"));
+                    assert!(
+                        evidence_body.contains(&format!("templates_sample=[{signal_template_id}]"))
+                    );
+                    assert!(!evidence_body
+                        .contains(&format!("templates_sample=[{suppressed_template_id}]")));
+                }
+                crate::log_analysis::TIMELINE => {
+                    assert!(result.detail_raw.contains("total_events: 4"));
+                }
+                crate::log_analysis::CORRELATE => {
+                    assert!(result.detail_raw.contains("result_count: 0"));
+                    assert!(evidence_body.is_empty());
+                }
+                crate::log_analysis::ANOMALIES => {
+                    assert!(result.detail_raw.contains("result_count: 1"));
+                    assert!(evidence_body.contains(&format!("- t{signal_template_id} ")));
+                    assert!(!evidence_body.contains(&format!("- t{suppressed_template_id} ")));
+                }
+                crate::log_analysis::TRACE => {
+                    assert!(result.detail_raw.contains("total_available: 4"));
+                    assert!(evidence_body.contains(&format!("tplt={signal_template_id}")));
+                    assert!(!evidence_body.contains(&format!("tplt={suppressed_template_id}")));
+                }
+                _ => unreachable!("unexpected log adapter {tool}"),
+            }
+        }
+
+        // A new turn clears and repins the lens. Every adapter must observe the
+        // disabled policy and restore the previously suppressed evidence.
+        drop(corpus);
+        host.set_log_corpus_scope(Some(corpus_id.clone()));
+        host.pin_log_suppression_lens(&corpus_id).unwrap();
+        host.set_max_results_per_source(16);
+        for (tool, args) in [
+            (
+                crate::log_analysis::SEARCH_LOGS,
+                json!({"query": "", "semantic": false}),
+            ),
+            (
+                crate::log_analysis::CLUSTER_PROBLEMS,
+                json!({"max_clusters": 10}),
+            ),
+            (crate::log_analysis::TIMELINE, json!({"width_secs": 1})),
+            (
+                crate::log_analysis::CORRELATE,
+                json!({
+                    "focus_template_id": signal_template_id,
+                    "around_ts": 1_700_000_030_i64,
+                    "window_secs": 60
+                }),
+            ),
+            (
+                crate::log_analysis::ANOMALIES,
+                json!({
+                    "baseline_from": 1_699_999_900_i64,
+                    "baseline_to": 1_700_000_000_i64,
+                    "incident_from": 1_700_000_000_i64,
+                    "incident_to": 1_700_000_100_i64
+                }),
+            ),
+            (
+                crate::log_analysis::TRACE,
+                json!({"trace_id": "adapter-parity-trace"}),
+            ),
+        ] {
+            let result = host.execute(tool, &args, None).await.unwrap();
+            assert!(result.ok, "{tool}: {}", result.summary);
+            assert!(
+                result.detail_raw.contains("suppression_active: false")
+                    && result.detail_raw.contains("suppression_rule_count: 0")
+                    && result.detail_raw.contains("suppressed_event_count: 0")
+                    && result
+                        .detail_raw
+                        .contains(&format!("suppression_revision: {}", disabled.revision))
+                    && result
+                        .detail_raw
+                        .contains("excluded_events_not_analyzed: false"),
+                "{tool}: {}",
+                result.detail_raw
+            );
+            let evidence_body = result
+                .detail_raw
+                .split_once("---\n")
+                .map(|(_, body)| body)
+                .expect("log tool output should delimit disclosure from evidence");
+            match tool {
+                crate::log_analysis::SEARCH_LOGS => {
+                    assert_eq!(result.log_result_count, Some(2));
+                    assert!(evidence_body.contains(&format!("- t{suppressed_template_id} ")));
+                    assert!(evidence_body.contains(&format!("- t{signal_template_id} ")));
+                    assert!(result
+                        .log_evidence
+                        .iter()
+                        .any(|identity| identity.template_id == suppressed_template_id));
+                    assert!(result
+                        .log_evidence
+                        .iter()
+                        .any(|identity| identity.template_id == signal_template_id));
+                }
+                crate::log_analysis::CLUSTER_PROBLEMS => {
+                    assert!(result.detail_raw.contains("result_count: 2"));
+                    assert!(evidence_body
+                        .contains(&format!("templates_sample=[{suppressed_template_id}]")));
+                    assert!(
+                        evidence_body.contains(&format!("templates_sample=[{signal_template_id}]"))
+                    );
+                }
+                crate::log_analysis::TIMELINE => {
+                    assert!(result.detail_raw.contains("total_events: 16"));
+                }
+                crate::log_analysis::CORRELATE => {
+                    assert!(result.detail_raw.contains("result_count: 1"));
+                    assert!(evidence_body.contains(&format!("- t{suppressed_template_id} ")));
+                }
+                crate::log_analysis::ANOMALIES => {
+                    assert!(result.detail_raw.contains("result_count: 2"));
+                    assert!(evidence_body.contains(&format!("- t{suppressed_template_id} ")));
+                    assert!(evidence_body.contains(&format!("- t{signal_template_id} ")));
+                }
+                crate::log_analysis::TRACE => {
+                    assert!(result.detail_raw.contains("total_available: 16"));
+                    assert!(evidence_body.contains(&format!("tplt={suppressed_template_id}")));
+                    assert!(
+                        evidence_body.contains(&format!("tplt={signal_template_id}")),
+                        "{}",
+                        result.detail_raw
+                    );
+                }
+                _ => unreachable!("unexpected log adapter {tool}"),
+            }
+        }
     }
 
     #[tokio::test]

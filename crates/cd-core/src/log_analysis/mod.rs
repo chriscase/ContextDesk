@@ -21,11 +21,16 @@ pub mod reanalyze;
 pub mod redact_log;
 pub mod search;
 pub mod store;
+pub mod suppression;
 pub mod tools;
 pub mod view_context;
 pub mod why;
 
-pub use analysis::{cluster_problems, timeline, ClusterSummary, TimelineBucket};
+pub use analysis::{
+    cluster_problems, cluster_problems_with_excluded_templates, timeline,
+    timeline_summary_with_excluded_templates, timeline_with_excluded_templates, ClusterSummary,
+    TimelineBucket,
+};
 pub use bookmarks::{
     add_evidence_bookmark, add_line_bookmark, add_range_bookmark, bookmark_summaries,
     delete_bookmark, list_bookmarks, list_resolved_bookmarks, resolve_bookmark, update_bookmark,
@@ -76,20 +81,34 @@ pub use query::{
     SharedTimelineSeverity, SharedTimelineSeveritySeries, SharedTimelineSummary,
     SharedTimelineSummaryQuery, TargetResolveStatus, TimeQuality, TimelineSummary,
     TimelineSummaryBucket, TimelineSummaryQuery, DEFAULT_EVENT_PAGE, DEFAULT_NEIGHBORHOOD_RADIUS,
-    DEFAULT_SOURCE_CATALOG_PAGE, DEFAULT_TIMELINE_BUCKETS, MAX_EVENT_PAGE, MAX_NEIGHBORHOOD_RADIUS,
-    MAX_REGEX_SCAN_EVENTS, MAX_SEARCH_EXCERPT_LEN, MAX_SEARCH_PATTERN_LEN,
-    MAX_SHARED_TIMELINE_COUNT_CELLS, MAX_SHARED_TIMELINE_LANES, MAX_SOURCE_CATALOG_CURSOR_BYTES,
-    MAX_SOURCE_CATALOG_PAGE, MAX_SOURCE_CATALOG_SEARCH_CHARS, MAX_TIMELINE_BUCKETS, MIN_WALL_TS,
+    DEFAULT_SOURCE_CATALOG_PAGE, DEFAULT_TIMELINE_BUCKETS, MAX_EVENT_PAGE,
+    MAX_EXCLUDED_TEMPLATE_IDS, MAX_NEIGHBORHOOD_RADIUS, MAX_REGEX_SCAN_EVENTS,
+    MAX_SEARCH_EXCERPT_LEN, MAX_SEARCH_PATTERN_LEN, MAX_SHARED_TIMELINE_COUNT_CELLS,
+    MAX_SHARED_TIMELINE_LANES, MAX_SOURCE_CATALOG_CURSOR_BYTES, MAX_SOURCE_CATALOG_PAGE,
+    MAX_SOURCE_CATALOG_SEARCH_CHARS, MAX_TIMELINE_BUCKETS, MIN_WALL_TS,
     SHARED_TIMELINE_SEVERITY_SERIES,
 };
 pub use reanalyze::{
     reanalyze_corpus_embeddings, reanalyze_corpus_embeddings_quiet, LOCAL_REANALYZE_TEMPLATE_CAP,
 };
-pub use search::{search_logs, SearchEvidenceIdentity, SearchHit, SearchLogsQuery};
+pub use search::{
+    search_logs, search_logs_with_excluded_templates, SearchEvidenceIdentity, SearchHit,
+    SearchLogsQuery, MAX_ANALYSIS_EXCLUDED_TEMPLATE_IDS,
+};
 
 pub use store::{
     CorpusEmbeddingStatus, CorpusId, CorpusMeta, CorpusStats, CorpusSummary, EmbeddingState,
     LogCorpus, LogEvent, TemplateRow, TopTemplateSnapshot, EVENT_ENGINE, META_VERSION,
+};
+pub use suppression::{
+    activate_template_suppression, load_suppression_document, mutate_template_suppression_rule,
+    preview_template_suppression, ActivateSuppressionPreview, NewSuppressionPreview,
+    SuppressionAuditAction, SuppressionAuditEntry, SuppressionDocument, SuppressionLevelCount,
+    SuppressionMutationResult, SuppressionPreview, SuppressionRepresentativeEvent, SuppressionRule,
+    SuppressionRuleMutation, SuppressionRuleOrigin, SuppressionRuleState,
+    SuppressionTemplatePredicate, SuppressionTimeSpan, MAX_SUPPRESSION_AUDIT_ENTRIES,
+    MAX_SUPPRESSION_LEVEL_BUCKETS, MAX_SUPPRESSION_PREVIEWS, MAX_SUPPRESSION_REPRESENTATIVES,
+    MAX_SUPPRESSION_RULES, SUPPRESSION_SCHEMA_VERSION,
 };
 pub use tools::{
     anomalies_tool_spec, cluster_problems_tool_spec, correlate_tool_spec, ingest_logs_tool_spec,
@@ -102,4 +121,7 @@ pub use view_context::{
     LaneView, LogNavAction, LogNavApplyResult, ViewContextInput, ViewContextSnapshot,
     MAX_VIEW_BOOKMARKS, MAX_VIEW_SEQS,
 };
-pub use why::{anomalies, correlate, trace, AnomalyHit, CorrelateHit, TraceEvent};
+pub use why::{
+    anomalies, anomalies_with_excluded_templates, correlate, correlate_with_excluded_templates,
+    trace, trace_with_excluded_templates, AnomalyHit, CorrelateHit, TraceEvent,
+};

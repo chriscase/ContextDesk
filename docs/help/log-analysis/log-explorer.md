@@ -33,6 +33,7 @@ import/export, and open investigation. It is not a million-row browser.
 | Feature                | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Find vs Filter         | **Find** pages chronological result identities and loads hit-centered context without removing surrounding rows. **Filter** reduces the table and intersects levels/sources/time. **Advanced** exposes literal vs bounded linear-time regex, case sensitivity, and optional template-semantic search when vectors exist                                                                                                                                              |
+| Noise policy           | A partial corpus-scoped exact-template lens under open issue #671. Preview exact impact before confirming; the candidate implementation routes enabled rules through rows, counts, facets, Timeline, Find, analysis, and linked log tools without deleting source evidence. Do not treat Slice 1 as fully accepted or unconditionally reversible yet                                                                                                                                 |
 | Counts                 | The filter rail labels **corpus total**, **matched** (global query/facets), and **resident** (currently loaded) separately — not a max-per-lane figure as a global total                                                                                                                                                                                                                                                                                             |
 | Bookmarks              | New saves preserve the exact selected event set, including noncontiguous selections, and reject duplicate exact sets. Activation loads a bounded neighborhood; filters may be temporarily cleared with an explicit restore                                                                                                                                                                                                                                           |
 | Investigation evidence | Selecting rows reveals **Ask about selection** and **Save evidence**. Saved exact identities live outside disposable corpus caches, survive chat deletion, and can be previewed without changing the Explorer before an explicit reveal                                                                                                                                                                                                                              |
@@ -77,6 +78,58 @@ Advanced scope uses explicit fields rather than a hidden query language:
 - Sequence start and end are inclusive stable event identities and remain
   available when calendar time is unavailable.
 - Trace ID and template ID are exact matches.
+
+## Noise policy — exact-template Slice 1
+
+Use **Noise** for a repeated template you have reviewed and intentionally want
+out of the active investigation. This is different from Filter: filters are
+temporary view criteria, while a noise rule is durable policy for this corpus.
+
+1. Select and inspect a representative event.
+2. Choose **Suppress exact template…**.
+3. Enter a short name and a reason. Frequency alone is not a reason to suppress
+   evidence.
+4. Choose **Preview impact**. Review the exact match and newly hidden counts,
+   level breakdown, number of sources, time span, and redacted examples.
+5. Choose **Confirm suppression** only when every event represented by that
+   template is known noise for this incident.
+
+The **Noise** control reports enabled rules and hidden events. Its current
+lifecycle surface can disable, re-enable, or remove a rule and inspect the
+audit. Remove creates an inactive tombstone; it does not erase the rule's
+history. This is not full CRUD: rule editing and complete durable creator
+identity are not implemented. Competing processes serialize publication through
+a corpus lock; stale revisions and changed enabled/re-enabled template
+fingerprints fail closed instead of suppressing a rebound template ID. Audit
+capacity is reserved so every live rule can still be disabled and removed.
+
+One enabled policy lens applies to event rows, matched counts, facets, Timeline,
+Find, clustering/search/correlation/anomaly/trace analysis, and linked log
+tools. A linked turn uses one pinned policy revision and reports that revision
+and hidden-event count, so different tool calls cannot silently analyze
+different evidence sets.
+
+Suppression does not delete or edit events. The complete source catalog,
+authoritative event identity, and **Original (redacted)** remain available. If
+a bookmark or exact evidence reference is hidden only by the noise policy,
+Explorer offers a targeted temporary reveal and restoration. That is not the
+global temporary **include suppressed** action required by #671.
+
+This is a partial exact-template Slice 1 and #671 remains open. Still required:
+
+- source, service, host, level-plus-template, and explicitly reviewed-text
+  rules;
+- rule editing and complete durable creator identity;
+- Investigation/saved-view rule references and package lifecycle;
+- baseline-generated proposals and larger-rule-set optimization;
+- one global temporary **include suppressed** action;
+- one visible, auditable tool option to include suppressed evidence;
+- suppression-specific 25k and 100k measurements, plus opt-in 1M proof when
+  practical.
+
+ContextDesk does not automatically learn or activate noise rules. Exact-template
+Slice 1 is reversible and evidence-preserving, but it is only one predicate
+family and is not a substitute for retaining the authoritative source bundle.
 
 ## Counts
 
@@ -219,6 +272,10 @@ the corpus identity, visible lane/source groups, active search and filters,
 selected and bookmarked counts, time quality, and link/alignment mode. Changing
 the Explorer after send does not rewrite the context of an already-running
 turn, and switching chats does not transfer its pending state.
+
+When exact-template suppression is enabled, that snapshot also pins the policy
+revision and hidden-event count. Every bounded log tool in the turn uses that
+same exclusion lens and discloses that excluded events were not analyzed.
 
 The snapshot is orientation, not a corpus dump. Every linked investigation must
 first obtain a successful result from a bounded log tool. When relevant, the
@@ -364,7 +421,7 @@ ContextDesk revalidates those references when the corpus reopens and visibly
 marks missing or stale evidence instead of opening an unrelated row. Older range
 bookmarks remain readable; their saved timestamps are hints rather than
 authoritative event identity. Export packages contain events/templates only;
-re-create bookmarks after import if needed.
+re-create bookmarks and noise policy after import if needed.
 
 ## Limits
 

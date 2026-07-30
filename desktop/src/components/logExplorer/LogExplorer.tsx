@@ -30,6 +30,8 @@ import {
   hostLogFacets,
   hostLogLoadActiveInvestigation,
   hostLogListBookmarks,
+  hostLogLoadSuppression,
+  hostLogMutateTemplateSuppressionRule,
   hostLogPreviewInvestigationEvidence,
   hostLogPreviewInvestigationFindingView,
   hostLogQueryEventOriginal,
@@ -49,6 +51,9 @@ import {
   type LogFacetsDto,
   type InvestigationViewRecipeDto,
   type ResolvedInvestigationDocumentDto,
+  type SuppressionDocumentDto,
+  type SuppressionMutationResultDto,
+  type SuppressionRuleMutation,
   type TimeQuality,
 } from "../../lib/host";
 import {
@@ -134,6 +139,7 @@ import { InvestigationAddMenu } from "./InvestigationAddMenu";
 import { SaveEvidenceDialog } from "./SaveEvidenceDialog";
 import { TimelineNavigator } from "./TimelineNavigator";
 import { LogDiagnosticDialog } from "../panes/LogDiagnosticDialog";
+import { NoisePolicyControl, SuppressTemplateDialog } from "./NoisePolicy";
 import {
   centeredLiteralExcerpt,
   eventRowHeight,
@@ -719,6 +725,27 @@ export function LogExplorer({ corpusId }: Props) {
     "loading" | "ready" | "error"
   >("loading");
   const [summaryLoadError, setSummaryLoadError] = useState<string | null>(null);
+  const [suppressionDocument, setSuppressionDocument] =
+    useState<SuppressionDocumentDto | null>(null);
+  const [suppressionLoadState, setSuppressionLoadState] = useState<
+    "loading" | "ready" | "error" | "refreshing"
+  >("loading");
+  const [suppressionLoadError, setSuppressionLoadError] = useState<
+    string | null
+  >(null);
+  const [suppressedEventCount, setSuppressedEventCount] = useState<
+    number | null
+  >(null);
+  const [revealSuppressedEvidence, setRevealSuppressedEvidence] =
+    useState(false);
+  const [suppressedBookmarkOffer, setSuppressedBookmarkOffer] = useState<{
+    bookmark: LogBookmarkDto;
+    templateId: number;
+    restoreView: InvestigationViewRecipeDto | null;
+  } | null>(null);
+  const [suppressTemplateId, setSuppressTemplateId] = useState<number | null>(
+    null,
+  );
   const [filters, setFilters] = useState<ExplorerFilters>(emptyFilters);
   const [facets, setFacets] = useState<LogFacetsDto | null>(null);
   const [facetsLoading, setFacetsLoading] = useState(true);
@@ -1021,6 +1048,8 @@ export function LogExplorer({ corpusId }: Props) {
   const investigationAddTriggerRef = useRef<HTMLButtonElement>(null);
   const investigationEditTriggerRef = useRef<HTMLButtonElement>(null);
   const diagnosticTriggerRef = useRef<HTMLButtonElement>(null);
+  const noisePolicyTriggerRef = useRef<HTMLButtonElement>(null);
+  const suppressTemplateTriggerRef = useRef<HTMLButtonElement>(null);
   const chatDraftRequestIdRef = useRef(0);
   const previousFiltersCollapsedRef = useRef(filtersCollapsed);
   const dragRef = useRef<"filters" | "chat" | null>(null);
@@ -1032,6 +1061,7 @@ export function LogExplorer({ corpusId }: Props) {
   const eventsRequestRef = useRef(0);
   const countRequestRef = useRef(0);
   const summaryRequestRef = useRef(0);
+  const suppressionRequestRef = useRef(0);
   const bookmarkRequestRef = useRef(0);
   const bookmarkMetadataStartedRef = useRef(false);
   const investigationMetadataStartedRef = useRef(false);
@@ -1051,6 +1081,35 @@ export function LogExplorer({ corpusId }: Props) {
     (summary?.embedding?.embeddedTemplates ?? summary?.stats?.embedded ?? 0) >
     0;
   const findBusy = findSearching || findLocating;
+  const enabledSuppressionTemplateIds = useMemo(
+    () =>
+      [
+        ...new Set(
+          (suppressionDocument?.rules ?? [])
+            .filter((rule) => rule.state === "enabled")
+            .map((rule) => rule.predicate.templateId),
+        ),
+      ].sort((a, b) => a - b),
+    [suppressionDocument],
+  );
+  const activeSuppressionTemplateIds = useMemo(
+    () => (revealSuppressedEvidence ? [] : enabledSuppressionTemplateIds),
+    [enabledSuppressionTemplateIds, revealSuppressedEvidence],
+  );
+  const queryWithNoise = useCallback(
+    (
+      nextFilters: ExplorerFilters,
+      extra?: Partial<EventQueryDto>,
+      includeSuppression = true,
+    ) =>
+      filtersToQuery(nextFilters, {
+        ...extra,
+        excludedTemplateIds: includeSuppression
+          ? activeSuppressionTemplateIds
+          : [],
+      }),
+    [activeSuppressionTemplateIds],
+  );
 
   const setAutoStatus = useCallback((nextStatus: string) => {
     if (autoStatusLockRef.current === "bookmark-restore") {
@@ -1414,6 +1473,132 @@ export function LogExplorer({ corpusId }: Props) {
     }
   }, [corpusId]);
 
+  const invalidateSuppressedEvidence = useCallback(() => {
+    eventsRequestRef.current += 1;
+    countRequestRef.current += 1;
+    facetRequestRef.current += 1;
+    setLaneEvents({});
+    setLaneCursors({});
+    setLanePaging({});
+    setLaneMatched({});
+    setLaneCountStates({});
+    setLaneTimeStates({});
+    setLaneScrollSeq({});
+    setFacets(null);
+    setTimelineReady(false);
+    setSelected(new Set());
+    setHighlight(new Set());
+    findRequestRef.current += 1;
+    const activeFindRequest = activeFindRequestRef.current;
+    activeFindRequestRef.current = null;
+    if (activeFindRequest) void hostCancelLogSearch(activeFindRequest);
+    setFindSearching(false);
+    setFindLocating(false);
+    setFindCancelling(false);
+    setFindMatches([]);
+    setFindMatchSources({});
+    setFindMatchRefs({});
+    setFindExcerpts({});
+    setFindIndex(0);
+    setFindTotal(0);
+    setFindTotalExact(false);
+    setFindBase(0);
+    setFindNextCursor(null);
+    setFindPageStart(null);
+    setFindHistory([]);
+    setFindPartial(false);
+    clearDetail();
+  }, [clearDetail]);
+
+  const loadSuppressionPolicy = useCallback(
+    async ({
+      refreshing = false,
+    }: {
+      refreshing?: boolean;
+    } = {}): Promise<SuppressionDocumentDto> => {
+      const requestId = ++suppressionRequestRef.current;
+      setSuppressionLoadState(refreshing ? "refreshing" : "loading");
+      setSuppressionLoadError(null);
+      if (!refreshing) {
+        setSuppressionDocument(null);
+        setSuppressedEventCount(null);
+      }
+      try {
+        const document = await hostLogLoadSuppression(corpusId);
+        const enabledTemplateIds = [
+          ...new Set(
+            document.rules
+              .filter((rule) => rule.state === "enabled")
+              .map((rule) => rule.predicate.templateId),
+          ),
+        ].sort((a, b) => a - b);
+        const hidden =
+          enabledTemplateIds.length === 0
+            ? 0
+            : (
+                await hostLogCountEvents(corpusId, {
+                  templateIds: enabledTemplateIds,
+                  excludedTemplateIds: [],
+                  limit: 1,
+                  sortByTime: true,
+                })
+              ).totalMatched;
+        if (requestId !== suppressionRequestRef.current) return document;
+        setSuppressionDocument(document);
+        setSuppressedEventCount(hidden);
+        setSuppressionLoadState("ready");
+        return document;
+      } catch (policyError) {
+        if (requestId === suppressionRequestRef.current) {
+          setSuppressionLoadState("error");
+          setSuppressionLoadError(String(policyError));
+          setSuppressionDocument(null);
+          setSuppressedEventCount(null);
+        }
+        throw policyError;
+      }
+    },
+    [corpusId],
+  );
+
+  const refreshSuppressionPolicy = useCallback(async () => {
+    invalidateSuppressedEvidence();
+    return loadSuppressionPolicy({ refreshing: true });
+  }, [invalidateSuppressedEvidence, loadSuppressionPolicy]);
+
+  const mutateSuppressionRule = useCallback(
+    async (
+      ruleId: string,
+      mutation: SuppressionRuleMutation,
+    ): Promise<SuppressionMutationResultDto> => {
+      if (!suppressionDocument) {
+        throw new Error("Noise policy must be loaded before it can be changed");
+      }
+      invalidateSuppressedEvidence();
+      setSuppressionLoadState("refreshing");
+      try {
+        const result = await hostLogMutateTemplateSuppressionRule(
+          corpusId,
+          suppressionDocument.revision,
+          ruleId,
+          mutation,
+        );
+        await loadSuppressionPolicy({ refreshing: true });
+        return result;
+      } catch (mutationError) {
+        setSuppressionLoadState("error");
+        setSuppressionLoadError(String(mutationError));
+        throw mutationError;
+      }
+    },
+    [
+      corpusId,
+      invalidateSuppressedEvidence,
+      loadSuppressionPolicy,
+      suppressionDocument,
+    ],
+  );
+
   const loadOptionalMetadata = useCallback(() => {
     if (!bookmarkMetadataStartedRef.current) {
       bookmarkMetadataStartedRef.current = true;
@@ -1457,12 +1642,13 @@ export function LogExplorer({ corpusId }: Props) {
   }, [corpusId]);
 
   const loadFacets = useCallback(async () => {
+    if (suppressionLoadState !== "ready") return;
     const requestId = ++facetRequestRef.current;
     setFacetsLoading(true);
     try {
       const f = await hostLogFacets(
         corpusId,
-        filtersToQuery(filters, { keyword: null }),
+        queryWithNoise(filters, { keyword: null }),
       );
       if (requestId !== facetRequestRef.current) return;
       setFacets(f);
@@ -1472,7 +1658,7 @@ export function LogExplorer({ corpusId }: Props) {
     } finally {
       if (requestId === facetRequestRef.current) setFacetsLoading(false);
     }
-  }, [corpusId, filters]);
+  }, [corpusId, filters, queryWithNoise, suppressionLoadState]);
 
   const loadLaneSourceCatalog = useCallback(
     async ({
@@ -1531,6 +1717,11 @@ export function LogExplorer({ corpusId }: Props) {
   }, [laneSourceCatalogNextCursor, loadLaneSourceCatalog]);
 
   const loadEvents = useCallback(async () => {
+    if (suppressionLoadState !== "ready") {
+      setBusy(false);
+      setTimelineReady(false);
+      return;
+    }
     const requestId = ++eventsRequestRef.current;
     const countRequestId = ++countRequestRef.current;
     let loadedCurrentView = false;
@@ -1573,7 +1764,7 @@ export function LogExplorer({ corpusId }: Props) {
     try {
       if (laneCount <= 1) {
         const sourceFilter = effectiveLaneSources(visibleLanes[0], filters);
-        const query = filtersToQuery(filters, { sources: sourceFilter });
+        const query = queryWithNoise(filters, { sources: sourceFilter });
         const page =
           sourceFilter?.length === 0
             ? emptyEventRowsPage()
@@ -1631,7 +1822,7 @@ export function LogExplorer({ corpusId }: Props) {
               countQuery: null,
             };
           }
-          const q = filtersToQuery(filters, {
+          const q = queryWithNoise(filters, {
             sources: sourceFilter,
             limit: 100,
             sortByTime: true,
@@ -1787,7 +1978,9 @@ export function LogExplorer({ corpusId }: Props) {
     finishRowLoadStatus,
     loadFacets,
     loadOptionalMetadata,
+    queryWithNoise,
     setAutoStatus,
+    suppressionLoadState,
   ]);
 
   useLayoutEffect(() => {
@@ -1824,7 +2017,9 @@ export function LogExplorer({ corpusId }: Props) {
     clearDetail();
 
     const savedLanes = loadLanes(corpusId);
-    setLanes(savedLanes && savedLanes.length > 0 ? savedLanes : defaultLanes(1));
+    setLanes(
+      savedLanes && savedLanes.length > 0 ? savedLanes : defaultLanes(1),
+    );
     setPreferredLaneCount(1);
     setLaneCount(1);
     setLinkMode(loadLinkMode(corpusId));
@@ -1834,12 +2029,20 @@ export function LogExplorer({ corpusId }: Props) {
     bookmarkMetadataStartedRef.current = false;
     investigationMetadataStartedRef.current = false;
     summaryRequestRef.current += 1;
+    suppressionRequestRef.current += 1;
     bookmarkRequestRef.current += 1;
     investigationLoadRequestRef.current += 1;
     setSummary(null);
     setSummaryLoadState("loading");
     setSummaryLoadError(null);
     setCorpusTotal(0);
+    setSuppressionDocument(null);
+    setSuppressionLoadState("loading");
+    setSuppressionLoadError(null);
+    setSuppressedEventCount(null);
+    setRevealSuppressedEvidence(false);
+    setSuppressedBookmarkOffer(null);
+    setSuppressTemplateId(null);
     setBookmarks([]);
     setBookmarksLoadState("idle");
     setBookmarksLoadError(null);
@@ -1851,6 +2054,7 @@ export function LogExplorer({ corpusId }: Props) {
     setFindingViewPreview(null);
     return () => {
       summaryRequestRef.current += 1;
+      suppressionRequestRef.current += 1;
       bookmarkRequestRef.current += 1;
       investigationLoadRequestRef.current += 1;
     };
@@ -1859,6 +2063,12 @@ export function LogExplorer({ corpusId }: Props) {
   useEffect(() => {
     void refreshSummary();
   }, [refreshSummary]);
+
+  useEffect(() => {
+    void loadSuppressionPolicy().catch(() => {
+      // The visible fail-closed policy error owns retry.
+    });
+  }, [loadSuppressionPolicy]);
 
   useEffect(() => {
     if (!laneEditorOpen) {
@@ -1910,6 +2120,16 @@ export function LogExplorer({ corpusId }: Props) {
       filters.templateId != null ? `templateId=${filters.templateId}` : null,
       filters.traceId ? `traceId=${filters.traceId}` : null,
       filters.keyword ? `keyword=${filters.keyword}` : null,
+      `noisePolicy=${
+        activeSuppressionTemplateIds.length > 0 ? "active" : "inactive"
+      }`,
+      `noisePolicyRevision=${suppressionDocument?.revision ?? "unavailable"}`,
+      `noiseRuleCount=${enabledSuppressionTemplateIds.length}`,
+      `noiseHiddenCount=${suppressedEventCount ?? "unavailable"}`,
+      activeSuppressionTemplateIds.length > 0
+        ? "noiseExcludedEventsNotAnalyzed=true"
+        : null,
+      revealSuppressedEvidence ? "noiseTemporaryEvidenceReveal=true" : null,
       `linkMode=${linkMode}`,
       `lanes=${lanes
         .slice(0, laneCount)
@@ -1935,6 +2155,11 @@ export function LogExplorer({ corpusId }: Props) {
     laneCount,
     selected,
     bookmarks,
+    activeSuppressionTemplateIds,
+    enabledSuppressionTemplateIds.length,
+    revealSuppressedEvidence,
+    suppressedEventCount,
+    suppressionDocument?.revision,
   ]);
 
   // Gap summaries are claims about shared time and belong only to true Align.
@@ -2075,6 +2300,7 @@ export function LogExplorer({ corpusId }: Props) {
       viewFilters?: ExplorerFilters;
       selectTarget?: boolean;
       isCurrent?: () => boolean;
+      includeSuppression?: boolean;
     },
   ): Promise<"found" | "hidden_by_filter" | "missing"> => {
     if (opts?.isCurrent && !opts.isCurrent()) return "missing";
@@ -2089,10 +2315,14 @@ export function LogExplorer({ corpusId }: Props) {
     if (sourceFilter?.length === 0) {
       return "hidden_by_filter";
     }
-    const filter = filtersToQuery(base, {
-      keyword: base.keyword,
-      sources: sourceFilter,
-    });
+    const filter = queryWithNoise(
+      base,
+      {
+        keyword: base.keyword,
+        sources: sourceFilter,
+      },
+      opts?.includeSuppression !== false,
+    );
     const nb = await hostLogQueryEventNeighborhood(corpusId, {
       targetSeq: seq,
       before: 50,
@@ -2212,6 +2442,12 @@ export function LogExplorer({ corpusId }: Props) {
       semantic: boolean;
     },
   ) => {
+    if (suppressionLoadState !== "ready") {
+      setError(
+        "Find is unavailable until the durable noise policy has loaded",
+      );
+      return;
+    }
     const q = (definition?.query ?? findDraft).trim();
     const matchMode = definition?.matchMode ?? findMatchMode;
     const caseSensitive = definition?.caseSensitive ?? findCaseSensitive;
@@ -2243,7 +2479,7 @@ export function LogExplorer({ corpusId }: Props) {
         // Only one bounded result page is retained in the webview.
         k: FIND_PAGE_SIZE,
         // Compose Find with every active Filter predicate, including keyword.
-        filter: filtersToQuery(scopedFilters, {
+        filter: queryWithNoise(scopedFilters, {
           afterSeq: start?.seq ?? null,
           afterTs: start?.ts ?? null,
           beforeSeq: null,
@@ -2371,7 +2607,9 @@ export function LogExplorer({ corpusId }: Props) {
       setFindSearching(false);
       setFindLocating(false);
       setFindCancelling(false);
-      setStatus("Find cancellation requested · previous visible results preserved");
+      setStatus(
+        "Find cancellation requested · previous visible results preserved",
+      );
     } catch (cancelError) {
       if (activeFindRequestRef.current !== requestId) return;
       setFindCancelling(false);
@@ -2394,7 +2632,7 @@ export function LogExplorer({ corpusId }: Props) {
       return;
     }
     findRefreshRef.current(filters);
-  }, [filters]);
+  }, [activeSuppressionTemplateIds, filters]);
 
   const findStep = async (dir: 1 | -1) => {
     if (findMatches.length === 0) {
@@ -3144,7 +3382,10 @@ export function LogExplorer({ corpusId }: Props) {
   }, [clearDetail, detail, laneEvents]);
 
   /** #531: activate bookmark — direct neighborhood seek (no multi-page scan). */
-  const activateBookmark = async (b: LogBookmarkDto) => {
+  const activateBookmark = async (
+    b: LogBookmarkDto,
+    allowSuppressed = false,
+  ) => {
     if (b.evidenceStatus === "missing" || b.evidenceStatus === "stale") {
       setBookmarkRevealState("missing");
       setStatus(
@@ -3157,6 +3398,7 @@ export function LogExplorer({ corpusId }: Props) {
     const exactRefs = b.eventRefs ?? [];
     const targetRef = exactRefs[0];
     const seq = targetRef?.seq ?? b.seqFrom;
+    const viewBeforeBookmarkActivation = captureCurrentInvestigationView();
     setHighlight(
       new Set(
         exactRefs.length > 0
@@ -3171,6 +3413,24 @@ export function LogExplorer({ corpusId }: Props) {
     setBusy(true);
     setError(null);
     try {
+      if (allowSuppressed) {
+        if (!revealRestore) {
+          const priorView =
+            suppressedBookmarkOffer?.bookmark.id === b.id
+              ? suppressedBookmarkOffer.restoreView
+              : viewBeforeBookmarkActivation;
+          if (!priorView) {
+            setBookmarkRevealState("missing");
+            setStatus(
+              "The current view cannot be restored exactly. Rerun Find or clear stale highlights before revealing suppressed evidence.",
+            );
+            return;
+          }
+          setRevealRestore(priorView);
+        }
+        setRevealSuppressedEvidence(true);
+        setSuppressedBookmarkOffer(null);
+      }
       // Resolve the stable target under current global filters. Hidden results
       // still return the target identity so the correct source lane can be
       // selected or temporarily composed.
@@ -3178,9 +3438,41 @@ export function LogExplorer({ corpusId }: Props) {
         targetSeq: seq,
         before: 0,
         after: 0,
-        filter: filtersToQuery(filters),
+        filter: queryWithNoise(filters, undefined, !allowSuppressed),
         sortByTime: true,
       });
+      if (!allowSuppressed && enabledSuppressionTemplateIds.length > 0) {
+        const maybeSuppressed =
+          resolved.target &&
+          enabledSuppressionTemplateIds.includes(resolved.target.templateId)
+            ? resolved
+            : resolved.status !== "found"
+              ? await hostLogQueryEventNeighborhood(corpusId, {
+                  targetSeq: seq,
+                  before: 0,
+                  after: 0,
+                  filter: queryWithNoise(emptyFilters(), undefined, false),
+                  sortByTime: true,
+                })
+              : null;
+        if (
+          maybeSuppressed?.target &&
+          enabledSuppressionTemplateIds.includes(
+            maybeSuppressed.target.templateId,
+          )
+        ) {
+          setSuppressedBookmarkOffer({
+            bookmark: b,
+            templateId: maybeSuppressed.target.templateId,
+            restoreView: viewBeforeBookmarkActivation,
+          });
+          setBookmarkRevealState("missing");
+          setStatus(
+            `Bookmark ${b.label} is hidden by an active noise rule for template ${maybeSuppressed.target.templateId}. Reveal it temporarily without changing the rule.`,
+          );
+          return;
+        }
+      }
       if (resolved.status === "missing" || !resolved.target) {
         setBookmarkRevealState("missing");
         setStatus(
@@ -3219,8 +3511,12 @@ export function LogExplorer({ corpusId }: Props) {
           setBookmarkFocusTarget({ laneId: matchingLane.id, seq });
           showDetail(residentTarget);
           setSelected(new Set([seq]));
-          setBookmarkRevealState("visible");
-          setStatus(`Bookmark visible: ${b.label}`);
+          setBookmarkRevealState(allowSuppressed ? "revealed" : "visible");
+          setStatus(
+            allowSuppressed
+              ? `Suppressed bookmark temporarily revealed: ${b.label} — noise rules remain unchanged; restore prior view when done`
+              : `Bookmark visible: ${b.label}`,
+          );
           return;
         }
         const status = await seekToSeq(seq, {
@@ -3230,14 +3526,19 @@ export function LogExplorer({ corpusId }: Props) {
               ? matchingLane.sources
               : filters.sources,
           focusRow: true,
+          includeSuppression: !allowSuppressed,
         });
         if (status !== "found") {
           throw new Error(
             "Bookmark target changed while it was being revealed",
           );
         }
-        setBookmarkRevealState("visible");
-        setStatus(`Bookmark visible under current filters: ${b.label}`);
+        setBookmarkRevealState(allowSuppressed ? "revealed" : "visible");
+        setStatus(
+          allowSuppressed
+            ? `Suppressed bookmark temporarily revealed: ${b.label} — noise rules remain unchanged; restore prior view when done`
+            : `Bookmark visible under current filters: ${b.label}`,
+        );
         return;
       }
 
@@ -3286,11 +3587,14 @@ export function LogExplorer({ corpusId }: Props) {
         laneId: revealLane.id,
         sources: [resolved.target.source],
         focusRow: true,
+        includeSuppression: !allowSuppressed,
       });
       if (status === "found") {
         setBookmarkRevealState("revealed");
         setStatus(
-          `Bookmark temporarily revealed: ${b.label} — filters cleared; restore prior view when done`,
+          allowSuppressed
+            ? `Suppressed bookmark temporarily revealed: ${b.label} — noise rules remain unchanged; restore prior view when done`
+            : `Bookmark temporarily revealed: ${b.label} — filters cleared; restore prior view when done`,
         );
       } else if (status === "missing") {
         setBookmarkRevealState("missing");
@@ -3486,6 +3790,8 @@ export function LogExplorer({ corpusId }: Props) {
     if (revealRestore) {
       autoStatusLockRef.current = "bookmark-restore";
       suppressSelectionClearStatusRef.current = true;
+      setRevealSuppressedEvidence(false);
+      setSuppressedBookmarkOffer(null);
       scheduleInvestigationViewApply(
         revealRestore,
         "Restored prior Explorer view",
@@ -3756,7 +4062,7 @@ export function LogExplorer({ corpusId }: Props) {
     try {
       const page = await hostLogQueryEventRows(
         corpusId,
-        filtersToQuery(filters, {
+        queryWithNoise(filters, {
           sources: sourceFilter,
           afterSeq: cur.afterSeq,
           afterTs: cur.afterTs,
@@ -3859,7 +4165,7 @@ export function LogExplorer({ corpusId }: Props) {
     try {
       const page = await hostLogQueryEventRows(
         corpusId,
-        filtersToQuery(filters, {
+        queryWithNoise(filters, {
           sources: sourceFilter,
           beforeSeq: cur.beforeSeq,
           beforeTs: cur.beforeTs,
@@ -4035,7 +4341,7 @@ export function LogExplorer({ corpusId }: Props) {
             (filters.keyword
               ? centeredLiteralExcerpt(event.message, filters.keyword)
               : event.message),
-      ),
+        ),
       baseRowH,
     );
     const firstLaneRows = estimated[visibleLanes[0]?.id ?? ""] ?? [];
@@ -4457,6 +4763,20 @@ export function LogExplorer({ corpusId }: Props) {
           >
             Lanes…
           </button>
+          <NoisePolicyControl
+            document={suppressionDocument}
+            hiddenCount={suppressedEventCount}
+            state={suppressionLoadState}
+            error={suppressionLoadError}
+            narrow={breakpoint === "narrow"}
+            triggerRef={noisePolicyTriggerRef}
+            onRetry={() => {
+              void loadSuppressionPolicy().catch(() => {
+                // The visible policy error remains until retry succeeds.
+              });
+            }}
+            onMutate={mutateSuppressionRule}
+          />
           {breakpoint !== "narrow" ? (
             <ToolbarPicker
               label="Lanes"
@@ -4648,6 +4968,44 @@ export function LogExplorer({ corpusId }: Props) {
         </div>
       </header>
 
+      {suppressionLoadState !== "ready" ? (
+        <div
+          className={`log-explorer__policy-gate ${
+            suppressionLoadState === "error"
+              ? "log-explorer__policy-gate--error"
+              : ""
+          }`}
+          role={suppressionLoadState === "error" ? "alert" : "status"}
+          data-testid="noise-policy-gate"
+        >
+          {suppressionLoadState === "error" ? (
+            <>
+              <span>
+                Noise policy could not be loaded. Evidence is withheld to avoid
+                showing an ungoverned view. {suppressionLoadError}
+              </span>
+              <button
+                type="button"
+                className="log-explorer__btn"
+                onClick={() => {
+                  void loadSuppressionPolicy().catch(() => {
+                    // Keep the retryable error visible.
+                  });
+                }}
+              >
+                Retry policy
+              </button>
+            </>
+          ) : (
+            <span>
+              {suppressionLoadState === "refreshing"
+                ? "Applying noise policy and refreshing every evidence view…"
+                : "Loading noise policy before evidence…"}
+            </span>
+          )}
+        </div>
+      ) : null}
+
       {laneEditorOpen && (
         <div
           ref={laneEditorRef}
@@ -4753,9 +5111,7 @@ export function LogExplorer({ corpusId }: Props) {
                 <button
                   type="button"
                   className={`log-explorer__btn ${
-                    lane.sources.length === 0
-                      ? "log-explorer__btn--active"
-                      : ""
+                    lane.sources.length === 0 ? "log-explorer__btn--active" : ""
                   }`}
                   aria-pressed={lane.sources.length === 0}
                   disabled={lane.sources.length === 0}
@@ -4817,8 +5173,7 @@ export function LogExplorer({ corpusId }: Props) {
                         ? ""
                         : ` (${Math.max(
                             0,
-                            laneSourceCatalogTotal -
-                              laneSourceCatalog.length,
+                            laneSourceCatalogTotal - laneSourceCatalog.length,
                           )} remaining)`
                     }`}
               </button>
@@ -4975,9 +5330,7 @@ export function LogExplorer({ corpusId }: Props) {
                 ref={findInputRef}
                 className="log-explorer__search"
                 placeholder={
-                  findMatchMode === "regex"
-                    ? "Regex…"
-                    : "Find logs…"
+                  findMatchMode === "regex" ? "Regex…" : "Find logs…"
                 }
                 value={findDraft}
                 onChange={(e) => {
@@ -5001,6 +5354,12 @@ export function LogExplorer({ corpusId }: Props) {
                   type="button"
                   className="log-explorer__btn"
                   data-testid="log-explorer-find-run"
+                  disabled={suppressionLoadState !== "ready"}
+                  title={
+                    suppressionLoadState === "ready"
+                      ? "Find matching log evidence"
+                      : "Find becomes available after the noise policy loads"
+                  }
                   onClick={() => void runFind()}
                 >
                   Find
@@ -5530,7 +5889,31 @@ export function LogExplorer({ corpusId }: Props) {
                     {bookmarkRevealState === "revealed" ? " (temp reveal)" : ""}
                   </button>
                 ) : null}
-                {bookmarkRevealState === "missing" ? (
+                {suppressedBookmarkOffer ? (
+                  <div
+                    className="log-explorer__suppressed-bookmark-offer"
+                    data-testid="suppressed-bookmark-offer"
+                    role="note"
+                  >
+                    <span>
+                      Hidden by active noise rule for template{" "}
+                      {suppressedBookmarkOffer.templateId}. The rule will not be
+                      changed.
+                    </span>
+                    <button
+                      type="button"
+                      className="log-explorer__btn log-explorer__btn--active"
+                      onClick={() =>
+                        void activateBookmark(
+                          suppressedBookmarkOffer.bookmark,
+                          true,
+                        )
+                      }
+                    >
+                      Reveal suppressed evidence
+                    </button>
+                  </div>
+                ) : bookmarkRevealState === "missing" ? (
                   <div
                     className="log-explorer__chat-preview"
                     data-testid="bookmark-missing"
@@ -5681,7 +6064,7 @@ export function LogExplorer({ corpusId }: Props) {
             <TimelineNavigator
               corpusId={corpusId}
               ready={timelineReady}
-              filter={filtersToQuery(filters, {
+              filter={queryWithNoise(filters, {
                 afterSeq: null,
                 afterTs: null,
                 beforeSeq: null,
@@ -6108,6 +6491,18 @@ export function LogExplorer({ corpusId }: Props) {
                   Copy
                 </button>
                 <button
+                  ref={suppressTemplateTriggerRef}
+                  type="button"
+                  className="log-explorer__btn"
+                  disabled={
+                    suppressionLoadState !== "ready" ||
+                    detail.templateId == null
+                  }
+                  onClick={() => setSuppressTemplateId(detail.templateId)}
+                >
+                  Suppress template…
+                </button>
+                <button
                   type="button"
                   className="log-explorer__btn"
                   data-testid="detail-close"
@@ -6412,6 +6807,27 @@ export function LogExplorer({ corpusId }: Props) {
           triggerRef={investigationEditTriggerRef}
           onSave={(draft) => void saveEditedInvestigationItem(draft)}
           onDismiss={() => setEditInvestigationItem(null)}
+        />
+      ) : null}
+
+      {suppressTemplateId != null && suppressionDocument ? (
+        <SuppressTemplateDialog
+          corpusId={corpusId}
+          templateId={suppressTemplateId}
+          policyRevision={suppressionDocument.revision}
+          narrow={breakpoint === "narrow"}
+          triggerRef={suppressTemplateTriggerRef}
+          onReloadPolicy={async () => {
+            const document = await refreshSuppressionPolicy();
+            return document.revision;
+          }}
+          onActivated={async () => {
+            await refreshSuppressionPolicy();
+            setStatus(
+              `Noise rule activated for template ${suppressTemplateId}; Explorer and linked analysis refreshed`,
+            );
+          }}
+          onDismiss={() => setSuppressTemplateId(null)}
         />
       ) : null}
 

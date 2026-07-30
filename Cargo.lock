@@ -507,6 +507,7 @@ dependencies = [
  "http-body",
  "http-body-util",
  "keyring",
+ "libc",
  "notify",
  "object_store",
  "regex",
