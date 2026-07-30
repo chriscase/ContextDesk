@@ -1663,6 +1663,87 @@ describe("LogExplorer shell", () => {
     await waitFor(() => expect(document.activeElement).toBe(columnsTrigger));
   });
 
+  it("dismisses toolbar peers in capture while preserving portaled help branches", async () => {
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+
+    const lanesTrigger = screen.getByTestId("lane-editor-toggle");
+    for (const [testId, menuName] of [
+      ["time-link-picker", "Time options"],
+      ["lane-count-picker", "Lanes options"],
+      ["row-mode-picker", "Rows options"],
+      ["density-picker", "Density options"],
+      ["columns-menu", "Columns actions"],
+    ] as const) {
+      const trigger = openToolbarPicker(testId);
+      const menu = screen.getByRole("menu", { name: menuName });
+      await waitFor(() =>
+        expect(menu.contains(document.activeElement)).toBe(true),
+      );
+      fireEvent.pointerDown(screen.getByTestId("log-explorer"));
+      expect(screen.queryByRole("menu", { name: menuName })).toBeNull();
+      await waitFor(() => expect(document.activeElement).toBe(trigger));
+    }
+
+    openToolbarPicker("time-link-picker");
+    const stopOutsidePointer = (event: Event) => event.stopPropagation();
+    lanesTrigger.addEventListener("pointerdown", stopOutsidePointer);
+    fireEvent.pointerDown(lanesTrigger);
+    lanesTrigger.removeEventListener("pointerdown", stopOutsidePointer);
+    lanesTrigger.focus();
+    expect(screen.queryByRole("menu", { name: "Time options" })).toBeNull();
+    expect(document.activeElement).toBe(lanesTrigger);
+
+    openToolbarPicker("density-picker");
+    const densityMenu = screen.getByRole("menu", {
+      name: "Density options",
+    });
+    await waitFor(() =>
+      expect(densityMenu.contains(document.activeElement)).toBe(true),
+    );
+    act(() => lanesTrigger.focus());
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("menu", { name: "Density options" }),
+      ).toBeNull(),
+    );
+    expect(document.activeElement).toBe(lanesTrigger);
+
+    const columnsTrigger = openToolbarPicker("columns-menu");
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole("menuitem", { name: /^Auto-fit columns\b/ }),
+      ),
+    );
+    fireEvent.pointerDown(screen.getByTestId("log-explorer"));
+    await waitFor(() => expect(document.activeElement).toBe(columnsTrigger));
+
+    openToolbarPicker("time-link-picker");
+    fireEvent.click(screen.getByTestId("row-mode-picker"));
+    expect(screen.queryByRole("menu", { name: "Time options" })).toBeNull();
+    const rowsMenu = screen.getByRole("menu", { name: "Rows options" });
+
+    const helpTrigger = within(rowsMenu).getByRole("button", {
+      name: "Help: Long-line reading help",
+    });
+    fireEvent.click(helpTrigger);
+    const helpPanel = await screen.findByTestId("help-tip-popover");
+    fireEvent.pointerDown(helpPanel);
+    expect(screen.getByRole("menu", { name: "Rows options" })).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByTestId("help-tip-popover")).toBeNull(),
+    );
+    expect(screen.getByRole("menu", { name: "Rows options" })).toBeTruthy();
+    expect(document.activeElement).toBe(helpTrigger);
+
+    fireEvent.keyDown(helpTrigger, { key: "Escape" });
+    const rowsTrigger = screen.getByTestId("row-mode-picker");
+    await waitFor(() => expect(document.activeElement).toBe(rowsTrigger));
+    expect(screen.queryByRole("menu", { name: "Rows options" })).toBeNull();
+  });
+
   it("starts new investigations with compact payload-first rows", async () => {
     render(<LogExplorer corpusId="c1" />);
     await screen.findByText(/auth failure/);

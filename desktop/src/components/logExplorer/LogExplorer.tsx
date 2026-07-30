@@ -15,6 +15,10 @@ import {
   type ReactNode,
 } from "react";
 import {
+  DismissibleLayerContext,
+  useDismissibleLayer,
+} from "../../hooks/useDismissibleLayer";
+import {
   createLogSearchRequestId,
   hostCancelLogSearch,
   hostGetBranding,
@@ -200,6 +204,8 @@ type ToolbarPickerOption<T extends string> = {
   visual?: ReactNode;
 };
 
+const TOOLBAR_DISMISSIBLE_GROUP = "log-explorer-toolbar";
+
 function ToolbarPicker<T extends string>({
   label,
   value,
@@ -223,27 +229,29 @@ function ToolbarPicker<T extends string>({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const selected = options.find((option) => option.value === value);
 
-  const close = useCallback((restoreFocus = true) => {
+  const close = useCallback((_restoreFocus = true) => {
     setOpen(false);
-    if (restoreFocus) {
-      queueMicrotask(() => triggerRef.current?.focus());
-    }
+    queueMicrotask(() => {
+      if (
+        document.activeElement == null ||
+        document.activeElement === document.body ||
+        rootRef.current?.contains(document.activeElement)
+      ) {
+        triggerRef.current?.focus();
+      }
+    });
   }, []);
+
+  useDismissibleLayer({
+    open,
+    layerId: id,
+    peerGroup: TOOLBAR_DISMISSIBLE_GROUP,
+    rootRef,
+    onDismiss: close,
+  });
 
   useEffect(() => {
     if (!open) return;
-    const onClick = (event: MouseEvent) => {
-      const target = event.target as Node | null;
-      if (target && !rootRef.current?.contains(target)) close(false);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        close();
-      }
-    };
-    document.addEventListener("click", onClick);
-    document.addEventListener("keydown", onKeyDown);
     queueMicrotask(() => {
       rootRef.current
         ?.querySelector<HTMLElement>(
@@ -251,11 +259,7 @@ function ToolbarPicker<T extends string>({
         )
         ?.focus();
     });
-    return () => {
-      document.removeEventListener("click", onClick);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [close, open]);
+  }, [open]);
 
   const moveOptionFocus = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
     if (
@@ -303,50 +307,52 @@ function ToolbarPicker<T extends string>({
         <IconChevronDown />
       </button>
       {open ? (
-        <div
-          id={id}
-          className="log-explorer__picker-menu"
-          role="menu"
-          aria-label={`${label} options`}
-        >
-          {options.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              className="log-explorer__picker-option"
-              role="menuitemradio"
-              aria-checked={option.value === value}
-              disabled={option.disabled}
-              title={option.disabledReason}
-              data-value={option.value}
-              onKeyDown={moveOptionFocus}
-              onClick={() => {
-                onChange(option.value);
-                close();
-              }}
-            >
-              {option.visual ? (
-                <span className="log-explorer__picker-visual">
-                  {option.visual}
+        <DismissibleLayerContext.Provider value={id}>
+          <div
+            id={id}
+            className="log-explorer__picker-menu"
+            role="menu"
+            aria-label={`${label} options`}
+          >
+            {options.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                className="log-explorer__picker-option"
+                role="menuitemradio"
+                aria-checked={option.value === value}
+                disabled={option.disabled}
+                title={option.disabledReason}
+                data-value={option.value}
+                onKeyDown={moveOptionFocus}
+                onClick={() => {
+                  onChange(option.value);
+                  close();
+                }}
+              >
+                {option.visual ? (
+                  <span className="log-explorer__picker-visual">
+                    {option.visual}
+                  </span>
+                ) : null}
+                <span className="log-explorer__picker-copy">
+                  <span className="log-explorer__picker-option-title">
+                    {option.label}
+                    {option.value === value ? (
+                      <span aria-hidden="true"> ✓</span>
+                    ) : null}
+                  </span>
+                  <span className="log-explorer__picker-description">
+                    {option.disabledReason ?? option.description}
+                  </span>
                 </span>
-              ) : null}
-              <span className="log-explorer__picker-copy">
-                <span className="log-explorer__picker-option-title">
-                  {option.label}
-                  {option.value === value ? (
-                    <span aria-hidden="true"> ✓</span>
-                  ) : null}
-                </span>
-                <span className="log-explorer__picker-description">
-                  {option.disabledReason ?? option.description}
-                </span>
-              </span>
-            </button>
-          ))}
-          {footer ? (
-            <div className="log-explorer__picker-footer">{footer}</div>
-          ) : null}
-        </div>
+              </button>
+            ))}
+            {footer ? (
+              <div className="log-explorer__picker-footer">{footer}</div>
+            ) : null}
+          </div>
+        </DismissibleLayerContext.Provider>
       ) : null}
     </div>
   );
@@ -372,33 +378,33 @@ function ToolbarActionMenu({
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
-  const close = useCallback((restoreFocus = true) => {
+  const close = useCallback((_restoreFocus = true) => {
     setOpen(false);
-    if (restoreFocus) queueMicrotask(() => triggerRef.current?.focus());
+    queueMicrotask(() => {
+      if (
+        document.activeElement == null ||
+        document.activeElement === document.body ||
+        rootRef.current?.contains(document.activeElement)
+      ) {
+        triggerRef.current?.focus();
+      }
+    });
   }, []);
+
+  useDismissibleLayer({
+    open,
+    layerId: id,
+    peerGroup: TOOLBAR_DISMISSIBLE_GROUP,
+    rootRef,
+    onDismiss: close,
+  });
 
   useEffect(() => {
     if (!open) return;
-    const onClick = (event: MouseEvent) => {
-      const target = event.target as Node | null;
-      if (target && !rootRef.current?.contains(target)) close(false);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        close();
-      }
-    };
-    document.addEventListener("click", onClick);
-    document.addEventListener("keydown", onKeyDown);
     queueMicrotask(() =>
       rootRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus(),
     );
-    return () => {
-      document.removeEventListener("click", onClick);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [close, open]);
+  }, [open]);
 
   const moveFocus = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
     if (
