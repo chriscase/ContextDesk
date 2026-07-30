@@ -1783,7 +1783,7 @@ impl ToolHost {
         ));
         for bucket in concentrated_buckets {
             let mut levels = bucket.by_level.iter().collect::<Vec<_>>();
-            levels.sort_by(|(left, _), (right, _)| left.cmp(right));
+            levels.sort_by_key(|(level, _)| *level);
             let line = format!(
                 "- start={} width={} count={} error_or_fatal_count={} levels={levels:?}\n",
                 bucket.start,
