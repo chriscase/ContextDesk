@@ -1,4 +1,12 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
 import type {
   ExplorerEventDto,
   InvestigationViewRecipeDto,
@@ -80,6 +88,7 @@ export function InvestigationModeControl({
   onChange: (mode: InvestigationRailMode) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const layerId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const options: {
@@ -102,6 +111,18 @@ export function InvestigationModeControl({
     },
   ];
   const current = options.find((option) => option.mode === mode)!;
+  const dismiss = useCallback((restoreFocus: boolean) => {
+    setOpen(false);
+    if (restoreFocus) queueMicrotask(() => triggerRef.current?.focus());
+  }, []);
+
+  useDismissibleLayer({
+    open,
+    layerId,
+    peerGroup: "investigation-rail-menu",
+    rootRef,
+    onDismiss: dismiss,
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -112,32 +133,6 @@ export function InvestigationModeControl({
         )
         ?.focus(),
     );
-    const onPointerDown = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (rootRef.current?.contains(target)) return;
-      const focusableTarget =
-        target instanceof Element
-          ? target.closest(
-              "button, a[href], input, select, textarea, [tabindex]:not([tabindex='-1'])",
-            )
-          : null;
-      setOpen(false);
-      if (!focusableTarget) {
-        window.setTimeout(() => triggerRef.current?.focus(), 0);
-      }
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      setOpen(false);
-      queueMicrotask(() => triggerRef.current?.focus());
-    };
-    document.addEventListener("mousedown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
   }, [open]);
 
   return (

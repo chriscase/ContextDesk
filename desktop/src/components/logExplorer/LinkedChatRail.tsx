@@ -56,6 +56,7 @@ import {
   type LogNavAction,
 } from "../../lib/logExplorer/logNav";
 import { useMessageWindow } from "../../hooks/useMessageWindow";
+import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
 import { HELP_LINKED_CHAT_CONTEXT } from "../../lib/helpContent";
 import { HelpTip } from "../HelpTip";
 import { IconChevronRight } from "../icons";
@@ -387,6 +388,7 @@ export function LinkedChatRail({
   const [modelSaving, setModelSaving] = useState(false);
   const modelHelpId = useId();
   const composerHelpId = useId();
+  const switcherLayerId = useId();
   /**
    * Turn-owned UI state is keyed by chat. A pending/error/completed turn for
    * chat A must not leak into chat B when the user switches mid-turn (#543).
@@ -1245,6 +1247,22 @@ export function LinkedChatRail({
     );
   }, [chats, switcherQuery]);
 
+  const dismissSwitcher = useCallback((restoreFocus: boolean) => {
+    setSwitcherOpen(false);
+    if (restoreFocus) {
+      queueMicrotask(() => switcherToggleRef.current?.focus());
+    }
+  }, []);
+
+  useDismissibleLayer({
+    open: switcherOpen,
+    layerId: switcherLayerId,
+    peerGroup: "investigation-rail-menu",
+    rootRef: switcherRef,
+    triggerRef: switcherToggleRef,
+    onDismiss: dismissSwitcher,
+  });
+
   useEffect(() => {
     if (!switcherOpen) return;
     queueMicrotask(() => {
@@ -1256,20 +1274,6 @@ export function LinkedChatRail({
       const first = switcher.querySelector<HTMLButtonElement>('[role="option"]');
       (selected ?? first)?.focus();
     });
-    const dismissOutside = (event: PointerEvent) => {
-      const target = event.target;
-      if (!(target instanceof Node)) return;
-      if (
-        switcherRef.current?.contains(target) ||
-        switcherToggleRef.current?.contains(target)
-      ) {
-        return;
-      }
-      setSwitcherOpen(false);
-      queueMicrotask(() => switcherToggleRef.current?.focus());
-    };
-    document.addEventListener("pointerdown", dismissOutside);
-    return () => document.removeEventListener("pointerdown", dismissOutside);
   }, [switcherOpen]);
 
   const activeMeta = chats.find((c) => c.id === activeChatId);
@@ -1317,12 +1321,6 @@ export function LinkedChatRail({
   };
 
   const onSwitcherKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (e.key === "Escape") {
-      e.preventDefault();
-      setSwitcherOpen(false);
-      switcherToggleRef.current?.focus();
-      return;
-    }
     const options = Array.from(
       e.currentTarget.querySelectorAll<HTMLButtonElement>('[role="option"]'),
     );
