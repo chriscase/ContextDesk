@@ -44,4 +44,4 @@ cat >"$ROOT/manifest.json" <<EOF
 EOF
 
 echo "wrote $ROOT"
-echo "validate with: cargo run -p cd-core --bin cd-validate-incident-evidence -- $ROOT"
+echo "validate with: cargo run -p cd-core --bin cd-validate-incident-evidence -- validate $ROOT"

@@ -102,7 +102,22 @@
             "note": { "type": "string", "maxLength": 512 }
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "role": { "const": "operational_metrics" }
+            },
+            "required": ["role"]
+          },
+          "then": {
+            "properties": {
+              "mediaType": { "const": "application/json" }
+            }
+          }
+        }
+      ]
     },
     "logComponent": {
       "allOf": [

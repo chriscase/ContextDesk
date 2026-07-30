@@ -31,6 +31,37 @@ public class Produce {
     long bytes = Files.size(logPath);
     String hex = sha256Hex(logPath);
 
+    String metricsRel = "metrics/operational-metrics.v1.json";
+    Path metricsPath = root.resolve(metricsRel);
+    Files.createDirectories(metricsPath.getParent());
+    Files.writeString(
+        metricsPath,
+        """
+        {
+          "schemaVersion": 1,
+          "id": "example-performance",
+          "name": "Example performance",
+          "series": [
+            {
+              "id": "cpu-percent",
+              "name": "CPU",
+              "unit": "%",
+              "timeQuality": "wall",
+              "provenance": {
+                "source": "synthetic/example-performance-monitor",
+                "collector": "example-java-collector"
+              },
+              "points": [
+                { "timestamp": 1705312800, "value": 20 },
+                { "timestamp": 1705312860, "value": 35 }
+              ]
+            }
+          ]
+        }
+        """);
+    long metricsBytes = Files.size(metricsPath);
+    String metricsHex = sha256Hex(metricsPath);
+
     String manifest =
         "{\n"
             + "  \"schemaId\": \"contextdesk.incident_evidence.v1\",\n"
@@ -44,7 +75,8 @@ public class Produce {
             + "    \"containsPii\": false\n"
             + "  },\n"
             + "  \"timeBasis\": { \"timezone\": \"UTC\", \"timezoneResolved\": true },\n"
-            + "  \"components\": [{\n"
+            + "  \"components\": [\n"
+            + "  {\n"
             + "    \"id\": \"log-app\",\n"
             + "    \"role\": \"log\",\n"
             + "    \"path\": \""
@@ -58,7 +90,22 @@ public class Produce {
             + hex
             + "\",\n"
             + "    \"sourceLabel\": \"app\"\n"
-            + "  }]\n"
+            + "  },\n"
+            + "  {\n"
+            + "    \"id\": \"metrics-performance\",\n"
+            + "    \"role\": \"operational_metrics\",\n"
+            + "    \"path\": \""
+            + metricsRel
+            + "\",\n"
+            + "    \"mediaType\": \"application/json\",\n"
+            + "    \"bytes\": "
+            + metricsBytes
+            + ",\n"
+            + "    \"sha256\": \""
+            + metricsHex
+            + "\"\n"
+            + "  }\n"
+            + "  ]\n"
             + "}\n";
     Files.writeString(root.resolve("manifest.json"), manifest);
     System.err.println("wrote " + root.toAbsolutePath());

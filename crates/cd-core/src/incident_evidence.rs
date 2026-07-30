@@ -441,6 +441,14 @@ pub fn validate_component_inventory(
                 format!("{base}.mediaType"),
                 format!("mediaType MUST be non-empty and <= {MAX_MEDIA_TYPE_CHARS} characters"),
             ));
+            ok_io = false;
+        } else if c.role == "operational_metrics" && c.media_type != "application/json" {
+            diagnostics.push(Diagnostic::new(
+                "metrics_media_type_invalid",
+                format!("{base}.mediaType"),
+                "operational_metrics mediaType MUST be application/json",
+            ));
+            ok_io = false;
         }
         if let Err(msg) = validate_relative_path(&c.path) {
             diagnostics.push(Diagnostic::new("unsafe_path", format!("{base}.path"), msg));
@@ -2262,6 +2270,31 @@ mod tests {
                 .filter(|diagnostic| diagnostic.code == "aggregate_too_large")
                 .count(),
             1,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn metrics_role_requires_application_json_before_payload_io() {
+        let component = ComponentEntry {
+            id: "metrics".into(),
+            role: "operational_metrics".into(),
+            path: "metrics/performance.json".into(),
+            media_type: "text/plain".into(),
+            bytes: 0,
+            sha256: "0".repeat(64),
+            source_label: None,
+            time_basis: None,
+            lineage: None,
+        };
+        let mut diagnostics = Vec::new();
+        let inventory = validate_component_inventory(&[component], &mut diagnostics);
+
+        assert_eq!(inventory.path_ok_for_io, vec![false]);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "metrics_media_type_invalid"),
             "{diagnostics:?}"
         );
     }

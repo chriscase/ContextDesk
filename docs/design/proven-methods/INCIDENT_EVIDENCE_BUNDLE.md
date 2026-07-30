@@ -61,7 +61,7 @@ flowchart LR
 | Bundle root | Directory or deterministic ZIP | yes | Contains capped root `manifest.json` |
 | Component path | Relative POSIX path | yes | No absolute/traversal/drive prefixes |
 | Component hash | 64 lowercase hex | yes | Stream-verified SHA-256 |
-| Operational metrics document | Existing v1 series JSON | when role used | `schemaVersion: 1` + `series` array; no second series schema |
+| Operational metrics document | Published [`operational-metrics.v1.json`](../../specs/incident-evidence/schemas/operational-metrics.v1.json) | when role used | `schemaVersion: 1`, bounded series/points, provenance, time quality; no second series schema |
 
 ### Outputs
 
@@ -78,6 +78,9 @@ flowchart LR
 - No product publication from the offline tool.
 - Evidence bundles ≠ `contextdesk.log_corpus.v1` analysis packages ≠ #532 cases.
 - Reuse operational-metrics v1; do not redefine series samples.
+- Treat JSON Schema as structural tooling; the offline validator is
+  authoritative for payload bytes, hashes, filesystem/archive safety, IANA
+  zones, sentinels, and cross-component limits.
 
 ![Trust boundary between producer, offline validator, and residual product publish](../../help/assets/incident-evidence-trust.svg)
 
@@ -134,8 +137,8 @@ diagnostics=N
 
 Help explains producer workflow, bundle vs analysis package vs Investigation,
 privacy review, and troubleshooting. Product import UX is residual and must not
-be claimed shipped by this chapter. Diagrams use theme-safe SVG with
-`currentColor`.
+be claimed shipped by this chapter. Diagrams use explicit theme-safe colors
+that remain legible when embedded as images in light and dark themes.
 
 ![Producer validates before transfer; import residual](../../help/assets/incident-evidence-lifecycle.svg)
 
@@ -152,6 +155,7 @@ be claimed shipped by this chapter. Diagrams use theme-safe SVG with
 | Dishonest timezone | fail `timezone_dishonest` |
 | Evaluator-truth sentinel | fail `forbidden_sentinel` |
 | Unknown role | fail `unknown_role` |
+| Metrics role with non-JSON media type | fail `metrics_media_type_invalid` in directory and ZIP forms |
 | Deterministic archive pack + validate | byte-identical output; directory/ZIP rule parity |
 
 ## 13. ContextDesk production anchors
@@ -184,7 +188,43 @@ be claimed shipped by this chapter. Diagrams use theme-safe SVG with
 4. Keep analysis packages and Investigation documents on separate schema ids.
 5. Treat unknown roles as fail-closed until a documented expansion ships.
 
-## 16. Open residuals
+## 16. Coding-agent implementation prompt
+
+This prompt is intentionally architecture-neutral. Replace bracketed values;
+the agent should not need ContextDesk validator source:
+
+```text
+Add a ContextDesk Incident Evidence Bundle v1 exporter to [APPLICATION] using
+[LANGUAGE/BUILD SYSTEM]. Treat docs/specs/INCIDENT_EVIDENCE_BUNDLE_V1.md and
+its linked JSON Schemas as authoritative.
+
+Authorized inputs:
+- logs: [LOCATIONS OR COLLECTION API]
+- operational metrics: [LOCATIONS/API OR NONE]
+- bounded attachments: [POLICY OR NONE]
+
+Emit stable relative paths, exact byte lengths, lowercase SHA-256 hashes,
+producer identity, privacy declarations, and explicit time-basis provenance.
+Reuse docs/specs/incident-evidence/schemas/operational-metrics.v1.json without
+changing its series/point schema, and declare it as application/json. Never
+guess a timezone, follow symlinks, include credentials/private absolute paths,
+or include diagnoses/evaluator truth. JSON Schema is structural only: run the
+offline validator for bytes, hashes, paths, timezones, sentinels, limits, and
+archive safety.
+
+Start from the nearest example in examples/incident-evidence-producers/.
+Generate a fully synthetic fixture and prove:
+1. directory validation succeeds;
+2. two independent pack runs are byte-identical;
+3. ZIP validation succeeds;
+4. duplicate basenames retain distinct relative identities;
+5. a deliberate hash or unsafe-path mutation fails closed.
+
+Report every assumption the public specification did not settle. Do not read
+crates/cd-core/src/incident_evidence*.rs to fill documentation gaps.
+```
+
+## 17. Open residuals
 
 - Product import/attachment UX for directory and archive forms (#763).
 - Round-trip product tests once import lands.

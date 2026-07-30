@@ -54,6 +54,27 @@ Pack is deterministic (Stored compression, fixed timestamps, sorted paths). Use
 
 Copy/paste templates live in `examples/incident-evidence-producers/`.
 
+## Delegate an exporter to a coding agent
+
+The specification and schemas are intended to be sufficient without reading
+ContextDesk source code. Give the agent the application-specific locations of
+authorized logs/metrics, then use this prompt:
+
+```text
+Implement a ContextDesk Incident Evidence Bundle v1 exporter for this
+application. Follow docs/specs/INCIDENT_EVIDENCE_BUNDLE_V1.md and its linked
+JSON Schemas exactly. Preserve stable relative source paths, emit exact byte
+counts and lowercase SHA-256 hashes, reuse operational-metrics v1 unchanged,
+and declare privacy/timezone uncertainty honestly. Use the nearest producer
+template under examples/incident-evidence-producers/. Generate a synthetic
+test bundle, validate its directory, pack it twice and prove the ZIP bytes are
+identical, then validate the ZIP. Do not inspect validator implementation code,
+guess timezones, include credentials/private paths, or invent schema fields.
+```
+
+Replace only the application-specific collection step. The validator remains
+the authority for conformance.
+
 ## What the manifest declares
 
 | Area | Meaning |
@@ -68,11 +89,17 @@ Duplicate basenames are fine when relative paths differ
 
 ## Operational metrics
 
-Reuse the existing **operational-metrics v1** document shape (series, units,
-points, wall-clock quality, and **required series `provenance.source`** — the
-same rules as the production TypeScript validator). Do not invent a second
-series schema. Metrics sit beside logs only because the manifest lists both
-roles; a sibling folder alone does not create a product attachment.
+Reuse the published
+`docs/specs/incident-evidence/schemas/operational-metrics.v1.json` shape:
+series, native units, strictly increasing Unix-second points, wall-clock
+quality, and required series `provenance.source`. The bundle component must use
+role `operational_metrics` and media type `application/json`. Do not invent a
+second series schema. Metrics sit beside logs only because the manifest lists
+both roles; a sibling folder alone does not create a product attachment.
+
+JSON Schema checks structure. The offline validator is still required because
+it also verifies exact bytes and hashes, registered timezones, path
+containment, privacy sentinels, aggregate limits, and ZIP safety.
 
 ## Privacy review before sharing
 
@@ -88,6 +115,7 @@ roles; a sibling folder alone does not create a product attachment.
 | --- | --- |
 | `unsupported_schema_id` | Wrong or future schema id |
 | `unsafe_path` | Absolute path, `..`, drive letter, or backslash separators |
+| `metrics_media_type_invalid` | An `operational_metrics` component is not `application/json` |
 | `hash_mismatch` / `byte_count_mismatch` | File changed after hashing, or wrong digest case |
 | `timezone_dishonest` | `timezoneResolved=true` without a timezone value |
 | `payload_missing` | Manifest path does not match an on-disk relative file |

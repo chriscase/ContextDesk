@@ -75,11 +75,15 @@ const manifestSchema = JSON.parse(
 const componentSchema = JSON.parse(
   read("docs/specs/incident-evidence/schemas/component.v1.json"),
 );
+const metricsSchema = JSON.parse(
+  read("docs/specs/incident-evidence/schemas/operational-metrics.v1.json"),
+);
 
 const requiredFiles = [
   "docs/specs/INCIDENT_EVIDENCE_BUNDLE_V1.md",
   "docs/specs/incident-evidence/schemas/manifest.v1.json",
   "docs/specs/incident-evidence/schemas/component.v1.json",
+  "docs/specs/incident-evidence/schemas/operational-metrics.v1.json",
   "crates/cd-core/src/incident_evidence.rs",
   "crates/cd-core/src/incident_evidence_archive.rs",
   "crates/cd-core/src/bin/cd-validate-incident-evidence.rs",
@@ -88,6 +92,8 @@ const requiredFiles = [
   "examples/incident-evidence-producers/README.md",
   "examples/incident-evidence-producers/produce.py",
   "examples/incident-evidence-producers/produce.mjs",
+  "examples/incident-evidence-producers/Produce.java",
+  "examples/incident-evidence-producers/produce.sh",
   "fixtures/incident-evidence/valid/minimal-log-only/manifest.json",
   "fixtures/incident-evidence/valid/logs-plus-metrics/manifest.json",
   "fixtures/incident-evidence/metrics-parity/valid-with-provenance.json",
@@ -183,6 +189,54 @@ if (schemaBytesMax !== limits.MAX_PER_FILE_BYTES) {
     `component.bytes.maximum ${schemaBytesMax} != MAX_PER_FILE_BYTES ${limits.MAX_PER_FILE_BYTES}`,
   );
 }
+const metricsMaxSeries = extractSchemaMax(metricsSchema, [
+  "properties",
+  "series",
+  "maxItems",
+]);
+if (metricsMaxSeries !== limits.MAX_METRICS_SERIES) {
+  fail(
+    `operational-metrics series.maxItems ${metricsMaxSeries} != MAX_METRICS_SERIES ${limits.MAX_METRICS_SERIES}`,
+  );
+}
+const metricsMaxPoints = extractSchemaMax(metricsSchema, [
+  "$defs",
+  "series",
+  "properties",
+  "points",
+  "maxItems",
+]);
+if (metricsMaxPoints !== limits.MAX_METRICS_POINTS_PER_SERIES) {
+  fail(
+    `operational-metrics points.maxItems ${metricsMaxPoints} != MAX_METRICS_POINTS_PER_SERIES ${limits.MAX_METRICS_POINTS_PER_SERIES}`,
+  );
+}
+if (
+  !JSON.stringify(componentSchema.$defs.component).includes(
+    '"mediaType":{"const":"application/json"}',
+  )
+) {
+  fail("component schema does not bind operational_metrics to application/json");
+}
+if (!rust.includes('"metrics_media_type_invalid"')) {
+  fail("runtime does not bind operational_metrics to application/json");
+}
+
+const sentinelBlock = rust.match(
+  /pub const FORBIDDEN_MANIFEST_SENTINELS:[\s\S]*?];/,
+);
+if (!sentinelBlock) {
+  fail("Rust forbidden sentinel set not found");
+} else {
+  const sentinels = [...sentinelBlock[0].matchAll(/"([^"]+)"/g)].map(
+    (match) => match[1],
+  );
+  for (const sentinel of sentinels) {
+    if (!spec.includes(sentinel)) {
+      fail(`spec does not enumerate forbidden sentinel ${sentinel}`);
+    }
+  }
+}
 
 // Valid fixtures: schemaId + hashes match on-disk payloads
 for (const name of [
@@ -250,12 +304,34 @@ for (const s of lpm.series) {
 for (const rel of [
   "examples/incident-evidence-producers/produce.mjs",
   "examples/incident-evidence-producers/produce.py",
+  "examples/incident-evidence-producers/Produce.java",
 ]) {
   const t = read(rel);
   if (!t.includes(SCHEMA_ID)) fail(`${rel}: schema id`);
   if (!t.includes("createdAt") && !t.includes("created_at")) {
     fail(`${rel}: createdAt field`);
   }
+}
+if (
+  !read("examples/incident-evidence-producers/Produce.java").includes(
+    '"role\\": \\"operational_metrics',
+  )
+) {
+  fail("Java producer missing operational_metrics component");
+}
+if (
+  !read("examples/incident-evidence-producers/produce.sh").includes(
+    "-- validate $ROOT",
+  )
+) {
+  fail("shell producer guidance must use explicit validate subcommand");
+}
+if (
+  !read("README.md").includes(
+    "docs/help/log-analysis/incident-evidence-bundle.md",
+  )
+) {
+  fail("README missing public integration-guide link");
 }
 
 // Theme-safe diagrams: no currentColor (img/base64 cannot inherit page theme)

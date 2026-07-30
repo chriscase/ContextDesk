@@ -10,7 +10,8 @@ architecture.
 1. Create a directory tree (`logs/`, optional `metrics/`, optional `attachments/`).
 2. Write authorized log files with **relative** paths preserved.
 3. Optionally write one operational-metrics **v1** JSON document (reuse the
-   shipped series schema; do not invent another).
+   [shipped series schema](../../docs/specs/incident-evidence/schemas/operational-metrics.v1.json);
+   do not invent another).
 4. Hash each file (SHA-256, lowercase hex) and record exact byte lengths.
 5. Write `manifest.json` with `schemaId`, producer, privacy, timeBasis, components.
 6. Validate offline:
@@ -30,6 +31,12 @@ cargo run -p cd-core --bin cd-validate-incident-evidence -- validate ./my-bundle
 | `Produce.java` | Java 17+ |
 | `produce.mjs` | JavaScript / TypeScript-friendly ESM |
 | `produce.sh` | shell + `shasum` / `openssl` |
+
+The [normative bundle specification](../../docs/specs/INCIDENT_EVIDENCE_BUNDLE_V1.md)
+defines identity, privacy, timestamp, path, and bound semantics. JSON Schema is
+helpful structural tooling, but only the offline validator checks payload
+hashes, exact bytes, path containment, timezones, privacy sentinels, and ZIP
+safety.
 
 ## Privacy
 

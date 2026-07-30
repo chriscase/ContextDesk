@@ -2515,6 +2515,17 @@ mod tests {
     }
 
     #[test]
+    fn archive_and_directory_reject_non_json_metrics_media_type() {
+        dir_and_archive_share_inventory_code(
+            |man| {
+                man["components"][0]["role"] = serde_json::json!("operational_metrics");
+                man["components"][0]["mediaType"] = serde_json::json!("text/plain");
+            },
+            "metrics_media_type_invalid",
+        );
+    }
+
+    #[test]
     fn archive_and_directory_reject_overlong_source_label() {
         dir_and_archive_share_inventory_code(
             |man| {

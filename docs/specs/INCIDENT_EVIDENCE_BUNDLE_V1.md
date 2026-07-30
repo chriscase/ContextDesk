@@ -18,7 +18,7 @@ Language follows RFC 2119: **MUST**, **MUST NOT**, **SHOULD**, **MAY**.
 | Exact schema id | `contextdesk.incident_evidence.v1` |
 | Manifest field | `schemaId` (string, exact match required) |
 | Reader capability integer | `minReaderVersion` (u32); this document defines reader capability **1** |
-| Operational metrics document | Reuse existing v1 document shape (`schemaVersion: 1` series document); do **not** invent a parallel metric-series schema |
+| Operational metrics document | [`operational-metrics.v1.json`](incident-evidence/schemas/operational-metrics.v1.json), `schemaVersion: 1`; do **not** invent a parallel metric-series schema |
 
 ### Rules
 
@@ -105,6 +105,13 @@ The root document **MUST** be a single JSON object named `manifest.json` at the 
 
 Unknown top-level fields **MAY** be present and **MUST** be ignored by v1 readers that do not understand them (unless listed in a future deny list).
 
+`bundleId` identifies this producer export for provenance and diagnostics. It is
+not a ContextDesk corpus id, deduplication key, or update instruction.
+`createdAt` is when the producer completed the manifest, not the beginning or
+end of the incident. Producers **SHOULD** use a collision-resistant stable id
+within their own system, and **MUST NOT** reuse an id to imply that ContextDesk
+should overwrite an earlier import.
+
 ---
 
 ## 4. Components
@@ -133,7 +140,7 @@ Optional:
 | Role | Meaning |
 | --- | --- |
 | `log` | Raw authorized log payload (text/JSONL/etc.). Nested relative paths preserve multi-source identity. |
-| `operational_metrics` | One operational-metrics **v1 document** (series/points). Referenced schema is the shipped metrics v1 document (same rules as the production TypeScript `validateOperationalMetricsDocument`, including **required series `provenance.source`** and `timeQuality`). |
+| `operational_metrics` | One operational-metrics **v1 document** (series/points), with `mediaType` exactly `application/json`. Validate against [`operational-metrics.v1.json`](incident-evidence/schemas/operational-metrics.v1.json) and the offline validator; every series requires `provenance.source` and `timeQuality`. |
 | `attachment` | Bounded supporting artifact (screenshot, config excerpt). Not ambient chat context without future product governance. |
 | `readme` | Optional human notes. **MUST NOT** contain evaluator truth, expected diagnoses, or private credentials. |
 
@@ -169,7 +176,23 @@ Shareable runtime bundles **MUST NOT** contain:
 - credentials, API keys, session tokens;
 - configured model inventories.
 
-Validators **MUST** reject component paths and declared `log` / `readme` payloads that embed the frozen evaluator-truth sentinel set defined for conformance (for example `evaluator_truth`, case-insensitively). Payload scanning **MUST** be streaming, happen in the same bounded pass as hashing, and detect sentinels split across read-chunk boundaries. This frozen check is a narrow fixture-governance safeguard, not a claim of general content classification. Path/id/manifest fields **MUST** always be checked.
+Validators **MUST** reject component paths and declared `log` / `readme`
+payloads that embed any member of this frozen, case-insensitive conformance set:
+
+```text
+evaluator_truth
+evaluator-truth
+answer_key
+answer-key
+expected_diagnosis
+truth_inventory
+company-data
+```
+
+Payload scanning **MUST** be streaming, happen in the same bounded pass as
+hashing, and detect sentinels split across read-chunk boundaries. This frozen
+check is a narrow fixture-governance safeguard, not a claim of general content
+classification. Path/id/manifest fields **MUST** always be checked.
 
 ---
 
@@ -198,6 +221,7 @@ A component `path` **MUST**:
 
 - be non-empty and relative;
 - use `/` as the separator in the manifest (validators normalize only for comparison on platforms that require it after validation);
+- contain only ASCII letters, digits, `.`, `_`, `@`, `+`, `-`, and `/`;
 - reject `.` / `..` path segments;
 - reject absolute paths (`/…`, `\…`, `C:…`);
 - reject NUL and other control characters;
@@ -207,6 +231,9 @@ A component `path` **MUST**:
 Validators **MUST** reject unsafe paths **before** reading payload content.
 
 Symlinks that escape the bundle root **MUST** fail closed when detected during validation.
+ZIP entry names are UTF-8, but declared component paths intentionally use the
+smaller ASCII allowlist above for portable extraction and case-collision
+checking.
 
 ---
 
@@ -247,9 +274,23 @@ Diagnostics **MUST** be deterministic and suitable for CI:
 - include a short `message`;
 - sort stably (by code, then path, then message).
 
+The text report's `totalBytes` value is the sum of successfully validated
+declared component payload bytes. It does not include `manifest.json`, ZIP
+headers, or archive container bytes. Archive size and manifest bytes are
+reported and bounded separately.
+
+## 12. Schema versus authoritative validation
+
+The JSON Schemas provide structural validation and editor/tooling support. They
+cannot prove filesystem containment, payload existence, exact byte length,
+SHA-256 content, strict timestamp ordering, finite numbers, registered IANA
+timezone validity, privacy sentinel absence, aggregate limits, or archive
+safety. A producer **MUST** run the offline validator on the directory and on
+the packed ZIP before transfer. Passing JSON Schema alone is not conformance.
+
 ---
 
-## 12. Relationships to other formats
+## 13. Relationships to other formats
 
 | Format | Role | Relationship |
 | --- | --- | --- |
@@ -260,7 +301,7 @@ Diagnostics **MUST** be deterministic and suitable for CI:
 
 ---
 
-## 13. Compatibility and extension
+## 14. Compatibility and extension
 
 - Additive optional JSON fields: allowed; unknown ignored by v1 readers.
 - New component roles: require a minor doc revision and reader update; v1 validators **MUST** reject unknown roles.
@@ -268,7 +309,7 @@ Diagnostics **MUST** be deterministic and suitable for CI:
 
 ---
 
-## 14. Explicit non-goals (v1)
+## 15. Explicit non-goals (v1)
 
 - Product import/attachment UX, progress UI, or one-click ingest (#763 later slices).
 - Live streaming telemetry, remote collectors, or directory watchers.
