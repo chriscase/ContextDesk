@@ -1122,6 +1122,30 @@ describe("LogExplorer shell", () => {
     vi.unstubAllGlobals();
   });
 
+  it("does not claim zero rules when a persisted suspended policy cannot load (#817)", async () => {
+    const store = memoryStorage();
+    store.setItem("contextdesk.noiseLensSuspended.v1.c1", "1");
+    vi.stubGlobal("localStorage", store);
+    vi.mocked(host.hostLogLoadSuppression).mockRejectedValue(
+      new Error("policy fixture unavailable"),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("noise-policy-gate").textContent).toMatch(
+        /could not be loaded/i,
+      ),
+    );
+    const disclosure = screen.getByTestId("noise-lens-disclosure-header");
+    await waitFor(() =>
+      expect(disclosure.textContent).toMatch(/policy unavailable/i),
+    );
+    expect(disclosure.textContent).toMatch(/counts unknown/i);
+    expect(disclosure.textContent).not.toMatch(/inactive|0 rules|0 excluded/i);
+    vi.unstubAllGlobals();
+  });
+
   it("previews and confirms a human suppression before atomically refreshing evidence", async () => {
     const emptyPolicy: host.SuppressionDocumentDto = {
       schemaVersion: 1,
@@ -3348,6 +3372,51 @@ describe("LogExplorer shell", () => {
           ),
       ).toBe(true),
     );
+  });
+
+  it("opens a bookmark normally when its durable noise rule is suspended (#817)", async () => {
+    const store = memoryStorage();
+    store.setItem("contextdesk.noiseLensSuspended.v1.c1", "1");
+    vi.stubGlobal("localStorage", store);
+    const allEvents = defaultEventPage().events;
+    const target = allEvents.find((event) => event.templateId === 2)!;
+    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+      suppressionDocument(),
+    );
+    vi.mocked(host.hostLogCountEvents).mockImplementation(
+      async (_corpusId, query) => ({
+        totalMatched: query?.templateIds?.includes(2) ? 1 : allEvents.length,
+      }),
+    );
+    vi.mocked(host.hostLogListBookmarks).mockResolvedValue([
+      bookmark("bm-suspended", "visible heartbeat", target.seq),
+    ]);
+    vi.mocked(host.hostLogQueryEvents).mockResolvedValue({
+      ...defaultEventPage(),
+      events: allEvents,
+      totalMatched: allEvents.length,
+    });
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockResolvedValue(
+      eventNeighborhood(target, "found", [target]),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("job ok");
+    fireEvent.click(
+      await screen.findByTestId("bookmark-activate-bm-suspended"),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain(
+        "Bookmark visible: visible heartbeat",
+      ),
+    );
+    expect(screen.queryByTestId("suppressed-bookmark-offer")).toBeNull();
+    expect(
+      vi.mocked(host.hostLogQueryEventNeighborhood).mock.calls.at(-1)?.[1]
+        .filter?.excludedTemplateIds ?? [],
+    ).toEqual([]);
+    vi.unstubAllGlobals();
   });
 
   it("reloads persisted bookmarks and activates them without stale reveal state", async () => {
@@ -7378,7 +7447,7 @@ describe("LogExplorer shell", () => {
         expect.objectContaining({
           corpus_id: "c1",
           brief: expect.stringMatching(
-            /corpusId=c1;.*noisePolicy=active; noisePolicyRevision=3; noiseRuleCount=1; noiseHiddenCount=1; noiseExcludedEventsNotAnalyzed=true/,
+            /corpusId=c1;.*noisePolicy=active; noisePolicyRevision=3; noiseRuleCount=1; noiseHiddenCount=1; noiseExcludedFromView=1; noiseExcludedEventsNotAnalyzed=true/,
           ),
         }),
         false,

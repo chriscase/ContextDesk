@@ -53,6 +53,7 @@ describe("noiseLens helpers", () => {
   it("formats disclosure for active, suspended, and inactive lenses", () => {
     expect(
       formatNoiseLensDisclosure({
+        policyState: "ready",
         enabledRuleCount: 0,
         policyHiddenCount: 0,
         lensApplying: false,
@@ -63,6 +64,7 @@ describe("noiseLens helpers", () => {
     ).toMatch(/0 rules · 0 excluded/);
 
     const active = formatNoiseLensDisclosure({
+      policyState: "ready",
       enabledRuleCount: 2,
       policyHiddenCount: 250,
       lensApplying: true,
@@ -77,6 +79,7 @@ describe("noiseLens helpers", () => {
     expect(active).toMatch(/r7/);
 
     const suspended = formatNoiseLensDisclosure({
+      policyState: "ready",
       enabledRuleCount: 2,
       policyHiddenCount: 250,
       lensApplying: false,
@@ -88,6 +91,18 @@ describe("noiseLens helpers", () => {
     expect(suspended).toMatch(/0 excluded now/);
     expect(suspended).toMatch(/would hide 250/);
     expect(suspended).not.toMatch(/rules disabled/i);
+
+    expect(
+      formatNoiseLensDisclosure({
+        policyState: "error",
+        enabledRuleCount: 0,
+        policyHiddenCount: null,
+        lensApplying: false,
+        lensSuspended: true,
+        temporaryReveal: false,
+        policyRevision: null,
+      }),
+    ).toBe("Noise policy unavailable · rule and exclusion counts unknown");
   });
 
   it("clears exclusion ids when suspended or temporarily revealing", () => {

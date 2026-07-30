@@ -43,6 +43,8 @@ export function writeNoiseLensSuspended(
 }
 
 export type NoiseLensDisclosureInput = {
+  /** Whether the durable policy is usable for the current evidence view. */
+  policyState: "loading" | "ready" | "error" | "refreshing";
   /** Count of enabled exact-template rules in the durable policy. */
   enabledRuleCount: number;
   /**
@@ -71,11 +73,20 @@ export function formatNoiseCount(value: number | null | undefined): string {
  * Always names rule count and excluded-event count; never claims confirmed noise.
  */
 export function formatNoiseLensDisclosure(input: NoiseLensDisclosureInput): string {
+  if (input.policyState === "error") {
+    return "Noise policy unavailable · rule and exclusion counts unknown";
+  }
+  if (input.policyState === "loading") {
+    return "Noise policy loading · evidence withheld";
+  }
   const rules = input.enabledRuleCount;
   const ruleWord = rules === 1 ? "rule" : "rules";
   const hidden = formatNoiseCount(input.policyHiddenCount);
   const rev =
     input.policyRevision != null ? ` · policy r${input.policyRevision}` : "";
+  if (input.policyState === "refreshing") {
+    return `Noise policy refreshing · last known ${rules} ${ruleWord} · ${hidden} previously excluded · evidence withheld${rev}`;
+  }
 
   if (rules === 0) {
     return `Noise inactive · 0 rules · 0 excluded${rev}`;

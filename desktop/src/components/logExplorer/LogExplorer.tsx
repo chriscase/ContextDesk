@@ -1138,6 +1138,7 @@ export function LogExplorer({ corpusId }: Props) {
   const noiseLensDisclosure = useMemo((): NoiseLensDisclosureInput => {
     const ruleCount = enabledSuppressionTemplateIds.length;
     return {
+      policyState: suppressionLoadState,
       enabledRuleCount: ruleCount,
       policyHiddenCount: suppressedEventCount,
       lensApplying: activeSuppressionTemplateIds.length > 0,
@@ -1147,6 +1148,7 @@ export function LogExplorer({ corpusId }: Props) {
     };
   }, [
     enabledSuppressionTemplateIds.length,
+    suppressionLoadState,
     suppressedEventCount,
     activeSuppressionTemplateIds.length,
     lensSuspended,
@@ -3541,10 +3543,10 @@ export function LogExplorer({ corpusId }: Props) {
         filter: queryWithNoise(filters, undefined, !allowSuppressed),
         sortByTime: true,
       });
-      if (!allowSuppressed && enabledSuppressionTemplateIds.length > 0) {
+      if (!allowSuppressed && activeSuppressionTemplateIds.length > 0) {
         const maybeSuppressed =
           resolved.target &&
-          enabledSuppressionTemplateIds.includes(resolved.target.templateId)
+          activeSuppressionTemplateIds.includes(resolved.target.templateId)
             ? resolved
             : resolved.status !== "found"
               ? await hostLogQueryEventNeighborhood(corpusId, {
@@ -3557,7 +3559,7 @@ export function LogExplorer({ corpusId }: Props) {
               : null;
         if (
           maybeSuppressed?.target &&
-          enabledSuppressionTemplateIds.includes(
+          activeSuppressionTemplateIds.includes(
             maybeSuppressed.target.templateId,
           )
         ) {
