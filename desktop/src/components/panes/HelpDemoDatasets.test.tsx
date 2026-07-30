@@ -307,7 +307,7 @@ describe("rendered demo-dataset Help (#715)", () => {
       "If you do not load this file, the CPU, heap, and client tracks remain absent",
     );
     expect(document.body.textContent).toContain(
-      "Metrics are loaded for this Explorer session and are not durably attached",
+      "The validated stored copy is attached to this exact corpus and restores after Explorer or application restart",
     );
   });
 });
