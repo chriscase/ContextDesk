@@ -212,6 +212,65 @@ reuses the separate trusted Preview → Confirm workflow; the proposal detector
 cannot call preview or activation. Revision drift marks the review stale and
 blocks action until refresh.
 
+### Stale rules and policy-bound findings — #819
+
+**Status: specified, not on `main`.** Neither half has landed: `main` carries no
+rule-resolution state and `INVESTIGATION_SCHEMA_VERSION` is still `3`. This
+section is the contract, not a description of shipped behavior.
+
+A corpus revision can change template identity — re-analysis, a timezone
+declaration, package import. Two durable records must survive that without
+changing meaning: a suppression rule and a finding.
+
+**Rule resolution.** Every enabled rule resolves against the currently open
+corpus into exactly one state. Only a state where the saved target *and* its
+content fingerprint both still agree may exclude events; every other state
+excludes nothing and carries a payload-free explanation:
+
+| Condition | Excludes | User-visible label |
+| --------- | -------- | ------------------ |
+| Target and fingerprint agree | yes | *(no label)* |
+| Target no longer exists | no | stale — matches nothing |
+| Target exists, fingerprint differs | no | stale — template changed |
+| Saved predicate not structurally valid | no | invalid — cannot be applied |
+| Two enabled rules claim one target | no | conflicts with another rule |
+| Disabled or removed | no | disabled / removed |
+
+A numeric target is never re-bound by coincidence, a stale rule is never removed
+automatically, and lifecycle actions plus audit history remain available on
+every state. Resolution is computed against the open corpus and is not part of
+the durable sidecar, so a stale judgment can never be persisted and later
+believed.
+
+**Policy binding.** A finding or saved view records the effective suppression
+policy revision, the resolved template revision, and whether the noise lens was
+active or suspended. Reopening compares that binding to the present state:
+identical is current; a differing policy revision or lens is **Made under a
+different noise policy**; a record predating binding is **legacy — policy not
+recorded** and is never assumed current. Any non-current state previews rather
+than applies, and blocks silent mutation. Recomputation is an explicit user
+action that produces a reviewable current view without rewriting the original
+record.
+
+**Revision drift.** A resolved snapshot belongs to one template revision. A
+response that no longer matches the current revision is discarded and re-derived
+rather than rendered, so two revisions never mix on one surface.
+
+**Restart, re-analysis, timezone apply/undo, and package round-trip** all
+re-derive resolution from scratch; none of them may silently repair, re-bind, or
+drop a rule, and undoing a timezone declaration must restore the prior
+resolution rather than leave rules stale. An imported package keeps an unbound
+finding unbound instead of adopting the importing profile's current policy.
+
+**Diagnostics.** A diagnostic export must carry enough to review a suppression
+decision on another machine and nothing more. It **may** include rule name,
+recorded rationale, lifecycle state, resolution state and its explanation,
+bounded matching counts, policy and template revisions, finding binding state,
+and payload-free audit metadata. It **must not** include representative rows,
+raw or redacted event payloads, hidden event content, template text, preview
+tokens, absolute paths, or any other private data. The reviewer learns what was
+hidden and why it was hidden — never what the hidden events said.
+
 ### Startup and paging critical path
 
 Opening Explorer prioritizes bounded evidence rows over aggregate metadata:

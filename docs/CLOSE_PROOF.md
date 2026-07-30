@@ -71,6 +71,50 @@ or keep the issue **OPEN** with:
 Residual: <exact unmet acceptance criterion>
 ```
 
+## Native packaged proof
+
+Several issues require "native packaged proof" or "packaged native acceptance".
+That phrase means all of the following. Component tests, `vitest`, and DOM-level
+automation are necessary but **never** sufficient for it, because they cannot
+observe the packaged shell, the real window manager, or OS-level input.
+
+1. **Built from the cited merged SHA.** The build comes from the same
+   current-`main` commit named in section (a). A build from a feature branch, a
+   local dirty tree, or a dev server is not native proof. State the SHA the
+   build came from.
+2. **Exact artifact identified.** Name the package or binary actually launched
+   (file name and platform). "The app" is not an artifact.
+3. **Exercised natively.** Drive the packaged application through OS-level
+   input — Computer Use, or a human at the keyboard. DOM-only automation,
+   in-browser dev servers, and headless drivers do not qualify. Say which was
+   used.
+4. **Corpus and prior state identified.** Name the corpus or fixture, its size,
+   and the relevant pre-existing state (existing rules, findings, attachments,
+   or a clean profile). "A large corpus" is not identification.
+5. **Observations recorded separately from automated tests.** Keep the native
+   observation list distinct from pasted `cargo test` / `vitest` output. A
+   reader must be able to tell what a machine asserted from what a person or
+   agent saw.
+6. **Mutations and non-mutations both verified.** State what changed *and* what
+   was confirmed unchanged — the second half is usually the real claim (filters
+   untouched, evidence preserved, counts identical, original files unmodified).
+7. **Relaunch checked where persistence is claimed.** If the issue claims
+   anything durable, quit and relaunch the packaged app, reopen the same
+   corpus, and record what survived. Reopening a window is not a relaunch.
+8. **Native defects block closure.** A defect visible only in the packaged app
+   — a popover that will not dismiss, a click the shell swallows, a window that
+   opens blank — keeps the issue **OPEN** with a `Residual:` line, even when
+   every automated gate is green.
+9. **Signing failures are reported honestly.** If packaging or launch fails for
+   want of a signing key or notarization, say so plainly and leave the issue
+   open. Do **not** request, create, borrow, export, paste, or fabricate a key,
+   and do not present an unsigned or ad-hoc-signed run as a signed one. Record
+   which platform could not be proven and why.
+
+If any item cannot be satisfied, name it in the `Residual:` line rather than
+weakening the claim. Partial native proof stated exactly is worth more than
+complete native proof implied.
+
 ## CI enforcement (what the guard actually checks)
 
 `scripts/check_close_proof.sh` (CI job **close-proof**) is now blocking and

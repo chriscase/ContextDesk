@@ -155,6 +155,56 @@ deliberately treated as risky.
 Candidate review never deletes evidence and never lets the detector activate a
 rule.
 
+### Stale rules and policy-bound findings
+
+> **Status:** the behavior in this section is the required contract for #819
+> and is **not** implemented on `main` yet. Until it ships, a rule whose target
+> changed and a finding made under an older policy are not labeled, so treat
+> both with care after any re-analysis or timezone change.
+
+Re-analysis, a timezone declaration, and package import can all change which
+templates a corpus contains. A durable noise rule and a durable finding must
+survive that without quietly changing meaning.
+
+**A rule whose target is gone stays visible.** It remains in the rule list and
+in the audit, labeled **stale — matches nothing**, and it hides zero events.
+ContextDesk does not delete it for you, because the rule and its recorded
+reason are part of the investigation record.
+
+**A reused template number never inherits an old rule.** Template numbers can be
+reassigned when a corpus is re-analyzed. A rule applies only when both the saved
+target and its content fingerprint still agree; when the number matches but the
+content does not, the rule is labeled **stale — template changed** and hides
+nothing. Silently re-pointing a rule at different content would hide evidence
+nobody reviewed.
+
+**Unusable rules fail closed.** A rule whose saved predicate is no longer valid,
+or which claims the same target as another enabled rule, hides nothing and
+explains why. Failing closed here means showing more evidence, never less.
+
+**Lifecycle stays available.** Disable, re-enable, remove, and the audit history
+continue to work on a stale rule. Remove still creates an inactive tombstone
+rather than erasing the rule's history.
+
+**Findings record the policy they were made under.** A finding or saved view
+created once this ships records the exact suppression policy revision, the
+resolved template revision, and whether the noise lens was active or suspended
+at the time. Reopening it under a different policy shows **Made under a
+different noise policy**, and its saved view is not applied automatically.
+Reviewing an old view previews it; it never silently becomes the current view.
+
+**Older findings stay explicitly unbound.** Findings created before policy
+recording existed are labeled **legacy — policy not recorded**. ContextDesk
+cannot reconstruct what was hidden when they were made, so it says so instead
+of treating them as current.
+
+**Recomputing is always your decision.** A finding is brought up to date only by
+an explicit action. Recomputation produces a current view for you to review; it
+does not rewrite the original finding, and nothing recomputes in the background.
+
+If a corpus or policy revision changes while Explorer is open, the affected
+surface refreshes instead of mixing results from two revisions.
+
 ## Counts
 
 **Corpus events** is the persisted corpus size. **Matched** belongs to the
