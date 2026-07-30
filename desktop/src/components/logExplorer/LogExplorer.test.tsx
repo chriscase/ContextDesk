@@ -421,26 +421,27 @@ function bookmark(id: string, label: string, seq: number): host.LogBookmarkDto {
 function suppressionDocument(
   state: host.SuppressionRuleState = "enabled",
   revision = 3,
+  extraRules: host.SuppressionDocumentDto["rules"] = [],
 ): host.SuppressionDocumentDto {
+  const primary = {
+    id: "019fb-noise-rule",
+    name: "Routine heartbeat",
+    rationale: "Known health-check traffic obscures incident evidence.",
+    predicate: {
+      templateId: 2,
+      templateFingerprint: "template-2-fingerprint",
+    },
+    origin: "human" as const,
+    state,
+    createdAt: 1,
+    updatedAt: 2,
+  };
+  const rules = [primary, ...extraRules];
   return {
     schemaVersion: 1,
     corpusId: "c1",
     revision,
-    rules: [
-      {
-        id: "019fb-noise-rule",
-        name: "Routine heartbeat",
-        rationale: "Known health-check traffic obscures incident evidence.",
-        predicate: {
-          templateId: 2,
-          templateFingerprint: "template-2-fingerprint",
-        },
-        origin: "human",
-        state,
-        createdAt: 1,
-        updatedAt: 2,
-      },
-    ],
+    rules,
     previews: [],
     audit: [
       {
@@ -452,6 +453,51 @@ function suppressionDocument(
         createdAt: 2,
       },
     ],
+  };
+}
+
+function multiRuleSuppressionDocument(
+  revision = 5,
+): host.SuppressionDocumentDto {
+  return suppressionDocument("enabled", revision, [
+    {
+      id: "019fb-noise-rule-b",
+      name: "Metrics tick",
+      rationale: "Secondary repetitive chatter.",
+      predicate: {
+        templateId: 9,
+        templateFingerprint: "template-9-fingerprint",
+      },
+      origin: "human",
+      state: "enabled",
+      createdAt: 3,
+      updatedAt: 4,
+    },
+  ]);
+}
+
+/** Minimal in-memory localStorage for suspend durability (#817). */
+function memoryStorage(): Storage {
+  const map = new Map<string, string>();
+  return {
+    get length() {
+      return map.size;
+    },
+    clear() {
+      map.clear();
+    },
+    getItem(key: string) {
+      return map.has(key) ? map.get(key)! : null;
+    },
+    key(index: number) {
+      return [...map.keys()][index] ?? null;
+    },
+    removeItem(key: string) {
+      map.delete(key);
+    },
+    setItem(key: string, value: string) {
+      map.set(key, String(value));
+    },
   };
 }
 
@@ -791,6 +837,289 @@ describe("LogExplorer shell", () => {
       vi.mocked(host.hostLogSearchEventsAdvanced).mock.calls.at(-1)?.[1]?.filter
         ?.excludedTemplateIds,
     ).toEqual([2]);
+  });
+
+  it("discloses active rule and excluded counts on every reduced surface (#817)", async () => {
+    vi.stubGlobal("localStorage", memoryStorage());
+    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+      suppressionDocument(),
+    );
+    vi.mocked(host.hostLogCountEvents).mockImplementation(
+      async (_corpusId, query) => ({
+        totalMatched: query?.templateIds?.includes(2) ? 4 : 1,
+      }),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await waitFor(() => expect(host.hostLogQueryEventRows).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Noise · 1 rule · 4 hidden" }),
+      ).toBeTruthy(),
+    );
+
+    for (const testId of [
+      "noise-lens-disclosure-header",
+      "noise-lens-disclosure-counts",
+      "noise-lens-disclosure-facets",
+      "noise-lens-disclosure-timeline",
+      "noise-lens-disclosure-lane-lane-0",
+    ]) {
+      const node = await screen.findByTestId(testId);
+      expect(node.textContent).toMatch(/Noise active/i);
+      expect(node.textContent).toMatch(/1 rule/);
+      expect(node.textContent).toMatch(/4 excluded/);
+      expect(node.textContent).toMatch(/not analyzed/i);
+    }
+    vi.unstubAllGlobals();
+  });
+
+  it("suspends and resumes the lens without mutating durable rules (#817)", async () => {
+    vi.stubGlobal("localStorage", memoryStorage());
+    const mutate = vi.mocked(host.hostLogMutateTemplateSuppressionRule);
+    mutate.mockClear();
+    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+      suppressionDocument("enabled", 3),
+    );
+    // Policy-hidden count uses templateIds filter; view counts use exclusions.
+    vi.mocked(host.hostLogCountEvents).mockImplementation(
+      async (_corpusId, query) => {
+        if (query?.templateIds?.includes(2)) return { totalMatched: 4 };
+        const excluded = query?.excludedTemplateIds ?? [];
+        return { totalMatched: excluded.includes(2) ? 6 : 10 };
+      },
+    );
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        const excluded = query?.excludedTemplateIds ?? [];
+        const events = defaultEventPage().events.filter(
+          (event) => !excluded.includes(event.templateId),
+        );
+        return {
+          ...defaultEventPage(),
+          events,
+          totalMatched: excluded.includes(2) ? 6 : 10,
+        };
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await waitFor(() => expect(host.hostLogQueryEventRows).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Noise · 1 rule · 4 hidden" }),
+      ).toBeTruthy(),
+    );
+    const suppressedCallCount = vi.mocked(host.hostLogQueryEventRows).mock.calls
+      .length;
+    expect(
+      vi.mocked(host.hostLogQueryEventRows).mock.calls.at(-1)?.[1]
+        ?.excludedTemplateIds,
+    ).toEqual([2]);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Noise · 1 rule · 4 hidden" }),
+    );
+    fireEvent.click(await screen.findByTestId("noise-lens-suspend-all"));
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", {
+          name: "Noise · suspended · 1 rule · 0 excluded",
+        }),
+      ).toBeTruthy(),
+    );
+    await waitFor(() =>
+      expect(
+        vi.mocked(host.hostLogQueryEventRows).mock.calls.length,
+      ).toBeGreaterThan(suppressedCallCount),
+    );
+    const suspendedQuery = vi
+      .mocked(host.hostLogQueryEventRows)
+      .mock.calls.at(-1)?.[1];
+    expect(suspendedQuery?.excludedTemplateIds ?? []).toEqual([]);
+    expect(
+      (await screen.findByTestId("noise-lens-disclosure-counts")).textContent,
+    ).toMatch(/suspended/i);
+    expect(
+      (await screen.findByTestId("noise-lens-disclosure-counts")).textContent,
+    ).toMatch(/0 excluded now/i);
+    expect(mutate).not.toHaveBeenCalled();
+
+    // Panel stays open after Suspend; Resume is already visible.
+    let resume = screen.queryByTestId("noise-lens-resume");
+    if (!resume) {
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "Noise · suspended · 1 rule · 0 excluded",
+        }),
+      );
+      resume = await screen.findByTestId("noise-lens-resume");
+    }
+    fireEvent.click(resume);
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Noise · 1 rule · 4 hidden" }),
+      ).toBeTruthy(),
+    );
+    await waitFor(() =>
+      expect(
+        vi.mocked(host.hostLogQueryEventRows).mock.calls.at(-1)?.[1]
+          ?.excludedTemplateIds,
+      ).toEqual([2]),
+    );
+    expect(
+      (await screen.findByTestId("noise-lens-disclosure-header")).textContent,
+    ).toMatch(/Noise active/i);
+    expect(mutate).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps multi-rule exclusions and discloses both rules (#817)", async () => {
+    vi.stubGlobal("localStorage", memoryStorage());
+    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+      multiRuleSuppressionDocument(8),
+    );
+    vi.mocked(host.hostLogCountEvents).mockImplementation(
+      async (_corpusId, query) => {
+        const tids = query?.templateIds ?? [];
+        if (tids.includes(2) || tids.includes(9)) {
+          // Policy-hidden count query uses templateIds of enabled rules.
+          return { totalMatched: 7 };
+        }
+        return { totalMatched: 3 };
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await waitFor(() => expect(host.hostLogQueryEventRows).toHaveBeenCalled());
+    const excluded =
+      vi.mocked(host.hostLogQueryEventRows).mock.calls.at(-1)?.[1]
+        ?.excludedTemplateIds ?? [];
+    expect(excluded).toEqual([2, 9]);
+    expect(
+      await screen.findByRole("button", {
+        name: "Noise · 2 rules · 7 hidden",
+      }),
+    ).toBeTruthy();
+    const disclosure = await screen.findByTestId(
+      "noise-lens-disclosure-facets",
+    );
+    expect(disclosure.textContent).toMatch(/2 rules/);
+    expect(disclosure.textContent).toMatch(/7 excluded/);
+    vi.unstubAllGlobals();
+  });
+
+  it("discloses zero-match enabled rules without inventing excluded events (#817)", async () => {
+    vi.stubGlobal("localStorage", memoryStorage());
+    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+      suppressionDocument("enabled", 2),
+    );
+    vi.mocked(host.hostLogCountEvents).mockImplementation(
+      async (_corpusId, query) => {
+        if (query?.templateIds?.includes(2)) return { totalMatched: 0 };
+        return { totalMatched: 10 };
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Noise · 1 rule · 0 hidden" }),
+      ).toBeTruthy(),
+    );
+    const disclosure = await screen.findByTestId(
+      "noise-lens-disclosure-header",
+    );
+    expect(disclosure.textContent).toMatch(/1 rule/);
+    expect(disclosure.textContent).toMatch(/0 excluded/);
+    expect(
+      vi.mocked(host.hostLogQueryEventRows).mock.calls.at(-1)?.[1]
+        ?.excludedTemplateIds,
+    ).toEqual([2]);
+    vi.unstubAllGlobals();
+  });
+
+  it("restores suspend flag after Explorer remount for the same corpus (#817)", async () => {
+    const store = memoryStorage();
+    vi.stubGlobal("localStorage", store);
+    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+      suppressionDocument(),
+    );
+    vi.mocked(host.hostLogCountEvents).mockImplementation(
+      async (_corpusId, query) => ({
+        totalMatched: query?.templateIds?.includes(2) ? 4 : 2,
+      }),
+    );
+
+    const first = render(<LogExplorer corpusId="c1" />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Noise · 1 rule · 4 hidden" }),
+      ).toBeTruthy(),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Noise · 1 rule · 4 hidden" }),
+    );
+    fireEvent.click(await screen.findByTestId("noise-lens-suspend-all"));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", {
+          name: "Noise · suspended · 1 rule · 0 excluded",
+        }),
+      ).toBeTruthy(),
+    );
+    expect(store.getItem("contextdesk.noiseLensSuspended.v1.c1")).toBe("1");
+    first.unmount();
+
+    render(<LogExplorer corpusId="c1" />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", {
+          name: "Noise · suspended · 1 rule · 0 excluded",
+        }),
+      ).toBeTruthy(),
+    );
+    await waitFor(() =>
+      expect(
+        vi.mocked(host.hostLogQueryEventRows).mock.calls.at(-1)?.[1]
+          ?.excludedTemplateIds ?? [],
+      ).toEqual([]),
+    );
+    vi.unstubAllGlobals();
+  });
+
+  it("does not inherit suspend flag when switching corpora (#817)", async () => {
+    const store = memoryStorage();
+    store.setItem("contextdesk.noiseLensSuspended.v1.c1", "1");
+    vi.stubGlobal("localStorage", store);
+    vi.mocked(host.hostLogLoadSuppression).mockImplementation(
+      async (corpusId) => ({
+        ...suppressionDocument(),
+        corpusId,
+      }),
+    );
+    vi.mocked(host.hostLogCountEvents).mockImplementation(
+      async (_corpusId, query) => ({
+        totalMatched: query?.templateIds?.includes(2) ? 4 : 2,
+      }),
+    );
+
+    render(<LogExplorer corpusId="c2" />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Noise · 1 rule · 4 hidden" }),
+      ).toBeTruthy(),
+    );
+    await waitFor(() =>
+      expect(
+        vi.mocked(host.hostLogQueryEventRows).mock.calls.at(-1)?.[1]
+          ?.excludedTemplateIds,
+      ).toEqual([2]),
+    );
+    expect(store.getItem("contextdesk.noiseLensSuspended.v1.c2")).toBeNull();
+    vi.unstubAllGlobals();
   });
 
   it("previews and confirms a human suppression before atomically refreshing evidence", async () => {

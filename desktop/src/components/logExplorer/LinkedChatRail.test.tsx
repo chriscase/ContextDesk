@@ -226,6 +226,111 @@ describe("LinkedChatRail", () => {
     vi.mocked(host.agentTurn).mockResolvedValue([]);
   });
 
+  it("shows active noise policy with excluded count and not-analyzed wording (#817)", async () => {
+    const activeContext: AgentContextSummary = {
+      ...baseContext,
+      noisePolicyLabel: "active",
+      noiseRuleCount: 2,
+      noiseExcludedEventCount: 250,
+      noisePolicyHiddenCount: 250,
+      noiseExcludedNotAnalyzed: true,
+      noiseLensSuspended: false,
+      noiseDisclosure:
+        "Noise active · 2 rules · 250 excluded · excluded events not analyzed · policy r7",
+      brief:
+        "corpusId=c1; noisePolicy=active; noiseRuleCount=2; noiseHiddenCount=250; noiseExcludedEventsNotAnalyzed=true",
+    };
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={activeContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    fireEvent.click(screen.getByText("Context shared with agent"));
+    const noise = await screen.findByTestId("linked-chat-noise-context");
+    expect(noise.textContent).toMatch(/Noise policy/i);
+    expect(noise.textContent).toMatch(/2 rules/);
+    expect(noise.textContent).toMatch(/250 excluded/);
+    expect(noise.textContent).toMatch(/not analyzed/i);
+  });
+
+  it("shows suspended noise lens honestly and passes noise_lens_suspended on agentTurn (#817)", async () => {
+    let stored: host.ChatSessionDto | null = null;
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
+      async () =>
+        stored
+          ? [
+              {
+                id: stored.id,
+                title: stored.title,
+                archived: false,
+                pinned: false,
+                created_at: stored.created_at,
+                updated_at: stored.updated_at,
+                message_count: stored.messages.length,
+                preview: "",
+                linked_corpus_id: "c1",
+              },
+            ]
+          : [],
+    );
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async () => stored);
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (s) => {
+      stored = {
+        ...s,
+        linked_corpus_id: s.linked_corpus_id ?? "c1",
+        chat_model: s.chat_model ?? "triage-1",
+        provider_profile_id: s.provider_profile_id ?? "tools-provider",
+      };
+      return stored;
+    });
+    vi.mocked(host.agentTurn).mockResolvedValue([]);
+
+    const suspendedContext: AgentContextSummary = {
+      ...baseContext,
+      noisePolicyLabel: "suspended",
+      noiseRuleCount: 2,
+      noiseExcludedEventCount: 0,
+      noisePolicyHiddenCount: 250,
+      noiseExcludedNotAnalyzed: false,
+      noiseLensSuspended: true,
+      noiseDisclosure:
+        "Noise lens suspended · 2 rules still enabled · 0 excluded now · policy would hide 250 · policy r7",
+      brief:
+        "corpusId=c1; noisePolicy=suspended; noiseLensSuspended=true; noiseExcludedFromView=0",
+    };
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={suspendedContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    fireEvent.click(screen.getByText("Context shared with agent"));
+    const noise = await screen.findByTestId("linked-chat-noise-context");
+    expect(noise.textContent).toMatch(/suspended/i);
+    expect(noise.textContent).toMatch(/0 excluded now/);
+    expect(noise.textContent).toMatch(/would hide 250/);
+
+    fireEvent.click(screen.getByTestId("new-linked-chat"));
+    await waitFor(() => expect(host.hostSaveChatSession).toHaveBeenCalled());
+    fireEvent.change(screen.getByLabelText("Chat message"), {
+      target: { value: "What problems remain?" },
+    });
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+    await waitFor(() => expect(host.agentTurn).toHaveBeenCalled());
+    const turnArgs = vi.mocked(host.agentTurn).mock.calls.at(-1);
+    expect(turnArgs?.[7]).toEqual(
+      expect.objectContaining({
+        corpus_id: "c1",
+        noise_lens_suspended: true,
+      }),
+    );
+  });
+
   it("explains the bounded linked-chat context and privacy boundary", async () => {
     render(
       <LinkedChatRail

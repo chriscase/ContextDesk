@@ -8382,6 +8382,22 @@ mod tests {
             vec![11],
             "enabled rules must remain enabled while the lens is suspended"
         );
+
+        // Resume path: re-pin active lens restores suppressed totals.
+        host.set_log_corpus_scope(Some(corpus_id.clone()));
+        host.seed_log_corpus_handle(&corpus_id, Arc::clone(&corpus))
+            .unwrap();
+        host.pin_log_suppression_lens(&corpus_id).unwrap();
+        let resumed = host.build_broad_log_triage_brief().unwrap();
+        assert_eq!(
+            resumed.unsuppressed_event_count, active.unsuppressed_event_count,
+            "resume must restore prior suppressed totals"
+        );
+        assert_eq!(resumed.suppression_revision, activated.revision);
+        assert!(resumed.model_text.contains("suppression_active: true"));
+        let after_resume = crate::log_analysis::load_suppression_document(&corpus).unwrap();
+        assert_eq!(after_resume.revision, activated.revision);
+        assert_eq!(after_resume.enabled_template_ids().unwrap(), vec![11]);
     }
 
     #[test]
