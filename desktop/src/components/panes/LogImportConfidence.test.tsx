@@ -96,6 +96,9 @@ describe("LogImportConfidence", () => {
       within(region).getByLabelText("Timestamp examples for edge/server.log")
         .textContent,
     ).toBe("2021-03-05T00:06,350 CET");
+    expect(
+      within(region).queryByRole("button", { name: "Resolve time…" }),
+    ).toBeNull();
   });
 
   it("labels unknown formats without claiming parsing failed", () => {

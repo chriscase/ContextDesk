@@ -1801,6 +1801,43 @@ export type LogImportConfidenceDto = {
   sources: LogSourceConfidenceDto[];
 };
 
+export type LogTimezoneDeclarationDto = {
+  source: string;
+  ianaZone: string;
+  basis: "user_declared" | "saved_hint" | "bundle_hint";
+  declaredAt: number;
+  appliedRevision: number;
+};
+
+export type LogTimezonePreviewRequestDto = {
+  source: string;
+  ianaZone: string;
+};
+
+export type LogTimezoneResolutionPreviewDto = {
+  source: string;
+  ianaZone: string;
+  previewToken: string;
+  affectedRecords: number;
+  firstResolvedTs: number | null;
+  lastResolvedTs: number | null;
+  dstGapRecords: number;
+  dstFoldAmbiguities: number;
+  unchangedOrderOnlyRecords: number;
+  precision: "whole_second";
+};
+
+export type LogTimezoneApplyRequestDto = {
+  source: string;
+  ianaZone: string;
+  previewToken: string;
+};
+
+export type LogTimezoneClearRequestDto = {
+  source: string;
+  appliedRevision: number;
+};
+
 export type LogIngestReportDto = {
   corpusId: string;
   lines: number;

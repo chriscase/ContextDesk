@@ -1,11 +1,24 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type {
   LogImportConfidenceDto,
   LogSourceConfidenceDto,
+  LogTimezoneApplyRequestDto,
+  LogTimezoneClearRequestDto,
+  LogTimezoneDeclarationDto,
+  LogTimezonePreviewRequestDto,
+  LogTimezoneResolutionPreviewDto,
 } from "../../lib/host";
+import { LogTimezoneReviewDialog } from "./LogTimezoneReviewDialog";
 
 type Props = {
   confidence: LogImportConfidenceDto;
+  timezoneDeclarations?: Record<string, LogTimezoneDeclarationDto | undefined>;
+  timezoneSuggestions?: Record<string, string | undefined>;
+  onPreviewTimezone?: (
+    request: LogTimezonePreviewRequestDto,
+  ) => Promise<LogTimezoneResolutionPreviewDto>;
+  onApplyTimezone?: (request: LogTimezoneApplyRequestDto) => Promise<void>;
+  onClearTimezone?: (request: LogTimezoneClearRequestDto) => Promise<void>;
 };
 
 function sourceTimeLabel(source: LogSourceConfidenceDto): string {
@@ -50,19 +63,47 @@ function sourceNeedsReview(source: LogSourceConfidenceDto): boolean {
   return source.timeQuality !== "wall" || source.outcome !== "matched";
 }
 
-export function LogImportConfidence({ confidence }: Props) {
+export function LogImportConfidence({
+  confidence,
+  timezoneDeclarations,
+  timezoneSuggestions,
+  onPreviewTimezone,
+  onApplyTimezone,
+  onClearTimezone,
+}: Props) {
   const [expanded, setExpanded] = useState(false);
+  const [timezoneSource, setTimezoneSource] =
+    useState<LogSourceConfidenceDto | null>(null);
+  const timezoneTriggerRef = useRef<HTMLButtonElement>(null);
   const detailsId = useId();
   const titleId = useId();
-  const reviewSources = confidence.sources.filter(sourceNeedsReview);
+  const reviewSources = confidence.sources.filter(
+    (source) =>
+      sourceNeedsReview(source) || Boolean(timezoneDeclarations?.[source.source]),
+  );
   const exactSources = confidence.counts.wall;
-  const reviewCount = reviewSources.length;
+  const reviewCount = confidence.sources.filter(sourceNeedsReview).length;
+  const disclosedSourceCount = reviewSources.length;
   const timeReviewCount = confidence.sources.filter(
     (source) => source.timeQuality !== "wall",
   ).length;
   const formatReviewCount = confidence.sources.filter(
     (source) => source.outcome !== "matched",
   ).length;
+  const timezoneReviewAvailable = Boolean(
+    onPreviewTimezone && onApplyTimezone,
+  );
+
+  useEffect(() => {
+    if (
+      timezoneSource &&
+      !confidence.sources.some(
+        (source) => source.source === timezoneSource.source,
+      )
+    ) {
+      setTimezoneSource(null);
+    }
+  }, [confidence.sources, timezoneSource]);
 
   return (
     <section
@@ -89,7 +130,7 @@ export function LogImportConfidence({ confidence }: Props) {
               : " · all source formats matched"}
           </span>
         </div>
-        {reviewCount > 0 ? (
+        {disclosedSourceCount > 0 ? (
           <button
             type="button"
             className="btn btn--ghost"
@@ -99,8 +140,8 @@ export function LogImportConfidence({ confidence }: Props) {
           >
             {expanded
               ? "Hide source review"
-              : `Review ${reviewCount} ${
-                  reviewCount === 1 ? "source" : "sources"
+              : `Review ${disclosedSourceCount} ${
+                  disclosedSourceCount === 1 ? "source" : "sources"
                 }`}
           </button>
         ) : null}
@@ -150,9 +191,45 @@ export function LogImportConfidence({ confidence }: Props) {
                   {source.timestampPrefixSamples?.join("\n")}
                 </pre>
               ) : null}
+              {timezoneReviewAvailable &&
+              (source.timeQuality !== "wall" ||
+                timezoneDeclarations?.[source.source]) ? (
+                <div className="log-import-confidence__source-actions">
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    aria-haspopup="dialog"
+                    onClick={(event) => {
+                      timezoneTriggerRef.current = event.currentTarget;
+                      setTimezoneSource(source);
+                    }}
+                  >
+                    {timezoneDeclarations?.[source.source]
+                      ? "Review timezone…"
+                      : "Resolve time…"}
+                  </button>
+                  <span>
+                    {timezoneDeclarations?.[source.source]
+                      ? `${timezoneDeclarations[source.source]?.ianaZone} is active`
+                      : "Defaults to order-only"}
+                  </span>
+                </div>
+              ) : null}
             </li>
           ))}
         </ul>
+      ) : null}
+      {timezoneSource && onPreviewTimezone && onApplyTimezone ? (
+        <LogTimezoneReviewDialog
+          source={timezoneSource}
+          declaration={timezoneDeclarations?.[timezoneSource.source]}
+          suggestedZone={timezoneSuggestions?.[timezoneSource.source]}
+          triggerRef={timezoneTriggerRef}
+          onPreview={onPreviewTimezone}
+          onApply={onApplyTimezone}
+          onClear={onClearTimezone}
+          onDismiss={() => setTimezoneSource(null)}
+        />
       ) : null}
     </section>
   );
