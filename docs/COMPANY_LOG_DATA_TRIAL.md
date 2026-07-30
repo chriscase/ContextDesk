@@ -86,8 +86,9 @@ Work through each row. Mark pass / fail / skip and a one-line note.
   contacting the provider. It cannot pass a grounded linked-chat trial.
 - For a broad linked-log prompt, expect **Preparing deterministic large-corpus
   triage**, then **Prepared bounded triage brief · N evidence identities**,
-  followed by synthesis. The brief is computed by the host before the first
-  model request.
+  followed by either direct synthesis or one visible bounded `search_logs`
+  deepening step and then tool-closed synthesis. The brief is computed and
+  checkpointed by the host before the first model request.
 - The broad brief uses one corpus and one pinned suppression revision. It
   includes bounded level/source/service/host distributions, structured ERROR
   templates with a rare-candidate reserve, clusters, timeline concentration,
@@ -120,7 +121,8 @@ against a packaged build and an approved 250,000+ event corpus:
    says linked tools are available.
 2. Send the broad prompt without first searching, filtering, or selecting rows.
 3. Observe the deterministic-triage preparation and completion statuses before
-   synthesis.
+   synthesis. If the model chooses the optional deepening step, confirm exactly
+   one bounded search runs before the tool-closed answer.
 4. Record completion time, visible truncation/failure disclosures, and the
    number of evidence identities shown.
 5. Open every material cited identity and confirm its sequence, relative source,

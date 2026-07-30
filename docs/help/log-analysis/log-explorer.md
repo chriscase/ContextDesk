@@ -295,8 +295,13 @@ Those identities—not sequence/source strings copied from the text—are the
 authority used to validate grounding.
 
 The brief is a bounded starting point, not a claim that every relevant event
-was selected or that every model will diagnose the incident well. Focused
-questions use staged bounded log tools. When relevant, the same turn can use
+was selected or that every model will diagnose the incident well. A
+tools-capable model may answer directly from a complete brief or use one
+offered bounded search to deepen or verify a candidate. After that search,
+synthesis is tool-closed. A complete host brief is checkpointed before the
+first provider request so a provider failure can offer synthesis-only retry
+without repeating deterministic retrieval. Focused questions use staged
+bounded log tools. When relevant, the same turn can use
 the normal configured read-only surface for an explicitly requested and
 eligible source: bounded workspace/Markdown search, durable-memory recall,
 bundled Help, and read-only database or connector tools. Linking a corpus does
@@ -314,6 +319,12 @@ permission-blocked sources remain visible rather than becoming silent success.
 Raw corpora, workspaces, databases, evaluator truth, credentials, and absolute
 source paths are not inserted wholesale.
 
+When a non-empty corpus has no ERROR/FATAL templates, the brief includes a
+small source-diverse representative sample instead of forcing an impossible
+error search. When the pinned view has zero unsuppressed events, the answer must
+say so without inventing event identities and must distinguish a truly empty
+corpus from one fully hidden by the active suppression lens.
+
 During a linked turn, the chat reports whether it is choosing evidence,
 retrieving bounded evidence, or synthesizing an evidence-cited answer. **Stop**
 interrupts the active provider or tool wait. If retrieval succeeded but
@@ -330,9 +341,10 @@ trashed, deleted, archived, relinked, or superseded by a new linked turn.
 
 For broad triage, expect the visible tool status to move through **Preparing
 deterministic large-corpus triage**, then **Prepared bounded triage brief** with
-an evidence-identity count, before synthesis. A failed brief is shown as a
-failure and falls back to the existing staged tools; it is not presented as
-successful evidence.
+an evidence-identity count, before synthesis. The model may then answer from
+that brief or visibly run one bounded `search_logs` deepening step. A failed or
+truncated brief is disclosed and falls back to the existing staged tools; it is
+not presented as complete evidence.
 
 The complete cross-source and provider-boundary explanation is available at
 help://context-selection-model-boundary.

@@ -82,6 +82,11 @@ flowchart TB
     XU["Visible unavailable-tools state"]
     Q{"Broad linked-log<br/>request?"}
     B["Trusted host builds deterministic brief<br/>one corpus + one suppression revision"]
+    O{"One targeted<br/>deepening search?"}
+    OG["Model requests bounded<br/>search_logs deepening"]
+    OT["Trusted host validates + executes<br/>the bounded deepening"]
+    OR["Deterministic search<br/>bounded + policy checked"]
+    OE["Additional typed evidence<br/>identity + provenance + status"]
     G["Model grounding round<br/>constrained native Read tool"]
     T["Trusted host validates + executes<br/>the native tool request"]
     R["Deterministic retriever<br/>bounded + policy checked"]
@@ -96,7 +101,9 @@ flowchart TB
     U --> UI --> H
     H -->|required capability unavailable| X --> XU
     H -->|eligible read surface| Q
-    Q -->|yes| B --> E
+    Q -->|yes| B --> E --> O
+    O -->|answer from complete brief| S
+    O -->|deepen one candidate| OG --> OT --> OR --> OE --> S
     Q -->|no| G --> T --> R
     R --> E --> S --> Y --> D --> V --> A
     B -->|assembly failure: visible status + staged fallback| G
@@ -314,8 +321,11 @@ could request writes in another workflow.
 
 - Broad linked log: before the first model request, assemble the host-owned
   deterministic brief when the conservative classifier matches. On successful
-  completion, the first provider round is tool-closed synthesis unless another
-  explicitly requested, eligible source still needs retrieval.
+  completion, retain a host-only retry checkpoint before provider inference.
+  The first provider round may answer directly from the brief or use one
+  offered bounded `search_logs` call to deepen a candidate; any following
+  synthesis round is tool-closed. Another explicitly requested, eligible source
+  is still retrieved through its governed staged path.
 - Focused linked log: offer bounded `search_logs` first.
 - Explicit runbook/workspace request: after log grounding, offer bounded
   workspace search.

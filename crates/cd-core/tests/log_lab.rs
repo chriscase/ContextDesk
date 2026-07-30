@@ -1196,7 +1196,7 @@ async fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
     let linked_events = run_agent_turn(
         &linked_backend,
         &mut triage_host,
-        "What problems do you see in these logs? Deepen the deterministic broad triage around CDLAB2004.",
+        "What problems do you see in these logs? Deepen the strongest deterministic incident candidate.",
         &mut linked_history,
         &AgentOptions {
             session_id: "literal-250k-linked-agent".into(),

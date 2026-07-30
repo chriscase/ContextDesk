@@ -135,7 +135,9 @@ machine-checked against production symbols. Partial work is listed separately.
 - **Governed linked chat:** a corpus link persists with the chat, each turn gets
   a bounded privacy-safe view snapshot, and broad triage starts from a
   deterministic 32 KiB host brief with separately trusted identities rather
-  than raw corpus rows. Focused follow-ups use bounded read-only log tools.
+  than raw corpus rows. A tools-capable model may answer directly or deepen one
+  candidate with one bounded read-only search before tool-closed synthesis.
+  Focused follow-ups use bounded read-only log tools.
   Tools-disabled profiles and provider failures remain visible; ordinary chats
   do not inherit a log corpus —
   `crates/cd-core/src/agent.rs:run_agent_turn_with_sink`
