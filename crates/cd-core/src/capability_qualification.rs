@@ -1021,7 +1021,7 @@ fn probe_embedding(
     let text = "ContextDesk synthetic embed token QUALIFY_EMBED_V1";
     let _ = assert_outbound_clean(text);
     match transport.embed(&key.model_id, text, cancel) {
-        Ok(resp) if cancel.load(Ordering::SeqCst) => check(
+        Ok(_resp) if cancel.load(Ordering::SeqCst) => check(
             CapabilityKind::EmbeddingContract,
             CapabilityStatus::Untested,
             start,
@@ -1064,7 +1064,7 @@ fn probe_reranker(
     let query = "ContextDesk synthetic rerank query QUALIFY_RERANK_V1";
     let _ = assert_outbound_clean(query);
     match transport.rerank(&key.model_id, query, &docs, cancel) {
-        Ok(resp) if cancel.load(Ordering::SeqCst) => check(
+        Ok(_resp) if cancel.load(Ordering::SeqCst) => check(
             CapabilityKind::RerankerContract,
             CapabilityStatus::Untested,
             start,
