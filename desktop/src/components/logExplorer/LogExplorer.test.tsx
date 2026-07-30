@@ -142,6 +142,11 @@ vi.mock("../../lib/host", () => ({
     ],
     lanes: [],
   })),
+  hostLoadLogOperationalMetricsAttachment: vi.fn(async () =>
+    Promise.reject({ code: "missing" }),
+  ),
+  hostSaveLogOperationalMetricsAttachment: vi.fn(),
+  hostRemoveLogOperationalMetricsAttachment: vi.fn(),
   hostLogQueryEventOriginal: vi.fn(async () => ({
     state: "unavailable",
     reason: "Original representation unavailable for this corpus",
@@ -6583,6 +6588,42 @@ describe("LogExplorer shell", () => {
 
   it("creates, sends, persists, and reopens a linked chat", async () => {
     let stored: host.ChatSessionDto | null = null;
+    const privateMetricMarker = "PRIVATE_METRIC_NOT_CHAT_CONTEXT";
+    const metricDocument = JSON.stringify({
+      schemaVersion: 1,
+      id: privateMetricMarker,
+      name: privateMetricMarker,
+      series: [
+        {
+          id: "cpu",
+          name: privateMetricMarker,
+          unit: "%",
+          timeQuality: "wall",
+          provenance: { source: "test-only-monitor" },
+          points: [
+            { timestamp: 1_700_000_000, value: 10 },
+            { timestamp: 1_700_000_004, value: 20 },
+          ],
+        },
+      ],
+    });
+    vi.mocked(
+      host.hostLoadLogOperationalMetricsAttachment,
+    ).mockResolvedValueOnce({
+      metadata: {
+        schemaVersion: 1,
+        attachmentId: "019fb100-0000-7000-8000-000000000002",
+        corpusId: "c1",
+        contentSha256: "b".repeat(64),
+        contentBytes: metricDocument.length,
+        metricSchemaVersion: 1,
+        displayName: "private-metrics.json",
+        validatedAtUnixSecs: 1_700_000_100,
+        source: { kind: "manual_load" },
+        timeQualityDeclarations: ["wall"],
+      },
+      documentText: metricDocument,
+    });
     vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
       suppressionDocument(),
     );
@@ -6628,6 +6669,7 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByText(/auth failure/);
+    await screen.findByTestId("timeline-session-metrics");
 
     fireEvent.click(screen.getByTestId("new-linked-chat"));
     await waitFor(() => {
@@ -6672,6 +6714,8 @@ describe("LogExplorer shell", () => {
       expect(stored?.chat_model).toBe("triage-1");
       expect(stored?.provider_profile_id).toBe("tools-provider");
     });
+    const turnContext = vi.mocked(host.agentTurn).mock.calls.at(-1)?.[7];
+    expect(JSON.stringify(turnContext)).not.toContain(privateMetricMarker);
 
     fireEvent.click(screen.getByTestId("linked-chat-switcher-toggle"));
     fireEvent.click(

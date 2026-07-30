@@ -1938,6 +1938,73 @@ export async function hostDiscardLogCorpus(corpusId: string): Promise<void> {
   await invoke("discard_log_corpus", { corpusId });
 }
 
+export type OperationalMetricsAttachmentSourceDto =
+  | { kind: "manual_load" }
+  | {
+      kind: "incident_evidence";
+      bundle_id: string;
+      component_id: string;
+    };
+
+export type OperationalMetricsAttachmentMetadataDto = {
+  schemaVersion: number;
+  attachmentId: string;
+  corpusId: string;
+  contentSha256: string;
+  contentBytes: number;
+  metricSchemaVersion: number;
+  displayName: string;
+  validatedAtUnixSecs: number;
+  source: OperationalMetricsAttachmentSourceDto;
+  timeQualityDeclarations: TimeQuality[];
+};
+
+export type OperationalMetricsAttachmentDto = {
+  metadata: OperationalMetricsAttachmentMetadataDto;
+  documentText: string;
+};
+
+/** Persist one bounded, validated metric document for the exact corpus. */
+export async function hostSaveLogOperationalMetricsAttachment(
+  corpusId: string,
+  documentText: string,
+  displayLabel: string,
+  source: OperationalMetricsAttachmentSourceDto = { kind: "manual_load" },
+): Promise<OperationalMetricsAttachmentDto> {
+  if (!isTauri()) {
+    throw new Error("Metric attachment requires the desktop app");
+  }
+  return invoke<OperationalMetricsAttachmentDto>(
+    "log_save_operational_metrics_attachment",
+    { corpusId, documentText, displayLabel, source },
+  );
+}
+
+/** Restore and revalidate the exact corpus's stored metric attachment. */
+export async function hostLoadLogOperationalMetricsAttachment(
+  corpusId: string,
+): Promise<OperationalMetricsAttachmentDto> {
+  if (!isTauri()) {
+    throw new Error("Metric attachment requires the desktop app");
+  }
+  return invoke<OperationalMetricsAttachmentDto>(
+    "log_load_operational_metrics_attachment",
+    { corpusId },
+  );
+}
+
+/** Remove only the exact corpus's stored metric attachment. */
+export async function hostRemoveLogOperationalMetricsAttachment(
+  corpusId: string,
+): Promise<void> {
+  if (!isTauri()) {
+    throw new Error("Metric attachment requires the desktop app");
+  }
+  await invoke<void>("log_remove_operational_metrics_attachment", {
+    corpusId,
+  });
+}
+
 /**
  * Set the host default log corpus so agent tools can omit `corpus=`
  * (log wizard handoff after SoftWrite ingest).

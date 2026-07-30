@@ -7758,6 +7758,243 @@ fn discard_log_corpus(state: State<'_, AppState>, corpus_id: String) -> Result<(
     Ok(())
 }
 
+fn save_log_operational_metrics_attachment_at(
+    cache: &std::path::Path,
+    corpus_id: &str,
+    document_text: &str,
+    display_label: &str,
+    source: cd_core::log_analysis::OperationalMetricsAttachmentSource,
+) -> Result<
+    cd_core::log_analysis::OperationalMetricsAttachment,
+    cd_core::log_analysis::OperationalMetricsAttachmentError,
+> {
+    cd_core::log_analysis::save_operational_metrics_attachment(
+        cache,
+        corpus_id,
+        document_text,
+        display_label,
+        source,
+    )
+}
+
+fn validate_log_operational_metrics_request_bounds(
+    document_text: &str,
+    display_label: &str,
+) -> Result<(), cd_core::log_analysis::OperationalMetricsAttachmentError> {
+    let content_bytes = u64::try_from(document_text.len()).unwrap_or(u64::MAX);
+    if content_bytes > cd_core::log_analysis::MAX_OPERATIONAL_METRICS_ATTACHMENT_BYTES {
+        return Err(
+            cd_core::log_analysis::OperationalMetricsAttachmentError::TooLarge {
+                actual_bytes: content_bytes,
+                max_bytes: cd_core::log_analysis::MAX_OPERATIONAL_METRICS_ATTACHMENT_BYTES,
+            },
+        );
+    }
+    if display_label.len() > cd_core::log_analysis::MAX_OPERATIONAL_METRICS_DISPLAY_LABEL_BYTES {
+        return Err(
+            cd_core::log_analysis::OperationalMetricsAttachmentError::InvalidSource {
+                reason: "display label exceeds its bounded input size".into(),
+            },
+        );
+    }
+    Ok(())
+}
+
+/// Persist one caller-neutral, validated operational-metrics attachment.
+///
+/// Manual loading and future Incident Evidence Bundle import use this exact
+/// core API and metadata contract. No external source path is accepted.
+#[tauri::command]
+async fn log_save_operational_metrics_attachment(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    document_text: String,
+    display_label: String,
+    source: cd_core::log_analysis::OperationalMetricsAttachmentSource,
+) -> Result<
+    cd_core::log_analysis::OperationalMetricsAttachment,
+    cd_core::log_analysis::OperationalMetricsAttachmentError,
+> {
+    validate_log_operational_metrics_request_bounds(&document_text, &display_label)?;
+    let cache = log_cache_dir(&state).map_err(|_| {
+        cd_core::log_analysis::OperationalMetricsAttachmentError::Storage {
+            operation: "resolve corpus storage".into(),
+        }
+    })?;
+    tokio::task::spawn_blocking(move || {
+        save_log_operational_metrics_attachment_at(
+            &cache,
+            &corpus_id,
+            &document_text,
+            &display_label,
+            source,
+        )
+    })
+    .await
+    .map_err(
+        |_| cd_core::log_analysis::OperationalMetricsAttachmentError::Storage {
+            operation: "join attachment save task".into(),
+        },
+    )?
+}
+
+fn load_log_operational_metrics_attachment_at(
+    cache: &std::path::Path,
+    corpus_id: &str,
+) -> Result<
+    cd_core::log_analysis::OperationalMetricsAttachment,
+    cd_core::log_analysis::OperationalMetricsAttachmentError,
+> {
+    cd_core::log_analysis::load_operational_metrics_attachment(cache, corpus_id)
+}
+
+/// Restore and revalidate one exact corpus attachment.
+#[tauri::command]
+async fn log_load_operational_metrics_attachment(
+    state: State<'_, AppState>,
+    corpus_id: String,
+) -> Result<
+    cd_core::log_analysis::OperationalMetricsAttachment,
+    cd_core::log_analysis::OperationalMetricsAttachmentError,
+> {
+    let cache = log_cache_dir(&state).map_err(|_| {
+        cd_core::log_analysis::OperationalMetricsAttachmentError::Storage {
+            operation: "resolve corpus storage".into(),
+        }
+    })?;
+    tokio::task::spawn_blocking(move || {
+        load_log_operational_metrics_attachment_at(&cache, &corpus_id)
+    })
+    .await
+    .map_err(
+        |_| cd_core::log_analysis::OperationalMetricsAttachmentError::Storage {
+            operation: "join attachment load task".into(),
+        },
+    )?
+}
+
+fn remove_log_operational_metrics_attachment_at(
+    cache: &std::path::Path,
+    corpus_id: &str,
+) -> Result<(), cd_core::log_analysis::OperationalMetricsAttachmentError> {
+    cd_core::log_analysis::remove_operational_metrics_attachment(cache, corpus_id)
+}
+
+/// Remove only the exact corpus attachment.
+#[tauri::command]
+async fn log_remove_operational_metrics_attachment(
+    state: State<'_, AppState>,
+    corpus_id: String,
+) -> Result<(), cd_core::log_analysis::OperationalMetricsAttachmentError> {
+    let cache = log_cache_dir(&state).map_err(|_| {
+        cd_core::log_analysis::OperationalMetricsAttachmentError::Storage {
+            operation: "resolve corpus storage".into(),
+        }
+    })?;
+    tokio::task::spawn_blocking(move || {
+        remove_log_operational_metrics_attachment_at(&cache, &corpus_id)
+    })
+    .await
+    .map_err(
+        |_| cd_core::log_analysis::OperationalMetricsAttachmentError::Storage {
+            operation: "join attachment remove task".into(),
+        },
+    )?
+}
+
+#[cfg(test)]
+mod operational_metrics_attachment_backend_tests {
+    use super::*;
+
+    fn document() -> String {
+        serde_json::json!({
+            "schemaVersion": 1,
+            "id": "tauri-boundary",
+            "name": "Tauri boundary metrics",
+            "series": [{
+                "id": "clients",
+                "name": "Concurrent clients",
+                "unit": "clients",
+                "provenance": {"source": "test-harness"},
+                "timeQuality": "wall",
+                "points": [
+                    {"timestamp": 1_735_737_600.0, "value": 10.0},
+                    {"timestamp": 1_735_737_601.0, "value": 20.0}
+                ]
+            }]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn backend_helpers_reconstruct_replace_and_remove_without_a_source_path() {
+        let cache = tempfile::tempdir().expect("cache");
+        let corpus = cd_core::log_analysis::LogCorpus::create(cache.path(), "tauri attachment")
+            .expect("corpus");
+        let corpus_id = corpus.id().to_string();
+        let corpus_root = corpus.root().to_path_buf();
+        drop(corpus);
+
+        let saved = save_log_operational_metrics_attachment_at(
+            cache.path(),
+            &corpus_id,
+            &document(),
+            r"C:\private\customer\performance.json",
+            cd_core::log_analysis::OperationalMetricsAttachmentSource::ManualLoad,
+        )
+        .expect("save");
+        assert_eq!(saved.metadata.display_name, "performance.json");
+
+        let restored = load_log_operational_metrics_attachment_at(cache.path(), &corpus_id)
+            .expect("restore after fresh corpus open");
+        assert_eq!(restored, saved);
+
+        let stored = std::fs::read_dir(&corpus_root)
+            .expect("corpus files")
+            .filter_map(Result::ok)
+            .find_map(|entry| {
+                let name = entry.file_name();
+                name.to_string_lossy()
+                    .starts_with("operational-metrics-attachment")
+                    .then(|| std::fs::read_to_string(entry.path()).expect("attachment text"))
+            })
+            .expect("attachment envelope");
+        assert!(!stored.contains(r"C:\private\customer"));
+
+        remove_log_operational_metrics_attachment_at(cache.path(), &corpus_id).expect("remove");
+        assert!(matches!(
+            load_log_operational_metrics_attachment_at(cache.path(), &corpus_id),
+            Err(cd_core::log_analysis::OperationalMetricsAttachmentError::Missing)
+        ));
+        assert!(corpus_root.join("events.duckdb").is_file());
+    }
+
+    #[test]
+    fn backend_helpers_reject_corpus_id_traversal_before_storage_access() {
+        let cache = tempfile::tempdir().expect("cache");
+        assert!(matches!(
+            load_log_operational_metrics_attachment_at(cache.path(), "../../outside"),
+            Err(cd_core::log_analysis::OperationalMetricsAttachmentError::CorpusUnavailable)
+        ));
+    }
+
+    #[test]
+    fn tauri_boundary_rejects_oversized_content_and_labels_before_core_work() {
+        let oversized_document = " "
+            .repeat((cd_core::log_analysis::MAX_OPERATIONAL_METRICS_ATTACHMENT_BYTES + 1) as usize);
+        assert!(matches!(
+            validate_log_operational_metrics_request_bounds(&oversized_document, "metrics.json"),
+            Err(cd_core::log_analysis::OperationalMetricsAttachmentError::TooLarge { .. })
+        ));
+        let oversized_label =
+            "x".repeat(cd_core::log_analysis::MAX_OPERATIONAL_METRICS_DISPLAY_LABEL_BYTES + 1);
+        assert!(matches!(
+            validate_log_operational_metrics_request_bounds("{}", &oversized_label),
+            Err(cd_core::log_analysis::OperationalMetricsAttachmentError::InvalidSource { .. })
+        ));
+    }
+}
+
 /// Set the host default log corpus so agent log tools can omit `corpus=` (wizard handoff).
 #[tauri::command]
 fn set_active_log_corpus(
@@ -9857,6 +10094,9 @@ pub fn run() {
             log_timeline,
             log_search,
             discard_log_corpus,
+            log_save_operational_metrics_attachment,
+            log_load_operational_metrics_attachment,
+            log_remove_operational_metrics_attachment,
             set_active_log_corpus,
             get_active_log_corpus,
             log_query_events,

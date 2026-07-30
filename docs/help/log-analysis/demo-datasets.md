@@ -184,7 +184,7 @@ smoke test; the 250,000-event default is the literal scale acceptance vector.
 
 ## Add the optional operational metrics
 
-Operational metrics are a separate, optional session input. If you do not load
+Operational metrics are a separate, optional corpus attachment. If you do not load
 this file, the CPU, heap, and client tracks remain absent; ordinary log
 investigation is unaffected.
 
@@ -194,8 +194,9 @@ investigation is unaffected.
 4. Select only
    `fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/metrics/operational-metrics.v1.json`.
 5. Use the shared cursor or brush a range to compare metric points with the log
-   histogram. Metrics are loaded for this Explorer session and are not durably
-   attached to the corpus.
+   histogram. The validated stored copy is attached to this exact corpus and
+   restores after Explorer or application restart. It remains outside agent
+   context unless a future governed evidence workflow explicitly selects it.
 
 | Track | Exact fixture coverage |
 | --- | --- |

@@ -52,7 +52,7 @@ Out of scope:
 | Optional first-run 25k install | **Local integration** | #732 packages only the 25k `import/` tree and delegates to ordinary bounded ingest with a managed idempotency marker | Exact packaged/native proof remains before promotion |
 | Generated seven-day 100k corpus | **Shipped** | [`generate_log_lab.rs`](../../../crates/cd-core/examples/generate_log_lab.rs) and ignored product-path test in [`log_lab.rs`](../../../crates/cd-core/tests/log_lab.rs) | Output is generated locally, not checked in |
 | Generated error-heavy 250k triage corpus | **Local integration** | #745 `triage-stress` generator, exact truth contract, minimum product-path test, and ignored literal 250k proof | Bulk output stays local; live linked-chat quality remains provider/build-specific |
-| Optional aligned metric document | **Shipped** | [`operational-metrics.v1.json`](../../../fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/metrics/operational-metrics.v1.json) and [metric-track design](../OPERATIONAL_METRIC_TRACKS.md) | Session-only; durable attachment and chat metric context are not shipped |
+| Optional aligned metric document | **Shipped** | [`operational-metrics.v1.json`](../../../fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/metrics/operational-metrics.v1.json) and [metric-track design](../OPERATIONAL_METRIC_TRACKS.md) | One durable corpus attachment ships; multiple/bundle attachment and governed metric chat context remain residual |
 | Exact Find, Filter, bookmark, and evidence workflow | **Partial** | [Log Explorer Help](../../help/log-analysis/log-explorer.md) and [investigation method](INVESTIGATION_LOOP.md) | Remaining packaged acceptance and proposal/report work are tracked by #656/#646/#532 |
 | Ordinary chat isolation | **Shipped** | [`agent.rs`](../../../crates/cd-core/src/agent.rs) and [context assembly method](DETERMINISTIC_CONTEXT_ASSEMBLY.md) | Repeat native proof per supported host |
 | Tools-disabled linked-chat refusal | **Shipped** | [`research.rs`](../../../crates/cd-core/src/research.rs) | Cannot pass a grounded linked-log evaluation |
@@ -490,7 +490,7 @@ A replacement store or renderer must publish its own bounds and measurements.
 | Small/local model times out | Phase deadline | Visible timeout with preserved transcript/evidence | Narrow prompt, adjust approved profile budgets, retry | Prior successful tool evidence remains identifiable |
 | Citation cannot resolve | Identity revalidation | Stale/missing/wrong-corpus | Reopen source or fail criterion | No fuzzy rebinding |
 | Metrics do not overlap reliable log time | Validator | Document remains unloaded | Choose correct document/corpus | No false alignment |
-| App restarts | Durable corpus/chat/investigation reload | Restored or explicit missing state | Reopen by identity | Session-only metrics are intentionally lost |
+| App restarts | Durable corpus/chat/investigation/metric reload | Restored or explicit missing/corrupt/unsupported state | Reopen by identity | One exact corpus metric attachment is revalidated before rendering |
 | Screenshot/privacy violation | Human review or media audit | Publication blocked | Redact source data or recapture neutral UI | Private inventory is not knowingly published |
 
 ## 9. Observability

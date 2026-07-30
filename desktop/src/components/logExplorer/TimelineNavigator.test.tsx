@@ -15,6 +15,9 @@ import { TimelineNavigator } from "./TimelineNavigator";
 vi.mock("../../lib/host", () => ({
   hostLogSharedTimelineSummary: vi.fn(),
   hostLogQueryEvents: vi.fn(),
+  hostLoadLogOperationalMetricsAttachment: vi.fn(),
+  hostSaveLogOperationalMetricsAttachment: vi.fn(),
+  hostRemoveLogOperationalMetricsAttachment: vi.fn(),
 }));
 
 const summary: host.SharedTimelineSummaryDto = {
@@ -105,6 +108,28 @@ function metricFile(value: unknown, name = "metrics.json") {
   return file;
 }
 
+function metricAttachment(
+  value: unknown = sessionMetrics,
+  displayName = "metrics.json",
+): host.OperationalMetricsAttachmentDto {
+  const documentText = JSON.stringify(value);
+  return {
+    metadata: {
+      schemaVersion: 1,
+      attachmentId: "019fb100-0000-7000-8000-000000000001",
+      corpusId: "c1",
+      contentSha256: "a".repeat(64),
+      contentBytes: documentText.length,
+      metricSchemaVersion: 1,
+      displayName,
+      validatedAtUnixSecs: 1_700_000_100,
+      source: { kind: "manual_load" },
+      timeQualityDeclarations: ["wall"],
+    },
+    documentText,
+  };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((resolvePromise) => {
@@ -178,6 +203,16 @@ describe("TimelineNavigator", () => {
       totalMatched: 1,
       timeQuality: "wall",
     });
+    vi.mocked(
+      host.hostLoadLogOperationalMetricsAttachment,
+    ).mockRejectedValue({ code: "missing" });
+    vi.mocked(host.hostSaveLogOperationalMetricsAttachment).mockImplementation(
+      async (_corpusId, documentText, displayLabel) =>
+        metricAttachment(JSON.parse(documentText), displayLabel),
+    );
+    vi.mocked(host.hostRemoveLogOperationalMetricsAttachment).mockResolvedValue(
+      undefined,
+    );
   });
 
   it("is visible by default, collapses accessibly, and does no work while closed", async () => {
@@ -456,7 +491,15 @@ describe("TimelineNavigator", () => {
     });
 
     const panel = await screen.findByTestId("timeline-session-metrics");
-    expect(panel.textContent).toContain("session only · not persisted");
+    expect(panel.textContent).toContain("attached to this corpus");
+    expect(panel.textContent).toContain("not shared with the agent");
+    expect(
+      host.hostSaveLogOperationalMetricsAttachment,
+    ).toHaveBeenCalledWith(
+      "c1",
+      JSON.stringify(sessionMetrics),
+      "metrics.json",
+    );
     expect(screen.getAllByRole("slider")).toHaveLength(4);
     expect(
       screen.getByTestId("operational-metric-track-cpu-percent"),
@@ -513,6 +556,121 @@ describe("TimelineNavigator", () => {
     expect(screen.queryByTestId("timeline-session-metrics")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Show tracks" }));
     expect(screen.getByTestId("timeline-session-metrics")).toBeTruthy();
+  });
+
+  it("restores a durable metric attachment when the same corpus reopens", async () => {
+    vi.mocked(
+      host.hostLoadLogOperationalMetricsAttachment,
+    ).mockResolvedValueOnce(metricAttachment());
+
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+
+    const panel = await screen.findByTestId("timeline-session-metrics");
+    expect(
+      host.hostLoadLogOperationalMetricsAttachment,
+    ).toHaveBeenCalledWith("c1");
+    expect(panel.textContent).toContain("metrics.json · attached to this corpus");
+    expect(panel.textContent).toContain("not shared with the agent");
+    expect(panel.textContent).toContain("aaaaaaaa");
+  });
+
+  it("keeps the prior attachment visible when replacement fails", async () => {
+    vi.mocked(
+      host.hostLoadLogOperationalMetricsAttachment,
+    ).mockResolvedValueOnce(metricAttachment());
+    vi.mocked(
+      host.hostSaveLogOperationalMetricsAttachment,
+    ).mockRejectedValueOnce({
+      code: "invalid_document",
+      diagnostics: [{ path: "$.series", message: "invalid" }],
+    });
+
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("timeline-session-metrics");
+
+    fireEvent.change(screen.getByTestId("timeline-metric-input"), {
+      target: { files: [metricFile(sessionMetrics, "replacement.json")] },
+    });
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Metrics not attached",
+    );
+    expect(screen.getByTestId("timeline-session-metrics").textContent).toContain(
+      "metrics.json · attached to this corpus",
+    );
+  });
+
+  it("removes only the stored attachment after inline confirmation", async () => {
+    vi.mocked(
+      host.hostLoadLogOperationalMetricsAttachment,
+    ).mockResolvedValueOnce(metricAttachment());
+
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("timeline-session-metrics");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove attachment" }),
+    );
+    const confirm = screen.getByRole("group", {
+      name: "Confirm metric attachment removal",
+    });
+    expect(confirm.textContent).toContain(
+      "Logs, findings, and the original file are unaffected",
+    );
+    fireEvent.click(
+      within(confirm).getByRole("button", { name: "Confirm remove" }),
+    );
+
+    await waitFor(() =>
+      expect(
+        host.hostRemoveLogOperationalMetricsAttachment,
+      ).toHaveBeenCalledWith("c1"),
+    );
+    expect(screen.queryByTestId("timeline-session-metrics")).toBeNull();
+  });
+
+  it("reports corrupt stored metrics instead of silently dropping them", async () => {
+    vi.mocked(
+      host.hostLoadLogOperationalMetricsAttachment,
+    ).mockRejectedValueOnce({
+      code: "corrupt",
+      reason: "content digest mismatch",
+    });
+
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "failed integrity checks",
+    );
+    expect(screen.queryByTestId("timeline-session-metrics")).toBeNull();
   });
 
   it("tracks the visible log viewport without querying or recomputing the timeline", async () => {
@@ -931,7 +1089,7 @@ describe("TimelineNavigator", () => {
     expect(screen.getByText(/clipped to the shared log timeline/)).toBeTruthy();
   });
 
-  it("fails closed when session metric time cannot align honestly", async () => {
+  it("persists metrics but does not render when their time cannot align honestly", async () => {
     const invalid = structuredClone(sessionMetrics);
     invalid.series[1]!.timeQuality = "order_only";
     render(
@@ -947,9 +1105,12 @@ describe("TimelineNavigator", () => {
       target: { files: [metricFile(invalid, "ambiguous.json")] },
     });
 
-    expect((await screen.findByRole("alert")).textContent).toContain(
-      "requires explicit wall-clock timestamps",
-    );
+    expect(
+      (await screen.findByTestId("timeline-metric-load-reason")).textContent,
+    ).toContain("need explicit wall-clock timestamps");
+    expect(
+      host.hostSaveLogOperationalMetricsAttachment,
+    ).toHaveBeenCalledTimes(1);
     expect(screen.queryByTestId("timeline-session-metrics")).toBeNull();
   });
 
@@ -1340,7 +1501,7 @@ describe("TimelineNavigator", () => {
     );
   });
 
-  it("disables metric load for order_only with the exact accessible explanation", async () => {
+  it("attaches metrics but blocks rendering for order_only with an accessible explanation", async () => {
     vi.mocked(host.hostLogSharedTimelineSummary).mockResolvedValue({
       ...summary,
       timeQuality: "order_only",
@@ -1358,33 +1519,26 @@ describe("TimelineNavigator", () => {
     );
     await screen.findByTestId("timeline-navigator-track");
     const load = screen.getByTestId("timeline-metric-load");
-    expect(load.getAttribute("aria-disabled")).toBe("true");
-    expect(load.getAttribute("aria-describedby")).toBe(
-      "timeline-metric-load-reason",
-    );
-    const reason = screen.getByTestId("timeline-metric-load-reason");
-    expect(reason.textContent).toBe(
-      "Metrics need a wall clock. This corpus is order-only, so metric tracks cannot be aligned.",
-    );
-    // Keyboard users: focus the control (aria-disabled, not HTML disabled) and
-    // the visible supporting copy which is itself tabbable.
-    load.focus();
-    expect(document.activeElement).toBe(load);
-    expect(
-      document.getElementById(load.getAttribute("aria-describedby")!),
-    ).toBe(reason);
-    reason.focus();
-    expect(document.activeElement).toBe(reason);
-
-    fireEvent.click(load);
+    expect(load.hasAttribute("disabled")).toBe(false);
     fireEvent.change(screen.getByTestId("timeline-metric-input"), {
       target: { files: [file] },
     });
-    expect(textSpy).not.toHaveBeenCalled();
+    const reason = await screen.findByTestId("timeline-metric-load-reason");
+    expect(reason.textContent).toBe(
+      "Metrics need a wall clock. This corpus is order-only, so metric tracks cannot be aligned.",
+    );
+    load.focus();
+    expect(document.activeElement).toBe(load);
+    reason.focus();
+    expect(document.activeElement).toBe(reason);
+    expect(textSpy).toHaveBeenCalledTimes(1);
+    expect(
+      host.hostSaveLogOperationalMetricsAttachment,
+    ).toHaveBeenCalledTimes(1);
     expect(screen.queryByTestId("timeline-session-metrics")).toBeNull();
   });
 
-  it("disables metric load for mixed with the distinct unresolved-time explanation", async () => {
+  it("attaches metrics but blocks rendering for mixed corpus time", async () => {
     vi.mocked(host.hostLogSharedTimelineSummary).mockResolvedValue({
       ...summary,
       timeQuality: "mixed",
@@ -1402,18 +1556,20 @@ describe("TimelineNavigator", () => {
     );
     await screen.findByTestId("timeline-navigator-track");
     const load = screen.getByTestId("timeline-metric-load");
-    expect(load.getAttribute("aria-disabled")).toBe("true");
-    expect(screen.getByTestId("timeline-metric-load-reason").textContent).toBe(
-      "Metrics need a reliable shared wall clock. Some sources in this corpus have unresolved time.",
-    );
+    expect(load.hasAttribute("disabled")).toBe(false);
     fireEvent.change(screen.getByTestId("timeline-metric-input"), {
       target: { files: [file] },
     });
-    expect(textSpy).not.toHaveBeenCalled();
+    expect(
+      (await screen.findByTestId("timeline-metric-load-reason")).textContent,
+    ).toBe(
+      "Metrics need a reliable shared wall clock. Some sources in this corpus have unresolved time.",
+    );
+    expect(textSpy).toHaveBeenCalledTimes(1);
     expect(screen.queryByTestId("timeline-session-metrics")).toBeNull();
   });
 
-  it("re-enables metric load when the timeline becomes wall-clock", async () => {
+  it("renders an attached metric document when corpus time becomes wall-clock", async () => {
     vi.mocked(host.hostLogSharedTimelineSummary).mockResolvedValue({
       ...summary,
       timeQuality: "order_only",
@@ -1427,31 +1583,22 @@ describe("TimelineNavigator", () => {
       />,
     );
     await screen.findByTestId("timeline-navigator-track");
-    expect(
-      screen.getByTestId("timeline-metric-load").getAttribute("aria-disabled"),
-    ).toBe("true");
+    fireEvent.change(screen.getByTestId("timeline-metric-input"), {
+      target: { files: [metricFile(sessionMetrics)] },
+    });
+    expect(await screen.findByTestId("timeline-metric-load-reason")).toBeTruthy();
+    expect(screen.queryByTestId("timeline-session-metrics")).toBeNull();
 
     vi.mocked(host.hostLogSharedTimelineSummary).mockResolvedValue(summary);
     rerender(
       <TimelineNavigator
-        corpusId="c2"
-        filter={{}}
+        corpusId="c1"
+        filter={{ levels: ["ERROR"] }}
         residentEvents={[]}
         onSeekSeq={vi.fn()}
       />,
     );
-    await waitFor(() =>
-      expect(
-        screen
-          .getByTestId("timeline-metric-load")
-          .getAttribute("aria-disabled"),
-      ).not.toBe("true"),
-    );
+    await screen.findByTestId("timeline-session-metrics");
     expect(screen.queryByTestId("timeline-metric-load-reason")).toBeNull();
-
-    fireEvent.change(screen.getByTestId("timeline-metric-input"), {
-      target: { files: [metricFile(sessionMetrics)] },
-    });
-    expect(await screen.findByTestId("timeline-session-metrics")).toBeTruthy();
   });
 });
