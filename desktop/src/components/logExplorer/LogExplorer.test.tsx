@@ -2348,10 +2348,11 @@ describe("LogExplorer shell", () => {
         filtersDrawer.contains(screen.getByLabelText("Sequence start filter")),
       ).toBe(true);
 
-      const errorFacet = within(screen.getByTestId("log-explorer-filters"))
-        .getByText("error")
-        .closest("label");
-      fireEvent.click(within(errorFacet!).getByRole("checkbox"));
+      fireEvent.click(
+        await within(
+          screen.getByTestId("log-explorer-filters"),
+        ).findByRole("checkbox", { name: /error/i }),
+      );
       expect(await screen.findByTestId("clear-all-filters")).toBeTruthy();
       fireEvent.click(screen.getByTestId("clear-all-filters"));
       await waitFor(() =>
@@ -2958,10 +2959,12 @@ describe("LogExplorer shell", () => {
       expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledTimes(1),
     );
 
-    const errorFacet = within(screen.getByTestId("log-explorer-filters"))
-      .getByText("error")
-      .closest("label");
-    fireEvent.click(within(errorFacet!).getByRole("checkbox"));
+    fireEvent.click(
+      await within(screen.getByTestId("log-explorer-filters")).findByRole(
+        "checkbox",
+        { name: /error/i },
+      ),
+    );
     await waitFor(() =>
       expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledTimes(2),
     );
@@ -4894,7 +4897,7 @@ describe("LogExplorer shell", () => {
 
     const filtersPanel = screen.getByTestId("log-explorer-filters");
     fireEvent.click(
-      within(filtersPanel).getByRole("checkbox", { name: /api\.log/i }),
+      await within(filtersPanel).findByRole("checkbox", { name: /api\.log/i }),
     );
     await screen.findByRole("button", { name: "source:api.log ×" });
     await waitFor(() =>
@@ -5736,9 +5739,12 @@ describe("LogExplorer shell", () => {
       }),
     );
 
-    const errorFacet = screen.getByText("error").closest("label");
-    expect(errorFacet).toBeTruthy();
-    fireEvent.click(within(errorFacet!).getByRole("checkbox"));
+    fireEvent.click(
+      await within(screen.getByTestId("log-explorer-filters")).findByRole(
+        "checkbox",
+        { name: /error/i },
+      ),
+    );
     await waitFor(() =>
       expect(host.hostLogSearchEventsAdvanced).toHaveBeenLastCalledWith(
         "c1",
@@ -6284,8 +6290,12 @@ describe("LogExplorer shell", () => {
       ),
     );
 
-    const errorFacet = screen.getByText("error").closest("label");
-    fireEvent.click(within(errorFacet!).getByRole("checkbox"));
+    fireEvent.click(
+      await within(screen.getByTestId("log-explorer-filters")).findByRole(
+        "checkbox",
+        { name: /error/i },
+      ),
+    );
     await waitFor(() =>
       expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledTimes(2),
     );
