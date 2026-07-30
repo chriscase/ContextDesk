@@ -1,7 +1,10 @@
+use std::env;
 use std::process::Command;
-use std::{env, path::Path};
 
+#[cfg(not(windows))]
 use cd_core::incident_evidence::validate_directory;
+#[cfg(not(windows))]
+use std::path::Path;
 
 #[test]
 fn incident_evidence_help_is_a_successful_read_only_action() {
