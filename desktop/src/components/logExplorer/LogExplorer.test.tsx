@@ -450,7 +450,7 @@ function suppressionDocument(
   revision = 3,
   extraRules: host.SuppressionDocumentDto["rules"] = [],
 ): host.SuppressionDocumentDto {
-  const primary = {
+  const primary: host.SuppressionRuleDto = {
     id: "019fb-noise-rule",
     name: "Routine heartbeat",
     rationale: "Known health-check traffic obscures incident evidence.",
@@ -458,16 +458,30 @@ function suppressionDocument(
       templateId: 2,
       templateFingerprint: "template-2-fingerprint",
     },
-    origin: "human" as const,
+    origin: "human",
     state,
     createdAt: 1,
     updatedAt: 2,
+    // Host always resolves rules on load; enabled + matches_current can exclude.
+    resolution:
+      state === "enabled"
+        ? {
+            kind: "matches_current",
+            matchesNothing: false,
+            explanation: "Exact template matches the current corpus.",
+          }
+        : {
+            kind: "inactive",
+            matchesNothing: true,
+            explanation: "Disabled rules do not participate.",
+          },
   };
   const rules = [primary, ...extraRules];
   return {
     schemaVersion: 1,
     corpusId: "c1",
     revision,
+    resolvedTemplateRevision: 7,
     rules,
     previews: [],
     audit: [
@@ -499,6 +513,11 @@ function multiRuleSuppressionDocument(
       state: "enabled",
       createdAt: 3,
       updatedAt: 4,
+      resolution: {
+        kind: "matches_current",
+        matchesNothing: false,
+        explanation: "Exact template matches the current corpus.",
+      },
     },
   ]);
 }
@@ -837,6 +856,89 @@ describe("LogExplorer shell", () => {
     expect(host.hostLogQueryEventRows).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Retry policy" }));
     expect(await screen.findByText(/auth failure/)).toBeTruthy();
+  });
+
+  it("excludes only matches_current templates; stale enabled rules match nothing (#819)", async () => {
+    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+      suppressionDocument("enabled", 4, [
+        {
+          id: "019fb-stale-rule",
+          name: "Gone template",
+          rationale: "Target missing after re-analysis.",
+          predicate: {
+            templateId: 99,
+            templateFingerprint: "template-99-old",
+          },
+          origin: "human",
+          state: "enabled",
+          createdAt: 1,
+          updatedAt: 2,
+          resolution: {
+            kind: "stale_target_missing",
+            matchesNothing: true,
+            explanation: "Target template no longer exists.",
+          },
+        },
+        {
+          id: "019fb-fingerprint-rule",
+          name: "Reused id",
+          rationale: "Numeric id reused for different content.",
+          predicate: {
+            templateId: 77,
+            templateFingerprint: "template-77-old",
+          },
+          origin: "human",
+          state: "enabled",
+          createdAt: 1,
+          updatedAt: 2,
+          resolution: {
+            kind: "stale_fingerprint_changed",
+            matchesNothing: true,
+            explanation: "Template content changed under the same id.",
+          },
+        },
+      ]),
+    );
+    vi.mocked(host.hostLogCountEvents).mockImplementation(
+      async (_corpusId, query) => {
+        // Hidden-count uses templateIds of applying rules only (template 2).
+        if (query?.templateIds?.includes(2)) return { totalMatched: 4 };
+        if (query?.templateIds?.includes(99) || query?.templateIds?.includes(77)) {
+          throw new Error("stale template ids must not enter the hidden-count query");
+        }
+        const excluded = query?.excludedTemplateIds ?? [];
+        if (excluded.includes(99) || excluded.includes(77)) {
+          throw new Error("stale rules must not appear in excludedTemplateIds");
+        }
+        return { totalMatched: excluded.includes(2) ? 6 : 10 };
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await waitFor(() => expect(host.hostLogQueryEventRows).toHaveBeenCalled());
+
+    const rowQuery = vi
+      .mocked(host.hostLogQueryEventRows)
+      .mock.calls.at(-1)?.[1];
+    expect(rowQuery?.excludedTemplateIds).toEqual([2]);
+    expect(rowQuery?.excludedTemplateIds).not.toContain(99);
+    expect(rowQuery?.excludedTemplateIds).not.toContain(77);
+
+    await waitFor(() => expect(host.hostLogCountEvents).toHaveBeenCalled());
+    // Policy-hidden count query must only count matches_current templates.
+    const hiddenCountCalls = vi
+      .mocked(host.hostLogCountEvents)
+      .mock.calls.filter(([, query]) => (query?.templateIds?.length ?? 0) > 0);
+    expect(hiddenCountCalls.length).toBeGreaterThan(0);
+    for (const [, query] of hiddenCountCalls) {
+      expect(query?.templateIds).toEqual([2]);
+    }
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /Noise · 3 rules · 4 hidden/ }),
+      ).toBeTruthy(),
+    );
   });
 
   it("applies one suppression lens to rows, counts, facets, timeline, and Find", async () => {

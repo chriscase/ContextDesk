@@ -75,6 +75,7 @@ import { subscribeLogExplorerNavTargets } from "../../lib/engine/platform";
 import {
   formatPolicyBindingStatus,
   policyBindingBlocksApply,
+  ruleContributesToExclusion,
 } from "../../lib/logExplorer/policyBinding";
 import {
   clampLaneCount,
@@ -1148,12 +1149,17 @@ export function LogExplorer({ corpusId }: Props) {
     (summary?.embedding?.embeddedTemplates ?? summary?.stats?.embedded ?? 0) >
     0;
   const findBusy = findSearching || findLocating;
+  // Fail-closed product lens (#819): only enabled rules the host resolved as
+  // matches_current may exclude events. Stale/fingerprint/invalid/conflicting
+  // rules remain visible but contribute zero exclusions.
   const enabledSuppressionTemplateIds = useMemo(
     () =>
       [
         ...new Set(
           (suppressionDocument?.rules ?? [])
-            .filter((rule) => rule.state === "enabled")
+            .filter((rule) =>
+              ruleContributesToExclusion(rule.state, rule.resolution ?? null),
+            )
             .map((rule) => rule.predicate.templateId),
         ),
       ].sort((a, b) => a - b),
@@ -1633,10 +1639,13 @@ export function LogExplorer({ corpusId }: Props) {
       }
       try {
         const document = await hostLogLoadSuppression(corpusId);
+        // Hidden-count preview must use the same fail-closed lens as queries.
         const enabledTemplateIds = [
           ...new Set(
             document.rules
-              .filter((rule) => rule.state === "enabled")
+              .filter((rule) =>
+                ruleContributesToExclusion(rule.state, rule.resolution ?? null),
+              )
               .map((rule) => rule.predicate.templateId),
           ),
         ].sort((a, b) => a - b);
