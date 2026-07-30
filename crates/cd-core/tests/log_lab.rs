@@ -1,6 +1,12 @@
 #[path = "support/log_lab_generator.rs"]
 mod log_lab_generator;
 
+use async_trait::async_trait;
+use cd_core::agent::{run_agent_turn, AgentOptions, ChatBackend, LogExplorerTurnContext};
+use cd_core::chat::{ChatCompletion, ChatMessage, FunctionCall, ToolCallMsg};
+use cd_core::error::CoreResult;
+use cd_core::events::{StreamEvent, ToolPhase};
+use cd_core::index::KeywordIndex;
 use cd_core::investigations::InvestigationStore;
 use cd_core::log_analysis::{
     activate_template_suppression, add_line_bookmark, cluster_problems, export_corpus_zip,
@@ -16,6 +22,11 @@ use cd_core::log_analysis::{
 use cd_core::process_progress::{
     CancelFlag, ProcessProgress, ProcessProgressObserver, RecordingProcessProgress,
 };
+use cd_core::tool_host::{
+    ToolHost, BROAD_LOG_TRIAGE_BRIEF_MAX_BYTES, BROAD_LOG_TRIAGE_IDENTITY_CAP,
+};
+use cd_core::tools::{ToolSideEffect, ToolSpec};
+use cd_core::workspace::Workspace;
 use log_lab_generator::{
     generate_behavior, generate_scale, generate_triage_stress, load_behavior_manifest,
     load_triage_stress_manifest, verify_safety, write_performance_template, BehaviorControls,
@@ -27,6 +38,10 @@ use serde_json::Value;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Mutex,
+};
 use std::time::Instant;
 
 fn fixture_root() -> PathBuf {
@@ -75,6 +90,148 @@ fn assert_no_raw_values(bytes: &[u8]) {
                 .any(|window| window == forbidden),
             "raw synthetic credential survived"
         );
+    }
+}
+
+fn marker_value(line: &str, marker: &str) -> Option<String> {
+    let start = line.find(marker)? + marker.len();
+    let suffix = line.get(start..)?;
+    let suffix = suffix.strip_prefix('"').unwrap_or(suffix);
+    let value = suffix
+        .chars()
+        .take_while(|character| {
+            !character.is_whitespace() && !matches!(character, '"' | ',' | ')' | ']' | ';')
+        })
+        .collect::<String>();
+    (!value.is_empty()).then_some(value)
+}
+
+fn trusted_identity_for_signal(context: &str, signal: &str) -> Option<(u64, String)> {
+    context.lines().find_map(|line| {
+        if !line.contains(signal) {
+            return None;
+        }
+        let seq = marker_value(line, "seq=")?.parse::<u64>().ok()?;
+        let source = marker_value(line, "source=")?;
+        Some((seq, source))
+    })
+}
+
+struct Literal250kLinkedBackend {
+    calls: AtomicUsize,
+    expected_corpus_id: String,
+    expected_suppression_revision: u64,
+    max_context_bytes: AtomicUsize,
+    max_seq_markers: AtomicUsize,
+    cited_identity: Mutex<Option<(u64, String)>>,
+}
+
+#[async_trait]
+impl ChatBackend for Literal250kLinkedBackend {
+    async fn complete(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> CoreResult<ChatCompletion> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let context = messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.max_context_bytes
+            .fetch_max(context.len(), Ordering::SeqCst);
+        self.max_seq_markers
+            .fetch_max(context.matches("seq=").count(), Ordering::SeqCst);
+
+        assert!(
+            context.len() <= 64 * 1024,
+            "provider context was not bounded: {} bytes",
+            context.len()
+        );
+        assert!(
+            context.matches("seq=").count() <= BROAD_LOG_TRIAGE_IDENTITY_CAP + 32,
+            "provider received an implausibly large raw-row surface"
+        );
+        assert!(
+            context.contains(&format!(
+                "corpus_id: {}",
+                serde_json::to_string(&self.expected_corpus_id).unwrap()
+            )),
+            "linked context lost its exact corpus binding"
+        );
+        assert!(
+            context.contains(&format!(
+                "suppression_revision: {}",
+                self.expected_suppression_revision
+            )),
+            "linked context lost its pinned suppression revision"
+        );
+
+        match call {
+            0 => {
+                assert!(
+                    context.contains("source_kind: deterministic_broad_log_triage"),
+                    "first provider call did not receive the host broad-triage brief"
+                );
+                assert!(
+                    tools
+                        .iter()
+                        .any(|tool| tool.name == cd_core::log_analysis::SEARCH_LOGS),
+                    "tools-capable broad triage did not offer bounded search_logs: {tools:?}"
+                );
+                assert!(
+                    tools
+                        .iter()
+                        .all(|tool| tool.side_effect == ToolSideEffect::Read),
+                    "linked broad triage exposed a write tool: {tools:?}"
+                );
+                Ok(ChatCompletion {
+                    content: String::new(),
+                    tool_calls: vec![ToolCallMsg {
+                        id: "literal-250k-search".into(),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name: cd_core::log_analysis::SEARCH_LOGS.into(),
+                            arguments: serde_json::json!({
+                                "query": "CDLAB2004",
+                                "level": "error",
+                                "semantic": false,
+                                "k": 8
+                            })
+                            .to_string(),
+                        },
+                    }],
+                    finish_reason: "tool_calls".into(),
+                })
+            }
+            1 => {
+                assert!(
+                    tools.is_empty(),
+                    "validated evidence should enter a tool-closed synthesis call: {tools:?}"
+                );
+                assert!(
+                    context.contains("source_kind: log_templates"),
+                    "second provider call did not receive validated search evidence"
+                );
+                let (seq, source) = trusted_identity_for_signal(&context, "CDLAB2004")
+                    .expect("CDLAB2004 search result must expose a trusted seq/source pair");
+                *self
+                    .cited_identity
+                    .lock()
+                    .expect("cited identity lock poisoned") = Some((seq, source.clone()));
+                Ok(ChatCompletion {
+                    content: format!(
+                        "Observation: CDLAB2004 identifies a bounded database-pool incident \
+                         (seq={seq} source=\"{source}\"). Inference: investigate saturation near \
+                         this event while retaining the active suppression lens."
+                    ),
+                    tool_calls: Vec::new(),
+                    finish_reason: "stop".into(),
+                })
+            }
+            _ => panic!("unexpected provider call {call}"),
+        }
     }
 }
 
@@ -864,9 +1021,9 @@ fn log_lab_triage_stress_minimum_product_path_keeps_rare_incident_signal() {
 
 /// Explicit local #744/#745 scale vector. The generated 250k tree lives only in
 /// a temporary directory and is never checked into the repository.
-#[test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "explicit 250k triage-stress product-path proof"]
-fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
+async fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
     let workspace = tempfile::tempdir().unwrap();
     let generated = workspace.path().join("triage-stress-250k");
     let generation_started = Instant::now();
@@ -992,6 +1149,161 @@ fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
     let suppression_timeline_ms = suppression_timeline_started.elapsed().as_millis();
     assert_eq!(suppression_timeline.total_matched, expected_visible);
 
+    let broad_triage_started = Instant::now();
+    let mut triage_host = ToolHost::new(
+        Workspace::new("triage-stress-250k", vec![workspace.path().to_path_buf()]),
+        KeywordIndex::new(),
+        None,
+    );
+    triage_host.set_log_analysis(true, Some(cache.clone()));
+    triage_host.set_active_log_corpus(Some(report.corpus_id.clone()));
+    triage_host.set_log_corpus_scope(Some(report.corpus_id.clone()));
+    triage_host
+        .pin_log_suppression_lens(&report.corpus_id)
+        .unwrap();
+    let broad_triage = triage_host.build_broad_log_triage_brief().unwrap();
+    let broad_triage_ms = broad_triage_started.elapsed().as_millis();
+    assert_eq!(broad_triage.unsuppressed_event_count, expected_visible);
+    assert_eq!(broad_triage.suppression_revision, active_policy.revision);
+    assert_eq!(broad_triage.time_quality, TimeQuality::Wall);
+    assert!(broad_triage.deterministic_complete);
+    assert!(broad_triage.model_text_bytes <= BROAD_LOG_TRIAGE_BRIEF_MAX_BYTES);
+    assert!(broad_triage.evidence.len() <= BROAD_LOG_TRIAGE_IDENTITY_CAP);
+    assert!(!broad_triage.evidence.is_empty());
+    assert!(
+        ["CDLAB2004", "CDLAB3102", "CDLAB4203"]
+            .iter()
+            .any(|signal| broad_triage.model_text.contains(signal)),
+        "bounded deterministic brief lost every labeled rare severe incident"
+    );
+
+    let linked_backend = Literal250kLinkedBackend {
+        calls: AtomicUsize::new(0),
+        expected_corpus_id: report.corpus_id.clone(),
+        expected_suppression_revision: active_policy.revision,
+        max_context_bytes: AtomicUsize::new(0),
+        max_seq_markers: AtomicUsize::new(0),
+        cited_identity: Mutex::new(None),
+    };
+    let linked_context = LogExplorerTurnContext::new(
+        "literal-250k-proof",
+        &report.corpus_id,
+        "All sources; active exact-template suppression lens",
+    )
+    .unwrap();
+    let mut linked_history = Vec::new();
+    let linked_agent_started = Instant::now();
+    let linked_events = run_agent_turn(
+        &linked_backend,
+        &mut triage_host,
+        "What problems do you see in these logs? Deepen the strongest deterministic incident candidate.",
+        &mut linked_history,
+        &AgentOptions {
+            session_id: "literal-250k-linked-agent".into(),
+            model: Some("deterministic-tools-capable-fake".into()),
+            provider_profile_id: Some("literal-250k-proof".into()),
+            max_results_per_source: 8,
+            max_rounds: 4,
+            context_char_budget: 64 * 1024,
+            log_explorer_context: Some(linked_context),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let linked_agent_ms = linked_agent_started.elapsed().as_millis();
+    assert_eq!(
+        linked_backend.calls.load(Ordering::SeqCst),
+        2,
+        "broad brief + one bounded search must require exactly two provider calls"
+    );
+    assert!(
+        linked_backend.max_context_bytes.load(Ordering::SeqCst) <= 64 * 1024,
+        "provider context exceeded the explicit hard cap"
+    );
+    assert!(
+        linked_backend.max_seq_markers.load(Ordering::SeqCst) <= BROAD_LOG_TRIAGE_IDENTITY_CAP + 32,
+        "raw 250k rows leaked into provider context"
+    );
+    assert!(linked_events.iter().any(|event| {
+        matches!(
+            event,
+            StreamEvent::Tool {
+                name,
+                phase: ToolPhase::Started,
+                ..
+            } if name == "broad_log_triage"
+        )
+    }));
+    assert!(linked_events.iter().any(|event| {
+        matches!(
+            event,
+            StreamEvent::Tool {
+                name,
+                phase: ToolPhase::Finished,
+                ok: Some(true),
+                ..
+            } if name == "broad_log_triage"
+        )
+    }));
+    assert!(linked_events.iter().any(|event| {
+        matches!(
+            event,
+            StreamEvent::Tool {
+                name,
+                phase: ToolPhase::Finished,
+                ok: Some(true),
+                ..
+            } if name == cd_core::log_analysis::SEARCH_LOGS
+        )
+    }));
+    let linked_trail = linked_events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::SearchTrail { steps } => Some(steps.join("|")),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    assert!(
+        linked_trail.contains("tool:search_logs"),
+        "bounded deepening search did not execute: {linked_trail}"
+    );
+    assert!(
+        !linked_events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Error { .. })),
+        "linked 250k turn emitted a typed error: {linked_events:#?}"
+    );
+    let (cited_seq, cited_source) = linked_backend
+        .cited_identity
+        .lock()
+        .expect("cited identity lock poisoned")
+        .clone()
+        .expect("fake backend did not cite validated evidence");
+    let linked_answer = linked_events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    assert!(linked_answer.contains("CDLAB2004"), "{linked_answer}");
+    assert!(
+        linked_answer.contains(&format!("seq={cited_seq} source=\"{cited_source}\"")),
+        "grounded answer lost its exact trusted citation: {linked_answer}"
+    );
+    assert!(
+        linked_events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::TurnCompleted { reason }
+                    if reason != "linked_invalid_grounded_answer"
+            )
+        }),
+        "grounded answer was not accepted: {linked_events:#?}"
+    );
+
     let first_rows_started = Instant::now();
     let first_rows = query_event_rows(
         &corpus,
@@ -1104,7 +1416,7 @@ fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
     );
 
     eprintln!(
-        "PASS triage-stress-250k events={} files={} templates={} source_bytes={} generation_ms={} import_ms={} cold_open_ms={} summary_ms={} first_rows_ms={} exact_count_ms={} facets_ms={} source_catalog_ms={} bookmarks_ms={} investigation_ms={} shared_timeline_ms={} agent_timeline_ms={} cluster_ms={} suppression_template_id={} suppression_hidden={} suppression_preview_ms={} suppression_activate_ms={} suppression_rows_ms={} suppression_count_ms={} suppression_facets_ms={} suppression_timeline_ms={} suppression_disable_ms={} tree_sha256={} (one-machine observation; not a universal claim)",
+        "PASS triage-stress-250k events={} files={} templates={} source_bytes={} generation_ms={} import_ms={} cold_open_ms={} summary_ms={} first_rows_ms={} exact_count_ms={} facets_ms={} source_catalog_ms={} bookmarks_ms={} investigation_ms={} shared_timeline_ms={} agent_timeline_ms={} cluster_ms={} broad_triage_ms={} linked_agent_ms={} broad_triage_bytes={} broad_triage_identities={} suppression_template_id={} suppression_hidden={} suppression_preview_ms={} suppression_activate_ms={} suppression_rows_ms={} suppression_count_ms={} suppression_facets_ms={} suppression_timeline_ms={} suppression_disable_ms={} tree_sha256={} (one-machine observation; not a universal claim)",
         report.stats.lines,
         report.stats.files,
         report.stats.templates,
@@ -1122,6 +1434,10 @@ fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
         shared_timeline_ms,
         timeline_ms,
         cluster_ms,
+        broad_triage_ms,
+        linked_agent_ms,
+        broad_triage.model_text_bytes,
+        broad_triage.evidence.len(),
         dominant_template.info.template_id,
         preview.matching_event_count,
         suppression_preview_ms,

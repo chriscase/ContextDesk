@@ -329,144 +329,147 @@ function MetricTrack({
           {currentText}
         </span>
       </header>
-      <div
-        className="operational-metric-track__plot"
-        role="slider"
-        tabIndex={0}
-        aria-label={`${series.name} shared time cursor`}
-        aria-valuemin={bounds.from}
-        aria-valuemax={bounds.to}
-        aria-valuenow={Math.round(cursor)}
-        aria-valuetext={currentText}
-        aria-keyshortcuts="Enter Space"
-        style={
-          {
-            "--metric-cursor-position": `${cursorX}%`,
-            "--metric-reading-position": `${cursorY}%`,
-          } as CSSProperties
-        }
-        onPointerEnter={() => {
-          onInteractionChange(interactionKey("pointer"), true);
-        }}
-        onPointerLeave={() => {
-          onInteractionChange(interactionKey("pointer"), false);
-        }}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerCancel}
-        onFocus={() => {
-          onInteractionChange(interactionKey("focus"), true);
-        }}
-        onBlur={() => {
-          onInteractionChange(interactionKey("focus"), false);
-        }}
-        onKeyDown={onKeyDown}
-      >
-        <svg
-          viewBox={`0 0 ${VIEWBOX_SIZE} ${VIEWBOX_SIZE}`}
-          preserveAspectRatio="none"
-          role="img"
-          aria-labelledby={`${series.id}-metric-title ${series.id}-metric-description`}
+      <div className="operational-metric-track__plot">
+        <div
+          className="operational-metric-track__canvas"
+          role="slider"
+          tabIndex={0}
+          aria-label={`${series.name} shared time cursor`}
+          aria-valuemin={bounds.from}
+          aria-valuemax={bounds.to}
+          aria-valuenow={Math.round(cursor)}
+          aria-valuetext={currentText}
+          aria-keyshortcuts="Enter Space"
+          style={
+            {
+              "--metric-cursor-position": `${cursorX}%`,
+              "--metric-reading-position": `${cursorY}%`,
+            } as CSSProperties
+          }
+          onPointerEnter={() => {
+            onInteractionChange(interactionKey("pointer"), true);
+          }}
+          onPointerLeave={() => {
+            onInteractionChange(interactionKey("pointer"), false);
+          }}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerCancel}
+          onFocus={() => {
+            onInteractionChange(interactionKey("focus"), true);
+          }}
+          onBlur={() => {
+            onInteractionChange(interactionKey("focus"), false);
+          }}
+          onKeyDown={onKeyDown}
         >
-          <title id={`${series.id}-metric-title`}>
-            {series.name} over shared time
-          </title>
-          <desc id={`${series.id}-metric-description`}>
-            {`${formatValue(domain.min, series.unit)} to ${formatValue(
-              domain.max,
-              series.unit,
-            )}. ${series.gaps?.length ?? 0} explicitly missing interval${
-              series.gaps?.length === 1 ? "" : "s"
-            }.`}
-          </desc>
-          {gaps.map((gap) => {
-            const x = scaleTimestamp(gap.from, bounds);
-            const width =
-              scaleTimestamp(gap.to, bounds) - scaleTimestamp(gap.from, bounds);
-            return (
-              <rect
-                key={`${gap.from}-${gap.to}`}
-                className="operational-metric-track__gap"
-                data-testid={`operational-metric-gap-${series.id}`}
-                x={x}
-                y={0}
-                width={Math.max(0.3, width)}
-                height={VIEWBOX_SIZE}
-              >
-                <title>
-                  Missing data from {formatTimestamp(gap.from)} to{" "}
-                  {formatTimestamp(gap.to)}
-                  {gap.reason ? `. ${gap.reason}` : ""}
-                </title>
-              </rect>
-            );
-          })}
-          {selection ? (
-            <rect
-              className="operational-metric-track__selection"
-              data-testid={`operational-metric-selection-${series.id}`}
-              x={scaleTimestamp(selection.from, bounds)}
-              y={0}
-              width={
-                scaleTimestamp(selection.to, bounds) -
-                scaleTimestamp(selection.from, bounds)
-              }
-              height={VIEWBOX_SIZE}
-              vectorEffect="non-scaling-stroke"
-            />
-          ) : null}
-          {(series.thresholds ?? []).map((threshold) => (
-            <line
-              key={threshold.id}
-              className={`operational-metric-track__threshold operational-metric-track__threshold--${threshold.severity}`}
-              x1={0}
-              x2={VIEWBOX_SIZE}
-              y1={scaleValue(threshold.value, domain)}
-              y2={scaleValue(threshold.value, domain)}
-            />
-          ))}
-          {paths.map((path, index) => (
-            <path
-              key={`${series.id}-segment-${index}`}
-              className="operational-metric-track__line"
-              data-testid={`operational-metric-segment-${series.id}`}
-              d={path}
-              fill="none"
-              vectorEffect="non-scaling-stroke"
-            />
-          ))}
-          <line
-            className="operational-metric-track__crosshair"
-            data-testid={`operational-metric-crosshair-${series.id}`}
-            x1={cursorX}
-            x2={cursorX}
-            y1={0}
-            y2={VIEWBOX_SIZE}
-            vectorEffect="non-scaling-stroke"
-          />
-        </svg>
-        <span
-          className="operational-metric-track__scale-label operational-metric-track__scale-label--max"
-          aria-hidden="true"
-        >
-          Max {formatValue(domain.max, series.unit)}
-        </span>
-        <span
-          className="operational-metric-track__scale-label operational-metric-track__scale-label--min"
-          aria-hidden="true"
-        >
-          Min {formatValue(domain.min, series.unit)}
-        </span>
-        {showReading ? (
-          <span
-            aria-hidden="true"
-            className="operational-metric-track__hover-reading"
-            data-testid={`operational-metric-hover-reading-${series.id}`}
+          <svg
+            viewBox={`0 0 ${VIEWBOX_SIZE} ${VIEWBOX_SIZE}`}
+            preserveAspectRatio="none"
+            role="img"
+            aria-labelledby={`${series.id}-metric-title ${series.id}-metric-description`}
           >
-            {currentText}
+            <title id={`${series.id}-metric-title`}>
+              {series.name} over shared time
+            </title>
+            <desc id={`${series.id}-metric-description`}>
+              {`${formatValue(domain.min, series.unit)} to ${formatValue(
+                domain.max,
+                series.unit,
+              )}. ${series.gaps?.length ?? 0} explicitly missing interval${
+                series.gaps?.length === 1 ? "" : "s"
+              }.`}
+            </desc>
+            {gaps.map((gap) => {
+              const x = scaleTimestamp(gap.from, bounds);
+              const width =
+                scaleTimestamp(gap.to, bounds) -
+                scaleTimestamp(gap.from, bounds);
+              return (
+                <rect
+                  key={`${gap.from}-${gap.to}`}
+                  className="operational-metric-track__gap"
+                  data-testid={`operational-metric-gap-${series.id}`}
+                  x={x}
+                  y={0}
+                  width={Math.max(0.3, width)}
+                  height={VIEWBOX_SIZE}
+                >
+                  <title>
+                    Missing data from {formatTimestamp(gap.from)} to{" "}
+                    {formatTimestamp(gap.to)}
+                    {gap.reason ? `. ${gap.reason}` : ""}
+                  </title>
+                </rect>
+              );
+            })}
+            {selection ? (
+              <rect
+                className="operational-metric-track__selection"
+                data-testid={`operational-metric-selection-${series.id}`}
+                x={scaleTimestamp(selection.from, bounds)}
+                y={0}
+                width={
+                  scaleTimestamp(selection.to, bounds) -
+                  scaleTimestamp(selection.from, bounds)
+                }
+                height={VIEWBOX_SIZE}
+                vectorEffect="non-scaling-stroke"
+              />
+            ) : null}
+            {(series.thresholds ?? []).map((threshold) => (
+              <line
+                key={threshold.id}
+                className={`operational-metric-track__threshold operational-metric-track__threshold--${threshold.severity}`}
+                x1={0}
+                x2={VIEWBOX_SIZE}
+                y1={scaleValue(threshold.value, domain)}
+                y2={scaleValue(threshold.value, domain)}
+              />
+            ))}
+            {paths.map((path, index) => (
+              <path
+                key={`${series.id}-segment-${index}`}
+                className="operational-metric-track__line"
+                data-testid={`operational-metric-segment-${series.id}`}
+                d={path}
+                fill="none"
+                vectorEffect="non-scaling-stroke"
+              />
+            ))}
+            <line
+              className="operational-metric-track__crosshair"
+              data-testid={`operational-metric-crosshair-${series.id}`}
+              x1={cursorX}
+              x2={cursorX}
+              y1={0}
+              y2={VIEWBOX_SIZE}
+              vectorEffect="non-scaling-stroke"
+            />
+          </svg>
+          {showReading ? (
+            <span
+              aria-hidden="true"
+              className="operational-metric-track__hover-reading"
+              data-testid={`operational-metric-hover-reading-${series.id}`}
+            >
+              {currentText}
+            </span>
+          ) : null}
+        </div>
+        <div
+          className="operational-metric-track__scale"
+          data-testid={`operational-metric-scale-${series.id}`}
+          aria-hidden="true"
+        >
+          <span className="operational-metric-track__scale-label operational-metric-track__scale-label--max">
+            Max {formatValue(domain.max, series.unit)}
           </span>
-        ) : null}
+          <span className="operational-metric-track__scale-label operational-metric-track__scale-label--min">
+            Min {formatValue(domain.min, series.unit)}
+          </span>
+        </div>
       </div>
       <footer className="operational-metric-track__details">
         <span>

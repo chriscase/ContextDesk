@@ -39,6 +39,9 @@ company-data session.
    - expected file/event counts;
    - one known incident token, one ordinary event, and one token known to be
      absent.
+7. **Choose a tools-enabled profile for linked-chat proof.** A profile that
+   reports tools unavailable is useful for testing honest refusal, but it
+   cannot prove broad linked-log triage.
 
 ## Import
 
@@ -72,7 +75,8 @@ Work through each row. Mark pass / fail / skip and a one-line note.
 | Timeline                  | Scroll/seek around the incident window                             | Order is usable; mixed or order-only data is not presented as perfect wall-clock certainty |
 | Noise policy (disposable/reproducible corpus only while #671 is open) | Preview one reviewed repetitive template, confirm it, then exercise its lifecycle | Record whether preview counts/examples and rows/counts/facets/Timeline/Find/tools agree; do not interpret this trial as proof of unconditional reversibility |
 | Bookmarks / investigation | Save 2–3 exact events and one finding; close and reopen Explorer    | Saved evidence resolves to the same events or visibly reports stale/missing identities     |
-| Linked chat               | Ask a narrow question using a model marked “linked tools available” | A real log tool runs and every cited `seq` and `source` resolves to the claimed evidence    |
+| Linked chat — broad       | Ask “What problems stand out in these logs?” using a model marked “linked tools available” | A deterministic triage brief is visibly prepared before synthesis; every material cited `seq` and `source` resolves |
+| Linked chat — focused     | Ask about one exact request, trace, job, source, or event identity | A bounded log tool runs, the answer stays on that scope, and every material citation resolves |
 
 ## AI and evidence
 
@@ -80,6 +84,20 @@ Work through each row. Mark pass / fail / skip and a one-line note.
   **linked tools available**.
 - A model marked **linked tools unavailable** is expected to stop before
   contacting the provider. It cannot pass a grounded linked-chat trial.
+- For a broad linked-log prompt, expect **Preparing deterministic large-corpus
+  triage**, then **Prepared bounded triage brief · N evidence identities**,
+  followed by either direct synthesis or one visible bounded `search_logs`
+  deepening step and then tool-closed synthesis. The brief is computed and
+  checkpointed by the host before the first model request.
+- The broad brief uses one corpus and one pinned suppression revision. It
+  includes bounded level/source/service/host distributions, structured ERROR
+  templates with a rare-candidate reserve, clusters, timeline concentration,
+  and correlations only when wall-clock time is safe.
+- The model receives at most 32 KiB of brief text and at most 128 trusted event
+  identities. The identities are carried separately from untrusted log text.
+  The brief performs no semantic/embedding or network retrieval.
+- If the brief visibly fails, record the failure and the staged-tool fallback.
+  Do not count a fluent answer as grounded unless its cited identities resolve.
 - Treat every AI conclusion as a **hypothesis** until you open the cited source
   lines (or confirm the claim is unsupported).
 - Prefer questions like “which events mention `req-…`?” over “what caused the
@@ -95,6 +113,25 @@ A useful first linked-chat prompt is:
 > Without assuming a cause, identify the three most suspicious patterns in
 > these logs. For each, distinguish observation from inference, cite the exact
 > `seq` and `source`, and suggest a safe view I can open.
+
+For the exact large-corpus acceptance still open on #745, repeat that prompt
+against a packaged build and an approved 250,000+ event corpus:
+
+1. Confirm the chat is linked to the intended corpus and the selected profile
+   says linked tools are available.
+2. Send the broad prompt without first searching, filtering, or selecting rows.
+3. Observe the deterministic-triage preparation and completion statuses before
+   synthesis. If the model chooses the optional deepening step, confirm exactly
+   one bounded search runs before the tool-closed answer.
+4. Record completion time, visible truncation/failure disclosures, and the
+   number of evidence identities shown.
+5. Open every material cited identity and confirm its sequence, relative source,
+   and event content.
+6. Ask one focused follow-up and confirm that only needed, eligible bounded
+   tools are offered or run.
+
+Passing this procedure proves one packaged build, corpus, provider, and model.
+It does not establish universal model quality.
 
 ## Trial an exact-template noise rule safely
 
@@ -147,6 +184,9 @@ Check each box only when true for **this** sample and build.
       exact evidence
 - [ ] A tools-enabled linked chat visibly uses a bounded log tool and every
       material citation resolves correctly
+- [ ] A broad linked-log prompt visibly prepares its deterministic brief before
+      model synthesis; brief assembly performs no semantic/embedding or network
+      retrieval
 - [ ] An ordinary chat does not silently inherit the corpus
 - [ ] No secrets or private data left in notes, screenshots, or tickets
 
@@ -184,6 +224,7 @@ OS profile when policy requires a guaranteed clean environment.
 | Timeline                              | pass / fail / skip — notes |
 | Bookmarks / investigation             | pass / fail / skip — notes |
 | Linked chat                           | pass / fail / skip — notes |
+| Broad triage status / identity count  |                            |
 | Timestamp issues seen                 |                            |
 | Noise / clutter issues seen           |                            |
 | Original-line / redaction issues seen |                            |
@@ -208,6 +249,9 @@ OS profile when policy requires a guaranteed clean environment.
   clock-skew correction remain incomplete.
 - Tools-disabled profiles cannot perform a linked log investigation. Their
   honest refusal is expected behavior.
+- #745 remains open for exact packaged 250,000+ event proof with a real
+  tools-enabled provider. Host-built deterministic evidence is shipped and
+  agent-testable, but provider/model synthesis quality is not universal.
 - Portable package v1 does not include corpus bookmarks, while durable
   Investigation records are persisted separately from the corpus. It also
   does not carry the corpus noise-policy sidecar.

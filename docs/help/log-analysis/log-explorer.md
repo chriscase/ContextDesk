@@ -46,7 +46,7 @@ import/export, and open investigation. It is not a million-row browser.
 | Time-link modes        | **Independent** scrolls lanes separately. **Follow** seeks approximate timestamp peers. **Align** uses shared exact wall-clock rows and explicit blank cells; it is unavailable for mixed, order-only, empty, failed, or unloaded lane sets                                                                                                                                                                                                                          |
 | Investigation timeline | Visible by default on desktop and quietly collapsible. A hard-capped backend summary shows volume, canonical severity, honest gaps, preview/committed position, and the resident range; releasing the broad chart scrubber loads one bounded event neighborhood. While collapsed, filter changes perform no timeline work                                                                                                                                            |
 | Time quality           | Wall clock vs **order only** (seq is not unlabeled calendar time)                                                                                                                                                                                                                                                                                                                                                                                                    |
-| Linked chat            | Compact rail with chat switcher; **New** creates a corpus-linked session. Switching chats is race-safe (a slow load cannot overwrite the active chat). Long threads use a bounded virtualized window; history stays persisted. The agent receives a privacy-safe viewport snapshot, must get a successful result from a **bounded log tool**, and may consult other configured read-only sources before producing an evidence-based answer — not planning-only prose |
+| Linked chat            | Compact rail with chat switcher; **New** creates a corpus-linked session. Switching chats is race-safe (a slow load cannot overwrite the active chat). Long threads use a bounded virtualized window; history stays persisted. For a conservatively recognized broad question, the host prepares bounded deterministic evidence before the model participates. Focused questions and explicitly requested eligible sources use staged bounded tools. No planning-only prose is accepted as evidence |
 | Follow latest          | While you stay near the bottom, new messages/tools stream into view; scroll up to read history without jumps. **Jump to latest** restores follow                                                                                                                                                                                                                                                                                                                     |
 | Agent context          | **Context shared with agent** discloses filters/lanes/selection counts; the nearby `?` explains the immutable turn snapshot, bounded tools, and privacy boundary. Full dumps stay out of chat context                                                                                                                                                                                                                                                                |
 | Nav chips              | Valid agent navigation proposals appear as opt-in chips; wrong-corpus proposals fail closed. Raw JSON paste is developer-only                                                                                                                                                                                                                                                                                                                                        |
@@ -278,13 +278,36 @@ revision and hidden-event count. Every bounded log tool in the turn uses that
 same exclusion lens and discloses that excluded events were not analyzed.
 
 The snapshot is orientation, not a corpus dump. Every linked investigation must
-first obtain a successful result from a bounded log tool. When relevant, the
-same turn can use the normal configured read-only surface: bounded
-workspace/Markdown search, durable-memory recall, bundled Help, and read-only
-database or connector tools. Linking a corpus does not configure a source,
-approve first-use access, or expose a write tool. An MCP read that still needs
-first-use approval is omitted from the linked turn until it has been separately
-authorized through the normal permission flow.
+first obtain successful bounded log evidence. For a conservatively classified
+broad prompt—such as asking what problems stand out across the linked
+corpus—the trusted host builds that first evidence brief before the model
+participates. The brief uses one pinned corpus and one pinned suppression
+revision. It summarizes bounded level/source/service/host distributions,
+structured ERROR templates with a reserve for rare candidates, problem
+clusters, and timeline concentration. Bounded temporal correlations are
+included only when time quality is safely wall clock. Mixed and order-only data
+do not receive wall-clock correlation claims.
+
+The broad brief uses no semantic/embedding or network backend. Its model-facing
+untrusted text is capped at 32 KiB, and no more than 128 trusted event
+identities travel beside that text through a separate structured channel.
+Those identities—not sequence/source strings copied from the text—are the
+authority used to validate grounding.
+
+The brief is a bounded starting point, not a claim that every relevant event
+was selected or that every model will diagnose the incident well. A
+tools-capable model may answer directly from a complete brief or use one
+offered bounded search to deepen or verify a candidate. After that search,
+synthesis is tool-closed. A complete host brief is checkpointed before the
+first provider request so a provider failure can offer synthesis-only retry
+without repeating deterministic retrieval. Focused questions use staged
+bounded log tools. When relevant, the same turn can use
+the normal configured read-only surface for an explicitly requested and
+eligible source: bounded workspace/Markdown search, durable-memory recall,
+bundled Help, and read-only database or connector tools. Linking a corpus does
+not configure a source, approve first-use access, or expose a write tool. An
+MCP read that still needs first-use approval is omitted from the linked turn
+until it has been separately authorized through the normal permission flow.
 
 This is an evidence plane followed by a synthesis plane. ContextDesk owns source
 eligibility, retrieval, caps, provenance, and permission checks; the model
@@ -295,6 +318,12 @@ remain with the originating chat. Failed, capped, unavailable, stale, or
 permission-blocked sources remain visible rather than becoming silent success.
 Raw corpora, workspaces, databases, evaluator truth, credentials, and absolute
 source paths are not inserted wholesale.
+
+When a non-empty corpus has no ERROR/FATAL templates, the brief includes a
+small source-diverse representative sample instead of forcing an impossible
+error search. When the pinned view has zero unsuppressed events, the answer must
+say so without inventing event identities and must distinguish a truly empty
+corpus from one fully hidden by the active suppression lens.
 
 During a linked turn, the chat reports whether it is choosing evidence,
 retrieving bounded evidence, or synthesizing an evidence-cited answer. **Stop**
@@ -310,6 +339,13 @@ then times out, fails provider-side, or is rejected as ungrounded. Checkpoints
 are memory-only, age/count/payload-byte bounded, and cleared when a chat is
 trashed, deleted, archived, relinked, or superseded by a new linked turn.
 
+For broad triage, expect the visible tool status to move through **Preparing
+deterministic large-corpus triage**, then **Prepared bounded triage brief** with
+an evidence-identity count, before synthesis. The model may then answer from
+that brief or visibly run one bounded `search_logs` deepening step. A failed or
+truncated brief is disclosed and falls back to the existing staged tools; it is
+not presented as complete evidence.
+
 The complete cross-source and provider-boundary explanation is available at
 help://context-selection-model-boundary.
 
@@ -320,7 +356,14 @@ Linked investigation requires a tools-enabled provider profile. If the selected
 profile advertises `capabilities.tools=false`, ContextDesk stops before
 contacting the provider and saves visible guidance that names the profile and
 unavailable capability. Ordinary chats keep `linked_corpus_id=null` and do not
-inherit an Explorer corpus or its active-corpus default.
+inherit an Explorer corpus or its active-corpus default. The host-owned broad
+brief does not weaken this capability gate or make a tools-disabled profile
+appear eligible.
+
+Exact packaged acceptance for a 250,000+ event broad-triage turn with a real
+tools-enabled provider remains open on #745. The deterministic brief reduces
+the first-step burden on small and private models, but ContextDesk does not
+claim universal model quality.
 
 ## Cross-computer diagnostic feedback
 

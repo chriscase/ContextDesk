@@ -1,4 +1,6 @@
 .timeline-navigator {
+  --timeline-body-max: min(44vh, 30rem);
+
   align-items: flex-start;
   flex-basis: 100%;
   width: 100%;
@@ -52,9 +54,11 @@
   align-content: start;
   gap: 0.25rem 0.55rem;
   min-height: 0;
+  max-height: var(--timeline-body-max);
   width: 100%;
   padding-right: 0.15rem;
   overflow-x: hidden;
+  overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
 }
@@ -540,5 +544,83 @@
 @media (prefers-reduced-motion: reduce) {
   .timeline-navigator * {
     scroll-behavior: auto;
+  }
+}
+
+@media (forced-colors: active) {
+  .timeline-navigator__toggle:focus-visible,
+  .timeline-navigator .timeline-navigator__body:focus-visible,
+  .timeline-navigator__metric-action:focus-visible,
+  .timeline-navigator__chart:has(.timeline-navigator__scrubber:focus-visible),
+  .timeline-navigator__session-metrics-note select:focus-visible {
+    outline-color: Highlight;
+  }
+
+  .timeline-navigator__legend b,
+  .timeline-navigator__error-key b {
+    color: CanvasText;
+    border-color: CanvasText;
+  }
+
+  .timeline-navigator__error-rail i {
+    forced-color-adjust: none;
+    background: CanvasText;
+    border-color: Canvas;
+  }
+
+  .timeline-navigator__stack i {
+    forced-color-adjust: none;
+    background-color: Canvas;
+  }
+
+  .timeline-navigator__stack i[data-level="error"] {
+    background-image: repeating-linear-gradient(
+      45deg,
+      CanvasText 0 1px,
+      Canvas 1px 3px
+    );
+  }
+
+  .timeline-navigator__stack i[data-level="warn"] {
+    background-image: repeating-linear-gradient(
+      -45deg,
+      CanvasText 0 1px,
+      Canvas 1px 3px
+    );
+  }
+
+  .timeline-navigator__stack i[data-level="info"] {
+    background: CanvasText;
+  }
+
+  .timeline-navigator__stack i[data-level="debug"] {
+    background-image: repeating-linear-gradient(
+      90deg,
+      CanvasText 0 1px,
+      Canvas 1px 3px
+    );
+  }
+
+  .timeline-navigator__stack i[data-level="other"] {
+    background-image: radial-gradient(CanvasText 0.7px, Canvas 0.8px);
+  }
+
+  .timeline-navigator__resident-range {
+    background: transparent;
+    border-color: GrayText;
+  }
+
+  .timeline-navigator__selection-range {
+    background: transparent;
+    border-color: Highlight;
+  }
+
+  .timeline-navigator__preview-marker {
+    border-color: CanvasText;
+  }
+
+  .timeline-navigator__committed-marker {
+    background: Highlight;
+    box-shadow: 0 0 0 1px Canvas;
   }
 }

@@ -58,11 +58,20 @@ describe("OperationalMetricTracks", () => {
   it("keeps unlike units in separate stacked tracks with their own scales", () => {
     render(<OperationalMetricTracks document={coherentFixture} />);
 
+    const cpuTrack = screen.getByTestId("operational-metric-track-cpu-percent");
+    const cpuScale = screen.getByTestId("operational-metric-scale-cpu-percent");
+    expect(cpuScale.parentElement?.className).toBe(
+      "operational-metric-track__plot",
+    );
     expect(
-      screen
-        .getByTestId("operational-metric-track-cpu-percent")
-        .textContent?.includes("Scale 16 %–98 %"),
-    ).toBe(true);
+      cpuScale.querySelector(".operational-metric-track__line"),
+    ).toBeNull();
+    expect(
+      cpuTrack
+        .querySelector(".operational-metric-track__canvas")
+        ?.querySelector(".operational-metric-track__line"),
+    ).toBeTruthy();
+    expect(cpuTrack.textContent?.includes("Scale 16 %–98 %")).toBe(true);
     expect(
       screen
         .getByTestId("operational-metric-track-heap-used-bytes")
@@ -539,5 +548,23 @@ describe("OperationalMetricTracks", () => {
       0,
     );
     expect(renderedCommands).toBeLessThanOrEqual(40);
+  });
+
+  it("uses the app accent for focus and preserves high-contrast chart roles", () => {
+    const css = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/logExplorer/OperationalMetricTracks.css",
+      ),
+      "utf8",
+    );
+
+    expect(css).toContain(".operational-metric-track__canvas:focus-visible");
+    expect(css).toContain("outline: 2px solid var(--accent");
+    expect(css).toContain("@media (forced-colors: active)");
+    expect(css).toContain(".operational-metric-track__line");
+    expect(css).toContain(".operational-metric-track__crosshair");
+    expect(css).toContain(".operational-metric-track__selection");
+    expect(css).toContain(".operational-metric-track__scale-label");
   });
 });
