@@ -1691,7 +1691,7 @@ fn shared_template_identity_store(
 }
 
 fn shared_corpus_connection(db_path: &Path) -> CoreResult<Arc<Mutex<Connection>>> {
-    let key = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
+    let key = canonical_db_key(db_path);
     let mut connections = CORPUS_CONNECTIONS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1704,6 +1704,16 @@ fn shared_corpus_connection(db_path: &Path) -> CoreResult<Arc<Mutex<Connection>>
     let connection = Arc::new(Mutex::new(connection));
     connections.insert(key, Arc::downgrade(&connection));
     Ok(connection)
+}
+
+fn canonical_db_key(db_path: &Path) -> PathBuf {
+    std::fs::canonicalize(db_path).unwrap_or_else(|_| {
+        db_path
+            .parent()
+            .and_then(|parent| std::fs::canonicalize(parent).ok())
+            .and_then(|parent| db_path.file_name().map(|name| parent.join(name)))
+            .unwrap_or_else(|| db_path.to_path_buf())
+    })
 }
 
 fn lock_err() -> CoreError {
@@ -1834,6 +1844,16 @@ mod tests {
             error.to_string().contains("invalid corpus id"),
             "unexpected error for {id:?}: {error}"
         );
+    }
+
+    #[test]
+    fn canonical_db_key_is_stable_when_the_database_is_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("events.duckdb");
+        let before_create = canonical_db_key(&db_path);
+        File::create(&db_path).unwrap();
+        let after_create = canonical_db_key(&db_path);
+        assert_eq!(before_create, after_create);
     }
 
     #[test]
