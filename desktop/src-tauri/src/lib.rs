@@ -4280,6 +4280,7 @@ async fn agent_turn(
             &context.corpus_id,
             Some(profile.id.as_str()),
             Some(profile.chat_model.as_str()),
+            context.noise_lens_suspended,
         ) {
             state
                 .linked_synthesis_checkpoints
@@ -4295,7 +4296,8 @@ async fn agent_turn(
                     code: "linked_synthesis_retry_stale".into(),
                     message:
                         "The preserved evidence belongs to a different chat, corpus, provider \
-                              profile, or model. Run a new linked investigation instead."
+                              profile, model, or noise-lens mode. Run a new linked investigation \
+                              instead."
                             .into(),
                 },
                 cd_core::events::StreamEvent::TurnCompleted {
@@ -14141,10 +14143,12 @@ mod chat_session_host_tests {
             LogExplorerTurnContextReq {
                 corpus_id: "corpus-a".into(),
                 brief: "levels=error; selectedSeqs=[1,2]".into(),
+                noise_lens_suspended: true,
             },
         )
         .expect("matching linked context");
         assert_eq!(context.corpus_id, "corpus-a");
+        assert!(context.noise_lens_suspended);
         assert!(matches!(
             context.origin,
             cd_core::agent::LinkedLogTurnOrigin::Explorer { ref window_id, .. }
@@ -14157,6 +14161,7 @@ mod chat_session_host_tests {
             LogExplorerTurnContextReq {
                 corpus_id: "corpus-b".into(),
                 brief: "levels=info".into(),
+                noise_lens_suspended: false,
             },
         )
         .unwrap_err();
@@ -14169,6 +14174,7 @@ mod chat_session_host_tests {
             LogExplorerTurnContextReq {
                 corpus_id: "corpus-a".into(),
                 brief: "levels=error".into(),
+                noise_lens_suspended: false,
             },
         )
         .is_err());
