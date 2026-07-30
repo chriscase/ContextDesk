@@ -116,14 +116,8 @@ describe("LogImportConfidence", () => {
             {
               source: "legacy/output.txt",
               lines: 3,
-              formatId: null,
-              formatVersion: null,
               outcome: "unknown",
-              runnerUpMargin: null,
-              producerHint: null,
               timeQuality: "wall",
-              unresolvedReasons: [],
-              timestampPrefixSamples: [],
             },
           ],
         })}
@@ -135,5 +129,6 @@ describe("LogImportConfidence", () => {
     expect(
       screen.getByText("No grammar matched — kept as raw lines"),
     ).toBeTruthy();
+    expect(screen.getByText("Exact wall clock")).toBeTruthy();
   });
 });
