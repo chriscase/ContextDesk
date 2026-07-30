@@ -259,6 +259,16 @@ struct PinnedLogSuppressionLens {
 }
 
 impl PinnedLogSuppressionLens {
+    fn mode(&self) -> &'static str {
+        if self.suppression_lens_suspended {
+            "suspended"
+        } else if self.configured_template_ids.is_empty() {
+            "inactive"
+        } else {
+            "active"
+        }
+    }
+
     fn suppression_active(&self) -> bool {
         !self.suppression_lens_suspended && !self.excluded_template_ids.is_empty()
     }
@@ -275,11 +285,7 @@ fn log_suppression_disclosure(lens: &PinnedLogSuppressionLens) -> String {
          suppression_applied_rule_count: {}\n\
          suppressed_event_count: {}\nsuppression_revision: {}\n\
          excluded_events_not_analyzed: {}\n",
-        if lens.suppression_lens_suspended {
-            "suspended"
-        } else {
-            "active"
-        },
+        lens.mode(),
         lens.suppression_lens_suspended,
         lens.suppression_active(),
         lens.configured_rule_count(),
@@ -303,11 +309,7 @@ fn broad_triage_section_disclosure(
          suppression_applied_rule_count: {}\n\
          suppressed_event_count: {}\nsuppression_revision: {}\n\
          excluded_events_not_analyzed: {}\n",
-        if lens.suppression_lens_suspended {
-            "suspended"
-        } else {
-            "active"
-        },
+        lens.mode(),
         lens.suppression_lens_suspended,
         lens.suppression_active(),
         lens.configured_rule_count(),
@@ -1947,13 +1949,9 @@ impl ToolHost {
             BROAD_LOG_TRIAGE_BRIEF_MAX_BYTES,
             BROAD_LOG_TRIAGE_IDENTITY_CAP,
             suppression.suppressed_event_count,
-            time_quality.label(),
-            if suppression.suppression_lens_suspended {
-                "suspended"
-            } else {
-                "active"
-            },
+            suppression.mode(),
             suppression.suppression_lens_suspended,
+            time_quality.label(),
             match time_quality {
                 crate::log_analysis::TimeQuality::Wall => "unix_wall_clock_seconds",
                 crate::log_analysis::TimeQuality::Mixed => "mixed_timestamp_domains",
