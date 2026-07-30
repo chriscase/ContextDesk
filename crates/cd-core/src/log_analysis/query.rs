@@ -3,7 +3,7 @@
 //! Semantic search stays **template-first** (template vectors → template_ids → events).
 //! Hard page caps keep IPC and UI virtualization safe.
 
-use super::search::{search_logs, SearchLogsQuery};
+use super::search::{search_logs_with_excluded_templates, SearchLogsQuery};
 use super::store::{EventCountCacheKey, LogCorpus, LogEvent};
 use crate::embed::EmbedBackend;
 use crate::error::{CoreError, CoreResult};
@@ -34,6 +34,12 @@ pub const DEFAULT_TIMELINE_BUCKETS: usize = 96;
 
 /// Hard cap on timeline summary buckets returned across IPC.
 pub const MAX_TIMELINE_BUCKETS: usize = 256;
+
+/// Hard cap on exact template exclusions in one suppression lens.
+///
+/// Durable rules are independently bounded, but the query layer also refuses
+/// an unbounded `NOT IN` predicate from direct host callers.
+pub const MAX_EXCLUDED_TEMPLATE_IDS: usize = 256;
 
 /// Hard cap on source-scoped lanes in one shared-axis timeline response.
 pub const MAX_SHARED_TIMELINE_LANES: usize = 4;
@@ -169,6 +175,10 @@ pub struct EventQuery {
     /// Optional template ids (OR) — used by semantic → events path.
     #[serde(default)]
     pub template_ids: Vec<u64>,
+    /// Exact template ids excluded by the active, user-approved suppression
+    /// lens. Direct identity/original fetches intentionally do not use it.
+    #[serde(default)]
+    pub excluded_template_ids: Vec<u64>,
     /// Optional trace id exact match.
     pub trace_id: Option<String>,
     /// Keyword substring (case-insensitive) on redacted message.
@@ -206,6 +216,7 @@ impl Default for EventQuery {
             hosts: vec![],
             template_id: None,
             template_ids: vec![],
+            excluded_template_ids: vec![],
             trace_id: None,
             keyword: None,
             after_seq: None,
@@ -779,7 +790,7 @@ pub fn query_timeline_summary(
     q: &TimelineSummaryQuery,
 ) -> CoreResult<TimelineSummary> {
     let max_buckets = q.max_buckets.clamp(1, MAX_TIMELINE_BUCKETS);
-    let (where_sql, binds) = build_where(&q.filter);
+    let (where_sql, binds) = build_where(&q.filter)?;
     let bounds_sql = format!("SELECT MIN(ts), MAX(ts), COUNT(*) FROM events WHERE {where_sql}");
 
     let (min_ts, max_ts, total_matched) = corpus.with_connection(|conn| {
@@ -934,7 +945,7 @@ pub fn query_shared_timeline_summary(
             }
         })
         .collect::<Vec<_>>();
-    let (where_sql, binds) = build_where(&q.filter);
+    let (where_sql, binds) = build_where(&q.filter)?;
     let bounds_sql = format!("SELECT MIN(ts), MAX(ts), COUNT(*) FROM events WHERE {where_sql}");
     let (min_ts, max_ts, total_matched) = corpus.with_connection(|conn| {
         let mut stmt = conn.prepare(&bounds_sql).map_err(duck_err)?;
@@ -1173,7 +1184,7 @@ fn query_shared_timeline_lane(
 
     let mut filter = global_filter.clone();
     filter.sources = sources.to_vec();
-    let (where_sql, binds) = build_where(&filter);
+    let (where_sql, binds) = build_where(&filter)?;
     let lane_sql = format!(
         "SELECT CAST(FLOOR((ts - ?) / CAST(? AS DOUBLE)) AS BIGINT) AS bucket_index, \
          COUNT(*), MIN(ts), MAX(ts) \
@@ -1321,7 +1332,7 @@ fn query_event_rows_with_additional_keyword(
         q.limit.clamp(1, MAX_EVENT_PAGE)
     };
 
-    let (where_sql, binds) = build_where_with_additional_keyword(q, additional_keyword);
+    let (where_sql, binds) = build_where_with_additional_keyword(q, additional_keyword)?;
     // Reverse page: only `before_*` (no `after_*`) — fetch the adjacent older
     // window via DESC + reverse so ASC LIMIT does not return corpus head (#538).
     let reverse_page = q.before_seq.is_some() && q.after_seq.is_none();
@@ -1471,7 +1482,7 @@ fn query_event_count_with_post_scan(
     additional_keyword: Option<&str>,
     post_scan: impl FnOnce(),
 ) -> CoreResult<EventCount> {
-    let (where_sql, binds) = build_where_with_additional_keyword(q, additional_keyword);
+    let (where_sql, binds) = build_where_with_additional_keyword(q, additional_keyword)?;
     let key = event_count_cache_key(&where_sql, &binds)?;
     let observed_revision = corpus.event_revision();
     if let Some(count) = corpus.cached_event_count(&key, observed_revision) {
@@ -1549,7 +1560,7 @@ fn summarize_event_quality(events: &[ExplorerEvent]) -> TimeQuality {
 
 /// Facets under filters (sources/levels/services/hosts).
 pub fn query_facets(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<LogFacets> {
-    let (where_sql, binds) = build_where(q);
+    let (where_sql, binds) = build_where(q)?;
 
     let mut facets = LogFacets {
         time_quality: corpus_time_quality_from_meta(corpus),
@@ -1778,7 +1789,12 @@ pub fn search_events_advanced_with_cancel(
             semantic: true,
             k: k.min(40),
         };
-        let template_hits = search_logs(corpus, &tq, embed)?;
+        let template_hits = search_logs_with_excluded_templates(
+            corpus,
+            &tq,
+            embed,
+            &q.filter.excluded_template_ids,
+        )?;
         if search_cancelled(cancel) {
             return Ok(cancelled_search_result(hits, scanned));
         }
@@ -2402,7 +2418,7 @@ pub(crate) fn fetch_events_by_seqs(
 }
 
 fn count_matched(corpus: &LogCorpus, filter: &EventQuery) -> CoreResult<u64> {
-    let (where_sql, binds) = build_where(filter);
+    let (where_sql, binds) = build_where(filter)?;
     let count_sql = format!("SELECT COUNT(*) FROM events WHERE {where_sql}");
     corpus.with_connection(|conn| {
         let mut stmt = conn.prepare(&count_sql).map_err(duck_err)?;
@@ -2438,6 +2454,9 @@ fn event_matches_filter(event: &ExplorerEvent, filter: &EventQuery) -> bool {
         }
     }
     if !filter.template_ids.is_empty() && !filter.template_ids.contains(&event.template_id) {
+        return false;
+    }
+    if filter.excluded_template_ids.contains(&event.template_id) {
         return false;
     }
     if !filter.levels.is_empty() {
@@ -2482,8 +2501,8 @@ use duckdb::types::Value;
 fn build_where_with_additional_keyword(
     q: &EventQuery,
     additional_keyword: Option<&str>,
-) -> (String, Vec<Value>) {
-    let (mut where_sql, mut binds) = build_where(q);
+) -> CoreResult<(String, Vec<Value>)> {
+    let (mut where_sql, mut binds) = build_where(q)?;
     if let Some(keyword) = additional_keyword {
         let keyword = keyword.trim();
         if !keyword.is_empty() {
@@ -2491,7 +2510,7 @@ fn build_where_with_additional_keyword(
             binds.push(Value::Text(format!("%{}%", keyword.to_lowercase())));
         }
     }
-    (where_sql, binds)
+    Ok((where_sql, binds))
 }
 
 fn event_count_cache_key(where_sql: &str, binds: &[Value]) -> CoreResult<EventCountCacheKey> {
@@ -2524,7 +2543,14 @@ fn event_count_cache_key(where_sql: &str, binds: &[Value]) -> CoreResult<EventCo
 }
 
 /// Builds WHERE clause with `?` placeholders and binds in **appearance order**.
-fn build_where(q: &EventQuery) -> (String, Vec<Value>) {
+fn build_where(q: &EventQuery) -> CoreResult<(String, Vec<Value>)> {
+    if q.excluded_template_ids.len() > MAX_EXCLUDED_TEMPLATE_IDS {
+        return Err(CoreError::Message(format!(
+            "excluded template count {} exceeds maximum {}",
+            q.excluded_template_ids.len(),
+            MAX_EXCLUDED_TEMPLATE_IDS
+        )));
+    }
     let mut clauses = vec!["1=1".to_string()];
     let mut binds: Vec<Value> = Vec::new();
 
@@ -2553,6 +2579,21 @@ fn build_where(q: &EventQuery) -> (String, Vec<Value>) {
         clauses.push(format!("template_id IN ({})", placeholders.join(",")));
         for tid in &q.template_ids {
             binds.push(Value::BigInt(*tid as i64));
+        }
+    }
+    if !q.excluded_template_ids.is_empty() {
+        let excluded = q
+            .excluded_template_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let placeholders: Vec<_> = excluded.iter().map(|_| "?").collect();
+        clauses.push(format!("template_id NOT IN ({})", placeholders.join(",")));
+        for tid in excluded {
+            let tid = i64::try_from(tid).map_err(|_| {
+                CoreError::Message("excluded template id exceeds signed storage range".into())
+            })?;
+            binds.push(Value::BigInt(tid));
         }
     }
     if !q.levels.is_empty() {
@@ -2600,7 +2641,7 @@ fn build_where(q: &EventQuery) -> (String, Vec<Value>) {
         }
     }
 
-    (clauses.join(" AND "), binds)
+    Ok((clauses.join(" AND "), binds))
 }
 
 fn params_ref(values: &[Value]) -> Vec<&dyn duckdb::ToSql> {
@@ -4207,6 +4248,208 @@ mod tests {
     }
 
     #[test]
+    fn excluded_templates_are_one_lens_for_rows_counts_facets_and_timelines() {
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::open(&cache, &id).unwrap();
+        let raw = query_event_rows(
+            &corpus,
+            &EventQuery {
+                limit: MAX_EVENT_PAGE,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(raw.events.len(), 90);
+
+        let mut template_counts = BTreeMap::<u64, u64>::new();
+        for event in &raw.events {
+            *template_counts.entry(event.template_id).or_default() += 1;
+        }
+        let (&excluded_template, &excluded_count) = template_counts
+            .iter()
+            .max_by_key(|(_, count)| *count)
+            .expect("fixture has a template");
+        let expected_visible = 90 - excluded_count;
+        let exact_identity = raw
+            .events
+            .iter()
+            .find(|event| event.template_id == excluded_template)
+            .expect("excluded event identity")
+            .seq;
+
+        let filter = EventQuery {
+            excluded_template_ids: vec![excluded_template, excluded_template],
+            limit: MAX_EVENT_PAGE,
+            ..Default::default()
+        };
+        let rows = query_event_rows(&corpus, &filter).unwrap();
+        assert_eq!(rows.events.len() as u64, expected_visible);
+        assert!(rows
+            .events
+            .iter()
+            .all(|event| event.template_id != excluded_template));
+        assert_eq!(
+            query_event_count(&corpus, &filter).unwrap().total_matched,
+            expected_visible
+        );
+
+        let facets = query_facets(&corpus, &filter).unwrap();
+        assert_eq!(facets.levels.values().sum::<u64>(), expected_visible);
+        assert_eq!(facets.sources.values().sum::<u64>(), expected_visible);
+        assert_eq!(facets.services.values().sum::<u64>(), expected_visible);
+        assert_eq!(facets.hosts.values().sum::<u64>(), expected_visible);
+
+        let legacy = query_timeline_summary(
+            &corpus,
+            &TimelineSummaryQuery {
+                filter: filter.clone(),
+                max_buckets: 17,
+            },
+        )
+        .unwrap();
+        assert_eq!(legacy.total_matched, expected_visible);
+        assert_eq!(
+            legacy
+                .buckets
+                .iter()
+                .map(|bucket| bucket.count)
+                .sum::<u64>(),
+            expected_visible
+        );
+
+        let shared = query_shared_timeline_summary(
+            &corpus,
+            &SharedTimelineSummaryQuery {
+                filter,
+                max_buckets: 17,
+                lanes: vec![SharedTimelineLaneScope {
+                    all_sources: true,
+                    sources: vec![],
+                }],
+            },
+        )
+        .unwrap();
+        assert_eq!(shared.total_matched, expected_visible);
+        assert_eq!(shared.counts.iter().sum::<u64>(), expected_visible);
+        assert_eq!(shared.lanes[0].total_matched, expected_visible);
+
+        assert_eq!(
+            corpus.event_count(),
+            90,
+            "suppression is a reversible lens, never corpus deletion"
+        );
+        let hidden = query_event_neighborhood(
+            &corpus,
+            &EventNeighborhoodQuery {
+                target_seq: exact_identity,
+                before: 5,
+                after: 5,
+                filter: EventQuery {
+                    excluded_template_ids: vec![excluded_template],
+                    ..Default::default()
+                },
+                sort_by_time: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(hidden.status, TargetResolveStatus::HiddenByFilter);
+        assert_eq!(
+            hidden.target.as_ref().map(|event| event.seq),
+            Some(exact_identity),
+            "exact evidence remains resolvable for an explicit reveal flow"
+        );
+        query_event_original(&corpus, exact_identity)
+            .expect("direct evidence remains available outside the lens");
+        let sources = query_source_catalog(&corpus, &LogSourceCatalogQuery::default()).unwrap();
+        assert_eq!(
+            sources.total_matched, 3,
+            "the complete raw source inventory remains visible"
+        );
+    }
+
+    #[test]
+    fn excluded_template_order_is_cache_canonical_and_the_input_is_bounded() {
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::open(&cache, &id).unwrap();
+        let raw = query_event_rows(
+            &corpus,
+            &EventQuery {
+                limit: MAX_EVENT_PAGE,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut templates = raw
+            .events
+            .iter()
+            .map(|event| event.template_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter();
+        let first = templates.next().expect("first fixture template");
+        let second = templates.next().unwrap_or(first);
+
+        let first_order = EventQuery {
+            excluded_template_ids: vec![first, second],
+            ..Default::default()
+        };
+        let reverse_with_duplicate = EventQuery {
+            excluded_template_ids: vec![second, first, second],
+            ..Default::default()
+        };
+        let expected = query_event_count(&corpus, &first_order).unwrap();
+        assert_eq!(
+            query_event_count(&corpus, &reverse_with_duplicate).unwrap(),
+            expected
+        );
+        assert_eq!(
+            corpus.event_count_scan_count(),
+            1,
+            "equivalent suppression sets share one exact-count cache entry"
+        );
+
+        let over_bound = EventQuery {
+            excluded_template_ids: vec![first; MAX_EXCLUDED_TEMPLATE_IDS + 1],
+            ..Default::default()
+        };
+        for error in [
+            query_event_rows(&corpus, &over_bound).unwrap_err(),
+            query_event_count(&corpus, &over_bound).unwrap_err(),
+            query_facets(&corpus, &over_bound).unwrap_err(),
+            query_timeline_summary(
+                &corpus,
+                &TimelineSummaryQuery {
+                    filter: over_bound.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err(),
+            query_shared_timeline_summary(
+                &corpus,
+                &SharedTimelineSummaryQuery {
+                    filter: over_bound.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err(),
+        ] {
+            assert!(error
+                .to_string()
+                .contains("excluded template count 257 exceeds maximum 256"));
+        }
+
+        let out_of_range = EventQuery {
+            excluded_template_ids: vec![u64::MAX],
+            ..Default::default()
+        };
+        assert!(query_event_rows(&corpus, &out_of_range)
+            .unwrap_err()
+            .to_string()
+            .contains("excluded template id exceeds signed storage range"));
+    }
+
+    #[test]
     fn source_catalog_pages_all_241_full_paths_without_gaps_or_duplicates() {
         let (dir, id) = high_cardinality_source_catalog_fixture();
         let corpus = LogCorpus::open(&dir.path().join("cache"), &id).unwrap();
@@ -4521,6 +4764,86 @@ mod tests {
                 "active Filter keyword must constrain every Find mode"
             );
         }
+    }
+
+    #[test]
+    fn advanced_find_honors_the_same_excluded_template_lens() {
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::open(&cache, &id).unwrap();
+        let auth = search_events_advanced(
+            &corpus,
+            &EventSearchQuery {
+                query: Some("auth failure".into()),
+                semantic: false,
+                k: 50,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(auth.hits.len(), 40);
+        let excluded_template = auth.hits[0].event.template_id;
+        assert!(auth
+            .hits
+            .iter()
+            .all(|hit| hit.event.template_id == excluded_template));
+        let filter = EventQuery {
+            excluded_template_ids: vec![excluded_template],
+            ..Default::default()
+        };
+
+        let literal = search_events_advanced(
+            &corpus,
+            &EventSearchQuery {
+                query: Some("auth failure".into()),
+                semantic: false,
+                k: 50,
+                filter: filter.clone(),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(literal.total_matched, Some(0));
+        assert!(literal.hits.is_empty());
+
+        let regex = search_events_advanced(
+            &corpus,
+            &EventSearchQuery {
+                query: Some(r"auth failure user \d+".into()),
+                semantic: false,
+                k: 50,
+                filter,
+                match_mode: SearchMatchMode::Regex,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert!(regex.hits.is_empty());
+        assert_eq!(regex.scanned, 50, "only non-suppressed events are scanned");
+
+        let backend = ConceptEmbedBackend::new(64);
+        let semantic = search_events_advanced(
+            &corpus,
+            &EventSearchQuery {
+                query: Some("login authentication denied".into()),
+                semantic: true,
+                k: 50,
+                filter: EventQuery {
+                    excluded_template_ids: vec![excluded_template],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            Some(&backend),
+        )
+        .unwrap();
+        assert!(semantic
+            .hits
+            .iter()
+            .all(|hit| hit.event.template_id != excluded_template));
     }
 
     #[test]

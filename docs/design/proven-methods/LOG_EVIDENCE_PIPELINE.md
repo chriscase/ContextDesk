@@ -9,7 +9,10 @@ timeline/metric presentation are present on `main`. Built-in record grammars
 use deterministic versioned fingerprints with content-only tie handling and
 record-level dispatch. Full timestamp provenance, subsecond precision,
 timezone rules, and clock-skew review remain #670; user-authored profiles and
-multiline framing remain #751; durable noise policy remains #671.
+multiline framing remain #751. #671 Slice 1 is a partial candidate for governed
+corpus-scoped exact-template suppression; #671 remains open for adversarial
+hardening, broader predicates and lifecycle, include-suppressed controls,
+suppression-specific scale proof, and baseline proposals.
 
 ## 1. Problem
 
@@ -55,7 +58,7 @@ The reusable method is a layered evidence plane:
 | Bounded event query, facets, Find, timeline summaries       | **Shipped**                               | [`query.rs`](../../../crates/cd-core/src/log_analysis/query.rs)                                                                                | Durable metric attachment and full #670 time policy         |
 | Search/correlation/anomaly/trace tool surface               | **Shipped**                               | [`search.rs`](../../../crates/cd-core/src/log_analysis/search.rs), [`why.rs`](../../../crates/cd-core/src/log_analysis/why.rs)                 | Provider quality requires tools-enabled acceptance          |
 | Privacy-reviewed diagnostic handoff                         | **Shipped**                               | `diagnostics.rs`, typed ingest evidence callbacks in `ingest.rs`, `logDiagnosticReport.ts`, `LogDiagnosticDialog.tsx`, `log_diagnostic_report.rs`, and `log_diagnostics.rs` | Reports are memory-only metadata; users still review before sharing |
-| Durable noise/squelch policy                                | **Planned**                               | #671                                                                                                                                           | Filters exist; governed reusable noise policy does not      |
+| Exact-template noise/squelch policy                         | **Partial — #671 remains open**            | [`suppression.rs`](../../../crates/cd-core/src/log_analysis/suppression.rs), shared query/analysis/tool lens, and Explorer Noise policy                                                                        | Adversarial hardening; rule editing/creator identity; additional predicates; global/tool include-suppressed controls; Investigation/saved-view/package lifecycle; scale proof; baseline proposals; larger rule-set optimization |
 
 ## 3. Reusable method
 
@@ -71,6 +74,7 @@ flowchart LR
     G["Drain-style template<br/>pattern + parameters"]
     H["Template vectors<br/>optional"]
     I["Bounded query plane<br/>page · facets · search · timeline"]
+    L["Exact-template noise lens<br/>preview · confirm · audit"]
     J["Explorer / tools<br/>evidence identities"]
     K["Redacted Original<br/>bounded fidelity view"]
 
@@ -81,6 +85,7 @@ flowchart LR
     F --> I
     G --> I
     H --> I
+    G --> L --> I
     I --> J
     K --> J
 ```
@@ -235,6 +240,38 @@ Trust boundaries:
 - user-applied time/noise rules must be explicit durable policy with provenance.
 
 ## 6. Algorithm detail
+
+### 6.0 Govern exact-template noise (#671 Slice 1)
+
+1. A human starts from one corpus-local template identity and supplies a name
+   and rationale.
+2. The trusted core resolves the template fingerprint and computes an exact
+   preview: raw matches, incremental hidden matches, levels, source count,
+   inclusive span, and bounded redacted representatives.
+3. The user reviews that preview and explicitly confirms it. Detector/model
+   proposals cannot enable themselves.
+4. The core publishes a versioned corpus sidecar. Mutations require the expected
+   revision; disable, re-enable, and remove-to-tombstone operations append audit
+   records. This is the current lifecycle surface, not full CRUD: rules cannot
+   be edited and complete durable creator identity is not yet recorded.
+5. Enabled template IDs become one bounded exclusion lens for rows, counts,
+   facets, timeline, Find, analysis, and log tools. A linked turn pins one
+   revision and discloses the revision and hidden-event count.
+6. The raw/source/original/direct-evidence paths remain outside the lens.
+   Resolving a suppressed bookmark offers a temporary, explicit reveal and a
+   return to the prior lens.
+
+The method intentionally makes no claim of automatic noise learning. It does
+not delete events, alter source bytes, infer that a frequent template is
+unimportant, or make a rule portable in package v1. The active lens is bounded
+and fails closed rather than silently truncating an oversized rule set.
+
+This exact-template Slice 1 is reversible and fail closed: enabled and
+re-enabled predicates are revalidated against authoritative fingerprints,
+bounded audit storage reserves terminal disable/remove capacity, publication
+uses a cross-process corpus lock, sidecar reads do not follow links, and direct
+adapter tests prove exclusion parity. #671 remains open for the broader policy
+surface listed below.
 
 ### 6.1 Discover and frame
 
@@ -555,7 +592,7 @@ latency, template count, and cancellation—not only ingest throughput.
 | Cancelled ingest/reanalysis   | Cancel flag/progress             | Cancelled                     | Retry                                      | Previous published corpus/index preserved |
 | Malformed package             | Preflight/hash/schema checks     | Import error                  | Obtain valid package                       | No partial corpus publication             |
 | Stale evidence identity       | Source/time hint revalidation    | Stale/missing                 | Locate replacement explicitly              | No silent rebinding                       |
-| Noise overwhelms results      | User observation/filter counts   | Temporary filter only today   | #671 durable policy later                  | No hidden permanent squelch               |
+| Noise overwhelms results      | User observation/filter counts   | Partial exact-template policy; #671 open | Preview/confirm a reviewed exact template; use filters otherwise | No deletion claim; incomplete lifecycle and hardening stay visible |
 
 ## 9. Observability
 
@@ -589,8 +626,9 @@ normalization.
 - Validate package paths, sizes, entry counts, hashes, and versions before
   publication.
 - Never offer an unredacted Original view as a convenience feature.
-- A future noise rule must be transparent to UI queries, analysis tools, and
-  model context; it cannot secretly delete evidence.
+- Exact-template noise rules are transparent to UI queries, analysis tools,
+  and model context; they cannot secretly delete evidence. Linked tools pin and
+  disclose the active policy revision and hidden count.
 - A future clock correction must be a reversible overlay with provenance and
   uncertainty, not a rewrite of source truth.
 
@@ -621,7 +659,9 @@ details, not only a hover tooltip.
 | Parser unit          | Registry identity/version uniqueness; JSON/logfmt/RFC5424/classic/special/plain fingerprints; equal-score ambiguity independent of order; banner/mixed records; incidental pairs; extension disagreement; pseudo-PRI; non-syslog `Jan…`; positive/negative offsets; malformed, offsetless, yearless, overflow; fractional precision contract; Unicode |
 | Redaction unit       | Complete-record redaction precedes truncation; secret absent from parser/store; invalid UTF-8 and CRLF accounting                            |
 | Store integration    | Stable corpus+seq+source identity; exact/noncontiguous references; legacy schema read; additive Original unavailable/available behavior      |
-| Query integration    | Filter intersection; keyset forward/backward; time bounds; regex cap; semantic template-to-event resolution; dense gap buckets               |
+| Query integration    | Filter intersection; keyset forward/backward; time bounds; regex cap; semantic template-to-event resolution; dense gap buckets; exact-template suppression parity across rows/counts/facets/timeline/Find |
+| Suppression store    | Trusted preview facts; human confirmation; stale preview/revision/fingerprint rejection; enable/disable/re-enable/tombstone audit; raw evidence unchanged |
+| Tool integration     | Search/clustering/timeline/correlation/anomaly/trace share one pinned revision and disclose hidden count; suppressed identities do not leak into results |
 | Package              | Frozen version fixture; path traversal, duplicate, cap, hash, too-new reader, staging cleanup                                                |
 | Deterministic corpus | Known cross-zone shared instant, ambiguous controls, noise families, long line, secret sentinel, stale identity                              |
 | Desktop component    | Inspector tabs/copy; time-quality labels; Find versus Filter; lane membership; gaps; timeline seek; focus restoration                        |
@@ -675,7 +715,7 @@ instant while ambiguous controls remain order-only.
 | Arbitrary timestamp diversity  | **Planned/partial**           | Ambiguous inputs fail to order rather than guess              | #670 timezone/year/DST/skew contract    |
 | Query/facets/search            | **Shipped**                   | Bounded event and template-aware retrieval                    | Unbounded regex or raw dumps            |
 | Timeline                       | **Partial**                   | Shared-axis log summary, metric tracks, scrubber, severity signal, resident range, lane coverage, and viewport-follow cursor | Durable metric attachment, metric chat context, and full #670 time policy |
-| Noise suppression              | **Planned**                   | Temporary filters exist                                       | Durable auditable squelch policy (#671) |
+| Noise suppression              | **Partial — #671 remains open** | Human-confirmed exact-template rules and one shared evidence lens | Adversarial hardening; rule editing/creator identity; other predicates; global/tool include-suppressed controls; Investigation/saved-view/package lifecycle; suppression scale proof; baseline proposals; larger rule sets |
 | Template “reduction”           | **Shipped**                   | Events/templates ratio                                        | Storage compression claim               |
 
 ## 15. Reimplementation notes
@@ -707,7 +747,12 @@ to “helpfully” interpret an offsetless production timestamp.
 - #670: first-class time basis, original timestamp provenance, subsecond
   precision, per-source timezone and year rules, DST ambiguity, skew proposals,
   UI disclosure, package compatibility, and import preview.
-- #671: durable transparent noise/squelch rules for viewer, analysis, and model.
+- #671 remains open/partial: add rule editing and complete creator identity;
+  source/service/host, level-plus-template, and reviewed-text predicates;
+  Investigation/saved-view and package lifecycle; global temporary and visible
+  auditable tool include-suppressed controls; suppression-specific 25k/100k and
+  optional-1M measurements; baseline proposals; and larger-rule-set
+  optimization.
 - #751: durable profile provenance, user-authored profile lifecycle,
   preview/approval UI, profile drift, and bounded multiline framing.
 - #667: optional metric/time-series tracks on the shared axis.

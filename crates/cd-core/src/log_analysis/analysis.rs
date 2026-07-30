@@ -1,8 +1,9 @@
 //! cluster_problems + timeline (#361).
 
+use super::search::normalize_excluded_template_ids;
 use super::store::LogCorpus;
 use crate::error::{CoreError, CoreResult};
-use duckdb::params;
+use duckdb::types::Value;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -90,7 +91,21 @@ pub fn cluster_problems(
     corpus: &LogCorpus,
     max_clusters: usize,
 ) -> CoreResult<Vec<ClusterSummary>> {
-    let all_templates = corpus.list_templates();
+    cluster_problems_with_excluded_templates(corpus, max_clusters, &[])
+}
+
+/// Cluster templates after applying an exact-template suppression lens.
+pub fn cluster_problems_with_excluded_templates(
+    corpus: &LogCorpus,
+    max_clusters: usize,
+    excluded_template_ids: &[u64],
+) -> CoreResult<Vec<ClusterSummary>> {
+    let excluded = normalize_excluded_template_ids(excluded_template_ids)?;
+    let all_templates = corpus
+        .list_templates()
+        .into_iter()
+        .filter(|template| !excluded.contains(&template.info.template_id))
+        .collect::<Vec<_>>();
     if all_templates.is_empty() {
         return Ok(vec![]);
     }
@@ -339,7 +354,25 @@ pub fn timeline(
     level: Option<&str>,
     service: Option<&str>,
 ) -> CoreResult<Vec<TimelineBucket>> {
-    Ok(timeline_summary(corpus, width_secs, level, service)?.buckets)
+    timeline_with_excluded_templates(corpus, width_secs, level, service, &[])
+}
+
+/// Frequency-over-time after applying an exact-template suppression lens.
+pub fn timeline_with_excluded_templates(
+    corpus: &LogCorpus,
+    width_secs: i64,
+    level: Option<&str>,
+    service: Option<&str>,
+    excluded_template_ids: &[u64],
+) -> CoreResult<Vec<TimelineBucket>> {
+    Ok(timeline_summary_with_excluded_templates(
+        corpus,
+        width_secs,
+        level,
+        service,
+        excluded_template_ids,
+    )?
+    .buckets)
 }
 
 /// Frequency-over-time with the exact width/coarsening decision used by the
@@ -350,26 +383,32 @@ pub fn timeline_summary(
     level: Option<&str>,
     service: Option<&str>,
 ) -> CoreResult<TimelineAnalysis> {
+    timeline_summary_with_excluded_templates(corpus, width_secs, level, service, &[])
+}
+
+/// Agent-facing timeline after applying an exact-template suppression lens.
+pub fn timeline_summary_with_excluded_templates(
+    corpus: &LogCorpus,
+    width_secs: i64,
+    level: Option<&str>,
+    service: Option<&str>,
+    excluded_template_ids: &[u64],
+) -> CoreResult<TimelineAnalysis> {
+    let excluded = normalize_excluded_template_ids(excluded_template_ids)?;
     let requested_width = width_secs.max(1);
     let normalized_level = level.map(str::to_ascii_lowercase);
+    let (where_sql, filter_binds) =
+        timeline_filter(&normalized_level, service, excluded.iter().copied());
     corpus.with_connection(|conn| {
+        let count_sql = format!("SELECT MIN(ts), MAX(ts), COUNT(*) FROM events WHERE {where_sql}");
         let (min_ts, max_ts, total_count) = conn
-            .query_row(
-                r#"
-                SELECT MIN(ts), MAX(ts), COUNT(*)
-                FROM events
-                WHERE (?1 IS NULL OR LOWER(level) = ?1)
-                  AND (?2 IS NULL OR service = ?2)
-                "#,
-                params![normalized_level.as_deref(), service],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<i64>>(0)?,
-                        row.get::<_, Option<i64>>(1)?,
-                        row.get::<_, i64>(2)? as u64,
-                    ))
-                },
-            )
+            .query_row(&count_sql, params_ref(&filter_binds).as_slice(), |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, i64>(2)? as u64,
+                ))
+            })
             .map_err(duck_error)?;
         let (Some(min_ts), Some(max_ts)) = (min_ts, max_ts) else {
             return Ok(TimelineAnalysis {
@@ -384,31 +423,29 @@ pub fn timeline_summary(
 
         // `ts - (ts % width)` matches Rust's integer division semantics,
         // including truncation toward zero for order-only negative values.
-        let mut stmt = conn
-            .prepare(
-                r#"
-                SELECT ts - (ts % ?1) AS bucket_start,
+        let timeline_sql = format!(
+            r#"
+                SELECT ts - (ts % ?) AS bucket_start,
                        level,
                        COUNT(*) AS event_count
                 FROM events
-                WHERE (?2 IS NULL OR LOWER(level) = ?2)
-                  AND (?3 IS NULL OR service = ?3)
+                WHERE {where_sql}
                 GROUP BY 1, 2
                 ORDER BY 1 ASC, 2 ASC
-                "#,
-            )
-            .map_err(duck_error)?;
+                "#
+        );
+        let mut stmt = conn.prepare(&timeline_sql).map_err(duck_error)?;
+        let mut timeline_binds = Vec::with_capacity(filter_binds.len() + 1);
+        timeline_binds.push(Value::BigInt(effective_width));
+        timeline_binds.extend(filter_binds.iter().cloned());
         let rows = stmt
-            .query_map(
-                params![effective_width, normalized_level.as_deref(), service],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)? as u64,
-                    ))
-                },
-            )
+            .query_map(params_ref(&timeline_binds).as_slice(), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)? as u64,
+                ))
+            })
             .map_err(duck_error)?;
 
         let mut buckets = Vec::<TimelineBucket>::new();
@@ -441,6 +478,46 @@ pub fn timeline_summary(
             buckets,
         })
     })
+}
+
+fn timeline_filter(
+    normalized_level: &Option<String>,
+    service: Option<&str>,
+    excluded_template_ids: impl Iterator<Item = u64>,
+) -> (String, Vec<Value>) {
+    let mut clauses = vec!["1=1".to_string()];
+    let mut binds = Vec::new();
+    if let Some(level) = normalized_level {
+        clauses.push("LOWER(level) = ?".into());
+        binds.push(Value::Text(level.clone()));
+    }
+    if let Some(service) = service {
+        clauses.push("service = ?".into());
+        binds.push(Value::Text(service.to_string()));
+    }
+    let excluded_template_ids = excluded_template_ids
+        .map(|template_id| {
+            i64::try_from(template_id)
+                .expect("excluded template ids were validated against signed storage range")
+        })
+        .collect::<Vec<_>>();
+    if !excluded_template_ids.is_empty() {
+        clauses.push(format!(
+            "template_id NOT IN ({})",
+            std::iter::repeat_n("?", excluded_template_ids.len())
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+        binds.extend(excluded_template_ids.into_iter().map(Value::BigInt));
+    }
+    (clauses.join(" AND "), binds)
+}
+
+fn params_ref(values: &[Value]) -> Vec<&dyn duckdb::ToSql> {
+    values
+        .iter()
+        .map(|value| value as &dyn duckdb::ToSql)
+        .collect()
 }
 
 fn bounded_timeline_width(min_ts: i64, max_ts: i64, requested_width: i64) -> i64 {
@@ -599,6 +676,43 @@ mod tests {
     }
 
     #[test]
+    fn exact_template_exclusions_remove_clusters_deterministically() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "suppressed clustering").unwrap();
+        corpus
+            .upsert_templates([
+                template_row(1, "routine heartbeat ok", 1, 50),
+                template_row(2, "database connection failed", 4, 3),
+            ])
+            .unwrap();
+
+        let baseline = cluster_problems(&corpus, 10).unwrap();
+        let explicit_empty = cluster_problems_with_excluded_templates(&corpus, 10, &[]).unwrap();
+        assert_eq!(
+            serde_json::to_value(&baseline).unwrap(),
+            serde_json::to_value(&explicit_empty).unwrap(),
+            "the compatibility wrapper must preserve empty-lens behavior"
+        );
+        assert!(baseline
+            .iter()
+            .any(|cluster| cluster.template_ids.contains(&1)));
+
+        let hidden_once = cluster_problems_with_excluded_templates(&corpus, 10, &[1]).unwrap();
+        let hidden_with_duplicates =
+            cluster_problems_with_excluded_templates(&corpus, 10, &[1, 1]).unwrap();
+        assert_eq!(
+            serde_json::to_value(&hidden_once).unwrap(),
+            serde_json::to_value(&hidden_with_duplicates).unwrap()
+        );
+        assert!(hidden_once
+            .iter()
+            .all(|cluster| !cluster.template_ids.contains(&1)));
+        assert!(hidden_once
+            .iter()
+            .all(|cluster| cluster.templates_available == 1));
+    }
+
+    #[test]
     fn rare_severe_template_survives_repetitive_error_candidates() {
         let dir = tempfile::tempdir().unwrap();
         let corpus = LogCorpus::create(dir.path(), "rare severe").unwrap();
@@ -747,6 +861,95 @@ mod tests {
         assert!(timeline(&corpus, 100, Some("error"), Some("worker"))
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn exact_template_exclusions_apply_to_analysis_timeline() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "suppressed timeline").unwrap();
+        corpus
+            .with_connection(|conn| {
+                conn.execute_batch(
+                    r#"
+                    INSERT INTO events (
+                        seq, ts, level, service, host, template_id, params,
+                        trace_id, message, source
+                    ) VALUES
+                        (1, 100, 'info', 'api', NULL, 1, '[]', NULL, 'heartbeat', 'x.log'),
+                        (2, 101, 'error', 'api', NULL, 2, '[]', NULL, 'failed', 'x.log'),
+                        (3, 102, 'error', 'api', NULL, 2, '[]', NULL, 'failed', 'x.log')
+                    "#,
+                )
+                .map_err(duck_error)?;
+                Ok(())
+            })
+            .unwrap();
+
+        let baseline = timeline_summary(&corpus, 10, None, None).unwrap();
+        let explicit_empty =
+            timeline_summary_with_excluded_templates(&corpus, 10, None, None, &[]).unwrap();
+        assert_eq!(
+            serde_json::to_value(&baseline).unwrap(),
+            serde_json::to_value(&explicit_empty).unwrap()
+        );
+        assert_eq!(baseline.total_count, 3);
+
+        let hidden_once =
+            timeline_summary_with_excluded_templates(&corpus, 10, None, None, &[2]).unwrap();
+        let hidden_with_duplicates =
+            timeline_summary_with_excluded_templates(&corpus, 10, None, None, &[2, 2]).unwrap();
+        assert_eq!(
+            serde_json::to_value(&hidden_once).unwrap(),
+            serde_json::to_value(&hidden_with_duplicates).unwrap()
+        );
+        assert_eq!(hidden_once.total_count, 1);
+        assert_eq!(
+            hidden_once
+                .buckets
+                .iter()
+                .map(|bucket| bucket.count)
+                .sum::<u64>(),
+            1
+        );
+        assert!(hidden_once
+            .buckets
+            .iter()
+            .all(|bucket| !bucket.by_level.contains_key("error")));
+    }
+
+    #[test]
+    fn analysis_rejects_over_bound_exclusion_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "suppression bound").unwrap();
+        let too_many = (0..=super::super::search::MAX_ANALYSIS_EXCLUDED_TEMPLATE_IDS as u64)
+            .collect::<Vec<_>>();
+
+        let cluster_error =
+            cluster_problems_with_excluded_templates(&corpus, 10, &too_many).unwrap_err();
+        let timeline_error =
+            timeline_summary_with_excluded_templates(&corpus, 10, None, None, &too_many)
+                .unwrap_err();
+        assert!(
+            cluster_error.to_string().contains("exceeds maximum 256"),
+            "{cluster_error}"
+        );
+        assert!(
+            timeline_error.to_string().contains("exceeds maximum 256"),
+            "{timeline_error}"
+        );
+    }
+
+    #[test]
+    fn timeline_rejects_template_ids_outside_signed_storage_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "suppression storage range").unwrap();
+        let error = timeline_summary_with_excluded_templates(&corpus, 10, None, None, &[u64::MAX])
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("exceeds signed storage range"),
+            "{error}"
+        );
     }
 
     #[test]

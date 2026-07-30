@@ -3,13 +3,15 @@ mod log_lab_generator;
 
 use cd_core::investigations::InvestigationStore;
 use cd_core::log_analysis::{
-    add_line_bookmark, cluster_problems, export_corpus_zip, import_corpus_zip_path, ingest_path,
-    ingest_path_with_observer, list_bookmarks, query_event_count, query_event_neighborhood,
-    query_event_rows, query_events, query_facets, query_shared_timeline_summary,
-    query_source_catalog, query_timeline_summary, search_events, search_events_advanced, timeline,
-    EventNeighborhoodQuery, EventQuery, EventSearchQuery, LogCorpus, LogSourceCatalogQuery,
-    SearchMatchMode, SharedTimelineSummaryQuery, TimeQuality, TimelineSummaryQuery, MAX_EVENT_PAGE,
-    MAX_REGEX_SCAN_EVENTS,
+    activate_template_suppression, add_line_bookmark, cluster_problems, export_corpus_zip,
+    import_corpus_zip_path, ingest_path, ingest_path_with_observer, list_bookmarks,
+    load_suppression_document, mutate_template_suppression_rule, preview_template_suppression,
+    query_event_count, query_event_neighborhood, query_event_rows, query_events, query_facets,
+    query_shared_timeline_summary, query_source_catalog, query_timeline_summary, search_events,
+    search_events_advanced, timeline, ActivateSuppressionPreview, EventNeighborhoodQuery,
+    EventQuery, EventSearchQuery, LogCorpus, LogSourceCatalogQuery, NewSuppressionPreview,
+    SearchMatchMode, SharedTimelineSummaryQuery, SuppressionRuleMutation, SuppressionRuleOrigin,
+    TimeQuality, TimelineSummaryQuery, MAX_EVENT_PAGE, MAX_REGEX_SCAN_EVENTS,
 };
 use cd_core::process_progress::{
     CancelFlag, ProcessProgress, ProcessProgressObserver, RecordingProcessProgress,
@@ -903,6 +905,93 @@ fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
         DEFAULT_TRIAGE_STRESS_EVENT_COUNT as u64
     );
 
+    let dominant_template = corpus
+        .list_templates()
+        .into_iter()
+        .max_by_key(|row| row.info.count)
+        .expect("250k corpus has templates");
+    let suppression_preview_started = Instant::now();
+    let empty_policy = load_suppression_document(&corpus).unwrap();
+    let preview = preview_template_suppression(
+        &corpus,
+        empty_policy.revision,
+        NewSuppressionPreview {
+            name: "Dominant synthetic noise family".into(),
+            rationale: "Explicit 250k acceptance proof for a reversible exact-template lens."
+                .into(),
+            template_id: dominant_template.info.template_id,
+            origin: SuppressionRuleOrigin::Human,
+        },
+    )
+    .unwrap();
+    let suppression_preview_ms = suppression_preview_started.elapsed().as_millis();
+    assert_eq!(
+        preview.matching_event_count, dominant_template.info.count,
+        "trusted preview count must match the authoritative template"
+    );
+    assert_eq!(
+        preview.incremental_event_count,
+        preview.matching_event_count
+    );
+
+    let suppression_activate_started = Instant::now();
+    let activated = activate_template_suppression(
+        &corpus,
+        preview.rule_revision,
+        ActivateSuppressionPreview {
+            preview_token: preview.token,
+        },
+    )
+    .unwrap();
+    let suppression_activate_ms = suppression_activate_started.elapsed().as_millis();
+    let active_policy = load_suppression_document(&corpus).unwrap();
+    assert_eq!(active_policy.revision, activated.revision);
+    let excluded_template_ids = active_policy.enabled_template_ids().unwrap();
+    assert_eq!(
+        excluded_template_ids,
+        vec![dominant_template.info.template_id]
+    );
+    let suppressed_query = EventQuery {
+        excluded_template_ids: excluded_template_ids.clone(),
+        limit: MAX_EVENT_PAGE,
+        ..Default::default()
+    };
+    let expected_visible = DEFAULT_TRIAGE_STRESS_EVENT_COUNT as u64 - preview.matching_event_count;
+
+    let suppression_rows_started = Instant::now();
+    let suppression_rows = query_event_rows(&corpus, &suppressed_query).unwrap();
+    let suppression_rows_ms = suppression_rows_started.elapsed().as_millis();
+    assert_eq!(suppression_rows.events.len(), MAX_EVENT_PAGE);
+    assert!(suppression_rows
+        .events
+        .iter()
+        .all(|event| event.template_id != dominant_template.info.template_id));
+
+    let suppression_count_started = Instant::now();
+    let suppression_count = query_event_count(&corpus, &suppressed_query).unwrap();
+    let suppression_count_ms = suppression_count_started.elapsed().as_millis();
+    assert_eq!(suppression_count.total_matched, expected_visible);
+
+    let suppression_facets_started = Instant::now();
+    let suppression_facets = query_facets(&corpus, &suppressed_query).unwrap();
+    let suppression_facets_ms = suppression_facets_started.elapsed().as_millis();
+    assert_eq!(
+        suppression_facets.levels.values().sum::<u64>(),
+        expected_visible
+    );
+
+    let suppression_timeline_started = Instant::now();
+    let suppression_timeline = query_timeline_summary(
+        &corpus,
+        &TimelineSummaryQuery {
+            filter: suppressed_query.clone(),
+            max_buckets: 96,
+        },
+    )
+    .unwrap();
+    let suppression_timeline_ms = suppression_timeline_started.elapsed().as_millis();
+    assert_eq!(suppression_timeline.total_matched, expected_visible);
+
     let first_rows_started = Instant::now();
     let first_rows = query_event_rows(
         &corpus,
@@ -982,6 +1071,7 @@ fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
                 query: Some(signal.into()),
                 semantic: false,
                 k: 20,
+                filter: suppressed_query.clone(),
                 ..Default::default()
             },
             None,
@@ -994,8 +1084,27 @@ fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
     assert_eq!(manifest["expected"]["severities"]["debug"], 7_500);
     assert_eq!(manifest["expected"]["severities"]["info"], 160_000);
 
+    let suppression_disable_started = Instant::now();
+    let disabled = mutate_template_suppression_rule(
+        &corpus,
+        active_policy.revision,
+        &activated.rule.id,
+        SuppressionRuleMutation::Disable,
+    )
+    .unwrap();
+    let suppression_disable_ms = suppression_disable_started.elapsed().as_millis();
+    let disabled_policy = load_suppression_document(&corpus).unwrap();
+    assert_eq!(disabled_policy.revision, disabled.revision);
+    assert!(disabled_policy.enabled_template_ids().unwrap().is_empty());
+    assert_eq!(
+        query_event_count(&corpus, &EventQuery::default())
+            .unwrap()
+            .total_matched,
+        DEFAULT_TRIAGE_STRESS_EVENT_COUNT as u64
+    );
+
     eprintln!(
-        "PASS triage-stress-250k events={} files={} templates={} source_bytes={} generation_ms={} import_ms={} cold_open_ms={} summary_ms={} first_rows_ms={} exact_count_ms={} facets_ms={} source_catalog_ms={} bookmarks_ms={} investigation_ms={} shared_timeline_ms={} agent_timeline_ms={} cluster_ms={} tree_sha256={} (one-machine observation; not a universal claim)",
+        "PASS triage-stress-250k events={} files={} templates={} source_bytes={} generation_ms={} import_ms={} cold_open_ms={} summary_ms={} first_rows_ms={} exact_count_ms={} facets_ms={} source_catalog_ms={} bookmarks_ms={} investigation_ms={} shared_timeline_ms={} agent_timeline_ms={} cluster_ms={} suppression_template_id={} suppression_hidden={} suppression_preview_ms={} suppression_activate_ms={} suppression_rows_ms={} suppression_count_ms={} suppression_facets_ms={} suppression_timeline_ms={} suppression_disable_ms={} tree_sha256={} (one-machine observation; not a universal claim)",
         report.stats.lines,
         report.stats.files,
         report.stats.templates,
@@ -1013,6 +1122,15 @@ fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
         shared_timeline_ms,
         timeline_ms,
         cluster_ms,
+        dominant_template.info.template_id,
+        preview.matching_event_count,
+        suppression_preview_ms,
+        suppression_activate_ms,
+        suppression_rows_ms,
+        suppression_count_ms,
+        suppression_facets_ms,
+        suppression_timeline_ms,
+        suppression_disable_ms,
         generation.tree_sha256
     );
 }

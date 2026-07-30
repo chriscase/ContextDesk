@@ -2,6 +2,7 @@
 //!
 //! Read-only; all results cite template ids + exemplars.
 
+use super::search::normalize_excluded_template_ids;
 use super::store::LogCorpus;
 use crate::error::CoreResult;
 use serde::{Deserialize, Serialize};
@@ -68,10 +69,27 @@ pub fn correlate(
     window_secs: i64,
     k: usize,
 ) -> CoreResult<Vec<CorrelateHit>> {
+    correlate_with_excluded_templates(corpus, focus_template_id, around_ts, window_secs, k, &[])
+}
+
+/// Correlate after applying an exact-template suppression lens.
+pub fn correlate_with_excluded_templates(
+    corpus: &LogCorpus,
+    focus_template_id: u64,
+    around_ts: Option<i64>,
+    window_secs: i64,
+    k: usize,
+    excluded_template_ids: &[u64],
+) -> CoreResult<Vec<CorrelateHit>> {
+    let excluded = normalize_excluded_template_ids(excluded_template_ids)?;
+    if excluded.contains(&focus_template_id) {
+        return Ok(Vec::new());
+    }
     let w = window_secs.max(1);
     let patterns: HashMap<u64, String> = corpus
         .list_templates()
         .into_iter()
+        .filter(|template| !excluded.contains(&template.info.template_id))
         .map(|t| (t.info.template_id, t.info.pattern))
         .collect();
 
@@ -92,7 +110,7 @@ pub fn correlate(
             return;
         }
         for e in events {
-            if e.template_id == focus_template_id {
+            if e.template_id == focus_template_id || excluded.contains(&e.template_id) {
                 continue;
             }
             let near = focus_ts.iter().any(|ft| (e.ts - ft).abs() <= w);
@@ -134,6 +152,7 @@ pub fn correlate(
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.template_id.cmp(&b.template_id))
     });
     hits.truncate(k.max(1));
     Ok(hits)
@@ -148,9 +167,32 @@ pub fn anomalies(
     incident_to: i64,
     k: usize,
 ) -> CoreResult<Vec<AnomalyHit>> {
+    anomalies_with_excluded_templates(
+        corpus,
+        baseline_from,
+        baseline_to,
+        incident_from,
+        incident_to,
+        k,
+        &[],
+    )
+}
+
+/// Find anomalies after applying an exact-template suppression lens.
+pub fn anomalies_with_excluded_templates(
+    corpus: &LogCorpus,
+    baseline_from: i64,
+    baseline_to: i64,
+    incident_from: i64,
+    incident_to: i64,
+    k: usize,
+    excluded_template_ids: &[u64],
+) -> CoreResult<Vec<AnomalyHit>> {
+    let excluded = normalize_excluded_template_ids(excluded_template_ids)?;
     let patterns: HashMap<u64, String> = corpus
         .list_templates()
         .into_iter()
+        .filter(|template| !excluded.contains(&template.info.template_id))
         .map(|t| (t.info.template_id, t.info.pattern))
         .collect();
 
@@ -160,6 +202,9 @@ pub fn anomalies(
 
     corpus.with_events(|events| {
         for e in events {
+            if excluded.contains(&e.template_id) {
+                continue;
+            }
             if e.ts >= baseline_from && e.ts < baseline_to {
                 *base.entry(e.template_id).or_insert(0) += 1;
             }
@@ -193,6 +238,7 @@ pub fn anomalies(
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.template_id.cmp(&b.template_id))
     });
     hits.truncate(k.max(1));
     Ok(hits)
@@ -200,6 +246,16 @@ pub fn anomalies(
 
 /// Follow a trace/request id across services and time.
 pub fn trace(corpus: &LogCorpus, trace_id: &str) -> CoreResult<Vec<TraceEvent>> {
+    trace_with_excluded_templates(corpus, trace_id, &[])
+}
+
+/// Follow a trace after applying an exact-template suppression lens.
+pub fn trace_with_excluded_templates(
+    corpus: &LogCorpus,
+    trace_id: &str,
+    excluded_template_ids: &[u64],
+) -> CoreResult<Vec<TraceEvent>> {
+    let excluded = normalize_excluded_template_ids(excluded_template_ids)?;
     let tid = trace_id.trim();
     if tid.is_empty() {
         return Ok(vec![]);
@@ -207,12 +263,13 @@ pub fn trace(corpus: &LogCorpus, trace_id: &str) -> CoreResult<Vec<TraceEvent>> 
     let patterns: HashMap<u64, String> = corpus
         .list_templates()
         .into_iter()
+        .filter(|template| !excluded.contains(&template.info.template_id))
         .map(|t| (t.info.template_id, t.info.pattern))
         .collect();
     let mut out = Vec::new();
     corpus.with_events(|events| {
         for e in events {
-            if e.trace_id.as_deref() == Some(tid) {
+            if e.trace_id.as_deref() == Some(tid) && !excluded.contains(&e.template_id) {
                 out.push(TraceEvent {
                     seq: e.seq,
                     ts: e.ts,
@@ -374,5 +431,124 @@ mod tests {
             services.contains("api") && services.contains("db"),
             "{services:?}"
         );
+    }
+
+    #[test]
+    fn exact_template_exclusions_apply_to_trace_without_changing_default() {
+        let (_dir, corpus) = seed_incident();
+        let baseline = trace(&corpus, "tr-fail-1").unwrap();
+        let explicit_empty = trace_with_excluded_templates(&corpus, "tr-fail-1", &[]).unwrap();
+        assert_eq!(
+            serde_json::to_value(&baseline).unwrap(),
+            serde_json::to_value(&explicit_empty).unwrap()
+        );
+        assert!(baseline.iter().any(|event| event.template_id == 3));
+
+        let hidden_once = trace_with_excluded_templates(&corpus, "tr-fail-1", &[3]).unwrap();
+        let hidden_with_duplicates =
+            trace_with_excluded_templates(&corpus, "tr-fail-1", &[3, 3]).unwrap();
+        assert_eq!(
+            serde_json::to_value(&hidden_once).unwrap(),
+            serde_json::to_value(&hidden_with_duplicates).unwrap()
+        );
+        assert!(hidden_once.iter().all(|event| {
+            event.template_id != 3 && event.pattern != "connection refused to upstream"
+        }));
+        assert!(
+            trace_with_excluded_templates(&corpus, "tr-fail-1", &[1, 2, 3])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn exact_template_exclusions_apply_to_correlation_and_anomalies() {
+        let (_dir, corpus) = seed_incident();
+
+        let baseline_correlation = correlate(&corpus, 2, Some(1050), 30, 10).unwrap();
+        let explicit_empty_correlation =
+            correlate_with_excluded_templates(&corpus, 2, Some(1050), 30, 10, &[]).unwrap();
+        assert_eq!(
+            serde_json::to_value(&baseline_correlation).unwrap(),
+            serde_json::to_value(&explicit_empty_correlation).unwrap()
+        );
+        assert!(baseline_correlation.iter().any(|hit| hit.template_id == 1));
+
+        let hidden_once =
+            correlate_with_excluded_templates(&corpus, 2, Some(1050), 30, 10, &[1]).unwrap();
+        let hidden_with_duplicates =
+            correlate_with_excluded_templates(&corpus, 2, Some(1050), 30, 10, &[1, 1]).unwrap();
+        assert_eq!(
+            serde_json::to_value(&hidden_once).unwrap(),
+            serde_json::to_value(&hidden_with_duplicates).unwrap()
+        );
+        assert!(hidden_once.iter().all(|hit| hit.template_id != 1));
+        assert!(
+            correlate_with_excluded_templates(&corpus, 2, Some(1050), 30, 10, &[2])
+                .unwrap()
+                .is_empty(),
+            "a suppressed focus template must not seed a correlation"
+        );
+
+        let baseline_anomalies = anomalies(&corpus, 0, 500, 1000, 1200, 10).unwrap();
+        let explicit_empty_anomalies =
+            anomalies_with_excluded_templates(&corpus, 0, 500, 1000, 1200, 10, &[]).unwrap();
+        assert_eq!(
+            serde_json::to_value(&baseline_anomalies).unwrap(),
+            serde_json::to_value(&explicit_empty_anomalies).unwrap()
+        );
+        assert!(baseline_anomalies.iter().any(|hit| hit.template_id == 3));
+
+        let hidden_anomalies =
+            anomalies_with_excluded_templates(&corpus, 0, 500, 1000, 1200, 10, &[3, 3]).unwrap();
+        assert!(hidden_anomalies.iter().all(|hit| hit.template_id != 3));
+    }
+
+    #[test]
+    fn why_analysis_rejects_over_bound_exclusion_input() {
+        let (_dir, corpus) = seed_incident();
+        let too_many = (0..=super::super::search::MAX_ANALYSIS_EXCLUDED_TEMPLATE_IDS as u64)
+            .collect::<Vec<_>>();
+
+        let correlation_error =
+            correlate_with_excluded_templates(&corpus, 2, Some(1050), 30, 10, &too_many)
+                .unwrap_err();
+        let anomaly_error =
+            anomalies_with_excluded_templates(&corpus, 0, 500, 1000, 1200, 10, &too_many)
+                .unwrap_err();
+        let trace_error =
+            trace_with_excluded_templates(&corpus, "tr-fail-1", &too_many).unwrap_err();
+        assert!(
+            correlation_error
+                .to_string()
+                .contains("exceeds maximum 256"),
+            "{correlation_error}"
+        );
+        assert!(
+            anomaly_error.to_string().contains("exceeds maximum 256"),
+            "{anomaly_error}"
+        );
+        assert!(
+            trace_error.to_string().contains("exceeds maximum 256"),
+            "{trace_error}"
+        );
+    }
+
+    #[test]
+    fn why_analysis_rejects_template_ids_outside_signed_storage_range() {
+        let (_dir, corpus) = seed_incident();
+
+        for error in [
+            correlate_with_excluded_templates(&corpus, 2, Some(1050), 30, 10, &[u64::MAX])
+                .unwrap_err(),
+            anomalies_with_excluded_templates(&corpus, 0, 500, 1000, 1200, 10, &[u64::MAX])
+                .unwrap_err(),
+            trace_with_excluded_templates(&corpus, "tr-fail-1", &[u64::MAX]).unwrap_err(),
+        ] {
+            assert!(
+                error.to_string().contains("exceeds signed storage range"),
+                "{error}"
+            );
+        }
     }
 }

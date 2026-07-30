@@ -3,14 +3,39 @@
 use super::query::{classify_ts, TimeQuality};
 use super::store::{LogCorpus, LogEvent};
 use crate::embed::EmbedBackend;
-use crate::error::CoreResult;
+use crate::error::{CoreError, CoreResult};
 use crate::memory::embed_blocking;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 const MAX_EXEMPLARS_PER_TEMPLATE: usize = 3;
 const MAX_EXEMPLAR_MESSAGE_CHARS: usize = 320;
+/// Maximum suppression predicates accepted by one analysis/search request.
+pub const MAX_ANALYSIS_EXCLUDED_TEMPLATE_IDS: usize = 256;
+
+pub(super) fn normalize_excluded_template_ids(
+    excluded_template_ids: &[u64],
+) -> CoreResult<BTreeSet<u64>> {
+    if excluded_template_ids.len() > MAX_ANALYSIS_EXCLUDED_TEMPLATE_IDS {
+        return Err(CoreError::Message(format!(
+            "excluded template count {} exceeds maximum {}",
+            excluded_template_ids.len(),
+            MAX_ANALYSIS_EXCLUDED_TEMPLATE_IDS
+        )));
+    }
+    if let Some(template_id) = excluded_template_ids
+        .iter()
+        .copied()
+        .find(|template_id| *template_id > i64::MAX as u64)
+    {
+        return Err(CoreError::Message(format!(
+            "excluded template id {template_id} exceeds signed storage range {}",
+            i64::MAX
+        )));
+    }
+    Ok(excluded_template_ids.iter().copied().collect())
+}
 
 #[derive(Debug)]
 struct RankedExemplar {
@@ -191,6 +216,17 @@ pub fn search_logs(
     q: &SearchLogsQuery,
     embed: Option<&dyn EmbedBackend>,
 ) -> CoreResult<Vec<SearchHit>> {
+    search_logs_with_excluded_templates(corpus, q, embed, &[])
+}
+
+/// Hybrid search after applying an exact-template suppression lens.
+pub fn search_logs_with_excluded_templates(
+    corpus: &LogCorpus,
+    q: &SearchLogsQuery,
+    embed: Option<&dyn EmbedBackend>,
+    excluded_template_ids: &[u64],
+) -> CoreResult<Vec<SearchHit>> {
+    let excluded = normalize_excluded_template_ids(excluded_template_ids)?;
     // A configured model does not make a keyword-only corpus semantic. Gate on
     // persisted/derived vector availability so tools and UI cannot overclaim.
     let embed = if corpus.embedding_status().embedded_templates > 0 {
@@ -214,6 +250,9 @@ pub fn search_logs(
 
     corpus.with_events(|events| {
         for e in events {
+            if excluded.contains(&e.template_id) {
+                continue;
+            }
             if let Some(from) = q.time_from {
                 if e.ts < from {
                     continue;
@@ -291,6 +330,9 @@ pub fn search_logs(
 
     // Also score templates by pattern FTS
     for row in corpus.list_templates() {
+        if excluded.contains(&row.info.template_id) {
+            continue;
+        }
         if !allowed.is_empty() && !allowed.contains(&row.info.template_id) {
             // if structured filter empty of constraints, allow all via pattern
         }
@@ -320,7 +362,9 @@ pub fn search_logs(
         && q.trace_id.is_none();
     if no_struct {
         for row in corpus.list_templates() {
-            allowed.insert(row.info.template_id);
+            if !excluded.contains(&row.info.template_id) {
+                allowed.insert(row.info.template_id);
+            }
         }
     }
 
@@ -346,10 +390,12 @@ pub fn search_logs(
     } else {
         ids.retain(|id| allowed.contains(id) || allowed.is_empty());
     }
+    ids.retain(|id| !excluded.contains(id));
 
     let templates: std::collections::HashMap<_, _> = corpus
         .list_templates()
         .into_iter()
+        .filter(|row| !excluded.contains(&row.info.template_id))
         .map(|r| (r.info.template_id, r))
         .collect();
 
@@ -404,6 +450,7 @@ pub fn search_logs(
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.template_id.cmp(&b.template_id))
     });
     hits.truncate(k);
     Ok(hits)
@@ -613,5 +660,185 @@ mod tests {
         assert!(evidence.contains("event_id=behavior-80000"), "{evidence}");
         assert!(evidence.contains("FIND_RARE_DEEP"), "{evidence}");
         assert!(!evidence.contains("behavior-100"), "{evidence}");
+    }
+
+    fn suppression_search_fixture() -> (tempfile::TempDir, LogCorpus) {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "suppression search").unwrap();
+        corpus
+            .upsert_templates([
+                TemplateRow {
+                    info: TemplateInfo {
+                        template_id: 7,
+                        pattern: "routine health check".into(),
+                        token_count: 3,
+                        count: 2,
+                        first_seen: 100,
+                        last_seen: 101,
+                        severity: 1,
+                        example: "routine health check".into(),
+                    },
+                    content_hash: template_content_hash("routine health check"),
+                    vector: None,
+                },
+                TemplateRow {
+                    info: TemplateInfo {
+                        template_id: 8,
+                        pattern: "database connection failed".into(),
+                        token_count: 3,
+                        count: 1,
+                        first_seen: 102,
+                        last_seen: 102,
+                        severity: 4,
+                        example: "database connection failed".into(),
+                    },
+                    content_hash: template_content_hash("database connection failed"),
+                    vector: None,
+                },
+            ])
+            .unwrap();
+        corpus
+            .push_events(&[
+                LogEvent {
+                    seq: 1,
+                    ts: 100,
+                    level: "info".into(),
+                    service: Some("api".into()),
+                    host: None,
+                    template_id: 7,
+                    params: vec![],
+                    trace_id: None,
+                    message: "routine health check".into(),
+                    source: "api.log".into(),
+                },
+                LogEvent {
+                    seq: 2,
+                    ts: 101,
+                    level: "info".into(),
+                    service: Some("api".into()),
+                    host: None,
+                    template_id: 7,
+                    params: vec![],
+                    trace_id: None,
+                    message: "routine health check".into(),
+                    source: "api.log".into(),
+                },
+                LogEvent {
+                    seq: 3,
+                    ts: 102,
+                    level: "error".into(),
+                    service: Some("db".into()),
+                    host: None,
+                    template_id: 8,
+                    params: vec![],
+                    trace_id: None,
+                    message: "database connection failed".into(),
+                    source: "db.log".into(),
+                },
+            ])
+            .unwrap();
+        (dir, corpus)
+    }
+
+    #[test]
+    fn exact_template_exclusions_remove_search_candidates_and_evidence() {
+        let (_dir, corpus) = suppression_search_fixture();
+        let baseline = search_logs(
+            &corpus,
+            &SearchLogsQuery {
+                k: 10,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            baseline
+                .iter()
+                .map(|hit| hit.template_id)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([7, 8])
+        );
+
+        let query = SearchLogsQuery {
+            k: 10,
+            ..Default::default()
+        };
+        let hidden_once = search_logs_with_excluded_templates(&corpus, &query, None, &[7]).unwrap();
+        let hidden_with_duplicates =
+            search_logs_with_excluded_templates(&corpus, &query, None, &[7, 7]).unwrap();
+
+        assert_eq!(
+            hidden_once
+                .iter()
+                .map(|hit| hit.template_id)
+                .collect::<Vec<_>>(),
+            vec![8]
+        );
+        assert_eq!(
+            hidden_with_duplicates
+                .iter()
+                .map(|hit| hit.template_id)
+                .collect::<Vec<_>>(),
+            vec![8]
+        );
+        assert!(hidden_once
+            .iter()
+            .flat_map(|hit| &hit.evidence)
+            .all(|identity| identity.template_id != 7));
+    }
+
+    #[test]
+    fn empty_search_exclusions_preserve_default_behavior() {
+        let (_dir, corpus) = suppression_search_fixture();
+        let default_query = SearchLogsQuery {
+            query: Some("database".into()),
+            k: 10,
+            ..Default::default()
+        };
+        let default_hits = search_logs(&corpus, &default_query, None).unwrap();
+        let explicit_hits =
+            search_logs_with_excluded_templates(&corpus, &default_query, None, &[]).unwrap();
+        assert_eq!(
+            serde_json::to_value(default_hits).unwrap(),
+            serde_json::to_value(explicit_hits).unwrap()
+        );
+    }
+
+    #[test]
+    fn search_rejects_over_bound_exclusion_input() {
+        let (_dir, corpus) = suppression_search_fixture();
+        let error = search_logs_with_excluded_templates(
+            &corpus,
+            &SearchLogsQuery {
+                k: 10,
+                ..Default::default()
+            },
+            None,
+            &(0..=MAX_ANALYSIS_EXCLUDED_TEMPLATE_IDS as u64).collect::<Vec<_>>(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("exceeds maximum 256"), "{error}");
+    }
+
+    #[test]
+    fn search_rejects_template_ids_outside_signed_storage_range() {
+        let (_dir, corpus) = suppression_search_fixture();
+        let error = search_logs_with_excluded_templates(
+            &corpus,
+            &SearchLogsQuery {
+                k: 10,
+                ..Default::default()
+            },
+            None,
+            &[u64::MAX],
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("exceeds signed storage range"),
+            "{error}"
+        );
     }
 }

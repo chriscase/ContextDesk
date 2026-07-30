@@ -2081,6 +2081,8 @@ export type EventQueryDto = {
   hosts?: string[];
   templateId?: number | null;
   templateIds?: number[];
+  /** Exact template ids hidden by the active, user-approved suppression lens. */
+  excludedTemplateIds?: number[];
   traceId?: string | null;
   keyword?: string | null;
   afterSeq?: number | null;
@@ -2090,6 +2092,86 @@ export type EventQueryDto = {
   beforeTs?: number | null;
   limit?: number;
   sortByTime?: boolean;
+};
+
+export type SuppressionRuleOrigin =
+  | "human"
+  | "detector_proposal"
+  | "model_proposal";
+export type SuppressionRuleState = "enabled" | "disabled" | "removed";
+export type SuppressionRuleMutation = "disable" | "reenable" | "remove";
+export type SuppressionAuditAction =
+  | "previewed"
+  | "activated"
+  | "disabled"
+  | "reenabled"
+  | "removed";
+
+export type SuppressionTemplatePredicateDto = {
+  templateId: number;
+  templateFingerprint: string;
+};
+
+export type SuppressionRepresentativeEventDto = {
+  seq: number;
+  source: string;
+  timestamp: number;
+  timeQuality: TimeQuality;
+  level: string;
+  redactedExcerpt: string;
+};
+
+export type SuppressionPreviewDto = {
+  token: string;
+  corpusId: string;
+  eventRevision: number;
+  ruleRevision: number;
+  name: string;
+  rationale: string;
+  predicate: SuppressionTemplatePredicateDto;
+  origin: SuppressionRuleOrigin;
+  matchingEventCount: number;
+  incrementalEventCount: number;
+  corpusEventCount: number;
+  levelCounts: { level: string; count: number }[];
+  sourceCount: number;
+  timeSpan: { from: number; to: number };
+  representatives: SuppressionRepresentativeEventDto[];
+  createdAt: number;
+};
+
+export type SuppressionRuleDto = {
+  id: string;
+  name: string;
+  rationale: string;
+  predicate: SuppressionTemplatePredicateDto;
+  origin: SuppressionRuleOrigin;
+  state: SuppressionRuleState;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type SuppressionAuditEntryDto = {
+  id: string;
+  revision: number;
+  action: SuppressionAuditAction;
+  ruleId?: string | null;
+  previewToken?: string | null;
+  createdAt: number;
+};
+
+export type SuppressionDocumentDto = {
+  schemaVersion: number;
+  corpusId: string;
+  revision: number;
+  rules: SuppressionRuleDto[];
+  previews: SuppressionPreviewDto[];
+  audit: SuppressionAuditEntryDto[];
+};
+
+export type SuppressionMutationResultDto = {
+  revision: number;
+  rule: SuppressionRuleDto;
 };
 
 export type EventPageDto = {
@@ -2640,6 +2722,76 @@ export async function hostLogSearchEventsAdvanced(
 export async function hostCancelLogSearch(requestId: string): Promise<boolean> {
   if (!isTauri()) return false;
   return invoke<boolean>("cancel_log_search", { requestId });
+}
+
+/** Durable, corpus-scoped exact-template suppression policy. */
+export async function hostLogLoadSuppression(
+  corpusId: string,
+): Promise<SuppressionDocumentDto> {
+  if (!isTauri()) {
+    return {
+      schemaVersion: 1,
+      corpusId,
+      revision: 0,
+      rules: [],
+      previews: [],
+      audit: [],
+    };
+  }
+  return invoke<SuppressionDocumentDto>("log_load_suppression", { corpusId });
+}
+
+/** Compute and persist a trusted-core preview; the caller supplies no counts. */
+export async function hostLogPreviewTemplateSuppression(
+  corpusId: string,
+  args: {
+    expectedRevision: number;
+    name: string;
+    rationale: string;
+    templateId: number;
+  },
+): Promise<SuppressionPreviewDto> {
+  if (!isTauri()) throw new Error("Noise-rule preview requires Tauri host");
+  return invoke<SuppressionPreviewDto>("log_preview_template_suppression", {
+    args: {
+      corpusId,
+      expectedRevision: args.expectedRevision,
+      name: args.name,
+      rationale: args.rationale,
+      templateId: args.templateId,
+    },
+  });
+}
+
+/** Activate one current human-authored preview token. */
+export async function hostLogActivateTemplateSuppression(
+  corpusId: string,
+  expectedRevision: number,
+  previewToken: string,
+): Promise<SuppressionMutationResultDto> {
+  if (!isTauri()) throw new Error("Noise-rule activation requires Tauri host");
+  return invoke<SuppressionMutationResultDto>(
+    "log_activate_template_suppression",
+    {
+      args: { corpusId, expectedRevision, previewToken },
+    },
+  );
+}
+
+/** Disable, re-enable, or tombstone one durable suppression rule. */
+export async function hostLogMutateTemplateSuppressionRule(
+  corpusId: string,
+  expectedRevision: number,
+  ruleId: string,
+  mutation: SuppressionRuleMutation,
+): Promise<SuppressionMutationResultDto> {
+  if (!isTauri()) throw new Error("Noise-rule mutation requires Tauri host");
+  return invoke<SuppressionMutationResultDto>(
+    "log_mutate_template_suppression_rule",
+    {
+      args: { corpusId, expectedRevision, ruleId, mutation },
+    },
+  );
 }
 
 export async function hostLogListBookmarks(

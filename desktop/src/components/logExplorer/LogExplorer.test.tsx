@@ -46,6 +46,17 @@ vi.mock("../../lib/host", () => ({
   })),
   hostSetActiveLogCorpus: vi.fn(async () => "c1"),
   hostLogListBookmarks: vi.fn(async () => []),
+  hostLogLoadSuppression: vi.fn(async (corpusId: string) => ({
+    schemaVersion: 1,
+    corpusId,
+    revision: 0,
+    rules: [],
+    previews: [],
+    audit: [],
+  })),
+  hostLogPreviewTemplateSuppression: vi.fn(),
+  hostLogActivateTemplateSuppression: vi.fn(),
+  hostLogMutateTemplateSuppressionRule: vi.fn(),
   hostListChatModels: vi.fn(async () => [
     {
       id: "triage-1",
@@ -375,6 +386,12 @@ function scrollLaneToEdge(edge: "older" | "newer", laneIndex = 0): HTMLElement {
   return list;
 }
 
+async function clickFindWhenReady(): Promise<void> {
+  const button = screen.getByTestId("log-explorer-find-run");
+  await waitFor(() => expect(button).toHaveProperty("disabled", false));
+  fireEvent.click(button);
+}
+
 function bookmark(id: string, label: string, seq: number): host.LogBookmarkDto {
   return {
     id,
@@ -384,6 +401,43 @@ function bookmark(id: string, label: string, seq: number): host.LogBookmarkDto {
     seqTo: seq,
     createdAt: 1,
     updatedAt: 1,
+  };
+}
+
+function suppressionDocument(
+  state: host.SuppressionRuleState = "enabled",
+  revision = 3,
+): host.SuppressionDocumentDto {
+  return {
+    schemaVersion: 1,
+    corpusId: "c1",
+    revision,
+    rules: [
+      {
+        id: "019fb-noise-rule",
+        name: "Routine heartbeat",
+        rationale: "Known health-check traffic obscures incident evidence.",
+        predicate: {
+          templateId: 2,
+          templateFingerprint: "template-2-fingerprint",
+        },
+        origin: "human",
+        state,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    ],
+    previews: [],
+    audit: [
+      {
+        id: "019fb-audit",
+        revision,
+        action: state === "enabled" ? "activated" : "disabled",
+        ruleId: "019fb-noise-rule",
+        previewToken: null,
+        createdAt: 2,
+      },
+    ],
   };
 }
 
@@ -527,6 +581,17 @@ describe("LogExplorer shell", () => {
       reason: "Original representation unavailable for this corpus",
     });
     vi.mocked(host.hostLogListBookmarks).mockResolvedValue([]);
+    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue({
+      schemaVersion: 1,
+      corpusId: "c1",
+      revision: 0,
+      rules: [],
+      previews: [],
+      audit: [],
+    });
+    vi.mocked(host.hostLogPreviewTemplateSuppression).mockReset();
+    vi.mocked(host.hostLogActivateTemplateSuppression).mockReset();
+    vi.mocked(host.hostLogMutateTemplateSuppressionRule).mockReset();
     vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(null);
     vi.mocked(host.hostListChatModels).mockResolvedValue([
       {
@@ -602,6 +667,219 @@ describe("LogExplorer shell", () => {
     expect(screen.getByText(/Keyword-only corpus/)).toBeTruthy();
   });
 
+  it("loads the durable noise policy before issuing any evidence query", async () => {
+    const policy = deferred<host.SuppressionDocumentDto>();
+    vi.mocked(host.hostLogLoadSuppression).mockReturnValue(policy.promise);
+
+    render(<LogExplorer corpusId="c1" />);
+
+    expect(
+      await screen.findByText("Loading noise policy before evidence…"),
+    ).toBeTruthy();
+    expect(host.hostLogQueryEventRows).not.toHaveBeenCalled();
+    expect(host.hostLogFacets).not.toHaveBeenCalled();
+    expect(host.hostLogSearchEventsAdvanced).not.toHaveBeenCalled();
+    expect(screen.queryByText(/auth failure/)).toBeNull();
+
+    await act(async () => {
+      policy.resolve({
+        schemaVersion: 1,
+        corpusId: "c1",
+        revision: 0,
+        rules: [],
+        previews: [],
+        audit: [],
+      });
+      await policy.promise;
+    });
+
+    expect(await screen.findByText(/auth failure/)).toBeTruthy();
+    expect(screen.queryByTestId("noise-policy-gate")).toBeNull();
+  });
+
+  it("fails closed with a visible retry when the noise policy is unavailable", async () => {
+    vi.mocked(host.hostLogLoadSuppression)
+      .mockRejectedValueOnce(new Error("policy sidecar unreadable"))
+      .mockResolvedValueOnce({
+        schemaVersion: 1,
+        corpusId: "c1",
+        revision: 0,
+        rules: [],
+        previews: [],
+        audit: [],
+      });
+
+    render(<LogExplorer corpusId="c1" />);
+
+    expect(
+      await screen.findByText(
+        /Evidence is withheld.*policy sidecar unreadable/,
+      ),
+    ).toBeTruthy();
+    expect(host.hostLogQueryEventRows).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Retry policy" }));
+    expect(await screen.findByText(/auth failure/)).toBeTruthy();
+  });
+
+  it("applies one suppression lens to rows, counts, facets, timeline, and Find", async () => {
+    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+      suppressionDocument(),
+    );
+    vi.mocked(host.hostLogCountEvents).mockImplementation(
+      async (_corpusId, query) => ({
+        totalMatched: query?.templateIds?.includes(2) ? 4 : 1,
+      }),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+
+    await waitFor(() => expect(host.hostLogQueryEventRows).toHaveBeenCalled());
+    const rowQuery = vi
+      .mocked(host.hostLogQueryEventRows)
+      .mock.calls.at(-1)?.[1];
+    expect(rowQuery?.excludedTemplateIds).toEqual([2]);
+
+    await waitFor(() => expect(host.hostLogFacets).toHaveBeenCalled());
+    expect(
+      vi.mocked(host.hostLogFacets).mock.calls.at(-1)?.[1]?.excludedTemplateIds,
+    ).toEqual([2]);
+
+    await waitFor(() =>
+      expect(host.hostLogSharedTimelineSummary).toHaveBeenCalled(),
+    );
+    expect(
+      vi.mocked(host.hostLogSharedTimelineSummary).mock.calls.at(-1)?.[1]
+        ?.excludedTemplateIds,
+    ).toEqual([2]);
+
+    expect(
+      await screen.findByRole("button", {
+        name: "Noise · 1 rule · 4 hidden",
+      }),
+    ).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Find in logs"), {
+      target: { value: "failure" },
+    });
+    await clickFindWhenReady();
+    await waitFor(() =>
+      expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalled(),
+    );
+    expect(
+      vi.mocked(host.hostLogSearchEventsAdvanced).mock.calls.at(-1)?.[1]?.filter
+        ?.excludedTemplateIds,
+    ).toEqual([2]);
+  });
+
+  it("previews and confirms a human suppression before atomically refreshing evidence", async () => {
+    const emptyPolicy: host.SuppressionDocumentDto = {
+      schemaVersion: 1,
+      corpusId: "c1",
+      revision: 0,
+      rules: [],
+      previews: [],
+      audit: [],
+    };
+    vi.mocked(host.hostLogLoadSuppression)
+      .mockResolvedValueOnce(emptyPolicy)
+      .mockResolvedValue(suppressionDocument());
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        const excluded = query?.excludedTemplateIds ?? [];
+        const events = defaultEventPage().events.filter(
+          (event) => !excluded.includes(event.templateId),
+        );
+        return {
+          ...defaultEventPage(),
+          events,
+          totalMatched: events.length,
+        };
+      },
+    );
+    vi.mocked(host.hostLogCountEvents).mockImplementation(
+      async (_corpusId, query) => ({
+        totalMatched: query?.templateIds?.includes(2) ? 1 : 1,
+      }),
+    );
+    vi.mocked(host.hostLogPreviewTemplateSuppression).mockResolvedValue({
+      token: "preview-token",
+      corpusId: "c1",
+      eventRevision: 4,
+      ruleRevision: 0,
+      name: "Routine worker completion",
+      rationale: "Expected completion chatter during this incident.",
+      predicate: {
+        templateId: 2,
+        templateFingerprint: "template-2-fingerprint",
+      },
+      origin: "human",
+      matchingEventCount: 1,
+      incrementalEventCount: 1,
+      corpusEventCount: 10,
+      levelCounts: [{ level: "info", count: 1 }],
+      sourceCount: 1,
+      timeSpan: { from: 1_700_000_001, to: 1_700_000_001 },
+      representatives: [
+        {
+          seq: 2,
+          source: "worker.log",
+          timestamp: 1_700_000_001,
+          timeQuality: "wall",
+          level: "info",
+          redactedExcerpt: "job ok",
+        },
+      ],
+      createdAt: 3,
+    });
+    vi.mocked(host.hostLogActivateTemplateSuppression).mockResolvedValue({
+      revision: 3,
+      rule: suppressionDocument().rules[0]!,
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByText("job ok"));
+    const inspector = await screen.findByTestId("log-explorer-detail");
+    fireEvent.click(
+      within(inspector).getByRole("button", {
+        name: "Suppress template…",
+      }),
+    );
+    fireEvent.change(screen.getByLabelText("Rule name"), {
+      target: { value: "Routine worker completion" },
+    });
+    fireEvent.change(screen.getByLabelText("Rationale (required)"), {
+      target: {
+        value: "Expected completion chatter during this incident.",
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Preview impact" }));
+    expect(await screen.findByText(/10.0% of raw corpus/)).toBeTruthy();
+    expect(host.hostLogActivateTemplateSuppression).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Confirm suppression" }),
+    );
+    await waitFor(() =>
+      expect(host.hostLogActivateTemplateSuppression).toHaveBeenCalledWith(
+        "c1",
+        0,
+        "preview-token",
+      ),
+    );
+    await waitFor(() => expect(screen.queryByText("job ok")).toBeNull());
+    expect(
+      await screen.findByRole("button", {
+        name: "Noise · 1 rule · 1 hidden",
+      }),
+    ).toBeTruthy();
+    expect(
+      vi
+        .mocked(host.hostLogQueryEventRows)
+        .mock.calls.some(([, query]) =>
+          query?.excludedTemplateIds?.includes(2),
+        ),
+    ).toBe(true);
+  });
+
   it("loads first evidence rows before starting large-corpus facet aggregation", async () => {
     const firstPage = deferred<host.EventPageDto>();
     const facetPage = deferred<host.LogFacetsDto>();
@@ -645,9 +923,7 @@ describe("LogExplorer shell", () => {
       await facetPage.promise;
     });
     await waitFor(() =>
-      expect(
-        screen.queryByTestId("log-explorer-facets-loading"),
-      ).toBeNull(),
+      expect(screen.queryByTestId("log-explorer-facets-loading")).toBeNull(),
     );
   });
 
@@ -720,8 +996,7 @@ describe("LogExplorer shell", () => {
       },
     );
     vi.mocked(host.hostLogCountEvents).mockImplementation(
-      (requestedCorpusId) =>
-        counts[requestedCorpusId as "c1" | "c2"].promise,
+      (requestedCorpusId) => counts[requestedCorpusId as "c1" | "c2"].promise,
     );
 
     const view = render(<LogExplorer corpusId="c1" />);
@@ -792,9 +1067,7 @@ describe("LogExplorer shell", () => {
     expect(await screen.findByTestId("log-explorer-detail")).toBeTruthy();
 
     view.rerender(<LogExplorer corpusId="c2" />);
-    expect(
-      screen.queryByText("private evidence from prior corpus"),
-    ).toBeNull();
+    expect(screen.queryByText("private evidence from prior corpus")).toBeNull();
     expect(screen.queryByTestId("log-explorer-detail")).toBeNull();
     expect(screen.getByText("Loading first evidence rows…")).toBeTruthy();
 
@@ -898,9 +1171,9 @@ describe("LogExplorer shell", () => {
     expect(screen.getByTestId("lane-count-lane-2").textContent).toContain(
       "0 matched · 0 resident",
     );
-    expect(screen.getByTestId("log-explorer-global-counts").textContent).toContain(
-      "3 lane queries",
-    );
+    expect(
+      screen.getByTestId("log-explorer-global-counts").textContent,
+    ).toContain("3 lane queries");
     expect(screen.getByTestId("log-explorer-count-truth").textContent).toMatch(
       /matched per lane below · resident rows 2/,
     );
@@ -1268,8 +1541,9 @@ describe("LogExplorer shell", () => {
     }
 
     fireEvent.click(within(dialog).getByRole("button", { name: "JSON" }));
-    const json = within(dialog).getByLabelText("JSON diagnostic preview")
-      .textContent;
+    const json = within(dialog).getByLabelText(
+      "JSON diagnostic preview",
+    ).textContent;
     expect(json).toContain('"activeView"');
     expect(json).toContain('"sourceCount": 0');
     expect(json).not.toContain("customer-private-filter");
@@ -1311,9 +1585,8 @@ describe("LogExplorer shell", () => {
     const bars = await screen.findByTestId("timeline-navigator-bars");
     await waitFor(() =>
       expect(
-        bars.querySelector<HTMLElement>(
-          ".timeline-navigator__preview-marker",
-        )?.style.left,
+        bars.querySelector<HTMLElement>(".timeline-navigator__preview-marker")
+          ?.style.left,
       ).toBe("0%"),
     );
     const queryCalls = vi.mocked(host.hostLogQueryEvents).mock.calls.length;
@@ -1328,9 +1601,8 @@ describe("LogExplorer shell", () => {
 
     await waitFor(() =>
       expect(
-        bars.querySelector<HTMLElement>(
-          ".timeline-navigator__preview-marker",
-        )?.style.left,
+        bars.querySelector<HTMLElement>(".timeline-navigator__preview-marker")
+          ?.style.left,
       ).toBe("40%"),
     );
     expect(host.hostLogQueryEvents).toHaveBeenCalledTimes(queryCalls);
@@ -2363,9 +2635,7 @@ describe("LogExplorer shell", () => {
       await screen.findByText("job ok");
       await waitFor(() =>
         expect(
-          within(screen.getByTestId("log-explorer-filters")).getByText(
-            "error",
-          ),
+          within(screen.getByTestId("log-explorer-filters")).getByText("error"),
         ).toBeTruthy(),
       );
       apply();
@@ -2407,6 +2677,92 @@ describe("LogExplorer shell", () => {
       );
     },
   );
+
+  it("requires an explicit temporary reveal for a noise-suppressed bookmark and reapplies policy on restore", async () => {
+    const allEvents = defaultEventPage().events;
+    const target = allEvents.find((event) => event.templateId === 2)!;
+    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+      suppressionDocument(),
+    );
+    vi.mocked(host.hostLogCountEvents).mockImplementation(
+      async (_corpusId, query) => ({
+        totalMatched: query?.templateIds?.includes(2) ? 1 : 1,
+      }),
+    );
+    vi.mocked(host.hostLogListBookmarks).mockResolvedValue([
+      bookmark("bm-suppressed", "heartbeat evidence", target.seq),
+    ]);
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        const excluded = query?.excludedTemplateIds ?? [];
+        const events = allEvents.filter(
+          (event) => !excluded.includes(event.templateId),
+        );
+        return {
+          ...defaultEventPage(),
+          events,
+          totalMatched: events.length,
+        };
+      },
+    );
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockImplementation(
+      async (_corpusId, query) => {
+        const hidden =
+          query.filter?.excludedTemplateIds?.includes(target.templateId) ??
+          false;
+        return eventNeighborhood(
+          target,
+          hidden ? "hidden_by_filter" : "found",
+          hidden ? [] : [target],
+        );
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    expect(screen.queryByText("job ok")).toBeNull();
+
+    fireEvent.click(
+      await screen.findByTestId("bookmark-activate-bm-suppressed"),
+    );
+    const offer = await screen.findByTestId("suppressed-bookmark-offer");
+    expect(within(offer).getByText(/Hidden by active noise rule/)).toBeTruthy();
+    expect(screen.queryByText("job ok")).toBeNull();
+
+    fireEvent.click(
+      within(offer).getByRole("button", {
+        name: "Reveal suppressed evidence",
+      }),
+    );
+    expect((await screen.findAllByText("job ok")).length).toBeGreaterThan(0);
+    expect(await screen.findByTestId("bookmark-restore-view")).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toContain(
+      "Suppressed bookmark temporarily revealed",
+    );
+    expect(
+      vi
+        .mocked(host.hostLogQueryEventNeighborhood)
+        .mock.calls.some(
+          ([, request]) =>
+            request.filter?.excludedTemplateIds?.length === 0 &&
+            request.targetSeq === target.seq,
+        ),
+    ).toBe(true);
+
+    fireEvent.click(screen.getByTestId("bookmark-restore-view"));
+    await waitFor(() => expect(screen.queryByText("job ok")).toBeNull());
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(host.hostLogQueryEventRows)
+          .mock.calls.some(
+            ([, query]) =>
+              query?.excludedTemplateIds?.length === 1 &&
+              query.excludedTemplateIds[0] === 2,
+          ),
+      ).toBe(true),
+    );
+  });
 
   it("reloads persisted bookmarks and activates them without stale reveal state", async () => {
     const target = defaultEventPage().events[0]!;
@@ -2496,9 +2852,7 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByText("auth failure");
-    fireEvent.click(
-      await screen.findByRole("checkbox", { name: /api\.log/i }),
-    );
+    fireEvent.click(await screen.findByRole("checkbox", { name: /api\.log/i }));
     await waitFor(() =>
       expect(host.hostLogQueryEvents).toHaveBeenLastCalledWith(
         "c1",
@@ -2594,7 +2948,7 @@ describe("LogExplorer shell", () => {
     fireEvent.change(screen.getByTestId("log-explorer-find"), {
       target: { value: "auth" },
     });
-    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await clickFindWhenReady();
     await waitFor(() =>
       expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledTimes(1),
     );
@@ -3952,7 +4306,7 @@ describe("LogExplorer shell", () => {
     fireEvent.change(screen.getByTestId("log-explorer-find"), {
       target: { value: "rare identity" },
     });
-    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await clickFindWhenReady();
     expect(
       await screen.findByText(/Match 1 of 1.*1 result identities resident/),
     ).toBeTruthy();
@@ -4314,16 +4668,14 @@ describe("LogExplorer shell", () => {
       ),
     );
     await waitFor(() =>
-      expect(screen.getByTestId("log-explorer-count-truth").textContent).toMatch(
-        /matched 2/,
-      ),
+      expect(
+        screen.getByTestId("log-explorer-count-truth").textContent,
+      ).toMatch(/matched 2/),
     );
 
     const eventQueryCalls = vi.mocked(host.hostLogQueryEvents).mock.calls
       .length;
-    fireEvent.click(
-      await screen.findByRole("checkbox", { name: /db\.log/ }),
-    );
+    fireEvent.click(await screen.findByRole("checkbox", { name: /db\.log/ }));
 
     await waitFor(() =>
       expect(
@@ -4659,8 +5011,7 @@ describe("LogExplorer shell", () => {
             ([, , lanes]) =>
               lanes?.length === 2 &&
               lanes.every(
-                (lane) =>
-                  lane.allSources === true && lane.sources.length === 0,
+                (lane) => lane.allSources === true && lane.sources.length === 0,
               ),
           ),
       ).toBe(true);
@@ -4893,9 +5244,7 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="c1" />);
 
-    const boundary = await screen.findByTestId(
-      "lane-boundary-start-lane-0",
-    );
+    const boundary = await screen.findByTestId("lane-boundary-start-lane-0");
     const viewport = screen.getByTestId("virtualized-event-list");
     expect(
       boundary.compareDocumentPosition(viewport) &
@@ -5093,7 +5442,7 @@ describe("LogExplorer shell", () => {
     fireEvent.change(screen.getByTestId("log-explorer-find"), {
       target: { value: "auth" },
     });
-    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await clickFindWhenReady();
     await waitFor(() =>
       expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledWith(
         "c1",
@@ -5166,7 +5515,7 @@ describe("LogExplorer shell", () => {
     fireEvent.change(screen.getByTestId("log-explorer-find"), {
       target: { value: "auth" },
     });
-    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await clickFindWhenReady();
     await waitFor(() =>
       expect(host.hostLogSearchEventsAdvanced).toHaveBeenLastCalledWith(
         "c1",
@@ -5185,9 +5534,7 @@ describe("LogExplorer shell", () => {
     });
     render(<LogExplorer corpusId="c1" />);
     await waitFor(() =>
-      expect(
-        screen.queryByTestId("log-explorer-facets-loading"),
-      ).toBeNull(),
+      expect(screen.queryByTestId("log-explorer-facets-loading")).toBeNull(),
     );
     fireEvent.click(await screen.findByTestId("log-explorer-advanced-toggle"));
     const utcStart = screen.getByLabelText(
@@ -5293,7 +5640,7 @@ describe("LogExplorer shell", () => {
     fireEvent.change(screen.getByTestId("log-explorer-find"), {
       target: { value: "needle" },
     });
-    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await clickFindWhenReady();
     expect(
       await screen.findByText(/Match 1 of 4.*2 result identities resident/),
     ).toBeTruthy();
@@ -5470,7 +5817,7 @@ describe("LogExplorer shell", () => {
     fireEvent.change(screen.getByTestId("log-explorer-find"), {
       target: { value: "needle" },
     });
-    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await clickFindWhenReady();
 
     await waitFor(() =>
       expect(host.hostLogQueryEventNeighborhood).toHaveBeenCalledWith(
@@ -5678,7 +6025,7 @@ describe("LogExplorer shell", () => {
     render(<LogExplorer corpusId="c1" />);
     const find = screen.getByTestId("log-explorer-find");
     fireEvent.change(find, { target: { value: "old" } });
-    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await clickFindWhenReady();
     await waitFor(() =>
       expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledWith(
         "c1",
@@ -5687,7 +6034,7 @@ describe("LogExplorer shell", () => {
     );
 
     fireEvent.change(find, { target: { value: "new" } });
-    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await clickFindWhenReady();
     await waitFor(() =>
       expect(host.hostCancelLogSearch).toHaveBeenCalledWith("find-old"),
     );
@@ -5722,9 +6069,10 @@ describe("LogExplorer shell", () => {
 
   it("retires backend cancellation before locating a nonresident Find match", async () => {
     const target = nonresidentFindEvent(90, "needle located in context");
-    const neighborhood = deferred<
-      Awaited<ReturnType<typeof host.hostLogQueryEventNeighborhood>>
-    >();
+    const neighborhood =
+      deferred<
+        Awaited<ReturnType<typeof host.hostLogQueryEventNeighborhood>>
+      >();
     vi.mocked(host.hostLogSearchEventsAdvanced).mockResolvedValue(
       findResultFor(target),
     );
@@ -5737,7 +6085,7 @@ describe("LogExplorer shell", () => {
     fireEvent.change(screen.getByTestId("log-explorer-find"), {
       target: { value: "needle" },
     });
-    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await clickFindWhenReady();
 
     await waitFor(() =>
       expect(host.hostLogQueryEventNeighborhood).toHaveBeenCalledWith(
@@ -5783,7 +6131,7 @@ describe("LogExplorer shell", () => {
     await screen.findByText("auth failure");
     const find = screen.getByTestId("log-explorer-find");
     fireEvent.change(find, { target: { value: "needle" } });
-    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await clickFindWhenReady();
     await screen.findByTestId("log-explorer-find-cancel");
 
     fireEvent.change(find, { target: { value: "replacement" } });
@@ -5811,9 +6159,10 @@ describe("LogExplorer shell", () => {
 
   it("ignores a late Find neighborhood after the match mode changes", async () => {
     const target = nonresidentFindEvent(92, "stale mode target");
-    const neighborhood = deferred<
-      Awaited<ReturnType<typeof host.hostLogQueryEventNeighborhood>>
-    >();
+    const neighborhood =
+      deferred<
+        Awaited<ReturnType<typeof host.hostLogQueryEventNeighborhood>>
+      >();
     vi.mocked(host.hostLogSearchEventsAdvanced).mockResolvedValue(
       findResultFor(target),
     );
@@ -5826,7 +6175,7 @@ describe("LogExplorer shell", () => {
     fireEvent.change(screen.getByTestId("log-explorer-find"), {
       target: { value: "needle" },
     });
-    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await clickFindWhenReady();
     await waitFor(() =>
       expect(screen.getByRole("status").textContent).toContain(
         "locating match",
@@ -5852,9 +6201,10 @@ describe("LogExplorer shell", () => {
 
   it("ignores a late Find neighborhood after a Filter refresh", async () => {
     const target = nonresidentFindEvent(93, "stale unfiltered location");
-    const neighborhood = deferred<
-      Awaited<ReturnType<typeof host.hostLogQueryEventNeighborhood>>
-    >();
+    const neighborhood =
+      deferred<
+        Awaited<ReturnType<typeof host.hostLogQueryEventNeighborhood>>
+      >();
     let searchCount = 0;
     vi.mocked(host.hostLogSearchEventsAdvanced).mockImplementation(async () => {
       searchCount += 1;
@@ -5878,7 +6228,7 @@ describe("LogExplorer shell", () => {
     fireEvent.change(screen.getByTestId("log-explorer-find"), {
       target: { value: "needle" },
     });
-    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await clickFindWhenReady();
     await waitFor(() =>
       expect(screen.getByRole("status").textContent).toContain(
         "locating match",
@@ -5918,7 +6268,7 @@ describe("LogExplorer shell", () => {
     fireEvent.change(screen.getByTestId("log-explorer-find"), {
       target: { value: "needle" },
     });
-    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await clickFindWhenReady();
     await screen.findByTestId("log-explorer-find-cancel");
 
     view.unmount();
@@ -5944,9 +6294,10 @@ describe("LogExplorer shell", () => {
   it("uses the locating phase when cursor pagination reveals a nonresident match", async () => {
     const first = defaultEventPage().events[0]!;
     const second = nonresidentFindEvent(94, "second page target");
-    const neighborhood = deferred<
-      Awaited<ReturnType<typeof host.hostLogQueryEventNeighborhood>>
-    >();
+    const neighborhood =
+      deferred<
+        Awaited<ReturnType<typeof host.hostLogQueryEventNeighborhood>>
+      >();
     let searchCount = 0;
     vi.mocked(host.hostLogSearchEventsAdvanced).mockImplementation(async () => {
       searchCount += 1;
@@ -5967,7 +6318,7 @@ describe("LogExplorer shell", () => {
     fireEvent.change(screen.getByTestId("log-explorer-find"), {
       target: { value: "needle" },
     });
-    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await clickFindWhenReady();
     await screen.findByText(/Match 1 of 2.*1 result identities resident/);
 
     fireEvent.click(screen.getByTestId("log-explorer-find-next"));
@@ -6030,12 +6381,12 @@ describe("LogExplorer shell", () => {
     render(<LogExplorer corpusId="c1" />);
     const find = screen.getByTestId("log-explorer-find");
     fireEvent.change(find, { target: { value: "cancel me" } });
-    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await clickFindWhenReady();
     expect(
       await screen.findByText(/Match 1 of 1.*1 result identities resident/),
     ).toBeTruthy();
 
-    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await clickFindWhenReady();
     const cancel = await screen.findByTestId("log-explorer-find-cancel");
     expect(cancel.textContent).toBe("Cancel");
     expect(host.hostLogSearchEventsAdvanced).toHaveBeenLastCalledWith(
@@ -6100,7 +6451,7 @@ describe("LogExplorer shell", () => {
     fireEvent.change(screen.getByTestId("log-explorer-find"), {
       target: { value: "slow regex" },
     });
-    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await clickFindWhenReady();
 
     fireEvent.click(await screen.findByTestId("log-explorer-find-cancel"));
     expect(
@@ -6174,7 +6525,7 @@ describe("LogExplorer shell", () => {
     fireEvent.change(screen.getByTestId("log-explorer-find"), {
       target: { value: "needle" },
     });
-    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await clickFindWhenReady();
     await waitFor(() =>
       expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledWith(
         "c1",
@@ -6232,6 +6583,14 @@ describe("LogExplorer shell", () => {
 
   it("creates, sends, persists, and reopens a linked chat", async () => {
     let stored: host.ChatSessionDto | null = null;
+    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+      suppressionDocument(),
+    );
+    vi.mocked(host.hostLogCountEvents).mockImplementation(
+      async (_corpusId, query) => ({
+        totalMatched: query?.templateIds?.includes(2) ? 1 : 1,
+      }),
+    );
     vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
       stored = session;
       return session;
@@ -6294,7 +6653,9 @@ describe("LogExplorer shell", () => {
         null,
         expect.objectContaining({
           corpus_id: "c1",
-          brief: expect.stringContaining("corpusId=c1"),
+          brief: expect.stringMatching(
+            /corpusId=c1;.*noisePolicy=active; noisePolicyRevision=3; noiseRuleCount=1; noiseHiddenCount=1; noiseExcludedEventsNotAnalyzed=true/,
+          ),
         }),
         false,
         expect.objectContaining({
@@ -6440,7 +6801,9 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="log-lab-checkout-cascade" />);
     const root = await screen.findByTestId("log-explorer");
-    expect(root.getAttribute("data-time-quality")).toBe("wall");
+    await waitFor(() =>
+      expect(root.getAttribute("data-time-quality")).toBe("wall"),
+    );
     expect(
       (await screen.findAllByLabelText(/^Source audit\/deploy\.jsonl;/)).length,
     ).toBeGreaterThan(0);
@@ -6452,7 +6815,7 @@ describe("LogExplorer shell", () => {
     fireEvent.change(screen.getByLabelText("Find in logs"), {
       target: { value: "job-7f3a" },
     });
-    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await clickFindWhenReady();
     await waitFor(() =>
       expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledWith(
         "log-lab-checkout-cascade",

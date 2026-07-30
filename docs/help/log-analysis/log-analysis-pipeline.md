@@ -7,6 +7,8 @@ tags:
   - logs
   - duckdb
   - drain
+  - template
+  - templates
   - troubleshooting
   - process
 order: 10

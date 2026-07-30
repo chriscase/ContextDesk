@@ -648,6 +648,8 @@ fn build_linked_log_fallback_host(
     host.set_log_only_tool_surface(true);
     host.set_log_corpus_scope(Some(context.corpus_id.clone()));
     host.set_active_log_corpus(Some(context.corpus_id.clone()));
+    host.pin_log_suppression_lens(&context.corpus_id)
+        .map_err(|error| error.to_string())?;
     Ok(host)
 }
 
@@ -4494,6 +4496,40 @@ async fn agent_turn(
                 return Ok(());
             }
         }
+        if let Err(error) = host.pin_log_suppression_lens(&context.corpus_id) {
+            tracing::warn!(error = %error, "linked suppression preflight failed");
+            host.set_log_corpus_scope(previous_log_scope.clone());
+            host.set_active_log_corpus(previous_log_corpus.clone());
+            if !using_fallback_host {
+                let _ = restore_host_if_generation_matches(
+                    &state.host,
+                    &state.host_generation,
+                    borrowed_host_generation.expect("shared host generation"),
+                    host,
+                );
+            }
+            let events = vec![
+                cd_core::events::StreamEvent::Error {
+                    code: "linked_log_suppression_unavailable".into(),
+                    message: "The linked corpus noise policy failed validation. Review the \
+                              visible corpus diagnostics before retrying; no log tool ran."
+                        .into(),
+                },
+                cd_core::events::StreamEvent::TurnCompleted {
+                    reason: "linked_log_suppression_unavailable".into(),
+                },
+            ];
+            persist_and_emit_host_terminal(
+                &state,
+                &req,
+                &events,
+                Some(&profile.id),
+                Some(&profile.label),
+                Some(&profile.chat_model),
+                &on_event,
+            )?;
+            return Ok(());
+        }
     } else {
         host.set_log_corpus_scope(None);
         host.set_active_log_corpus(None);
@@ -8116,6 +8152,151 @@ fn cancel_log_search(state: State<'_, AppState>, request_id: String) -> Result<b
     Ok(false)
 }
 
+fn load_log_suppression_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+) -> Result<cd_core::log_analysis::SuppressionDocument, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    cd_core::log_analysis::load_suppression_document(&corpus).map_err(|error| error.to_string())
+}
+
+/// Load the durable exact-template suppression policy for one corpus.
+#[tauri::command]
+async fn log_load_suppression(
+    state: State<'_, AppState>,
+    corpus_id: String,
+) -> Result<cd_core::log_analysis::SuppressionDocument, String> {
+    let cache = log_cache_dir(&state)?;
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || load_log_suppression_at(&handles, &cache, &corpus_id))
+        .await
+        .map_err(|error| format!("log suppression load task join: {error}"))?
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LogPreviewTemplateSuppressionArgs {
+    corpus_id: String,
+    expected_revision: u64,
+    name: String,
+    rationale: String,
+    template_id: u64,
+}
+
+fn preview_log_template_suppression_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    args: LogPreviewTemplateSuppressionArgs,
+) -> Result<cd_core::log_analysis::SuppressionPreview, String> {
+    let corpus = handles.open(cache, &args.corpus_id)?;
+    cd_core::log_analysis::preview_template_suppression(
+        &corpus,
+        args.expected_revision,
+        cd_core::log_analysis::NewSuppressionPreview {
+            name: args.name,
+            rationale: args.rationale,
+            template_id: args.template_id,
+            // This IPC represents an explicit person action. Detector/model
+            // proposals require a separate review path and cannot impersonate it.
+            origin: cd_core::log_analysis::SuppressionRuleOrigin::Human,
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Compute and persist a trusted-core preview. The webview supplies no counts,
+/// representative rows, or template fingerprint.
+#[tauri::command]
+async fn log_preview_template_suppression(
+    state: State<'_, AppState>,
+    args: LogPreviewTemplateSuppressionArgs,
+) -> Result<cd_core::log_analysis::SuppressionPreview, String> {
+    let cache = log_cache_dir(&state)?;
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || preview_log_template_suppression_at(&handles, &cache, args))
+        .await
+        .map_err(|error| format!("log suppression preview task join: {error}"))?
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LogActivateTemplateSuppressionArgs {
+    corpus_id: String,
+    expected_revision: u64,
+    preview_token: String,
+}
+
+fn activate_log_template_suppression_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    args: LogActivateTemplateSuppressionArgs,
+) -> Result<cd_core::log_analysis::SuppressionMutationResult, String> {
+    let corpus = handles.open(cache, &args.corpus_id)?;
+    cd_core::log_analysis::activate_template_suppression(
+        &corpus,
+        args.expected_revision,
+        cd_core::log_analysis::ActivateSuppressionPreview {
+            preview_token: args.preview_token,
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Activate one current human-authored preview.
+#[tauri::command]
+async fn log_activate_template_suppression(
+    state: State<'_, AppState>,
+    args: LogActivateTemplateSuppressionArgs,
+) -> Result<cd_core::log_analysis::SuppressionMutationResult, String> {
+    let cache = log_cache_dir(&state)?;
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || {
+        activate_log_template_suppression_at(&handles, &cache, args)
+    })
+    .await
+    .map_err(|error| format!("log suppression activation task join: {error}"))?
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LogMutateTemplateSuppressionRuleArgs {
+    corpus_id: String,
+    expected_revision: u64,
+    rule_id: String,
+    mutation: cd_core::log_analysis::SuppressionRuleMutation,
+}
+
+fn mutate_log_template_suppression_rule_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    args: LogMutateTemplateSuppressionRuleArgs,
+) -> Result<cd_core::log_analysis::SuppressionMutationResult, String> {
+    let corpus = handles.open(cache, &args.corpus_id)?;
+    cd_core::log_analysis::mutate_template_suppression_rule(
+        &corpus,
+        args.expected_revision,
+        &args.rule_id,
+        args.mutation,
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Disable, re-enable, or tombstone one durable suppression rule.
+#[tauri::command]
+async fn log_mutate_template_suppression_rule(
+    state: State<'_, AppState>,
+    args: LogMutateTemplateSuppressionRuleArgs,
+) -> Result<cd_core::log_analysis::SuppressionMutationResult, String> {
+    let cache = log_cache_dir(&state)?;
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || {
+        mutate_log_template_suppression_rule_at(&handles, &cache, args)
+    })
+    .await
+    .map_err(|error| format!("log suppression mutation task join: {error}"))?
+}
+
 /// List bookmarks for a corpus.
 fn list_log_bookmarks_at(
     handles: &LogCorpusHandleCache,
@@ -9689,6 +9870,10 @@ pub fn run() {
             log_source_catalog,
             log_search_events,
             cancel_log_search,
+            log_load_suppression,
+            log_preview_template_suppression,
+            log_activate_template_suppression,
+            log_mutate_template_suppression_rule,
             log_list_bookmarks,
             log_add_bookmark,
             log_delete_bookmark,
@@ -10091,6 +10276,26 @@ mod log_explorer_async_query_host_tests {
                 "query_log_source_catalog_at",
             ),
             (
+                "async fn log_load_suppression(",
+                "struct LogPreviewTemplateSuppressionArgs",
+                "load_log_suppression_at",
+            ),
+            (
+                "async fn log_preview_template_suppression(",
+                "struct LogActivateTemplateSuppressionArgs",
+                "preview_log_template_suppression_at",
+            ),
+            (
+                "async fn log_activate_template_suppression(",
+                "struct LogMutateTemplateSuppressionRuleArgs",
+                "activate_log_template_suppression_at",
+            ),
+            (
+                "async fn log_mutate_template_suppression_rule(",
+                "/// List bookmarks for a corpus",
+                "mutate_log_template_suppression_rule_at",
+            ),
+            (
                 "async fn log_list_bookmarks(",
                 "#[derive(Debug, Deserialize)]",
                 "list_log_bookmarks_at",
@@ -10140,6 +10345,52 @@ mod log_explorer_async_query_host_tests {
         let templates = list_log_templates_at(&handles, &cache, &report.corpus_id, Some(1))
             .expect("template list");
         assert_eq!(templates.len(), 1);
+        let suppression =
+            load_log_suppression_at(&handles, &cache, &report.corpus_id).expect("empty policy");
+        assert_eq!(suppression.revision, 0);
+        let preview = preview_log_template_suppression_at(
+            &handles,
+            &cache,
+            LogPreviewTemplateSuppressionArgs {
+                corpus_id: report.corpus_id.clone(),
+                expected_revision: suppression.revision,
+                name: "Routine startup".into(),
+                rationale: "Reviewed repetitive startup template".into(),
+                template_id: templates[0].id,
+            },
+        )
+        .expect("trusted preview");
+        assert!(preview.matching_event_count > 0);
+        assert_eq!(preview.corpus_event_count, 2);
+        let activated = activate_log_template_suppression_at(
+            &handles,
+            &cache,
+            LogActivateTemplateSuppressionArgs {
+                corpus_id: report.corpus_id.clone(),
+                expected_revision: preview.rule_revision,
+                preview_token: preview.token,
+            },
+        )
+        .expect("activate policy");
+        assert_eq!(
+            activated.rule.state,
+            cd_core::log_analysis::SuppressionRuleState::Enabled
+        );
+        let disabled = mutate_log_template_suppression_rule_at(
+            &handles,
+            &cache,
+            LogMutateTemplateSuppressionRuleArgs {
+                corpus_id: report.corpus_id.clone(),
+                expected_revision: activated.revision,
+                rule_id: activated.rule.id,
+                mutation: cd_core::log_analysis::SuppressionRuleMutation::Disable,
+            },
+        )
+        .expect("disable policy");
+        assert_eq!(
+            disabled.rule.state,
+            cd_core::log_analysis::SuppressionRuleState::Disabled
+        );
 
         let page =
             query_log_events_at(&handles, &cache, &report.corpus_id, &query).expect("event page");

@@ -68,6 +68,9 @@ windows-sys = { version = "0.61", features = [
   "Win32_Storage_FileSystem",
 ] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 default = []
 # Local ONNX template embeddings via fastembed-rs (downloads model on first use).
