@@ -1396,8 +1396,10 @@ mod tests {
 
     #[test]
     fn profile_tools_disabled_is_authoritative() {
-        let mut t = ScriptedQualificationTransport::default();
-        t.honor_cancel = true;
+        let mut t = ScriptedQualificationTransport {
+            honor_cancel: true,
+            ..Default::default()
+        };
         let mut responses = vec![
             Ok(SyntheticChatResponse {
                 content: SYNTH_GENERATION_MARKER.into(),
