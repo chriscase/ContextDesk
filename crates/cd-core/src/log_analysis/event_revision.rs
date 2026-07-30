@@ -1,10 +1,10 @@
 //! Atomic event-table revision foundation for log corpora (#780).
 //!
-//! The active `events` table remains queryable and unchanged while a complete
-//! candidate table is built and validated. Publication is one DuckDB `COMMIT`
-//! containing the active timestamp replacements, durable revision metadata,
-//! and the retained one-step undo table. The active table identity and every
-//! corpus-adjacent sidecar remain stable.
+//! Timestamp replacements are staged and validated by exact event identity.
+//! Publication is one DuckDB `COMMIT` containing the active replacements,
+//! durable revision metadata, and a one-step undo snapshot of only the changed
+//! rows. The active table identity and every corpus-adjacent sidecar remain
+//! stable.
 
 use super::parse::{ActiveTimestampBasis, TimestampProvenance};
 use super::query::TimeQuality;
@@ -26,7 +26,6 @@ pub const EVENT_REVISION_AUDIT_SCHEMA_VERSION: u32 = 1;
 pub const MAX_EVENT_REVISION_METADATA_BYTES: usize = 1024 * 1024;
 
 const LOCK_DIRECTORY: &str = ".event-revision-locks";
-const CANDIDATE_TABLE: &str = "__cd_event_revision_candidate";
 const UPDATES_TABLE: &str = "__cd_event_revision_updates";
 const PREVIOUS_TABLE: &str = "events_previous";
 const TIMESTAMP_CHANGES_TABLE: &str = "event_revision_timestamp_changes";
@@ -356,12 +355,10 @@ fn next_revision(current: u64) -> CoreResult<u64> {
     Ok(next)
 }
 
-fn create_candidate(conn: &Connection) -> CoreResult<()> {
+fn create_update_stage(conn: &Connection) -> CoreResult<()> {
     conn.execute_batch(&format!(
         r#"
-        DROP TABLE IF EXISTS {CANDIDATE_TABLE};
         DROP TABLE IF EXISTS {UPDATES_TABLE};
-        CREATE TABLE {CANDIDATE_TABLE} AS SELECT * FROM events;
         CREATE TABLE {UPDATES_TABLE} (
             seq BIGINT NOT NULL,
             source VARCHAR NOT NULL,
@@ -435,7 +432,7 @@ where
     Ok(count)
 }
 
-fn apply_and_validate_candidate(conn: &Connection, update_count: u64) -> CoreResult<()> {
+fn validate_staged_updates(conn: &Connection, update_count: u64) -> CoreResult<()> {
     let exact_matches = conn
         .query_row(
             &format!(
@@ -464,101 +461,25 @@ fn apply_and_validate_candidate(conn: &Connection, update_count: u64) -> CoreRes
         )));
     }
 
-    conn.execute(
-        &format!(
-            "UPDATE {CANDIDATE_TABLE} candidate
-             SET ts = updates.revised_ts,
-                 active_timestamp_basis = updates.revised_active_timestamp_basis
-             FROM {UPDATES_TABLE} updates
-             WHERE candidate.seq = updates.seq
-               AND candidate.source = updates.source
-               AND candidate.ts = updates.expected_ts
-               AND candidate.active_timestamp_basis =
-                   updates.expected_active_timestamp_basis"
-        ),
-        [],
-    )
-    .map_err(|error| CoreError::Message(format!("apply staged event timestamps: {error}")))?;
-
-    let identity_differences = conn
-        .query_row(
-            &format!(
-                r#"
-                SELECT COUNT(*) FROM (
-                    (
-                        SELECT seq, level, service, host, template_id, params,
-                               trace_id, message, source, original_redacted,
-                               original_source_bytes, original_redacted_chars,
-                               original_truncated, original_encoding_normalized,
-                               original_redaction_applied, timestamp_provenance,
-                               unresolved_local_timestamp
-                        FROM events
-                        EXCEPT ALL
-                        SELECT seq, level, service, host, template_id, params,
-                               trace_id, message, source, original_redacted,
-                               original_source_bytes, original_redacted_chars,
-                               original_truncated, original_encoding_normalized,
-                               original_redaction_applied, timestamp_provenance,
-                               unresolved_local_timestamp
-                        FROM {CANDIDATE_TABLE}
-                    )
-                    UNION ALL
-                    (
-                        SELECT seq, level, service, host, template_id, params,
-                               trace_id, message, source, original_redacted,
-                               original_source_bytes, original_redacted_chars,
-                               original_truncated, original_encoding_normalized,
-                               original_redaction_applied, timestamp_provenance,
-                               unresolved_local_timestamp
-                        FROM {CANDIDATE_TABLE}
-                        EXCEPT ALL
-                        SELECT seq, level, service, host, template_id, params,
-                               trace_id, message, source, original_redacted,
-                               original_source_bytes, original_redacted_chars,
-                               original_truncated, original_encoding_normalized,
-                               original_redaction_applied, timestamp_provenance,
-                               unresolved_local_timestamp
-                        FROM events
-                    )
-                )
-                "#
-            ),
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|error| {
-            CoreError::Message(format!("validate event revision payloads: {error}"))
-        })?;
-    if identity_differences != 0 {
-        return Err(CoreError::Message(
-            "event revision changed non-timestamp event identity or payload".into(),
-        ));
-    }
     let invalid_timestamp_rows = conn
         .query_row(
             &format!(
                 r#"
                 SELECT COUNT(*)
-                FROM {CANDIDATE_TABLE}
+                FROM {UPDATES_TABLE}
                 WHERE NOT (
-                    (timestamp_provenance = 'explicit_wall'
-                     AND active_timestamp_basis = 'explicit_wall'
-                     AND unresolved_local_timestamp IS NULL)
+                    (expected_timestamp_provenance = 'explicit_wall'
+                     AND expected_active_timestamp_basis = 'explicit_wall'
+                     AND revised_active_timestamp_basis = 'explicit_wall'
+                     AND expected_unresolved_local_timestamp IS NULL)
                     OR
-                    (timestamp_provenance = 'unresolved_local'
-                     AND active_timestamp_basis IN ('order_only', 'resolved_local')
-                     AND unresolved_local_timestamp IS NOT NULL
-                     AND unresolved_local_timestamp <> ''
-                     AND length(unresolved_local_timestamp) <= 256
-                     AND strpos(unresolved_local_timestamp, chr(0)) = 0)
-                    OR
-                    (timestamp_provenance = 'order_only'
-                     AND active_timestamp_basis = 'order_only'
-                     AND unresolved_local_timestamp IS NULL)
-                    OR
-                    (timestamp_provenance = 'legacy_unknown'
-                     AND active_timestamp_basis IN ('legacy_unknown', 'order_only')
-                     AND unresolved_local_timestamp IS NULL)
+                    (expected_timestamp_provenance = 'unresolved_local'
+                     AND expected_active_timestamp_basis IN ('order_only', 'resolved_local')
+                     AND revised_active_timestamp_basis IN ('order_only', 'resolved_local')
+                     AND expected_unresolved_local_timestamp IS NOT NULL
+                     AND expected_unresolved_local_timestamp <> ''
+                     AND length(expected_unresolved_local_timestamp) <= 256
+                     AND strpos(expected_unresolved_local_timestamp, chr(0)) = 0)
                 )
                 "#
             ),
@@ -566,22 +487,129 @@ fn apply_and_validate_candidate(conn: &Connection, update_count: u64) -> CoreRes
             |row| row.get::<_, i64>(0),
         )
         .map_err(|error| {
-            CoreError::Message(format!(
-                "validate event revision timestamp provenance: {error}"
-            ))
+            CoreError::Message(format!("validate staged timestamp provenance: {error}"))
         })?;
     if invalid_timestamp_rows != 0 {
         return Err(CoreError::Message(
-            "event revision candidate contains inconsistent timestamp provenance".into(),
+            "event revision updates contain inconsistent timestamp provenance".into(),
         ));
     }
     Ok(())
 }
 
-fn active_stats(conn: &Connection, table: &str) -> CoreResult<(u64, Option<i64>, Option<i64>)> {
-    let (count, ts_min, ts_max) = conn
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RevisionStats {
+    event_count: u64,
+    wall_event_count: u64,
+    ts_min: Option<i64>,
+    ts_max: Option<i64>,
+}
+
+fn stored_revision_stats(conn: &Connection) -> CoreResult<RevisionStats> {
+    let (event_count, wall_event_count, ts_min, ts_max) = conn
         .query_row(
-            &format!("SELECT COUNT(*), MIN(ts), MAX(ts) FROM {table}"),
+            "SELECT event_count, wall_event_count, ts_min, ts_max
+             FROM event_revision_state
+             WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            },
+        )
+        .map_err(|error| {
+            CoreError::Message(format!("read current event revision statistics: {error}"))
+        })?;
+    let event_count = u64::try_from(event_count)
+        .map_err(|_| CoreError::Message("active event count is outside supported range".into()))?;
+    let wall_event_count = u64::try_from(wall_event_count)
+        .ok()
+        .filter(|count| *count <= event_count)
+        .ok_or_else(|| {
+            CoreError::Message("active wall-clock event count is outside supported range".into())
+        })?;
+    if event_count == 0 && (ts_min.is_some() || ts_max.is_some()) {
+        return Err(CoreError::Message(
+            "empty event revision has invalid timestamp statistics".into(),
+        ));
+    }
+    if event_count > 0 && (ts_min.is_none() || ts_max.is_none() || ts_min > ts_max) {
+        return Err(CoreError::Message(
+            "active event timestamp statistics are invalid".into(),
+        ));
+    }
+    Ok(RevisionStats {
+        event_count,
+        wall_event_count,
+        ts_min,
+        ts_max,
+    })
+}
+
+fn unchanged_boundary(conn: &Connection, boundary: i64, minimum: bool) -> CoreResult<Option<i64>> {
+    let changed_at_boundary = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM {UPDATES_TABLE} WHERE expected_ts = ?1"),
+            params![boundary],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| {
+            CoreError::Message(format!("count revised boundary timestamps: {error}"))
+        })?;
+    if changed_at_boundary == 0 {
+        return Ok(Some(boundary));
+    }
+    let active_at_boundary = conn
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE ts = ?1",
+            params![boundary],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| {
+            CoreError::Message(format!("count active boundary timestamps: {error}"))
+        })?;
+    if changed_at_boundary < active_at_boundary {
+        return Ok(Some(boundary));
+    }
+    let aggregate = if minimum { "MIN" } else { "MAX" };
+    conn.query_row(
+        &format!(
+            "SELECT {aggregate}(active.ts)
+             FROM events active
+             LEFT JOIN {UPDATES_TABLE} updates
+               ON active.seq = updates.seq
+              AND active.source = updates.source
+             WHERE updates.seq IS NULL"
+        ),
+        [],
+        |row| row.get::<_, Option<i64>>(0),
+    )
+    .map_err(|error| {
+        CoreError::Message(format!(
+            "derive unchanged event timestamp boundary: {error}"
+        ))
+    })
+}
+
+fn revised_stats(conn: &Connection, previous: RevisionStats) -> CoreResult<RevisionStats> {
+    let (wall_delta, revised_min, revised_max) = conn
+        .query_row(
+            &format!(
+                "SELECT COALESCE(SUM(
+                            CASE WHEN revised_active_timestamp_basis
+                                           IN ('explicit_wall', 'resolved_local')
+                                 THEN 1 ELSE 0 END
+                          - CASE WHEN expected_active_timestamp_basis
+                                           IN ('explicit_wall', 'resolved_local')
+                                 THEN 1 ELSE 0 END
+                        ), 0),
+                        MIN(revised_ts), MAX(revised_ts)
+                 FROM {UPDATES_TABLE}"
+            ),
             [],
             |row| {
                 Ok((
@@ -591,31 +619,33 @@ fn active_stats(conn: &Connection, table: &str) -> CoreResult<(u64, Option<i64>,
                 ))
             },
         )
-        .map_err(|error| CoreError::Message(format!("read event revision statistics: {error}")))?;
-    let count = u64::try_from(count).map_err(|_| {
-        CoreError::Message("event revision count is outside supported range".into())
-    })?;
-    Ok((count, ts_min, ts_max))
-}
-
-fn active_wall_count(conn: &Connection, table: &str) -> CoreResult<u64> {
-    let count = conn
-        .query_row(
-            &format!(
-                "SELECT COALESCE(SUM(
-                     CASE WHEN active_timestamp_basis IN ('explicit_wall', 'resolved_local')
-                          THEN 1 ELSE 0 END
-                 ), 0)
-                 FROM {table}"
-            ),
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|error| {
-            CoreError::Message(format!("read event revision wall-clock count: {error}"))
+        .map_err(|error| CoreError::Message(format!("derive revised event statistics: {error}")))?;
+    let wall_event_count = i128::from(previous.wall_event_count) + i128::from(wall_delta);
+    let wall_event_count = u64::try_from(wall_event_count)
+        .ok()
+        .filter(|count| *count <= previous.event_count)
+        .ok_or_else(|| {
+            CoreError::Message("revised wall-clock event count is outside supported range".into())
         })?;
-    u64::try_from(count).map_err(|_| {
-        CoreError::Message("event revision wall-clock count is outside supported range".into())
+    let previous_min = previous
+        .ts_min
+        .ok_or_else(|| CoreError::Message("active event minimum is unavailable".into()))?;
+    let previous_max = previous
+        .ts_max
+        .ok_or_else(|| CoreError::Message("active event maximum is unavailable".into()))?;
+    let revised_min = revised_min
+        .ok_or_else(|| CoreError::Message("revised event minimum is unavailable".into()))?;
+    let revised_max = revised_max
+        .ok_or_else(|| CoreError::Message("revised event maximum is unavailable".into()))?;
+    let unchanged_min = unchanged_boundary(conn, previous_min, true)?;
+    let unchanged_max = unchanged_boundary(conn, previous_max, false)?;
+    let ts_min = Some(unchanged_min.map_or(revised_min, |value| value.min(revised_min)));
+    let ts_max = Some(unchanged_max.map_or(revised_max, |value| value.max(revised_max)));
+    Ok(RevisionStats {
+        event_count: previous.event_count,
+        wall_event_count,
+        ts_min,
+        ts_max,
     })
 }
 
@@ -660,79 +690,14 @@ fn validate_retained_revision_integrity(
             "retained event revision schema changed; undo refused".into(),
         ));
     }
-
-    let immutable_differences = conn
+    let total_audit_rows = conn
         .query_row(
-            &format!(
-                r#"
-                SELECT COUNT(*) FROM (
-                    (
-                        SELECT seq, level, service, host, template_id, params,
-                               trace_id, message, source, original_redacted,
-                               original_source_bytes, original_redacted_chars,
-                               original_truncated, original_encoding_normalized,
-                               original_redaction_applied, timestamp_provenance,
-                               unresolved_local_timestamp
-                        FROM events
-                        EXCEPT ALL
-                        SELECT seq, level, service, host, template_id, params,
-                               trace_id, message, source, original_redacted,
-                               original_source_bytes, original_redacted_chars,
-                               original_truncated, original_encoding_normalized,
-                               original_redaction_applied, timestamp_provenance,
-                               unresolved_local_timestamp
-                        FROM {PREVIOUS_TABLE}
-                    )
-                    UNION ALL
-                    (
-                        SELECT seq, level, service, host, template_id, params,
-                               trace_id, message, source, original_redacted,
-                               original_source_bytes, original_redacted_chars,
-                               original_truncated, original_encoding_normalized,
-                               original_redaction_applied, timestamp_provenance,
-                               unresolved_local_timestamp
-                        FROM {PREVIOUS_TABLE}
-                        EXCEPT ALL
-                        SELECT seq, level, service, host, template_id, params,
-                               trace_id, message, source, original_redacted,
-                               original_source_bytes, original_redacted_chars,
-                               original_truncated, original_encoding_normalized,
-                               original_redaction_applied, timestamp_provenance,
-                               unresolved_local_timestamp
-                        FROM events
-                    )
-                )
-                "#
-            ),
+            &format!("SELECT COUNT(*) FROM {TIMESTAMP_CHANGES_TABLE}"),
             [],
             |row| row.get::<_, i64>(0),
         )
-        .map_err(|error| {
-            CoreError::Message(format!("validate retained event payloads: {error}"))
-        })?;
-    if immutable_differences != 0 {
-        return Err(CoreError::Message(
-            "active event identity, payload, raw representation, or provenance changed; undo refused"
-                .into(),
-        ));
-    }
-
-    let changed_rows = conn
-        .query_row(
-            &format!(
-                "SELECT COUNT(*)
-                 FROM events active
-                 JOIN {PREVIOUS_TABLE} previous
-                   ON active.seq = previous.seq
-                  AND active.source = previous.source
-                 WHERE active.ts <> previous.ts
-                    OR active.active_timestamp_basis <> previous.active_timestamp_basis"
-            ),
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|error| CoreError::Message(format!("count retained event changes: {error}")))?;
-    let audit_rows = conn
+        .unwrap_or(-1);
+    let valid_audit_rows = conn
         .query_row(
             &format!(
                 "SELECT COUNT(*)
@@ -744,12 +709,36 @@ fn validate_retained_revision_integrity(
             |row| row.get::<_, i64>(0),
         )
         .unwrap_or(-1);
-    if audit_rows < 0 || audit_rows != changed_rows {
+    if total_audit_rows <= 0 || valid_audit_rows != total_audit_rows {
         return Err(CoreError::Message(
             "retained timestamp audit count does not match active changes; undo refused".into(),
         ));
     }
-    let exact_audit_rows = conn
+    let previous_event_count = conn
+        .query_row(
+            "SELECT previous_event_count
+             FROM event_revision_state
+             WHERE singleton = 1",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .map_err(|error| {
+            CoreError::Message(format!("read retained event count for integrity: {error}"))
+        })?
+        .ok_or_else(|| CoreError::Message("retained event count is unavailable".into()))?;
+    let retained_rows = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM {PREVIOUS_TABLE}"),
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(-1);
+    if retained_rows != total_audit_rows && retained_rows != previous_event_count {
+        return Err(CoreError::Message(
+            "retained event snapshot count is inconsistent with its audit; undo refused".into(),
+        ));
+    }
+    let exact_mapping_rows = conn
         .query_row(
             &format!(
                 r#"
@@ -770,18 +759,68 @@ fn validate_retained_revision_integrity(
                 WHERE changes.audit_schema_version =
                       {EVENT_REVISION_AUDIT_SCHEMA_VERSION}
                   AND changes.revision = ?1
+                  AND changes.previous_ts <> changes.current_ts
                 "#
             ),
             params![current_revision as i64],
             |row| row.get::<_, i64>(0),
         )
         .unwrap_or(-1);
-    if exact_audit_rows != audit_rows || previous_revision + 1 != current_revision {
+    if exact_mapping_rows != total_audit_rows || previous_revision + 1 != current_revision {
         return Err(CoreError::Message(
             "retained timestamp audit mapping is inconsistent; undo refused".into(),
         ));
     }
-    u64::try_from(changed_rows).map_err(|_| {
+    let exact_payload_rows = conn
+        .query_row(
+            &format!(
+                r#"
+                SELECT COUNT(*)
+                FROM {TIMESTAMP_CHANGES_TABLE} changes
+                JOIN events active
+                  ON active.seq = changes.seq
+                 AND active.source = changes.source
+                JOIN {PREVIOUS_TABLE} previous
+                  ON previous.seq = changes.seq
+                 AND previous.source = changes.source
+                WHERE changes.audit_schema_version =
+                      {EVENT_REVISION_AUDIT_SCHEMA_VERSION}
+                  AND changes.revision = ?1
+                  AND active.level IS NOT DISTINCT FROM previous.level
+                  AND active.service IS NOT DISTINCT FROM previous.service
+                  AND active.host IS NOT DISTINCT FROM previous.host
+                  AND active.template_id IS NOT DISTINCT FROM previous.template_id
+                  AND active.params IS NOT DISTINCT FROM previous.params
+                  AND active.trace_id IS NOT DISTINCT FROM previous.trace_id
+                  AND active.message IS NOT DISTINCT FROM previous.message
+                  AND active.original_redacted IS NOT DISTINCT FROM previous.original_redacted
+                  AND active.original_source_bytes
+                      IS NOT DISTINCT FROM previous.original_source_bytes
+                  AND active.original_redacted_chars
+                      IS NOT DISTINCT FROM previous.original_redacted_chars
+                  AND active.original_truncated
+                      IS NOT DISTINCT FROM previous.original_truncated
+                  AND active.original_encoding_normalized
+                      IS NOT DISTINCT FROM previous.original_encoding_normalized
+                  AND active.original_redaction_applied
+                      IS NOT DISTINCT FROM previous.original_redaction_applied
+                  AND active.timestamp_provenance
+                      IS NOT DISTINCT FROM previous.timestamp_provenance
+                  AND active.unresolved_local_timestamp
+                      IS NOT DISTINCT FROM previous.unresolved_local_timestamp
+                "#
+            ),
+            params![current_revision as i64],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(-1);
+    if exact_payload_rows != total_audit_rows {
+        return Err(CoreError::Message(
+            "active event identity, payload, raw representation, or provenance changed; undo refused"
+                .into(),
+        ));
+    }
+    u64::try_from(total_audit_rows).map_err(|_| {
         CoreError::Message("retained timestamp change count is outside supported range".into())
     })
 }
@@ -797,9 +836,10 @@ fn event_time_quality_code(quality: TimeQuality) -> Option<i64> {
 /// Return only old timestamp hints proven by the retained active revision.
 ///
 /// A matching seq/source pair alone is not enough. The active revision must
-/// retain an exact published old/new mapping, the old row must still exist in
-/// `events_previous`, and every non-timestamp event/payload/raw column must be
-/// unchanged. Older corpora without this audit table fail closed.
+/// retain an exact published old/new mapping, the changed row's old snapshot
+/// must still exist in `events_previous`, and every non-timestamp
+/// event/payload/raw column must be unchanged. Older corpora without this audit
+/// table fail closed.
 pub(crate) fn retained_timestamp_revision_hints(
     corpus: &LogCorpus,
     hints: &[EventReferenceTimestampHint],
@@ -846,25 +886,24 @@ pub(crate) fn retained_timestamp_revision_hints(
             return Ok(HashSet::new());
         }
 
-        let active_stats = active_stats(conn, "events")?;
-        let state_stats = conn
+        let active_event_count = conn
+            .query_row("SELECT COUNT(*) FROM events", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .ok()
+            .and_then(|count| u64::try_from(count).ok());
+        let state_event_count = conn
             .query_row(
-                "SELECT event_count, ts_min, ts_max
+                "SELECT event_count
                  FROM event_revision_state
                  WHERE singleton = 1
                    AND previous_revision IS NOT NULL",
                 [],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, Option<i64>>(1)?,
-                        row.get::<_, Option<i64>>(2)?,
-                    ))
-                },
+                |row| row.get::<_, i64>(0),
             )
             .ok()
-            .and_then(|(count, min, max)| u64::try_from(count).ok().map(|count| (count, min, max)));
-        if state_stats != Some(active_stats) {
+            .and_then(|count| u64::try_from(count).ok());
+        if state_event_count.is_none() || state_event_count != active_event_count {
             return Ok(HashSet::new());
         }
 
@@ -1000,7 +1039,7 @@ pub(crate) fn retained_timestamp_revision_hints(
 /// Stage, validate, and atomically publish exact timestamp replacements.
 ///
 /// A conflict, cancellation, validation error, or publication error rolls the
-/// DuckDB transaction back. The previous `events` table is retained for one
+/// DuckDB transaction back. Only exact changed rows are retained for one
 /// successful [`undo_event_revision`] call.
 pub fn apply_event_timestamp_revision<I>(
     cache_root: &Path,
@@ -1058,11 +1097,16 @@ where
                 )));
             }
             let revision = next_revision(previous_revision)?;
-            create_candidate(conn)?;
+            create_update_stage(conn)?;
             let changed_events = stage_updates(conn, updates, cancel)?;
-            apply_and_validate_candidate(conn, changed_events)?;
-            let (event_count, ts_min, ts_max) = active_stats(conn, CANDIDATE_TABLE)?;
-            let wall_event_count = active_wall_count(conn, CANDIDATE_TABLE)?;
+            validate_staged_updates(conn, changed_events)?;
+            let previous_stats = stored_revision_stats(conn)?;
+            if changed_events > previous_stats.event_count {
+                return Err(CoreError::Message(
+                    "event revision update count exceeds the active corpus".into(),
+                ));
+            }
+            let revised_stats = revised_stats(conn, previous_stats)?;
             check_fault(fault, EventRevisionCheckpoint::CandidateReady)?;
             if cancelled(cancel) {
                 return Err(CoreError::Message(
@@ -1079,7 +1123,14 @@ where
             })?;
             conn.execute_batch(&format!(
                 "CREATE TABLE {PREVIOUS_TABLE} AS
-                     SELECT * FROM events;
+                     SELECT active.*
+                     FROM events active
+                     JOIN {UPDATES_TABLE} updates
+                       ON active.seq = updates.seq
+                      AND active.source = updates.source
+                      AND active.ts = updates.expected_ts
+                      AND active.active_timestamp_basis =
+                          updates.expected_active_timestamp_basis;
                  CREATE TABLE {TIMESTAMP_CHANGES_TABLE} AS
                      SELECT {EVENT_REVISION_AUDIT_SCHEMA_VERSION}::INTEGER
                                 AS audit_schema_version,
@@ -1090,17 +1141,37 @@ where
                             expected_active_timestamp_basis AS previous_active_timestamp_basis,
                             revised_ts AS current_ts,
                             revised_active_timestamp_basis AS current_active_timestamp_basis
-                       FROM {UPDATES_TABLE};
-                 UPDATE events active
-                    SET ts = candidate.ts,
-                        active_timestamp_basis = candidate.active_timestamp_basis
-                   FROM {CANDIDATE_TABLE} candidate
-                  WHERE active.seq = candidate.seq
-                    AND active.source = candidate.source;
-                 DROP TABLE {CANDIDATE_TABLE};
-                 DROP TABLE {UPDATES_TABLE};"
+                       FROM {UPDATES_TABLE};"
             ))
             .map_err(|error| CoreError::Message(format!("publish staged events: {error}")))?;
+            let updated_events = conn
+                .execute(
+                    &format!(
+                        "UPDATE events active
+                            SET ts = updates.revised_ts,
+                                active_timestamp_basis =
+                                    updates.revised_active_timestamp_basis
+                           FROM {UPDATES_TABLE} updates
+                          WHERE active.seq = updates.seq
+                            AND active.source = updates.source
+                            AND active.ts = updates.expected_ts
+                            AND active.active_timestamp_basis =
+                                updates.expected_active_timestamp_basis"
+                    ),
+                    [],
+                )
+                .map_err(|error| {
+                    CoreError::Message(format!("publish staged event timestamps: {error}"))
+                })?;
+            if updated_events as u64 != changed_events {
+                return Err(CoreError::Message(format!(
+                    "event revision publication changed {updated_events} events; expected {changed_events}"
+                )));
+            }
+            conn.execute_batch(&format!("DROP TABLE {UPDATES_TABLE};"))
+                .map_err(|error| {
+                    CoreError::Message(format!("finish staged event publication: {error}"))
+                })?;
             conn.execute(
                 "UPDATE event_revision_state
                  SET previous_revision = current_revision,
@@ -1119,10 +1190,10 @@ where
                 params![
                     revision as i64,
                     metadata_json,
-                    event_count as i64,
-                    wall_event_count as i64,
-                    ts_min,
-                    ts_max
+                    revised_stats.event_count as i64,
+                    revised_stats.wall_event_count as i64,
+                    revised_stats.ts_min,
+                    revised_stats.ts_max
                 ],
             )
             .map_err(|error| {
@@ -1137,9 +1208,9 @@ where
                 revision,
                 previous_revision,
                 changed_events,
-                event_count,
-                ts_min,
-                ts_max,
+                event_count: revised_stats.event_count,
+                ts_min: revised_stats.ts_min,
+                ts_max: revised_stats.ts_max,
             })
         })();
         if result.is_err() {
@@ -1239,61 +1310,79 @@ fn undo_event_revision_inner(
                         "retained wall-clock event count is unavailable or invalid".into(),
                     )
                 })?;
-            let retained_stats = active_stats(conn, PREVIOUS_TABLE)?;
-            let retained_wall_count = active_wall_count(conn, PREVIOUS_TABLE)?;
-            if retained_stats != (event_count, ts_min, ts_max)
-                || retained_wall_count != wall_event_count
+            if event_count == 0
+                || ts_min.is_none()
+                || ts_max.is_none()
+                || ts_min > ts_max
+                || wall_event_count > event_count
             {
                 return Err(CoreError::Message(
-                    "retained event revision does not match its published statistics".into(),
+                    "retained event revision statistics are invalid".into(),
                 ));
             }
-
-            let active_stats = active_stats(conn, "events")?;
-            let active_wall_count = active_wall_count(conn, "events")?;
-            let expected_current_stats = conn
+            let current_stats = stored_revision_stats(conn)?;
+            let active_event_count = conn
                 .query_row(
-                    "SELECT event_count, wall_event_count, ts_min, ts_max
-                     FROM event_revision_state
-                     WHERE singleton = 1",
+                    "SELECT COUNT(*) FROM events",
                     [],
-                    |row| {
-                        Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, i64>(1)?,
-                            row.get::<_, Option<i64>>(2)?,
-                            row.get::<_, Option<i64>>(3)?,
-                        ))
-                    },
+                    |row| row.get::<_, i64>(0),
                 )
                 .map_err(|error| {
-                    CoreError::Message(format!("read active event statistics: {error}"))
+                    CoreError::Message(format!("count active events before undo: {error}"))
                 })?;
-            let expected_current_count = u64::try_from(expected_current_stats.0).map_err(|_| {
+            let active_event_count = u64::try_from(active_event_count).map_err(|_| {
                 CoreError::Message("active event count is outside supported range".into())
             })?;
-            if active_stats
-                != (
-                    expected_current_count,
-                    expected_current_stats.2,
-                    expected_current_stats.3,
-                )
-                || active_wall_count != u64::try_from(expected_current_stats.1).unwrap_or(u64::MAX)
-            {
+            if active_event_count != current_stats.event_count {
                 return Err(CoreError::Message(
                     "active events changed after revision publication; undo refused".into(),
                 ));
             }
             let changed_events = validate_retained_revision_integrity(conn, current, previous)?;
+            if cancelled(cancel) {
+                return Err(CoreError::Message(
+                    "event revision undo cancelled before publication".into(),
+                ));
+            }
+            let restored_events = conn
+                .execute(
+                    &format!(
+                        "UPDATE events active
+                            SET ts = previous.ts,
+                                active_timestamp_basis =
+                                    previous.active_timestamp_basis
+                           FROM {PREVIOUS_TABLE} previous
+                           JOIN {TIMESTAMP_CHANGES_TABLE} changes
+                             ON previous.seq = changes.seq
+                            AND previous.source = changes.source
+                            AND previous.ts = changes.previous_ts
+                            AND previous.active_timestamp_basis =
+                                changes.previous_active_timestamp_basis
+                          WHERE active.seq = changes.seq
+                            AND active.source = changes.source
+                            AND active.ts = changes.current_ts
+                            AND active.active_timestamp_basis =
+                                changes.current_active_timestamp_basis
+                            AND changes.audit_schema_version =
+                                {EVENT_REVISION_AUDIT_SCHEMA_VERSION}
+                            AND changes.revision = ?1"
+                    ),
+                    params![current as i64],
+                )
+                .map_err(|error| {
+                    CoreError::Message(format!("restore retained event timestamps: {error}"))
+                })?;
+            if restored_events as u64 != changed_events {
+                return Err(CoreError::Message(format!(
+                    "event revision undo restored {restored_events} events; expected {changed_events}"
+                )));
+            }
             conn.execute_batch(&format!(
-                "DELETE FROM events;
-                 INSERT INTO events
-                 SELECT * FROM {PREVIOUS_TABLE};
-                 DROP TABLE {PREVIOUS_TABLE};
-                 DROP TABLE IF EXISTS {TIMESTAMP_CHANGES_TABLE};"
+                "DROP TABLE {PREVIOUS_TABLE};
+                 DROP TABLE {TIMESTAMP_CHANGES_TABLE};"
             ))
             .map_err(|error| {
-                CoreError::Message(format!("restore retained event revision: {error}"))
+                CoreError::Message(format!("remove restored event revision: {error}"))
             })?;
             conn.execute(
                 "UPDATE event_revision_state
@@ -1967,6 +2056,42 @@ mod tests {
         assert_eq!(
             restored[0].unresolved_local_timestamp.as_deref(),
             Some("2021-03-05 02:53:53,654")
+        );
+    }
+
+    #[test]
+    fn undo_accepts_pre_sparse_full_table_retention() {
+        let (cache, corpus_id) = fixture();
+        let before = event_snapshot(cache.path(), &corpus_id);
+        let published = apply_event_timestamp_revision(
+            cache.path(),
+            &corpus_id,
+            active_revision(cache.path(), &corpus_id),
+            metadata(),
+            [update(1, 1_700_000_010, 1_700_003_610)],
+            None,
+        )
+        .expect("publish sparse revision");
+        let corpus = LogCorpus::open(cache.path(), &corpus_id).unwrap();
+        mutate_event(
+            &corpus,
+            &format!(
+                "CREATE TABLE __legacy_events_previous AS SELECT * FROM events;
+                 UPDATE __legacy_events_previous
+                    SET ts = 1700000010
+                  WHERE seq = 1 AND source = 'app.log';
+                 DROP TABLE {PREVIOUS_TABLE};
+                 ALTER TABLE __legacy_events_previous RENAME TO {PREVIOUS_TABLE};"
+            ),
+        );
+        drop(corpus);
+
+        let undone =
+            undo_event_revision(cache.path(), &corpus_id, published.revision, None).unwrap();
+        assert_eq!(undone.changed_events, 1);
+        assert_eq!(
+            serde_json::to_value(event_snapshot(cache.path(), &corpus_id)).unwrap(),
+            serde_json::to_value(before).unwrap()
         );
     }
 

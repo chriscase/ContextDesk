@@ -429,7 +429,8 @@ pub fn clear_source_timezone(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::log_analysis::{corpus_time_quality, LogEvent, TimeQuality};
+    use crate::log_analysis::{corpus_time_quality, undo_event_revision, LogEvent, TimeQuality};
+    use std::time::{Duration, Instant};
 
     fn fixture() -> (tempfile::TempDir, String) {
         let cache = tempfile::tempdir().expect("cache");
@@ -469,6 +470,70 @@ mod tests {
             ])
             .unwrap();
         corpus.flush().unwrap();
+        let corpus_id = corpus.id().to_string();
+        drop(corpus);
+        (cache, corpus_id)
+    }
+
+    fn large_sparse_fixture() -> (tempfile::TempDir, String) {
+        const EVENT_COUNT: i64 = 250_000;
+        const LOCAL_SEQ: i64 = 125_000;
+        let cache = tempfile::tempdir().expect("cache");
+        let corpus = LogCorpus::create(cache.path(), "timezone sparse scale").unwrap();
+        corpus
+            .with_connection(|connection| {
+                connection
+                    .execute_batch(&format!(
+                        r#"
+                        INSERT INTO events (
+                            seq, ts, level, service, host, template_id, params,
+                            trace_id, message, source, original_redacted,
+                            original_source_bytes, original_redacted_chars,
+                            original_truncated, original_encoding_normalized,
+                            original_redaction_applied, timestamp_provenance,
+                            active_timestamp_basis, unresolved_local_timestamp
+                        )
+                        SELECT i,
+                               CASE WHEN i = {LOCAL_SEQ}
+                                    THEN i ELSE 1700000000 + i END,
+                               CASE WHEN i = {LOCAL_SEQ}
+                                    THEN 'error' ELSE 'info' END,
+                               'service', 'host', i % 17, '[]', NULL,
+                               CASE WHEN i = {LOCAL_SEQ}
+                                    THEN 'one unresolved local event'
+                                    ELSE 'ordinary explicit event' END,
+                               CASE WHEN i = {LOCAL_SEQ}
+                                    THEN 'server/server.log'
+                                    ELSE 'bulk/bulk.log' END,
+                               NULL, NULL, NULL, NULL, NULL, NULL,
+                               CASE WHEN i = {LOCAL_SEQ}
+                                    THEN 'unresolved_local' ELSE 'explicit_wall' END,
+                               CASE WHEN i = {LOCAL_SEQ}
+                                    THEN 'order_only' ELSE 'explicit_wall' END,
+                               CASE WHEN i = {LOCAL_SEQ}
+                                    THEN '2021-03-05 02:53:53,654' ELSE NULL END
+                        FROM range(0, {EVENT_COUNT}) rows(i);
+                        UPDATE event_revision_state
+                           SET current_revision = 1,
+                               previous_revision = NULL,
+                               current_metadata_json = '{{}}',
+                               previous_metadata_json = NULL,
+                               event_count = {EVENT_COUNT},
+                               wall_event_count = {EVENT_COUNT} - 1,
+                               ts_min = {LOCAL_SEQ},
+                               ts_max = 1700000000 + {EVENT_COUNT} - 1,
+                               previous_event_count = NULL,
+                               previous_wall_event_count = NULL,
+                               previous_ts_min = NULL,
+                               previous_ts_max = NULL
+                         WHERE singleton = 1;
+                        "#
+                    ))
+                    .map_err(|error| {
+                        CoreError::Message(format!("seed sparse timezone scale corpus: {error}"))
+                    })
+            })
+            .unwrap();
         let corpus_id = corpus.id().to_string();
         drop(corpus);
         (cache, corpus_id)
@@ -573,6 +638,173 @@ mod tests {
         assert_eq!(
             events[1].active_timestamp_basis,
             ActiveTimestampBasis::ExplicitWall
+        );
+    }
+
+    #[test]
+    fn one_row_timezone_apply_and_undo_in_250k_corpus_retain_one_row() {
+        const LOCAL_SEQ: i64 = 125_000;
+        const EVENT_COUNT: i64 = 250_000;
+        let (cache, corpus_id) = large_sparse_fixture();
+        let initial = load_timezone_resolution_state(cache.path(), &corpus_id).unwrap();
+        assert_eq!(initial.scope.event_revision, 1);
+        assert_eq!(initial.sources.len(), 1);
+        assert_eq!(initial.sources[0].unresolved_local_records, 1);
+
+        let preview = preview_source_timezone(
+            cache.path(),
+            &corpus_id,
+            initial.scope.event_revision,
+            "server/server.log",
+            "Europe/Berlin",
+        )
+        .unwrap();
+        assert_eq!(preview.affected_records, 1);
+
+        let apply_started = Instant::now();
+        let applied = apply_source_timezone(
+            cache.path(),
+            &corpus_id,
+            initial.scope.event_revision,
+            "server/server.log",
+            "Europe/Berlin",
+            &preview.declaration_fingerprint,
+            1_753_833_600,
+        )
+        .unwrap();
+        let apply_elapsed = apply_started.elapsed();
+        assert_eq!(applied.changed_events, 1);
+        assert_eq!(applied.event_count, EVENT_COUNT as u64);
+        assert_eq!(applied.ts_min, Some(1_614_909_233));
+        assert_eq!(applied.ts_max, Some(1_700_249_999));
+        assert!(
+            apply_elapsed < Duration::from_secs(10),
+            "one-row apply exceeded bounded scale proof: {apply_elapsed:?}"
+        );
+
+        let applied_corpus = LogCorpus::open(cache.path(), &corpus_id).unwrap();
+        let retained = applied_corpus
+            .with_connection(|connection| {
+                connection
+                    .query_row(
+                        "SELECT
+                            (SELECT COUNT(*) FROM events_previous),
+                            (SELECT COUNT(*) FROM event_revision_timestamp_changes),
+                            (SELECT COUNT(*) FROM information_schema.tables
+                              WHERE table_name LIKE '__cd_event_revision_%'),
+                            (SELECT COUNT(*) FROM events),
+                            (SELECT COUNT(*) FROM events
+                              WHERE active_timestamp_basis
+                                    IN ('explicit_wall', 'resolved_local')),
+                            (SELECT MIN(ts) FROM events),
+                            (SELECT MAX(ts) FROM events),
+                            (SELECT COUNT(*) FROM events
+                              WHERE seq = ?1
+                                AND source = 'server/server.log'
+                                AND ts = 1614909233
+                                AND active_timestamp_basis = 'resolved_local'),
+                            (SELECT COUNT(*) FROM events
+                              WHERE seq IN (0, 249999)
+                                AND source = 'bulk/bulk.log'
+                                AND ts = 1700000000 + seq
+                                AND active_timestamp_basis = 'explicit_wall')",
+                        params![LOCAL_SEQ],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, i64>(2)?,
+                                row.get::<_, i64>(3)?,
+                                row.get::<_, i64>(4)?,
+                                row.get::<_, i64>(5)?,
+                                row.get::<_, i64>(6)?,
+                                row.get::<_, i64>(7)?,
+                                row.get::<_, i64>(8)?,
+                            ))
+                        },
+                    )
+                    .map_err(|error| {
+                        CoreError::Message(format!("inspect sparse timezone revision: {error}"))
+                    })
+            })
+            .unwrap();
+        assert_eq!(
+            retained,
+            (
+                1,
+                1,
+                0,
+                EVENT_COUNT,
+                EVENT_COUNT,
+                1_614_909_233,
+                1_700_249_999,
+                1,
+                2
+            ),
+            "new revision must retain only the changed row and leave unrelated rows exact"
+        );
+        drop(applied_corpus);
+
+        let undo_started = Instant::now();
+        let undone = undo_event_revision(cache.path(), &corpus_id, applied.revision, None).unwrap();
+        let undo_elapsed = undo_started.elapsed();
+        assert_eq!(undone.changed_events, 1);
+        assert_eq!(undone.event_count, EVENT_COUNT as u64);
+        assert_eq!(undone.ts_min, Some(LOCAL_SEQ));
+        assert_eq!(undone.ts_max, Some(1_700_249_999));
+        assert!(
+            undo_elapsed < Duration::from_secs(10),
+            "one-row undo exceeded bounded scale proof: {undo_elapsed:?}"
+        );
+        eprintln!(
+            "250k sparse timezone proof: apply={apply_elapsed:?} undo={undo_elapsed:?} retained_rows=1"
+        );
+
+        let restored = LogCorpus::open(cache.path(), &corpus_id).unwrap();
+        let restored_state = restored
+            .with_connection(|connection| {
+                connection
+                    .query_row(
+                        "SELECT
+                            (SELECT COUNT(*) FROM events),
+                            (SELECT COUNT(*) FROM events
+                              WHERE seq = ?1
+                                AND source = 'server/server.log'
+                                AND ts = ?1
+                                AND active_timestamp_basis = 'order_only'
+                                AND timestamp_provenance = 'unresolved_local'
+                                AND unresolved_local_timestamp =
+                                    '2021-03-05 02:53:53,654'),
+                            (SELECT COUNT(*) FROM events
+                              WHERE active_timestamp_basis
+                                    IN ('explicit_wall', 'resolved_local')),
+                            (SELECT MIN(ts) FROM events),
+                            (SELECT MAX(ts) FROM events),
+                            (SELECT COUNT(*) FROM information_schema.tables
+                              WHERE table_name IN (
+                                'events_previous',
+                                'event_revision_timestamp_changes'
+                              ))",
+                        params![LOCAL_SEQ],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, i64>(2)?,
+                                row.get::<_, i64>(3)?,
+                                row.get::<_, i64>(4)?,
+                                row.get::<_, i64>(5)?,
+                            ))
+                        },
+                    )
+                    .map_err(|error| {
+                        CoreError::Message(format!("inspect sparse timezone undo: {error}"))
+                    })
+            })
+            .unwrap();
+        assert_eq!(
+            restored_state,
+            (EVENT_COUNT, 1, EVENT_COUNT - 1, LOCAL_SEQ, 1_700_249_999, 0)
         );
     }
 }

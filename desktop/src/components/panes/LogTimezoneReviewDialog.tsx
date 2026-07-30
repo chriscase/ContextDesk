@@ -71,6 +71,15 @@ function isValidIanaZone(value: string): boolean {
   }
 }
 
+function systemIanaZone(): string | null {
+  try {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return isValidIanaZone(zone) ? zone : null;
+  } catch {
+    return null;
+  }
+}
+
 function countLabel(value: number, noun: string): string {
   return `${value.toLocaleString()} ${noun}${value === 1 ? "" : "s"}`;
 }
@@ -108,8 +117,11 @@ export function LogTimezoneReviewDialog({
   onClear,
   onDismiss,
 }: LogTimezoneReviewDialogProps) {
+  const systemSuggestedZone =
+    !declaration && !suggestedZone ? systemIanaZone() : null;
+  const effectiveSuggestedZone = suggestedZone ?? systemSuggestedZone;
   const initialMode: ResolutionMode = declaration ? "iana" : "unresolved";
-  const initialZone = declaration?.ianaZone ?? suggestedZone ?? "";
+  const initialZone = declaration?.ianaZone ?? effectiveSuggestedZone ?? "";
   const declarationZone = declaration?.ianaZone ?? null;
   const declarationRevision = declaration?.appliedRevision ?? null;
   const [mode, setMode] = useState<ResolutionMode>(initialMode);
@@ -180,7 +192,7 @@ export function LogTimezoneReviewDialog({
   useEffect(() => {
     previewGenerationRef.current += 1;
     setMode(declarationZone ? "iana" : "unresolved");
-    setZone(declarationZone ?? suggestedZone ?? "");
+    setZone(declarationZone ?? effectiveSuggestedZone ?? "");
     setPreview(null);
     setError(null);
     setConfirmClear(false);
@@ -190,7 +202,7 @@ export function LogTimezoneReviewDialog({
     source.source,
     declarationZone,
     declarationRevision,
-    suggestedZone,
+    effectiveSuggestedZone,
     scope.corpusId,
     scope.eventRevision,
   ]);
@@ -388,10 +400,12 @@ export function LogTimezoneReviewDialog({
             <small id={zoneHelpId}>
               Use a regional name such as Europe/Berlin—not an abbreviation such
               as CET.
-              {suggestedZone && !declaration ? (
+              {effectiveSuggestedZone && !declaration ? (
                 <>
                   {" "}
-                  A saved or bundle hint filled this field; it is not active.
+                  {suggestedZone
+                    ? "A saved or bundle hint filled this field; it is not active."
+                    : "This computer’s timezone filled this field as a convenience; it is not active."}
                 </>
               ) : null}
             </small>

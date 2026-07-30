@@ -126,6 +126,35 @@ async function openReview(
 }
 
 describe("LogTimezoneReviewDialog", () => {
+  it("prefills the computer timezone without silently activating it", async () => {
+    const resolvedOptions = vi
+      .spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
+      .mockReturnValue({
+        locale: "en-US",
+        calendar: "gregory",
+        numberingSystem: "latn",
+        timeZone: "America/Chicago",
+      });
+
+    const { dialog, onPreview, onApply } = await openReview();
+    const leaveUnresolved = within(dialog).getByRole("radio", {
+      name: /Leave unresolved — order-only/,
+    }) as HTMLInputElement;
+    const zone = within(dialog).getByRole("textbox", {
+      name: /^IANA timezone/,
+    }) as HTMLInputElement;
+
+    expect(leaveUnresolved.checked).toBe(true);
+    expect(zone.value).toBe("America/Chicago");
+    expect(zone.disabled).toBe(true);
+    expect(dialog.textContent).toContain(
+      "This computer’s timezone filled this field as a convenience; it is not active",
+    );
+    expect(onPreview).not.toHaveBeenCalled();
+    expect(onApply).not.toHaveBeenCalled();
+    resolvedOptions.mockRestore();
+  });
+
   it("defaults a hinted unresolved source to order-only and explains uncertainty", async () => {
     const { dialog, trigger, onPreview, onApply } = await openReview({
       suggestion: "Europe/Berlin",

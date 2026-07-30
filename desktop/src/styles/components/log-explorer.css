@@ -3129,3 +3129,84 @@
   max-height: 86vh;
   width: 100%;
 }
+.log-explorer__badge-action {
+  cursor: pointer;
+  color: var(--accent);
+}
+
+.log-explorer__badge-action:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+
+.log-explorer__inline-action {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+  cursor: pointer;
+}
+
+.log-explorer__inline-action:focus-visible,
+.log-explorer__badge-action:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.log-explorer-time-resolution__backdrop {
+  position: fixed;
+  z-index: 1300;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: clamp(12px, 3vw, 32px);
+  background: color-mix(in srgb, var(--surface-0) 58%, transparent);
+}
+
+.log-explorer-time-resolution {
+  width: min(760px, 100%);
+  max-height: min(760px, calc(100vh - 32px));
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px;
+  background: var(--surface-1);
+  box-shadow: var(--shadow-lg);
+}
+
+.log-explorer-time-resolution__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 8px;
+}
+
+.log-explorer-time-resolution__header h2 {
+  margin: 3px 0 0;
+  font-size: 1.05rem;
+}
+
+.log-explorer-time-resolution__lead {
+  margin: 0 0 14px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+@media (max-width: 720px) {
+  .log-explorer-time-resolution__backdrop {
+    place-items: end stretch;
+    padding: 8px;
+  }
+
+  .log-explorer-time-resolution {
+    width: auto;
+    max-height: min(82vh, 680px);
+    border-radius: 14px 14px 8px 8px;
+    padding: 16px;
+  }
+}
