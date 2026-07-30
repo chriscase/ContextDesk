@@ -652,8 +652,13 @@ fn build_linked_log_fallback_host(
     host.set_log_only_tool_surface(true);
     host.set_log_corpus_scope(Some(context.corpus_id.clone()));
     host.set_active_log_corpus(Some(context.corpus_id.clone()));
-    host.pin_log_suppression_lens(&context.corpus_id)
-        .map_err(|error| error.to_string())?;
+    if context.noise_lens_suspended {
+        host.pin_log_suppression_lens_suspended(&context.corpus_id)
+            .map_err(|error| error.to_string())?;
+    } else {
+        host.pin_log_suppression_lens(&context.corpus_id)
+            .map_err(|error| error.to_string())?;
+    }
     Ok(host)
 }
 
@@ -3007,6 +3012,9 @@ struct AgentTurnReq {
 struct LogExplorerTurnContextReq {
     corpus_id: String,
     brief: String,
+    /// When true, do not apply durable noise exclusions for this turn (#817).
+    #[serde(default)]
+    noise_lens_suspended: bool,
 }
 
 fn validate_log_explorer_turn_context(
@@ -3017,7 +3025,9 @@ fn validate_log_explorer_turn_context(
     if session.linked_corpus_id.as_deref() != Some(request.corpus_id.as_str()) {
         return Err("Log Explorer context does not match this chat session's linked corpus".into());
     }
+    let suspended = request.noise_lens_suspended;
     cd_core::agent::LogExplorerTurnContext::new(window_id, request.corpus_id, request.brief)
+        .map(|context| context.with_noise_lens_suspended(suspended))
         .map_err(|e| e.to_string())
 }
 
@@ -4500,7 +4510,12 @@ async fn agent_turn(
                 return Ok(());
             }
         }
-        if let Err(error) = host.pin_log_suppression_lens(&context.corpus_id) {
+        let pin_result = if context.noise_lens_suspended {
+            host.pin_log_suppression_lens_suspended(&context.corpus_id)
+        } else {
+            host.pin_log_suppression_lens(&context.corpus_id)
+        };
+        if let Err(error) = pin_result {
             tracing::warn!(error = %error, "linked suppression preflight failed");
             host.set_log_corpus_scope(previous_log_scope.clone());
             host.set_active_log_corpus(previous_log_corpus.clone());

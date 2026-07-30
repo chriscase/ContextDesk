@@ -292,6 +292,9 @@ pub struct LogExplorerTurnContext {
     /// Whether this turn carries an Explorer viewport or only an explicit
     /// main-chat corpus attachment.
     pub origin: LinkedLogTurnOrigin,
+    /// When true, log tools must not apply durable noise exclusions for this
+    /// turn (Explorer “Suspend all”; rules remain enabled in the sidecar).
+    pub noise_lens_suspended: bool,
 }
 
 impl LogExplorerTurnContext {
@@ -330,6 +333,7 @@ impl LogExplorerTurnContext {
                 window_id: identity(window_id.into(), "window id")?,
                 brief: brief.chars().take(Self::MAX_BRIEF_CHARS).collect(),
             },
+            noise_lens_suspended: false,
         })
     }
 
@@ -350,7 +354,14 @@ impl LogExplorerTurnContext {
         Ok(Self {
             corpus_id,
             origin: LinkedLogTurnOrigin::MainChat,
+            noise_lens_suspended: false,
         })
+    }
+
+    /// Mark this turn so log tools do not apply durable noise exclusions.
+    pub fn with_noise_lens_suspended(mut self, suspended: bool) -> Self {
+        self.noise_lens_suspended = suspended;
+        self
     }
 
     fn system_hint(&self) -> String {
@@ -1856,7 +1867,13 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
     // offered, and ToolHost still enforces connector/session permission policy.
     let linked_turn = opts.log_explorer_context.is_some();
     if let Some(context) = opts.log_explorer_context.as_ref() {
-        if let Err(error) = host.pin_log_suppression_lens_if_present(&context.corpus_id) {
+        let pin_result = if context.noise_lens_suspended {
+            host.pin_log_suppression_lens_suspended(&context.corpus_id)
+                .map(|_| true)
+        } else {
+            host.pin_log_suppression_lens_if_present(&context.corpus_id)
+        };
+        if let Err(error) = pin_result {
             return terminal_linked_snapshot_stale(out, &["started".into()], error);
         }
     }

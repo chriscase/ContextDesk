@@ -1744,6 +1744,19 @@ impl ToolHost {
         Ok(())
     }
 
+    /// Pin the policy revision but apply **no** template exclusions for this turn.
+    ///
+    /// Used when the Explorer noise lens is suspended (#817). Durable rules stay
+    /// enabled in the sidecar; only this turn's query lens is empty.
+    pub fn pin_log_suppression_lens_suspended(&mut self, corpus_id: &str) -> CoreResult<()> {
+        let corpus = self.open_log_corpus(corpus_id)?;
+        let mut lens = Self::load_log_suppression_lens(corpus_id, &corpus)?;
+        lens.excluded_template_ids.clear();
+        lens.suppressed_event_count = 0;
+        self.pinned_log_suppression = Some(lens);
+        Ok(())
+    }
+
     /// Pin a linked corpus when it exists in this host's configured cache.
     ///
     /// The desktop host validates corpus availability before entering the
@@ -8308,6 +8321,67 @@ mod tests {
         assert_eq!(restored.suppression_revision, disabled.revision);
         assert!(restored.model_text.contains("suppression_active: false"));
         assert!(restored.model_text.contains("routine heartbeat"));
+    }
+
+    #[test]
+    fn pin_log_suppression_lens_suspended_clears_exclusions_without_rule_mutation() {
+        let (_dir, corpus, mut host) = broad_triage_fixture(crate::log_analysis::TimeQuality::Wall);
+        let corpus_id = corpus.id().to_string();
+        let before = crate::log_analysis::load_suppression_document(&corpus).unwrap();
+        let preview = crate::log_analysis::preview_template_suppression(
+            &corpus,
+            before.revision,
+            crate::log_analysis::NewSuppressionPreview {
+                name: "routine heartbeat".into(),
+                rationale: "suspend-lens proof".into(),
+                template_id: 11,
+                origin: crate::log_analysis::SuppressionRuleOrigin::Human,
+            },
+        )
+        .unwrap();
+        let activated = crate::log_analysis::activate_template_suppression(
+            &corpus,
+            preview.rule_revision,
+            crate::log_analysis::ActivateSuppressionPreview {
+                preview_token: preview.token,
+            },
+        )
+        .unwrap();
+        host.set_log_corpus_scope(Some(corpus_id.clone()));
+        host.seed_log_corpus_handle(&corpus_id, Arc::clone(&corpus))
+            .unwrap();
+
+        host.pin_log_suppression_lens(&corpus_id).unwrap();
+        let active = host.build_broad_log_triage_brief().unwrap();
+        assert_eq!(active.unsuppressed_event_count, 19);
+        assert!(active.model_text.contains("suppression_active: true"));
+
+        host.set_log_corpus_scope(Some(corpus_id.clone()));
+        host.seed_log_corpus_handle(&corpus_id, Arc::clone(&corpus))
+            .unwrap();
+        host.pin_log_suppression_lens_suspended(&corpus_id).unwrap();
+        let suspended = host.build_broad_log_triage_brief().unwrap();
+        assert_eq!(
+            suspended.unsuppressed_event_count, 39,
+            "suspended lens must restore unsuppressed totals"
+        );
+        assert_eq!(suspended.suppression_revision, activated.revision);
+        assert!(suspended.model_text.contains("suppression_active: false"));
+        assert!(
+            suspended.model_text.contains("routine heartbeat"),
+            "suspended lens must not hide the previously suppressed template"
+        );
+
+        let after = crate::log_analysis::load_suppression_document(&corpus).unwrap();
+        assert_eq!(
+            after.revision, activated.revision,
+            "suspend pin must not mutate durable policy"
+        );
+        assert_eq!(
+            after.enabled_template_ids().unwrap(),
+            vec![11],
+            "enabled rules must remain enabled while the lens is suspended"
+        );
     }
 
     #[test]

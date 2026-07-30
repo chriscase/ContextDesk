@@ -158,6 +158,13 @@ const baseContext: AgentContextSummary = {
   selectedCount: 0,
   bookmarkCount: 0,
   brief: "corpusId=c1; timeQuality=wall",
+  noisePolicyLabel: "inactive",
+  noiseRuleCount: 0,
+  noiseExcludedEventCount: 0,
+  noisePolicyHiddenCount: 0,
+  noiseExcludedNotAnalyzed: false,
+  noiseLensSuspended: false,
+  noiseDisclosure: "Noise inactive · 0 rules · 0 excluded",
 };
 
 function sessionDto(
@@ -1203,6 +1210,12 @@ describe("LinkedChatRail", () => {
     expect(context.textContent).toContain("workspace/Markdown");
     expect(context.textContent).toContain("Retrieval and synthesis");
     expect(context.textContent).toContain("Process instructions only");
+    expect(screen.getByTestId("linked-chat-noise-context").textContent).toMatch(
+      /Noise policy/i,
+    );
+    expect(screen.getByTestId("linked-chat-noise-context").textContent).toMatch(
+      /0 rules|inactive/i,
+    );
 
     await waitFor(() =>
       expect(

@@ -2859,6 +2859,18 @@
   margin: 0;
 }
 
+.log-explorer__noise-policy-lens-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.log-explorer__btn--warn {
+  border-color: var(--warn-border, #8a6d1d);
+  color: var(--warn-fg, #f0d78c);
+}
+
 .log-explorer__noise-policy-list {
   display: grid;
   gap: 0.45rem;

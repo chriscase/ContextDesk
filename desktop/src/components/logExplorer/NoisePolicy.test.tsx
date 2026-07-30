@@ -108,6 +108,8 @@ describe("NoisePolicyControl", () => {
         triggerRef={triggerRef}
         onRetry={vi.fn()}
         onMutate={vi.fn()}
+        onSuspendAll={vi.fn()}
+        onResume={vi.fn()}
       />,
     );
 
@@ -119,6 +121,9 @@ describe("NoisePolicyControl", () => {
       "popover",
     );
     expect(await screen.findByText("Routine heartbeat")).toBeTruthy();
+    expect(screen.getByTestId("noise-policy-disclosure").textContent).toMatch(
+      /not analyzed/i,
+    );
     fireEvent.click(document.body);
     await waitFor(() =>
       expect(screen.queryByTestId("noise-policy-panel")).toBeNull(),
@@ -132,6 +137,62 @@ describe("NoisePolicyControl", () => {
       expect(screen.queryByTestId("noise-policy-panel")).toBeNull(),
     );
     await waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
+  it("exposes Suspend all and Resume without disabling rules", async () => {
+    const triggerRef = createRef<HTMLButtonElement>();
+    const onSuspendAll = vi.fn();
+    const onResume = vi.fn();
+    const onMutate = vi.fn();
+    const { unmount } = render(
+      <NoisePolicyControl
+        document={policy()}
+        hiddenCount={250}
+        state="ready"
+        error={null}
+        narrow={false}
+        lensSuspended={false}
+        triggerRef={triggerRef}
+        onRetry={vi.fn()}
+        onMutate={onMutate}
+        onSuspendAll={onSuspendAll}
+        onResume={onResume}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Noise · 1 rule · 250 hidden" }),
+    );
+    fireEvent.click(screen.getByTestId("noise-lens-suspend-all"));
+    expect(onSuspendAll).toHaveBeenCalledTimes(1);
+    expect(onMutate).not.toHaveBeenCalled();
+    unmount();
+
+    render(
+      <NoisePolicyControl
+        document={policy()}
+        hiddenCount={250}
+        state="ready"
+        error={null}
+        narrow={false}
+        lensSuspended
+        triggerRef={triggerRef}
+        onRetry={vi.fn()}
+        onMutate={onMutate}
+        onSuspendAll={onSuspendAll}
+        onResume={onResume}
+      />,
+    );
+    const suspendedTrigger = screen.getByRole("button", {
+      name: "Noise · suspended · 1 rule · 0 excluded",
+    });
+    fireEvent.click(suspendedTrigger);
+    const disclosure = await screen.findByTestId("noise-policy-disclosure");
+    expect(disclosure.textContent).toMatch(/suspended/i);
+    expect(disclosure.textContent).toMatch(/not disabled/i);
+    fireEvent.click(screen.getByTestId("noise-lens-resume"));
+    expect(onResume).toHaveBeenCalledTimes(1);
+    expect(onMutate).not.toHaveBeenCalled();
   });
 
   it("uses a narrow sheet and exposes disable, re-enable, remove, and audit actions", async () => {

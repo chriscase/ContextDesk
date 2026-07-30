@@ -154,6 +154,14 @@ export type AgentContextSummary = {
   bookmarkCount: number;
   /** Privacy-safe one-line brief for the host turn snapshot. */
   brief: string;
+  /** Noise policy state for Context shared with agent (#817). */
+  noisePolicyLabel?: string;
+  noiseRuleCount?: number;
+  noiseExcludedEventCount?: number | null;
+  noisePolicyHiddenCount?: number | null;
+  noiseExcludedNotAnalyzed?: boolean;
+  noiseLensSuspended?: boolean;
+  noiseDisclosure?: string;
 };
 
 type Props = {
@@ -1026,6 +1034,7 @@ export function LinkedChatRail({
         {
           corpus_id: corpusId,
           brief: agentContext.brief,
+          noise_lens_suspended: agentContext.noiseLensSuspended === true,
         },
         retrySynthesisOnly,
         {
@@ -1918,6 +1927,21 @@ export function LinkedChatRail({
             ]
               .filter(Boolean)
               .join(" · ") || "none"}
+          </li>
+          <li data-testid="linked-chat-noise-context">
+            <strong>Noise policy</strong>{" "}
+            {agentContext.noiseDisclosure ??
+              (agentContext.noiseRuleCount != null
+                ? `${agentContext.noisePolicyLabel ?? "inactive"} · ${
+                    agentContext.noiseRuleCount
+                  } rules · ${
+                    agentContext.noiseExcludedEventCount ?? 0
+                  } excluded from view${
+                    agentContext.noiseExcludedNotAnalyzed
+                      ? " · excluded events not analyzed"
+                      : ""
+                  }`
+                : "inactive · 0 rules · 0 excluded")}
           </li>
           <li>
             <strong>Selected</strong> {agentContext.selectedCount} ·{" "}
