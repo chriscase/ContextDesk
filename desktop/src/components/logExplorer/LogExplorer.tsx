@@ -114,6 +114,7 @@ import {
   type TimeLinkMode,
 } from "../../lib/logExplorer/laneCompose";
 import { buildAlignedLaneRows } from "../../lib/logExplorer/alignment";
+import { createLinkedScrollCoordinator } from "../../lib/logExplorer/linkedScrollCoordinator";
 import { HelpTip } from "../HelpTip";
 import { IconChevronDown, IconChevronLeft, IconLogExplorer } from "../icons";
 import {
@@ -869,7 +870,10 @@ export function LogExplorer({ corpusId }: Props) {
     laneId: string;
     seq: number;
   } | null>(null);
-  const [alignedScrollTop, setAlignedScrollTop] = useState(0);
+  const alignedScrollCoordinator = useMemo(
+    () => createLinkedScrollCoordinator(),
+    [],
+  );
   const [alignedMeasuredHeights, setAlignedMeasuredHeights] = useState<
     Record<string, Record<string, number>>
   >({});
@@ -4311,7 +4315,7 @@ export function LogExplorer({ corpusId }: Props) {
   };
 
   const setTimeLinkMode = (mode: TimeLinkMode) => {
-    if (mode === "align_time") setAlignedScrollTop(0);
+    if (mode === "align_time") alignedScrollCoordinator.reset(0);
     setLinkMode(mode);
     saveLinkMode(corpusId, mode);
   };
@@ -6337,13 +6341,13 @@ export function LogExplorer({ corpusId }: Props) {
                         ? alignedRowsByLane[lane.id]
                         : undefined
                     }
-                    linkedScrollTop={
-                      linkMode === "align_time" ? alignedScrollTop : undefined
-                    }
-                    onLinkedScrollTop={
+                    linkedScrollCoordinator={
                       linkMode === "align_time"
-                        ? setAlignedScrollTop
+                        ? alignedScrollCoordinator
                         : undefined
+                    }
+                    linkedScrollId={
+                      linkMode === "align_time" ? lane.id : undefined
                     }
                     alignedLaneId={
                       linkMode === "align_time" ? lane.id : undefined

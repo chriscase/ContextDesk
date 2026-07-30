@@ -4656,9 +4656,25 @@ describe("LogExplorer shell", () => {
       (document.querySelector('[data-seq="21"]') as HTMLElement).style.top,
     );
 
-    lists[0]!.scrollTop = 42;
-    fireEvent.scroll(lists[0]!);
-    await waitFor(() => expect(lists[1]!.scrollTop).toBe(42));
+    act(() => {
+      lists[0]!.scrollTop = 42;
+      lists[0]!.dispatchEvent(new Event("scroll"));
+      expect(lists[1]!.scrollTop).toBe(42);
+    });
+
+    act(() => {
+      lists[1]!.scrollTop = 64;
+      lists[1]!.dispatchEvent(new Event("scroll"));
+      expect(lists[0]!.scrollTop).toBe(64);
+    });
+
+    chooseTimeMode("Independent");
+    const independentPeerTop = lists[1]!.scrollTop;
+    act(() => {
+      lists[0]!.scrollTop = 84;
+      lists[0]!.dispatchEvent(new Event("scroll"));
+      expect(lists[1]!.scrollTop).toBe(independentPeerTop);
+    });
   });
 
   it("refuses exact Align for mixed time while retaining approximate Follow", async () => {

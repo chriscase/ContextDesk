@@ -12,6 +12,7 @@ import {
   VirtualizedEventList,
 } from "./VirtualizedEventList";
 import type { ExplorerEventDto } from "../../lib/host";
+import { createLinkedScrollCoordinator } from "../../lib/logExplorer/linkedScrollCoordinator";
 
 function makeEvents(n: number): ExplorerEventDto[] {
   return Array.from({ length: n }, (_, i) => ({
@@ -66,8 +67,6 @@ describe("VirtualizedEventList", () => {
       <VirtualizedEventList
         events={events}
         alignedRows={alignedRows}
-        linkedScrollTop={0}
-        onLinkedScrollTop={vi.fn()}
         timeQuality="wall"
         selected={new Set()}
         highlight={new Set()}
@@ -104,7 +103,6 @@ describe("VirtualizedEventList", () => {
       <VirtualizedEventList
         {...props}
         alignedRows={alignedRows}
-        linkedScrollTop={140_000}
       />,
     );
     const list = screen.getByTestId("virtualized-event-list");
@@ -265,6 +263,34 @@ describe("VirtualizedEventList", () => {
     await waitFor(() => {
       expect((list as HTMLDivElement).scrollTop).toBeGreaterThan(0);
       expect(document.querySelector('[data-seq="50"]')).toBeTruthy();
+    });
+  });
+
+  it("synchronizes a programmatic reveal through the resident lane coordinator", async () => {
+    const coordinator = createLinkedScrollCoordinator();
+    const events = makeEvents(60);
+    const props = {
+      events,
+      timeQuality: "wall" as const,
+      selected: new Set<number>(),
+      highlight: new Set<number>(),
+      density: "comfortable" as const,
+      onRowClick: vi.fn(),
+      scrollToSeq: 50,
+      linkedScrollCoordinator: coordinator,
+    };
+
+    render(
+      <>
+        <VirtualizedEventList {...props} linkedScrollId="first" />
+        <VirtualizedEventList {...props} linkedScrollId="second" />
+      </>,
+    );
+
+    const [first, second] = screen.getAllByTestId("virtualized-event-list");
+    await waitFor(() => {
+      expect(first!.scrollTop).toBeGreaterThan(0);
+      expect(second!.scrollTop).toBe(first!.scrollTop);
     });
   });
 
