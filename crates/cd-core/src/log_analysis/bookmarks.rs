@@ -3,10 +3,14 @@
 //! Persisted as `bookmarks.json` under the corpus root (sidecar, not in package v1).
 
 use super::store::LogCorpus;
-use super::{query::fetch_events_by_seqs, ExplorerEvent, TimeQuality};
+use super::{
+    event_revision::{retained_timestamp_revision_hints, EventReferenceTimestampHint},
+    query::{classify_ts, fetch_events_by_seqs},
+    ExplorerEvent, TimeQuality,
+};
 use crate::error::{CoreError, CoreResult};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -26,7 +30,8 @@ static BOOKMARK_MUTATION_LOCK: Mutex<()> = Mutex::new(());
 /// Stable, payload-free identity for one saved evidence event.
 ///
 /// Sequence is authoritative only inside `corpus_id`. Source and time fields are
-/// persisted hints that must match the corpus before the reference is opened.
+/// persisted hints that must match the corpus or an exact retained,
+/// timestamp-only event revision before the reference is opened.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BookmarkEventRef {
@@ -48,7 +53,8 @@ pub struct BookmarkEventRef {
 pub enum BookmarkEvidenceStatus {
     /// Version-1 seq range with no exact event set.
     LegacyRange,
-    /// Every exact reference still matches the authoritative corpus.
+    /// Every exact reference still matches the authoritative corpus, directly
+    /// or through its exact retained timestamp-only revision proof.
     Verified,
     /// At least one referenced sequence no longer exists.
     Missing,
@@ -244,6 +250,7 @@ fn validate_event_ref_from_map(
     corpus_id: &str,
     event_ref: &BookmarkEventRef,
     actual_by_seq: &HashMap<u64, ExplorerEvent>,
+    revision_hints: &HashSet<EventReferenceTimestampHint>,
 ) -> BookmarkEvidenceStatus {
     if event_ref.corpus_id != corpus_id {
         return BookmarkEvidenceStatus::Stale;
@@ -251,26 +258,56 @@ fn validate_event_ref_from_map(
     let Some(actual) = actual_by_seq.get(&event_ref.seq) else {
         return BookmarkEvidenceStatus::Missing;
     };
-    if actual.source != event_ref.source
-        || actual.ts != event_ref.timestamp_hint
-        || actual.time_quality != event_ref.time_quality_hint
-    {
+    if actual.source != event_ref.source {
         return BookmarkEvidenceStatus::Stale;
     }
-    BookmarkEvidenceStatus::Verified
+    if actual.ts == event_ref.timestamp_hint && actual.time_quality == event_ref.time_quality_hint {
+        return BookmarkEvidenceStatus::Verified;
+    }
+    let revision_hint = EventReferenceTimestampHint {
+        seq: event_ref.seq,
+        source: event_ref.source.clone(),
+        timestamp_hint: event_ref.timestamp_hint,
+    };
+    if event_ref.time_quality_hint == classify_ts(event_ref.timestamp_hint)
+        && revision_hints.contains(&revision_hint)
+    {
+        return BookmarkEvidenceStatus::Verified;
+    }
+    BookmarkEvidenceStatus::Stale
+}
+
+fn timestamp_revision_candidates(
+    event_refs: impl Iterator<Item = BookmarkEventRef>,
+    actual_by_seq: &HashMap<u64, ExplorerEvent>,
+) -> Vec<EventReferenceTimestampHint> {
+    event_refs
+        .filter_map(|event_ref| {
+            let actual = actual_by_seq.get(&event_ref.seq)?;
+            (actual.source == event_ref.source
+                && actual.ts != event_ref.timestamp_hint
+                && event_ref.time_quality_hint == classify_ts(event_ref.timestamp_hint))
+            .then_some(EventReferenceTimestampHint {
+                seq: event_ref.seq,
+                source: event_ref.source,
+                timestamp_hint: event_ref.timestamp_hint,
+            })
+        })
+        .collect()
 }
 
 fn resolve_bookmark_with_events(
     corpus_id: &str,
     bookmark: Bookmark,
     actual_by_seq: &HashMap<u64, ExplorerEvent>,
+    revision_hints: &HashSet<EventReferenceTimestampHint>,
 ) -> ResolvedBookmark {
     let evidence_status = if bookmark.event_refs.is_empty() {
         BookmarkEvidenceStatus::LegacyRange
     } else {
         let mut status = BookmarkEvidenceStatus::Verified;
         for event_ref in &bookmark.event_refs {
-            match validate_event_ref_from_map(corpus_id, event_ref, actual_by_seq) {
+            match validate_event_ref_from_map(corpus_id, event_ref, actual_by_seq, revision_hints) {
                 BookmarkEvidenceStatus::Missing => {
                     status = BookmarkEvidenceStatus::Missing;
                     break;
@@ -306,10 +343,15 @@ pub fn resolve_bookmark(corpus: &LogCorpus, bookmark: Bookmark) -> CoreResult<Re
         .into_iter()
         .map(|event| (event.seq, event))
         .collect::<HashMap<_, _>>();
+    let revision_hints = retained_timestamp_revision_hints(
+        corpus,
+        &timestamp_revision_candidates(bookmark.event_refs.iter().cloned(), &actual_by_seq),
+    )?;
     Ok(resolve_bookmark_with_events(
         corpus.id(),
         bookmark,
         &actual_by_seq,
+        &revision_hints,
     ))
 }
 
@@ -324,9 +366,20 @@ pub fn list_resolved_bookmarks(corpus: &LogCorpus) -> CoreResult<Vec<ResolvedBoo
         .into_iter()
         .map(|event| (event.seq, event))
         .collect::<HashMap<_, _>>();
+    let revision_hints = retained_timestamp_revision_hints(
+        corpus,
+        &timestamp_revision_candidates(
+            bookmarks
+                .iter()
+                .flat_map(|bookmark| bookmark.event_refs.iter().cloned()),
+            &actual_by_seq,
+        ),
+    )?;
     Ok(bookmarks
         .into_iter()
-        .map(|bookmark| resolve_bookmark_with_events(corpus.id(), bookmark, &actual_by_seq))
+        .map(|bookmark| {
+            resolve_bookmark_with_events(corpus.id(), bookmark, &actual_by_seq, &revision_hints)
+        })
         .collect())
 }
 
@@ -434,7 +487,8 @@ pub fn add_range_bookmark(corpus: &LogCorpus, new: NewBookmark) -> CoreResult<Bo
 ///
 /// The returned identities are payload-free, sorted, and deduplicated. Every
 /// requested identity must belong to `corpus` and still match its source, time,
-/// and time-quality hints. This function never reads or writes bookmark
+/// and time-quality hints, directly or through the exact retained
+/// timestamp-only revision proof. This function never reads or writes bookmark
 /// serialization; durable investigation evidence reuses it as a trusted
 /// validation boundary.
 pub fn canonicalize_exact_event_refs(
@@ -468,6 +522,10 @@ pub fn canonicalize_exact_event_refs(
         .into_iter()
         .map(|event| (event.seq, event))
         .collect::<HashMap<_, _>>();
+    let revision_hints = retained_timestamp_revision_hints(
+        corpus,
+        &timestamp_revision_candidates(requested.iter().cloned(), &actual_by_seq),
+    )?;
 
     let mut canonical = Vec::with_capacity(requested.len());
     for requested_ref in requested {
@@ -477,9 +535,8 @@ pub fn canonicalize_exact_event_refs(
                 requested_ref.seq
             )));
         };
-        if actual.source != requested_ref.source
-            || actual.ts != requested_ref.timestamp_hint
-            || actual.time_quality != requested_ref.time_quality_hint
+        if validate_event_ref_from_map(corpus.id(), &requested_ref, &actual_by_seq, &revision_hints)
+            != BookmarkEvidenceStatus::Verified
         {
             return Err(CoreError::Message(format!(
                 "bookmark event seq {} no longer matches source/time identity",

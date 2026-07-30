@@ -9,9 +9,10 @@
 use super::store::{contained_exact_corpus_root, LogCorpus};
 use crate::error::{CoreError, CoreResult};
 use crate::process_progress::CancelFlag;
-use duckdb::{params, Connection};
+use duckdb::{params, types::Value as DuckValue, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::path::Path;
 
@@ -24,8 +25,18 @@ const LOCK_DIRECTORY: &str = ".event-revision-locks";
 const CANDIDATE_TABLE: &str = "__cd_event_revision_candidate";
 const UPDATES_TABLE: &str = "__cd_event_revision_updates";
 const PREVIOUS_TABLE: &str = "events_previous";
+const TIMESTAMP_CHANGES_TABLE: &str = "event_revision_timestamp_changes";
 const MAX_OPERATION_BYTES: usize = 96;
 const MAX_SOURCE_BYTES: usize = 4 * 1024;
+
+/// One durable evidence hint that may be explained by the retained,
+/// transactionally published timestamp-only revision.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct EventReferenceTimestampHint {
+    pub(crate) seq: u64,
+    pub(crate) source: String,
+    pub(crate) timestamp_hint: i64,
+}
 
 /// One exact timestamp replacement.
 ///
@@ -467,6 +478,158 @@ fn active_stats(conn: &Connection, table: &str) -> CoreResult<(u64, Option<i64>,
     Ok((count, ts_min, ts_max))
 }
 
+/// Return only old timestamp hints proven by the retained active revision.
+///
+/// A matching seq/source pair alone is not enough. The active revision must
+/// retain an exact published old/new mapping, the old row must still exist in
+/// `events_previous`, and every non-timestamp event/payload/raw column must be
+/// unchanged. Older corpora without this audit table fail closed.
+pub(crate) fn retained_timestamp_revision_hints(
+    corpus: &LogCorpus,
+    hints: &[EventReferenceTimestampHint],
+) -> CoreResult<HashSet<EventReferenceTimestampHint>> {
+    if hints.is_empty() {
+        return Ok(HashSet::new());
+    }
+    corpus.with_connection(|conn| {
+        let required_tables = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM information_schema.tables
+                 WHERE table_schema = 'main'
+                   AND table_name IN (
+                       'event_revision_state',
+                       'event_revision_timestamp_changes',
+                       'events_previous'
+                   )",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| {
+                CoreError::Message(format!("inspect retained event revision evidence: {error}"))
+            })?;
+        if required_tables != 3 {
+            return Ok(HashSet::new());
+        }
+
+        let active_stats = active_stats(conn, "events")?;
+        let state_stats = conn
+            .query_row(
+                "SELECT event_count, ts_min, ts_max
+                 FROM event_revision_state
+                 WHERE singleton = 1
+                   AND previous_revision IS NOT NULL",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .ok()
+            .and_then(|(count, min, max)| u64::try_from(count).ok().map(|count| (count, min, max)));
+        if state_stats != Some(active_stats) {
+            return Ok(HashSet::new());
+        }
+
+        let mut unique_hints = hints
+            .iter()
+            .filter(|hint| hint.seq <= i64::MAX as u64)
+            .cloned()
+            .collect::<Vec<_>>();
+        unique_hints.sort_by(|left, right| {
+            left.seq
+                .cmp(&right.seq)
+                .then_with(|| left.source.cmp(&right.source))
+                .then_with(|| left.timestamp_hint.cmp(&right.timestamp_hint))
+        });
+        unique_hints.dedup();
+
+        let mut verified = HashSet::new();
+        for chunk in unique_hints.chunks(256) {
+            let placeholders = std::iter::repeat_n("(?, ?, ?)", chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                r#"
+                WITH requested(seq, source, previous_ts) AS (
+                    VALUES {placeholders}
+                )
+                SELECT requested.seq, requested.source, requested.previous_ts
+                FROM requested
+                JOIN event_revision_timestamp_changes changes
+                  ON changes.seq = requested.seq
+                 AND changes.source = requested.source
+                 AND changes.previous_ts = requested.previous_ts
+                JOIN event_revision_state state
+                  ON changes.revision = state.current_revision
+                JOIN events active
+                  ON active.seq = changes.seq
+                 AND active.source = changes.source
+                 AND active.ts = changes.current_ts
+                JOIN events_previous previous
+                  ON previous.seq = changes.seq
+                 AND previous.source = changes.source
+                 AND previous.ts = changes.previous_ts
+                WHERE state.singleton = 1
+                  AND state.previous_revision IS NOT NULL
+                  AND changes.previous_ts <> changes.current_ts
+                  AND active.level IS NOT DISTINCT FROM previous.level
+                  AND active.service IS NOT DISTINCT FROM previous.service
+                  AND active.host IS NOT DISTINCT FROM previous.host
+                  AND active.template_id IS NOT DISTINCT FROM previous.template_id
+                  AND active.params IS NOT DISTINCT FROM previous.params
+                  AND active.trace_id IS NOT DISTINCT FROM previous.trace_id
+                  AND active.message IS NOT DISTINCT FROM previous.message
+                  AND active.original_redacted IS NOT DISTINCT FROM previous.original_redacted
+                  AND active.original_source_bytes
+                      IS NOT DISTINCT FROM previous.original_source_bytes
+                  AND active.original_redacted_chars
+                      IS NOT DISTINCT FROM previous.original_redacted_chars
+                  AND active.original_truncated
+                      IS NOT DISTINCT FROM previous.original_truncated
+                  AND active.original_encoding_normalized
+                      IS NOT DISTINCT FROM previous.original_encoding_normalized
+                  AND active.original_redaction_applied
+                      IS NOT DISTINCT FROM previous.original_redaction_applied
+                "#
+            );
+            let mut values = Vec::with_capacity(chunk.len() * 3);
+            for hint in chunk {
+                values.push(DuckValue::BigInt(hint.seq as i64));
+                values.push(DuckValue::Text(hint.source.clone()));
+                values.push(DuckValue::BigInt(hint.timestamp_hint));
+            }
+            let bound = values
+                .iter()
+                .map(|value| value as &dyn duckdb::ToSql)
+                .collect::<Vec<_>>();
+            let mut statement = conn.prepare(&sql).map_err(|error| {
+                CoreError::Message(format!("prepare retained timestamp evidence: {error}"))
+            })?;
+            let rows = statement
+                .query_map(bound.as_slice(), |row| {
+                    Ok(EventReferenceTimestampHint {
+                        seq: row.get::<_, i64>(0)? as u64,
+                        source: row.get(1)?,
+                        timestamp_hint: row.get(2)?,
+                    })
+                })
+                .map_err(|error| {
+                    CoreError::Message(format!("validate retained timestamp evidence: {error}"))
+                })?;
+            for row in rows {
+                verified.insert(row.map_err(|error| {
+                    CoreError::Message(format!("read retained timestamp evidence: {error}"))
+                })?);
+            }
+        }
+        Ok(verified)
+    })
+}
+
 /// Stage, validate, and atomically publish exact timestamp replacements.
 ///
 /// A conflict, cancellation, validation error, or publication error rolls the
@@ -540,7 +703,8 @@ where
             }
 
             conn.execute_batch(&format!(
-                "DROP TABLE IF EXISTS {PREVIOUS_TABLE};"
+                "DROP TABLE IF EXISTS {PREVIOUS_TABLE};
+                 DROP TABLE IF EXISTS {TIMESTAMP_CHANGES_TABLE};"
             ))
             .map_err(|error| {
                 CoreError::Message(format!("remove obsolete event revision: {error}"))
@@ -548,6 +712,13 @@ where
             conn.execute_batch(&format!(
                 "CREATE TABLE {PREVIOUS_TABLE} AS
                      SELECT * FROM events;
+                 CREATE TABLE {TIMESTAMP_CHANGES_TABLE} AS
+                     SELECT {revision}::BIGINT AS revision,
+                            seq,
+                            source,
+                            expected_ts AS previous_ts,
+                            revised_ts AS current_ts
+                       FROM {UPDATES_TABLE};
                  UPDATE events active
                     SET ts = candidate.ts
                    FROM {CANDIDATE_TABLE} candidate
@@ -748,7 +919,8 @@ fn undo_event_revision_inner(
                 "DELETE FROM events;
                  INSERT INTO events
                  SELECT * FROM {PREVIOUS_TABLE};
-                 DROP TABLE {PREVIOUS_TABLE};"
+                 DROP TABLE {PREVIOUS_TABLE};
+                 DROP TABLE IF EXISTS {TIMESTAMP_CHANGES_TABLE};"
             ))
             .map_err(|error| {
                 CoreError::Message(format!("restore retained event revision: {error}"))
@@ -958,8 +1130,8 @@ mod tests {
     }
 
     fn saved_view_recipe(corpus_id: &str) -> FindingViewRecipe {
-        let api_ref = event_ref(corpus_id, 0, "api/app.log", 1_700_000_000);
-        let worker_ref = event_ref(corpus_id, 2, "worker/worker.log", 1_700_000_020);
+        let api_ref = event_ref(corpus_id, 1, "api/app.log", 1_700_000_010);
+        let worker_ref = event_ref(corpus_id, 3, "worker/worker.log", 1_700_000_030);
         FindingViewRecipe {
             filters: FindingViewFilters {
                 levels: vec![],
@@ -1042,8 +1214,8 @@ mod tests {
         durable_root: &Path,
     ) -> ProductIdentityFixture {
         let selected = vec![
-            event_ref(corpus.id(), 0, "api/app.log", 1_700_000_000),
-            event_ref(corpus.id(), 2, "worker/worker.log", 1_700_000_020),
+            event_ref(corpus.id(), 1, "api/app.log", 1_700_000_010),
+            event_ref(corpus.id(), 3, "worker/worker.log", 1_700_000_030),
         ];
         let bookmark = add_evidence_bookmark(
             corpus,
@@ -1164,6 +1336,44 @@ mod tests {
             load_operational_metrics_attachment(cache, corpus.id()).unwrap(),
             expected.metric_attachment
         );
+    }
+
+    fn assert_product_event_references_stale(
+        corpus: &LogCorpus,
+        durable_root: &Path,
+        expected: &ProductIdentityFixture,
+    ) {
+        let bookmarks = list_resolved_bookmarks(corpus).unwrap();
+        assert_eq!(bookmarks.len(), 1);
+        assert_eq!(bookmarks[0].evidence_status, BookmarkEvidenceStatus::Stale);
+
+        let store = InvestigationStore::new(durable_root.join("investigations"));
+        let investigation = store.load(&expected.investigation_id, corpus).unwrap();
+        assert!(investigation.evidence[0]
+            .references
+            .iter()
+            .any(|reference| reference.status == EvidenceReferenceStatus::Stale));
+        let preview = store
+            .preview_evidence(&expected.investigation_id, &expected.evidence_id, corpus)
+            .unwrap();
+        assert!(preview
+            .references
+            .iter()
+            .any(|reference| reference.status == EvidenceReferenceStatus::Stale));
+        let recipe = store
+            .resolve_finding_view_recipe(&expected.investigation_id, &expected.finding_id, corpus)
+            .unwrap();
+        assert!(recipe.stale_count > 0);
+    }
+
+    fn mutate_event(corpus: &LogCorpus, sql: &str) {
+        corpus
+            .with_connection(|conn| {
+                conn.execute_batch(sql).map_err(|error| {
+                    CoreError::Message(format!("mutate event for adversarial proof: {error}"))
+                })
+            })
+            .unwrap();
     }
 
     fn event_snapshot(cache: &Path, corpus_id: &str) -> Vec<super::super::LogEvent> {
@@ -1343,7 +1553,7 @@ mod tests {
     }
 
     #[test]
-    fn real_product_identities_and_saved_view_survive_multi_source_apply_and_undo() {
+    fn directly_revised_references_survive_apply_and_undo_but_unrelated_mutations_stale() {
         let (cache, corpus_id) = multi_source_fixture();
         let durable = tempfile::tempdir().expect("durable investigation root");
         let corpus_root = root(cache.path(), &corpus_id);
@@ -1426,6 +1636,55 @@ mod tests {
             .filter(|(name, _)| is_corpus_sidecar(name))
             .collect::<BTreeMap<_, _>>();
         assert_eq!(sidecars_after, sidecars_before);
+        assert_product_identities(
+            cache.path(),
+            &already_open,
+            durable.path(),
+            &product_identities,
+            2,
+        );
+
+        mutate_event(
+            &already_open,
+            "UPDATE events
+             SET ts = 1700009999
+             WHERE seq = 1 AND source = 'api/app.log'",
+        );
+        assert_product_event_references_stale(&already_open, durable.path(), &product_identities);
+        mutate_event(
+            &already_open,
+            "UPDATE events
+             SET ts = 1700003610
+             WHERE seq = 1 AND source = 'api/app.log'",
+        );
+
+        mutate_event(
+            &already_open,
+            "UPDATE events
+             SET message = 'ordinary payload mutation'
+             WHERE seq = 1 AND source = 'api/app.log'",
+        );
+        assert_product_event_references_stale(&already_open, durable.path(), &product_identities);
+        mutate_event(
+            &already_open,
+            "UPDATE events
+             SET message = 'API local timestamp to revise'
+             WHERE seq = 1 AND source = 'api/app.log'",
+        );
+
+        mutate_event(
+            &already_open,
+            "UPDATE events
+             SET original_redacted = 'ordinary raw mutation'
+             WHERE seq = 1 AND source = 'api/app.log'",
+        );
+        assert_product_event_references_stale(&already_open, durable.path(), &product_identities);
+        mutate_event(
+            &already_open,
+            "UPDATE events
+             SET original_redacted = NULL
+             WHERE seq = 1 AND source = 'api/app.log'",
+        );
         assert_product_identities(
             cache.path(),
             &already_open,
