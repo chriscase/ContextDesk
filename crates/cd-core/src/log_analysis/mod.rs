@@ -11,6 +11,7 @@ pub mod bookmarks;
 pub mod diagnostics;
 pub mod drain;
 pub mod embed_policy;
+pub mod event_revision;
 pub mod format_profile;
 pub mod ingest;
 mod ingest_confidence;
@@ -49,6 +50,11 @@ pub use diagnostics::{
 pub use drain::{DrainMiner, TemplateInfo};
 pub use embed_policy::{
     LogEmbedMode, LogEmbedPolicy, CLOUD_LEAVE_MACHINE_CONFIRM, LOCAL_EMBED_DEFER_SOURCE_BYTES,
+};
+pub use event_revision::{
+    apply_event_timestamp_revision, undo_event_revision, EventRevisionMetadata,
+    EventRevisionReport, EventTimestampUpdate, EVENT_REVISION_METADATA_SCHEMA_VERSION,
+    MAX_EVENT_REVISION_METADATA_BYTES,
 };
 pub use format_profile::{
     fingerprint_format, BuiltInFormatProfile, BuiltInGrammar, FormatFingerprint,

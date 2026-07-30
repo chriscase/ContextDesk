@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use uuid::Uuid;
 
 /// Corpus identifier (UUIDv7 string).
@@ -38,6 +38,22 @@ const MAX_CORPUS_META_BYTES: u64 = 8 * 1024 * 1024;
 /// Keeping this cache deliberately small prevents count optimization from
 /// becoming a second corpus-sized store.
 const EVENT_COUNT_CACHE_CAP: usize = 64;
+
+/// All handles for one corpus database share one process-local revision clock.
+///
+/// Event-level publication can happen through a different `LogCorpus` handle
+/// than an already-open Explorer or tool host. A shared clock makes those
+/// handles reject cached facts from the prior DuckDB transaction immediately.
+static EVENT_REVISION_CLOCKS: LazyLock<Mutex<HashMap<PathBuf, Weak<AtomicU64>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Reopened handles for one corpus share one serialized DuckDB connection.
+///
+/// A separately opened DuckDB connection can retain the snapshot from before
+/// another connection commits an event revision. Sharing the connection keeps
+/// already-open query handles on the same publication boundary.
+static CORPUS_CONNECTIONS: LazyLock<Mutex<HashMap<PathBuf, Weak<Mutex<Connection>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Fixed-size identity for an exact event-count predicate.
 ///
@@ -332,7 +348,7 @@ pub struct LogCorpus {
     name: String,
     root: PathBuf,
     meta: Mutex<CorpusMeta>,
-    db: Mutex<Connection>,
+    db: Arc<Mutex<Connection>>,
     templates: Mutex<HashMap<u64, TemplateRow>>,
     /// Vector index over template ids (Exact or Hnsw by size) — pure Rust.
     index: Mutex<Box<dyn VectorIndex>>,
@@ -340,8 +356,8 @@ pub struct LogCorpus {
     index_backend: Mutex<&'static str>,
     /// Exact event counts keyed by cursor-independent filter predicate.
     event_count_cache: Mutex<EventCountCache>,
-    /// Changes only after a successful event append.
-    event_revision: AtomicU64,
+    /// Changes only after a successful event append or revision publication.
+    event_revision: Arc<AtomicU64>,
     /// Test instrumentation: physical `COUNT(*)` scans, not cache reads.
     #[cfg(test)]
     event_count_scans: AtomicUsize,
@@ -371,19 +387,19 @@ impl LogCorpus {
         };
         write_meta_file(&root, &meta)?;
         let db_path = root.join("events.duckdb");
-        let conn = Connection::open(&db_path).map_err(duck_err)?;
-        init_schema(&conn)?;
+        let db = shared_corpus_connection(&db_path)?;
+        let event_revision = shared_event_revision_clock(&db_path, 0);
         Ok(Self {
             id,
             name: name_s,
             root,
             meta: Mutex::new(meta),
-            db: Mutex::new(conn),
+            db,
             templates: Mutex::new(HashMap::new()),
             index: Mutex::new(select_backend(0)),
             index_backend: Mutex::new(backend_name(0)),
             event_count_cache: Mutex::new(EventCountCache::default()),
-            event_revision: AtomicU64::new(0),
+            event_revision,
             #[cfg(test)]
             event_count_scans: AtomicUsize::new(0),
         })
@@ -434,8 +450,13 @@ impl LogCorpus {
                 "corpus {metadata_id} missing events.duckdb"
             )));
         }
-        let conn = Connection::open(&db_path).map_err(duck_err)?;
-        init_schema(&conn)?;
+        let db = shared_corpus_connection(&db_path)?;
+        let durable_revision = db
+            .lock()
+            .ok()
+            .and_then(|connection| persisted_event_revision(&connection))
+            .unwrap_or(0);
+        let event_revision = shared_event_revision_clock(&db_path, durable_revision);
 
         let mut templates = HashMap::new();
         let t_path = root.join("templates.json");
@@ -457,12 +478,12 @@ impl LogCorpus {
             name,
             root,
             meta: Mutex::new(meta),
-            db: Mutex::new(conn),
+            db,
             templates: Mutex::new(templates),
             index: Mutex::new(idx),
             index_backend: Mutex::new(backend_name(n_tpl)),
             event_count_cache: Mutex::new(EventCountCache::default()),
-            event_revision: AtomicU64::new(0),
+            event_revision,
             #[cfg(test)]
             event_count_scans: AtomicUsize::new(0),
         })
@@ -697,13 +718,35 @@ impl LogCorpus {
         self.event_revision.load(Ordering::SeqCst)
     }
 
+    /// Read the durable event revision while the caller already holds the
+    /// corpus connection lock.
+    ///
+    /// Event-level re-analysis publishes this value in the same DuckDB
+    /// transaction as the active event changes. Keeping this variant separate
+    /// avoids recursively locking `db` in count queries.
+    pub(crate) fn event_revision_with_connection(&self, conn: &Connection) -> u64 {
+        let fallback = self.event_revision.load(Ordering::SeqCst);
+        let revision = persisted_event_revision(conn).unwrap_or(fallback);
+        let observed = self.event_revision.fetch_max(revision, Ordering::SeqCst);
+        observed.max(revision)
+    }
+
+    /// Publish a committed durable revision to every in-process corpus handle.
+    pub(super) fn publish_event_revision(&self, revision: u64) {
+        self.event_revision.store(revision, Ordering::SeqCst);
+        self.event_count_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
     /// Return an exact cached count only when it belongs to the current events.
     pub(crate) fn cached_event_count(
         &self,
         key: &EventCountCacheKey,
         revision: u64,
     ) -> Option<u64> {
-        if self.event_revision() != revision {
+        if self.event_revision.load(Ordering::SeqCst) != revision {
             return None;
         }
         self.event_count_cache
@@ -719,14 +762,14 @@ impl LogCorpus {
         revision: u64,
         count: u64,
     ) -> bool {
-        if self.event_revision() != revision {
+        if self.event_revision.load(Ordering::SeqCst) != revision {
             return false;
         }
         self.event_count_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(key, CachedEventCount { revision, count });
-        self.event_revision() == revision
+        self.event_revision.load(Ordering::SeqCst) == revision
     }
 
     #[cfg(test)]
@@ -1176,6 +1219,49 @@ fn init_schema(conn: &Connection) -> CoreResult<()> {
     )
     .map_err(duck_err)?;
     Ok(())
+}
+
+fn persisted_event_revision(conn: &Connection) -> Option<u64> {
+    conn.query_row(
+        "SELECT current_revision
+         FROM event_revision_state
+         WHERE singleton = 1",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .ok()
+    .and_then(|revision| u64::try_from(revision).ok())
+}
+
+fn shared_event_revision_clock(db_path: &Path, durable_revision: u64) -> Arc<AtomicU64> {
+    let key = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
+    let mut clocks = EVENT_REVISION_CLOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clocks.retain(|_, clock| clock.strong_count() > 0);
+    if let Some(clock) = clocks.get(&key).and_then(Weak::upgrade) {
+        clock.fetch_max(durable_revision, Ordering::SeqCst);
+        return clock;
+    }
+    let clock = Arc::new(AtomicU64::new(durable_revision));
+    clocks.insert(key, Arc::downgrade(&clock));
+    clock
+}
+
+fn shared_corpus_connection(db_path: &Path) -> CoreResult<Arc<Mutex<Connection>>> {
+    let key = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
+    let mut connections = CORPUS_CONNECTIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    connections.retain(|_, connection| connection.strong_count() > 0);
+    if let Some(connection) = connections.get(&key).and_then(Weak::upgrade) {
+        return Ok(connection);
+    }
+    let connection = Connection::open(db_path).map_err(duck_err)?;
+    init_schema(&connection)?;
+    let connection = Arc::new(Mutex::new(connection));
+    connections.insert(key, Arc::downgrade(&connection));
+    Ok(connection)
 }
 
 fn lock_err() -> CoreError {

@@ -1496,7 +1496,7 @@ fn query_event_count_with_post_scan(
         // Event appends publish their revision while holding this same database
         // lock. Reading it here therefore identifies the exact event snapshot
         // counted below.
-        let snapshot_revision = corpus.event_revision();
+        let snapshot_revision = corpus.event_revision_with_connection(conn);
         // Another identical caller may have populated the cache while this
         // request waited for the database lock. Recheck under that lock so
         // concurrent lane/count requests collapse to one exact scan.
