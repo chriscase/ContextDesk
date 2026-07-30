@@ -5,10 +5,12 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useRef,
   useState,
   type InputHTMLAttributes,
 } from "react";
+import { useDismissibleLayer } from "../hooks/useDismissibleLayer";
 import {
   hostListLogCorpora,
   hostListSkills,
@@ -53,8 +55,25 @@ export function SessionContextBar({
   const [importPhase, setImportPhase] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  const addLayerId = useId();
   const addRootRef = useRef<HTMLDivElement>(null);
   const addTriggerRef = useRef<HTMLButtonElement>(null);
+
+  const closeAdd = useCallback((restoreFocus: boolean) => {
+    setAddOpen(false);
+    if (restoreFocus) {
+      queueMicrotask(() => addTriggerRef.current?.focus());
+    }
+  }, []);
+
+  useDismissibleLayer({
+    open: addOpen,
+    layerId: addLayerId,
+    peerGroup: "main-chat-context-menu",
+    rootRef: addRootRef,
+    triggerRef: addTriggerRef,
+    onDismiss: closeAdd,
+  });
 
   const refresh = useCallback(async () => {
     if (!sessionId) {
@@ -104,27 +123,6 @@ export function SessionContextBar({
       setExpanded(true);
     }
   }, [entries.length, importPhase, linkedCorpusId, note, pinnedSkillId]);
-
-  useEffect(() => {
-    if (!addOpen) return;
-    const onPointerDown = (event: MouseEvent) => {
-      if (!addRootRef.current?.contains(event.target as Node)) {
-        setAddOpen(false);
-      }
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      setAddOpen(false);
-      addTriggerRef.current?.focus();
-    };
-    document.addEventListener("mousedown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [addOpen]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -350,12 +348,14 @@ export function SessionContextBar({
               disabled={disabled}
               aria-expanded={addOpen}
               aria-haspopup="dialog"
+              aria-controls={addOpen ? addLayerId : undefined}
               onClick={() => setAddOpen((open) => !open)}
             >
               + Add context
             </button>
             {addOpen ? (
               <div
+                id={addLayerId}
                 className="session-context-add__panel"
                 role="dialog"
                 aria-label="Add context"
@@ -433,8 +433,7 @@ export function SessionContextBar({
                               onLinkedCorpusChange?.(corpus.id),
                             )
                               .then(() => {
-                                setAddOpen(false);
-                                addTriggerRef.current?.focus();
+                                closeAdd(true);
                               })
                               .catch((error) =>
                                 setNote(

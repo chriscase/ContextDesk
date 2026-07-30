@@ -4932,7 +4932,7 @@ describe("LogExplorer shell", () => {
     ).toHaveLength(1);
   });
 
-  it("closes the lane composer on Escape and outside click without losing composed lanes", async () => {
+  it("dismisses the lane composer in capture with predictable focus without losing composed lanes", async () => {
     render(<LogExplorer corpusId="c1" />);
     const toggle = await screen.findByTestId("lane-editor-toggle");
     fireEvent.click(toggle);
@@ -4948,19 +4948,51 @@ describe("LogExplorer shell", () => {
     fireEvent.click(toggle);
     await screen.findByTestId("lane-editor");
     const outsideTarget = screen.getByTestId("log-explorer-find");
-    fireEvent.mouseDown(outsideTarget);
+    const stopOutsidePointer = (event: Event) => event.stopPropagation();
+    outsideTarget.addEventListener("pointerdown", stopOutsidePointer);
+    fireEvent.pointerDown(outsideTarget);
+    outsideTarget.removeEventListener("pointerdown", stopOutsidePointer);
     outsideTarget.focus();
-    expect(document.activeElement).toBe(outsideTarget);
-    expect(screen.getByTestId("lane-editor")).not.toBeNull();
-    fireEvent.mouseUp(outsideTarget);
-    fireEvent.click(outsideTarget);
     await waitFor(() => expect(screen.queryByTestId("lane-editor")).toBeNull());
-    await waitFor(() => expect(document.activeElement).toBe(toggle));
+    expect(document.activeElement).toBe(outsideTarget);
 
     fireEvent.click(toggle);
     expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
       "1 source",
     );
+    fireEvent.pointerDown(screen.getByTestId("log-explorer"));
+    await waitFor(() => expect(screen.queryByTestId("lane-editor")).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(toggle));
+  });
+
+  it("treats portaled lane-composition help as part of the lane popover", async () => {
+    render(<LogExplorer corpusId="c1" />);
+    const toggle = await screen.findByTestId("lane-editor-toggle");
+    fireEvent.click(toggle);
+    const editor = await screen.findByTestId("lane-editor");
+    const helpTrigger = within(editor).getByRole("button", {
+      name: "Help: Lane composition",
+    });
+
+    fireEvent.click(helpTrigger);
+    const helpPanel = await screen.findByTestId("help-tip-popover");
+    fireEvent.pointerDown(
+      within(helpPanel).getByText(
+        /The same source may appear in multiple lanes/i,
+      ),
+    );
+    expect(screen.getByTestId("lane-editor")).toBeTruthy();
+
+    fireEvent.keyDown(helpPanel, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByTestId("help-tip-popover")).toBeNull(),
+    );
+    expect(screen.getByTestId("lane-editor")).toBeTruthy();
+    expect(document.activeElement).toBe(helpTrigger);
+
+    fireEvent.keyDown(helpTrigger, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("lane-editor")).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(toggle));
   });
 
   it("keeps the full lane source catalog editable under a conflicting source filter", async () => {

@@ -389,6 +389,7 @@ export function LinkedChatRail({
   const modelHelpId = useId();
   const composerHelpId = useId();
   const switcherLayerId = useId();
+  const manageLayerId = useId();
   /**
    * Turn-owned UI state is keyed by chat. A pending/error/completed turn for
    * chat A must not leak into chat B when the user switches mid-turn (#543).
@@ -443,6 +444,7 @@ export function LinkedChatRail({
   const switcherToggleRef = useRef<HTMLButtonElement>(null);
   const switcherRef = useRef<HTMLDivElement>(null);
   const manageToggleRef = useRef<HTMLButtonElement>(null);
+  const manageRef = useRef<HTMLDivElement>(null);
   const collapseToggleRef = useRef<HTMLButtonElement>(null);
   const reopenRef = useRef<HTMLButtonElement>(null);
   const previousCollapsedRef = useRef(collapsed);
@@ -1263,6 +1265,22 @@ export function LinkedChatRail({
     onDismiss: dismissSwitcher,
   });
 
+  const dismissManage = useCallback((restoreFocus: boolean) => {
+    setManageOpen(false);
+    if (restoreFocus) {
+      queueMicrotask(() => manageToggleRef.current?.focus());
+    }
+  }, []);
+
+  useDismissibleLayer({
+    open: manageOpen,
+    layerId: manageLayerId,
+    peerGroup: "investigation-rail-menu",
+    rootRef: manageRef,
+    triggerRef: manageToggleRef,
+    onDismiss: dismissManage,
+  });
+
   useEffect(() => {
     if (!switcherOpen) return;
     queueMicrotask(() => {
@@ -1275,6 +1293,13 @@ export function LinkedChatRail({
       (selected ?? first)?.focus();
     });
   }, [switcherOpen]);
+
+  useEffect(() => {
+    if (!manageOpen) return;
+    queueMicrotask(() => {
+      manageRef.current?.querySelector<HTMLInputElement>("input")?.focus();
+    });
+  }, [manageOpen]);
 
   const activeMeta = chats.find((c) => c.id === activeChatId);
   const activeTitle =
@@ -1290,8 +1315,12 @@ export function LinkedChatRail({
 
   const openManage = () => {
     if (!activeMeta) return;
+    if (manageOpen) {
+      dismissManage(true);
+      return;
+    }
     setRenameDraft(activeMeta.title);
-    setManageOpen((open) => !open);
+    setManageOpen(true);
   };
 
   const finishManageMutation = async (
@@ -1675,17 +1704,12 @@ export function LinkedChatRail({
 
       {manageOpen && activeMeta && (
         <div
+          ref={manageRef}
           className="log-explorer__chat-manage"
           id="linked-chat-manage"
           role="dialog"
           aria-label={`Manage ${activeMeta.title}`}
           data-testid="linked-chat-manage"
-          onKeyDown={(event) => {
-            if (event.key !== "Escape") return;
-            event.preventDefault();
-            setManageOpen(false);
-            manageToggleRef.current?.focus();
-          }}
         >
           <label className="log-explorer__chat-manage-rename">
             <span>Chat title</span>
