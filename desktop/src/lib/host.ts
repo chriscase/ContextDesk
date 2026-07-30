@@ -1775,14 +1775,14 @@ export type LogTimeUnresolvedReason =
 export type LogSourceConfidenceDto = {
   source: string;
   lines: number;
-  formatId: string | null;
-  formatVersion: number | null;
+  formatId?: string | null;
+  formatVersion?: number | null;
   outcome: LogFormatConfidenceOutcome;
-  runnerUpMargin: number | null;
-  producerHint: string | null;
+  runnerUpMargin?: number | null;
+  producerHint?: string | null;
   timeQuality: TimeQuality;
-  unresolvedReasons: LogTimeUnresolvedReason[];
-  timestampPrefixSamples: string[];
+  unresolvedReasons?: LogTimeUnresolvedReason[];
+  timestampPrefixSamples?: string[];
 };
 
 export type LogImportConfidenceCountsDto = {

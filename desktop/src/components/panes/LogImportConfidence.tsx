@@ -9,14 +9,15 @@ type Props = {
 };
 
 function sourceTimeLabel(source: LogSourceConfidenceDto): string {
+  const unresolvedReasons = source.unresolvedReasons ?? [];
   if (source.timeQuality === "wall") return "Exact wall clock";
   if (
-    source.unresolvedReasons.includes("zone_abbreviation_not_resolved") &&
-    source.unresolvedReasons.includes("no_timezone")
+    unresolvedReasons.includes("zone_abbreviation_not_resolved") &&
+    unresolvedReasons.includes("no_timezone")
   ) {
     return "No timezone and zone abbreviation not resolved — order-only";
   }
-  if (source.unresolvedReasons.includes("zone_abbreviation_not_resolved")) {
+  if (unresolvedReasons.includes("zone_abbreviation_not_resolved")) {
     return "Zone abbreviation not resolved — order-only";
   }
   if (source.timeQuality === "mixed") {
@@ -31,17 +32,17 @@ function formatLabel(source: LogSourceConfidenceDto): string {
   }
   if (source.outcome === "ambiguous") {
     return `Multiple grammars fit${
-      source.runnerUpMargin === null ? "" : ` — margin ${source.runnerUpMargin}`
+      source.runnerUpMargin == null ? "" : ` — margin ${source.runnerUpMargin}`
     }`;
   }
   const grammar =
-    source.formatId === null
+    source.formatId == null
       ? "Grammar matched"
       : `${source.formatId}${
-          source.formatVersion === null ? "" : ` v${source.formatVersion}`
+          source.formatVersion == null ? "" : ` v${source.formatVersion}`
         }`;
   return `${grammar}${
-    source.runnerUpMargin === null ? "" : ` — margin ${source.runnerUpMargin}`
+    source.runnerUpMargin == null ? "" : ` — margin ${source.runnerUpMargin}`
   }`;
 }
 
@@ -141,12 +142,12 @@ export function LogImportConfidence({ confidence }: Props) {
                   verified)
                 </span>
               ) : null}
-              {source.timestampPrefixSamples.length > 0 ? (
+              {(source.timestampPrefixSamples?.length ?? 0) > 0 ? (
                 <pre
                   tabIndex={0}
                   aria-label={`Timestamp examples for ${source.source}`}
                 >
-                  {source.timestampPrefixSamples.join("\n")}
+                  {source.timestampPrefixSamples?.join("\n")}
                 </pre>
               ) : null}
             </li>
