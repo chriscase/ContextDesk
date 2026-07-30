@@ -251,19 +251,21 @@ function stripRanges(text: string, ranges: Array<[number, number]>): string {
   for (const [start, end] of sorted) {
     if (start < cursor) continue;
     out += text.slice(cursor, start);
-    cursor = end;
+    // If removing an inline object would join two existing separator spaces,
+    // consume only the second one. Do not normalize unrelated Markdown.
+    cursor = out.endsWith(" ") && text[end] === " " ? end + 1 : end;
   }
   out += text.slice(cursor);
   return out;
 }
 
-/** Collapse leftover double spaces / empty lines without destroying sentence structure. */
+/**
+ * Remove wrappers left behind by a fenced machine payload while preserving
+ * ordinary Markdown whitespace, indentation, tables, and hard line breaks.
+ */
 function tidyProse(text: string): string {
   return text
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n[ \t]+/g, "\n")
-    .replace(/[ \t]{2,}/g, " ")
+    .replace(/```(?:json)?[ \t]*\n(?:[ \t]*\n)*[ \t]*```/gi, "")
     .replace(/\n{3,}/g, "\n\n")
-    .replace(/^[ \t]+|[ \t]+$/g, "")
     .trim();
 }

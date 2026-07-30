@@ -91,6 +91,23 @@ export function formatLinkedElapsed(ms: number): string {
   return `${m}:${String(r).padStart(2, "0")}`;
 }
 
+function LinkedElapsed({ startedAt }: { startedAt: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(id);
+  }, []);
+  return (
+    <span
+      className="log-explorer__chat-elapsed"
+      data-testid="linked-chat-elapsed"
+      aria-hidden="true"
+    >
+      {formatLinkedElapsed(Math.max(0, now - startedAt))}
+    </span>
+  );
+}
+
 /**
  * Visible assistant body: strip machine log_nav JSON; quiet unreadable note.
  * While streaming, incomplete nav-like JSON must not flash the unreadable
@@ -383,7 +400,6 @@ export function LinkedChatRail({
   const [hostPhaseByChat, setHostPhaseByChat] = useState<
     Record<string, string | null>
   >({});
-  const [elapsedTick, setElapsedTick] = useState(0);
   const [cancellationRequestedByChat, setCancellationRequestedByChat] =
     useState<Record<string, boolean>>({});
   const [errorByChat, setErrorByChat] = useState<Record<string, string | null>>(
@@ -508,16 +524,6 @@ export function LinkedChatRail({
     ? (turnStartedAtByChat[activeChatId] ?? null)
     : null;
   const anyBusy = Object.values(busyByChat).some(Boolean);
-
-  // Elapsed clock only while the active chat is busy (visual only — not SR).
-  useEffect(() => {
-    if (!busy) return;
-    const id = window.setInterval(() => setElapsedTick((n) => n + 1), 200);
-    return () => window.clearInterval(id);
-  }, [busy]);
-  void elapsedTick;
-  const elapsedMs =
-    busy && turnStartedAt != null ? Math.max(0, Date.now() - turnStartedAt) : 0;
   const cancellationRequested = activeChatId
     ? (cancellationRequestedByChat[activeChatId] ?? false)
     : false;
@@ -1979,14 +1985,11 @@ export function LinkedChatRail({
                       ? "Working…"
                       : status || ""}
             </span>
-            {busy && hostPhase && !cancellationRequested ? (
-              <span
-                className="log-explorer__chat-elapsed"
-                data-testid="linked-chat-elapsed"
-                aria-hidden="true"
-              >
-                {formatLinkedElapsed(elapsedMs)}
-              </span>
+            {busy &&
+            hostPhase &&
+            !cancellationRequested &&
+            turnStartedAt != null ? (
+              <LinkedElapsed startedAt={turnStartedAt} />
             ) : null}
             {busy && !cancellationRequested ? (
               <span

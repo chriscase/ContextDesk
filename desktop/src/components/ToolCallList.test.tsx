@@ -92,4 +92,15 @@ describe("ToolCallList pending state", () => {
       }),
     ).toBe("failure");
   });
+
+  it("never downgrades an explicit host failure to a warning from its prose", () => {
+    expect(
+      toolCallVisualState({
+        id: "4",
+        name: "search_logs",
+        summary: "warning threshold reached before tool crashed",
+        ok: false,
+      }),
+    ).toBe("failure");
+  });
 });

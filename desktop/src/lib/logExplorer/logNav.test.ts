@@ -74,6 +74,28 @@ describe("logNav", () => {
     expect(cleaned.displayText.includes("log_nav")).toBe(false);
   });
 
+  it("preserves surrounding Markdown formatting and removes an empty JSON fence", () => {
+    const payload =
+      '{"type":"log_nav","corpusId":"c","sources":["a.log"],"label":"A"}';
+    const text = [
+      "Before  ",
+      "  indented code",
+      "",
+      "```json",
+      payload,
+      "```",
+      "",
+      "| A | B |",
+      "|---|---|",
+    ].join("\n");
+    const cleaned = extractAndCleanLogNav(text);
+    expect(cleaned.actions).toHaveLength(1);
+    expect(cleaned.displayText).toContain("Before  \n  indented code");
+    expect(cleaned.displayText).toContain("| A | B |\n|---|---|");
+    expect(cleaned.displayText).not.toContain("```json");
+    expect(cleaned.displayText).not.toContain("log_nav");
+  });
+
   it("accepts multiple payloads up to the action cap", () => {
     const chunks = Array.from(
       { length: LOG_NAV_MAX_ACTIONS + 2 },

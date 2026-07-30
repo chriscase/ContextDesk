@@ -71,10 +71,6 @@
   color: var(--text-faint);
 }
 
-.tool-row[data-ok="warning"] .tool-row__status {
-  color: var(--warn, var(--text-muted));
-}
-
 .tool-row__main {
   display: grid;
   grid-template-columns: 14px minmax(72px, max-content) 1fr 14px;

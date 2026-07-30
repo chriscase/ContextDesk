@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { IconAlert, IconCheck, IconTool, IconWarn } from "./icons";
+import { IconAlert, IconCheck, IconTool } from "./icons";
 
 export type ToolCallView = {
   id: string;
@@ -22,7 +22,6 @@ export type ToolCallVisualState =
   | "running"
   | "permission"
   | "success"
-  | "warning"
   | "failure";
 
 /** Map host tool fields to a distinct semantic UI state. */
@@ -31,11 +30,7 @@ export function toolCallVisualState(t: ToolCallView): ToolCallVisualState {
   // Older persisted sessions recorded "awaiting permission" as false.
   if (summary === "awaiting permission") return "permission";
   if (t.ok === true) return "success";
-  if (t.ok === false) {
-    // Explicit non-failure soft warnings (if host ever emits them).
-    if (summary.includes("warn") && !summary.includes("fail")) return "warning";
-    return "failure";
-  }
+  if (t.ok === false) return "failure";
   // ok undefined/null → in-flight, not a warning.
   return "running";
 }
@@ -43,7 +38,6 @@ export function toolCallVisualState(t: ToolCallView): ToolCallVisualState {
 function StatusIcon({ state }: { state: ToolCallVisualState }) {
   if (state === "success") return <IconCheck />;
   if (state === "failure") return <IconAlert />;
-  if (state === "warning") return <IconWarn />;
   // running + permission: neutral tool mark (never warning merely for in-flight).
   return <IconTool />;
 }
@@ -111,9 +105,7 @@ export function ToolCallList({
               ? "false"
               : state === "running"
                 ? "running"
-                : state === "warning"
-                  ? "warning"
-                  : "pending";
+                : "pending";
         const summaryText =
           t.summary ||
           (state === "failure"
