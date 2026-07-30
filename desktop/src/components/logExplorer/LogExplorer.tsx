@@ -1062,7 +1062,12 @@ export function LogExplorer({ corpusId }: Props) {
   const countRequestRef = useRef(0);
   const summaryRequestRef = useRef(0);
   const suppressionRequestRef = useRef(0);
+  const bookmarkLifecycleRef = useRef(0);
   const bookmarkRequestRef = useRef(0);
+  const bookmarkMutationOverlayRef = useRef<{
+    added: Map<string, LogBookmarkDto>;
+    deleted: Set<string>;
+  }>({ added: new Map(), deleted: new Set() });
   const bookmarkMetadataStartedRef = useRef(false);
   const investigationMetadataStartedRef = useRef(false);
   const investigationLoadRequestRef = useRef(0);
@@ -1608,7 +1613,16 @@ export function LogExplorer({ corpusId }: Props) {
       void hostLogListBookmarks(corpusId)
         .then((loadedBookmarks) => {
           if (bookmarkRequest !== bookmarkRequestRef.current) return;
-          setBookmarks(loadedBookmarks ?? []);
+          const overlay = bookmarkMutationOverlayRef.current;
+          const merged = new Map(
+            (loadedBookmarks ?? [])
+              .filter((bookmark) => !overlay.deleted.has(bookmark.id))
+              .map((bookmark) => [bookmark.id, bookmark]),
+          );
+          overlay.added.forEach((bookmark) =>
+            merged.set(bookmark.id, bookmark),
+          );
+          setBookmarks([...merged.values()]);
           setBookmarksLoadState("ready");
         })
         .catch((bookmarkError) => {
@@ -2026,7 +2040,12 @@ export function LogExplorer({ corpusId }: Props) {
   }, [clearDetail, corpusId]);
 
   useEffect(() => {
+    bookmarkLifecycleRef.current += 1;
     bookmarkMetadataStartedRef.current = false;
+    bookmarkMutationOverlayRef.current = {
+      added: new Map(),
+      deleted: new Set(),
+    };
     investigationMetadataStartedRef.current = false;
     summaryRequestRef.current += 1;
     suppressionRequestRef.current += 1;
@@ -2053,6 +2072,7 @@ export function LogExplorer({ corpusId }: Props) {
     setEvidencePreview(null);
     setFindingViewPreview(null);
     return () => {
+      bookmarkLifecycleRef.current += 1;
       summaryRequestRef.current += 1;
       suppressionRequestRef.current += 1;
       bookmarkRequestRef.current += 1;
@@ -3024,6 +3044,7 @@ export function LogExplorer({ corpusId }: Props) {
       setStatus(`Already bookmarked: ${existing.label}`);
       return;
     }
+    const bookmarkLifecycle = bookmarkLifecycleRef.current;
     try {
       const bm = await hostLogAddBookmark(corpusId, {
         seqFrom: from,
@@ -3036,6 +3057,9 @@ export function LogExplorer({ corpusId }: Props) {
               ? `seq ${from}–${to}`
               : `${seqs.length} selected events`,
       });
+      if (bookmarkLifecycle !== bookmarkLifecycleRef.current) return;
+      bookmarkMutationOverlayRef.current.deleted.delete(bm.id);
+      bookmarkMutationOverlayRef.current.added.set(bm.id, bm);
       setBookmarks((current) =>
         current.some((bookmark) => bookmark.id === bm.id)
           ? current
@@ -5973,13 +5997,27 @@ export function LogExplorer({ corpusId }: Props) {
                         type="button"
                         className="log-explorer__btn"
                         aria-label={`Delete bookmark ${b.label}`}
-                        onClick={() =>
-                          void hostLogDeleteBookmark(corpusId, b.id).then(() =>
+                        onClick={() => {
+                          const bookmarkLifecycle =
+                            bookmarkLifecycleRef.current;
+                          void hostLogDeleteBookmark(corpusId, b.id).then(() => {
+                            if (
+                              bookmarkLifecycle !==
+                              bookmarkLifecycleRef.current
+                            ) {
+                              return;
+                            }
+                            bookmarkMutationOverlayRef.current.added.delete(
+                              b.id,
+                            );
+                            bookmarkMutationOverlayRef.current.deleted.add(
+                              b.id,
+                            );
                             setBookmarks((all) =>
                               all.filter((x) => x.id !== b.id),
-                            ),
-                          )
-                        }
+                            );
+                          });
+                        }}
                       >
                         ×
                       </button>

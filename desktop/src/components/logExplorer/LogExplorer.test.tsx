@@ -3040,6 +3040,50 @@ describe("LogExplorer shell", () => {
     expect(screen.queryByText(/Jumped bookmark/i)).toBeNull();
   });
 
+  it("keeps a saved bookmark when an older list response resolves afterward", async () => {
+    const bookmarkPage = deferred<host.LogBookmarkDto[]>();
+    const bookmark: host.LogBookmarkDto = {
+      id: "bm-after-list",
+      label: "seq 1",
+      seqFrom: 1,
+      seqTo: 1,
+      eventRefs: [
+        {
+          corpusId: "c1",
+          seq: 1,
+          source: "api.log",
+          timestampHint: 1_700_000_000,
+          timeQualityHint: "wall",
+        },
+      ],
+      evidenceStatus: "verified",
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    vi.mocked(host.hostLogListBookmarks).mockReturnValue(bookmarkPage.promise);
+    vi.mocked(host.hostLogAddBookmark).mockResolvedValue(bookmark);
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByText("auth failure"));
+    await waitFor(() =>
+      expect(host.hostLogListBookmarks).toHaveBeenCalledWith("c1"),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Bookmark (B)" }));
+    await waitFor(() =>
+      expect(host.hostLogAddBookmark).toHaveBeenCalledTimes(1),
+    );
+    expect(await screen.findByText("Bookmarked seq 1")).toBeTruthy();
+
+    await act(async () => {
+      bookmarkPage.resolve([]);
+      await bookmarkPage.promise;
+    });
+    expect(
+      await screen.findByTestId("bookmark-activate-bm-after-list"),
+    ).toBeTruthy();
+  });
+
   it("saves and highlights an exact noncontiguous evidence set without intervening rows", async () => {
     const sharedTs = 1_700_000_100;
     const events: host.ExplorerEventDto[] = [
