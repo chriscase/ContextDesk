@@ -11504,6 +11504,32 @@ mod log_noise_candidate_host_tests {
         assert!(!command.contains("ensure_host("));
         assert!(!command.contains("LogCorpus::open"));
     }
+
+    /// #824 — SoftWrite ingest must not run DuckDB/analysis on the UI event loop.
+    #[test]
+    fn run_log_ingest_keeps_core_ingest_off_the_event_loop() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("async fn run_log_ingest(")
+            .expect("run_log_ingest");
+        let end = source[start..]
+            .find("\n#[tauri::command]")
+            .map(|offset| start + offset)
+            .expect("run_log_ingest boundary");
+        let body = &source[start..end];
+        assert!(
+            body.contains("tokio::task::spawn_blocking"),
+            "run_log_ingest must use spawn_blocking for trusted-core ingest"
+        );
+        assert!(
+            body.contains("ingest_path_with_policy_and_observer"),
+            "run_log_ingest must call the shipped core ingest path"
+        );
+        assert!(
+            !body.contains("LogCorpus::open("),
+            "run_log_ingest must not open DuckDB on the async host path"
+        );
+    }
 }
 
 #[cfg(test)]

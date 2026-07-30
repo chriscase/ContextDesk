@@ -82,6 +82,8 @@ export function LogTroubleshootingWizard({
     bytes_processed: p.bytes_processed,
     templates: p.templates,
     cancellable: p.cancellable,
+    elapsed_ms: p.elapsed_ms ?? null,
+    phase_elapsed_ms: p.phase_elapsed_ms ?? null,
   });
   const [corpusId, setCorpusId] = useState<string | null>(null);
   const [ingestReport, setIngestReport] = useState<LogIngestReportDto | null>(

@@ -115,8 +115,10 @@ pub enum ProcessProgressPhase {
     Redact,
     /// Writing events/templates to the event store.
     Store,
-    /// Embedding templates only.
+    /// Embedding templates only (optional; may be deferred).
     Embed,
+    /// Atomic publication of the staged corpus into the library (#824).
+    Publish,
     /// Reading source bytes (session context).
     Read,
     /// Cap / policy validation.
@@ -138,12 +140,13 @@ impl ProcessProgressPhase {
     pub fn label(self) -> &'static str {
         match self {
             Self::Starting => "Starting",
-            Self::Scan => "Scan",
-            Self::Parse => "Parse",
-            Self::Template => "Template",
+            Self::Scan => "Discover / read",
+            Self::Parse => "Parse / frame",
+            Self::Template => "Template analysis",
             Self::Redact => "Redact",
-            Self::Store => "Store",
-            Self::Embed => "Embed",
+            Self::Store => "Persist / index",
+            Self::Embed => "Optional embedding",
+            Self::Publish => "Publication",
             Self::Read => "Read",
             Self::Validate => "Validate",
             Self::Extract => "Extract",
@@ -176,6 +179,12 @@ pub struct ProcessProgress {
     pub templates: Option<u64>,
     /// Whether the host can still cancel cleanly.
     pub cancellable: bool,
+    /// Wall-clock milliseconds since this operation started (#824).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    /// Wall-clock milliseconds spent in the phase being left (when transitioning).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_elapsed_ms: Option<u64>,
 }
 
 impl ProcessProgress {
@@ -196,7 +205,21 @@ impl ProcessProgress {
             bytes_processed: None,
             templates: None,
             cancellable,
+            elapsed_ms: None,
+            phase_elapsed_ms: None,
         }
+    }
+
+    /// Attach total elapsed milliseconds since operation start.
+    pub fn with_elapsed_ms(mut self, elapsed_ms: u64) -> Self {
+        self.elapsed_ms = Some(elapsed_ms);
+        self
+    }
+
+    /// Attach duration of the previous phase (ms).
+    pub fn with_phase_elapsed_ms(mut self, phase_elapsed_ms: u64) -> Self {
+        self.phase_elapsed_ms = Some(phase_elapsed_ms);
+        self
     }
 
     /// Set fraction clamped to 0..=1.
@@ -373,5 +396,23 @@ mod tests {
         assert!(!f.is_cancelled());
         f.cancel();
         assert!(f.is_cancelled());
+    }
+
+    #[test]
+    fn publish_phase_and_elapsed_serialize_snake_case() {
+        let p = ProcessProgress::phase(
+            ProcessProgressKind::LogIngest,
+            ProcessProgressPhase::Publish,
+            "publishing corpus into the library (atomic)",
+            false,
+        )
+        .with_elapsed_ms(12_345)
+        .with_phase_elapsed_ms(40);
+        assert_eq!(ProcessProgressPhase::Publish.label(), "Publication");
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["phase"], "publish");
+        assert_eq!(v["elapsed_ms"], 12345);
+        assert_eq!(v["phase_elapsed_ms"], 40);
+        assert_eq!(v["cancellable"], false);
     }
 }

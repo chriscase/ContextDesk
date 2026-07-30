@@ -142,6 +142,31 @@ impl IngestStats {
     }
 }
 
+/// Measured wall-clock phase timings for one ingest (#824).
+///
+/// Values are one-machine observations, not a product SLA. Phases map to the
+/// issue language (discover/read, parse/frame, …) via progress labels.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestPhaseTimings {
+    /// Discover/scan + open/read inventory (ms).
+    pub discover_read_ms: u64,
+    /// Parse / frame logical records (ms).
+    pub parse_frame_ms: u64,
+    /// Drain template analysis + redact (ms).
+    pub template_analysis_ms: u64,
+    /// Persist events/templates to the event store (ms).
+    pub persist_index_ms: u64,
+    /// Optional embedding (0 when deferred or not requested) (ms).
+    pub optional_embedding_ms: u64,
+    /// Validate + atomic library publication (ms).
+    pub publication_ms: u64,
+    /// End-to-end wall time for the ingest operation (ms).
+    pub total_ms: u64,
+    /// True when optional embedding was deferred past first use.
+    pub embedding_deferred: bool,
+}
+
 /// Full ingest report.
 #[derive(Debug, Clone)]
 pub struct IngestReport {
@@ -155,6 +180,8 @@ pub struct IngestReport {
     pub top_templates: Vec<(u64, String, u64, u8)>,
     /// Persisted semantic-vector availability.
     pub embedding: CorpusEmbeddingStatus,
+    /// Phase wall-clock timings (#824); zeroed when not instrumented.
+    pub phase_timings: IngestPhaseTimings,
 }
 
 /// Ingest a file or directory into a new corpus under `cache_root`.
@@ -310,12 +337,129 @@ fn cancelled(cancel: Option<&CancelFlag>) -> bool {
     cancel.map(|c| c.is_cancelled()).unwrap_or(false)
 }
 
+/// Tracks wall-clock phase durations for truthful progress and scale proofs (#824).
+struct IngestProgressClock {
+    start: std::time::Instant,
+    phase_started: std::time::Instant,
+    current_phase: ProcessProgressPhase,
+    timings: IngestPhaseTimings,
+}
+
+impl IngestProgressClock {
+    fn new() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            start: now,
+            phase_started: now,
+            current_phase: ProcessProgressPhase::Starting,
+            timings: IngestPhaseTimings::default(),
+        }
+    }
+
+    fn stamp(&mut self, mut update: ProcessProgress) -> ProcessProgress {
+        let now = std::time::Instant::now();
+        if update.phase != self.current_phase {
+            let spent = now
+                .saturating_duration_since(self.phase_started)
+                .as_millis() as u64;
+            self.record_phase(self.current_phase, spent);
+            update.phase_elapsed_ms = Some(spent);
+            self.current_phase = update.phase;
+            self.phase_started = now;
+        }
+        let total = now.saturating_duration_since(self.start).as_millis() as u64;
+        update.elapsed_ms = Some(total);
+        self.timings.total_ms = total;
+        update
+    }
+
+    fn finish(&mut self) {
+        let now = std::time::Instant::now();
+        let spent = now
+            .saturating_duration_since(self.phase_started)
+            .as_millis() as u64;
+        self.record_phase(self.current_phase, spent);
+        self.timings.total_ms = now.saturating_duration_since(self.start).as_millis() as u64;
+        // Lock the clock so a subsequent terminal Completed emit does not
+        // double-count the final working phase (e.g. Publish).
+        self.current_phase = ProcessProgressPhase::Completed;
+        self.phase_started = now;
+    }
+
+    fn record_phase(&mut self, phase: ProcessProgressPhase, ms: u64) {
+        match phase {
+            ProcessProgressPhase::Starting | ProcessProgressPhase::Scan => {
+                self.timings.discover_read_ms = self.timings.discover_read_ms.saturating_add(ms);
+            }
+            ProcessProgressPhase::Parse => {
+                self.timings.parse_frame_ms = self.timings.parse_frame_ms.saturating_add(ms);
+            }
+            ProcessProgressPhase::Template | ProcessProgressPhase::Redact => {
+                self.timings.template_analysis_ms =
+                    self.timings.template_analysis_ms.saturating_add(ms);
+            }
+            ProcessProgressPhase::Store => {
+                self.timings.persist_index_ms = self.timings.persist_index_ms.saturating_add(ms);
+            }
+            ProcessProgressPhase::Embed => {
+                self.timings.optional_embedding_ms =
+                    self.timings.optional_embedding_ms.saturating_add(ms);
+            }
+            ProcessProgressPhase::Publish | ProcessProgressPhase::Validate => {
+                self.timings.publication_ms = self.timings.publication_ms.saturating_add(ms);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn emit(progress: &dyn ProcessProgressObserver, mut update: ProcessProgress) {
     if update.kind == ProcessProgressKind::LogIngest && update.phase != ProcessProgressPhase::Parse
     {
         update.fraction = None;
     }
     progress.progress(update);
+}
+
+/// Observer wrapper that stamps elapsed timings onto every progress update.
+///
+/// `Mutex` (not `RefCell`) because [`ProcessProgressObserver`] is `Sync`;
+/// ingest is single-threaded on the worker, so contention is not a concern.
+struct TimedIngestObserver<'a> {
+    inner: &'a dyn ProcessProgressObserver,
+    clock: std::sync::Mutex<IngestProgressClock>,
+}
+
+impl<'a> TimedIngestObserver<'a> {
+    fn new(inner: &'a dyn ProcessProgressObserver) -> Self {
+        Self {
+            inner,
+            clock: std::sync::Mutex::new(IngestProgressClock::new()),
+        }
+    }
+
+    fn finish_timings(&self, embedding_deferred: bool) -> IngestPhaseTimings {
+        let mut clock = self.clock.lock().expect("ingest progress clock");
+        clock.finish();
+        let mut timings = clock.timings.clone();
+        timings.embedding_deferred = embedding_deferred;
+        timings
+    }
+}
+
+impl ProcessProgressObserver for TimedIngestObserver<'_> {
+    fn progress(&self, update: ProcessProgress) {
+        let stamped = self
+            .clock
+            .lock()
+            .expect("ingest progress clock")
+            .stamp(update);
+        emit(self.inner, stamped);
+    }
+
+    fn log_ingest_evidence(&self, evidence: LogIngestEvidence) {
+        self.inner.log_ingest_evidence(evidence);
+    }
 }
 
 fn parse_file_fraction(completed_files: u64, total_files: u64) -> Option<f32> {
@@ -2142,6 +2286,8 @@ fn ingest_path_inner_with_limits_and_fault(
 ) -> CoreResult<IngestReport> {
     let kind = ProcessProgressKind::LogIngest;
     let source_label = progress_basename(path);
+    let timed = TimedIngestObserver::new(progress);
+    let progress = &timed;
 
     emit(
         progress,
@@ -2216,6 +2362,17 @@ fn ingest_path_inner_with_limits_and_fault(
             staged.write_managed_identity(identity)?;
         }
         check_ingest_fault(fault, IngestCheckpoint::BeforeValidation)?;
+        emit(
+            progress,
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Validate,
+                "validating staged corpus before publication",
+                true,
+            )
+            .with_lines(report.stats.lines)
+            .with_templates(report.stats.templates as u64),
+        );
         validate_staged_ingest(staging.cache_root(), &report)?;
         check_ingest_fault(fault, IngestCheckpoint::BeforePublish)?;
         if cancelled(cancel) {
@@ -2224,22 +2381,42 @@ fn ingest_path_inner_with_limits_and_fault(
                 ProcessProgress::phase(
                     kind,
                     ProcessProgressPhase::Cancelled,
-                    "ingest cancelled",
+                    "ingest cancelled before publication",
                     false,
                 ),
             );
             return Err(CoreError::Cancelled);
         }
+        emit(
+            progress,
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Publish,
+                "publishing corpus into the library (atomic)",
+                false,
+            )
+            .with_lines(report.stats.lines)
+            .with_templates(report.stats.templates as u64),
+        );
         staging.publish(cache_root, &report.corpus_id)?;
         Ok(report)
     })();
     let cleanup_result = staging.cleanup_checked();
-    let (report, cleanup_deferred) = reconcile_ingest_cleanup(ingest_result, cleanup_result)?;
+    let (mut report, cleanup_deferred) = reconcile_ingest_cleanup(ingest_result, cleanup_result)?;
+    let embedding_deferred = report.embedding.state == EmbeddingState::Deferred;
+    report.phase_timings = timed.finish_timings(embedding_deferred);
+    let defer_note = if embedding_deferred {
+        "; optional embedding deferred (keyword/structured first use ready)"
+    } else {
+        ""
+    };
     let completion_message = format!(
-        "ingested {} events → {} learned templates ({:.1} avg. events/template){}",
+        "ingested {} events → {} learned templates ({:.1} avg. events/template) in {} ms{}{}",
         report.stats.lines,
         report.stats.templates,
         report.stats.reduction_ratio,
+        report.phase_timings.total_ms,
+        defer_note,
         if cleanup_deferred {
             "; private staging cleanup deferred"
         } else {
@@ -2781,6 +2958,7 @@ fn ingest_path_into_cache(
         confidence,
         top_templates: top,
         embedding,
+        phase_timings: IngestPhaseTimings::default(),
     })
 }
 
@@ -5287,6 +5465,14 @@ mod tests {
             phases.contains(&ProcessProgressPhase::Embed),
             "phases={phases:?}"
         );
+        assert!(
+            phases.contains(&ProcessProgressPhase::Validate),
+            "phases={phases:?}"
+        );
+        assert!(
+            phases.contains(&ProcessProgressPhase::Publish),
+            "publish phase required for atomic library handoff (#824): {phases:?}"
+        );
         assert_eq!(
             phases.last().copied(),
             Some(ProcessProgressPhase::Completed)
@@ -5296,6 +5482,11 @@ mod tests {
         assert!(
             completed.message.contains("avg. events/template"),
             "{}",
+            completed.message
+        );
+        assert!(
+            completed.message.contains(" ms"),
+            "completion must report wall-clock total (#824): {}",
             completed.message
         );
         assert!(
@@ -5315,7 +5506,349 @@ mod tests {
                 "unexpected secret token: {}",
                 u.message
             );
+            assert!(
+                u.elapsed_ms.is_some(),
+                "every progress update must carry elapsed_ms (#824): {u:?}"
+            );
         }
+        // Elapsed is monotonic non-decreasing across the operation.
+        let elapsed: Vec<u64> = updates.iter().filter_map(|u| u.elapsed_ms).collect();
+        assert!(
+            elapsed.windows(2).all(|w| w[0] <= w[1]),
+            "elapsed={elapsed:?}"
+        );
+        assert!(
+            report.phase_timings.total_ms > 0,
+            "phase timings must be instrumented: {:?}",
+            report.phase_timings
+        );
+        assert!(
+            report.phase_timings.publication_ms > 0
+                || report.phase_timings.persist_index_ms > 0
+                || report.phase_timings.parse_frame_ms > 0,
+            "at least one working phase must accumulate wall time: {:?}",
+            report.phase_timings
+        );
+        assert!(!report.phase_timings.embedding_deferred);
+    }
+
+    /// #824 — optional embedding deferred past first use is disclosed, not claimed complete.
+    #[test]
+    fn ingest_defers_embedding_and_discloses_in_progress_and_timings() {
+        use crate::log_analysis::LogEmbedPolicy;
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let mut f = std::fs::File::create(logs.join("app.log")).unwrap();
+        for i in 0..40 {
+            writeln!(f, "info event-{i} payload").unwrap();
+        }
+        let backend = ConceptEmbedBackend::new(32);
+        let mut policy = LogEmbedPolicy::local_default();
+        policy.defer_above_source_bytes = Some(1);
+        let recorder = RecordingProcessProgress::default();
+        let report = ingest_path_with_policy_and_observer(
+            dir.path(),
+            &logs,
+            "defer-embed",
+            &policy,
+            Some(std::sync::Arc::new(backend)),
+            &recorder,
+            None,
+        )
+        .unwrap();
+        assert_eq!(report.embedding.state, EmbeddingState::Deferred);
+        assert!(report.phase_timings.embedding_deferred);
+        assert_eq!(
+            report.phase_timings.optional_embedding_ms, 0,
+            "deferred embed must not burn wall time as if it ran"
+        );
+        {
+            let updates = recorder.updates.lock().unwrap();
+            let completed = updates.last().expect("completed");
+            assert!(
+                completed.message.contains("deferred") || completed.message.contains("first use"),
+                "must disclose deferred optional work: {}",
+                completed.message
+            );
+        }
+        let phases = recorder.phases();
+        assert!(
+            !phases.contains(&ProcessProgressPhase::Embed),
+            "optional embed phase must not appear when deferred: {phases:?}"
+        );
+        assert!(
+            phases.contains(&ProcessProgressPhase::Publish),
+            "publication still required when embed deferred"
+        );
+        // Keyword/structured first use: corpus is listed and queryable.
+        assert!(!LogCorpus::list_ids(dir.path()).unwrap().is_empty());
+        let corpus = LogCorpus::open(dir.path(), &report.corpus_id).unwrap();
+        assert!(corpus.event_count() >= 40);
+    }
+
+    /// #824 — cancel before publish leaves no library entry (atomicity).
+    #[test]
+    fn ingest_cancel_during_parse_does_not_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let mut f = std::fs::File::create(logs.join("bulk.log")).unwrap();
+        for i in 0..8_000 {
+            writeln!(f, "warn bulk line {i} padding-padding").unwrap();
+        }
+        let flag = CancelFlag::new();
+        struct CancelMidParse {
+            flag: CancelFlag,
+            rec: RecordingProcessProgress,
+        }
+        impl ProcessProgressObserver for CancelMidParse {
+            fn progress(&self, update: ProcessProgress) {
+                if update.phase == ProcessProgressPhase::Parse
+                    && update.lines_processed.unwrap_or(0) >= 2_000
+                {
+                    self.flag.cancel();
+                }
+                self.rec.progress(update);
+            }
+        }
+        let observer = CancelMidParse {
+            flag: flag.clone(),
+            rec: RecordingProcessProgress::default(),
+        };
+        let err = ingest_path_with_observer(
+            dir.path(),
+            &logs,
+            "cancel-mid-parse",
+            None,
+            "none",
+            &observer,
+            Some(&flag),
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("cancelled"), "{err}");
+        assert!(LogCorpus::list_ids(dir.path()).unwrap().is_empty());
+        assert_no_ingest_staging(dir.path());
+        assert!(observer
+            .rec
+            .phases()
+            .contains(&ProcessProgressPhase::Cancelled));
+        assert!(
+            !observer
+                .rec
+                .phases()
+                .contains(&ProcessProgressPhase::Publish),
+            "must not reach publish after cancel"
+        );
+    }
+
+    /// #824 — deterministic 25k scale proof with phase timings (one-machine observation).
+    #[test]
+    fn scale_proof_25k_records_phase_timings_and_first_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let path = logs.join("scale-25k.log");
+        let mut f = std::fs::File::create(&path).unwrap();
+        const N: usize = 25_000;
+        for i in 0..N {
+            // Mix a few templates so template analysis is non-trivial.
+            match i % 7 {
+                0 => writeln!(f, "ERROR connection refused host-{i}").unwrap(),
+                1 => writeln!(f, "WARN retry timeout attempt={}", i % 5).unwrap(),
+                2 => writeln!(f, "INFO request completed path=/api/v1/items id={i}").unwrap(),
+                _ => writeln!(f, "DEBUG heartbeat tick={i}").unwrap(),
+            }
+        }
+        drop(f);
+        let recorder = RecordingProcessProgress::default();
+        let started = std::time::Instant::now();
+        let report = ingest_path_with_observer(
+            dir.path(),
+            &logs,
+            "scale-25k",
+            None,
+            "none",
+            &recorder,
+            None,
+        )
+        .unwrap();
+        let wall_ms = started.elapsed().as_millis() as u64;
+        assert_eq!(report.stats.lines as usize, N);
+        assert!(report.phase_timings.total_ms > 0);
+        // Wall clock and instrumented total should be in the same ballpark.
+        assert!(
+            report.phase_timings.total_ms <= wall_ms.saturating_add(2_000),
+            "instrumented total {} vs wall {}",
+            report.phase_timings.total_ms,
+            wall_ms
+        );
+        let phases = recorder.phases();
+        for required in [
+            ProcessProgressPhase::Scan,
+            ProcessProgressPhase::Parse,
+            ProcessProgressPhase::Store,
+            ProcessProgressPhase::Publish,
+            ProcessProgressPhase::Completed,
+        ] {
+            assert!(
+                phases.contains(&required),
+                "missing {required:?} in {phases:?}"
+            );
+        }
+        let corpus = LogCorpus::open(dir.path(), &report.corpus_id).unwrap();
+        let page = crate::log_analysis::query::query_events(
+            &corpus,
+            &crate::log_analysis::query::EventQuery {
+                limit: 200,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(page.events.len(), 200, "bounded first page after publish");
+        eprintln!(
+            "PASS scale-25k one-machine observation (not a universal SLA): events={} total_ms={} discover_read_ms={} parse_frame_ms={} template_analysis_ms={} persist_index_ms={} optional_embedding_ms={} publication_ms={} wall_ms={} templates={} embedding_deferred={}",
+            report.stats.lines,
+            report.phase_timings.total_ms,
+            report.phase_timings.discover_read_ms,
+            report.phase_timings.parse_frame_ms,
+            report.phase_timings.template_analysis_ms,
+            report.phase_timings.persist_index_ms,
+            report.phase_timings.optional_embedding_ms,
+            report.phase_timings.publication_ms,
+            wall_ms,
+            report.stats.templates,
+            report.phase_timings.embedding_deferred
+        );
+    }
+
+    /// #824 — 100k scale proof (default suite).
+    #[test]
+    fn scale_proof_100k_records_phase_timings_and_first_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let path = logs.join("scale-100k.log");
+        let mut f = std::fs::File::create(&path).unwrap();
+        const N: usize = 100_000;
+        for i in 0..N {
+            match i % 11 {
+                0 => writeln!(f, "ERROR connection refused host-{i}").unwrap(),
+                1 => writeln!(f, "WARN retry timeout attempt={}", i % 5).unwrap(),
+                2 => writeln!(f, "INFO request completed path=/api/v1/items id={i}").unwrap(),
+                3 => writeln!(f, "ERROR auth failed user=u{i}").unwrap(),
+                _ => writeln!(f, "DEBUG heartbeat tick={i}").unwrap(),
+            }
+        }
+        drop(f);
+        let recorder = RecordingProcessProgress::default();
+        let started = std::time::Instant::now();
+        let report = ingest_path_with_observer(
+            dir.path(),
+            &logs,
+            "scale-100k",
+            None,
+            "none",
+            &recorder,
+            None,
+        )
+        .unwrap();
+        let wall_ms = started.elapsed().as_millis() as u64;
+        assert_eq!(report.stats.lines as usize, N);
+        assert!(report.phase_timings.total_ms > 0);
+        assert!(recorder.phases().contains(&ProcessProgressPhase::Publish));
+        let corpus = LogCorpus::open(dir.path(), &report.corpus_id).unwrap();
+        let page = crate::log_analysis::query::query_events(
+            &corpus,
+            &crate::log_analysis::query::EventQuery {
+                limit: 200,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(page.events.len(), 200);
+        // Same-machine regression budget (one-machine observation, not SLA):
+        // keyword-first-use path without embed should complete under 180s on
+        // developer hardware; tighten only after establishing a new baseline.
+        assert!(
+            wall_ms < 180_000,
+            "100k wall_ms={wall_ms} exceeded same-machine budget (180s); investigate regression"
+        );
+        eprintln!(
+            "PASS scale-100k one-machine observation (not a universal SLA): events={} total_ms={} discover_read_ms={} parse_frame_ms={} template_analysis_ms={} persist_index_ms={} optional_embedding_ms={} publication_ms={} wall_ms={} templates={}",
+            report.stats.lines,
+            report.phase_timings.total_ms,
+            report.phase_timings.discover_read_ms,
+            report.phase_timings.parse_frame_ms,
+            report.phase_timings.template_analysis_ms,
+            report.phase_timings.persist_index_ms,
+            report.phase_timings.optional_embedding_ms,
+            report.phase_timings.publication_ms,
+            wall_ms,
+            report.stats.templates
+        );
+    }
+
+    /// #824 — 250k scale proof (ignored by default; run explicitly for handoff timings).
+    #[test]
+    #[ignore = "long-running 250k scale; run with --ignored for #824 handoff timings"]
+    fn scale_proof_250k_records_phase_timings_and_first_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let path = logs.join("scale-250k.log");
+        let mut f = std::fs::File::create(&path).unwrap();
+        const N: usize = 250_000;
+        for i in 0..N {
+            match i % 13 {
+                0 => writeln!(f, "ERROR connection refused host-{i}").unwrap(),
+                1 => writeln!(f, "WARN retry timeout attempt={}", i % 5).unwrap(),
+                2 => writeln!(f, "INFO request completed path=/api/v1/items id={i}").unwrap(),
+                3 => writeln!(f, "ERROR auth failed user=u{i}").unwrap(),
+                4 => writeln!(f, "WARN slow query ms={}", 100 + (i % 50)).unwrap(),
+                _ => writeln!(f, "DEBUG heartbeat tick={i}").unwrap(),
+            }
+        }
+        drop(f);
+        let recorder = RecordingProcessProgress::default();
+        let started = std::time::Instant::now();
+        let report = ingest_path_with_observer(
+            dir.path(),
+            &logs,
+            "scale-250k",
+            None,
+            "none",
+            &recorder,
+            None,
+        )
+        .unwrap();
+        let wall_ms = started.elapsed().as_millis() as u64;
+        assert_eq!(report.stats.lines as usize, N);
+        assert!(report.phase_timings.total_ms > 0);
+        assert!(recorder.phases().contains(&ProcessProgressPhase::Publish));
+        let corpus = LogCorpus::open(dir.path(), &report.corpus_id).unwrap();
+        let page = crate::log_analysis::query::query_events(
+            &corpus,
+            &crate::log_analysis::query::EventQuery {
+                limit: 200,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(page.events.len(), 200);
+        eprintln!(
+            "PASS scale-250k one-machine observation (not a universal SLA): events={} total_ms={} discover_read_ms={} parse_frame_ms={} template_analysis_ms={} persist_index_ms={} optional_embedding_ms={} publication_ms={} wall_ms={} templates={}",
+            report.stats.lines,
+            report.phase_timings.total_ms,
+            report.phase_timings.discover_read_ms,
+            report.phase_timings.parse_frame_ms,
+            report.phase_timings.template_analysis_ms,
+            report.phase_timings.persist_index_ms,
+            report.phase_timings.optional_embedding_ms,
+            report.phase_timings.publication_ms,
+            wall_ms,
+            report.stats.templates
+        );
     }
 
     #[test]

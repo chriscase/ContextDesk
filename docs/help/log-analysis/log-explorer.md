@@ -514,9 +514,18 @@ one-machine observations, not universal claims. Full generator docs:
 | Session context pack  | max 200 files / 50 MiB           | Chat attachments only — not huge dumps |
 
 Cancel an in-progress SoftWrite with **Cancel ingest** on the progress panel.
-Keyword-only and deferred corpora remain searchable. Use **Re-analyze locally…**
+The progress panel shows the current phase (discover/read → parse/frame →
+template analysis → persist/index → optional embedding → publication), wall-clock
+**Elapsed** time, and whether cancel is still available. Cancel or failure before
+**Publication** never lists a partial corpus; source files are left intact.
+Keyword-only and deferred corpora remain searchable after publication when
+embedding was skipped or deferred (the completion message states that keyword/
+structured first use is ready). Use **Re-analyze locally…**
 from the Logs overview to build template vectors with progress and cancellation;
 the Explorer then labels semantic search available.
+
+Phase timings and 25k/100k/250k import numbers are **one-machine observations**
+used for same-machine regression checks—not a product SLA.
 
 ## Bookmarks and packages
 

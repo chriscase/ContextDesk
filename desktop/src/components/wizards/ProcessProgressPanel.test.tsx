@@ -4,6 +4,7 @@ import { ProcessProgressPanel } from "./ProcessProgressPanel";
 import {
   LOG_INGEST_PIPELINE,
   SESSION_IMPORT_PIPELINE,
+  formatElapsedMs,
   phaseLabel,
   type ProcessProgressDto,
 } from "./types";
@@ -39,6 +40,30 @@ describe("ProcessProgressPanel", () => {
   it("includes the session import extract phase", () => {
     expect(SESSION_IMPORT_PIPELINE).toContain("extract");
     expect(phaseLabel("extract")).toBe("Extract");
+  });
+
+  it("includes publication after optional embedding for log ingest (#824)", () => {
+    expect(LOG_INGEST_PIPELINE).toContain("publish");
+    expect(LOG_INGEST_PIPELINE.indexOf("publish")).toBeGreaterThan(
+      LOG_INGEST_PIPELINE.indexOf("embed"),
+    );
+    expect(phaseLabel("publish")).toBe("Publication");
+    expect(phaseLabel("scan")).toBe("Discover / read");
+    expect(phaseLabel("embed")).toBe("Optional embedding");
+  });
+
+  it("shows wall-clock elapsed when the host reports it (#824)", () => {
+    render(
+      <ProcessProgressPanel
+        progress={progress({ elapsed_ms: 3_450, phase: "store" })}
+      />,
+    );
+    expect(screen.getByTestId("process-progress-elapsed").textContent).toBe(
+      "3.5 s",
+    );
+    expect(formatElapsedMs(850)).toBe("850 ms");
+    expect(formatElapsedMs(12_450)).toBe("12 s");
+    expect(formatElapsedMs(null)).toBeNull();
   });
 
   it("shows only a finite host-reported fraction as determinate progress", () => {
@@ -159,7 +184,7 @@ describe("ProcessProgressPanel", () => {
     );
     const status = screen.getByRole("status");
 
-    expect(status.textContent).toBe("Current phase: Parse");
+    expect(status.textContent).toBe("Current phase: Parse / frame");
     expect(status.textContent).not.toContain("file 1");
 
     rerender(
@@ -171,7 +196,7 @@ describe("ProcessProgressPanel", () => {
         })}
       />,
     );
-    expect(status.textContent).toBe("Current phase: Parse");
+    expect(status.textContent).toBe("Current phase: Parse / frame");
     expect(status.textContent).not.toContain("file 2");
 
     rerender(
@@ -183,7 +208,7 @@ describe("ProcessProgressPanel", () => {
         })}
       />,
     );
-    expect(status.textContent).toBe("Current phase: Store");
+    expect(status.textContent).toBe("Current phase: Persist / index");
   });
 
   it("offers cancellation only while the host declares the phase cancellable", () => {

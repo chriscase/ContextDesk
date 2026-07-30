@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import {
   LOG_INGEST_PIPELINE,
   SESSION_IMPORT_PIPELINE,
+  formatElapsedMs,
   phaseLabel,
   type ProcessProgressDto,
   type ProcessProgressPhase,
@@ -132,6 +133,14 @@ export function ProcessProgressPanel({
 
       {progress ? (
         <dl className="process-progress__stats">
+          {formatElapsedMs(progress.elapsed_ms) != null ? (
+            <>
+              <dt>Elapsed</dt>
+              <dd data-testid="process-progress-elapsed">
+                {formatElapsedMs(progress.elapsed_ms)}
+              </dd>
+            </>
+          ) : null}
           {progress.lines_processed != null ? (
             <>
               <dt>Lines</dt>

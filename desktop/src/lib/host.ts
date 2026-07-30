@@ -2070,7 +2070,7 @@ export async function hostCancelLogReanalysis(): Promise<boolean> {
   return invoke<boolean>("cancel_log_reanalysis");
 }
 
-/** Multi-phase process progress (#445) — redacted; no full home paths. */
+/** Multi-phase process progress (#445 / #824) — redacted; no full home paths. */
 export type ProcessProgressDto = {
   kind: "log_ingest" | "session_context_import";
   phase: string;
@@ -2081,6 +2081,10 @@ export type ProcessProgressDto = {
   bytes_processed: number | null;
   templates: number | null;
   cancellable: boolean;
+  /** Wall-clock ms since operation start (#824). */
+  elapsed_ms?: number | null;
+  /** Wall-clock ms of previous phase when transitioning (#824). */
+  phase_elapsed_ms?: number | null;
 };
 
 export async function hostListenProcessProgress(
