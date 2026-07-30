@@ -77,7 +77,7 @@ import {
 import {
   classifyBreakpoint,
   emptyFilters,
-  formatCanonicalUtc,
+  formatEventTimeTitle,
   leastReliableTimeQuality,
   timeQualityLabel,
   type Breakpoint,
@@ -4549,12 +4549,19 @@ export function LogExplorer({ corpusId }: Props) {
     }
     const original =
       detailOriginal.status === "loaded" ? detailOriginal.result : null;
+    const formattedTime = formatEventTimeTitle(
+      detail.ts,
+      detail.timeQuality,
+    );
+    const sourceLocalTime = detail.unresolvedLocalTimestamp
+      ? `\tsource-local ${detail.unresolvedLocalTimestamp} (timezone unresolved)`
+      : "";
     const text =
       detailRepresentation === "original"
         ? original?.state === "available"
           ? original.text
           : null
-        : `${detail.seq}\t${formatCanonicalUtc(detail.ts)}\t${detail.level}\t${detail.source}\t${detail.message}`;
+        : `${detail.seq}\t${formattedTime}${sourceLocalTime}\t${detail.level}\t${detail.source}\t${detail.message}`;
     if (text == null) return;
     try {
       await navigator.clipboard.writeText(text);
@@ -6585,8 +6592,36 @@ export function LogExplorer({ corpusId }: Props) {
                     <div>
                       <dt>Time</dt>
                       <dd>
-                        {formatCanonicalUtc(detail.ts)} ·{" "}
-                        {timeQualityLabel(detail.timeQuality)} · UTC
+                        {formatEventTimeTitle(
+                          detail.ts,
+                          detail.timeQuality,
+                        )}
+                        {detail.timeQuality === "order_only" ? (
+                          <span className="log-explorer__detail-time-guidance">
+                            {detail.unresolvedLocalTimestamp ? (
+                              <>
+                                Source timestamp{" "}
+                                {detail.unresolvedLocalTimestamp}; timezone
+                                unresolved. Resolve the source timezone in Logs
+                                → Overview → Time interpretation to enable
+                                timeline alignment.
+                              </>
+                            ) : detail.timestampProvenance ===
+                              "legacy_unknown" ? (
+                              <>
+                                This legacy event predates retained timestamp
+                                provenance and cannot be safely upgraded.
+                                Re-import the original log files with the current
+                                build.
+                              </>
+                            ) : (
+                              <>
+                                The source did not provide usable calendar time;
+                                this event can only be ordered by sequence.
+                              </>
+                            )}
+                          </span>
+                        ) : null}
                       </dd>
                     </div>
                     <div>

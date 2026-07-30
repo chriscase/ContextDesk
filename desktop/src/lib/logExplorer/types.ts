@@ -138,7 +138,7 @@ export function formatEventTime(
   opts?: { minTs?: number; maxTs?: number },
 ): string {
   if (!Number.isFinite(ts)) return "invalid time";
-  if (quality === "order_only" || ts < 946_684_800) {
+  if (quality === "order_only") {
     return `ord ${ts}`;
   }
   if (quality === "mixed" && ts < 946_684_800) {
@@ -176,7 +176,10 @@ export function formatEventTime(
 /** Accessible full timestamp title including quality. */
 export function formatEventTimeTitle(ts: number, quality: TimeQuality): string {
   if (!Number.isFinite(ts)) return "invalid timestamp (not calendar time)";
-  if (quality === "order_only" || ts < 946_684_800) {
+  if (
+    quality === "order_only" ||
+    (quality === "mixed" && ts < 946_684_800)
+  ) {
     return `order-only seq-time ${ts} (not calendar time)`;
   }
   return `${formatCanonicalUtc(ts)} · ${timeQualityLabel(quality)} · UTC`;

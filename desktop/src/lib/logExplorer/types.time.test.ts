@@ -55,6 +55,13 @@ describe("adaptive event time (#535)", () => {
     expect(formatEventTimeTitle(42, "order_only")).toContain("not calendar");
   });
 
+  it("uses explicit wall-clock provenance rather than numeric magnitude", () => {
+    expect(formatEventTime(42, "wall")).toBe("1970-01-01 00:00:42Z");
+    const title = formatEventTimeTitle(42, "wall");
+    expect(title).toContain("1970-01-01 00:00:42.000Z");
+    expect(title).toContain("wall clock");
+  });
+
   it("exposes full canonical UTC in titles", () => {
     const title = formatEventTimeTitle(day, "wall");
     expect(title).toContain(formatCanonicalUtc(day));
