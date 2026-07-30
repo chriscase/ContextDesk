@@ -2642,6 +2642,14 @@
   overflow-wrap: anywhere;
 }
 
+.log-explorer__detail-time-guidance {
+  color: var(--fg-muted, #9aa0a6);
+  display: block;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  margin-top: 0.25rem;
+}
+
 .log-explorer__detail-message {
   margin: 0.55rem 0 0;
   overflow: auto;

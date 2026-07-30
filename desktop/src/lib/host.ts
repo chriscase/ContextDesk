@@ -2366,6 +2366,14 @@ export type ExplorerEventDto = {
   seq: number;
   ts: number;
   timeQuality: TimeQuality;
+  /** Immutable parser evidence; legacy_unknown means an older corpus cannot prove the numeric ts. */
+  timestampProvenance?:
+    | "explicit_wall_clock"
+    | "unresolved_local"
+    | "order_only"
+    | "legacy_unknown";
+  /** Exact source-local timestamp retained while an offsetless event awaits a timezone. */
+  unresolvedLocalTimestamp?: string | null;
   level: string;
   service: string | null;
   host: string | null;

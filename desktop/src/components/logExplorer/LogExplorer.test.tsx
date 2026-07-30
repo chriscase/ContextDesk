@@ -2178,6 +2178,111 @@ describe("LogExplorer shell", () => {
     expect(host.hostLogQueryEventOriginal).toHaveBeenCalledTimes(1);
   });
 
+  it("presents and copies an unresolved JBoss timestamp without fabricating 1970 UTC", async () => {
+    const page = defaultEventPage();
+    page.timeQuality = "order_only";
+    page.events = [
+      {
+        ...page.events[0]!,
+        seq: 58_241,
+        ts: 58_241,
+        timeQuality: "order_only",
+        unresolvedLocalTimestamp: "2021-03-05 02:53:53,654",
+        message:
+          "[org.jboss.remoting.remote.connection] (webworker I/O-175) JBREM000200: Remote connection failed",
+        source: "server.log",
+      },
+    ];
+    page.totalMatched = 1;
+    vi.mocked(host.hostLogQueryEvents).mockResolvedValue(page);
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: { "server.log": 1 },
+      levels: { error: 1 },
+      services: { api: 1 },
+      hosts: {},
+      timeQuality: "order_only",
+    });
+    const writeText = vi.fn(async (_text: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(
+      await screen.findByText(/JBREM000200: Remote connection failed/),
+    );
+
+    const inspector = await screen.findByTestId("log-explorer-detail");
+    const metadata = within(inspector).getByTestId("detail-metadata");
+    expect(metadata.textContent).toContain(
+      "order-only seq-time 58241 (not calendar time)",
+    );
+    expect(metadata.textContent).toContain(
+      "Source timestamp 2021-03-05 02:53:53,654; timezone unresolved.",
+    );
+    expect(metadata.textContent).toContain(
+      "Logs → Overview → Time interpretation",
+    );
+    expect(metadata.textContent).not.toContain("1970");
+    expect(metadata.textContent).not.toContain("· UTC");
+
+    fireEvent.click(within(inspector).getByTestId("detail-copy"));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    const copied = String(writeText.mock.calls[0]?.[0]);
+    expect(copied).toContain(
+      "order-only seq-time 58241 (not calendar time)",
+    );
+    expect(copied).toContain(
+      "source-local 2021-03-05 02:53:53,654 (timezone unresolved)",
+    );
+    expect(copied).not.toContain("1970");
+  });
+
+  it("tells legacy corpus users to re-import instead of offering unusable timezone resolution", async () => {
+    const page = defaultEventPage();
+    page.timeQuality = "order_only";
+    page.events = [
+      {
+        ...page.events[0]!,
+        seq: 1_735_732_819,
+        ts: 1_735_732_819,
+        timeQuality: "order_only",
+        timestampProvenance: "legacy_unknown",
+        message: "legacy event without retained original",
+      },
+    ];
+    page.totalMatched = 1;
+    vi.mocked(host.hostLogQueryEvents).mockResolvedValue(page);
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: { "api.log": 1 },
+      levels: { error: 1 },
+      services: { api: 1 },
+      hosts: {},
+      timeQuality: "order_only",
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(
+      await screen.findByText("legacy event without retained original"),
+    );
+
+    const metadata = within(
+      await screen.findByTestId("log-explorer-detail"),
+    ).getByTestId("detail-metadata");
+    expect(metadata.textContent).toContain(
+      "order-only seq-time 1735732819 (not calendar time)",
+    );
+    expect(metadata.textContent).toContain(
+      "legacy event predates retained timestamp provenance",
+    );
+    expect(metadata.textContent).toContain(
+      "Re-import the original log files with the current build.",
+    );
+    expect(metadata.textContent).not.toContain("1970");
+    expect(metadata.textContent).not.toContain("Time interpretation");
+  });
+
   it("shows honest unavailable and retryable error states without inventing original text", async () => {
     vi.mocked(host.hostLogQueryEventOriginal)
       .mockRejectedValueOnce(new Error("event store unavailable"))
