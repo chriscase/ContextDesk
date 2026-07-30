@@ -9361,13 +9361,14 @@ fn load_active_log_investigation_at(
     handles: &LogCorpusHandleCache,
     cache: &std::path::Path,
     corpus_id: &str,
+    noise_lens: cd_core::investigations::InvestigationNoiseLens,
 ) -> Result<Option<cd_core::investigations::ResolvedInvestigationDocument>, String> {
     let Some(summary) = active_investigation_for_corpus(store, corpus_id)? else {
         return Ok(None);
     };
     let corpus = handles.open(cache, corpus_id)?;
     store
-        .load(&summary.id, &corpus)
+        .load_with_policy_lens(&summary.id, &corpus, noise_lens)
         .map(Some)
         .map_err(|e| e.to_string())
 }
@@ -9376,12 +9377,13 @@ fn load_active_log_investigation_at(
 async fn log_load_active_investigation(
     state: State<'_, AppState>,
     corpus_id: String,
+    noise_lens: cd_core::investigations::InvestigationNoiseLens,
 ) -> Result<Option<cd_core::investigations::ResolvedInvestigationDocument>, String> {
     let store = investigation_store(&state)?;
     let cache = log_cache_dir(&state)?;
     let handles = Arc::clone(&state.log_corpus_handles);
     tokio::task::spawn_blocking(move || {
-        load_active_log_investigation_at(&store, &handles, &cache, &corpus_id)
+        load_active_log_investigation_at(&store, &handles, &cache, &corpus_id, noise_lens)
     })
     .await
     .map_err(|error| format!("log investigation task join: {error}"))?
@@ -9395,6 +9397,7 @@ struct LogAddInvestigationEvidenceArgs {
     expected_revision: Option<u64>,
     title: String,
     event_refs: Vec<cd_core::log_analysis::BookmarkEventRef>,
+    noise_lens: cd_core::investigations::InvestigationNoiseLens,
 }
 
 fn investigation_mutation_target(
@@ -9440,7 +9443,7 @@ fn log_add_investigation_evidence(
         args.expected_revision,
     )?;
 
-    store
+    let updated = store
         .add_exact_evidence(
             &investigation_id,
             expected_revision,
@@ -9448,6 +9451,9 @@ fn log_add_investigation_evidence(
             &corpus,
             args.event_refs,
         )
+        .map_err(|e| e.to_string())?;
+    store
+        .load_with_policy_lens(&updated.document.id, &corpus, args.noise_lens)
         .map_err(|e| e.to_string())
 }
 
@@ -9462,6 +9468,7 @@ struct LogAddInvestigationFindingArgs {
     why_it_matters: String,
     event_refs: Vec<cd_core::log_analysis::BookmarkEventRef>,
     view_recipe: Option<cd_core::investigations::FindingViewRecipe>,
+    noise_lens: cd_core::investigations::InvestigationNoiseLens,
 }
 
 /// Atomically save exact selected identities and a human-authored finding.
@@ -9485,11 +9492,15 @@ fn log_add_investigation_finding(
         args.expected_revision,
     )?;
 
+    let binding =
+        cd_core::investigations::InvestigationPolicyBinding::capture(&corpus, args.noise_lens)
+            .map_err(|e| e.to_string())?;
     store
-        .add_human_finding(
+        .add_human_finding_bound(
             &investigation_id,
             expected_revision,
             &corpus,
+            binding,
             cd_core::investigations::AddFindingInput {
                 kind: args.kind,
                 title: args.title,
@@ -9512,6 +9523,7 @@ struct LogAddInvestigationNoteArgs {
     event_refs: Vec<cd_core::log_analysis::BookmarkEventRef>,
     #[serde(default)]
     finding_ids: Vec<String>,
+    noise_lens: cd_core::investigations::InvestigationNoiseLens,
 }
 
 /// Atomically save exact selected identities and a human-authored cited note.
@@ -9535,7 +9547,7 @@ fn log_add_investigation_note(
         args.expected_revision,
     )?;
 
-    store
+    let updated = store
         .add_human_note(
             &investigation_id,
             expected_revision,
@@ -9547,6 +9559,9 @@ fn log_add_investigation_note(
                 finding_ids: args.finding_ids,
             },
         )
+        .map_err(|e| e.to_string())?;
+    store
+        .load_with_policy_lens(&updated.document.id, &corpus, args.noise_lens)
         .map_err(|e| e.to_string())
 }
 
@@ -9561,6 +9576,7 @@ struct LogEditInvestigationFindingArgs {
     lifecycle: cd_core::investigations::FindingLifecycle,
     title: String,
     why_it_matters: String,
+    noise_lens: cd_core::investigations::InvestigationNoiseLens,
 }
 
 /// Edit human-controlled finding fields under optimistic concurrency.
@@ -9576,7 +9592,8 @@ fn log_edit_investigation_finding(
     let cache = log_cache_dir(&state)?;
     let corpus = cd_core::log_analysis::LogCorpus::open(&cache, &args.corpus_id)
         .map_err(|e| e.to_string())?;
-    investigation_store(&state)?
+    let store = investigation_store(&state)?;
+    let updated = store
         .edit_human_finding(
             &args.investigation_id,
             args.expected_revision,
@@ -9589,6 +9606,9 @@ fn log_edit_investigation_finding(
                 why_it_matters: args.why_it_matters,
             },
         )
+        .map_err(|e| e.to_string())?;
+    store
+        .load_with_policy_lens(&updated.document.id, &corpus, args.noise_lens)
         .map_err(|e| e.to_string())
 }
 
@@ -9604,6 +9624,7 @@ struct LogEditInvestigationNoteArgs {
     evidence_ids: Vec<String>,
     #[serde(default)]
     finding_ids: Vec<String>,
+    noise_lens: cd_core::investigations::InvestigationNoiseLens,
 }
 
 /// Edit human-controlled note fields and citations under optimistic concurrency.
@@ -9619,7 +9640,8 @@ fn log_edit_investigation_note(
     let cache = log_cache_dir(&state)?;
     let corpus = cd_core::log_analysis::LogCorpus::open(&cache, &args.corpus_id)
         .map_err(|e| e.to_string())?;
-    investigation_store(&state)?
+    let store = investigation_store(&state)?;
+    let updated = store
         .edit_human_note(
             &args.investigation_id,
             args.expected_revision,
@@ -9632,6 +9654,9 @@ fn log_edit_investigation_note(
                 finding_ids: args.finding_ids,
             },
         )
+        .map_err(|e| e.to_string())?;
+    store
+        .load_with_policy_lens(&updated.document.id, &corpus, args.noise_lens)
         .map_err(|e| e.to_string())
 }
 
@@ -9658,12 +9683,57 @@ fn log_preview_investigation_finding_view(
     corpus_id: String,
     investigation_id: String,
     finding_id: String,
+    noise_lens: cd_core::investigations::InvestigationNoiseLens,
 ) -> Result<cd_core::investigations::FindingViewRecipeResolution, String> {
     let cache = log_cache_dir(&state)?;
     let corpus =
         cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
     investigation_store(&state)?
-        .resolve_finding_view_recipe(&investigation_id, &finding_id, &corpus)
+        .resolve_finding_view_recipe_with_policy_lens(
+            &investigation_id,
+            &finding_id,
+            &corpus,
+            noise_lens,
+        )
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LogRecomputeInvestigationFindingViewArgs {
+    corpus_id: String,
+    investigation_id: String,
+    expected_revision: u64,
+    finding_id: String,
+    view_recipe: cd_core::investigations::FindingViewRecipe,
+    noise_lens: cd_core::investigations::InvestigationNoiseLens,
+}
+
+/// Explicitly replace one saved finding view under the exact current policy.
+#[tauri::command]
+fn log_recompute_investigation_finding_view(
+    state: State<'_, AppState>,
+    args: LogRecomputeInvestigationFindingViewArgs,
+) -> Result<cd_core::investigations::ResolvedInvestigationDocument, String> {
+    let _mutation = state
+        .investigation_mutation
+        .lock()
+        .map_err(|_| "Investigation storage is temporarily unavailable".to_string())?;
+    let cache = log_cache_dir(&state)?;
+    let corpus = cd_core::log_analysis::LogCorpus::open(&cache, &args.corpus_id)
+        .map_err(|e| e.to_string())?;
+    let binding =
+        cd_core::investigations::InvestigationPolicyBinding::capture(&corpus, args.noise_lens)
+            .map_err(|e| e.to_string())?;
+    investigation_store(&state)?
+        .recompute_human_finding_view(
+            &args.investigation_id,
+            args.expected_revision,
+            &corpus,
+            binding,
+            &args.finding_id,
+            args.view_recipe,
+        )
         .map_err(|e| e.to_string())
 }
 
@@ -10993,6 +11063,7 @@ pub fn run() {
             log_edit_investigation_note,
             log_preview_investigation_evidence,
             log_preview_investigation_finding_view,
+            log_recompute_investigation_finding_view,
             list_chat_sessions_for_corpus,
             set_chat_linked_corpus,
             open_log_explorer,
@@ -11836,6 +11907,7 @@ mod log_explorer_async_query_host_tests {
             &handles,
             &cache,
             &report.corpus_id,
+            cd_core::investigations::InvestigationNoiseLens::Active,
         )
         .expect("no investigation")
         .is_none());
@@ -11849,6 +11921,7 @@ mod log_explorer_async_query_host_tests {
             &handles,
             &cache,
             &report.corpus_id,
+            cd_core::investigations::InvestigationNoiseLens::Active,
         )
         .expect("load investigation")
         .expect("active investigation");
