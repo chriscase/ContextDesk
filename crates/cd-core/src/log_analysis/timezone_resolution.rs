@@ -403,10 +403,11 @@ fn declaration_fingerprint(
     hasher.update(b"\0");
     hasher.update(scope.event_revision.to_le_bytes());
     hasher.update(b"\0");
-    hasher.update(
-        serde_json::to_vec(declaration)
-            .expect("validated timezone declaration must serialize deterministically"),
-    );
+    hasher.update(declaration.source.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(declaration.iana_timezone.as_bytes());
+    hasher.update(b"\0user_declared\0");
+    hasher.update(declaration.applied_revision.to_le_bytes());
     format!("{:x}", hasher.finalize())
 }
 
@@ -693,6 +694,17 @@ mod tests {
         assert_eq!(preview.affected_records, 0);
         assert_eq!(preview.existing_wall_clock_records, 0);
         assert_eq!(preview.unchanged_order_only_records, 0);
+
+        let mut later_declaration = declaration("Europe/Berlin");
+        later_declaration.declared_at += 300;
+        let later = SourceTimezoneResolver::new(later_declaration)
+            .expect("later resolver")
+            .preview(&scope(), empty)
+            .expect("later preview");
+        assert_eq!(
+            later.declaration_fingerprint, preview.declaration_fingerprint,
+            "preview binding must not freeze the eventual apply timestamp"
+        );
 
         let mut stale = scope();
         stale.event_revision = 7;
