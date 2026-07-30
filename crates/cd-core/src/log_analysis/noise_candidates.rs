@@ -2804,10 +2804,8 @@ mod tests {
     #[test]
     fn cancellation_returns_partial_or_empty_without_panic() {
         let mut events = Vec::new();
-        let mut seq = 1u64;
-        for i in 0..50 {
+        for (seq, i) in (1u64..).zip(0..50) {
             events.push(wall_event(seq, 1_700_000_000 + i, "INFO", 1, "x", "a.log"));
-            seq += 1;
         }
         let (_dir, corpus) = corpus_with("cancel", &[(1, "x", 50, 1)], events);
         let flag = AtomicBool::new(true);
