@@ -1,8 +1,8 @@
 # Incident Evidence Bundle v1
 
-**Schema identifier:** `contextdesk.incident_evidence.v1`  
-**Status:** Normative interchange contract (documentation and offline validation).  
-**Parent issue:** #763 · **Conformance slice:** #764  
+**Schema identifier:** `contextdesk.incident_evidence.v1`
+**Status:** Normative interchange contract (documentation and offline validation).
+**Parent issue:** #763 · **Conformance slice:** #764
 **Related:** operational-metrics v1 (`docs/design/OPERATIONAL_METRIC_TRACKS.md`), portable analysis package `contextdesk.log_corpus.v1`, Investigation/Case workspaces (#532 Phase D).
 
 This specification defines a **producer-facing interchange format** for authorized incident evidence: raw logs, operational metrics, optional bounded attachments, and declared provenance. It does **not** define ContextDesk product import UI, DuckDB analysis packages, or Investigation documents.
@@ -77,7 +77,7 @@ A conforming ZIP transport **MUST**:
 - fixed DOS timestamp 1980-01-01 00:00:00;
 - unix permissions `0o644`;
 - no machine-specific comments or extra fields;
-- atomic write (temp `.<name>.partial` then rename); no partial left on failure;
+- atomic publication from a uniquely created same-directory temporary file; no partial left on failure;
 - refuse overwrite unless `--force`.
 
 Packing **MUST NOT** follow filesystem symlinks (leaf or intermediate). Nested `.zip` files declared as `attachment` components are **opaque payloads** (hashed, never recursively expanded).
@@ -169,7 +169,7 @@ Shareable runtime bundles **MUST NOT** contain:
 - credentials, API keys, session tokens;
 - configured model inventories.
 
-Validators **MUST** reject component paths or readme/log **samples in fixtures** that embed forbidden sentinel substrings defined for conformance (e.g. `evaluator_truth`, `EVALUATOR_TRUTH`). Full content scanning of multi-gigabyte customer logs is product-policy residual; path/id/manifest fields **MUST** always be checked.
+Validators **MUST** reject component paths and declared `log` / `readme` payloads that embed the frozen evaluator-truth sentinel set defined for conformance (for example `evaluator_truth`, case-insensitively). Payload scanning **MUST** be streaming, happen in the same bounded pass as hashing, and detect sentinels split across read-chunk boundaries. This frozen check is a narrow fixture-governance safeguard, not a claim of general content classification. Path/id/manifest fields **MUST** always be checked.
 
 ---
 
@@ -179,15 +179,16 @@ Bundle and component `timeBasis` objects:
 
 | Field | Type | Requirement |
 | --- | --- | --- |
-| `timezone` | string or null | IANA name, numeric offset (`+00:00`), or `UTC`; **null** means unresolved |
+| `timezone` | string or null | Registered IANA name, valid numeric offset (`+00:00`), or `UTC`; **null** means unresolved |
 | `timezoneResolved` | boolean | **MUST** be `true` only when `timezone` is non-null and intentionally applied |
 
 ### Honesty rules
 
 1. If `timezone` is null or absent, `timezoneResolved` **MUST** be `false`.
 2. If `timezoneResolved` is `true`, `timezone` **MUST** be a non-empty explicit value.
-3. Validators **MUST NOT** invent or guess timezones.
-4. Per-record offsets inside log/metric payloads remain authoritative when present; bundle defaults **MUST NOT** silently rewrite them.
+3. Validators **MUST** reject unknown IANA identifiers and malformed or out-of-range numeric offsets.
+4. Validators **MUST NOT** invent or guess timezones.
+5. Per-record offsets inside log/metric payloads remain authoritative when present; bundle defaults **MUST NOT** silently rewrite them.
 
 ---
 

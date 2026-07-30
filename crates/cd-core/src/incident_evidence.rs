@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
+use std::str::FromStr;
 
 /// Exact schema identifier for Incident Evidence Bundle v1.
 pub const SCHEMA_ID: &str = "contextdesk.incident_evidence.v1";
@@ -58,6 +59,8 @@ pub const FORBIDDEN_MANIFEST_SENTINELS: &[&str] = &[
 /// Characters allowed in component relative paths (matches JSON Schema relativePath).
 const REL_PATH_ALLOWED: &[u8] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._@+/-";
+const BUNDLE_ID_ALLOWED: &[u8] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:@+/-";
 
 /// One deterministic diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -306,6 +309,8 @@ pub fn validate_component_inventory(
     let mut seen_paths_lower = HashSet::new();
     let mut declared_paths: HashSet<String> = HashSet::new();
     let mut path_ok_for_io: Vec<bool> = Vec::with_capacity(components.len());
+    let mut declared_aggregate = 0u64;
+    let mut aggregate_limit_reported = false;
 
     for (i, c) in components.iter().enumerate() {
         let base = format!("$.components[{i}]");
@@ -389,14 +394,23 @@ pub fn validate_component_inventory(
         }
         if let Some(lin) = &c.lineage {
             if let Some(pid) = &lin.parent_id {
-                if pid.len() > MAX_ID_CHARS {
+                if pid.trim().is_empty() || pid.len() > MAX_ID_CHARS {
                     diagnostics.push(Diagnostic::new(
                         "lineage_parent_too_long",
                         format!("{base}.lineage.parentId"),
-                        format!("lineage.parentId exceeds {MAX_ID_CHARS} characters"),
+                        format!(
+                            "lineage.parentId MUST be non-empty and <= {MAX_ID_CHARS} characters"
+                        ),
                     ));
                 }
                 scan_forbidden_sentinels(pid, &format!("{base}.lineage.parentId"), diagnostics);
+                if looks_like_absolute_host_path(pid) {
+                    diagnostics.push(Diagnostic::new(
+                        "lineage_absolute_path",
+                        format!("{base}.lineage.parentId"),
+                        "lineage MUST NOT embed absolute host paths",
+                    ));
+                }
             }
             if let Some(note) = &lin.note {
                 if note.len() > 512 {
@@ -407,13 +421,7 @@ pub fn validate_component_inventory(
                     ));
                 }
                 scan_forbidden_sentinels(note, &format!("{base}.lineage.note"), diagnostics);
-                if note.starts_with('/')
-                    || note.starts_with('\\')
-                    || (note.as_bytes().get(1) == Some(&b':')
-                        && note.as_bytes().first().is_some_and(u8::is_ascii_alphabetic))
-                    || note.contains(":\\")
-                    || note.contains(":/")
-                {
+                if looks_like_absolute_host_path(note) {
                     diagnostics.push(Diagnostic::new(
                         "lineage_absolute_path",
                         format!("{base}.lineage.note"),
@@ -436,6 +444,24 @@ pub fn validate_component_inventory(
                 format!("declared bytes exceed MAX_PER_FILE_BYTES ({MAX_PER_FILE_BYTES})"),
             ));
             ok_io = false;
+        }
+        let next_aggregate = declared_aggregate.checked_add(c.bytes);
+        if aggregate_limit_reported
+            || next_aggregate.is_none_or(|total| total > MAX_AGGREGATE_BYTES)
+        {
+            if !aggregate_limit_reported {
+                diagnostics.push(Diagnostic::new(
+                    "aggregate_too_large",
+                    "$.components",
+                    format!(
+                        "declared component bytes exceed MAX_AGGREGATE_BYTES ({MAX_AGGREGATE_BYTES})"
+                    ),
+                ));
+                aggregate_limit_reported = true;
+            }
+            ok_io = false;
+        } else if let Some(total) = next_aggregate {
+            declared_aggregate = total;
         }
         if let Some(tb) = &c.time_basis {
             validate_time_basis(tb, &format!("{base}.timeBasis"), diagnostics);
@@ -481,11 +507,13 @@ pub fn validate_manifest_header(manifest: &Manifest, diagnostics: &mut Vec<Diagn
             "minReaderVersion must be >= 1",
         ));
     }
-    if manifest.bundle_id.trim().is_empty() || manifest.bundle_id.len() > MAX_BUNDLE_ID_CHARS {
+    if !is_valid_bundle_id(&manifest.bundle_id) {
         diagnostics.push(Diagnostic::new(
             "bundle_id_invalid",
             "$.bundleId",
-            format!("bundleId must be non-empty and <= {MAX_BUNDLE_ID_CHARS} characters"),
+            format!(
+                "bundleId MUST be non-empty, <= {MAX_BUNDLE_ID_CHARS} characters, and match [A-Za-z0-9._:@+/-]+"
+            ),
         ));
     }
     if contains_forbidden_sentinel(&manifest.bundle_id) {
@@ -499,7 +527,7 @@ pub fn validate_manifest_header(manifest: &Manifest, diagnostics: &mut Vec<Diagn
         diagnostics.push(Diagnostic::new(
             "created_at_offset_required",
             "$.createdAt",
-            "createdAt MUST include an explicit offset or Z",
+            "createdAt MUST be a valid RFC3339 timestamp with an explicit offset or Z",
         ));
     }
     if manifest.created_at.len() > 64 {
@@ -629,9 +657,30 @@ fn validate_manifest_and_payloads(
                     format!("declared bytes {} != actual {}", c.bytes, opened.size),
                 ));
             }
-            // Hash exactly once from the open handle.
-            let hex = match stream_sha256_file(&mut opened.file, opened.size) {
-                Ok(h) => h,
+            let next_aggregate = aggregate_actual.saturating_add(opened.size);
+            if next_aggregate > MAX_AGGREGATE_BYTES {
+                diagnostics.push(Diagnostic::new(
+                    "aggregate_too_large",
+                    "$.components",
+                    format!(
+                        "aggregate actual bytes exceed MAX_AGGREGATE_BYTES ({MAX_AGGREGATE_BYTES})"
+                    ),
+                ));
+                continue;
+            }
+            // Count attempted payload bytes before hashing so subsequent I/O
+            // remains bounded even when this component later fails validation.
+            aggregate_actual = next_aggregate;
+            // Hash exactly once from the open handle. Log/readme evidence is also
+            // scanned for the small frozen evaluator-truth sentinel set in the
+            // same bounded pass, including matches split across read chunks.
+            let scan_evaluator_truth = matches!(c.role.as_str(), "log" | "readme");
+            let (hex, forbidden_content) = match stream_sha256_file_with_sentinel_scan(
+                &mut opened.file,
+                opened.size,
+                scan_evaluator_truth,
+            ) {
+                Ok(result) => result,
                 Err(e) => {
                     diagnostics.push(Diagnostic::new(
                         "hash_failed",
@@ -641,6 +690,13 @@ fn validate_manifest_and_payloads(
                     continue;
                 }
             };
+            if forbidden_content {
+                diagnostics.push(Diagnostic::new(
+                    "forbidden_sentinel",
+                    c.path.clone(),
+                    "payload contains forbidden evaluator-truth / answer-key sentinel",
+                ));
+            }
             if let Err(d) = verify_identity_unchanged(&opened) {
                 diagnostics.push(Diagnostic::new(d.code, c.path.clone(), d.message));
                 continue;
@@ -652,17 +708,6 @@ fn validate_manifest_and_payloads(
                     "declared sha256 does not match file contents",
                 ));
             }
-            aggregate_actual = aggregate_actual.saturating_add(opened.size);
-            if aggregate_actual > MAX_AGGREGATE_BYTES {
-                diagnostics.push(Diagnostic::new(
-                    "aggregate_too_large",
-                    "$.components",
-                    format!(
-                        "aggregate actual bytes exceed MAX_AGGREGATE_BYTES ({MAX_AGGREGATE_BYTES})"
-                    ),
-                ));
-            }
-
             if c.role == "operational_metrics" {
                 if opened.size > MAX_METRICS_DOC_BYTES {
                     diagnostics.push(Diagnostic::new(
@@ -766,28 +811,7 @@ pub(crate) fn is_lowercase_sha256(s: &str) -> bool {
 
 fn created_at_has_explicit_offset(s: &str) -> bool {
     let t = s.trim();
-    if t.is_empty() {
-        return false;
-    }
-    // Require Z or ±HH:MM at end (RFC3339-ish). Reject offsetless local forms.
-    if t.ends_with('Z') || t.ends_with('z') {
-        return true;
-    }
-    // ...+00:00 or ...-05:00 — scan ASCII bytes only (timestamps are ASCII).
-    let bytes = t.as_bytes();
-    if bytes.len() >= 6 {
-        let tail = &bytes[bytes.len() - 6..];
-        if (tail[0] == b'+' || tail[0] == b'-')
-            && tail[3] == b':'
-            && tail[1].is_ascii_digit()
-            && tail[2].is_ascii_digit()
-            && tail[4].is_ascii_digit()
-            && tail[5].is_ascii_digit()
-        {
-            return true;
-        }
-    }
-    false
+    !t.is_empty() && chrono::DateTime::parse_from_rfc3339(t).is_ok()
 }
 
 pub(crate) fn validate_time_basis(tb: &TimeBasis, json_path: &str, out: &mut Vec<Diagnostic>) {
@@ -803,21 +827,61 @@ pub(crate) fn validate_time_basis(tb: &TimeBasis, json_path: &str, out: &mut Vec
             "timezoneResolved=true requires a non-empty timezone",
         ));
     }
-    if !tb.timezone_resolved && tz.is_some() {
-        // Allowed: declare a candidate timezone without claiming resolution.
-        // Spec: unresolved means timezoneResolved false; timezone MAY still be null.
-    }
-    if tb.timezone_resolved {
-        if let Some(z) = tz {
-            if z.contains("..") || z.contains('/') && z.starts_with('/') {
-                out.push(Diagnostic::new(
-                    "timezone_invalid",
-                    json_path,
-                    "timezone must not look like a filesystem path",
-                ));
-            }
+    if let Some(z) = tz {
+        if z.len() > MAX_ID_CHARS || !is_valid_timezone(z) {
+            out.push(Diagnostic::new(
+                "timezone_invalid",
+                json_path,
+                "timezone MUST be UTC, a valid numeric offset, or a registered IANA timezone",
+            ));
         }
     }
+}
+
+fn is_valid_bundle_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_BUNDLE_ID_CHARS
+        && value.bytes().all(|byte| BUNDLE_ID_ALLOWED.contains(&byte))
+}
+
+fn looks_like_absolute_host_path(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.starts_with('/')
+        || trimmed.starts_with('\\')
+        || (trimmed.as_bytes().get(1) == Some(&b':')
+            && trimmed
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphabetic))
+        || trimmed.contains(":\\")
+        || trimmed.contains(":/")
+}
+
+fn is_valid_timezone(value: &str) -> bool {
+    if value == "UTC" {
+        return true;
+    }
+    if is_valid_numeric_utc_offset(value) {
+        return true;
+    }
+    chrono_tz::Tz::from_str(value).is_ok()
+}
+
+fn is_valid_numeric_utc_offset(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 6
+        || !matches!(bytes[0], b'+' | b'-')
+        || bytes[3] != b':'
+        || !bytes[1].is_ascii_digit()
+        || !bytes[2].is_ascii_digit()
+        || !bytes[4].is_ascii_digit()
+        || !bytes[5].is_ascii_digit()
+    {
+        return false;
+    }
+    let hours = (bytes[1] - b'0') * 10 + (bytes[2] - b'0');
+    let minutes = (bytes[4] - b'0') * 10 + (bytes[5] - b'0');
+    hours <= 23 && minutes <= 59
 }
 
 /// Reject absolute, traversal, drive-prefix, empty, overlong, and non-schema paths.
@@ -895,6 +959,41 @@ fn scan_forbidden_sentinels(text: &str, path: &str, out: &mut Vec<Diagnostic>) {
             path,
             "text contains forbidden evaluator-truth / answer-key sentinel",
         ));
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ForbiddenSentinelStream {
+    tail: Vec<u8>,
+    found: bool,
+}
+
+impl ForbiddenSentinelStream {
+    pub(crate) fn observe(&mut self, chunk: &[u8]) {
+        if self.found {
+            return;
+        }
+        let max_len = FORBIDDEN_MANIFEST_SENTINELS
+            .iter()
+            .map(|sentinel| sentinel.len())
+            .max()
+            .unwrap_or(1);
+        let mut window = Vec::with_capacity(self.tail.len() + chunk.len());
+        window.extend_from_slice(&self.tail);
+        window.extend_from_slice(chunk);
+        let lower = window.to_ascii_lowercase();
+        self.found = FORBIDDEN_MANIFEST_SENTINELS.iter().any(|sentinel| {
+            lower
+                .windows(sentinel.len())
+                .any(|w| w == sentinel.as_bytes())
+        });
+        let keep = max_len.saturating_sub(1).min(window.len());
+        self.tail.clear();
+        self.tail.extend_from_slice(&window[window.len() - keep..]);
+    }
+
+    pub(crate) fn found(&self) -> bool {
+        self.found
     }
 }
 
@@ -1072,9 +1171,18 @@ fn read_all_bounded(file: &mut File, expected: u64, max: u64) -> Result<Vec<u8>,
 
 /// Stream SHA-256 of an open file, reading at most `size` bytes (single pass).
 pub fn stream_sha256_file(file: &mut File, size: u64) -> Result<String, String> {
+    stream_sha256_file_with_sentinel_scan(file, size, false).map(|(hash, _)| hash)
+}
+
+fn stream_sha256_file_with_sentinel_scan(
+    file: &mut File,
+    size: u64,
+    scan_forbidden: bool,
+) -> Result<(String, bool), String> {
     file.seek(SeekFrom::Start(0))
         .map_err(|e| format!("seek failed: {e}"))?;
     let mut hasher = Sha256::new();
+    let mut sentinel_scan = ForbiddenSentinelStream::default();
     let mut buf = vec![0u8; HASH_BUFFER_BYTES];
     let mut remaining = size;
     while remaining > 0 {
@@ -1086,6 +1194,9 @@ pub fn stream_sha256_file(file: &mut File, size: u64) -> Result<String, String> 
             return Err("unexpected EOF while hashing".into());
         }
         hasher.update(&buf[..n]);
+        if scan_forbidden {
+            sentinel_scan.observe(&buf[..n]);
+        }
         remaining -= n as u64;
     }
     // Ensure no extra bytes beyond declared size on the open handle.
@@ -1093,11 +1204,14 @@ pub fn stream_sha256_file(file: &mut File, size: u64) -> Result<String, String> 
     if extra != 0 {
         return Err("payload grew beyond size observed at open".into());
     }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+    Ok((
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+        sentinel_scan.found(),
+    ))
 }
 
 fn path_has_symlink_component(root: &Path, rel: &str) -> bool {
@@ -1640,12 +1754,15 @@ pub fn format_report_text(report: &ValidationReport) -> String {
         report.ok, root
     ));
     if let Some(s) = &report.schema_id {
-        lines.push(format!("schemaId={s}"));
+        lines.push(format!("schemaId={}", sanitize_report_field(s, 256)));
     }
     if let Some(b) = &report.bundle_id {
-        lines.push(format!("bundleId={b}"));
+        lines.push(format!("bundleId={}", sanitize_report_field(b, 256)));
     }
-    lines.push(format!("transport={}", report.transport));
+    lines.push(format!(
+        "transport={}",
+        sanitize_report_field(&report.transport, 32)
+    ));
     if let Some(n) = report.component_count {
         lines.push(format!("components={n}"));
     }
@@ -1656,7 +1773,7 @@ pub fn format_report_text(report: &ValidationReport) -> String {
     for d in &report.diagnostics {
         lines.push(format!(
             "{} | {} | {}",
-            d.code,
+            sanitize_report_field(&d.code, 128),
             sanitize_report_path(&d.path),
             sanitize_report_message(&d.message)
         ));
@@ -1669,47 +1786,57 @@ pub fn sanitize_report_path(path: &str) -> String {
     if path.is_empty() {
         return path.to_string();
     }
-    // Unix absolute or Windows drive — keep only the final component or bundle-relative tail.
-    if path.starts_with('/') || path.starts_with('\\') {
-        return Path::new(path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("path")
-            .to_string();
-    }
-    let bytes = path.as_bytes();
-    if bytes.len() >= 3
+    let safe = sanitize_report_field(path, MAX_RELATIVE_PATH_BYTES);
+    let bytes = safe.as_bytes();
+    let drive_absolute = bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
-        && (bytes[2] == b'\\' || bytes[2] == b'/')
-    {
-        return Path::new(path)
-            .file_name()
-            .and_then(|s| s.to_str())
+        && matches!(bytes[2], b'\\' | b'/');
+    let absolute_or_private = safe.starts_with('/')
+        || safe.starts_with('\\')
+        || drive_absolute
+        || safe.contains("/Users/")
+        || safe.contains("/home/")
+        || safe.contains("Documents/GitHub");
+    if absolute_or_private {
+        return safe
+            .split(['/', '\\'])
+            .rfind(|segment| !segment.is_empty())
             .unwrap_or("path")
             .to_string();
     }
-    // Drop any accidental absolute segments embedded in messages like "… /Users/…"
-    if path.contains("/Users/") || path.contains("/home/") || path.contains("Documents/GitHub") {
-        return Path::new(path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("path")
-            .to_string();
-    }
-    path.to_string()
+    safe
 }
 
 /// Redact absolute machine path fragments from diagnostic messages (CLI-safe).
 pub fn sanitize_report_message(message: &str) -> String {
     // Never echo absolute machine paths from OS errors.
     let mut out = message.to_string();
-    for marker in ["/Users/", "/home/", "Documents/GitHub", "C:\\Users\\"] {
+    for marker in [
+        "/Users/",
+        "/home/",
+        "Documents/GitHub",
+        "C:\\Users\\",
+        "\\\\?\\",
+        "\\\\",
+    ] {
         if let Some(idx) = out.find(marker) {
             // Truncate from marker and replace with redacted token (byte-safe via get).
             let prefix = out.get(..idx).unwrap_or("");
             out = format!("{prefix}[redacted-path]");
             break;
+        }
+    }
+    sanitize_report_field(&out, 2048)
+}
+
+fn sanitize_report_field(value: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for ch in value.chars().take(max_chars) {
+        if ch.is_control() {
+            out.extend(ch.escape_default());
+        } else {
+            out.push(ch);
         }
     }
     out
@@ -1901,6 +2028,75 @@ mod tests {
     }
 
     #[test]
+    fn declared_aggregate_limit_prevents_out_of_budget_payload_io() {
+        let components = (0..5)
+            .map(|index| ComponentEntry {
+                id: format!("component-{index}"),
+                role: "log".into(),
+                path: format!("logs/{index}.log"),
+                media_type: "text/plain".into(),
+                bytes: MAX_PER_FILE_BYTES,
+                sha256: "0".repeat(64),
+                source_label: None,
+                time_basis: None,
+                lineage: None,
+            })
+            .collect::<Vec<_>>();
+        let mut diagnostics = Vec::new();
+        let inventory = validate_component_inventory(&components, &mut diagnostics);
+
+        assert_eq!(
+            inventory.path_ok_for_io,
+            vec![true, true, true, true, false]
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "aggregate_too_large")
+                .count(),
+            1,
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn text_report_escapes_controls_and_redacts_cross_platform_paths() {
+        let report = ValidationReport {
+            ok: false,
+            root: r"C:\Users\example\private\bundle".into(),
+            schema_id: Some("bad\nschema\u{1b}[31m".into()),
+            bundle_id: Some("bad\rbundle".into()),
+            diagnostics: vec![Diagnostic::new(
+                "bad\ncode",
+                r"\\server\share\private.log",
+                "failure\nat C:\\Users\\example\\secret",
+            )],
+            transport: "directory\nforged=true".into(),
+            component_count: None,
+            total_validated_bytes: None,
+        };
+
+        let text = format_report_text(&report);
+        assert!(!text.contains("bad\nschema"));
+        assert!(!text.contains("bad\ncode"));
+        assert!(!text.contains("bad\rbundle"));
+        assert!(!text.contains('\r'));
+        assert!(!text.contains("\u{1b}"));
+        assert!(!text.contains("Users"));
+        assert!(!text.contains("server"));
+        assert!(text.contains(r"schemaId=bad\nschema\u{1b}[31m"), "{text}");
+        assert!(text.contains("private.log"), "{text}");
+        assert_eq!(
+            sanitize_report_path(r"C:\Users\example\secret\bundle.zip"),
+            "bundle.zip"
+        );
+        assert_eq!(
+            sanitize_report_path(r"\\server\share\secret\bundle.zip"),
+            "bundle.zip"
+        );
+    }
+
+    #[test]
     fn unknown_role_fails() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -1932,6 +2128,129 @@ mod tests {
         assert!(created_at_has_explicit_offset("2024-01-15T12:00:00Z"));
         assert!(created_at_has_explicit_offset("2024-01-15T12:00:00+00:00"));
         assert!(!created_at_has_explicit_offset("2024-01-15T12:00:00"));
+        assert!(!created_at_has_explicit_offset("Z"));
+        assert!(!created_at_has_explicit_offset("2024-99-15T12:00:00Z"));
+        assert!(!created_at_has_explicit_offset("not-a-timestamp+00:00"));
+    }
+
+    #[test]
+    fn manifest_and_component_grammars_match_the_normative_schema() {
+        let mut manifest = Manifest {
+            schema_id: SCHEMA_ID.into(),
+            min_reader_version: 1,
+            bundle_id: "valid-bundle".into(),
+            created_at: "2024-01-15T12:00:00Z".into(),
+            producer: Producer {
+                name: "test".into(),
+                version: "1".into(),
+            },
+            privacy: Privacy {
+                redaction_declared: true,
+                contains_credentials: false,
+                contains_pii: false,
+                notes: None,
+            },
+            time_basis: TimeBasis {
+                timezone: Some("America/Chicago".into()),
+                timezone_resolved: true,
+            },
+            components: Vec::new(),
+        };
+        let mut diagnostics = Vec::new();
+        validate_manifest_header(&manifest, &mut diagnostics);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        manifest.bundle_id = "contains spaces".into();
+        manifest.created_at = "Z".into();
+        manifest.time_basis.timezone = Some("banana".into());
+        validate_manifest_header(&manifest, &mut diagnostics);
+        assert!(
+            diagnostics.iter().any(|d| d.code == "bundle_id_invalid"),
+            "{diagnostics:?}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == "created_at_offset_required"),
+            "{diagnostics:?}"
+        );
+        assert!(
+            diagnostics.iter().any(|d| d.code == "timezone_invalid"),
+            "{diagnostics:?}"
+        );
+
+        diagnostics.clear();
+        manifest.bundle_id = "valid-bundle".into();
+        manifest.created_at = "2024-01-15T12:00:00+05:30".into();
+        manifest.time_basis.timezone = Some("+24:00".into());
+        validate_manifest_header(&manifest, &mut diagnostics);
+        assert!(
+            diagnostics.iter().any(|d| d.code == "timezone_invalid"),
+            "{diagnostics:?}"
+        );
+
+        let component = ComponentEntry {
+            id: "child".into(),
+            role: "log".into(),
+            path: "logs/app.log".into(),
+            media_type: "text/plain".into(),
+            bytes: 0,
+            sha256: "0".repeat(64),
+            source_label: None,
+            time_basis: None,
+            lineage: Some(Lineage {
+                parent_id: Some("/Users/example/private.log".into()),
+                note: None,
+            }),
+        };
+        diagnostics.clear();
+        validate_component_inventory(&[component], &mut diagnostics);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == "lineage_absolute_path"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn declared_log_payload_rejects_split_evaluator_truth_sentinel() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("logs")).unwrap();
+        let mut payload = vec![b'x'; HASH_BUFFER_BYTES - 5];
+        payload.extend_from_slice(b"EVALUATOR_TRUTH expected diagnosis\n");
+        let log_path = root.join("logs/app.log");
+        std::fs::write(&log_path, &payload).unwrap();
+        let hash = stream_sha256_hex(&log_path).unwrap();
+        let manifest = format!(
+            r#"{{
+  "schemaId":"contextdesk.incident_evidence.v1",
+  "minReaderVersion":1,
+  "bundleId":"declared-truth",
+  "createdAt":"2024-01-15T12:00:00Z",
+  "producer":{{"name":"t","version":"1"}},
+  "privacy":{{"redactionDeclared":true,"containsCredentials":false,"containsPii":false}},
+  "timeBasis":{{"timezone":"UTC","timezoneResolved":true}},
+  "components":[{{
+    "id":"l","role":"log","path":"logs/app.log","mediaType":"text/plain",
+    "bytes":{bytes},"sha256":"{hash}"
+  }}]
+}}"#,
+            bytes = payload.len()
+        );
+        std::fs::write(root.join("manifest.json"), manifest).unwrap();
+
+        let report = validate_directory(root);
+        assert!(!report.ok, "{:?}", report.diagnostics);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "forbidden_sentinel" && d.path == "logs/app.log"),
+            "{:?}",
+            report.diagnostics
+        );
     }
 
     #[test]

@@ -43,6 +43,10 @@ def main() -> None:
                 "name": "CPU",
                 "unit": "%",
                 "timeQuality": "wall",
+                "provenance": {
+                    "source": "synthetic/example-performance-monitor",
+                    "collector": "example-python-collector",
+                },
                 "points": [
                     {"timestamp": 1705312800, "value": 20},
                     {"timestamp": 1705312860, "value": 35},

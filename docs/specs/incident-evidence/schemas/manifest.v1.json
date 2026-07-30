@@ -32,7 +32,8 @@
     "createdAt": {
       "type": "string",
       "minLength": 10,
-      "maxLength": 64
+      "maxLength": 64,
+      "format": "date-time"
     },
     "producer": {
       "$ref": "component.v1.json#/$defs/producer"

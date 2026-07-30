@@ -17,6 +17,7 @@ toml = { workspace = true }
 semver = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = "0.10"
 reqwest = { workspace = true }
 dirs = { workspace = true }
 keyring = { workspace = true }

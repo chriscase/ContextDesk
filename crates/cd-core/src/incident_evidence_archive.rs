@@ -8,16 +8,18 @@ use crate::incident_evidence::{
     contains_forbidden_sentinel, is_lowercase_sha256, redacted_root_label,
     stream_sha256_hex_bounded, validate_component_inventory, validate_directory,
     validate_manifest_header, validate_metrics_document_text, validate_relative_path, Diagnostic,
-    Manifest, ValidationReport, HASH_BUFFER_BYTES, MAX_AGGREGATE_BYTES, MAX_COMPONENTS,
-    MAX_MANIFEST_BYTES, MAX_METRICS_DOC_BYTES, MAX_PER_FILE_BYTES, MAX_RELATIVE_PATH_BYTES,
-    SCHEMA_ID,
+    ForbiddenSentinelStream, Manifest, ValidationReport, HASH_BUFFER_BYTES, MAX_AGGREGATE_BYTES,
+    MAX_COMPONENTS, MAX_MANIFEST_BYTES, MAX_METRICS_DOC_BYTES, MAX_PER_FILE_BYTES,
+    MAX_RELATIVE_PATH_BYTES, SCHEMA_ID,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
 
@@ -32,6 +34,7 @@ pub const MAX_ARCHIVE_ENTRIES: usize = MAX_COMPONENTS + 1;
 pub const MAX_COMPRESSION_RATIO: u64 = 100;
 /// Minimum compressed size when applying ratio (avoid div-by-zero).
 const RATIO_FLOOR_COMPRESSED: u64 = 64;
+static UNIQUE_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Fixed DOS timestamp for deterministic packs (1980-01-01 00:00:00).
 fn deterministic_mtime() -> DateTime {
@@ -47,12 +50,21 @@ fn pack_options() -> SimpleFileOptions {
 
 /// Pack a validated directory into a deterministic ZIP archive.
 ///
-/// Steps: directory validate → refuse links → write temp → atomic rename.
+/// Steps: directory validate → refuse links → unique temp → validate temp → atomic publication.
 /// Does not overwrite `output` unless `overwrite` is true.
 pub fn pack_directory(
     root: &Path,
     output: &Path,
     overwrite: bool,
+) -> Result<PackReport, Vec<Diagnostic>> {
+    pack_directory_with_before_write(root, output, overwrite, || {})
+}
+
+fn pack_directory_with_before_write(
+    root: &Path,
+    output: &Path,
+    overwrite: bool,
+    before_write: impl FnOnce(),
 ) -> Result<PackReport, Vec<Diagnostic>> {
     let dir_report = validate_directory(root);
     if !dir_report.ok {
@@ -68,13 +80,7 @@ pub fn pack_directory(
     }
 
     let manifest_path = root.join("manifest.json");
-    let raw = fs::read_to_string(&manifest_path).map_err(|e| {
-        vec![Diagnostic::new(
-            "manifest_unreadable",
-            "manifest.json",
-            format!("cannot read manifest for pack: {e}"),
-        )]
-    })?;
+    let raw = read_pack_manifest(&manifest_path)?;
     let manifest: Manifest = serde_json::from_str(&raw).map_err(|e| {
         vec![Diagnostic::new(
             "manifest_json_invalid",
@@ -116,6 +122,16 @@ pub fn pack_directory(
     }
     // Stable order: lexicographic by archive path (manifest.json first among equals).
     entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let expected_components: HashMap<&str, (u64, &str)> = manifest
+        .components
+        .iter()
+        .map(|component| {
+            (
+                component.path.as_str(),
+                (component.bytes, component.sha256.as_str()),
+            )
+        })
+        .collect();
 
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent).map_err(|e| {
@@ -125,128 +141,156 @@ pub fn pack_directory(
             format!("cannot create output parent: {e}"),
         )]
     })?;
-    let tmp = parent.join(format!(
-        ".{}.partial",
-        output
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("bundle.zip")
-    ));
-    // Always start clean.
-    let _ = fs::remove_file(&tmp);
+    before_write();
+    let (tmp, file) = create_unique_partial(parent, output).map_err(|d| vec![d])?;
 
-    let write_result = (|| -> Result<u64, Diagnostic> {
-        let file = File::create(&tmp).map_err(|e| {
-            Diagnostic::new(
-                "pack_create_failed",
-                redacted_root_label(&tmp),
-                format!("cannot create partial archive: {e}"),
-            )
-        })?;
+    let write_result = (|| -> Result<(u64, String), Vec<Diagnostic>> {
         let mut zip = ZipWriter::new(file);
         let opts = pack_options();
         let mut total = 0u64;
         for (name, path) in &entries {
-            // Bound + TOCTOU-safe open; stream into zip without full-file allocation
-            // when possible, still detect source mutation (size/identity change).
-            let mut opened = crate::incident_evidence::open_regular_file_bounded(
-                path,
-                MAX_PER_FILE_BYTES,
-                name,
-            )?;
-            let size_at_open = opened.size;
-            let mut buf = vec![0u8; HASH_BUFFER_BYTES];
-            let mut remaining = size_at_open;
-            let mut data = Vec::with_capacity(
-                usize::try_from(size_at_open)
-                    .unwrap_or(0)
-                    .min(64 * 1024 * 1024),
-            );
-            // For deterministic Stored entries we need full bytes once; still bound by MAX_PER_FILE.
-            while remaining > 0 {
-                let chunk = (remaining as usize).min(buf.len());
-                let n = opened.file.read(&mut buf[..chunk]).map_err(|e| {
-                    Diagnostic::new(
-                        "pack_read_failed",
-                        name.clone(),
-                        format!("cannot read payload for pack: {e}"),
-                    )
-                })?;
-                if n == 0 {
-                    return Err(Diagnostic::new(
-                        "pack_read_failed",
-                        name.clone(),
-                        "unexpected EOF while packing payload",
-                    ));
-                }
-                data.extend_from_slice(&buf[..n]);
-                remaining -= n as u64;
-            }
-            // Source mutation during pack: size/identity must not change mid-read.
-            let meta_after = opened.file.metadata().map_err(|e| {
-                Diagnostic::new(
-                    "payload_identity_changed",
-                    name.clone(),
-                    format!("cannot re-stat during pack: {e}"),
-                )
-            })?;
-            if meta_after.len() != size_at_open {
-                return Err(Diagnostic::new(
-                    "payload_identity_changed",
-                    name.clone(),
-                    "source file size changed during pack",
-                ));
-            }
-            total = total.saturating_add(size_at_open);
             zip.start_file(name.as_str(), opts).map_err(|e| {
-                Diagnostic::new(
+                vec![Diagnostic::new(
                     "pack_zip_failed",
                     name.clone(),
                     format!("zip start_file: {e}"),
-                )
+                )]
             })?;
-            zip.write_all(&data).map_err(|e| {
-                Diagnostic::new("pack_zip_failed", name.clone(), format!("zip write: {e}"))
+
+            if name == ARCHIVE_MANIFEST_PATH {
+                zip.write_all(raw.as_bytes()).map_err(|e| {
+                    vec![Diagnostic::new(
+                        "pack_zip_failed",
+                        name.clone(),
+                        format!("zip write: {e}"),
+                    )]
+                })?;
+                total = total.saturating_add(raw.len() as u64);
+                continue;
+            }
+
+            let Some(&(expected_bytes, expected_sha256)) = expected_components.get(name.as_str())
+            else {
+                return Err(vec![Diagnostic::new(
+                    "payload_identity_changed",
+                    name.clone(),
+                    "component no longer has a manifest declaration during pack",
+                )]);
+            };
+
+            // Bound + TOCTOU-safe open; stream into zip without full-file allocation
+            // and verify the bytes still match the already-validated manifest.
+            let mut opened =
+                crate::incident_evidence::open_regular_file_bounded(path, MAX_PER_FILE_BYTES, name)
+                    .map_err(|d| vec![d])?;
+            let size_at_open = opened.size;
+            if size_at_open != expected_bytes {
+                return Err(vec![Diagnostic::new(
+                    "payload_identity_changed",
+                    name.clone(),
+                    "source file size no longer matches the manifest during pack",
+                )]);
+            }
+
+            let mut hasher = Sha256::new();
+            let mut buf = vec![0u8; HASH_BUFFER_BYTES];
+            let mut remaining = size_at_open;
+            while remaining > 0 {
+                let chunk = (remaining as usize).min(buf.len());
+                let n = opened.file.read(&mut buf[..chunk]).map_err(|e| {
+                    vec![Diagnostic::new(
+                        "pack_read_failed",
+                        name.clone(),
+                        format!("cannot read payload for pack: {e}"),
+                    )]
+                })?;
+                if n == 0 {
+                    return Err(vec![Diagnostic::new(
+                        "pack_read_failed",
+                        name.clone(),
+                        "unexpected EOF while packing payload",
+                    )]);
+                }
+                hasher.update(&buf[..n]);
+                zip.write_all(&buf[..n]).map_err(|e| {
+                    vec![Diagnostic::new(
+                        "pack_zip_failed",
+                        name.clone(),
+                        format!("zip write: {e}"),
+                    )]
+                })?;
+                remaining -= n as u64;
+            }
+            // Read at most one byte beyond the declared size so growth cannot hide
+            // behind a stale size observed at open.
+            let mut extra = [0u8; 1];
+            if opened.file.read(&mut extra).map_err(|e| {
+                vec![Diagnostic::new(
+                    "pack_read_failed",
+                    name.clone(),
+                    format!("cannot finish payload read for pack: {e}"),
+                )]
+            })? != 0
+            {
+                return Err(vec![Diagnostic::new(
+                    "payload_identity_changed",
+                    name.clone(),
+                    "source file grew while being packed",
+                )]);
+            }
+
+            let meta_after = opened.file.metadata().map_err(|e| {
+                vec![Diagnostic::new(
+                    "payload_identity_changed",
+                    name.clone(),
+                    format!("cannot re-stat during pack: {e}"),
+                )]
             })?;
+            if meta_after.len() != size_at_open {
+                return Err(vec![Diagnostic::new(
+                    "payload_identity_changed",
+                    name.clone(),
+                    "source file size changed during pack",
+                )]);
+            }
+
+            let actual_sha256: String = hasher
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            if actual_sha256 != expected_sha256 {
+                return Err(vec![Diagnostic::new(
+                    "payload_identity_changed",
+                    name.clone(),
+                    "source file contents no longer match the manifest during pack",
+                )]);
+            }
+            total = total.saturating_add(size_at_open);
         }
         zip.finish().map_err(|e| {
-            Diagnostic::new(
+            vec![Diagnostic::new(
                 "pack_zip_failed",
                 redacted_root_label(&tmp),
                 format!("zip finish: {e}"),
-            )
+            )]
         })?;
-        Ok(total)
+
+        let validation = validate_archive(&tmp);
+        if !validation.ok {
+            return Err(validation.diagnostics);
+        }
+        let digest = stream_sha256_hex_bounded(&tmp, MAX_ARCHIVE_COMPRESSED_BYTES)
+            .map_err(|e| vec![Diagnostic::new("hash_failed", redacted_root_label(&tmp), e)])?;
+        Ok((total, digest))
     })();
 
     match write_result {
-        Ok(total_bytes) => {
-            if output.exists() && overwrite {
-                fs::remove_file(output).map_err(|e| {
-                    let _ = fs::remove_file(&tmp);
-                    vec![Diagnostic::new(
-                        "output_replace_failed",
-                        redacted_root_label(output),
-                        format!("cannot replace existing output: {e}"),
-                    )]
-                })?;
-            }
-            fs::rename(&tmp, output).map_err(|e| {
+        Ok((total_bytes, digest)) => {
+            publish_archive(&tmp, output, overwrite).map_err(|d| {
                 let _ = fs::remove_file(&tmp);
-                vec![Diagnostic::new(
-                    "output_rename_failed",
-                    redacted_root_label(output),
-                    format!("atomic rename failed: {e}"),
-                )]
+                vec![d]
             })?;
-            let digest =
-                stream_sha256_hex_bounded(output, MAX_ARCHIVE_COMPRESSED_BYTES).map_err(|e| {
-                    vec![Diagnostic::new(
-                        "hash_failed",
-                        redacted_root_label(output),
-                        e,
-                    )]
-                })?;
             Ok(PackReport {
                 output: redacted_root_label(output),
                 schema_id: SCHEMA_ID.to_string(),
@@ -256,11 +300,193 @@ pub fn pack_directory(
                 archive_sha256: digest,
             })
         }
-        Err(d) => {
+        Err(diagnostics) => {
             let _ = fs::remove_file(&tmp);
-            Err(vec![d])
+            Err(diagnostics)
         }
     }
+}
+
+fn read_pack_manifest(path: &Path) -> Result<String, Vec<Diagnostic>> {
+    let opened = crate::incident_evidence::open_regular_file_bounded(
+        path,
+        MAX_MANIFEST_BYTES,
+        ARCHIVE_MANIFEST_PATH,
+    )
+    .map_err(|d| vec![d])?;
+    let mut bytes = Vec::with_capacity(usize::try_from(opened.size).unwrap_or(0));
+    opened
+        .file
+        .take(MAX_MANIFEST_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| {
+            vec![Diagnostic::new(
+                "manifest_unreadable",
+                ARCHIVE_MANIFEST_PATH,
+                format!("cannot read manifest for pack: {e}"),
+            )]
+        })?;
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(vec![Diagnostic::new(
+            "manifest_too_large",
+            ARCHIVE_MANIFEST_PATH,
+            format!("manifest exceeds MAX_MANIFEST_BYTES ({MAX_MANIFEST_BYTES})"),
+        )]);
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        vec![Diagnostic::new(
+            "manifest_utf8",
+            ARCHIVE_MANIFEST_PATH,
+            "manifest.json is not UTF-8",
+        )]
+    })
+}
+
+fn unique_suffix() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let counter = UNIQUE_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}.{}.{}", std::process::id(), nanos, counter)
+}
+
+fn create_unique_partial(parent: &Path, output: &Path) -> Result<(PathBuf, File), Diagnostic> {
+    let output_name = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("bundle.zip");
+    for attempt in 0..128u16 {
+        let path = parent.join(format!(
+            ".{output_name}.partial.{}.{}",
+            unique_suffix(),
+            attempt
+        ));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(Diagnostic::new(
+                    "pack_create_failed",
+                    redacted_root_label(&path),
+                    format!("cannot create partial archive: {error}"),
+                ));
+            }
+        }
+    }
+    Err(Diagnostic::new(
+        "pack_create_failed",
+        redacted_root_label(output),
+        "cannot allocate a unique partial archive name",
+    ))
+}
+
+fn publish_archive(temp: &Path, output: &Path, overwrite: bool) -> Result<(), Diagnostic> {
+    if !overwrite {
+        fs::hard_link(temp, output).map_err(|error| {
+            let (code, message) = if error.kind() == std::io::ErrorKind::AlreadyExists {
+                (
+                    "output_exists",
+                    "output archive already exists; pass --force to replace".to_string(),
+                )
+            } else {
+                (
+                    "output_rename_failed",
+                    format!("atomic no-clobber publication failed: {error}"),
+                )
+            };
+            Diagnostic::new(code, redacted_root_label(output), message)
+        })?;
+        let _ = fs::remove_file(temp);
+        return Ok(());
+    }
+
+    publish_archive_overwrite(temp, output)
+}
+
+#[cfg(not(windows))]
+fn publish_archive_overwrite(temp: &Path, output: &Path) -> Result<(), Diagnostic> {
+    // POSIX rename atomically replaces a same-filesystem destination and leaves
+    // the previous destination untouched when the rename itself fails.
+    fs::rename(temp, output).map_err(|error| {
+        Diagnostic::new(
+            "output_replace_failed",
+            redacted_root_label(output),
+            format!("atomic replacement failed: {error}"),
+        )
+    })
+}
+
+#[cfg(windows)]
+fn publish_archive_overwrite(temp: &Path, output: &Path) -> Result<(), Diagnostic> {
+    if !output.exists() {
+        return fs::rename(temp, output).map_err(|error| {
+            Diagnostic::new(
+                "output_rename_failed",
+                redacted_root_label(output),
+                format!("atomic rename failed: {error}"),
+            )
+        });
+    }
+
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let output_name = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("bundle.zip");
+    let backup = (0..128u16)
+        .find_map(|attempt| {
+            let candidate = parent.join(format!(
+                ".{output_name}.backup.{}.{}",
+                unique_suffix(),
+                attempt
+            ));
+            match fs::hard_link(output, &candidate) {
+                Ok(()) => Some(Ok(candidate)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(error)),
+            }
+        })
+        .transpose()
+        .map_err(|error| {
+            Diagnostic::new(
+                "output_replace_failed",
+                redacted_root_label(output),
+                format!("cannot preserve existing output before replacement: {error}"),
+            )
+        })?
+        .ok_or_else(|| {
+            Diagnostic::new(
+                "output_replace_failed",
+                redacted_root_label(output),
+                "cannot allocate a unique replacement backup",
+            )
+        })?;
+
+    if let Err(error) = fs::remove_file(output) {
+        let _ = fs::remove_file(&backup);
+        return Err(Diagnostic::new(
+            "output_replace_failed",
+            redacted_root_label(output),
+            format!("cannot prepare existing output for replacement: {error}"),
+        ));
+    }
+    if let Err(error) = fs::rename(temp, output) {
+        let rollback = fs::rename(&backup, output);
+        return Err(Diagnostic::new(
+            "output_replace_failed",
+            redacted_root_label(output),
+            match rollback {
+                Ok(()) => format!("replacement failed; previous output restored: {error}"),
+                Err(rollback_error) => format!(
+                    "replacement failed and previous output remains at a recovery backup: \
+                     {error}; restore failed: {rollback_error}"
+                ),
+            },
+        ));
+    }
+    let _ = fs::remove_file(backup);
+    Ok(())
 }
 
 /// Result of a successful pack.
@@ -385,10 +611,12 @@ pub fn validate_archive(path: &Path) -> ValidationReport {
             root_display.clone(),
             format!("archive entry count exceeds MAX_ARCHIVE_ENTRIES ({MAX_ARCHIVE_ENTRIES})"),
         ));
+        return finish_archive(false, root_display, None, None, None, None, diagnostics);
     }
 
     let mut by_name: HashMap<String, usize> = HashMap::new();
     let mut lower_names: HashSet<String> = HashSet::new();
+    let mut unsafe_payload_indices: HashSet<usize> = HashSet::new();
     let mut expanded_total: u64 = 0;
 
     for index in 0..archive.len() {
@@ -478,12 +706,14 @@ pub fn validate_archive(path: &Path) -> ValidationReport {
             ));
         }
 
+        let mut unsafe_for_payload_io = false;
         if entry.encrypted() {
             diagnostics.push(Diagnostic::new(
                 "entry_encrypted",
                 name.clone(),
                 "encrypted zip entries are not supported",
             ));
+            unsafe_for_payload_io = true;
         }
         if entry.is_symlink() {
             diagnostics.push(Diagnostic::new(
@@ -491,6 +721,7 @@ pub fn validate_archive(path: &Path) -> ValidationReport {
                 name.clone(),
                 "symlink zip entries are not supported",
             ));
+            unsafe_for_payload_io = true;
         }
         // Reject FIFO/chardev/block/socket and other non-regular modes via
         // unix external attributes (same kind mask as log zip ingest).
@@ -506,10 +737,12 @@ pub fn validate_archive(path: &Path) -> ValidationReport {
                         kind
                     ),
                 ));
+                unsafe_for_payload_io = true;
             }
         }
         if entry.is_dir() {
             // Directory entries are rejected later as directory_entry; keep kind check above.
+            unsafe_for_payload_io = true;
         }
         match entry.compression() {
             CompressionMethod::Stored | CompressionMethod::Deflated => {}
@@ -519,6 +752,7 @@ pub fn validate_archive(path: &Path) -> ValidationReport {
                     name.clone(),
                     format!("unsupported compression method: {other:?}"),
                 ));
+                unsafe_for_payload_io = true;
             }
         }
 
@@ -530,9 +764,9 @@ pub fn validate_archive(path: &Path) -> ValidationReport {
                 name.clone(),
                 format!("expanded entry exceeds MAX_PER_FILE_BYTES ({MAX_PER_FILE_BYTES})"),
             ));
+            unsafe_for_payload_io = true;
         }
         expanded_total = expanded_total.saturating_add(expanded);
-        let _ = compressed; // used for ratio below
         if expanded_total > MAX_AGGREGATE_BYTES {
             diagnostics.push(Diagnostic::new(
                 "aggregate_too_large",
@@ -541,11 +775,12 @@ pub fn validate_archive(path: &Path) -> ValidationReport {
                     "aggregate expanded bytes exceed MAX_AGGREGATE_BYTES ({MAX_AGGREGATE_BYTES})"
                 ),
             ));
+            unsafe_for_payload_io = true;
         }
         // Compression ratio bomb guard (expanded / max(compressed, floor)).
         if !entry.is_dir() && matches!(entry.compression(), CompressionMethod::Deflated) {
             let denom = compressed.max(RATIO_FLOOR_COMPRESSED);
-            if expanded / denom > MAX_COMPRESSION_RATIO {
+            if expanded > denom.saturating_mul(MAX_COMPRESSION_RATIO) {
                 diagnostics.push(Diagnostic::new(
                     "compression_ratio",
                     name.clone(),
@@ -553,7 +788,11 @@ pub fn validate_archive(path: &Path) -> ValidationReport {
                         "entry expanded/compressed ratio exceeds MAX_COMPRESSION_RATIO ({MAX_COMPRESSION_RATIO})"
                     ),
                 ));
+                unsafe_for_payload_io = true;
             }
+        }
+        if unsafe_for_payload_io {
+            unsafe_payload_indices.insert(index);
         }
 
         let lower = name.to_ascii_lowercase();
@@ -596,6 +835,12 @@ pub fn validate_archive(path: &Path) -> ValidationReport {
             ARCHIVE_MANIFEST_PATH,
             "archive MUST contain root manifest.json",
         ));
+        return finish_archive(false, root_display, None, None, None, None, diagnostics);
+    }
+    if by_name
+        .get(ARCHIVE_MANIFEST_PATH)
+        .is_some_and(|index| unsafe_payload_indices.contains(index))
+    {
         return finish_archive(false, root_display, None, None, None, None, diagnostics);
     }
 
@@ -695,6 +940,12 @@ pub fn validate_archive(path: &Path) -> ValidationReport {
             ));
             continue;
         };
+        // Metadata rejection is terminal for payload I/O. In particular, never
+        // instantiate a decoder for an oversized, over-ratio, or over-aggregate
+        // entry merely to discover another error while hashing.
+        if unsafe_payload_indices.contains(&idx) {
+            continue;
+        }
 
         // Nested .zip as declared attachment is opaque — we only stream-hash.
         let mut entry = match archive.by_index(idx) {
@@ -727,6 +978,17 @@ pub fn validate_archive(path: &Path) -> ValidationReport {
                 ),
             ));
         }
+        let aggregate_remaining = MAX_AGGREGATE_BYTES.saturating_sub(validated_bytes);
+        if expanded > aggregate_remaining {
+            diagnostics.push(Diagnostic::new(
+                "aggregate_too_large",
+                c.path.clone(),
+                format!(
+                    "aggregate actual bytes exceed MAX_AGGREGATE_BYTES ({MAX_AGGREGATE_BYTES})"
+                ),
+            ));
+            continue;
+        }
         // Single pass: hash while optionally capturing metrics JSON (bounded).
         let capture_metrics = c.role == "operational_metrics" && expanded <= MAX_METRICS_DOC_BYTES;
         let mut metrics_buf = if capture_metrics {
@@ -734,13 +996,26 @@ pub fn validate_archive(path: &Path) -> ValidationReport {
         } else {
             None
         };
-        match stream_sha256_reader_capturing(&mut entry, metrics_buf.as_mut()) {
-            Ok(hex) => {
+        let scan_forbidden = matches!(c.role.as_str(), "log" | "readme");
+        match stream_sha256_reader_capturing(
+            &mut entry,
+            expanded,
+            metrics_buf.as_mut(),
+            scan_forbidden,
+        ) {
+            Ok((hex, forbidden_content)) => {
                 if is_lowercase_sha256(&c.sha256) && hex != c.sha256 {
                     diagnostics.push(Diagnostic::new(
                         "hash_mismatch",
                         c.path.clone(),
                         "declared sha256 does not match archive entry contents",
+                    ));
+                }
+                if forbidden_content {
+                    diagnostics.push(Diagnostic::new(
+                        "forbidden_sentinel",
+                        c.path.clone(),
+                        "payload contains forbidden evaluator-truth / answer-key sentinel",
                     ));
                 }
             }
@@ -1091,25 +1366,45 @@ fn preflight_zip_structure(path: &Path, compressed_len: u64) -> Result<(), Diagn
 
 fn stream_sha256_reader_capturing(
     reader: &mut dyn Read,
+    byte_ceiling: u64,
     mut capture: Option<&mut Vec<u8>>,
-) -> Result<String, String> {
+    scan_forbidden: bool,
+) -> Result<(String, bool), String> {
     let mut hasher = Sha256::new();
+    let mut sentinel_scan = ForbiddenSentinelStream::default();
     let mut buf = vec![0u8; HASH_BUFFER_BYTES];
+    let mut limited = reader.take(byte_ceiling.saturating_add(1));
+    let mut observed = 0u64;
     loop {
-        let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
+        let n = limited.read(&mut buf).map_err(|e| e.to_string())?;
         if n == 0 {
             break;
         }
+        observed = observed.saturating_add(n as u64);
+        if observed > byte_ceiling {
+            return Err(format!("read bound exceeded ({byte_ceiling})"));
+        }
         hasher.update(&buf[..n]);
+        if scan_forbidden {
+            sentinel_scan.observe(&buf[..n]);
+        }
         if let Some(cap) = capture.as_deref_mut() {
             cap.extend_from_slice(&buf[..n]);
         }
     }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+    if observed != byte_ceiling {
+        return Err(format!(
+            "read length {observed} != expected size {byte_ceiling}"
+        ));
+    }
+    Ok((
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+        sentinel_scan.found(),
+    ))
 }
 
 fn finish_archive(
@@ -1161,6 +1456,41 @@ mod tests {
 
     fn valid_dir(name: &str) -> PathBuf {
         fixture_root().join("valid").join(name)
+    }
+
+    fn write_single_component_archive(
+        path: &Path,
+        role: &str,
+        payload: &[u8],
+        payload_compression: CompressionMethod,
+        declared_sha256: Option<&str>,
+    ) {
+        let actual_sha256: String = Sha256::digest(payload)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let sha256 = declared_sha256.map(str::to_owned).unwrap_or(actual_sha256);
+        let manifest = format!(
+            r#"{{"schemaId":"contextdesk.incident_evidence.v1","minReaderVersion":1,"bundleId":"archive-test","createdAt":"2024-01-15T12:00:00Z","producer":{{"name":"test","version":"1"}},"privacy":{{"redactionDeclared":true,"containsCredentials":false,"containsPii":false}},"timeBasis":{{"timezone":"UTC","timezoneResolved":true}},"components":[{{"id":"component","role":"{role}","path":"logs/app.log","mediaType":"text/plain","bytes":{},"sha256":"{sha256}"}}]}}"#,
+            payload.len()
+        );
+        let file = File::create(path).unwrap();
+        let mut archive = ZipWriter::new(file);
+        archive
+            .start_file(
+                ARCHIVE_MANIFEST_PATH,
+                SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+            )
+            .unwrap();
+        archive.write_all(manifest.as_bytes()).unwrap();
+        archive
+            .start_file(
+                "logs/app.log",
+                SimpleFileOptions::default().compression_method(payload_compression),
+            )
+            .unwrap();
+        archive.write_all(payload).unwrap();
+        archive.finish().unwrap();
     }
 
     #[test]
@@ -1236,10 +1566,51 @@ mod tests {
         let bad = tmp.path().join("bad-root");
         fs::create_dir_all(&bad).unwrap();
         let out = tmp.path().join("out.zip");
-        let partial = tmp.path().join(".out.zip.partial");
         let _ = pack_directory(&bad, &out, false);
         assert!(!out.exists());
-        assert!(!partial.exists());
+        assert!(
+            fs::read_dir(tmp.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".out.zip.partial.")),
+            "failed pack must clean up only its uniquely-created partial"
+        );
+    }
+
+    #[test]
+    fn pack_preserves_unrelated_predictable_partial() {
+        let dir = valid_dir("minimal-log-only");
+        let tmp = tempfile::tempdir().unwrap();
+        let output = tmp.path().join("out.zip");
+        let unrelated = tmp.path().join(".out.zip.partial");
+        fs::write(&unrelated, b"unrelated data").unwrap();
+
+        pack_directory(&dir, &output, false).expect("pack");
+
+        assert_eq!(fs::read(&unrelated).unwrap(), b"unrelated data");
+        assert!(output.is_file());
+    }
+
+    #[test]
+    fn failed_publication_preserves_existing_destination() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing_temp = tmp.path().join("missing-partial");
+        let destination = tmp.path().join("existing.zip");
+        fs::write(&destination, b"prior archive").unwrap();
+
+        let error = publish_archive(&missing_temp, &destination, true).unwrap_err();
+
+        assert!(
+            matches!(
+                error.code.as_str(),
+                "output_replace_failed" | "output_rename_failed"
+            ),
+            "{error:?}"
+        );
+        assert_eq!(fs::read(&destination).unwrap(), b"prior archive");
     }
 
     #[test]
@@ -1792,6 +2163,100 @@ mod tests {
     }
 
     #[test]
+    fn over_ratio_entry_is_rejected_without_payload_hashing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("ratio-skip.zip");
+        let payload = vec![0u8; 1024 * 1024];
+        write_single_component_archive(
+            &zip_path,
+            "log",
+            &payload,
+            CompressionMethod::Deflated,
+            Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        );
+
+        let report = validate_archive(&zip_path);
+
+        assert!(!report.ok);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "compression_ratio"),
+            "{:?}",
+            report.diagnostics
+        );
+        assert!(
+            report.diagnostics.iter().all(|diagnostic| !matches!(
+                diagnostic.code.as_str(),
+                "hash_mismatch" | "hash_failed"
+            )),
+            "unsafe entry reached payload hashing: {:?}",
+            report.diagnostics
+        );
+    }
+
+    #[test]
+    fn archive_payload_reader_stops_at_explicit_ceiling() {
+        struct EndlessReader {
+            observed: usize,
+        }
+
+        impl Read for EndlessReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                buffer.fill(b'x');
+                self.observed += buffer.len();
+                Ok(buffer.len())
+            }
+        }
+
+        let mut reader = EndlessReader { observed: 0 };
+        let error = stream_sha256_reader_capturing(&mut reader, 31, None, false).unwrap_err();
+
+        assert_eq!(error, "read bound exceeded (31)");
+        assert_eq!(
+            reader.observed, 32,
+            "reader must receive at most ceiling + one detection byte"
+        );
+    }
+
+    #[test]
+    fn archive_rejects_case_insensitive_payload_sentinel_across_chunk_boundary() {
+        for role in ["log", "readme"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let zip_path = tmp.path().join(format!("{role}-sentinel.zip"));
+            let mut payload = vec![b'x'; HASH_BUFFER_BYTES - 5];
+            payload.extend_from_slice(b"EvAlUaToR_TrUtH expected diagnosis\n");
+            write_single_component_archive(
+                &zip_path,
+                role,
+                &payload,
+                CompressionMethod::Stored,
+                None,
+            );
+
+            let report = validate_archive(&zip_path);
+
+            assert!(!report.ok);
+            assert!(
+                report.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == "forbidden_sentinel" && diagnostic.path == "logs/app.log"
+                }),
+                "{role}: {:?}",
+                report.diagnostics
+            );
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .all(|diagnostic| diagnostic.code != "hash_failed"),
+                "{role}: sentinel scan must share the bounded hash pass: {:?}",
+                report.diagnostics
+            );
+        }
+    }
+
+    #[test]
     fn archive_rejects_truncated_central_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let zip_path = tmp.path().join("trunc.zip");
@@ -1933,19 +2398,49 @@ mod tests {
     }
 
     #[test]
-    fn pack_detects_source_mutation_size_change() {
-        // Race-style: open for pack after validating, then if size changes mid-read
-        // open_regular_file_bounded + re-stat path rejects. Exercise re-stat by
-        // replacing a payload with a longer file between validate and the second open
-        // is hard without threads; instead assert pack refuses non-regular and that
-        // identity check code path exists via packing a normal tree twice (no partial).
-        let dir = valid_dir("minimal-log-only");
+    fn pack_detects_same_size_source_mutation() {
         let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("bundle");
+        fs::create_dir_all(dir.join("logs")).unwrap();
+        fs::copy(
+            valid_dir("minimal-log-only").join("manifest.json"),
+            dir.join("manifest.json"),
+        )
+        .unwrap();
+        fs::copy(
+            valid_dir("minimal-log-only").join("logs/app.log"),
+            dir.join("logs/app.log"),
+        )
+        .unwrap();
+        let payload = dir.join("logs/app.log");
+        let mut mutated = fs::read(&payload).unwrap();
+        mutated[0] = if mutated[0] == b'X' { b'Y' } else { b'X' };
+        let original_len = fs::metadata(&payload).unwrap().len();
         let out = tmp.path().join("m.zip");
-        pack_directory(&dir, &out, false).expect("pack");
-        assert!(out.is_file());
-        let partial = tmp.path().join(".m.zip.partial");
-        assert!(!partial.exists(), "no partial left after success");
+
+        let error = pack_directory_with_before_write(&dir, &out, false, || {
+            fs::write(&payload, &mutated).unwrap();
+            assert_eq!(fs::metadata(&payload).unwrap().len(), original_len);
+        })
+        .unwrap_err();
+
+        assert!(
+            error
+                .iter()
+                .any(|diagnostic| diagnostic.code == "payload_identity_changed"),
+            "{error:?}"
+        );
+        assert!(!out.exists());
+        assert!(
+            fs::read_dir(tmp.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".m.zip.partial.")),
+            "failed mutation pack must remove its unique partial"
+        );
     }
 
     #[test]
