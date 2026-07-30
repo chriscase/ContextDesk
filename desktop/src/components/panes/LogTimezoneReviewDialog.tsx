@@ -14,16 +14,18 @@ import type {
   LogTimezoneDeclarationDto,
   LogTimezonePreviewRequestDto,
   LogTimezoneResolutionPreviewDto,
+  LogTimezoneScopeDto,
 } from "../../lib/host";
-import { formatCanonicalUtc } from "../../lib/logExplorer/types";
 
 type ResolutionMode = "unresolved" | "iana";
 
 export type LogTimezoneReviewDialogProps = {
+  scope: LogTimezoneScopeDto;
   source: LogSourceConfidenceDto;
   declaration?: LogTimezoneDeclarationDto | null;
   suggestedZone?: string | null;
   triggerRef: RefObject<HTMLButtonElement | null>;
+  fallbackFocusRef: RefObject<HTMLButtonElement | null>;
   onPreview: (
     request: LogTimezonePreviewRequestDto,
   ) => Promise<LogTimezoneResolutionPreviewDto>;
@@ -73,6 +75,13 @@ function countLabel(value: number, noun: string): string {
   return `${value.toLocaleString()} ${noun}${value === 1 ? "" : "s"}`;
 }
 
+function formatWholeSecondUtc(unixSeconds: number): string {
+  return new Date(unixSeconds * 1000)
+    .toISOString()
+    .replace("T", " ")
+    .replace(".000Z", "Z");
+}
+
 function sourceReason(source: LogSourceConfidenceDto): string {
   const reasons = source.unresolvedReasons ?? [];
   if (reasons.includes("zone_abbreviation_not_resolved")) {
@@ -82,10 +91,12 @@ function sourceReason(source: LogSourceConfidenceDto): string {
 }
 
 export function LogTimezoneReviewDialog({
+  scope,
   source,
   declaration,
   suggestedZone,
   triggerRef,
+  fallbackFocusRef,
   onPreview,
   onApply,
   onClear,
@@ -93,6 +104,8 @@ export function LogTimezoneReviewDialog({
 }: LogTimezoneReviewDialogProps) {
   const initialMode: ResolutionMode = declaration ? "iana" : "unresolved";
   const initialZone = declaration?.ianaZone ?? suggestedZone ?? "";
+  const declarationZone = declaration?.ianaZone ?? null;
+  const declarationRevision = declaration?.appliedRevision ?? null;
   const [mode, setMode] = useState<ResolutionMode>(initialMode);
   const [zone, setZone] = useState(initialZone);
   const [preview, setPreview] =
@@ -110,19 +123,42 @@ export function LogTimezoneReviewDialog({
   const zoneHelpId = useId();
   const resultId = useId();
   const busy = status !== "idle";
+  const mutationBusy = status === "applying" || status === "clearing";
   const trimmedZone = zone.trim();
   const validZone = mode === "iana" && isValidIanaZone(trimmedZone);
   const previewMatchesCurrent =
+    preview?.corpusId === scope.corpusId &&
+    preview.eventRevision === scope.eventRevision &&
     preview?.source === source.source &&
     preview.ianaZone === trimmedZone &&
     preview.previewToken.trim().length > 0;
   const previewCanApply =
     previewMatchesCurrent && (preview?.affectedRecords ?? 0) > 0;
+  const residualOrderOnlyRecords = preview
+    ? preview.unchangedOrderOnlyRecords +
+      preview.dstGapRecords +
+      preview.dstFoldAmbiguities +
+      preview.unsupportedTimestampRecords +
+      preview.outOfRangeRecords
+    : 0;
+  const resultingSourceQuality =
+    (preview?.affectedRecords ?? 0) === 0
+      ? "order-only"
+      : residualOrderOnlyRecords > 0
+        ? "mixed"
+        : "exact wall clock";
+
+  const restoreFocus = () => {
+    queueMicrotask(() => {
+      (triggerRef.current ?? fallbackFocusRef.current)?.focus();
+    });
+  };
 
   const dismiss = () => {
-    if (busy) return;
+    if (mutationBusy) return;
+    previewGenerationRef.current += 1;
     onDismiss();
-    queueMicrotask(() => triggerRef.current?.focus());
+    restoreFocus();
   };
 
   const invalidatePreview = () => {
@@ -134,14 +170,21 @@ export function LogTimezoneReviewDialog({
 
   useEffect(() => {
     previewGenerationRef.current += 1;
-    setMode(declaration ? "iana" : "unresolved");
-    setZone(declaration?.ianaZone ?? suggestedZone ?? "");
+    setMode(declarationZone ? "iana" : "unresolved");
+    setZone(declarationZone ?? suggestedZone ?? "");
     setPreview(null);
     setError(null);
     setConfirmClear(false);
     setStatus("idle");
     queueMicrotask(() => safeDefaultRef.current?.focus());
-  }, [source.source, declaration, suggestedZone]);
+  }, [
+    source.source,
+    declarationZone,
+    declarationRevision,
+    suggestedZone,
+    scope.corpusId,
+    scope.eventRevision,
+  ]);
 
   useEffect(() => {
     queueMicrotask(() => safeDefaultRef.current?.focus());
@@ -150,6 +193,8 @@ export function LogTimezoneReviewDialog({
   const previewZone = async () => {
     if (!validZone || busy) return;
     const request: LogTimezonePreviewRequestDto = {
+      corpusId: scope.corpusId,
+      eventRevision: scope.eventRevision,
       source: source.source,
       ianaZone: trimmedZone,
     };
@@ -162,12 +207,14 @@ export function LogTimezoneReviewDialog({
       const result = await onPreview(request);
       if (previewGenerationRef.current !== generation) return;
       if (
+        result.corpusId !== request.corpusId ||
+        result.eventRevision !== request.eventRevision ||
         result.source !== request.source ||
         result.ianaZone !== request.ianaZone ||
         !result.previewToken.trim()
       ) {
         throw new Error(
-          "The preview no longer matches this source and timezone. Preview again.",
+          "The preview no longer matches this source, timezone, or corpus revision. Preview again.",
         );
       }
       setPreview(result);
@@ -185,12 +232,14 @@ export function LogTimezoneReviewDialog({
     setStatus("applying");
     try {
       await onApply({
+        corpusId: scope.corpusId,
+        expectedRevision: scope.eventRevision,
         source: source.source,
         ianaZone: trimmedZone,
         previewToken: preview.previewToken,
       });
       onDismiss();
-      queueMicrotask(() => triggerRef.current?.focus());
+      restoreFocus();
     } catch (applyError) {
       setError(String(applyError));
       setStatus("idle");
@@ -203,11 +252,13 @@ export function LogTimezoneReviewDialog({
     setStatus("clearing");
     try {
       await onClear({
+        corpusId: scope.corpusId,
+        expectedRevision: scope.eventRevision,
         source: source.source,
         appliedRevision: declaration.appliedRevision,
       });
       onDismiss();
-      queueMicrotask(() => triggerRef.current?.focus());
+      restoreFocus();
     } catch (clearError) {
       setError(String(clearError));
       setStatus("idle");
@@ -244,15 +295,13 @@ export function LogTimezoneReviewDialog({
           <div>
             <span className="eyebrow">Source time</span>
             <h2 id={titleId}>Review timezone</h2>
-            <span className="log-timezone-review__source">
-              {source.source}
-            </span>
+            <span className="log-timezone-review__source">{source.source}</span>
           </div>
           <button
             type="button"
             className="btn btn--ghost"
             aria-label="Close timezone review"
-            disabled={busy}
+            disabled={mutationBusy}
             onClick={dismiss}
           >
             Close
@@ -328,10 +377,13 @@ export function LogTimezoneReviewDialog({
               }}
             />
             <small id={zoneHelpId}>
-              Use a regional name such as Europe/Berlin—not an abbreviation
-              such as CET.
+              Use a regional name such as Europe/Berlin—not an abbreviation such
+              as CET.
               {suggestedZone && !declaration ? (
-                <> A saved or bundle hint filled this field; it is not active.</>
+                <>
+                  {" "}
+                  A saved or bundle hint filled this field; it is not active.
+                </>
               ) : null}
             </small>
           </label>
@@ -377,6 +429,16 @@ export function LogTimezoneReviewDialog({
                 <strong>Preview for {preview.ianaZone}</strong>
                 <span>Not applied</span>
               </div>
+              <p className="log-timezone-review__outcome">
+                <strong>
+                  {countLabel(preview.affectedRecords, "record")} resolved
+                </strong>
+                <span aria-hidden="true"> · </span>
+                {countLabel(residualOrderOnlyRecords, "record")} remain
+                order-only
+                <span aria-hidden="true"> · </span>
+                Resulting source quality: {resultingSourceQuality}
+              </p>
               <dl>
                 <div>
                   <dt>Affected</dt>
@@ -393,7 +455,7 @@ export function LogTimezoneReviewDialog({
                   <dd>
                     {preview.firstResolvedTs == null
                       ? "None"
-                      : formatCanonicalUtc(preview.firstResolvedTs)}
+                      : formatWholeSecondUtc(preview.firstResolvedTs)}
                   </dd>
                 </div>
                 <div>
@@ -401,7 +463,7 @@ export function LogTimezoneReviewDialog({
                   <dd>
                     {preview.lastResolvedTs == null
                       ? "None"
-                      : formatCanonicalUtc(preview.lastResolvedTs)}
+                      : formatWholeSecondUtc(preview.lastResolvedTs)}
                   </dd>
                 </div>
                 <div>
@@ -410,9 +472,7 @@ export function LogTimezoneReviewDialog({
                 </div>
                 <div>
                   <dt>DST fold ambiguity</dt>
-                  <dd>
-                    {countLabel(preview.dstFoldAmbiguities, "record")}
-                  </dd>
+                  <dd>{countLabel(preview.dstFoldAmbiguities, "record")}</dd>
                 </div>
                 <div>
                   <dt>Unchanged / order-only</dt>

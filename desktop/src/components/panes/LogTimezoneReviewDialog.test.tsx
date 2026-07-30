@@ -15,9 +15,12 @@ import type {
 } from "../../lib/host";
 import { LogImportConfidence } from "./LogImportConfidence";
 
-function unresolvedReport(
-  source = "edge/server.log",
-): LogImportConfidenceDto {
+const TIMEZONE_SCOPE = {
+  corpusId: "corpus-779",
+  eventRevision: 6,
+} as const;
+
+function unresolvedReport(source = "edge/server.log"): LogImportConfidenceDto {
   return {
     corpusTimeQuality: "order_only",
     counts: {
@@ -51,6 +54,8 @@ function preview(
   ianaZone: string,
 ): LogTimezoneResolutionPreviewDto {
   return {
+    corpusId: TIMEZONE_SCOPE.corpusId,
+    eventRevision: TIMEZONE_SCOPE.eventRevision,
     source,
     ianaZone,
     previewToken: `preview:${source}:${ianaZone}`,
@@ -92,6 +97,7 @@ async function openReview(
   render(
     <LogImportConfidence
       confidence={unresolvedReport()}
+      timezoneScope={TIMEZONE_SCOPE}
       timezoneSuggestions={
         options.suggestion
           ? { "edge/server.log": options.suggestion }
@@ -178,9 +184,66 @@ describe("LogTimezoneReviewDialog", () => {
     expect(document.activeElement).toBe(trigger);
   });
 
-  it("binds Apply to the current successful preview and invalidates it on zone change", async () => {
+  it("can dismiss an in-flight preview without accepting its late result", async () => {
+    let finishPreview:
+      ((value: LogTimezoneResolutionPreviewDto) => void) | undefined;
     const onPreview = vi.fn(
-      async ({ source, ianaZone }) => preview(source, ianaZone),
+      () =>
+        new Promise<LogTimezoneResolutionPreviewDto>((resolve) => {
+          finishPreview = resolve;
+        }),
+    );
+    const { dialog, trigger } = await openReview({ onPreview });
+    fireEvent.click(
+      within(dialog).getByRole("radio", {
+        name: /Use an IANA timezone/,
+      }),
+    );
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /^IANA timezone/ }),
+      { target: { value: "Europe/Berlin" } },
+    );
+    const previewButton = within(dialog).getByRole("button", {
+      name: "Preview",
+    });
+    fireEvent.click(previewButton);
+    expect(
+      (
+        within(dialog).getByRole("button", {
+          name: "Close timezone review",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false);
+
+    fireEvent.keyDown(previewButton, { key: "Escape" });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Review timezone" }),
+      ).toBeNull(),
+    );
+    expect(document.activeElement).toBe(trigger);
+
+    finishPreview?.(preview("edge/server.log", "Europe/Berlin"));
+    await Promise.resolve();
+    expect(
+      screen.queryByRole("region", { name: "Timezone preview" }),
+    ).toBeNull();
+  });
+
+  it("dismisses from the backdrop and restores focus", async () => {
+    const { trigger } = await openReview();
+    fireEvent.mouseDown(screen.getByTestId("timezone-review-backdrop"));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Review timezone" }),
+      ).toBeNull(),
+    );
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("binds Apply to the current successful preview and invalidates it on zone change", async () => {
+    const onPreview = vi.fn(async ({ source, ianaZone }) =>
+      preview(source, ianaZone),
     );
     const { dialog, trigger, onApply } = await openReview({ onPreview });
     const useZone = within(dialog).getByRole("radio", {
@@ -198,18 +261,32 @@ describe("LogTimezoneReviewDialog", () => {
       name: "Timezone preview",
     });
     expect(onPreview).toHaveBeenCalledWith({
+      corpusId: "corpus-779",
+      eventRevision: 6,
       source: "edge/server.log",
       ianaZone: "Europe/Berlin",
     });
     expect(result.textContent).toContain("21 records");
-    expect(result.textContent).toContain("2021-03-05 00:00:05.000Z");
-    expect(result.textContent).toContain("2021-03-05 01:00:05.000Z");
-    expect(result.textContent).toContain("1 record");
-    expect(result.textContent).toContain("2 records");
-    expect(result.textContent).toContain("3 records");
-    expect(result.textContent).toContain(
-      "coarse whole-second precision",
-    );
+    expect(result.textContent).toContain("2021-03-05 00:00:05Z");
+    expect(result.textContent).toContain("2021-03-05 01:00:05Z");
+    expect(result.textContent).toContain("21 records resolved");
+    expect(result.textContent).toContain("7 records remain order-only");
+    expect(result.textContent).toContain("Resulting source quality: mixed");
+    expect(
+      within(result).getByText("Already exact").nextElementSibling?.textContent,
+    ).toBe("4 records");
+    expect(
+      within(result).getByText("DST gaps").nextElementSibling?.textContent,
+    ).toBe("1 record");
+    expect(
+      within(result).getByText("DST fold ambiguity").nextElementSibling
+        ?.textContent,
+    ).toBe("2 records");
+    expect(
+      within(result).getByText("Unchanged / order-only").nextElementSibling
+        ?.textContent,
+    ).toBe("3 records");
+    expect(result.textContent).toContain("coarse whole-second precision");
 
     const apply = within(dialog).getByRole("button", {
       name: "Apply declaration",
@@ -228,6 +305,8 @@ describe("LogTimezoneReviewDialog", () => {
 
     await waitFor(() =>
       expect(onApply).toHaveBeenCalledWith({
+        corpusId: "corpus-779",
+        expectedRevision: 6,
         source: "edge/server.log",
         ianaZone: "America/Chicago",
         previewToken: "preview:edge/server.log:America/Chicago",
@@ -265,6 +344,8 @@ describe("LogTimezoneReviewDialog", () => {
     fireEvent.click(previewButton);
     await waitFor(() =>
       expect(onPreview).toHaveBeenCalledWith({
+        corpusId: "corpus-779",
+        eventRevision: 6,
         source: "edge/server.log",
         ianaZone: "UTC",
       }),
@@ -272,9 +353,10 @@ describe("LogTimezoneReviewDialog", () => {
   });
 
   it("rejects a stale or mismatched preview instead of enabling Apply", async () => {
-    const onPreview = vi.fn(async () =>
-      preview("another/source.log", "Europe/Berlin"),
-    );
+    const onPreview = vi.fn(async () => ({
+      ...preview("edge/server.log", "Europe/Berlin"),
+      eventRevision: 7,
+    }));
     const { dialog } = await openReview({ onPreview });
     fireEvent.click(
       within(dialog).getByRole("radio", {
@@ -289,7 +371,7 @@ describe("LogTimezoneReviewDialog", () => {
 
     const alert = await within(dialog).findByRole("alert");
     expect(alert.textContent).toContain(
-      "preview no longer matches this source and timezone",
+      "preview no longer matches this source, timezone, or corpus revision",
     );
     expect(
       (
@@ -333,13 +415,14 @@ describe("LogTimezoneReviewDialog", () => {
   });
 
   it("discards a preview when the reviewed source changes", async () => {
-    const onPreview = vi.fn(
-      async ({ source, ianaZone }) => preview(source, ianaZone),
+    const onPreview = vi.fn(async ({ source, ianaZone }) =>
+      preview(source, ianaZone),
     );
     const onApply = vi.fn(async () => undefined);
     const { rerender } = render(
       <LogImportConfidence
         confidence={unresolvedReport("first/server.log")}
+        timezoneScope={TIMEZONE_SCOPE}
         onPreviewTimezone={onPreview}
         onApplyTimezone={onApply}
       />,
@@ -364,6 +447,7 @@ describe("LogTimezoneReviewDialog", () => {
     rerender(
       <LogImportConfidence
         confidence={unresolvedReport("second/server.log")}
+        timezoneScope={TIMEZONE_SCOPE}
         onPreviewTimezone={onPreview}
         onApplyTimezone={onApply}
       />,
@@ -415,6 +499,8 @@ describe("LogTimezoneReviewDialog", () => {
     );
     await waitFor(() =>
       expect(onClear).toHaveBeenCalledWith({
+        corpusId: "corpus-779",
+        expectedRevision: 6,
         source: "edge/server.log",
         appliedRevision: 7,
       }),

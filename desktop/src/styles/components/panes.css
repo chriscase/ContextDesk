@@ -1056,12 +1056,24 @@
   font-weight: 650;
 }
 
+.log-timezone-review__outcome {
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--text);
+  font-size: 0.86rem;
+}
+
 .log-timezone-review__preview p,
 .log-timezone-review__clear-confirm p {
   margin: 0;
   color: var(--text-muted);
   font-size: 0.8rem;
   line-height: 1.45;
+}
+
+.log-timezone-review__preview .log-timezone-review__outcome {
+  color: var(--text);
+  font-size: 0.86rem;
 }
 
 .log-timezone-review__error {

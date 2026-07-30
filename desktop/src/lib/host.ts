@@ -1809,12 +1809,21 @@ export type LogTimezoneDeclarationDto = {
   appliedRevision: number;
 };
 
+export type LogTimezoneScopeDto = {
+  corpusId: string;
+  eventRevision: number;
+};
+
 export type LogTimezonePreviewRequestDto = {
+  corpusId: string;
+  eventRevision: number;
   source: string;
   ianaZone: string;
 };
 
 export type LogTimezoneResolutionPreviewDto = {
+  corpusId: string;
+  eventRevision: number;
   source: string;
   ianaZone: string;
   previewToken: string;
@@ -1831,12 +1840,16 @@ export type LogTimezoneResolutionPreviewDto = {
 };
 
 export type LogTimezoneApplyRequestDto = {
+  corpusId: string;
+  expectedRevision: number;
   source: string;
   ianaZone: string;
   previewToken: string;
 };
 
 export type LogTimezoneClearRequestDto = {
+  corpusId: string;
+  expectedRevision: number;
   source: string;
   appliedRevision: number;
 };
@@ -2222,12 +2235,14 @@ export async function hostExportLogCorpusPackage(
   return invoke<string>("export_log_corpus_package", { corpusId, path });
 }
 
-export type LogDiagnosticSaveStatus = {
-  status: "saved" | "cancelled";
-} | {
-  status: "saved_with_warning";
-  warning: string;
-};
+export type LogDiagnosticSaveStatus =
+  | {
+      status: "saved" | "cancelled";
+    }
+  | {
+      status: "saved_with_warning";
+      warning: string;
+    };
 
 export type PreparedLogDiagnosticDto = {
   reportId: string;
@@ -2328,17 +2343,11 @@ export type EventQueryDto = {
 };
 
 export type SuppressionRuleOrigin =
-  | "human"
-  | "detector_proposal"
-  | "model_proposal";
+  "human" | "detector_proposal" | "model_proposal";
 export type SuppressionRuleState = "enabled" | "disabled" | "removed";
 export type SuppressionRuleMutation = "disable" | "reenable" | "remove";
 export type SuppressionAuditAction =
-  | "previewed"
-  | "activated"
-  | "disabled"
-  | "reenabled"
-  | "removed";
+  "previewed" | "activated" | "disabled" | "reenabled" | "removed";
 
 export type SuppressionTemplatePredicateDto = {
   templateId: number;
