@@ -81,7 +81,11 @@ describe("process pipeline labels", () => {
       "redact",
       "store",
       "embed",
+      "validate",
+      "publish",
     ]);
-    expect(phaseLabel("template")).toBe("Template");
+    expect(phaseLabel("template")).toBe("Template analysis");
+    expect(phaseLabel("validate")).toBe("Validate");
+    expect(phaseLabel("publish")).toBe("Publication");
   });
 });
