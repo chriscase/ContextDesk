@@ -371,6 +371,33 @@
   border-color: var(--accent, #5b9fd4);
 }
 
+/* Stop is visually distinct from Send (#768). */
+.log-explorer__btn--stop {
+  background: color-mix(in srgb, var(--danger, #e57373) 14%, transparent);
+  border-color: color-mix(in srgb, var(--danger, #e57373) 55%, var(--border));
+  color: var(--fg-primary, #e8eaed);
+}
+
+.log-explorer__nav-unreadable {
+  margin: 0.35rem 0 0;
+  color: var(--fg-muted, #9aa0a6);
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
+.log-explorer__chat-elapsed {
+  color: var(--fg-muted, #9aa0a6);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.log-explorer__chat-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .log-explorer__body {
   display: grid;
   flex: 1;
@@ -530,6 +557,19 @@
   justify-content: center;
   min-width: 1.35rem;
   padding: 0 0.25rem;
+}
+
+/* Collapsed rail still signals an in-flight turn (#768). */
+.log-explorer__chat-reopen-busy {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 999px;
+  background: var(--accent, #5b9fd4);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent, #5b9fd4) 30%, transparent);
+}
+
+.log-explorer__chat--collapsed[data-busy="true"] .log-explorer__chat-reopen {
+  color: var(--fg-primary, #e8eaed);
 }
 
 .log-explorer__chat-header {

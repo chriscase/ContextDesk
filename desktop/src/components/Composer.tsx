@@ -226,7 +226,8 @@ export function Composer({
               type="button"
               className="composer__stop"
               onClick={onStop}
-              title="Stop showing the response"
+              title="Cancel the current turn"
+              aria-label="Stop — cancel the current turn"
             >
               <IconClose />
               Stop
