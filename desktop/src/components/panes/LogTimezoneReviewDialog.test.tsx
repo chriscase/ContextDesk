@@ -405,6 +405,7 @@ describe("LogTimezoneReviewDialog", () => {
         /No records can be resolved by this declaration/,
       ),
     ).toBeTruthy();
+    expect(dialog.textContent).toContain("Resulting source quality: mixed");
     expect(
       (
         within(dialog).getByRole("button", {
@@ -483,6 +484,12 @@ describe("LogTimezoneReviewDialog", () => {
       appliedRevision: 7,
     };
     const { dialog, trigger, onClear } = await openReview({ declaration });
+    expect(dialog.textContent).toContain(
+      "Europe/Berlin is the active source timezone",
+    );
+    expect(dialog.textContent).not.toContain(
+      "cannot be placed on a shared wall clock until you declare",
+    );
 
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Remove declaration…" }),

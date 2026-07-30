@@ -82,7 +82,13 @@ function formatWholeSecondUtc(unixSeconds: number): string {
     .replace(".000Z", "Z");
 }
 
-function sourceReason(source: LogSourceConfidenceDto): string {
+function sourceReason(
+  source: LogSourceConfidenceDto,
+  declaration?: LogTimezoneDeclarationDto | null,
+): string {
+  if (declaration) {
+    return `${declaration.ianaZone} is the active source timezone. You can preview a different IANA timezone or remove this declaration to return its resolved local records to order-only time.`;
+  }
   const reasons = source.unresolvedReasons ?? [];
   if (reasons.includes("zone_abbreviation_not_resolved")) {
     return "This source includes a timezone abbreviation. Abbreviations such as CET can refer to different regional or historic rules, so ContextDesk left those records order-only.";
@@ -141,12 +147,15 @@ export function LogTimezoneReviewDialog({
       preview.unsupportedTimestampRecords +
       preview.outOfRangeRecords
     : 0;
+  const resultingWallClockRecords = preview
+    ? preview.affectedRecords + preview.existingWallClockRecords
+    : 0;
   const resultingSourceQuality =
-    (preview?.affectedRecords ?? 0) === 0
-      ? "order-only"
-      : residualOrderOnlyRecords > 0
-        ? "mixed"
-        : "exact wall clock";
+    resultingWallClockRecords > 0 && residualOrderOnlyRecords > 0
+      ? "mixed"
+      : resultingWallClockRecords > 0
+        ? "exact wall clock"
+        : "order-only";
 
   const restoreFocus = () => {
     queueMicrotask(() => {
@@ -310,7 +319,7 @@ export function LogTimezoneReviewDialog({
 
         <div className="log-timezone-review__body">
           <p id={descriptionId} className="log-timezone-review__lead">
-            {sourceReason(source)}
+            {sourceReason(source, declaration)}
           </p>
 
           <fieldset className="log-timezone-review__choice">

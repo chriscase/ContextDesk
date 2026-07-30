@@ -7,12 +7,16 @@ analysis tools, packages, and Log Explorer query APIs. Bounded redacted
 Original records, explicit-offset logfmt/RFC5424 normalization, and the shared
 timeline/metric presentation are present on `main`. Built-in record grammars
 use deterministic versioned fingerprints with content-only tie handling and
-record-level dispatch. Full timestamp provenance, subsecond precision,
-timezone rules, and clock-skew review remain #670; user-authored profiles and
-multiline framing remain #751. #671 Slice 1 is a partial candidate for governed
-corpus-scoped exact-template suppression; #671 remains open for adversarial
-hardening, broader predicates and lifecycle, include-suppressed controls,
-suppression-specific scale proof, and baseline proposals.
+record-level dispatch. Events persist parser timestamp provenance, active time
+basis, and parser-recognized unresolved local timestamp text. A user can
+preview, apply, reopen, and clear an explicit per-source IANA timezone through
+revision-bound event publication. Whole-second storage, yearless policy,
+abbreviation mapping, subsecond precision, and clock-skew review remain #670;
+user-authored profiles and multiline framing remain #751. #671 Slice 1 is a
+partial candidate for governed corpus-scoped exact-template suppression; #671
+remains open for adversarial hardening, broader predicates and lifecycle,
+include-suppressed controls, suppression-specific scale proof, and baseline
+proposals.
 
 ## 1. Problem
 
@@ -48,11 +52,13 @@ The reusable method is a layered evidence plane:
 | Bounded nested support-bundle ZIP intake                    | **Shipped**                               | [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs) nested-archive preflight, private staging, virtual identities, and adversarial tests | Three-container depth and fixed safety caps are deliberate  |
 | Redaction before ordinary event persistence/embedding       | **Shipped**                               | [`redact_log.rs`](../../../crates/cd-core/src/log_analysis/redact_log.rs)                                                                      | Redaction cannot prove all domain-specific PII is removed   |
 | Bounded redacted Original representation                    | **Shipped**                               | `prepare_original_record` and additive store fields in [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs) and [`store.rs`](../../../crates/cd-core/src/log_analysis/store.rs) | Bounded redacted fidelity, not unbounded raw retention      |
-| JSON numeric/RFC3339 timestamp parsing                      | **Shipped**                               | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs)                                                                                | Whole-second storage and incomplete provenance              |
-| Explicit-offset logfmt/RFC5424 normalization                | **Shipped**                               | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs) and current-main proof on #681                                                  | Whole-second storage and full #670 provenance policy        |
-| Offsetless/yearless timestamps remain unresolved/order-only | **Shipped**                               | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs)                                                                                | Per-source timezone/year policy remains #670                |
-| Versioned built-in grammar fingerprints                     | **Shipped**                               | [`format_profile.rs`](../../../crates/cd-core/src/log_analysis/format_profile.rs), [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs), and record-level ingest dispatch in [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs) | User-authored profiles, durable provenance, and multiline framing remain #751 |
-| Full timestamp provenance, precision, DST, skew policy      | **Planned**                               | #670                                                                                                                                           | No current claim of seamless arbitrary timestamp alignment  |
+| JSON numeric/RFC3339 timestamp parsing                      | **Shipped**                               | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs)                                                                                | Whole-second storage; no subsecond persistence               |
+| Explicit-offset logfmt/RFC5424 normalization                | **Shipped**                               | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs) and current-main proof on #681                                                  | Whole-second storage and no clock-skew correction            |
+| Persisted parser timestamp evidence                         | **Shipped**                               | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs), [`store.rs`](../../../crates/cd-core/src/log_analysis/store.rs), and [`query.rs`](../../../crates/cd-core/src/log_analysis/query.rs) | Persists provenance, active basis, and recognized unresolved local text; not byte-exact timestamp tokens or subsecond precision |
+| Per-source IANA timezone preview/apply/clear                | **Shipped — bounded #779/#780 slice**      | [`timezone_resolution.rs`](../../../crates/cd-core/src/log_analysis/timezone_resolution.rs), [`timezone_application.rs`](../../../crates/cd-core/src/log_analysis/timezone_application.rs), and [`event_revision.rs`](../../../crates/cd-core/src/log_analysis/event_revision.rs) | No year inference, abbreviation guessing, custom profiles, or skew correction |
+| Offsetless/yearless timestamps initially remain order-only  | **Shipped**                               | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs)                                                                                | Only parser-recognized complete local calendar timestamps can use an explicit source IANA declaration; yearless forms remain unresolved |
+| Versioned built-in grammar fingerprints                     | **Shipped**                               | [`format_profile.rs`](../../../crates/cd-core/src/log_analysis/format_profile.rs), [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs), and record-level ingest dispatch in [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs) | User-authored profiles, durable grammar/profile provenance, and multiline framing remain #751 |
+| Complete timestamp precision/year/abbreviation/skew policy  | **Planned/partial**                       | #670                                                                                                                                           | No current claim of seamless arbitrary timestamp alignment  |
 | DuckDB event store                                          | **Shipped**                               | [`store.rs`](../../../crates/cd-core/src/log_analysis/store.rs)                                                                                | None for current batch architecture                         |
 | Drain templates and template-only embedding                 | **Shipped**                               | [`drain.rs`](../../../crates/cd-core/src/log_analysis/drain.rs), [`embed_policy.rs`](../../../crates/cd-core/src/log_analysis/embed_policy.rs) | Cloud embedding remains opt-in/follow-up                    |
 | Bounded event query, facets, Find, timeline summaries       | **Shipped**                               | [`query.rs`](../../../crates/cd-core/src/log_analysis/query.rs)                                                                                | Durable metric attachment and full #670 time policy         |
@@ -69,11 +75,12 @@ flowchart LR
     B["Record framing<br/>streamed + bounded"]
     C["Normalize encoding<br/>and line ending"]
     D["Redact complete record"]
-    E["Parse structure + time<br/>fail to order, never drop"]
-    F["Event store<br/>stable identity + quality"]
+    E["Parse structure + time<br/>persist evidence; fail to order"]
+    F["Event store<br/>stable identity + active time basis"]
     G["Drain-style template<br/>pattern + parameters"]
     H["Template vectors<br/>optional"]
     I["Bounded query plane<br/>page · facets · search · timeline"]
+    T["Explicit source time review<br/>preview · apply · clear"]
     L["Exact-template noise lens<br/>preview · confirm · audit"]
     J["Explorer / tools<br/>evidence identities"]
     K["Redacted Original<br/>bounded fidelity view"]
@@ -83,6 +90,7 @@ flowchart LR
     D --> K
     E --> G --> H
     F --> I
+    F --> T --> I
     G --> I
     H --> I
     G --> L --> I
@@ -144,6 +152,9 @@ explicitly for an inspector.
 | `corpus_id` + `seq`           | Authoritative event identity                            | `seq` is meaningful only inside its corpus                   |
 | `source`                      | Relative provenance                                     | Revalidated for saved evidence                               |
 | `ts`                          | Wall-clock whole seconds or ingest-order fallback today | Must be paired with quality                                  |
+| parser timestamp provenance  | Explicit wall, unresolved local, order-only, or legacy evidence | Immutable across a timezone application or clear       |
+| active timestamp basis       | Explicit wall, resolved local, order-only, or legacy interpretation | Changes atomically with `ts` through an event revision |
+| unresolved local timestamp   | Bounded parser-recognized local calendar text            | Retained after apply and clear; not an arbitrary message parse |
 | `time_quality`                | `wall`, `mixed`, or `order_only` projections            | A reliable source cannot upgrade an unreliable one           |
 | `level`                       | Normalized severity token                               | Original spelling may only be available in redacted Original |
 | `service`, `host`, `trace_id` | Optional parsed facets                                  | Missing is not empty evidence                                |
@@ -168,26 +179,41 @@ flowchart LR
     O["Explicit numeric offset"]
     W["Wall-time evidence<br/>normalized to UTC"]
     A["Eligible for exact-time alignment<br/>at recorded precision"]
-    L["Offsetless · yearless · ambiguous<br/>malformed · missing"]
+    L["Recognized offsetless<br/>local calendar timestamp"]
+    D["User declares source IANA zone<br/>preview · confirm · revision"]
+    U["Yearless · abbreviation-only<br/>malformed · missing"]
     Q["Order-only evidence<br/>stable ingest sequence"]
     C["No inferred timezone, year,<br/>or cross-source wall-time alignment"]
 
     Z --> W
     O --> W
     W --> A
-    L --> Q --> C
+    L --> Q
+    L --> D --> W
+    U --> Q --> C
 ```
 
-The diagram separates two outcomes rather than suggesting that every timestamp
-can be normalized. Explicit instants can participate in exact-time alignment at
-their stored precision. Ambiguous or unsupported forms remain navigable by
-stable ingest order and must not be promoted to shared wall time without a
-separately configured and disclosed source rule.
+The diagram does not suggest that every timestamp can be normalized. Explicit
+instants participate in exact-time alignment at whole-second stored precision.
+Explicit offsets win: a source declaration never rewrites a parser-proven
+explicit instant. A parser-recognized complete local calendar timestamp starts
+order-only and can become resolved wall time only after the user previews and
+confirms a source-specific IANA declaration. Unsupported forms remain
+navigable by stable ingest order.
 
-Current ContextDesk production storage has one whole-second `i64` and uses a
-wall/order quality heuristic. It does not yet persist full `time_basis`,
-original timestamp text/hash, offset/zone provenance, precision, DST
-ambiguity, or skew adjustment. Those are #670 requirements, not shipped facts.
+Current ContextDesk storage persists the parser provenance, active basis, and
+bounded unresolved local text alongside one whole-second `i64`. Preview is
+bound to an exact corpus event revision and reports affected, existing
+explicit-wall, and unchanged order-only counts; inclusive resolved range; DST
+gap/fold counts; unsupported timestamp count; and out-of-range count. Apply
+recomputes that preview and token before publication. The declaration survives
+reopen; clear restores its resolved-local events to ingest order without
+discarding parser evidence.
+
+This is still a partial #670 implementation. It does not retain subsecond
+precision or every byte of the original timestamp token, infer a year, map
+timezone abbreviations, correct source clock skew, or support arbitrary
+user-authored format profiles.
 
 ### Template contract
 
@@ -331,6 +357,19 @@ Equivalent positive/negative offsets and epoch forms map to one UTC second.
 Fractional input is deterministically truncated to whole seconds. Offsetless,
 yearless, malformed, and missing timestamps remain order-only.
 
+The stored event separates immutable parser evidence from its current
+interpretation:
+
+- `timestamp_provenance` records whether the parser proved explicit wall time,
+  recognized an unresolved local calendar timestamp, or had only order
+  evidence;
+- `unresolved_local_timestamp` retains the bounded recognized local text needed
+  for a later source review; and
+- `active_timestamp_basis` records whether the active `ts` is explicit wall,
+  user-resolved local, order-only, or legacy.
+
+No numeric-magnitude heuristic can promote ingest sequence to wall time.
+
 Before parser dispatch, every non-empty bounded physical record receives a
 transient `FormatFingerprint`. The immutable built-in registry is:
 
@@ -373,13 +412,10 @@ millisecond separator). Logger and thread text remain in the parsed message and
 the redacted Original retains the complete normalized line. An attached or
 separate `Z`/numeric offset is normalized to a whole Unix second. An offsetless
 local calendar timestamp is validated but the event deliberately retains
-ingest-order time. The transient parser result exposes that validated source
-text as `unresolved_local_timestamp` so a bounded import-preview sampler can
-ask for timezone policy without guessing. Current ingest does not persist this
-field because the event schema has no honest place for the local datetime,
-timezone provenance, or DST ambiguity. A future #670 per-source timezone rule
-must preserve that source text, preview the chosen interpretation, and record
-the rule before the event becomes wall-time alignable.
+ingest-order time. The event persists that validated source text as
+`unresolved_local_timestamp` with unresolved-local parser provenance. A user
+may preview and confirm an IANA timezone for that exact portable source; the
+parser does not choose one.
 
 The #749 parser slice recognizes the classic Elasticsearch bracketed shape
 `[YYYY-MM-DD HH:mm:ss,SSS][LEVEL][component][node] message` by content, even
@@ -387,8 +423,8 @@ when a file-level sample was classified as plain text. It trims padded
 severity, component, and node fields; maps component and node into the existing
 service and host fields; and keeps the complete original line. As with
 WildFly, an explicit `Z` or numeric offset becomes a whole-second instant while
-an offsetless local timestamp remains order-only and is exposed transiently as
-unresolved source-local evidence for the future #670 policy.
+an offsetless local timestamp remains order-only and is persisted as unresolved
+source-local evidence until an explicit source declaration is applied.
 
 The #752 parser slice also recognizes the strict content shape
 `YYYY-MM-DDTHH:mm,SSS ZONE. LEVEL: message`. It extracts severity and payload
@@ -399,10 +435,38 @@ are not resolved through the workstation locale. A future declarative source
 profile (#751) may define those semantics; #670 must then retain the selected
 rule/version and original evidence.
 
-The preceding parser slices are limitations, not a complete timestamp system. A
-reimplementation should design the richer #670 contract before writing data:
-original timestamp evidence, precision, explicit time basis, timezone rule
-identity, ambiguity state, and non-destructive skew overlays.
+For eligible unresolved local timestamps, a resolution preview is scoped to
+the corpus id and current event revision and contains no event payloads. It
+reports exact counts for records that would resolve, explicit wall records that
+would remain unchanged, other order-only records, DST gaps and folds,
+unsupported timestamp shapes, and out-of-range results, plus the inclusive
+resolved UTC range. Apply validates the same source, IANA zone, revision, and
+preview fingerprint before publishing.
+
+Apply, reapply, and clear use the event-revision layer. A candidate event table,
+timestamp-change audit, declaration metadata, event and wall-event counts, and
+min/max values publish in one transaction under a corpus lock. Identity,
+payload, redacted Original, parser provenance, and unresolved local evidence
+must match the active revision and remain unchanged. The previous complete
+event set and audit are retained for one-step undo; stale revision, stale
+preview, schema mismatch, payload mutation, or audit mismatch fails closed.
+Clear publishes a new revision, removes the declaration, and returns only its
+resolved-local records to `ts = ingest sequence` / order-only.
+
+Reopen reconstructs declarations and per-source unresolved, resolved-local,
+explicit-wall, and other-order counts from the active revision. Source and
+corpus quality are recomputed from active timestamp bases and transactional
+wall-event counts, so apply can move a corpus from mixed/order-only toward wall
+and clear or undo can move it back without trusting stale import metadata.
+
+These parser and resolution slices remain limitations, not a complete
+timestamp system. A reimplementation should preserve the separation among
+source acquisition, byte decoding, record framing, recursive envelopes,
+record grammar, optional schema/profile mapping, and the normalized event.
+ContextDesk does not yet claim general source adapters, encoding-aware decoder
+coverage, multiline framing, arbitrary envelope handling, or user-authored
+profiles. #670 remains open for subsecond precision, yearless policy,
+abbreviation mapping, and non-destructive skew review.
 
 ### 6.4 Template and embed
 
@@ -582,10 +646,12 @@ latency, template count, and cancellation—not only ingest throughput.
 | Invalid UTF-8                 | Decoder reports replacement      | Encoding normalized label     | Inspect redacted Original                  | Event retained                            |
 | Secret pattern                | Redactor changes/blocks content  | Redaction indicator           | None without privileged source outside app | Secret not persisted in ordinary fields   |
 | Unknown format                | Parser cannot defend structure   | Plain/order-only quality      | Configure future source rule or use search | Record not dropped                        |
-| Offsetless local timestamp    | No explicit zone/rule            | Order-only/unresolved         | Future previewed per-source rule (#670)    | Workstation zone not guessed              |
+| Offsetless local timestamp    | No explicit zone/rule            | Order-only/unresolved         | Preview and explicitly confirm an IANA zone for that source | Workstation zone not guessed |
+| DST fold or gap under selected zone | Preview resolver reports ambiguity/nonexistence | Counted and left unresolved | Choose a different defensible source declaration or keep order-only | No silent DST choice |
 | Yearless syslog               | No reference-year policy         | Order-only/unresolved         | Future explicit rollover policy            | Current year not guessed                  |
 | Fractional timestamp today    | Whole-second store               | Precision limitation          | #670 schema evolution                      | No false subsecond claim                  |
-| Mixed time quality            | Per-source/corpus classification | Align disabled or limited     | Inspect/fix source policy                  | Reliable peer does not upgrade it         |
+| Mixed time quality            | Active per-event bases and transactional wall count | Align disabled or limited | Inspect, preview, and explicitly apply eligible source policy | Reliable peer does not upgrade it |
+| Stale timezone preview        | Corpus revision/token mismatch   | Apply refused                 | Reopen review and preview current revision | No stale mutation                         |
 | Embedding unavailable/timeout | Embed status                     | Keyword-only/deferred/partial | Trusted reanalysis                         | Corpus remains usable                     |
 | Import omission/read error    | Per-file counters/reasons        | Partial corpus status         | Correct input and reimport                 | Missing data not hidden                   |
 | Unsafe/malformed nested ZIP   | Shared archive preflight/budgets | Stable import error           | Correct or split the bundle                | No partial corpus; private staging removed |
@@ -605,14 +671,20 @@ Persist or expose:
 - template repetition and embedding state;
 - format and normalized severity counts;
 - timestamp quality counts—not only min/max;
+- persisted parser timestamp provenance and active timestamp-basis counts;
+- source timezone declarations with their applied revision;
+- preview affected/existing/unchanged, DST gap/fold, unsupported, out-of-range,
+  and inclusive-range values;
+- active event revision, wall-event count, and one-step undo availability;
 - redaction, encoding normalization, and Original truncation flags;
 - query mode, filter, result/page count, bucket count, and cancellation;
 - per-phase progress and duration; and
 - package version/hash verification.
 
-Future #670 observability should add parsed/ambiguous/rejected/relative/order
-counts and the exact source rule or skew overlay responsible for each
-normalization.
+Future #670 observability should add full precision, yearless/abbreviation
+policy evidence, relative-time semantics, and any proposed skew overlay. The
+shipped declaration metadata identifies the explicit source IANA rule and
+revision responsible for resolved-local active time.
 
 ## 10. Security and privacy
 
@@ -706,11 +778,12 @@ instant while ambiguous controls remain order-only.
 | ------------------------------ | ----------------------------- | ------------------------------------------------------------- | --------------------------------------- |
 | Batch ingest/store/templates   | **Shipped**                   | Embedded local pipeline and deterministic states              | Live sources/tailing                    |
 | Redacted Original              | **Shipped**                   | Bounded, redacted, tested source representation                | Unbounded raw retention or perfect domain-specific PII removal |
-| Explicit-offset JSON           | **Shipped**                   | Defensible RFC3339/epoch to whole seconds                     | Full provenance/subseconds              |
-| Explicit-offset logfmt/RFC5424 | **Shipped**                   | Explicit `Z`/offset forms normalize to whole seconds           | Full #670 provenance/subsecond/timezone policy          |
-| Built-in grammar fingerprints | **Shipped**                    | Immutable versioned registry, record-level dispatch, explicit unknown/ambiguous outcomes, and grammar/producer separation | Durable provenance, custom profiles, profile drift, and multiline framing (#751) |
-| JBoss/WildFly `server.log`      | **Partial**                   | Structure and explicit offsets parse; offsetless lines remain intact and order-only | Persisted local-calendar provenance and per-source timezone rule (#670) |
-| Classic Elasticsearch logs     | **Partial**                   | Bracketed structure and explicit offsets parse; padded metadata is normalized | Persisted local-calendar provenance and per-source timezone rule (#670) |
+| Explicit-offset JSON           | **Shipped**                   | Defensible RFC3339/epoch to whole seconds with persisted explicit-wall provenance | Subsecond persistence |
+| Explicit-offset logfmt/RFC5424 | **Shipped**                   | Explicit `Z`/offset forms normalize to whole seconds and remain authoritative under source declarations | Subsecond persistence and skew correction |
+| Source timezone resolution     | **Shipped — bounded #779/#780 slice** | Persisted unresolved local evidence; revision-bound IANA preview/apply/reopen/clear; DST gap/fold counts; atomic quality recomputation; one-step undo | Yearless policy, abbreviation guessing, custom profiles, subsecond persistence, or skew correction |
+| Built-in grammar fingerprints | **Shipped**                    | Immutable versioned registry, record-level dispatch, explicit unknown/ambiguous outcomes, and grammar/producer separation | Durable grammar/profile provenance, custom profiles, profile drift, and multiline framing (#751) |
+| JBoss/WildFly `server.log`      | **Partial**                   | Structure and explicit offsets parse; recognized offsetless local text persists and can use an explicit source IANA declaration | No automatic zone/year inference or arbitrary grammar profile |
+| Classic Elasticsearch logs     | **Partial**                   | Bracketed structure and explicit offsets parse; padded metadata is normalized; recognized local text can use an explicit source IANA declaration | No automatic zone/year inference or arbitrary grammar profile |
 | Incomplete time + zone abbreviation | **Partial**              | Strict shape, level, payload, and unresolved source token are preserved | Comma-field semantics and abbreviation mapping require a versioned source profile (#751/#670) |
 | Arbitrary timestamp diversity  | **Planned/partial**           | Ambiguous inputs fail to order rather than guess              | #670 timezone/year/DST/skew contract    |
 | Query/facets/search            | **Shipped**                   | Bounded event and template-aware retrieval                    | Unbounded regex or raw dumps            |
@@ -744,9 +817,13 @@ to “helpfully” interpret an offsetless production timestamp.
 
 ## 16. Open residuals
 
-- #670: first-class time basis, original timestamp provenance, subsecond
-  precision, per-source timezone and year rules, DST ambiguity, skew proposals,
-  UI disclosure, package compatibility, and import preview.
+- #670 remains open: the bounded #779/#780 slice persists parser provenance,
+  active basis, and recognized unresolved local text and ships explicit
+  per-source IANA preview/apply/reopen/clear with DST gap/fold disclosure,
+  atomic revision, quality recomputation, and one-step undo. Residuals include
+  subsecond persistence, complete original timestamp-token fidelity, yearless
+  policy, abbreviation mapping, relative-time semantics, clock-skew
+  review/correction, package compatibility, and arbitrary custom profiles.
 - #671 remains open/partial: add rule editing and complete creator identity;
   source/service/host, level-plus-template, and reviewed-text predicates;
   Investigation/saved-view and package lifecycle; global temporary and visible

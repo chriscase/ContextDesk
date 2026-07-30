@@ -5,8 +5,7 @@
 //! event-level decisions that the atomic reanalysis work in #780 can stage in a
 //! transaction. Existing wall-clock events are never rewritten.
 
-use super::parse::ParsedLine;
-use super::query::{classify_ts, TimeQuality};
+use super::parse::{ActiveTimestampBasis, ParsedLine, TimestampProvenance};
 use chrono::{LocalResult, NaiveDateTime, Offset, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
@@ -186,7 +185,7 @@ impl TimezoneResolutionPreview {
         }
     }
 
-    fn observe(&mut self, resolution: &TimestampResolution) {
+    pub(crate) fn observe(&mut self, resolution: &TimestampResolution) {
         match resolution {
             TimestampResolution::ExistingWallClock { .. } => {
                 self.existing_wall_clock_records =
@@ -256,6 +255,9 @@ pub enum TimezoneResolutionError {
     /// The current revision cannot be advanced safely.
     #[error("timezone event revision overflow")]
     EventRevisionOverflow,
+    /// Persisted timestamp fields contradict their provenance contract.
+    #[error("timestamp provenance is internally inconsistent")]
+    ContradictoryTimestampEvidence,
 }
 
 /// Validated resolver reusable across a source scan.
@@ -302,8 +304,22 @@ impl SourceTimezoneResolver {
         // Fail safely even if a future or malformed caller presents
         // contradictory fields. Existing wall time is authoritative and is
         // never replaced by a declaration.
-        if let Some(unix_seconds) = parsed.ts.filter(|ts| classify_ts(*ts) == TimeQuality::Wall) {
+        if parsed.active_timestamp_basis == ActiveTimestampBasis::ExplicitWall {
+            let unix_seconds = parsed
+                .ts
+                .ok_or(TimezoneResolutionError::ContradictoryTimestampEvidence)?;
             return Ok(TimestampResolution::ExistingWallClock { unix_seconds });
+        }
+
+        if parsed.timestamp_provenance != TimestampProvenance::UnresolvedLocal
+            || !matches!(
+                parsed.active_timestamp_basis,
+                ActiveTimestampBasis::OrderOnly | ActiveTimestampBasis::ResolvedLocal
+            )
+        {
+            return Ok(TimestampResolution::Unresolved {
+                reason: UnresolvedTimestampReason::NoRecognizedLocalTimestamp,
+            });
         }
 
         let Some(local_text) = parsed.unresolved_local_timestamp.as_deref() else {
@@ -364,6 +380,23 @@ impl SourceTimezoneResolver {
             TimezoneResolutionPreview::new(scope, &self.declaration, declaration_fingerprint);
         for (source, parsed) in records {
             let resolution = self.resolve(source, parsed)?;
+            preview.observe(&resolution);
+        }
+        Ok(preview)
+    }
+
+    /// Preview owned parsed records without retaining a second reference graph.
+    pub(crate) fn preview_owned<'a>(
+        &self,
+        scope: &TimezoneResolutionScope,
+        records: impl IntoIterator<Item = (&'a str, ParsedLine)>,
+    ) -> Result<TimezoneResolutionPreview, TimezoneResolutionError> {
+        validate_scope(scope, &self.declaration)?;
+        let declaration_fingerprint = declaration_fingerprint(scope, &self.declaration);
+        let mut preview =
+            TimezoneResolutionPreview::new(scope, &self.declaration, declaration_fingerprint);
+        for (source, parsed) in records {
+            let resolution = self.resolve(source, &parsed)?;
             preview.observe(&resolution);
         }
         Ok(preview)
@@ -644,6 +677,34 @@ mod tests {
             resolver.resolve(SOURCE, &explicit).unwrap(),
             TimestampResolution::ExistingWallClock {
                 unix_seconds: 1_614_912_833
+            }
+        );
+    }
+
+    #[test]
+    fn provenance_not_numeric_magnitude_decides_wall_clock_truth() {
+        let pre_2000_explicit = parse_line(
+            "ts=1999-01-01T00:00:00Z level=error msg=\"pre-2000 wall event\"",
+            None,
+            7,
+        );
+        let billionth_order_event = parse_line(
+            "ordinary event without a timestamp",
+            Some(LogFormat::Plain),
+            1_700_000_000,
+        );
+        let resolver = SourceTimezoneResolver::new(declaration("UTC")).expect("resolver");
+
+        assert_eq!(
+            resolver.resolve(SOURCE, &pre_2000_explicit).unwrap(),
+            TimestampResolution::ExistingWallClock {
+                unix_seconds: 915_148_800
+            }
+        );
+        assert_eq!(
+            resolver.resolve(SOURCE, &billionth_order_event).unwrap(),
+            TimestampResolution::Unresolved {
+                reason: UnresolvedTimestampReason::NoRecognizedLocalTimestamp
             }
         );
     }

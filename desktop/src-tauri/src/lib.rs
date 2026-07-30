@@ -7984,6 +7984,210 @@ fn discard_log_corpus(state: State<'_, AppState>, corpus_id: String) -> Result<(
     Ok(())
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogTimezoneDeclarationDto {
+    source: String,
+    iana_zone: String,
+    basis: &'static str,
+    declared_at: i64,
+    applied_revision: u64,
+}
+
+impl From<cd_core::log_analysis::SourceTimezoneDeclaration> for LogTimezoneDeclarationDto {
+    fn from(value: cd_core::log_analysis::SourceTimezoneDeclaration) -> Self {
+        Self {
+            source: value.source,
+            iana_zone: value.iana_timezone,
+            basis: "user_declared",
+            declared_at: value.declared_at,
+            applied_revision: value.applied_revision,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogTimezoneSourceStatusDto {
+    source: String,
+    unresolved_local_records: u64,
+    resolved_local_records: u64,
+    explicit_wall_clock_records: u64,
+    other_order_only_records: u64,
+}
+
+impl From<cd_core::log_analysis::TimezoneSourceStatus> for LogTimezoneSourceStatusDto {
+    fn from(value: cd_core::log_analysis::TimezoneSourceStatus) -> Self {
+        Self {
+            source: value.source,
+            unresolved_local_records: value.unresolved_local_records,
+            resolved_local_records: value.resolved_local_records,
+            explicit_wall_clock_records: value.explicit_wall_clock_records,
+            other_order_only_records: value.other_order_only_records,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogTimezoneStateDto {
+    corpus_id: String,
+    event_revision: u64,
+    declarations: std::collections::BTreeMap<String, LogTimezoneDeclarationDto>,
+    sources: Vec<LogTimezoneSourceStatusDto>,
+}
+
+impl From<cd_core::log_analysis::TimezoneResolutionState> for LogTimezoneStateDto {
+    fn from(value: cd_core::log_analysis::TimezoneResolutionState) -> Self {
+        Self {
+            corpus_id: value.scope.corpus_id,
+            event_revision: value.scope.event_revision,
+            declarations: value
+                .declarations
+                .into_iter()
+                .map(|(source, declaration)| (source, declaration.into()))
+                .collect(),
+            sources: value.sources.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogTimezonePreviewDto {
+    corpus_id: String,
+    event_revision: u64,
+    source: String,
+    iana_zone: String,
+    preview_token: String,
+    affected_records: u64,
+    existing_wall_clock_records: u64,
+    first_resolved_ts: Option<i64>,
+    last_resolved_ts: Option<i64>,
+    dst_gap_records: u64,
+    dst_fold_ambiguities: u64,
+    unchanged_order_only_records: u64,
+    unsupported_timestamp_records: u64,
+    out_of_range_records: u64,
+    precision: &'static str,
+}
+
+impl From<cd_core::log_analysis::TimezoneResolutionPreview> for LogTimezonePreviewDto {
+    fn from(value: cd_core::log_analysis::TimezoneResolutionPreview) -> Self {
+        Self {
+            corpus_id: value.corpus_id,
+            event_revision: value.event_revision,
+            source: value.source,
+            iana_zone: value.iana_timezone,
+            preview_token: value.declaration_fingerprint,
+            affected_records: value.affected_records,
+            existing_wall_clock_records: value.existing_wall_clock_records,
+            first_resolved_ts: value.first_resolved_instant,
+            last_resolved_ts: value.last_resolved_instant,
+            dst_gap_records: value.dst_gap_count,
+            dst_fold_ambiguities: value.dst_fold_count,
+            unchanged_order_only_records: value.unchanged_order_only_records,
+            unsupported_timestamp_records: value.unsupported_timestamp_count,
+            out_of_range_records: value.out_of_range_count,
+            precision: "whole_second",
+        }
+    }
+}
+
+#[tauri::command]
+async fn log_load_timezone_state(
+    state: State<'_, AppState>,
+    corpus_id: String,
+) -> Result<LogTimezoneStateDto, String> {
+    let cache = log_cache_dir(&state)?;
+    tokio::task::spawn_blocking(move || {
+        cd_core::log_analysis::load_timezone_resolution_state(&cache, &corpus_id)
+            .map(Into::into)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("timezone state task join: {error}"))?
+}
+
+#[tauri::command]
+async fn log_preview_source_timezone(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    event_revision: u64,
+    source: String,
+    iana_zone: String,
+) -> Result<LogTimezonePreviewDto, String> {
+    let cache = log_cache_dir(&state)?;
+    tokio::task::spawn_blocking(move || {
+        cd_core::log_analysis::preview_source_timezone(
+            &cache,
+            &corpus_id,
+            event_revision,
+            &source,
+            &iana_zone,
+        )
+        .map(Into::into)
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("timezone preview task join: {error}"))?
+}
+
+#[tauri::command]
+async fn log_apply_source_timezone(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    expected_revision: u64,
+    source: String,
+    iana_zone: String,
+    preview_token: String,
+) -> Result<cd_core::log_analysis::EventRevisionReport, String> {
+    let cache = log_cache_dir(&state)?;
+    let declared_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "system time is before the Unix epoch".to_string())?
+        .as_secs();
+    let declared_at = i64::try_from(declared_at)
+        .map_err(|_| "system time is outside the supported range".to_string())?;
+    tokio::task::spawn_blocking(move || {
+        cd_core::log_analysis::apply_source_timezone(
+            &cache,
+            &corpus_id,
+            expected_revision,
+            &source,
+            &iana_zone,
+            &preview_token,
+            declared_at,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("timezone apply task join: {error}"))?
+}
+
+#[tauri::command]
+async fn log_clear_source_timezone(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    expected_revision: u64,
+    source: String,
+    applied_revision: u64,
+) -> Result<cd_core::log_analysis::EventRevisionReport, String> {
+    let cache = log_cache_dir(&state)?;
+    tokio::task::spawn_blocking(move || {
+        cd_core::log_analysis::clear_source_timezone(
+            &cache,
+            &corpus_id,
+            expected_revision,
+            &source,
+            applied_revision,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("timezone clear task join: {error}"))?
+}
+
 fn save_log_operational_metrics_attachment_at(
     cache: &std::path::Path,
     corpus_id: &str,
@@ -10327,6 +10531,10 @@ pub fn run() {
             log_timeline,
             log_search,
             discard_log_corpus,
+            log_load_timezone_state,
+            log_preview_source_timezone,
+            log_apply_source_timezone,
+            log_clear_source_timezone,
             log_save_operational_metrics_attachment,
             log_load_operational_metrics_attachment,
             log_remove_operational_metrics_attachment,
@@ -10641,6 +10849,69 @@ mod log_ingest_cancel_registry_tests {
             &newer,
         ));
         assert!(!cancels.contains_key(LOG_INGEST_CANCEL_KEY));
+    }
+}
+
+#[cfg(test)]
+mod log_timezone_host_tests {
+    use super::*;
+
+    #[test]
+    fn timezone_commands_are_registered_and_keep_corpus_work_off_the_event_loop() {
+        let source = include_str!("lib.rs");
+        for command in [
+            "log_load_timezone_state",
+            "log_preview_source_timezone",
+            "log_apply_source_timezone",
+            "log_clear_source_timezone",
+        ] {
+            assert!(
+                source.contains(&format!("{command},")),
+                "{command} must be registered"
+            );
+            let start = source
+                .find(&format!("async fn {command}("))
+                .unwrap_or_else(|| panic!("{command} command"));
+            let end = source[start..]
+                .find("\n#[tauri::command]")
+                .map(|offset| start + offset)
+                .unwrap_or_else(|| panic!("{command} boundary"));
+            let body = &source[start..end];
+            assert!(
+                body.contains("tokio::task::spawn_blocking"),
+                "{command} must keep corpus I/O off the app event loop"
+            );
+        }
+    }
+
+    #[test]
+    fn timezone_preview_wire_contract_is_camel_case_and_precision_honest() {
+        let preview = cd_core::log_analysis::TimezoneResolutionPreview {
+            corpus_id: "corpus-time".into(),
+            event_revision: 7,
+            source: "server/server.log".into(),
+            iana_timezone: "America/Chicago".into(),
+            declaration_fingerprint: "preview-token".into(),
+            affected_records: 12,
+            existing_wall_clock_records: 3,
+            first_resolved_instant: Some(1_700_000_000),
+            last_resolved_instant: Some(1_700_000_120),
+            dst_gap_count: 1,
+            dst_fold_count: 2,
+            unchanged_order_only_records: 4,
+            unsupported_timestamp_count: 5,
+            out_of_range_count: 6,
+        };
+        let wire =
+            serde_json::to_value(LogTimezonePreviewDto::from(preview)).expect("serialize preview");
+        assert_eq!(wire["corpusId"], "corpus-time");
+        assert_eq!(wire["eventRevision"], 7);
+        assert_eq!(wire["ianaZone"], "America/Chicago");
+        assert_eq!(wire["previewToken"], "preview-token");
+        assert_eq!(wire["dstGapRecords"], 1);
+        assert_eq!(wire["dstFoldAmbiguities"], 2);
+        assert_eq!(wire["precision"], "whole_second");
+        assert!(wire.get("event_revision").is_none());
     }
 }
 

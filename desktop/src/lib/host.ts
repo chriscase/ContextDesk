@@ -1854,6 +1854,30 @@ export type LogTimezoneClearRequestDto = {
   appliedRevision: number;
 };
 
+export type LogTimezoneSourceStatusDto = {
+  source: string;
+  unresolvedLocalRecords: number;
+  resolvedLocalRecords: number;
+  explicitWallClockRecords: number;
+  otherOrderOnlyRecords: number;
+};
+
+export type LogTimezoneStateDto = {
+  corpusId: string;
+  eventRevision: number;
+  declarations: Record<string, LogTimezoneDeclarationDto | undefined>;
+  sources: LogTimezoneSourceStatusDto[];
+};
+
+export type LogEventRevisionReportDto = {
+  revision: number;
+  previousRevision: number;
+  changedEvents: number;
+  eventCount: number;
+  tsMin: number | null;
+  tsMax: number | null;
+};
+
 export type LogIngestReportDto = {
   corpusId: string;
   lines: number;
@@ -2115,6 +2139,56 @@ export async function hostLogSearch(
 export async function hostDiscardLogCorpus(corpusId: string): Promise<void> {
   if (!isTauri()) throw new Error("Discard requires Tauri host");
   await invoke("discard_log_corpus", { corpusId });
+}
+
+export async function hostLoadLogTimezoneState(
+  corpusId: string,
+): Promise<LogTimezoneStateDto> {
+  if (!isTauri()) {
+    return {
+      corpusId,
+      eventRevision: 0,
+      declarations: {},
+      sources: [],
+    };
+  }
+  return invoke<LogTimezoneStateDto>("log_load_timezone_state", { corpusId });
+}
+
+export async function hostPreviewLogSourceTimezone(
+  request: LogTimezonePreviewRequestDto,
+): Promise<LogTimezoneResolutionPreviewDto> {
+  if (!isTauri()) {
+    throw new Error("Timezone review requires the desktop app");
+  }
+  return invoke<LogTimezoneResolutionPreviewDto>(
+    "log_preview_source_timezone",
+    request,
+  );
+}
+
+export async function hostApplyLogSourceTimezone(
+  request: LogTimezoneApplyRequestDto,
+): Promise<LogEventRevisionReportDto> {
+  if (!isTauri()) {
+    throw new Error("Timezone review requires the desktop app");
+  }
+  return invoke<LogEventRevisionReportDto>(
+    "log_apply_source_timezone",
+    request,
+  );
+}
+
+export async function hostClearLogSourceTimezone(
+  request: LogTimezoneClearRequestDto,
+): Promise<LogEventRevisionReportDto> {
+  if (!isTauri()) {
+    throw new Error("Timezone review requires the desktop app");
+  }
+  return invoke<LogEventRevisionReportDto>(
+    "log_clear_source_timezone",
+    request,
+  );
 }
 
 export type OperationalMetricsAttachmentSourceDto =

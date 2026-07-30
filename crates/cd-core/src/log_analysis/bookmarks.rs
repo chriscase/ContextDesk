@@ -5,7 +5,7 @@
 use super::store::LogCorpus;
 use super::{
     event_revision::{retained_timestamp_revision_hints, EventReferenceTimestampHint},
-    query::{classify_ts, fetch_events_by_seqs},
+    query::fetch_events_by_seqs,
     ExplorerEvent, TimeQuality,
 };
 use crate::error::{CoreError, CoreResult};
@@ -268,10 +268,9 @@ fn validate_event_ref_from_map(
         seq: event_ref.seq,
         source: event_ref.source.clone(),
         timestamp_hint: event_ref.timestamp_hint,
+        time_quality_hint: event_ref.time_quality_hint,
     };
-    if event_ref.time_quality_hint == classify_ts(event_ref.timestamp_hint)
-        && revision_hints.contains(&revision_hint)
-    {
+    if revision_hints.contains(&revision_hint) {
         return BookmarkEvidenceStatus::Verified;
     }
     BookmarkEvidenceStatus::Stale
@@ -285,13 +284,14 @@ fn timestamp_revision_candidates(
         .filter_map(|event_ref| {
             let actual = actual_by_seq.get(&event_ref.seq)?;
             (actual.source == event_ref.source
-                && actual.ts != event_ref.timestamp_hint
-                && event_ref.time_quality_hint == classify_ts(event_ref.timestamp_hint))
-            .then_some(EventReferenceTimestampHint {
-                seq: event_ref.seq,
-                source: event_ref.source,
-                timestamp_hint: event_ref.timestamp_hint,
-            })
+                && (actual.ts != event_ref.timestamp_hint
+                    || actual.time_quality != event_ref.time_quality_hint))
+                .then_some(EventReferenceTimestampHint {
+                    seq: event_ref.seq,
+                    source: event_ref.source,
+                    timestamp_hint: event_ref.timestamp_hint,
+                    time_quality_hint: event_ref.time_quality_hint,
+                })
         })
         .collect()
 }

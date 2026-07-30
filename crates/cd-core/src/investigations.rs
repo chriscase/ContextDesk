@@ -17,9 +17,7 @@ use crate::log_analysis::event_revision::{
     retained_timestamp_revision_hints, EventReferenceTimestampHint,
 };
 use crate::log_analysis::query::fetch_events_by_seqs;
-use crate::log_analysis::{
-    classify_ts, BookmarkEventRef, ExplorerEvent, LogCorpus, MAX_BOOKMARK_EVENT_REFS,
-};
+use crate::log_analysis::{BookmarkEventRef, ExplorerEvent, LogCorpus, MAX_BOOKMARK_EVENT_REFS};
 use crate::redact::redact_candidate;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -2338,13 +2336,14 @@ fn timestamp_revision_candidates<'a>(
         .filter_map(|event_ref| {
             let actual = actual_by_seq.get(&event_ref.seq)?;
             (actual.source == event_ref.source
-                && actual.ts != event_ref.timestamp_hint
-                && event_ref.time_quality_hint == classify_ts(event_ref.timestamp_hint))
-            .then_some(EventReferenceTimestampHint {
-                seq: event_ref.seq,
-                source: event_ref.source.clone(),
-                timestamp_hint: event_ref.timestamp_hint,
-            })
+                && (actual.ts != event_ref.timestamp_hint
+                    || actual.time_quality != event_ref.time_quality_hint))
+                .then_some(EventReferenceTimestampHint {
+                    seq: event_ref.seq,
+                    source: event_ref.source.clone(),
+                    timestamp_hint: event_ref.timestamp_hint,
+                    time_quality_hint: event_ref.time_quality_hint,
+                })
         })
         .collect()
 }
@@ -2392,10 +2391,9 @@ fn exact_reference_status(
                 seq: event_ref.seq,
                 source: event_ref.source.clone(),
                 timestamp_hint: event_ref.timestamp_hint,
+                time_quality_hint: event_ref.time_quality_hint,
             };
-            if event_ref.time_quality_hint == classify_ts(event_ref.timestamp_hint)
-                && revision_hints.contains(&revision_hint)
-            {
+            if revision_hints.contains(&revision_hint) {
                 EvidenceReferenceStatus::Verified
             } else {
                 EvidenceReferenceStatus::Stale

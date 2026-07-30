@@ -14,7 +14,9 @@ import { createPortal } from "react-dom";
 import {
   hostDiscardLogCorpus,
   hostExportLogCorpusPackage,
+  hostApplyLogSourceTimezone,
   hostClearFailedLogIngestDiagnostic,
+  hostClearLogSourceTimezone,
   hostGetBranding,
   hostGetFailedLogIngestDiagnostic,
   hostImportLogCorpusPackagePath,
@@ -24,7 +26,9 @@ import {
   hostListLogCorpora,
   hostListLogTemplates,
   hostListenProcessProgress,
+  hostLoadLogTimezoneState,
   hostLogClusterProblems,
+  hostPreviewLogSourceTimezone,
   hostLogSearch,
   hostOpenLogExplorer,
   hostReanalyzeLogCorpus,
@@ -35,6 +39,9 @@ import {
   type LogImportConfidenceDto,
   type LogSearchHitDto,
   type LogTemplateRowDto,
+  type LogTimezoneApplyRequestDto,
+  type LogTimezoneClearRequestDto,
+  type LogTimezoneStateDto,
   type ProcessProgressDto,
 } from "../../lib/host";
 import {
@@ -62,6 +69,7 @@ import type { ProcessProgressDto as WizardProgressDto } from "../wizards/types";
 import { LogExplorer } from "../logExplorer/LogExplorer";
 import { LogDiagnosticDialog } from "./LogDiagnosticDialog";
 import { LogImportConfidence } from "./LogImportConfidence";
+import { LogTimezoneStatus } from "./LogTimezoneStatus";
 
 function hostProgressToWizard(p: ProcessProgressDto): WizardProgressDto {
   return {
@@ -139,6 +147,11 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     corpusId: string;
     report: LogImportConfidenceDto;
   } | null>(null);
+  const [timezoneState, setTimezoneState] =
+    useState<LogTimezoneStateDto | null>(null);
+  const [timezoneStateError, setTimezoneStateError] = useState<string | null>(
+    null,
+  );
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<LogSearchHitDto[]>([]);
   const [analysisByCorpus, setAnalysisByCorpus] = useState<
@@ -185,6 +198,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const hostSelectionQueueRef = useRef<Promise<void>>(Promise.resolve());
   const activeIdRef = useRef<string | null>(null);
   const refreshGenerationRef = useRef(0);
+  const timezoneGenerationRef = useRef(0);
   const mountedRef = useRef(true);
   const menuTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
   const corpusButtonRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -280,6 +294,46 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
         /* The optional transient diagnostic must not block Logs. */
       });
   }, []);
+
+  const refreshTimezoneState = useCallback(async (corpusId: string) => {
+    if (activeIdRef.current !== corpusId) return;
+    const generation = ++timezoneGenerationRef.current;
+    setTimezoneStateError(null);
+    try {
+      const next = await hostLoadLogTimezoneState(corpusId);
+      if (
+        !mountedRef.current ||
+        generation !== timezoneGenerationRef.current ||
+        activeIdRef.current !== corpusId
+      ) {
+        return;
+      }
+      setTimezoneState(next);
+    } catch (stateError) {
+      if (
+        !mountedRef.current ||
+        generation !== timezoneGenerationRef.current ||
+        activeIdRef.current !== corpusId
+      ) {
+        return;
+      }
+      setTimezoneState(null);
+      setTimezoneStateError(
+        `Time interpretation is unavailable: ${String(stateError)}`,
+      );
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!activeId) {
+      timezoneGenerationRef.current += 1;
+      setTimezoneState(null);
+      setTimezoneStateError(null);
+      return;
+    }
+    setTimezoneState(null);
+    void refreshTimezoneState(activeId);
+  }, [activeId, refreshTimezoneState]);
 
   const closeCorpusMenu = useCallback(
     (restoreFocus = true) => {
@@ -523,6 +577,30 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     hostSelectionQueueRef.current = queued;
     await queued;
   }, []);
+
+  const applyTimezone = useCallback(
+    async (request: LogTimezoneApplyRequestDto) => {
+      await hostApplyLogSourceTimezone(request);
+      if (activeIdRef.current !== request.corpusId) return;
+      setImportConfidence((current) =>
+        current?.corpusId === request.corpusId ? null : current,
+      );
+      await Promise.all([refresh(), refreshTimezoneState(request.corpusId)]);
+    },
+    [refresh, refreshTimezoneState],
+  );
+
+  const clearTimezone = useCallback(
+    async (request: LogTimezoneClearRequestDto) => {
+      await hostClearLogSourceTimezone(request);
+      if (activeIdRef.current !== request.corpusId) return;
+      setImportConfidence((current) =>
+        current?.corpusId === request.corpusId ? null : current,
+      );
+      await Promise.all([refresh(), refreshTimezoneState(request.corpusId)]);
+    },
+    [refresh, refreshTimezoneState],
+  );
 
   const writeAnalysis = useCallback((id: string, value: CorpusAnalysis) => {
     analysisCacheRef.current.set(id, value);
@@ -1312,7 +1390,26 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       ) : null}
       {note ? <p className="muted log-pane__note">{note}</p> : null}
       {importConfidence?.corpusId === activeId ? (
-        <LogImportConfidence confidence={importConfidence.report} />
+        <LogImportConfidence
+          confidence={importConfidence.report}
+          timezoneScope={
+            timezoneState?.corpusId === activeId
+              ? {
+                  corpusId: timezoneState.corpusId,
+                  eventRevision: timezoneState.eventRevision,
+                }
+              : undefined
+          }
+          timezoneDeclarations={timezoneState?.declarations}
+          onPreviewTimezone={hostPreviewLogSourceTimezone}
+          onApplyTimezone={applyTimezone}
+          onClearTimezone={clearTimezone}
+        />
+      ) : null}
+      {timezoneStateError ? (
+        <p className="muted log-pane__note" role="status">
+          {timezoneStateError}
+        </p>
       ) : null}
 
       <div className="pane__split pane__split--logs">
@@ -1457,6 +1554,15 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
 
               {tab === "overview" ? (
                 <div className="log-detail__body" data-testid="log-overview">
+                  {timezoneState?.corpusId === activeId &&
+                  importConfidence?.corpusId !== activeId ? (
+                    <LogTimezoneStatus
+                      state={timezoneState}
+                      onPreview={hostPreviewLogSourceTimezone}
+                      onApply={applyTimezone}
+                      onClear={clearTimezone}
+                    />
+                  ) : null}
                   {active.stats ? (
                     <>
                       <p className="log-detail__blurb">

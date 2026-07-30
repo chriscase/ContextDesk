@@ -1381,23 +1381,47 @@ fn init_schema(conn: &Connection) -> CoreResult<()> {
             current_metadata_json VARCHAR NOT NULL,
             previous_metadata_json VARCHAR,
             event_count BIGINT NOT NULL,
+            wall_event_count BIGINT NOT NULL,
             ts_min BIGINT,
             ts_max BIGINT,
             previous_event_count BIGINT,
+            previous_wall_event_count BIGINT,
             previous_ts_min BIGINT,
             previous_ts_max BIGINT
         );
+        ALTER TABLE event_revision_state
+            ADD COLUMN IF NOT EXISTS wall_event_count BIGINT;
+        ALTER TABLE event_revision_state
+            ADD COLUMN IF NOT EXISTS previous_wall_event_count BIGINT;
         INSERT INTO event_revision_state
         SELECT 1, 0, NULL, '{}', NULL,
-               stats.event_count, stats.ts_min, stats.ts_max,
-               NULL, NULL, NULL
+               stats.event_count, stats.wall_event_count,
+               stats.ts_min, stats.ts_max,
+               NULL, NULL, NULL, NULL
         FROM (
-            SELECT COUNT(*) AS event_count, MIN(ts) AS ts_min, MAX(ts) AS ts_max
+            SELECT COUNT(*) AS event_count,
+                   COALESCE(SUM(
+                       CASE WHEN active_timestamp_basis
+                                      IN ('explicit_wall', 'resolved_local')
+                            THEN 1 ELSE 0 END
+                   ), 0) AS wall_event_count,
+                   MIN(ts) AS ts_min,
+                   MAX(ts) AS ts_max
             FROM events
         ) stats
         WHERE NOT EXISTS (
             SELECT 1 FROM event_revision_state WHERE singleton = 1
         );
+        UPDATE event_revision_state
+        SET wall_event_count = (
+            SELECT COALESCE(SUM(
+                CASE WHEN active_timestamp_basis
+                               IN ('explicit_wall', 'resolved_local')
+                     THEN 1 ELSE 0 END
+            ), 0)
+            FROM events
+        )
+        WHERE wall_event_count IS NULL;
         "#,
     )
     .map_err(duck_err)?;
@@ -1411,22 +1435,37 @@ fn advance_event_revision_after_append(conn: &Connection) -> CoreResult<u64> {
         .checked_add(1)
         .filter(|value| *value <= i64::MAX as u64)
         .ok_or_else(|| CoreError::Message("event revision overflow".into()))?;
-    let (event_count, ts_min, ts_max) = conn
-        .query_row("SELECT COUNT(*), MIN(ts), MAX(ts) FROM events", [], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Option<i64>>(1)?,
-                row.get::<_, Option<i64>>(2)?,
-            ))
-        })
+    let (event_count, wall_event_count, ts_min, ts_max) = conn
+        .query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(
+                        CASE WHEN active_timestamp_basis
+                                       IN ('explicit_wall', 'resolved_local')
+                             THEN 1 ELSE 0 END
+                    ), 0),
+                    MIN(ts), MAX(ts)
+             FROM events",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            },
+        )
         .map_err(duck_err)?;
-    if event_count < 0 {
+    if event_count < 0 || wall_event_count < 0 || wall_event_count > event_count {
         return Err(CoreError::Message(
-            "event count is outside supported range".into(),
+            "event time-quality counts are outside supported range".into(),
         ));
     }
-    conn.execute_batch("DROP TABLE IF EXISTS events_previous")
-        .map_err(duck_err)?;
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS events_previous;
+         DROP TABLE IF EXISTS event_revision_timestamp_changes;",
+    )
+    .map_err(duck_err)?;
     conn.execute(
         "UPDATE event_revision_state
          SET current_revision = ?1,
@@ -1434,13 +1473,21 @@ fn advance_event_revision_after_append(conn: &Connection) -> CoreResult<u64> {
              current_metadata_json = '{}',
              previous_metadata_json = NULL,
              event_count = ?2,
-             ts_min = ?3,
-             ts_max = ?4,
+             wall_event_count = ?3,
+             ts_min = ?4,
+             ts_max = ?5,
              previous_event_count = NULL,
+             previous_wall_event_count = NULL,
              previous_ts_min = NULL,
              previous_ts_max = NULL
          WHERE singleton = 1",
-        params![revision as i64, event_count, ts_min, ts_max],
+        params![
+            revision as i64,
+            event_count,
+            wall_event_count,
+            ts_min,
+            ts_max
+        ],
     )
     .map_err(duck_err)?;
     Ok(revision)

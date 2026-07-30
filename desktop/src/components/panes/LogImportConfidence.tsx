@@ -65,6 +65,17 @@ function sourceNeedsReview(source: LogSourceConfidenceDto): boolean {
   return source.timeQuality !== "wall" || source.outcome !== "matched";
 }
 
+function declarationFor(
+  declarations:
+    | Record<string, LogTimezoneDeclarationDto | undefined>
+    | undefined,
+  source: string,
+): LogTimezoneDeclarationDto | undefined {
+  return declarations && Object.hasOwn(declarations, source)
+    ? declarations[source]
+    : undefined;
+}
+
 export function LogImportConfidence({
   confidence,
   timezoneScope,
@@ -84,7 +95,7 @@ export function LogImportConfidence({
   const reviewSources = confidence.sources.filter(
     (source) =>
       sourceNeedsReview(source) ||
-      Boolean(timezoneDeclarations?.[source.source]),
+      Boolean(declarationFor(timezoneDeclarations, source.source)),
   );
   const exactSources = confidence.counts.wall;
   const reviewCount = confidence.sources.filter(sourceNeedsReview).length;
@@ -202,7 +213,7 @@ export function LogImportConfidence({
               ) : null}
               {timezoneReviewAvailable &&
               (source.timeQuality !== "wall" ||
-                timezoneDeclarations?.[source.source]) ? (
+                declarationFor(timezoneDeclarations, source.source)) ? (
                 <div className="log-import-confidence__source-actions">
                   <button
                     type="button"
@@ -213,13 +224,13 @@ export function LogImportConfidence({
                       setTimezoneSourceId(source.source);
                     }}
                   >
-                    {timezoneDeclarations?.[source.source]
+                    {declarationFor(timezoneDeclarations, source.source)
                       ? "Review timezone…"
                       : "Resolve time…"}
                   </button>
                   <span>
-                    {timezoneDeclarations?.[source.source]
-                      ? `${timezoneDeclarations[source.source]?.ianaZone} is active`
+                    {declarationFor(timezoneDeclarations, source.source)
+                      ? `${declarationFor(timezoneDeclarations, source.source)?.ianaZone} is active`
                       : "Defaults to order-only"}
                   </span>
                 </div>
@@ -235,7 +246,10 @@ export function LogImportConfidence({
         <LogTimezoneReviewDialog
           scope={timezoneScope}
           source={timezoneSource}
-          declaration={timezoneDeclarations?.[timezoneSource.source]}
+          declaration={declarationFor(
+            timezoneDeclarations,
+            timezoneSource.source,
+          )}
           suggestedZone={timezoneSuggestions?.[timezoneSource.source]}
           triggerRef={timezoneTriggerRef}
           fallbackFocusRef={reviewToggleRef}

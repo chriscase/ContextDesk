@@ -25,6 +25,7 @@ pub mod redact_log;
 pub mod search;
 pub mod store;
 pub mod suppression;
+pub mod timezone_application;
 pub mod timezone_resolution;
 pub mod tools;
 pub mod view_context;
@@ -53,8 +54,8 @@ pub use embed_policy::{
 };
 pub use event_revision::{
     apply_event_timestamp_revision, undo_event_revision, EventRevisionMetadata,
-    EventRevisionReport, EventTimestampUpdate, EVENT_REVISION_METADATA_SCHEMA_VERSION,
-    MAX_EVENT_REVISION_METADATA_BYTES,
+    EventRevisionReport, EventTimestampUpdate, EVENT_REVISION_AUDIT_SCHEMA_VERSION,
+    EVENT_REVISION_METADATA_SCHEMA_VERSION, MAX_EVENT_REVISION_METADATA_BYTES,
 };
 pub use format_profile::{
     fingerprint_format, BuiltInFormatProfile, BuiltInGrammar, FormatFingerprint,
@@ -131,6 +132,10 @@ pub use suppression::{
     SuppressionTemplatePredicate, SuppressionTimeSpan, MAX_SUPPRESSION_AUDIT_ENTRIES,
     MAX_SUPPRESSION_LEVEL_BUCKETS, MAX_SUPPRESSION_PREVIEWS, MAX_SUPPRESSION_REPRESENTATIVES,
     MAX_SUPPRESSION_RULES, SUPPRESSION_SCHEMA_VERSION,
+};
+pub use timezone_application::{
+    apply_source_timezone, clear_source_timezone, load_timezone_resolution_state,
+    preview_source_timezone, TimezoneResolutionState, TimezoneSourceStatus,
 };
 pub use timezone_resolution::{
     SourceTimezoneDeclaration, SourceTimezoneResolver, TimestampResolution,

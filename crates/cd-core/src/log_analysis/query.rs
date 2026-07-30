@@ -68,7 +68,7 @@ pub const MAX_SHARED_TIMELINE_COUNT_CELLS: usize =
 pub const MIN_WALL_TS: i64 = 946_684_800;
 
 /// How timestamps should be presented for a corpus or event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TimeQuality {
     /// Parsed / wall-clock timestamps.
@@ -139,8 +139,33 @@ fn quality_from_persisted_counts(counts: &std::collections::BTreeMap<String, u64
     quality_from_counts(counts.values().copied().sum(), wall)
 }
 
+fn corpus_time_quality_from_revision_state(corpus: &LogCorpus) -> Option<TimeQuality> {
+    corpus
+        .with_connection(|connection| {
+            let (total, wall) = connection
+                .query_row(
+                    "SELECT event_count, wall_event_count
+                     FROM event_revision_state
+                     WHERE singleton = 1",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .map_err(duck_err)?;
+            if total < 0 || wall < 0 || wall > total {
+                return Err(CoreError::Message(
+                    "event revision time-quality counts are invalid".into(),
+                ));
+            }
+            Ok(quality_from_counts(total as u64, wall as u64))
+        })
+        .ok()
+}
+
 /// Classify corpus-level time quality from stats or a sample of events.
 pub fn corpus_time_quality(corpus: &LogCorpus) -> TimeQuality {
+    if let Some(quality) = corpus_time_quality_from_revision_state(corpus) {
+        return quality;
+    }
     if let Ok(meta) = corpus.meta() {
         if let Some(stats) = meta.stats {
             if !stats.active_timestamp_basis_counts.is_empty() {
@@ -1575,6 +1600,9 @@ fn query_event_count_with_post_scan(
 }
 
 fn corpus_time_quality_from_meta(corpus: &LogCorpus) -> TimeQuality {
+    if let Some(quality) = corpus_time_quality_from_revision_state(corpus) {
+        return quality;
+    }
     if let Ok(meta) = corpus.meta() {
         if let Some(stats) = meta.stats {
             if !stats.active_timestamp_basis_counts.is_empty() {
