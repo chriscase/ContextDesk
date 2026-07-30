@@ -60,7 +60,7 @@ function trapFocus(
 
 function isValidIanaZone(value: string): boolean {
   const zone = value.trim();
-  if (!zone.includes("/")) return false;
+  if (zone !== "UTC" && !zone.includes("/")) return false;
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: zone }).format(0);
     return true;

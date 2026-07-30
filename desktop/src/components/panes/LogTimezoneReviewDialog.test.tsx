@@ -241,6 +241,36 @@ describe("LogTimezoneReviewDialog", () => {
     expect(document.activeElement).toBe(trigger);
   });
 
+  it("accepts canonical UTC but rejects ambiguous abbreviations", async () => {
+    const { dialog, onPreview } = await openReview();
+    fireEvent.click(
+      within(dialog).getByRole("radio", {
+        name: /Use an IANA timezone/,
+      }),
+    );
+    const zone = within(dialog).getByRole("textbox", {
+      name: /^IANA timezone/,
+    }) as HTMLInputElement;
+    const previewButton = within(dialog).getByRole("button", {
+      name: "Preview",
+    }) as HTMLButtonElement;
+
+    fireEvent.change(zone, { target: { value: "CET" } });
+    expect(zone.getAttribute("aria-invalid")).toBe("true");
+    expect(previewButton.disabled).toBe(true);
+
+    fireEvent.change(zone, { target: { value: "UTC" } });
+    expect(zone.getAttribute("aria-invalid")).toBe("false");
+    expect(previewButton.disabled).toBe(false);
+    fireEvent.click(previewButton);
+    await waitFor(() =>
+      expect(onPreview).toHaveBeenCalledWith({
+        source: "edge/server.log",
+        ianaZone: "UTC",
+      }),
+    );
+  });
+
   it("rejects a stale or mismatched preview instead of enabling Apply", async () => {
     const onPreview = vi.fn(async () =>
       preview("another/source.log", "Europe/Berlin"),
