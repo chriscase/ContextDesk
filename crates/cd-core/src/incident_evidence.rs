@@ -283,6 +283,172 @@ fn non_empty_str(v: Option<&serde_json::Value>) -> bool {
         .is_some_and(|s| !s.trim().is_empty())
 }
 
+/// Pass-1 component inventory result (shared directory/archive).
+#[derive(Debug, Clone)]
+pub struct ComponentInventory {
+    /// Per-component flag: safe to perform payload I/O for this index.
+    pub path_ok_for_io: Vec<bool>,
+    /// Declared component relative paths (exact strings).
+    pub declared_paths: HashSet<String>,
+}
+
+/// Shared component inventory checks for directory **and** archive transports.
+///
+/// Validates id/role/mediaType/path (incl. portable case collision), sourceLabel,
+/// lineage (length/sentinel/absolute), hash shape, declared size, and timeBasis
+/// **before** any payload open/hash. Transports MUST use this rather than forking.
+pub fn validate_component_inventory(
+    components: &[ComponentEntry],
+    diagnostics: &mut Vec<Diagnostic>,
+) -> ComponentInventory {
+    let mut seen_ids = HashSet::new();
+    let mut seen_paths = HashSet::new();
+    let mut seen_paths_lower = HashSet::new();
+    let mut declared_paths: HashSet<String> = HashSet::new();
+    let mut path_ok_for_io: Vec<bool> = Vec::with_capacity(components.len());
+
+    for (i, c) in components.iter().enumerate() {
+        let base = format!("$.components[{i}]");
+        let mut ok_io = true;
+        if c.id.trim().is_empty() || c.id.len() > MAX_ID_CHARS {
+            diagnostics.push(Diagnostic::new(
+                "component_id_invalid",
+                format!("{base}.id"),
+                format!("component id MUST be non-empty and <= {MAX_ID_CHARS} characters"),
+            ));
+            ok_io = false;
+        }
+        if contains_forbidden_sentinel(&c.id) {
+            diagnostics.push(Diagnostic::new(
+                "forbidden_sentinel",
+                format!("{base}.id"),
+                "component id contains forbidden sentinel",
+            ));
+        }
+        if !seen_ids.insert(c.id.clone()) {
+            diagnostics.push(Diagnostic::new(
+                "duplicate_component_id",
+                format!("{base}.id"),
+                format!("duplicate component id `{}`", c.id),
+            ));
+        }
+        if !is_known_role(&c.role) {
+            diagnostics.push(Diagnostic::new(
+                "unknown_role",
+                format!("{base}.role"),
+                format!("unknown component role `{}`", c.role),
+            ));
+            ok_io = false;
+        }
+        if c.media_type.trim().is_empty() || c.media_type.len() > MAX_MEDIA_TYPE_CHARS {
+            diagnostics.push(Diagnostic::new(
+                "media_type_empty",
+                format!("{base}.mediaType"),
+                format!("mediaType MUST be non-empty and <= {MAX_MEDIA_TYPE_CHARS} characters"),
+            ));
+        }
+        if let Err(msg) = validate_relative_path(&c.path) {
+            diagnostics.push(Diagnostic::new("unsafe_path", format!("{base}.path"), msg));
+            ok_io = false;
+        } else {
+            if contains_forbidden_sentinel(&c.path) {
+                diagnostics.push(Diagnostic::new(
+                    "forbidden_sentinel",
+                    format!("{base}.path"),
+                    "component path contains forbidden sentinel",
+                ));
+            }
+            if !seen_paths.insert(c.path.clone()) {
+                diagnostics.push(Diagnostic::new(
+                    "duplicate_component_path",
+                    format!("{base}.path"),
+                    format!("duplicate component path `{}`", c.path),
+                ));
+                ok_io = false;
+            }
+            let lower = c.path.to_ascii_lowercase();
+            if !seen_paths_lower.insert(lower) {
+                diagnostics.push(Diagnostic::new(
+                    "portable_path_collision",
+                    format!("{base}.path"),
+                    format!("case-insensitive path collision for `{}`", c.path),
+                ));
+                ok_io = false;
+            }
+            declared_paths.insert(c.path.clone());
+        }
+        if let Some(label) = &c.source_label {
+            if label.len() > MAX_ID_CHARS {
+                diagnostics.push(Diagnostic::new(
+                    "source_label_too_long",
+                    format!("{base}.sourceLabel"),
+                    format!("sourceLabel exceeds {MAX_ID_CHARS} characters"),
+                ));
+            }
+            scan_forbidden_sentinels(label, &format!("{base}.sourceLabel"), diagnostics);
+        }
+        if let Some(lin) = &c.lineage {
+            if let Some(pid) = &lin.parent_id {
+                if pid.len() > MAX_ID_CHARS {
+                    diagnostics.push(Diagnostic::new(
+                        "lineage_parent_too_long",
+                        format!("{base}.lineage.parentId"),
+                        format!("lineage.parentId exceeds {MAX_ID_CHARS} characters"),
+                    ));
+                }
+                scan_forbidden_sentinels(pid, &format!("{base}.lineage.parentId"), diagnostics);
+            }
+            if let Some(note) = &lin.note {
+                if note.len() > 512 {
+                    diagnostics.push(Diagnostic::new(
+                        "lineage_note_too_long",
+                        format!("{base}.lineage.note"),
+                        "lineage.note exceeds 512 characters",
+                    ));
+                }
+                scan_forbidden_sentinels(note, &format!("{base}.lineage.note"), diagnostics);
+                if note.starts_with('/')
+                    || note.starts_with('\\')
+                    || (note.as_bytes().get(1) == Some(&b':')
+                        && note.as_bytes().first().is_some_and(u8::is_ascii_alphabetic))
+                    || note.contains(":\\")
+                    || note.contains(":/")
+                {
+                    diagnostics.push(Diagnostic::new(
+                        "lineage_absolute_path",
+                        format!("{base}.lineage.note"),
+                        "lineage MUST NOT embed absolute host paths",
+                    ));
+                }
+            }
+        }
+        if !is_lowercase_sha256(&c.sha256) {
+            diagnostics.push(Diagnostic::new(
+                "hash_malformed",
+                format!("{base}.sha256"),
+                "sha256 MUST be 64 lowercase hex characters",
+            ));
+        }
+        if c.bytes > MAX_PER_FILE_BYTES {
+            diagnostics.push(Diagnostic::new(
+                "file_too_large",
+                format!("{base}.bytes"),
+                format!("declared bytes exceed MAX_PER_FILE_BYTES ({MAX_PER_FILE_BYTES})"),
+            ));
+            ok_io = false;
+        }
+        if let Some(tb) = &c.time_basis {
+            validate_time_basis(tb, &format!("{base}.timeBasis"), diagnostics);
+        }
+        path_ok_for_io.push(ok_io);
+    }
+
+    ComponentInventory {
+        path_ok_for_io,
+        declared_paths,
+    }
+}
+
 /// Shared manifest header/policy checks for directory **and** archive transports.
 ///
 /// Covers schemaId, minReaderVersion, bundleId, createdAt offset/length, producer,
@@ -419,132 +585,10 @@ fn validate_manifest_and_payloads(
     // Shared structural rules — identical for directory and archive transports.
     validate_manifest_header(&manifest, &mut diagnostics);
 
-    // --- Pass 1: inventory integrity before any payload I/O ---
-    let mut seen_ids = HashSet::new();
-    let mut seen_paths = HashSet::new();
-    let mut seen_paths_lower = HashSet::new();
-    let mut declared_paths: HashSet<String> = HashSet::new();
-    let mut path_ok_for_io: Vec<bool> = Vec::with_capacity(manifest.components.len());
-
-    for (i, c) in manifest.components.iter().enumerate() {
-        let base = format!("$.components[{i}]");
-        let mut ok_io = true;
-        if c.id.trim().is_empty() || c.id.len() > MAX_ID_CHARS {
-            diagnostics.push(Diagnostic::new(
-                "component_id_invalid",
-                format!("{base}.id"),
-                format!("component id MUST be non-empty and <= {MAX_ID_CHARS} characters"),
-            ));
-            ok_io = false;
-        }
-        if contains_forbidden_sentinel(&c.id) {
-            diagnostics.push(Diagnostic::new(
-                "forbidden_sentinel",
-                format!("{base}.id"),
-                "component id contains forbidden sentinel",
-            ));
-        }
-        if !seen_ids.insert(c.id.clone()) {
-            diagnostics.push(Diagnostic::new(
-                "duplicate_component_id",
-                format!("{base}.id"),
-                format!("duplicate component id `{}`", c.id),
-            ));
-        }
-        if !is_known_role(&c.role) {
-            diagnostics.push(Diagnostic::new(
-                "unknown_role",
-                format!("{base}.role"),
-                format!("unknown component role `{}`", c.role),
-            ));
-            ok_io = false;
-        }
-        if c.media_type.trim().is_empty() || c.media_type.len() > MAX_MEDIA_TYPE_CHARS {
-            diagnostics.push(Diagnostic::new(
-                "media_type_empty",
-                format!("{base}.mediaType"),
-                format!("mediaType MUST be non-empty and <= {MAX_MEDIA_TYPE_CHARS} characters"),
-            ));
-        }
-        if let Err(msg) = validate_relative_path(&c.path) {
-            diagnostics.push(Diagnostic::new("unsafe_path", format!("{base}.path"), msg));
-            ok_io = false;
-        } else {
-            if contains_forbidden_sentinel(&c.path) {
-                diagnostics.push(Diagnostic::new(
-                    "forbidden_sentinel",
-                    format!("{base}.path"),
-                    "component path contains forbidden sentinel",
-                ));
-            }
-            if !seen_paths.insert(c.path.clone()) {
-                diagnostics.push(Diagnostic::new(
-                    "duplicate_component_path",
-                    format!("{base}.path"),
-                    format!("duplicate component path `{}`", c.path),
-                ));
-                ok_io = false;
-            }
-            let lower = c.path.to_ascii_lowercase();
-            if !seen_paths_lower.insert(lower) {
-                diagnostics.push(Diagnostic::new(
-                    "portable_path_collision",
-                    format!("{base}.path"),
-                    format!("case-insensitive path collision for `{}`", c.path),
-                ));
-                ok_io = false;
-            }
-            declared_paths.insert(c.path.clone());
-        }
-        if let Some(label) = &c.source_label {
-            if label.len() > MAX_ID_CHARS {
-                diagnostics.push(Diagnostic::new(
-                    "source_label_too_long",
-                    format!("{base}.sourceLabel"),
-                    format!("sourceLabel exceeds {MAX_ID_CHARS} characters"),
-                ));
-            }
-            scan_forbidden_sentinels(label, &format!("{base}.sourceLabel"), &mut diagnostics);
-        }
-        if let Some(lin) = &c.lineage {
-            if let Some(note) = &lin.note {
-                if note.len() > 512 {
-                    diagnostics.push(Diagnostic::new(
-                        "lineage_note_too_long",
-                        format!("{base}.lineage.note"),
-                        "lineage.note exceeds 512 characters",
-                    ));
-                }
-                scan_forbidden_sentinels(note, &format!("{base}.lineage.note"), &mut diagnostics);
-                if note.contains('/') && (note.starts_with('/') || note.contains(":\\")) {
-                    diagnostics.push(Diagnostic::new(
-                        "lineage_absolute_path",
-                        format!("{base}.lineage.note"),
-                        "lineage MUST NOT embed absolute host paths",
-                    ));
-                }
-            }
-        }
-        if !is_lowercase_sha256(&c.sha256) {
-            diagnostics.push(Diagnostic::new(
-                "hash_malformed",
-                format!("{base}.sha256"),
-                "sha256 MUST be 64 lowercase hex characters",
-            ));
-        }
-        if c.bytes > MAX_PER_FILE_BYTES {
-            diagnostics.push(Diagnostic::new(
-                "file_too_large",
-                format!("{base}.bytes"),
-                format!("declared bytes exceed MAX_PER_FILE_BYTES ({MAX_PER_FILE_BYTES})"),
-            ));
-            ok_io = false;
-        }
-        if let Some(tb) = &c.time_basis {
-            validate_time_basis(tb, &format!("{base}.timeBasis"), &mut diagnostics);
-        }
-        path_ok_for_io.push(ok_io);
-    }
+    // --- Pass 1: inventory integrity before any payload I/O (shared with archive) ---
+    let inventory = validate_component_inventory(&manifest.components, &mut diagnostics);
+    let path_ok_for_io = inventory.path_ok_for_io;
+    let declared_paths = inventory.declared_paths;
 
     // --- Pass 2: single-open size/hash/(metrics parse) per declared path ---
     let mut aggregate_actual: u64 = 0;

@@ -5,11 +5,12 @@
 //! - Pack produces byte-identical archives for identical directory inputs.
 
 use crate::incident_evidence::{
-    contains_forbidden_sentinel, is_known_role, is_lowercase_sha256, redacted_root_label,
-    stream_sha256_hex_bounded, validate_directory, validate_manifest_header,
-    validate_metrics_document_text, validate_relative_path, Diagnostic, Manifest, ValidationReport,
-    HASH_BUFFER_BYTES, MAX_AGGREGATE_BYTES, MAX_COMPONENTS, MAX_MANIFEST_BYTES,
-    MAX_METRICS_DOC_BYTES, MAX_PER_FILE_BYTES, MAX_RELATIVE_PATH_BYTES, SCHEMA_ID,
+    contains_forbidden_sentinel, is_lowercase_sha256, redacted_root_label,
+    stream_sha256_hex_bounded, validate_component_inventory, validate_directory,
+    validate_manifest_header, validate_metrics_document_text, validate_relative_path, Diagnostic,
+    Manifest, ValidationReport, HASH_BUFFER_BYTES, MAX_AGGREGATE_BYTES, MAX_COMPONENTS,
+    MAX_MANIFEST_BYTES, MAX_METRICS_DOC_BYTES, MAX_PER_FILE_BYTES, MAX_RELATIVE_PATH_BYTES,
+    SCHEMA_ID,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -672,61 +673,18 @@ pub fn validate_archive(path: &Path) -> ValidationReport {
     let schema_id = Some(manifest.schema_id.clone());
     let bundle_id = Some(manifest.bundle_id.clone());
 
-    // Structural + component policy — same header rules as directory form.
+    // Structural + component inventory — same rules as directory form.
     validate_manifest_header(&manifest, &mut diagnostics);
-
-    let mut declared_paths: HashSet<String> = HashSet::new();
+    let inventory = validate_component_inventory(&manifest.components, &mut diagnostics);
+    let mut declared_paths = inventory.declared_paths;
     declared_paths.insert(ARCHIVE_MANIFEST_PATH.to_string());
-    let mut seen_ids = HashSet::new();
     let mut validated_bytes: u64 = 0;
 
     for (i, c) in manifest.components.iter().enumerate() {
-        let base = format!("$.components[{i}]");
-        if c.id.trim().is_empty() || c.id.len() > 128 {
-            diagnostics.push(Diagnostic::new(
-                "component_id_invalid",
-                format!("{base}.id"),
-                "component id MUST be non-empty and <= 128 characters",
-            ));
-        }
-        if !seen_ids.insert(c.id.clone()) {
-            diagnostics.push(Diagnostic::new(
-                "duplicate_component_id",
-                format!("{base}.id"),
-                format!("duplicate component id `{}`", c.id),
-            ));
-        }
-        if !is_known_role(&c.role) {
-            diagnostics.push(Diagnostic::new(
-                "unknown_role",
-                format!("{base}.role"),
-                format!("unknown component role `{}`", c.role),
-            ));
-        }
-        if let Err(msg) = validate_relative_path(&c.path) {
-            diagnostics.push(Diagnostic::new("unsafe_path", format!("{base}.path"), msg));
+        // Skip payload I/O when Pass-1 already failed closed for this component
+        // (unsafe path, unknown role, case collision, etc.) — parity with directory.
+        if !inventory.path_ok_for_io.get(i).copied().unwrap_or(false) {
             continue;
-        }
-        if !declared_paths.insert(c.path.clone()) {
-            diagnostics.push(Diagnostic::new(
-                "duplicate_component_path",
-                format!("{base}.path"),
-                format!("duplicate component path `{}`", c.path),
-            ));
-        }
-        if !is_lowercase_sha256(&c.sha256) {
-            diagnostics.push(Diagnostic::new(
-                "hash_malformed",
-                format!("{base}.sha256"),
-                "sha256 MUST be 64 lowercase hex characters",
-            ));
-        }
-        if c.bytes > MAX_PER_FILE_BYTES {
-            diagnostics.push(Diagnostic::new(
-                "file_too_large",
-                format!("{base}.bytes"),
-                format!("declared bytes exceed MAX_PER_FILE_BYTES ({MAX_PER_FILE_BYTES})"),
-            ));
         }
 
         let Some(&idx) = by_name.get(&c.path) else {
@@ -2001,6 +1959,129 @@ mod tests {
         let text = crate::incident_evidence::format_report_text(&r);
         assert!(!text.contains("/Users/"));
         assert!(!text.contains("var/folders"));
+    }
+
+    /// Build a minimal valid directory, then mutate one manifest field and prove
+    /// directory and archive transports emit the same diagnostic code.
+    fn dir_and_archive_share_inventory_code(
+        mutate: impl FnOnce(&mut serde_json::Value),
+        code: &str,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("logs")).unwrap();
+        std::fs::write(root.join("logs/app.log"), b"x\n").unwrap();
+        let hex = stream_sha256_hex(&root.join("logs/app.log")).unwrap();
+        let bytes = std::fs::metadata(root.join("logs/app.log")).unwrap().len();
+        let mut man = serde_json::json!({
+            "schemaId": "contextdesk.incident_evidence.v1",
+            "minReaderVersion": 1,
+            "bundleId": "parity",
+            "createdAt": "2024-01-15T12:00:00Z",
+            "producer": { "name": "t", "version": "1" },
+            "privacy": {
+                "redactionDeclared": true,
+                "containsCredentials": false,
+                "containsPii": false
+            },
+            "timeBasis": { "timezone": "UTC", "timezoneResolved": true },
+            "components": [{
+                "id": "l",
+                "role": "log",
+                "path": "logs/app.log",
+                "mediaType": "text/plain",
+                "bytes": bytes,
+                "sha256": hex
+            }]
+        });
+        mutate(&mut man);
+        std::fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec_pretty(&man).unwrap(),
+        )
+        .unwrap();
+
+        let dir_r = validate_directory(root);
+        assert!(
+            dir_r.diagnostics.iter().any(|d| d.code == code),
+            "directory missing {code}: {:?}",
+            dir_r.diagnostics
+        );
+
+        // Pack is blocked when directory invalid — hand-build zip from tree.
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("parity.zip");
+        {
+            let f = File::create(&zip_path).unwrap();
+            let mut z = ZipWriter::new(f);
+            let opts = pack_options();
+            z.start_file("manifest.json", opts).unwrap();
+            z.write_all(&std::fs::read(root.join("manifest.json")).unwrap())
+                .unwrap();
+            z.start_file("logs/app.log", opts).unwrap();
+            z.write_all(b"x\n").unwrap();
+            z.finish().unwrap();
+        }
+        let arch_r = validate_archive(&zip_path);
+        assert!(
+            arch_r.diagnostics.iter().any(|d| d.code == code),
+            "archive missing {code}: {:?}",
+            arch_r.diagnostics
+        );
+        assert!(!dir_r.ok && !arch_r.ok);
+    }
+
+    #[test]
+    fn archive_and_directory_reject_empty_media_type() {
+        dir_and_archive_share_inventory_code(
+            |man| {
+                man["components"][0]["mediaType"] = serde_json::json!("");
+            },
+            "media_type_empty",
+        );
+    }
+
+    #[test]
+    fn archive_and_directory_reject_overlong_source_label() {
+        dir_and_archive_share_inventory_code(
+            |man| {
+                man["components"][0]["sourceLabel"] = serde_json::json!("x".repeat(129));
+            },
+            "source_label_too_long",
+        );
+    }
+
+    #[test]
+    fn archive_and_directory_reject_absolute_lineage_note() {
+        dir_and_archive_share_inventory_code(
+            |man| {
+                man["components"][0]["lineage"] = serde_json::json!({
+                    "note": "/Users/secret/path"
+                });
+            },
+            "lineage_absolute_path",
+        );
+    }
+
+    #[test]
+    fn archive_and_directory_reject_portable_case_collision() {
+        dir_and_archive_share_inventory_code(
+            |man| {
+                let c0 = man["components"][0].clone();
+                man["components"] = serde_json::json!([
+                    c0,
+                    {
+                        "id": "l2",
+                        "role": "log",
+                        "path": "logs/App.log",
+                        "mediaType": "text/plain",
+                        "bytes": 2,
+                        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    }
+                ]);
+            },
+            "portable_path_collision",
+        );
     }
 
     #[test]
