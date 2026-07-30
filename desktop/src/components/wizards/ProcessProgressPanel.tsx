@@ -47,8 +47,8 @@ export function ProcessProgressPanel({
     progress?.fraction != null && Number.isFinite(progress.fraction)
       ? Math.max(0, Math.min(1, progress.fraction))
       : null;
-  const fraction = active === "completed" ? 1 : reportedFraction;
-  const fractionPercent = fraction == null ? null : Math.round(fraction * 100);
+  const fractionPercent =
+    reportedFraction == null ? null : Math.round(reportedFraction * 100);
   const indeterminate = running && fractionPercent == null;
 
   useEffect(() => {
@@ -68,10 +68,17 @@ export function ProcessProgressPanel({
   return (
     <div
       className={["process-progress", className].filter(Boolean).join(" ")}
-      role="status"
-      aria-live="polite"
       aria-busy={!terminal && !error}
     >
+      <p
+        className="sr-only"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        Current phase: {error ? "Failed" : phaseLabel(active)}
+      </p>
+
       <ol className="process-progress__pipeline" aria-label="Process phases">
         {pipeline.map((phase, i) => {
           const done =
@@ -98,26 +105,16 @@ export function ProcessProgressPanel({
         })}
       </ol>
 
-      <div
+      <progress
         className="process-progress__bar-track"
-        role="progressbar"
         aria-label="Process progress"
-        aria-valuemin={0}
-        aria-valuemax={100}
+        max={100}
+        {...(fractionPercent == null ? {} : { value: fractionPercent })}
         {...(fractionPercent == null
           ? {}
           : { "aria-valuenow": fractionPercent })}
-      >
-        <div
-          className="process-progress__bar-fill"
-          style={
-            fractionPercent == null
-              ? undefined
-              : { width: `${fractionPercent}%` }
-          }
-          data-indeterminate={indeterminate ? "true" : "false"}
-        />
-      </div>
+        data-indeterminate={indeterminate ? "true" : "false"}
+      />
 
       <p className="process-progress__message">
         {error

@@ -42,28 +42,28 @@ describe("ProcessProgressPanel", () => {
   });
 
   it("shows only a finite host-reported fraction as determinate progress", () => {
-    const { container, rerender } = render(
+    const { rerender } = render(
       <ProcessProgressPanel progress={progress({ fraction: 0.354 })} />,
     );
     const bar = screen.getByRole("progressbar", {
       name: "Process progress",
     });
-    const fill = container.querySelector(".process-progress__bar-fill");
 
+    expect(bar.tagName).toBe("PROGRESS");
+    expect(bar.getAttribute("value")).toBe("35");
     expect(bar.getAttribute("aria-valuenow")).toBe("35");
-    expect(fill?.getAttribute("style")).toBe("width: 35%;");
-    expect(fill?.getAttribute("data-indeterminate")).toBe("false");
+    expect(bar.getAttribute("data-indeterminate")).toBe("false");
 
     rerender(
       <ProcessProgressPanel progress={progress({ fraction: Number.NaN })} />,
     );
+    expect(bar.hasAttribute("value")).toBe(false);
     expect(bar.hasAttribute("aria-valuenow")).toBe(false);
-    expect(fill?.hasAttribute("style")).toBe(false);
-    expect(fill?.getAttribute("data-indeterminate")).toBe("true");
+    expect(bar.getAttribute("data-indeterminate")).toBe("true");
   });
 
   it("does not infer progress from phase position and clears stale width", () => {
-    const { container, rerender } = render(
+    const { rerender } = render(
       <ProcessProgressPanel
         progress={progress({ phase: "template", fraction: 0.8 })}
       />,
@@ -71,10 +71,9 @@ describe("ProcessProgressPanel", () => {
     const bar = screen.getByRole("progressbar", {
       name: "Process progress",
     });
-    const fill = container.querySelector(".process-progress__bar-fill");
 
+    expect(bar.getAttribute("value")).toBe("80");
     expect(bar.getAttribute("aria-valuenow")).toBe("80");
-    expect(fill?.getAttribute("style")).toBe("width: 80%;");
 
     rerender(
       <ProcessProgressPanel
@@ -85,13 +84,13 @@ describe("ProcessProgressPanel", () => {
         })}
       />,
     );
+    expect(bar.hasAttribute("value")).toBe(false);
     expect(bar.hasAttribute("aria-valuenow")).toBe(false);
-    expect(fill?.hasAttribute("style")).toBe(false);
-    expect(fill?.getAttribute("data-indeterminate")).toBe("true");
+    expect(bar.getAttribute("data-indeterminate")).toBe("true");
   });
 
-  it("uses terminal host state without animating failed or completed work", () => {
-    const { container, rerender } = render(
+  it("does not invent a determinate value for terminal host state", () => {
+    const { rerender } = render(
       <ProcessProgressPanel
         progress={progress({
           phase: "failed",
@@ -103,10 +102,10 @@ describe("ProcessProgressPanel", () => {
     const bar = screen.getByRole("progressbar", {
       name: "Process progress",
     });
-    const fill = container.querySelector(".process-progress__bar-fill");
 
+    expect(bar.hasAttribute("value")).toBe(false);
     expect(bar.hasAttribute("aria-valuenow")).toBe(false);
-    expect(fill?.getAttribute("data-indeterminate")).toBe("false");
+    expect(bar.getAttribute("data-indeterminate")).toBe("false");
 
     rerender(
       <ProcessProgressPanel
@@ -117,9 +116,9 @@ describe("ProcessProgressPanel", () => {
         })}
       />,
     );
-    expect(bar.getAttribute("aria-valuenow")).toBe("100");
-    expect(fill?.getAttribute("style")).toBe("width: 100%;");
-    expect(fill?.getAttribute("data-indeterminate")).toBe("false");
+    expect(bar.hasAttribute("value")).toBe(false);
+    expect(bar.hasAttribute("aria-valuenow")).toBe(false);
+    expect(bar.getAttribute("data-indeterminate")).toBe("false");
   });
 
   it("stops indeterminate activity when an error is displayed", () => {
@@ -132,10 +131,53 @@ describe("ProcessProgressPanel", () => {
 
     expect(
       container
-        .querySelector(".process-progress__bar-fill")
+        .querySelector(".process-progress__bar-track")
         ?.getAttribute("data-indeterminate"),
     ).toBe("false");
-    expect(screen.getByRole("status").getAttribute("aria-busy")).toBe("false");
+    expect(
+      container
+        .querySelector(".process-progress")
+        ?.getAttribute("aria-busy"),
+    ).toBe("false");
+  });
+
+  it("announces phase changes without putting counter ticks in the live region", () => {
+    const { rerender } = render(
+      <ProcessProgressPanel
+        progress={progress({
+          phase: "parse",
+          message: "Parsing file 1",
+          files_processed: 1,
+        })}
+      />,
+    );
+    const status = screen.getByRole("status");
+
+    expect(status.textContent).toBe("Current phase: Parse");
+    expect(status.textContent).not.toContain("file 1");
+
+    rerender(
+      <ProcessProgressPanel
+        progress={progress({
+          phase: "parse",
+          message: "Parsing file 2",
+          files_processed: 2,
+        })}
+      />,
+    );
+    expect(status.textContent).toBe("Current phase: Parse");
+    expect(status.textContent).not.toContain("file 2");
+
+    rerender(
+      <ProcessProgressPanel
+        progress={progress({
+          phase: "store",
+          message: "Writing corpus",
+          fraction: null,
+        })}
+      />,
+    );
+    expect(status.textContent).toBe("Current phase: Store");
   });
 
   it("offers cancellation only while the host declares the phase cancellable", () => {
