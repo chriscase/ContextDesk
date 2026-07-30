@@ -641,10 +641,9 @@ fn authoritative_template_predicate(
             "suppression template id is outside the supported range".into(),
         ));
     }
-    let row = corpus
-        .list_templates()
-        .into_iter()
-        .find(|row| row.info.template_id == template_id)
+    let fingerprint = corpus
+        .template_fingerprints(&[template_id], MAX_TEMPLATE_FINGERPRINT_BYTES)
+        .remove(&template_id)
         .ok_or_else(|| {
             CoreError::Message(format!(
                 "suppression template {template_id} is missing from the corpus"
@@ -652,7 +651,7 @@ fn authoritative_template_predicate(
         })?;
     let predicate = SuppressionTemplatePredicate {
         template_id,
-        template_fingerprint: row.content_hash,
+        template_fingerprint: fingerprint,
     };
     validate_predicate(&predicate)?;
     Ok(predicate)
@@ -662,12 +661,31 @@ fn validate_enabled_predicates(
     corpus: &LogCorpus,
     document: &SuppressionDocument,
 ) -> CoreResult<()> {
-    for rule in document
+    let enabled = document
         .rules
         .iter()
         .filter(|rule| rule.state == SuppressionRuleState::Enabled)
-    {
-        let current = authoritative_template_predicate(corpus, rule.predicate.template_id)?;
+        .collect::<Vec<_>>();
+    let template_ids = enabled
+        .iter()
+        .map(|rule| rule.predicate.template_id)
+        .collect::<Vec<_>>();
+    let current_fingerprints =
+        corpus.template_fingerprints(&template_ids, MAX_TEMPLATE_FINGERPRINT_BYTES);
+    for rule in enabled {
+        let current_fingerprint = current_fingerprints
+            .get(&rule.predicate.template_id)
+            .ok_or_else(|| {
+                CoreError::Message(format!(
+                    "suppression template {} is missing from the corpus",
+                    rule.predicate.template_id
+                ))
+            })?;
+        let current = SuppressionTemplatePredicate {
+            template_id: rule.predicate.template_id,
+            template_fingerprint: current_fingerprint.clone(),
+        };
+        validate_predicate(&current)?;
         if current != rule.predicate {
             return Err(CoreError::Message(format!(
                 "enabled suppression rule {} is stale; exact template {} changed",

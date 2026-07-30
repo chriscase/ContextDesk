@@ -16,6 +16,7 @@ pub mod format_profile;
 pub mod ingest;
 mod ingest_confidence;
 pub mod lanes;
+pub mod noise_candidates;
 pub mod operational_metrics;
 pub mod package;
 pub mod parse;
@@ -74,6 +75,16 @@ pub use ingest_confidence::{
 pub use lanes::{
     clamp_lane_count, compute_gaps, link_allowed, nearest_at_or_after, scrub_linked, GapRegion,
     LaneEventRef, LinkScrubResult, PeerPosition, MAX_LANES,
+};
+pub use noise_candidates::{
+    propose_noise_candidates, propose_noise_candidates_with_cancel, score_noise_candidate_facts,
+    template_eligible_for_noise_candidate, NoiseCandidate, NoiseCandidateOptions,
+    NoiseCandidateReasonCode, NoiseCandidateReport, NoiseCandidateRepresentative,
+    TemplateNoiseFacts, DEFAULT_NOISE_CANDIDATE_CAP, DEFAULT_NOISE_REPRESENTATIVE_CAP,
+    MAX_NOISE_CANDIDATES, MAX_NOISE_LEVEL_BUCKETS, MAX_NOISE_PATTERN_BYTES, MAX_NOISE_QUERY_COUNT,
+    MAX_NOISE_QUERY_DURATION, MAX_NOISE_REPORT_BYTES, MAX_NOISE_REPRESENTATIVES,
+    MAX_NOISE_REPRESENTATIVE_EXCERPT_BYTES, MAX_TEMPLATES_SCANNED,
+    MIN_CORPUS_EVENTS_FOR_CANDIDATES, MIN_PROPOSAL_SCORE, MIN_TEMPLATE_EVENTS_FOR_CANDIDATE,
 };
 pub use operational_metrics::{
     load_operational_metrics_attachment, remove_operational_metrics_attachment,
