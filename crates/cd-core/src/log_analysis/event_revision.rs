@@ -1456,22 +1456,31 @@ mod tests {
         cache.join("log_corpora").join(corpus_id)
     }
 
-    fn snapshot(root: &Path) -> BTreeMap<String, Vec<u8>> {
+    fn snapshot_where(root: &Path, include: impl Fn(&str) -> bool) -> BTreeMap<String, Vec<u8>> {
         let mut files = BTreeMap::new();
         for entry in std::fs::read_dir(root).expect("read corpus root") {
             let entry = entry.expect("entry");
             if entry.file_type().expect("type").is_file() {
-                files.insert(
-                    entry.file_name().to_string_lossy().to_string(),
-                    std::fs::read(entry.path()).expect("read corpus file"),
-                );
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !include(&name) {
+                    continue;
+                }
+                files.insert(name, std::fs::read(entry.path()).expect("read corpus file"));
             }
         }
         files
     }
 
+    fn snapshot(root: &Path) -> BTreeMap<String, Vec<u8>> {
+        snapshot_where(root, |_| true)
+    }
+
     fn is_corpus_sidecar(name: &str) -> bool {
         !matches!(name, "events.duckdb" | "events.duckdb.wal")
+    }
+
+    fn sidecar_snapshot(root: &Path) -> BTreeMap<String, Vec<u8>> {
+        snapshot_where(root, is_corpus_sidecar)
     }
 
     fn metadata() -> EventRevisionMetadata {
@@ -1970,9 +1979,9 @@ mod tests {
         ] {
             let (cache, corpus_id) = fixture();
             let corpus_root = root(cache.path(), &corpus_id);
-            let _already_open = LogCorpus::open(cache.path(), &corpus_id).unwrap();
             let bytes_before = snapshot(&corpus_root);
             let events_before = event_snapshot(cache.path(), &corpus_id);
+            let already_open = LogCorpus::open(cache.path(), &corpus_id).unwrap();
             let fault = |actual| {
                 if actual == checkpoint {
                     Err(CoreError::Message("injected event revision fault".into()))
@@ -1990,6 +1999,7 @@ mod tests {
                 Some(&fault),
             );
             assert!(result.is_err(), "{checkpoint:?}");
+            drop(already_open);
             assert_eq!(snapshot(&corpus_root), bytes_before, "{checkpoint:?}");
             assert_eq!(
                 serde_json::to_value(event_snapshot(cache.path(), &corpus_id)).unwrap(),
@@ -2156,10 +2166,7 @@ mod tests {
             &product_identities,
             4,
         );
-        let sidecars_before = snapshot(&corpus_root)
-            .into_iter()
-            .filter(|(name, _)| is_corpus_sidecar(name))
-            .collect::<BTreeMap<_, _>>();
+        let sidecars_before = sidecar_snapshot(&corpus_root);
 
         let report = apply_event_timestamp_revision(
             cache.path(),
@@ -2209,10 +2216,7 @@ mod tests {
             assert_eq!(before.trace_id, after.trace_id);
             assert_eq!(before.message, after.message);
         }
-        let sidecars_after = snapshot(&corpus_root)
-            .into_iter()
-            .filter(|(name, _)| is_corpus_sidecar(name))
-            .collect::<BTreeMap<_, _>>();
+        let sidecars_after = sidecar_snapshot(&corpus_root);
         assert_eq!(sidecars_after, sidecars_before);
         assert_product_identities(
             cache.path(),
