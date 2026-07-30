@@ -1,6 +1,12 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { fireEvent, render, screen } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import {
   validateOperationalMetricsDocument,
@@ -396,6 +402,51 @@ describe("OperationalMetricTracks", () => {
     expect(
       screen.getAllByTestId(/operational-metric-segment-/).length,
     ).toBeGreaterThan(patternFixture.series.length);
+  });
+
+  it("keeps one gap detail open and dismisses it without stale obstruction", async () => {
+    render(
+      <div>
+        <OperationalMetricTracks document={patternFixture} />
+        <button onPointerDown={(event) => event.stopPropagation()}>
+          Outside metric destination
+        </button>
+      </div>,
+    );
+
+    const details = screen.getAllByTestId(/operational-metric-details-/);
+    const cpuDetails = details[0] as HTMLDetailsElement;
+    const heapDetails = details[1] as HTMLDetailsElement;
+    const cpuTrigger = within(cpuDetails).getByText("1 data gap");
+    const heapTrigger = within(heapDetails).getByText("1 data gap");
+
+    fireEvent.click(cpuTrigger);
+    expect(cpuDetails.open).toBe(true);
+    fireEvent.pointerDown(
+      within(cpuDetails).getByText("synthetic CPU collector outage"),
+    );
+    expect(cpuDetails.open).toBe(true);
+
+    fireEvent.click(heapTrigger);
+    expect(cpuDetails.open).toBe(false);
+    expect(heapDetails.open).toBe(true);
+
+    fireEvent.keyDown(
+      within(heapDetails).getByText("synthetic heap collector outage"),
+      { key: "Escape" },
+    );
+    await waitFor(() => expect(heapDetails.open).toBe(false));
+    await waitFor(() => expect(document.activeElement).toBe(heapTrigger));
+
+    fireEvent.click(cpuTrigger);
+    expect(cpuDetails.open).toBe(true);
+    const outside = screen.getByRole("button", {
+      name: "Outside metric destination",
+    });
+    fireEvent.pointerDown(outside);
+    await waitFor(() => expect(cpuDetails.open).toBe(false));
+    outside.focus();
+    expect(document.activeElement).toBe(outside);
   });
 
   it("does not bridge a declared gap with no sample timestamp inside it", () => {

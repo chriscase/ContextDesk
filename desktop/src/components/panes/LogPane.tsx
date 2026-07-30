@@ -63,6 +63,10 @@ import {
   type LogDiagnosticStatus,
 } from "../../lib/logDiagnosticReport";
 import { HELP_TEMPLATE_GROUPING } from "../../lib/helpContent";
+import {
+  DismissibleLayerContext,
+  useDismissibleLayer,
+} from "../../hooks/useDismissibleLayer";
 import { HelpTip } from "../HelpTip";
 import { ProcessProgressPanel } from "../wizards/ProcessProgressPanel";
 import type { ProcessProgressDto as WizardProgressDto } from "../wizards/types";
@@ -117,6 +121,8 @@ type Props = {
   pickDirectory?: () => Promise<string | null>;
   onOpenHelp?: (pageId: string) => void;
 };
+
+const LOG_LIBRARY_MENU_PEER_GROUP = "log-library-menu";
 
 function CorpusOverflowGlyph() {
   return (
@@ -183,8 +189,11 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   } | null>(null);
   const menuId = useId();
   const importMenuId = useId();
+  const corpusMenuLayerId = `${menuId}-dismissible`;
+  const importMenuLayerId = `${importMenuId}-dismissible`;
   const menuRef = useRef<HTMLDivElement>(null);
   const importMenuRef = useRef<HTMLDivElement>(null);
+  const corpusMenuTriggerRef = useRef<HTMLButtonElement>(null);
   const importMenuTriggerRef = useRef<HTMLButtonElement>(null);
   const importMenuInitialFocusRef = useRef<"first" | "last">("first");
   const listRef = useRef<HTMLElement>(null);
@@ -347,6 +356,15 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     [openMenuId],
   );
 
+  useDismissibleLayer({
+    open: openMenuId !== null,
+    layerId: corpusMenuLayerId,
+    peerGroup: LOG_LIBRARY_MENU_PEER_GROUP,
+    rootRef: menuRef,
+    triggerRef: corpusMenuTriggerRef,
+    onDismiss: closeCorpusMenu,
+  });
+
   const positionCorpusMenu = useCallback(() => {
     if (!openMenuId) return;
     const trigger = menuTriggerRefs.current.get(openMenuId);
@@ -384,53 +402,13 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
 
   useEffect(() => {
     if (!openMenuId) return;
-
-    const trigger = menuTriggerRefs.current.get(openMenuId);
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target as Node | null;
-      if (
-        !target ||
-        menuRef.current?.contains(target) ||
-        trigger?.contains(target)
-      ) {
-        return;
-      }
-      const otherTrigger =
-        target instanceof Element
-          ? target.closest("[data-log-corpus-menu-trigger]")
-          : null;
-      closeCorpusMenu(!otherTrigger);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      closeCorpusMenu();
-    };
-    const onFocusIn = (event: FocusEvent) => {
-      const target = event.target as Node | null;
-      if (
-        !target ||
-        menuRef.current?.contains(target) ||
-        trigger?.contains(target)
-      ) {
-        return;
-      }
-      closeCorpusMenu(false);
-    };
-
-    document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    document.addEventListener("focusin", onFocusIn);
     document.addEventListener("scroll", positionCorpusMenu, true);
     window.addEventListener("resize", positionCorpusMenu);
     return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-      document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("scroll", positionCorpusMenu, true);
       window.removeEventListener("resize", positionCorpusMenu);
     };
-  }, [closeCorpusMenu, openMenuId, positionCorpusMenu]);
+  }, [openMenuId, positionCorpusMenu]);
 
   useEffect(() => {
     if (openMenuId && !corpora.some((corpus) => corpus.id === openMenuId)) {
@@ -447,6 +425,15 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       queueMicrotask(() => trigger?.focus());
     }
   }, []);
+
+  useDismissibleLayer({
+    open: importMenuTriggerKey !== null,
+    layerId: importMenuLayerId,
+    peerGroup: LOG_LIBRARY_MENU_PEER_GROUP,
+    rootRef: importMenuRef,
+    triggerRef: importMenuTriggerRef,
+    onDismiss: closeImportMenu,
+  });
 
   const positionImportMenu = useCallback(() => {
     if (!importMenuTriggerKey) return;
@@ -488,49 +475,13 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
 
   useEffect(() => {
     if (!importMenuTriggerKey) return;
-
-    const trigger = importMenuTriggerRef.current;
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target as Node | null;
-      if (
-        !target ||
-        importMenuRef.current?.contains(target) ||
-        trigger?.contains(target)
-      ) {
-        return;
-      }
-      closeImportMenu(false);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      closeImportMenu();
-    };
-    const onFocusIn = (event: FocusEvent) => {
-      const target = event.target as Node | null;
-      if (
-        !target ||
-        importMenuRef.current?.contains(target) ||
-        trigger?.contains(target)
-      ) {
-        return;
-      }
-      closeImportMenu(false);
-    };
-
-    document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    document.addEventListener("focusin", onFocusIn);
     document.addEventListener("scroll", positionImportMenu, true);
     window.addEventListener("resize", positionImportMenu);
     return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-      document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("scroll", positionImportMenu, true);
       window.removeEventListener("resize", positionImportMenu);
     };
-  }, [closeImportMenu, importMenuTriggerKey, positionImportMenu]);
+  }, [importMenuTriggerKey, positionImportMenu]);
 
   useEffect(() => {
     const pendingId = pendingDiscardFocusRef.current;
@@ -990,7 +941,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     event?: ReactKeyboardEvent<HTMLButtonElement>,
   ) {
     event?.preventDefault();
-    closeImportMenu(false);
+    corpusMenuTriggerRef.current = menuTriggerRefs.current.get(id) ?? null;
     setMenuPosition(null);
     setOpenMenuId(id);
   }
@@ -1000,7 +951,6 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     trigger: HTMLButtonElement,
     initialFocus: "first" | "last" = "first",
   ) {
-    closeCorpusMenu(false);
     importMenuTriggerRef.current = trigger;
     importMenuInitialFocusRef.current = initialFocus;
     setImportMenuPosition(null);
@@ -1867,79 +1817,85 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       ) : null}
       {importMenuTriggerKey && typeof document !== "undefined"
         ? createPortal(
-            <div
-              ref={importMenuRef}
-              id={importMenuId}
-              className="log-card__menu log-import-menu"
-              role="menu"
-              aria-label="Import logs"
-              style={
-                importMenuPosition
-                  ? {
-                      left: importMenuPosition.left,
-                      top: importMenuPosition.top,
-                    }
-                  : { left: 0, top: 0, visibility: "hidden" }
-              }
-            >
-              <button
-                type="button"
-                role="menuitem"
-                className="log-card__menu-item"
-                onKeyDown={onImportMenuItemKeyDown}
-                onClick={() => void onImportLogs("directory")}
+            <DismissibleLayerContext.Provider value={importMenuLayerId}>
+              <div
+                ref={importMenuRef}
+                id={importMenuId}
+                className="log-card__menu log-import-menu"
+                role="menu"
+                aria-label="Import logs"
+                data-dismissible-layer-branch={importMenuLayerId}
+                style={
+                  importMenuPosition
+                    ? {
+                        left: importMenuPosition.left,
+                        top: importMenuPosition.top,
+                      }
+                    : { left: 0, top: 0, visibility: "hidden" }
+                }
               >
-                Import a folder…
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                className="log-card__menu-item"
-                onKeyDown={onImportMenuItemKeyDown}
-                onClick={() => void onImportLogs("file")}
-              >
-                Import a raw log file or ZIP…
-              </button>
-            </div>,
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="log-card__menu-item"
+                  onKeyDown={onImportMenuItemKeyDown}
+                  onClick={() => void onImportLogs("directory")}
+                >
+                  Import a folder…
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="log-card__menu-item"
+                  onKeyDown={onImportMenuItemKeyDown}
+                  onClick={() => void onImportLogs("file")}
+                >
+                  Import a raw log file or ZIP…
+                </button>
+              </div>
+            </DismissibleLayerContext.Provider>,
             document.body,
           )
         : null}
       {openMenuId && typeof document !== "undefined"
         ? createPortal(
-            <div
-              ref={menuRef}
-              id={menuId}
-              className="log-card__menu"
-              role="menu"
-              aria-label={`Actions for ${
-                corpora.find((corpus) => corpus.id === openMenuId)?.name ??
-                "corpus"
-              }`}
-              style={
-                menuPosition
-                  ? { left: menuPosition.left, top: menuPosition.top }
-                  : { left: 0, top: 0, visibility: "hidden" }
-              }
-            >
-              <button
-                type="button"
-                role="menuitem"
-                className="log-card__menu-item"
-                onKeyDown={onMenuItemKeyDown}
-                onClick={() => void onOpenDiagnostics(openMenuId)}
+            <DismissibleLayerContext.Provider value={corpusMenuLayerId}>
+              <div
+                ref={menuRef}
+                id={menuId}
+                className="log-card__menu"
+                role="menu"
+                aria-label={`Actions for ${
+                  corpora.find((corpus) => corpus.id === openMenuId)?.name ??
+                  "corpus"
+                }`}
+                data-dismissible-layer-branch={corpusMenuLayerId}
+                style={
+                  menuPosition
+                    ? { left: menuPosition.left, top: menuPosition.top }
+                    : { left: 0, top: 0, visibility: "hidden" }
+                }
               >
-                Export diagnostics…
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                className="log-card__menu-item log-card__menu-item--danger"
-                onKeyDown={onMenuItemKeyDown}
-                onClick={() => void onDiscard(openMenuId)}
-              >
-                Discard corpus…
-              </button>
-            </div>,
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="log-card__menu-item"
+                  onKeyDown={onMenuItemKeyDown}
+                  onClick={() => void onOpenDiagnostics(openMenuId)}
+                >
+                  Export diagnostics…
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="log-card__menu-item log-card__menu-item--danger"
+                  onKeyDown={onMenuItemKeyDown}
+                  onClick={() => void onDiscard(openMenuId)}
+                >
+                  Discard corpus…
+                </button>
+              </div>
+            </DismissibleLayerContext.Provider>,
             document.body,
           )
         : null}

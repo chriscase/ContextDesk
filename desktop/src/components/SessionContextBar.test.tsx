@@ -197,14 +197,20 @@ describe("SessionContextBar compact disclosure", () => {
     expect(screen.getByRole("dialog", { name: triggerName })).toBeTruthy();
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: triggerName })).toBeNull();
-    expect(document.activeElement).toBe(trigger);
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
-  it("dismisses Add context on an outside pointer without stealing destination focus", async () => {
+  it("dismisses Add context in capture phase without stealing interactive destination focus", async () => {
     render(
       <>
         <SessionContextBar sessionId="session-1" />
-        <button type="button">Outside destination</button>
+        <button
+          type="button"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+        >
+          Outside destination
+        </button>
       </>,
     );
 
@@ -215,10 +221,75 @@ describe("SessionContextBar compact disclosure", () => {
     const destination = screen.getByRole("button", {
       name: "Outside destination",
     });
-    fireEvent.mouseDown(destination);
+    fireEvent.pointerDown(destination);
     destination.focus();
 
     expect(screen.queryByRole("dialog", { name: "Add context" })).toBeNull();
     expect(document.activeElement).toBe(destination);
+  });
+
+  it("restores trigger focus when blank-space dismissal has no focus destination", async () => {
+    render(
+      <>
+        <SessionContextBar sessionId="session-1" />
+        <div data-testid="outside-blank">Outside blank space</div>
+      </>,
+    );
+
+    const trigger = screen.getByRole("button", { name: /Add context/ });
+    fireEvent.click(trigger);
+    expect(screen.getByRole("dialog", { name: "Add context" })).toBeTruthy();
+
+    fireEvent.pointerDown(screen.getByTestId("outside-blank"));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Add context" })).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+    });
+  });
+
+  it("keeps inside interactions open until a menu action dismisses it", () => {
+    render(<SessionContextBar sessionId="session-1" />);
+
+    const trigger = screen.getByRole("button", { name: /Add context/ });
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "Add context" });
+
+    fireEvent.pointerDown(
+      screen.getByText("Imported under this chat’s bounded context pack."),
+    );
+    fireEvent.click(
+      screen.getByText("Imported under this chat’s bounded context pack."),
+    );
+
+    expect(screen.getByRole("dialog", { name: "Add context" })).toBe(dialog);
+    expect(trigger.getAttribute("aria-controls")).toBe(dialog.id);
+  });
+
+  it("keeps Escape scoped to the topmost Add context peer", async () => {
+    render(
+      <>
+        <SessionContextBar sessionId="session-1" />
+        <SessionContextBar sessionId="session-2" />
+      </>,
+    );
+
+    const triggers = screen.getAllByRole("button", { name: /Add context/ });
+    fireEvent.click(triggers[0]);
+    fireEvent.click(triggers[1]);
+
+    expect(screen.getAllByRole("dialog", { name: "Add context" })).toHaveLength(
+      1,
+    );
+    expect(triggers[0].getAttribute("aria-expanded")).toBe("false");
+    expect(triggers[1].getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Add context" })).toBeNull();
+      expect(document.activeElement).toBe(triggers[1]);
+    });
+    expect(triggers[0].getAttribute("aria-expanded")).toBe("false");
   });
 });

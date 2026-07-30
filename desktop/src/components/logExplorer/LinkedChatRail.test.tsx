@@ -2410,6 +2410,83 @@ describe("LinkedChatRail", () => {
     expect(document.activeElement).toBe(outside);
   });
 
+  it("coordinates Manage with Chats and dismisses it with topmost focus behavior", async () => {
+    const stored = sessionDto("s1", "Incident chat");
+    vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([
+      {
+        id: stored.id,
+        title: stored.title,
+        archived: stored.archived,
+        pinned: stored.pinned,
+        created_at: stored.created_at,
+        updated_at: stored.updated_at,
+        message_count: stored.messages.length,
+        preview: "",
+        linked_corpus_id: "c1",
+      },
+    ]);
+    vi.mocked(host.hostLoadChatSession).mockResolvedValue(stored);
+
+    render(
+      <div>
+        <LinkedChatRail
+          corpusId="c1"
+          corpusName="fixture"
+          agentContext={baseContext}
+          onApplyNav={() => undefined}
+        />
+        <button onPointerDown={(event) => event.stopPropagation()}>
+          Outside Manage destination
+        </button>
+      </div>,
+    );
+
+    const chatsToggle = await screen.findByTestId(
+      "linked-chat-switcher-toggle",
+    );
+    fireEvent.click(chatsToggle);
+    fireEvent.click(
+      within(screen.getByTestId("linked-chat-switcher")).getByText(
+        "Incident chat",
+      ),
+    );
+
+    const manageToggle = await screen.findByTestId("linked-chat-manage-toggle");
+    fireEvent.click(manageToggle);
+    let manage = await screen.findByTestId("linked-chat-manage");
+    const titleInput = within(manage).getByLabelText("Chat title");
+    await waitFor(() => expect(document.activeElement).toBe(titleInput));
+    fireEvent.pointerDown(titleInput);
+    expect(screen.getByTestId("linked-chat-manage")).toBeTruthy();
+
+    fireEvent.click(chatsToggle);
+    expect(screen.queryByTestId("linked-chat-manage")).toBeNull();
+    expect(screen.getByTestId("linked-chat-switcher")).toBeTruthy();
+
+    fireEvent.click(manageToggle);
+    expect(screen.queryByTestId("linked-chat-switcher")).toBeNull();
+    manage = await screen.findByTestId("linked-chat-manage");
+    fireEvent.keyDown(within(manage).getByLabelText("Chat title"), {
+      key: "Escape",
+    });
+    await waitFor(() =>
+      expect(screen.queryByTestId("linked-chat-manage")).toBeNull(),
+    );
+    await waitFor(() => expect(document.activeElement).toBe(manageToggle));
+
+    fireEvent.click(manageToggle);
+    await screen.findByTestId("linked-chat-manage");
+    const outside = screen.getByRole("button", {
+      name: "Outside Manage destination",
+    });
+    fireEvent.pointerDown(outside);
+    await waitFor(() =>
+      expect(screen.queryByTestId("linked-chat-manage")).toBeNull(),
+    );
+    outside.focus();
+    expect(document.activeElement).toBe(outside);
+  });
+
   it("scopes drafts per chat when switching", async () => {
     const a = sessionDto("a", "Chat A");
     const b = sessionDto("b", "Chat B");

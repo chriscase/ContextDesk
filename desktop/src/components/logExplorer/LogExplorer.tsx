@@ -230,17 +230,16 @@ function ToolbarPicker<T extends string>({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const selected = options.find((option) => option.value === value);
 
-  const close = useCallback((_restoreFocus = true) => {
+  const close = useCallback((restoreFocus = true) => {
     setOpen(false);
-    queueMicrotask(() => {
-      if (
-        document.activeElement == null ||
-        document.activeElement === document.body ||
-        rootRef.current?.contains(document.activeElement)
-      ) {
-        triggerRef.current?.focus();
-      }
-    });
+    if (!restoreFocus) return;
+    if (
+      document.activeElement == null ||
+      document.activeElement === document.body ||
+      rootRef.current?.contains(document.activeElement)
+    ) {
+      triggerRef.current?.focus();
+    }
   }, []);
 
   useDismissibleLayer({
@@ -248,6 +247,7 @@ function ToolbarPicker<T extends string>({
     layerId: id,
     peerGroup: TOOLBAR_DISMISSIBLE_GROUP,
     rootRef,
+    triggerRef,
     onDismiss: close,
   });
 
@@ -379,17 +379,16 @@ function ToolbarActionMenu({
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
-  const close = useCallback((_restoreFocus = true) => {
+  const close = useCallback((restoreFocus = true) => {
     setOpen(false);
-    queueMicrotask(() => {
-      if (
-        document.activeElement == null ||
-        document.activeElement === document.body ||
-        rootRef.current?.contains(document.activeElement)
-      ) {
-        triggerRef.current?.focus();
-      }
-    });
+    if (!restoreFocus) return;
+    if (
+      document.activeElement == null ||
+      document.activeElement === document.body ||
+      rootRef.current?.contains(document.activeElement)
+    ) {
+      triggerRef.current?.focus();
+    }
   }, []);
 
   useDismissibleLayer({
@@ -397,6 +396,7 @@ function ToolbarActionMenu({
     layerId: id,
     peerGroup: TOOLBAR_DISMISSIBLE_GROUP,
     rootRef,
+    triggerRef,
     onDismiss: close,
   });
 
@@ -1049,6 +1049,7 @@ export function LogExplorer({ corpusId }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const laneEditorRef = useRef<HTMLDivElement>(null);
   const laneEditorToggleRef = useRef<HTMLButtonElement>(null);
+  const laneEditorLayerId = useId();
   const findInputRef = useRef<HTMLInputElement>(null);
   const narrowFiltersToggleRef = useRef<HTMLButtonElement>(null);
   const narrowChatToggleRef = useRef<HTMLButtonElement>(null);
@@ -1169,12 +1170,21 @@ export function LogExplorer({ corpusId }: Props) {
       source.toLocaleLowerCase().includes(query),
     );
   }, [laneEditorSources, laneSourceQuery]);
-  const closeLaneEditor = useCallback(() => {
+  const closeLaneEditor = useCallback((restoreFocus = true) => {
     setLaneEditorOpen(false);
     setLaneSourceQuery("");
-    // Return focus after the activating or dismissal click has completed.
-    window.setTimeout(() => laneEditorToggleRef.current?.focus(), 0);
+    if (restoreFocus) {
+      // Return focus after the activating or dismissal click has completed.
+      window.setTimeout(() => laneEditorToggleRef.current?.focus(), 0);
+    }
   }, []);
+  useDismissibleLayer({
+    open: laneEditorOpen && breakpoint !== "narrow",
+    layerId: laneEditorLayerId,
+    rootRef: laneEditorRef,
+    triggerRef: laneEditorToggleRef,
+    onDismiss: closeLaneEditor,
+  });
   const handleRailSummary = useCallback((next: typeof chatSummary) => {
     setChatSummary((previous) =>
       previous.chatCount === next.chatCount &&
@@ -1280,7 +1290,7 @@ export function LogExplorer({ corpusId }: Props) {
   }, [laneEditorOpen]);
 
   useEffect(() => {
-    if (!laneEditorOpen) return;
+    if (!laneEditorOpen || breakpoint !== "narrow") return;
     const onClick = (event: MouseEvent) => {
       const target = event.target as Node | null;
       if (
@@ -1297,16 +1307,15 @@ export function LogExplorer({ corpusId }: Props) {
         closeLaneEditor();
       }
     };
-    // Wait for click rather than closing on mousedown. Native controls can move
-    // focus after mousedown, so closing there races the promised trigger-focus
-    // restoration in the packaged app.
+    // The narrow sheet preserves its existing bounded-sheet semantics. Normal
+    // and wide popovers use the shared capture-phase dismissible layer above.
     document.addEventListener("click", onClick);
     document.addEventListener("keydown", onKeyDown);
     return () => {
       document.removeEventListener("click", onClick);
       document.removeEventListener("keydown", onKeyDown);
     };
-  }, [closeLaneEditor, laneEditorOpen]);
+  }, [breakpoint, closeLaneEditor, laneEditorOpen]);
 
   useEffect(() => {
     if (breakpoint !== "narrow") return;
@@ -5079,16 +5088,20 @@ export function LogExplorer({ corpusId }: Props) {
               </div>
             </div>
             <div className="log-explorer__lane-editor-actions">
-              <HelpTip
-                label="Lane composition"
-                title="Lane composition"
-                content={HELP_LANE_COMPOSE}
-              />
+              <DismissibleLayerContext.Provider
+                value={breakpoint === "narrow" ? null : laneEditorLayerId}
+              >
+                <HelpTip
+                  label="Lane composition"
+                  title="Lane composition"
+                  content={HELP_LANE_COMPOSE}
+                />
+              </DismissibleLayerContext.Provider>
               <button
                 type="button"
                 className="log-explorer__btn"
                 data-testid="lane-editor-close"
-                onClick={closeLaneEditor}
+                onClick={() => closeLaneEditor()}
               >
                 Done
               </button>

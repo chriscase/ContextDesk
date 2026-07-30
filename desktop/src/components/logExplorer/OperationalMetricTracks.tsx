@@ -1,4 +1,6 @@
 import {
+  useCallback,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -17,6 +19,7 @@ import {
   type OperationalMetricsDocumentV1,
   type OperationalMetricSeries,
 } from "../../lib/logExplorer/operationalMetrics";
+import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
 import "./OperationalMetricTracks.css";
 
 export type OperationalMetricDensity = "compact" | "standard" | "detailed";
@@ -52,6 +55,7 @@ export type OperationalMetricTracksProps = {
 };
 
 const VIEWBOX_SIZE = 100;
+const METRIC_GAP_DETAIL_GROUP = "operational-metric-gap-detail";
 
 function clamp(value: number, from: number, to: number): number {
   return Math.max(from, Math.min(to, value));
@@ -254,6 +258,24 @@ function MetricTrack({
   const cursorX = scaleTimestamp(cursor, bounds);
   const cursorY = cursorInGap ? 50 : scaleValue(currentPoint.value, domain);
   const gaps = series.gaps ?? [];
+  const [gapDetailOpen, setGapDetailOpen] = useState(false);
+  const gapDetailLayerId = useId();
+  const gapDetailRef = useRef<HTMLDetailsElement>(null);
+  const gapDetailTriggerRef = useRef<HTMLElement>(null);
+  const dismissGapDetail = useCallback((restoreFocus: boolean) => {
+    setGapDetailOpen(false);
+    if (restoreFocus) {
+      queueMicrotask(() => gapDetailTriggerRef.current?.focus());
+    }
+  }, []);
+  useDismissibleLayer({
+    open: gapDetailOpen,
+    layerId: gapDetailLayerId,
+    peerGroup: METRIC_GAP_DETAIL_GROUP,
+    rootRef: gapDetailRef,
+    triggerRef: gapDetailTriggerRef,
+    onDismiss: dismissGapDetail,
+  });
   const interactionKey = (kind: "pointer" | "focus" | "drag") =>
     `${series.id}:${kind}`;
 
@@ -494,8 +516,20 @@ function MetricTrack({
           </span>
         ))}
         {gaps.length > 0 ? (
-          <details className="operational-metric-track__gaps">
-            <summary>
+          <details
+            ref={gapDetailRef}
+            className="operational-metric-track__gaps"
+            data-testid={`operational-metric-details-${series.id}`}
+            open={gapDetailOpen}
+          >
+            <summary
+              ref={gapDetailTriggerRef}
+              aria-expanded={gapDetailOpen}
+              onClick={(event) => {
+                event.preventDefault();
+                setGapDetailOpen((open) => !open);
+              }}
+            >
               {gaps.length} data gap{gaps.length === 1 ? "" : "s"}
             </summary>
             <div

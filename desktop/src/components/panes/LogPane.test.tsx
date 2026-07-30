@@ -527,6 +527,186 @@ describe("LogPane", () => {
     ).toBe(document.activeElement);
   });
 
+  it("dismisses both portaled menus in capture phase when an outside destination stops propagation", async () => {
+    const item = corpus("corpus-a", "API incident");
+    hostMocks.listCorpora.mockResolvedValue([item]);
+
+    render(<LogPane />);
+    const importTrigger = screen.getAllByRole("button", {
+      name: "Import logs…",
+    })[0]!;
+    const corpusTrigger = await screen.findByRole("button", {
+      name: `More actions for ${item.name}`,
+    });
+    const destination = screen.getByRole("button", {
+      name: "Import ContextDesk package…",
+    });
+    const stopPropagation = (event: Event) => event.stopPropagation();
+    destination.addEventListener("pointerdown", stopPropagation);
+
+    try {
+      fireEvent.click(importTrigger);
+      expect(
+        await screen.findByRole("menu", { name: "Import logs" }),
+      ).toBeTruthy();
+      fireEvent.pointerDown(destination);
+      act(() => destination.focus());
+      await waitFor(() =>
+        expect(screen.queryByRole("menu", { name: "Import logs" })).toBeNull(),
+      );
+      expect(document.activeElement).toBe(destination);
+
+      fireEvent.click(corpusTrigger);
+      expect(
+        await screen.findByRole("menu", {
+          name: `Actions for ${item.name}`,
+        }),
+      ).toBeTruthy();
+      fireEvent.pointerDown(destination);
+      act(() => destination.focus());
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("menu", {
+            name: `Actions for ${item.name}`,
+          }),
+        ).toBeNull(),
+      );
+      expect(document.activeElement).toBe(destination);
+    } finally {
+      destination.removeEventListener("pointerdown", stopPropagation);
+    }
+  });
+
+  it("restores each portaled menu trigger when Escape starts inside the menu", async () => {
+    const item = corpus("corpus-a", "API incident");
+    hostMocks.listCorpora.mockResolvedValue([item]);
+
+    render(<LogPane />);
+    const importTrigger = screen.getAllByRole("button", {
+      name: "Import logs…",
+    })[0]!;
+    importTrigger.focus();
+    fireEvent.keyDown(importTrigger, { key: "ArrowDown" });
+    const importMenu = await screen.findByRole("menu", {
+      name: "Import logs",
+    });
+    const importItem = within(importMenu).getByRole("menuitem", {
+      name: "Import a folder…",
+    });
+    fireEvent.keyDown(importItem, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByRole("menu", { name: "Import logs" })).toBeNull(),
+    );
+    expect(document.activeElement).toBe(importTrigger);
+
+    const corpusTrigger = await screen.findByRole("button", {
+      name: `More actions for ${item.name}`,
+    });
+    corpusTrigger.focus();
+    fireEvent.keyDown(corpusTrigger, { key: "ArrowDown" });
+    const corpusMenu = await screen.findByRole("menu", {
+      name: `Actions for ${item.name}`,
+    });
+    fireEvent.keyDown(
+      within(corpusMenu).getByRole("menuitem", {
+        name: "Export diagnostics…",
+      }),
+      { key: "Escape" },
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("menu", {
+          name: `Actions for ${item.name}`,
+        }),
+      ).toBeNull(),
+    );
+    expect(document.activeElement).toBe(corpusTrigger);
+  });
+
+  it("keeps interactions inside each portaled root open until an action dismisses it", async () => {
+    const item = corpus("corpus-a", "API incident");
+    hostMocks.listCorpora.mockResolvedValue([item]);
+    hostMocks.confirm.mockResolvedValue(false);
+
+    render(<LogPane />);
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Import logs…" })[0]!,
+    );
+    const importMenu = await screen.findByRole("menu", {
+      name: "Import logs",
+    });
+    fireEvent.pointerDown(importMenu);
+    fireEvent.click(importMenu);
+    expect(screen.getByRole("menu", { name: "Import logs" })).toBe(importMenu);
+    fireEvent.keyDown(importMenu, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByRole("menu", { name: "Import logs" })).toBeNull(),
+    );
+
+    const corpusTrigger = await screen.findByRole("button", {
+      name: `More actions for ${item.name}`,
+    });
+    fireEvent.click(corpusTrigger);
+    const corpusMenu = await screen.findByRole("menu", {
+      name: `Actions for ${item.name}`,
+    });
+    fireEvent.pointerDown(corpusMenu);
+    fireEvent.click(corpusMenu);
+    expect(screen.getByRole("menu", { name: `Actions for ${item.name}` })).toBe(
+      corpusMenu,
+    );
+
+    fireEvent.click(
+      within(corpusMenu).getByRole("menuitem", {
+        name: "Discard corpus…",
+      }),
+    );
+    await waitFor(() => expect(hostMocks.confirm).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(hostMocks.discard).not.toHaveBeenCalled();
+  });
+
+  it("keeps Import and corpus overflow mutually exclusive as peer menus", async () => {
+    const item = corpus("corpus-a", "API incident");
+    hostMocks.listCorpora.mockResolvedValue([item]);
+
+    render(<LogPane />);
+    const corpusTrigger = await screen.findByRole("button", {
+      name: `More actions for ${item.name}`,
+    });
+    const importTrigger = screen.getAllByRole("button", {
+      name: "Import logs…",
+    })[0]!;
+
+    fireEvent.click(corpusTrigger);
+    expect(
+      await screen.findByRole("menu", {
+        name: `Actions for ${item.name}`,
+      }),
+    ).toBeTruthy();
+    fireEvent.click(importTrigger);
+    const importMenu = await screen.findByRole("menu", {
+      name: "Import logs",
+    });
+    expect(screen.getAllByRole("menu")).toHaveLength(1);
+    expect(corpusTrigger.getAttribute("aria-expanded")).toBe("false");
+    expect(importTrigger.getAttribute("aria-expanded")).toBe("true");
+    expect(within(importMenu).getAllByRole("menuitem")[0]).toBe(
+      document.activeElement,
+    );
+
+    fireEvent.click(corpusTrigger);
+    const corpusMenu = await screen.findByRole("menu", {
+      name: `Actions for ${item.name}`,
+    });
+    expect(screen.getAllByRole("menu")).toHaveLength(1);
+    expect(importTrigger.getAttribute("aria-expanded")).toBe("false");
+    expect(corpusTrigger.getAttribute("aria-expanded")).toBe("true");
+    expect(within(corpusMenu).getAllByRole("menuitem")[0]).toBe(
+      document.activeElement,
+    );
+  });
+
   it("preserves primary corpus selection and keeps only one named overflow menu open", async () => {
     const first = corpus("corpus-a", "API incident");
     const second = corpus("corpus-b", "Worker incident");
