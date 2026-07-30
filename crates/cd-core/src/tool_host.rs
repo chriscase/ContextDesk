@@ -7585,6 +7585,8 @@ mod tests {
             .build_broad_log_triage_brief()
             .expect_err("a new turn must pin its suppression revision before triage");
         assert!(unpinned.to_string().contains("suppression revision pinned"));
+        host.seed_log_corpus_handle(&corpus_id, Arc::clone(&corpus))
+            .unwrap();
         host.pin_log_suppression_lens(&corpus_id).unwrap();
         let restored = host.build_broad_log_triage_brief().unwrap();
         assert_eq!(restored.unsuppressed_event_count, 39);
