@@ -17,7 +17,9 @@ use crate::log_analysis::event_revision::{
     retained_timestamp_revision_hints, EventReferenceTimestampHint,
 };
 use crate::log_analysis::query::fetch_events_by_seqs;
-use crate::log_analysis::{BookmarkEventRef, ExplorerEvent, LogCorpus, MAX_BOOKMARK_EVENT_REFS};
+use crate::log_analysis::{
+    load_suppression_document, BookmarkEventRef, ExplorerEvent, LogCorpus, MAX_BOOKMARK_EVENT_REFS,
+};
 use crate::redact::redact_candidate;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -26,7 +28,7 @@ use std::path::{Component, Path, PathBuf};
 use uuid::{Uuid, Version};
 
 /// Investigation document schema understood by this build.
-pub const INVESTIGATION_SCHEMA_VERSION: u32 = 3;
+pub const INVESTIGATION_SCHEMA_VERSION: u32 = 4;
 const MIN_INVESTIGATION_SCHEMA_VERSION: u32 = 1;
 /// Maximum durable investigation documents under one store root.
 pub const MAX_INVESTIGATION_DOCUMENTS: usize = 256;
@@ -118,6 +120,66 @@ pub enum FindingLifecycle {
     Accepted,
     /// The finding has been addressed or otherwise resolved.
     Resolved,
+}
+
+/// Suppression-lens mode under which a finding and its optional saved view were produced.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InvestigationNoiseLens {
+    /// Enabled suppression rules were applied.
+    Active,
+    /// The person temporarily suspended all suppression rules.
+    Suspended,
+}
+
+/// Exact, payload-free suppression-policy binding for a durable finding.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InvestigationPolicyBinding {
+    /// Monotonic suppression sidecar revision observed when the finding was made.
+    pub suppression_policy_revision: u64,
+    /// Whether the suppression lens was active or temporarily suspended.
+    pub noise_lens: InvestigationNoiseLens,
+}
+
+impl InvestigationPolicyBinding {
+    /// Capture the exact current suppression revision with an explicit lens mode.
+    pub fn capture(corpus: &LogCorpus, noise_lens: InvestigationNoiseLens) -> CoreResult<Self> {
+        Ok(Self {
+            suppression_policy_revision: load_suppression_document(corpus)?.revision,
+            noise_lens,
+        })
+    }
+}
+
+/// Machine-readable relationship between a durable binding and the current view.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InvestigationPolicyBindingStatus {
+    /// A pre-schema-4 finding has no binding and must not be treated as current.
+    UnboundLegacy,
+    /// Policy revision and lens mode are exactly the same.
+    Current,
+    /// The durable record was made under another suppression-policy revision.
+    MadeUnderDifferentPolicy,
+    /// The policy revision is the same, but the suppression lens mode differs.
+    MadeUnderDifferentLens,
+    /// The policy revision is the same, but the caller did not supply the current lens mode.
+    CurrentLensUnknown,
+}
+
+/// Payload-free current-state resolution for one finding policy binding.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InvestigationPolicyBindingResolution {
+    /// Durable binding, or `None` for a readable legacy finding.
+    pub binding: Option<InvestigationPolicyBinding>,
+    /// Current authoritative suppression sidecar revision.
+    pub current_suppression_policy_revision: u64,
+    /// Caller-supplied current lens mode, when known.
+    pub current_noise_lens: Option<InvestigationNoiseLens>,
+    /// Exact comparison result; never inferred from finding content.
+    pub status: InvestigationPolicyBindingStatus,
 }
 
 /// Structured filters captured in a durable finding view recipe.
@@ -251,6 +313,8 @@ pub struct FindingViewRecipeResolution {
     pub revision: u64,
     /// Finding that owns the recipe.
     pub finding_id: String,
+    /// Honest comparison between the finding's durable policy binding and the current view.
+    pub policy_binding: InvestigationPolicyBindingResolution,
     /// Original durable, payload-free recipe.
     #[serde(rename = "recipe")]
     pub view_recipe: FindingViewRecipe,
@@ -303,6 +367,12 @@ pub struct FindingItem {
     /// Optional durable Explorer view recipe for preview/apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view_recipe: Option<FindingViewRecipe>,
+    /// Exact suppression policy and lens mode used for this finding and saved view.
+    ///
+    /// Missing means a readable legacy record. It is never inferred or
+    /// backfilled from current policy state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_binding: Option<InvestigationPolicyBinding>,
     /// Explicit human-only authorship provenance.
     pub provenance: HumanProvenance,
     /// Creation time as Unix seconds.
@@ -525,6 +595,18 @@ pub struct ResolvedInvestigationDocument {
     pub document: InvestigationDocument,
     /// Resolved evidence in the same order as `document.evidence`.
     pub evidence: Vec<ResolvedEvidenceItem>,
+    /// Findings with an explicit current-vs-durable policy comparison.
+    pub findings: Vec<ResolvedFindingItem>,
+}
+
+/// One durable finding plus its machine-readable current policy relationship.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedFindingItem {
+    /// Durable finding body. No log payload is introduced by resolution.
+    pub item: FindingItem,
+    /// Exact binding comparison for the caller's current suppression view.
+    pub policy_binding: InvestigationPolicyBindingResolution,
 }
 
 /// Bounded transient preview of one saved evidence item.
@@ -651,6 +733,21 @@ impl InvestigationStore {
         resolve_document(document, corpus)
     }
 
+    /// Load with the caller's explicit current suppression-lens mode.
+    ///
+    /// The suppression revision is always read from the authoritative corpus
+    /// sidecar. Supplying the lens mode lets every finding resolve to a precise
+    /// current/different-policy/different-lens state.
+    pub fn load_with_policy_lens(
+        &self,
+        investigation_id: &str,
+        corpus: &LogCorpus,
+        current_noise_lens: InvestigationNoiseLens,
+    ) -> CoreResult<ResolvedInvestigationDocument> {
+        let document = self.load_document(investigation_id)?;
+        resolve_document_with_policy_lens(document, corpus, Some(current_noise_lens))
+    }
+
     /// Add one exact, human-provenance evidence item.
     ///
     /// `expected_revision` must equal the latest readable revision. A competing
@@ -753,6 +850,43 @@ impl InvestigationStore {
         corpus: &LogCorpus,
         input: AddFindingInput,
     ) -> CoreResult<ResolvedInvestigationDocument> {
+        self.add_human_finding_internal(investigation_id, expected_revision, corpus, None, input)
+    }
+
+    /// Atomically save a finding bound to an exact suppression policy and lens.
+    ///
+    /// The caller captures the binding before preparing its response. This
+    /// method rejects a stale policy revision before publication, preventing a
+    /// late response from masquerading as current. Lens mode is explicit
+    /// because temporary suspension belongs to the view, not the sidecar.
+    pub fn add_human_finding_bound(
+        &self,
+        investigation_id: &str,
+        expected_revision: u64,
+        corpus: &LogCorpus,
+        policy_binding: InvestigationPolicyBinding,
+        input: AddFindingInput,
+    ) -> CoreResult<ResolvedInvestigationDocument> {
+        self.add_human_finding_internal(
+            investigation_id,
+            expected_revision,
+            corpus,
+            Some(policy_binding),
+            input,
+        )
+    }
+
+    fn add_human_finding_internal(
+        &self,
+        investigation_id: &str,
+        expected_revision: u64,
+        corpus: &LogCorpus,
+        policy_binding: Option<InvestigationPolicyBinding>,
+        input: AddFindingInput,
+    ) -> CoreResult<ResolvedInvestigationDocument> {
+        if let Some(binding) = policy_binding {
+            require_current_policy_binding(corpus, binding)?;
+        }
         let title = sanitize_title("finding title", input.title)?;
         let why_it_matters = sanitize_body(
             "finding why it matters",
@@ -772,14 +906,21 @@ impl InvestigationStore {
             &document,
             corpus.id(),
             &event_refs,
-            kind,
-            &title,
-            &why_it_matters,
-            view_recipe.as_ref(),
+            FindingMatch {
+                kind,
+                title: &title,
+                why_it_matters: &why_it_matters,
+                view_recipe: view_recipe.as_ref(),
+                policy_binding: policy_binding.as_ref(),
+            },
         )
         .is_some()
         {
-            return resolve_document(document, corpus);
+            return resolve_document_with_policy_lens(
+                document,
+                corpus,
+                policy_binding.map(|binding| binding.noise_lens),
+            );
         }
         if document.revision != expected_revision {
             return Err(stale_revision_error(
@@ -805,29 +946,44 @@ impl InvestigationStore {
             why_it_matters: why_it_matters.clone(),
             evidence_ids: vec![evidence_id],
             view_recipe: view_recipe.clone(),
+            policy_binding,
             provenance: HumanProvenance::Human,
             created_at: now,
             updated_at: now,
         });
         advance_revision(&mut document, now)?;
 
+        if let Some(binding) = policy_binding {
+            require_current_policy_binding(corpus, binding)?;
+        }
         let directory = self.investigation_directory(investigation_id)?;
         match publish_revision(&directory, &document) {
-            Ok(()) => resolve_document(document, corpus),
+            Ok(()) => resolve_document_with_policy_lens(
+                document,
+                corpus,
+                policy_binding.map(|binding| binding.noise_lens),
+            ),
             Err(publication_error) => {
                 let latest = self.load_document(investigation_id)?;
                 if finding_for_exact_set(
                     &latest,
                     corpus.id(),
                     &event_refs,
-                    kind,
-                    &title,
-                    &why_it_matters,
-                    view_recipe.as_ref(),
+                    FindingMatch {
+                        kind,
+                        title: &title,
+                        why_it_matters: &why_it_matters,
+                        view_recipe: view_recipe.as_ref(),
+                        policy_binding: policy_binding.as_ref(),
+                    },
                 )
                 .is_some()
                 {
-                    resolve_document(latest, corpus)
+                    resolve_document_with_policy_lens(
+                        latest,
+                        corpus,
+                        policy_binding.map(|binding| binding.noise_lens),
+                    )
                 } else {
                     Err(publication_error)
                 }
@@ -1132,6 +1288,32 @@ impl InvestigationStore {
         finding_id: &str,
         corpus: &LogCorpus,
     ) -> CoreResult<FindingViewRecipeResolution> {
+        self.resolve_finding_view_recipe_internal(investigation_id, finding_id, corpus, None)
+    }
+
+    /// Revalidate a saved view with the caller's explicit current lens mode.
+    pub fn resolve_finding_view_recipe_with_policy_lens(
+        &self,
+        investigation_id: &str,
+        finding_id: &str,
+        corpus: &LogCorpus,
+        current_noise_lens: InvestigationNoiseLens,
+    ) -> CoreResult<FindingViewRecipeResolution> {
+        self.resolve_finding_view_recipe_internal(
+            investigation_id,
+            finding_id,
+            corpus,
+            Some(current_noise_lens),
+        )
+    }
+
+    fn resolve_finding_view_recipe_internal(
+        &self,
+        investigation_id: &str,
+        finding_id: &str,
+        corpus: &LogCorpus,
+        current_noise_lens: Option<InvestigationNoiseLens>,
+    ) -> CoreResult<FindingViewRecipeResolution> {
         validate_uuid_v7("finding id", finding_id)?;
         let document = self.load_document(investigation_id)?;
         ensure_corpus_link(&document, corpus.id())?;
@@ -1173,6 +1355,11 @@ impl InvestigationStore {
             investigation_id: document.id,
             revision: document.revision,
             finding_id: finding_id.to_string(),
+            policy_binding: resolve_policy_binding(
+                finding.policy_binding,
+                load_suppression_document(corpus)?.revision,
+                current_noise_lens,
+            ),
             view_recipe: recipe,
             missing_count,
             stale_count,
@@ -1856,24 +2043,30 @@ fn exact_evidence_for_set<'a>(
     })
 }
 
+struct FindingMatch<'a> {
+    kind: FindingKind,
+    title: &'a str,
+    why_it_matters: &'a str,
+    view_recipe: Option<&'a FindingViewRecipe>,
+    policy_binding: Option<&'a InvestigationPolicyBinding>,
+}
+
 fn finding_for_exact_set<'a>(
     document: &'a InvestigationDocument,
     corpus_id: &str,
     event_refs: &[BookmarkEventRef],
-    kind: FindingKind,
-    title: &str,
-    why_it_matters: &str,
-    view_recipe: Option<&FindingViewRecipe>,
+    expected: FindingMatch<'_>,
 ) -> Option<&'a FindingItem> {
     let evidence_id = exact_evidence_for_set(document, corpus_id, event_refs)?
         .id
         .as_str();
     document.findings.iter().find(|finding| {
-        finding.kind == kind
-            && finding.title == title
-            && finding.why_it_matters == why_it_matters
+        finding.kind == expected.kind
+            && finding.title == expected.title
+            && finding.why_it_matters == expected.why_it_matters
             && finding.evidence_ids.as_slice() == [evidence_id]
-            && finding.view_recipe.as_ref() == view_recipe
+            && finding.view_recipe.as_ref() == expected.view_recipe
+            && finding.policy_binding.as_ref() == expected.policy_binding
     })
 }
 
@@ -2042,6 +2235,17 @@ fn validate_document(
     {
         return Err(CoreError::Message(
             "investigation schema versions 1 and 2 cannot contain finding view recipes".into(),
+        ));
+    }
+    if document.schema_version < 4
+        && document
+            .findings
+            .iter()
+            .any(|finding| finding.policy_binding.is_some())
+    {
+        return Err(CoreError::Message(
+            "investigation schema versions 1 through 3 cannot contain finding policy bindings"
+                .into(),
         ));
     }
     validate_uuid_v7("investigation id", &document.id)?;
@@ -2254,9 +2458,59 @@ fn ensure_corpus_link(document: &InvestigationDocument, corpus_id: &str) -> Core
     }
 }
 
+fn require_current_policy_binding(
+    corpus: &LogCorpus,
+    binding: InvestigationPolicyBinding,
+) -> CoreResult<()> {
+    let current = load_suppression_document(corpus)?.revision;
+    if binding.suppression_policy_revision != current {
+        return Err(CoreError::Message(format!(
+            "stale suppression policy binding: expected revision {}, current {current}",
+            binding.suppression_policy_revision
+        )));
+    }
+    Ok(())
+}
+
+fn resolve_policy_binding(
+    binding: Option<InvestigationPolicyBinding>,
+    current_suppression_policy_revision: u64,
+    current_noise_lens: Option<InvestigationNoiseLens>,
+) -> InvestigationPolicyBindingResolution {
+    let status = match binding {
+        None => InvestigationPolicyBindingStatus::UnboundLegacy,
+        Some(binding)
+            if binding.suppression_policy_revision != current_suppression_policy_revision =>
+        {
+            InvestigationPolicyBindingStatus::MadeUnderDifferentPolicy
+        }
+        Some(binding) => match current_noise_lens {
+            Some(current) if current == binding.noise_lens => {
+                InvestigationPolicyBindingStatus::Current
+            }
+            Some(_) => InvestigationPolicyBindingStatus::MadeUnderDifferentLens,
+            None => InvestigationPolicyBindingStatus::CurrentLensUnknown,
+        },
+    };
+    InvestigationPolicyBindingResolution {
+        binding,
+        current_suppression_policy_revision,
+        current_noise_lens,
+        status,
+    }
+}
+
 fn resolve_document(
     document: InvestigationDocument,
     corpus: &LogCorpus,
+) -> CoreResult<ResolvedInvestigationDocument> {
+    resolve_document_with_policy_lens(document, corpus, None)
+}
+
+fn resolve_document_with_policy_lens(
+    document: InvestigationDocument,
+    corpus: &LogCorpus,
+    current_noise_lens: Option<InvestigationNoiseLens>,
 ) -> CoreResult<ResolvedInvestigationDocument> {
     ensure_corpus_link(&document, corpus.id())?;
     if document
@@ -2301,7 +2555,25 @@ fn resolve_document(
             item,
         })
         .collect();
-    Ok(ResolvedInvestigationDocument { document, evidence })
+    let current_suppression_policy_revision = load_suppression_document(corpus)?.revision;
+    let findings = document
+        .findings
+        .iter()
+        .cloned()
+        .map(|item| ResolvedFindingItem {
+            policy_binding: resolve_policy_binding(
+                item.policy_binding,
+                current_suppression_policy_revision,
+                current_noise_lens,
+            ),
+            item,
+        })
+        .collect();
+    Ok(ResolvedInvestigationDocument {
+        document,
+        evidence,
+        findings,
+    })
 }
 
 fn resolve_evidence_references(
@@ -2572,7 +2844,10 @@ fn stale_revision_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::log_analysis::{ActiveTimestampBasis, LogEvent, TimeQuality, TimestampProvenance};
+    use crate::log_analysis::{
+        preview_template_suppression, ActiveTimestampBasis, LogEvent, NewSuppressionPreview,
+        SuppressionRuleOrigin, TemplateInfo, TemplateRow, TimeQuality, TimestampProvenance,
+    };
 
     const PAYLOAD_SENTINEL: &str = "INVESTIGATION_PAYLOAD_SENTINEL_MUST_NOT_PERSIST";
 
@@ -2719,8 +2994,40 @@ mod tests {
         }
     }
 
+    fn publish_policy_preview(corpus: &LogCorpus) -> u64 {
+        corpus
+            .upsert_templates([TemplateRow {
+                info: TemplateInfo {
+                    template_id: 1,
+                    pattern: "failure boundary <*>".into(),
+                    token_count: 3,
+                    count: 1,
+                    first_seen: 1_700_000_010,
+                    last_seen: 1_700_000_010,
+                    severity: 4,
+                    example: "failure boundary example".into(),
+                },
+                content_hash: "sha256:investigation-template-one".into(),
+                vector: None,
+            }])
+            .unwrap();
+        let current = load_suppression_document(corpus).unwrap();
+        preview_template_suppression(
+            corpus,
+            current.revision,
+            NewSuppressionPreview {
+                name: "Reviewed failure boundary".into(),
+                rationale: "Policy revision fixture for finding-binding tests".into(),
+                template_id: 1,
+                origin: SuppressionRuleOrigin::Human,
+            },
+        )
+        .unwrap()
+        .rule_revision
+    }
+
     #[test]
-    fn investigation_v1_loads_without_rewrite_and_first_mutation_upgrades_to_v3() {
+    fn investigation_v1_loads_without_rewrite_and_first_mutation_upgrades_to_v4() {
         let cache = tempfile::tempdir().unwrap();
         let durable = tempfile::tempdir().unwrap();
         let corpus = evidence_corpus(&cache);
@@ -2748,13 +3055,13 @@ mod tests {
         let upgraded = store
             .add_human_finding(&document.id, 1, &corpus, finding_input(&corpus))
             .unwrap();
-        assert_eq!(upgraded.document.schema_version, 3);
+        assert_eq!(upgraded.document.schema_version, 4);
         assert_eq!(upgraded.document.revision, 2);
         assert!(revision_path.exists());
     }
 
     #[test]
-    fn investigation_v2_loads_without_rewrite_and_first_recipe_mutation_upgrades_to_v3() {
+    fn investigation_v2_loads_without_rewrite_and_first_recipe_mutation_upgrades_to_v4() {
         let cache = tempfile::tempdir().unwrap();
         let durable = tempfile::tempdir().unwrap();
         let corpus = evidence_corpus(&cache);
@@ -2785,11 +3092,301 @@ mod tests {
         let upgraded = store
             .add_human_finding(&document.id, 2, &corpus, input)
             .unwrap();
-        assert_eq!(upgraded.document.schema_version, 3);
+        assert_eq!(upgraded.document.schema_version, 4);
         assert_eq!(upgraded.document.revision, 3);
         assert_eq!(upgraded.document.findings.len(), 2);
         assert!(upgraded.document.findings[1].view_recipe.is_some());
         assert_eq!(std::fs::read(&revision_path).unwrap(), legacy_bytes);
+    }
+
+    #[test]
+    fn investigation_policy_binding_and_saved_view_survive_restart_without_payloads() {
+        let cache = tempfile::tempdir().unwrap();
+        let durable = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&cache);
+        let corpus_id = corpus.id().to_string();
+        let store = InvestigationStore::new(durable.path());
+        let document = store.create("Policy-bound restart", &corpus).unwrap();
+        let binding =
+            InvestigationPolicyBinding::capture(&corpus, InvestigationNoiseLens::Active).unwrap();
+        let mut input = finding_input(&corpus);
+        input.view_recipe = Some(finding_view_recipe(&corpus));
+
+        let saved = store
+            .add_human_finding_bound(&document.id, 1, &corpus, binding, input)
+            .unwrap();
+        assert_eq!(saved.document.schema_version, 4);
+        assert_eq!(saved.document.findings[0].policy_binding, Some(binding));
+        assert_eq!(
+            saved.findings[0].policy_binding.status,
+            InvestigationPolicyBindingStatus::Current
+        );
+
+        drop(corpus);
+        drop(store);
+        let reopened_corpus = LogCorpus::open(cache.path(), &corpus_id).unwrap();
+        let reopened_store = InvestigationStore::new(durable.path());
+        let reopened = reopened_store
+            .load_with_policy_lens(
+                &document.id,
+                &reopened_corpus,
+                InvestigationNoiseLens::Active,
+            )
+            .unwrap();
+        assert_eq!(reopened.document.findings[0].policy_binding, Some(binding));
+        assert_eq!(
+            reopened.findings[0].policy_binding.status,
+            InvestigationPolicyBindingStatus::Current
+        );
+        let without_lens = reopened_store.load(&document.id, &reopened_corpus).unwrap();
+        assert_eq!(
+            without_lens.findings[0].policy_binding.status,
+            InvestigationPolicyBindingStatus::CurrentLensUnknown
+        );
+        let finding_id = reopened.document.findings[0].id.clone();
+        let view = reopened_store
+            .resolve_finding_view_recipe_with_policy_lens(
+                &document.id,
+                &finding_id,
+                &reopened_corpus,
+                InvestigationNoiseLens::Active,
+            )
+            .unwrap();
+        assert_eq!(
+            view.policy_binding.status,
+            InvestigationPolicyBindingStatus::Current
+        );
+        assert_eq!(view.policy_binding.binding, Some(binding));
+
+        let durable_json = serde_json::to_string(&reopened.document).unwrap();
+        assert!(durable_json.contains("\"policyBinding\""));
+        assert!(durable_json.contains("\"suppressionPolicyRevision\":0"));
+        assert!(!durable_json.contains(PAYLOAD_SENTINEL));
+        assert!(!durable_json.contains("\"message\""));
+        assert!(!durable_json.contains("\"params\""));
+    }
+
+    #[test]
+    fn investigation_policy_change_marks_finding_and_saved_view_different_policy() {
+        let cache = tempfile::tempdir().unwrap();
+        let durable = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&cache);
+        let store = InvestigationStore::new(durable.path());
+        let document = store.create("Changed policy", &corpus).unwrap();
+        let binding =
+            InvestigationPolicyBinding::capture(&corpus, InvestigationNoiseLens::Active).unwrap();
+        let mut input = finding_input(&corpus);
+        input.view_recipe = Some(finding_view_recipe(&corpus));
+        let same_finding_under_new_policy = input.clone();
+        let saved = store
+            .add_human_finding_bound(&document.id, 1, &corpus, binding, input)
+            .unwrap();
+        let finding_id = saved.document.findings[0].id.clone();
+
+        let changed_revision = publish_policy_preview(&corpus);
+        assert_ne!(changed_revision, binding.suppression_policy_revision);
+        let reopened = store
+            .load_with_policy_lens(&document.id, &corpus, InvestigationNoiseLens::Active)
+            .unwrap();
+        assert_eq!(
+            reopened.findings[0].policy_binding.status,
+            InvestigationPolicyBindingStatus::MadeUnderDifferentPolicy
+        );
+        assert_eq!(
+            reopened.findings[0]
+                .policy_binding
+                .current_suppression_policy_revision,
+            changed_revision
+        );
+        let view = store
+            .resolve_finding_view_recipe_with_policy_lens(
+                &document.id,
+                &finding_id,
+                &corpus,
+                InvestigationNoiseLens::Active,
+            )
+            .unwrap();
+        assert_eq!(
+            view.policy_binding.status,
+            InvestigationPolicyBindingStatus::MadeUnderDifferentPolicy
+        );
+        assert_eq!(
+            serde_json::to_value(&view).unwrap()["policyBinding"]["status"],
+            "made_under_different_policy"
+        );
+        assert_eq!(
+            Some(&view.view_recipe),
+            saved.document.findings[0].view_recipe.as_ref()
+        );
+        assert_eq!(reopened.document.revision, saved.document.revision);
+
+        let current_binding =
+            InvestigationPolicyBinding::capture(&corpus, InvestigationNoiseLens::Active).unwrap();
+        let recomputed = store
+            .add_human_finding_bound(
+                &document.id,
+                saved.document.revision,
+                &corpus,
+                current_binding,
+                same_finding_under_new_policy,
+            )
+            .unwrap();
+        assert_eq!(recomputed.document.findings.len(), 2);
+        assert_eq!(
+            recomputed.document.findings[0].policy_binding,
+            Some(binding)
+        );
+        assert_eq!(
+            recomputed.document.findings[1].policy_binding,
+            Some(current_binding)
+        );
+    }
+
+    #[test]
+    fn investigation_policy_binding_distinguishes_suspended_and_active_lenses() {
+        let cache = tempfile::tempdir().unwrap();
+        let durable = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&cache);
+        let store = InvestigationStore::new(durable.path());
+        let document = store.create("Suspended lens", &corpus).unwrap();
+        let binding =
+            InvestigationPolicyBinding::capture(&corpus, InvestigationNoiseLens::Suspended)
+                .unwrap();
+        let saved = store
+            .add_human_finding_bound(&document.id, 1, &corpus, binding, finding_input(&corpus))
+            .unwrap();
+        assert_eq!(
+            saved.findings[0].policy_binding.status,
+            InvestigationPolicyBindingStatus::Current
+        );
+
+        let active = store
+            .load_with_policy_lens(&document.id, &corpus, InvestigationNoiseLens::Active)
+            .unwrap();
+        assert_eq!(
+            active.findings[0].policy_binding.status,
+            InvestigationPolicyBindingStatus::MadeUnderDifferentLens
+        );
+        let suspended = store
+            .load_with_policy_lens(&document.id, &corpus, InvestigationNoiseLens::Suspended)
+            .unwrap();
+        assert_eq!(
+            suspended.findings[0].policy_binding.status,
+            InvestigationPolicyBindingStatus::Current
+        );
+        assert_eq!(
+            suspended.findings[0]
+                .policy_binding
+                .binding
+                .unwrap()
+                .noise_lens,
+            InvestigationNoiseLens::Suspended
+        );
+    }
+
+    #[test]
+    fn investigation_legacy_findings_stay_unbound_when_new_bound_finding_upgrades_schema() {
+        let cache = tempfile::tempdir().unwrap();
+        let durable = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&cache);
+        let store = InvestigationStore::new(durable.path());
+        let document = store.create("Legacy policy binding", &corpus).unwrap();
+        let legacy_finding = store
+            .add_human_finding(&document.id, 1, &corpus, finding_input(&corpus))
+            .unwrap();
+        let revision_path = durable.path().join(&document.id).join(revision_filename(2));
+        let mut legacy = serde_json::to_value(&legacy_finding.document).unwrap();
+        legacy["schemaVersion"] = serde_json::json!(3);
+        legacy["findings"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("policyBinding");
+        let legacy_bytes = serde_json::to_vec_pretty(&legacy).unwrap();
+        std::fs::write(&revision_path, &legacy_bytes).unwrap();
+
+        let binding =
+            InvestigationPolicyBinding::capture(&corpus, InvestigationNoiseLens::Active).unwrap();
+        let mut invalid_schema_three = legacy_finding.document.clone();
+        invalid_schema_three.schema_version = 3;
+        invalid_schema_three.findings[0].policy_binding = Some(binding);
+        assert!(validate_document(&invalid_schema_three, None, None)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot contain finding policy bindings"));
+
+        let loaded = store
+            .load_with_policy_lens(&document.id, &corpus, InvestigationNoiseLens::Active)
+            .unwrap();
+        assert_eq!(loaded.document.schema_version, 3);
+        assert_eq!(
+            loaded.findings[0].policy_binding.status,
+            InvestigationPolicyBindingStatus::UnboundLegacy
+        );
+        assert_eq!(std::fs::read(&revision_path).unwrap(), legacy_bytes);
+
+        let mut distinct = finding_input(&corpus);
+        distinct.title = "Bound follow-up".into();
+        let upgraded = store
+            .add_human_finding_bound(&document.id, 2, &corpus, binding, distinct)
+            .unwrap();
+        assert_eq!(upgraded.document.schema_version, 4);
+        assert_eq!(upgraded.document.findings.len(), 2);
+        assert_eq!(upgraded.document.findings[0].policy_binding, None);
+        assert_eq!(upgraded.document.findings[1].policy_binding, Some(binding));
+        assert_eq!(
+            upgraded.findings[0].policy_binding.status,
+            InvestigationPolicyBindingStatus::UnboundLegacy
+        );
+        assert_eq!(
+            upgraded.findings[1].policy_binding.status,
+            InvestigationPolicyBindingStatus::Current
+        );
+    }
+
+    #[test]
+    fn investigation_stale_policy_response_fails_closed_without_publishing() {
+        let cache = tempfile::tempdir().unwrap();
+        let durable = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&cache);
+        let first = InvestigationStore::new(durable.path());
+        let second = InvestigationStore::new(durable.path());
+        let document = first.create("Concurrent policy response", &corpus).unwrap();
+        let stale_binding =
+            InvestigationPolicyBinding::capture(&corpus, InvestigationNoiseLens::Active).unwrap();
+        let current_revision = publish_policy_preview(&corpus);
+        let current_binding =
+            InvestigationPolicyBinding::capture(&corpus, InvestigationNoiseLens::Active).unwrap();
+        assert_eq!(
+            current_binding.suppression_policy_revision,
+            current_revision
+        );
+
+        let winner = first
+            .add_human_finding_bound(
+                &document.id,
+                1,
+                &corpus,
+                current_binding,
+                finding_input(&corpus),
+            )
+            .unwrap();
+        let mut late = finding_input(&corpus);
+        late.title = "Late stale response".into();
+        let error = second
+            .add_human_finding_bound(&document.id, 1, &corpus, stale_binding, late)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("stale suppression policy binding"));
+
+        let reopened = second
+            .load_with_policy_lens(&document.id, &corpus, InvestigationNoiseLens::Active)
+            .unwrap();
+        assert_eq!(reopened.document.revision, winner.document.revision);
+        assert_eq!(reopened.document.findings.len(), 1);
+        assert_eq!(
+            reopened.document.findings[0].policy_binding,
+            Some(current_binding)
+        );
     }
 
     #[test]
