@@ -11,8 +11,11 @@ export const LOG_DIAGNOSTIC_REPORT_MAX_BYTES = 64 * 1024;
 const MAX_EXAMPLES = 12;
 const MAX_FAILED_INGEST_TRANSCRIPT = 20;
 const MAX_COUNT_ENTRIES = 32;
+const MAX_SUPPRESSION_RULES = 32;
+const MAX_SUPPRESSION_AUDIT_ENTRIES = 64;
 const MAX_LABEL_CHARS = 160;
 const MAX_STATUS_CHARS = 800;
+const MAX_RATIONALE_CHARS = 400;
 
 export type LogDiagnosticStatus = {
   kind: "error" | "status";
@@ -70,6 +73,44 @@ export type LogDiagnosticActiveViewInput = {
 };
 
 export type LogDiagnosticActiveView = LogDiagnosticActiveViewInput;
+
+export type LogDiagnosticSuppressionPolicyInput = {
+  policyRevision: number;
+  resolvedTemplateRevision: number;
+  enabledRuleCount: number;
+  appliedRuleCount: number;
+  staleRuleCount: number;
+  rules: {
+    ruleId: string;
+    name: string;
+    rationale: string;
+    state: "enabled" | "disabled" | "removed";
+    resolutionKind:
+      | "matches_current"
+      | "stale_target_missing"
+      | "stale_fingerprint_changed"
+      | "invalid_predicate"
+      | "conflicting_predicate"
+      | "inactive";
+    matchingEventCount: number;
+  }[];
+  audit: {
+    action: "previewed" | "activated" | "disabled" | "reenabled" | "removed";
+    revision: number;
+    ruleId: string | null;
+    createdAt: number;
+  }[];
+  omittedRuleEntries?: number;
+  omittedAuditEntries?: number;
+};
+
+export type LogDiagnosticSuppressionPolicy = Omit<
+  LogDiagnosticSuppressionPolicyInput,
+  "omittedRuleEntries" | "omittedAuditEntries"
+> & {
+  omittedRuleEntries: number;
+  omittedAuditEntries: number;
+};
 
 export type LogDiagnosticManifest = {
   schemaVersion: 1;
@@ -142,6 +183,7 @@ export type LogDiagnosticManifest = {
     };
     retention: "memory_only_until_clear_next_ingest_or_restart";
   } | null;
+  suppressionPolicy?: LogDiagnosticSuppressionPolicy | null;
   activeView: LogDiagnosticActiveView | null;
   currentStatus: LogDiagnosticStatus | null;
   userNote: string | null;
@@ -160,12 +202,11 @@ const EXCLUDED_CONTENT = [
   "provider and model inventories",
   "credentials and secrets",
   "evaluator truth",
+  "suppression representatives and preview tokens",
 ];
 
-const ABSOLUTE_UNIX_PATH_RE =
-  /(^|[\s("'`=:])\/(?!\/)[^\s)"'`,;]+/g;
-const ABSOLUTE_WINDOWS_PATH_RE =
-  /(?:[A-Za-z]:\\|\\\\)[^\s)"'`,;]+/g;
+const ABSOLUTE_UNIX_PATH_RE = /(^|[\s("'`=:])\/(?!\/)[^\s)"'`,;]+/g;
+const ABSOLUTE_WINDOWS_PATH_RE = /(?:[A-Za-z]:\\|\\\\)[^\s)"'`,;]+/g;
 
 function capText(value: string, maxChars: number): string {
   return Array.from(value).slice(0, maxChars).join("");
@@ -261,6 +302,45 @@ function boundedSeqs(values: number[]): number[] {
     .slice(0, 32);
 }
 
+function buildSuppressionPolicy(
+  policy: LogDiagnosticSuppressionPolicyInput | null | undefined,
+): LogDiagnosticSuppressionPolicy | null {
+  if (!policy) return null;
+  return {
+    policyRevision: safeCount(policy.policyRevision),
+    resolvedTemplateRevision: safeCount(policy.resolvedTemplateRevision),
+    enabledRuleCount: safeCount(policy.enabledRuleCount),
+    appliedRuleCount: safeCount(policy.appliedRuleCount),
+    staleRuleCount: safeCount(policy.staleRuleCount),
+    rules: policy.rules.slice(0, MAX_SUPPRESSION_RULES).map((rule) => ({
+      ruleId: sanitizeIdentifier(rule.ruleId),
+      name: sanitizeText(rule.name, MAX_LABEL_CHARS) || "Unnamed rule",
+      rationale:
+        sanitizeText(rule.rationale, MAX_RATIONALE_CHARS) ||
+        "No rationale recorded",
+      state: rule.state,
+      resolutionKind: rule.resolutionKind,
+      matchingEventCount: safeCount(rule.matchingEventCount),
+    })),
+    audit: policy.audit.slice(-MAX_SUPPRESSION_AUDIT_ENTRIES).map((entry) => ({
+      action: entry.action,
+      revision: safeCount(entry.revision),
+      ruleId: entry.ruleId ? sanitizeIdentifier(entry.ruleId) : null,
+      createdAt: safeCount(entry.createdAt),
+    })),
+    omittedRuleEntries: Math.min(
+      Number.MAX_SAFE_INTEGER,
+      safeCount(policy.omittedRuleEntries) +
+        Math.max(0, policy.rules.length - MAX_SUPPRESSION_RULES),
+    ),
+    omittedAuditEntries: Math.min(
+      Number.MAX_SAFE_INTEGER,
+      safeCount(policy.omittedAuditEntries) +
+        Math.max(0, policy.audit.length - MAX_SUPPRESSION_AUDIT_ENTRIES),
+    ),
+  };
+}
+
 function buildActiveView(
   view: LogDiagnosticActiveViewInput | null | undefined,
 ): LogDiagnosticActiveView | null {
@@ -354,8 +434,7 @@ function buildFailedIngest(
             entry.basename.replace(/\\/g, "/").split("/").at(-1) ?? "";
           return {
             reason: sanitizeReason(entry.reason),
-            basename:
-              sanitizeText(basename, 96) || "[REDACTED_BASENAME]",
+            basename: sanitizeText(basename, 96) || "[REDACTED_BASENAME]",
           };
         }),
       omittedEntries: Math.min(
@@ -363,8 +442,7 @@ function buildFailedIngest(
         safeCount(failure.evidence.omittedEntries) +
           Math.max(
             0,
-            failure.evidence.transcript.length -
-              MAX_FAILED_INGEST_TRANSCRIPT,
+            failure.evidence.transcript.length - MAX_FAILED_INGEST_TRANSCRIPT,
           ),
       ),
     },
@@ -388,6 +466,7 @@ export function renderLogDiagnosticMarkdown(
 ): string {
   const stats = manifest.corpus?.stats ?? null;
   const failure = manifest.failedIngest;
+  const suppressionPolicy = manifest.suppressionPolicy;
   const activeView = manifest.activeView;
   return [
     manifest.corpus
@@ -479,6 +558,41 @@ export function renderLogDiagnosticMarkdown(
           "",
         ]
       : []),
+    ...(suppressionPolicy
+      ? [
+          "## Suppression policy (payload-free)",
+          `- Policy revision: ${suppressionPolicy.policyRevision}`,
+          `- Resolved template revision: ${suppressionPolicy.resolvedTemplateRevision}`,
+          `- Rules: ${suppressionPolicy.enabledRuleCount} enabled / ${suppressionPolicy.appliedRuleCount} applied / ${suppressionPolicy.staleRuleCount} stale`,
+          "",
+          "### Bounded rule metadata",
+          ...(suppressionPolicy.rules.length
+            ? suppressionPolicy.rules.map(
+                (rule) =>
+                  `- ${rule.name} (${rule.ruleId}): ${rule.state} / ${rule.resolutionKind} / ${rule.matchingEventCount} matching event(s) — ${rule.rationale}`,
+              )
+            : ["- none recorded"]),
+          ...(suppressionPolicy.omittedRuleEntries > 0
+            ? [
+                `- ${suppressionPolicy.omittedRuleEntries} additional rule entry/entries omitted by the diagnostic bound`,
+              ]
+            : []),
+          "",
+          "### Bounded payload-free audit",
+          ...(suppressionPolicy.audit.length
+            ? suppressionPolicy.audit.map(
+                (entry) =>
+                  `- Revision ${entry.revision}: ${entry.action}; rule ${nullable(entry.ruleId)}; Unix seconds ${entry.createdAt}`,
+              )
+            : ["- none recorded"]),
+          ...(suppressionPolicy.omittedAuditEntries > 0
+            ? [
+                `- ${suppressionPolicy.omittedAuditEntries} older audit entry/entries omitted by the diagnostic bound`,
+              ]
+            : []),
+          "",
+        ]
+      : []),
     ...(activeView
       ? [
           "## Active Explorer view (payload-free)",
@@ -525,9 +639,7 @@ export function diagnosticEnvironmentFromBranding(
   return {
     appVersion: sanitizeIdentifier(branding.version, 64),
     channel: sanitizeIdentifier(branding.channel, 32),
-    gitSha: branding.git_sha
-      ? sanitizeIdentifier(branding.git_sha, 64)
-      : null,
+    gitSha: branding.git_sha ? sanitizeIdentifier(branding.git_sha, 64) : null,
     os: portableDiagnosticOsHint(),
   };
 }
@@ -544,6 +656,7 @@ export function portableDiagnosticOsHint(): string {
 export function buildLogDiagnosticReport(args: {
   corpus?: LogCorpusSummaryDto | null;
   failedIngest?: FailedLogIngestDiagnosticDto | null;
+  suppressionPolicy?: LogDiagnosticSuppressionPolicyInput | null;
   activeView?: LogDiagnosticActiveViewInput | null;
   environment: LogDiagnosticEnvironment;
   currentStatus?: LogDiagnosticStatus | null;
@@ -589,21 +702,21 @@ export function buildLogDiagnosticReport(args: {
     },
     corpus,
     failedIngest: buildFailedIngest(args.failedIngest),
+    suppressionPolicy: args.corpus
+      ? buildSuppressionPolicy(args.suppressionPolicy)
+      : null,
     activeView: buildActiveView(args.activeView),
     currentStatus:
       !args.activeView && !args.failedIngest && args.currentStatus
-      ? {
-          kind: args.currentStatus.kind,
-          message:
-            sanitizeText(args.currentStatus.message, MAX_STATUS_CHARS) ||
-            "No detail",
-        }
-      : null,
+        ? {
+            kind: args.currentStatus.kind,
+            message:
+              sanitizeText(args.currentStatus.message, MAX_STATUS_CHARS) ||
+              "No detail",
+          }
+        : null,
     userNote:
-      sanitizeText(
-        args.userNote ?? "",
-        LOG_DIAGNOSTIC_NOTE_MAX_CHARS,
-      ) || null,
+      sanitizeText(args.userNote ?? "", LOG_DIAGNOSTIC_NOTE_MAX_CHARS) || null,
   };
   const markdown = renderLogDiagnosticMarkdown(manifest);
   const json = JSON.stringify(manifest, null, 2);

@@ -5,6 +5,7 @@ import {
   LOG_DIAGNOSTIC_NOTE_MAX_CHARS,
   type LogDiagnosticActiveViewInput,
   type LogDiagnosticEnvironment,
+  type LogDiagnosticSuppressionPolicyInput,
   type LogDiagnosticStatus,
 } from "../../lib/logDiagnosticReport";
 import {
@@ -30,6 +31,7 @@ async function releasePreparedReport(reportId: string) {
 export function LogDiagnosticDialog({
   corpus,
   failedIngest = null,
+  suppressionPolicy = null,
   activeView = null,
   environment,
   currentStatus,
@@ -37,18 +39,19 @@ export function LogDiagnosticDialog({
 }: {
   corpus: LogCorpusSummaryDto | null;
   failedIngest?: FailedLogIngestDiagnosticDto | null;
+  suppressionPolicy?: LogDiagnosticSuppressionPolicyInput | null;
   activeView?: LogDiagnosticActiveViewInput | null;
   environment: LogDiagnosticEnvironment;
   currentStatus: LogDiagnosticStatus | null;
   onDismiss: () => void;
 }) {
   const [userNote, setUserNote] = useState("");
-  const [previewFormat, setPreviewFormat] =
-    useState<PreviewFormat>("markdown");
+  const [previewFormat, setPreviewFormat] = useState<PreviewFormat>("markdown");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
-  const [prepared, setPrepared] =
-    useState<PreparedLogDiagnosticDto | null>(null);
+  const [prepared, setPrepared] = useState<PreparedLogDiagnosticDto | null>(
+    null,
+  );
   const [prepareError, setPrepareError] = useState<string | null>(null);
   const generatedAtRef = useRef(new Date());
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -66,6 +69,7 @@ export function LogDiagnosticDialog({
       buildLogDiagnosticReport({
         corpus,
         failedIngest,
+        suppressionPolicy,
         activeView,
         environment,
         currentStatus,
@@ -78,6 +82,7 @@ export function LogDiagnosticDialog({
       currentStatus,
       environment,
       failedIngest,
+      suppressionPolicy,
       userNote,
     ],
   );
@@ -130,9 +135,7 @@ export function LogDiagnosticDialog({
             const previous = preparedRef.current;
             preparedRef.current = null;
             if (previous) await releasePreparedReport(previous.reportId);
-            setPrepareError(
-              `Could not prepare diagnostics: ${String(error)}`,
-            );
+            setPrepareError(`Could not prepare diagnostics: ${String(error)}`);
           }
         });
     }, PREPARE_DEBOUNCE_MS);
@@ -149,7 +152,9 @@ export function LogDiagnosticDialog({
     setResult(null);
     const json = previewFormat === "json";
     if (!prepared) {
-      setResult(prepareError ?? "The trusted host is still preparing the preview.");
+      setResult(
+        prepareError ?? "The trusted host is still preparing the preview.",
+      );
       return;
     }
     try {
@@ -169,7 +174,9 @@ export function LogDiagnosticDialog({
   async function save(format: PreviewFormat) {
     const markdown = format === "markdown";
     if (!prepared) {
-      setResult(prepareError ?? "The trusted host is still preparing the preview.");
+      setResult(
+        prepareError ?? "The trusted host is still preparing the preview.",
+      );
       return;
     }
     setBusy(true);
@@ -329,7 +336,8 @@ export function LogDiagnosticDialog({
               ? previewFormat === "markdown"
                 ? prepared.markdown
                 : prepared.json
-              : prepareError ?? "Preparing exact preview in the trusted host…"}
+              : (prepareError ??
+                "Preparing exact preview in the trusted host…")}
           </pre>
 
           {result ? (

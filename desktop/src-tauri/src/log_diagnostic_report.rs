@@ -12,8 +12,11 @@ const MAX_IDENTIFIER_CHARS: usize = 128;
 const MAX_COUNT_ENTRIES: usize = 32;
 const MAX_EXAMPLES: usize = 12;
 const MAX_TRANSCRIPT: usize = 20;
+const MAX_SUPPRESSION_RULES: usize = 32;
+const MAX_SUPPRESSION_AUDIT_ENTRIES: usize = 64;
 const MAX_SEQS: usize = 32;
 const MAX_LANES: usize = 4;
+const MAX_RATIONALE_CHARS: usize = 400;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 static REPORT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -35,6 +38,7 @@ pub struct LogDiagnosticManifest {
     application: DiagnosticApplication,
     corpus: Option<DiagnosticCorpus>,
     failed_ingest: Option<DiagnosticFailedIngest>,
+    suppression_policy: Option<DiagnosticSuppressionPolicy>,
     active_view: Option<DiagnosticActiveView>,
     current_status: Option<DiagnosticStatus>,
     user_note: Option<String>,
@@ -145,6 +149,40 @@ struct DiagnosticScanCounts {
 struct DiagnosticTranscriptEntry {
     reason: String,
     basename: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DiagnosticSuppressionPolicy {
+    policy_revision: u64,
+    resolved_template_revision: u64,
+    enabled_rule_count: u64,
+    applied_rule_count: u64,
+    stale_rule_count: u64,
+    rules: Vec<DiagnosticSuppressionRule>,
+    audit: Vec<DiagnosticSuppressionAuditEntry>,
+    omitted_rule_entries: u64,
+    omitted_audit_entries: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DiagnosticSuppressionRule {
+    rule_id: String,
+    name: String,
+    rationale: String,
+    state: String,
+    resolution_kind: String,
+    matching_event_count: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DiagnosticSuppressionAuditEntry {
+    action: String,
+    revision: u64,
+    rule_id: Option<String>,
+    created_at: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -390,6 +428,12 @@ fn validate_and_sanitize_manifest(manifest: &mut LogDiagnosticManifest) -> Resul
     if let Some(failure) = &mut manifest.failed_ingest {
         validate_failed_ingest(failure)?;
     }
+    if manifest.failed_ingest.is_some() && manifest.suppression_policy.is_some() {
+        return Err("failed-ingest diagnostics cannot include a suppression policy".into());
+    }
+    if let Some(policy) = &mut manifest.suppression_policy {
+        validate_suppression_policy(policy)?;
+    }
     if let Some(active) = &mut manifest.active_view {
         validate_active_view(active)?;
     }
@@ -406,6 +450,123 @@ fn validate_and_sanitize_manifest(manifest: &mut LogDiagnosticManifest) -> Resul
         .take()
         .map(|note| sanitize_text(&note, MAX_TEXT_CHARS))
         .filter(|note| !note.is_empty());
+    Ok(())
+}
+
+fn validate_suppression_policy(policy: &mut DiagnosticSuppressionPolicy) -> Result<(), String> {
+    for (label, count) in [
+        ("suppression policy revision", policy.policy_revision),
+        (
+            "suppression resolved template revision",
+            policy.resolved_template_revision,
+        ),
+        ("suppression enabled rule count", policy.enabled_rule_count),
+        ("suppression applied rule count", policy.applied_rule_count),
+        ("suppression stale rule count", policy.stale_rule_count),
+        (
+            "suppression omitted rule entries",
+            policy.omitted_rule_entries,
+        ),
+        (
+            "suppression omitted audit entries",
+            policy.omitted_audit_entries,
+        ),
+    ] {
+        validate_count(count, label)?;
+    }
+    if policy.applied_rule_count > policy.enabled_rule_count
+        || policy.stale_rule_count > policy.enabled_rule_count
+    {
+        return Err("suppression policy counts are internally inconsistent".into());
+    }
+    if policy.rules.len() > MAX_SUPPRESSION_RULES {
+        return Err("suppression diagnostic rules exceed the entry bound".into());
+    }
+    if policy.audit.len() > MAX_SUPPRESSION_AUDIT_ENTRIES {
+        return Err("suppression diagnostic audit exceeds the entry bound".into());
+    }
+
+    for rule in &mut policy.rules {
+        rule.rule_id = validate_uuid_identifier(&rule.rule_id, "suppression rule id")?;
+        rule.name = sanitize_text(&rule.name, MAX_LABEL_CHARS);
+        if rule.name.is_empty() {
+            rule.name = "Unnamed rule".into();
+        }
+        rule.rationale = sanitize_text(&rule.rationale, MAX_RATIONALE_CHARS);
+        if rule.rationale.is_empty() {
+            rule.rationale = "No rationale recorded".into();
+        }
+        validate_one_of(
+            &rule.state,
+            "suppression rule state",
+            &["enabled", "disabled", "removed"],
+        )?;
+        validate_one_of(
+            &rule.resolution_kind,
+            "suppression rule resolution",
+            &[
+                "matches_current",
+                "stale_target_missing",
+                "stale_fingerprint_changed",
+                "invalid_predicate",
+                "conflicting_predicate",
+                "inactive",
+            ],
+        )?;
+        validate_count(
+            rule.matching_event_count,
+            "suppression rule matching event count",
+        )?;
+        match (rule.state.as_str(), rule.resolution_kind.as_str()) {
+            ("enabled", "matches_current")
+            | (
+                "enabled",
+                "stale_target_missing"
+                | "stale_fingerprint_changed"
+                | "invalid_predicate"
+                | "conflicting_predicate",
+            )
+            | ("disabled" | "removed", "inactive") => {}
+            _ => {
+                return Err("suppression lifecycle and trusted resolution are inconsistent".into())
+            }
+        }
+        if rule.resolution_kind != "matches_current" && rule.matching_event_count != 0 {
+            return Err("non-applying suppression rules must report zero matches".into());
+        }
+    }
+
+    let mut previous_revision = None;
+    for entry in &mut policy.audit {
+        validate_one_of(
+            &entry.action,
+            "suppression audit action",
+            &["previewed", "activated", "disabled", "reenabled", "removed"],
+        )?;
+        validate_count(entry.revision, "suppression audit revision")?;
+        validate_count(entry.created_at, "suppression audit createdAt")?;
+        entry.rule_id = entry
+            .rule_id
+            .as_deref()
+            .map(|value| validate_uuid_identifier(value, "suppression audit rule id"))
+            .transpose()?;
+        if entry.action == "previewed" {
+            if entry.rule_id.is_some() {
+                return Err("preview audit metadata cannot identify a rule".into());
+            }
+        } else if entry.rule_id.is_none() {
+            return Err("suppression lifecycle audit metadata requires a rule id".into());
+        }
+        if entry.revision > policy.policy_revision
+            || previous_revision.is_some_and(|revision| entry.revision <= revision)
+        {
+            return Err("suppression audit revisions are inconsistent".into());
+        }
+        previous_revision = Some(entry.revision);
+    }
+    if previous_revision.is_some_and(|revision| revision != policy.policy_revision) {
+        return Err("suppression audit does not reach the reported policy revision".into());
+    }
     Ok(())
 }
 
@@ -640,6 +801,10 @@ fn sanitize_basename(value: &str, max_chars: usize) -> String {
 }
 
 fn validate_corpus_id(value: &str) -> Result<String, String> {
+    validate_uuid_identifier(value, "diagnostic corpus id")
+}
+
+fn validate_uuid_identifier(value: &str, field: &str) -> Result<String, String> {
     let bytes = value.as_bytes();
     let uuid_shape = bytes.len() == 36
         && bytes.iter().enumerate().all(|(index, byte)| match index {
@@ -647,9 +812,9 @@ fn validate_corpus_id(value: &str) -> Result<String, String> {
             _ => byte.is_ascii_hexdigit(),
         });
     if !uuid_shape {
-        return Err("diagnostic corpus id must be a UUID".into());
+        return Err(format!("{field} must be a UUID"));
     }
-    validate_identifier(value, "corpus id", 36)
+    validate_identifier(value, field, 36)
 }
 
 fn validate_git_sha(value: &str) -> Result<String, String> {
@@ -935,6 +1100,64 @@ fn render_markdown(manifest: &LogDiagnosticManifest) -> String {
             String::new(),
         ]);
     }
+    if let Some(policy) = &manifest.suppression_policy {
+        lines.extend([
+            "## Suppression policy (payload-free)".into(),
+            format!("- Policy revision: {}", policy.policy_revision),
+            format!(
+                "- Resolved template revision: {}",
+                policy.resolved_template_revision
+            ),
+            format!(
+                "- Rules: {} enabled / {} applied / {} stale",
+                policy.enabled_rule_count, policy.applied_rule_count, policy.stale_rule_count
+            ),
+            String::new(),
+            "### Bounded rule metadata".into(),
+        ]);
+        if policy.rules.is_empty() {
+            lines.push("- none recorded".into());
+        } else {
+            lines.extend(policy.rules.iter().map(|rule| {
+                format!(
+                    "- {} ({}): {} / {} / {} matching event(s) — {}",
+                    markdown_literal(&rule.name),
+                    markdown_literal(&rule.rule_id),
+                    markdown_literal(&rule.state),
+                    markdown_literal(&rule.resolution_kind),
+                    rule.matching_event_count,
+                    markdown_literal(&rule.rationale)
+                )
+            }));
+        }
+        if policy.omitted_rule_entries > 0 {
+            lines.push(format!(
+                "- {} additional rule entry/entries omitted by the diagnostic bound",
+                policy.omitted_rule_entries
+            ));
+        }
+        lines.extend([String::new(), "### Bounded payload-free audit".into()]);
+        if policy.audit.is_empty() {
+            lines.push("- none recorded".into());
+        } else {
+            lines.extend(policy.audit.iter().map(|entry| {
+                format!(
+                    "- Revision {}: {}; rule {}; Unix seconds {}",
+                    entry.revision,
+                    markdown_literal(&entry.action),
+                    markdown_literal(&nullable(entry.rule_id.clone())),
+                    entry.created_at
+                )
+            }));
+        }
+        if policy.omitted_audit_entries > 0 {
+            lines.push(format!(
+                "- {} older audit entry/entries omitted by the diagnostic bound",
+                policy.omitted_audit_entries
+            ));
+        }
+        lines.push(String::new());
+    }
     if let Some(active) = &manifest.active_view {
         lines.extend([
             "## Active Explorer view (payload-free)".into(),
@@ -1132,9 +1355,54 @@ mod tests {
                 "embedding": { "state": "keyword_only" }
             },
             "failedIngest": null,
+            "suppressionPolicy": null,
             "activeView": null,
             "currentStatus": { "kind": "status", "message": "ready" },
             "userNote": "Reproduced safely"
+        })
+    }
+
+    fn safe_suppression_policy_value() -> serde_json::Value {
+        serde_json::json!({
+            "policyRevision": 2,
+            "resolvedTemplateRevision": 9,
+            "enabledRuleCount": 2,
+            "appliedRuleCount": 1,
+            "staleRuleCount": 1,
+            "rules": [
+                {
+                    "ruleId": "019fab76-18ff-7361-8dd8-e4ddc0f1bb6d",
+                    "name": "Applied repetitive family",
+                    "rationale": "Reviewed exact template",
+                    "state": "enabled",
+                    "resolutionKind": "matches_current",
+                    "matchingEventCount": 12452
+                },
+                {
+                    "ruleId": "019fab76-18ff-7361-8dd8-e4ddc0f1bb6e",
+                    "name": "Missing template",
+                    "rationale": "Retained for review",
+                    "state": "enabled",
+                    "resolutionKind": "stale_target_missing",
+                    "matchingEventCount": 0
+                }
+            ],
+            "audit": [
+                {
+                    "action": "previewed",
+                    "revision": 1,
+                    "ruleId": null,
+                    "createdAt": 1753680000
+                },
+                {
+                    "action": "activated",
+                    "revision": 2,
+                    "ruleId": "019fab76-18ff-7361-8dd8-e4ddc0f1bb6d",
+                    "createdAt": 1753680001
+                }
+            ],
+            "omittedRuleEntries": 0,
+            "omittedAuditEntries": 0
         })
     }
 
@@ -1213,6 +1481,113 @@ mod tests {
                 .expect("stored json"),
             prepared.json
         );
+    }
+
+    #[test]
+    fn host_accepts_and_renders_bounded_payload_free_suppression_diagnostics() {
+        let mut value = safe_manifest_value();
+        value["suppressionPolicy"] = safe_suppression_policy_value();
+        value["suppressionPolicy"]["rules"][0]["name"] =
+            serde_json::json!("Rule on server.internal");
+        value["suppressionPolicy"]["rules"][0]["rationale"] =
+            serde_json::json!("Hide /opt/company/logs with Bearer secret-token-value");
+
+        let manifest = serde_json::from_value(value).expect("manifest");
+        let prepared = LogDiagnosticReportStore::default()
+            .prepare(manifest)
+            .expect("prepare");
+
+        for expected in [
+            "## Suppression policy (payload-free)",
+            "Policy revision: 2",
+            "Resolved template revision: 9",
+            "2 enabled / 1 applied / 1 stale",
+            "stale&#95;target&#95;missing",
+            "12452 matching event(s)",
+            "Revision 2: activated",
+        ] {
+            assert!(prepared.markdown.contains(expected), "{expected}");
+        }
+        for forbidden in [
+            "server.internal",
+            "/opt/company",
+            "secret-token-value",
+            "representative",
+            "previewToken",
+            "rawPayload",
+            "sourcePath",
+        ] {
+            assert!(!prepared.markdown.contains(forbidden), "{forbidden}");
+            assert!(!prepared.json.contains(forbidden), "{forbidden}");
+        }
+    }
+
+    #[test]
+    fn suppression_diagnostics_reject_unknown_private_or_preview_fields() {
+        for (pointer, field) in [
+            ("/suppressionPolicy/rules/0", "representatives"),
+            ("/suppressionPolicy/rules/0", "rawPayload"),
+            ("/suppressionPolicy/rules/0", "sourcePath"),
+            ("/suppressionPolicy/audit/0", "previewToken"),
+        ] {
+            let mut value = safe_manifest_value();
+            value["suppressionPolicy"] = safe_suppression_policy_value();
+            value
+                .pointer_mut(pointer)
+                .expect("target object")
+                .as_object_mut()
+                .expect("object")
+                .insert(field.into(), serde_json::json!("private content"));
+            let error = serde_json::from_value::<LogDiagnosticManifest>(value)
+                .expect_err("private field must fail closed");
+            assert!(error.to_string().contains("unknown field"), "{error}");
+        }
+    }
+
+    #[test]
+    fn suppression_diagnostics_reject_unbounded_or_inconsistent_shapes() {
+        let mut unbounded = safe_manifest_value();
+        unbounded["suppressionPolicy"] = safe_suppression_policy_value();
+        let rule = unbounded["suppressionPolicy"]["rules"][0].clone();
+        unbounded["suppressionPolicy"]["rules"] =
+            serde_json::Value::Array(vec![rule; MAX_SUPPRESSION_RULES + 1]);
+        let manifest = serde_json::from_value(unbounded).expect("typed manifest");
+        let error = LogDiagnosticReportStore::default()
+            .prepare(manifest)
+            .expect_err("unbounded rules must fail");
+        assert!(error.contains("rules exceed the entry bound"), "{error}");
+
+        for (pointer, replacement, expected) in [
+            (
+                "/suppressionPolicy/appliedRuleCount",
+                serde_json::json!(3),
+                "counts are internally inconsistent",
+            ),
+            (
+                "/suppressionPolicy/rules/1/matchingEventCount",
+                serde_json::json!(1),
+                "must report zero matches",
+            ),
+            (
+                "/suppressionPolicy/rules/1/state",
+                serde_json::json!("disabled"),
+                "lifecycle and trusted resolution are inconsistent",
+            ),
+            (
+                "/suppressionPolicy/audit/1/revision",
+                serde_json::json!(1),
+                "audit revisions are inconsistent",
+            ),
+        ] {
+            let mut value = safe_manifest_value();
+            value["suppressionPolicy"] = safe_suppression_policy_value();
+            *value.pointer_mut(pointer).expect("field") = replacement;
+            let manifest = serde_json::from_value(value).expect("typed manifest");
+            let error = LogDiagnosticReportStore::default()
+                .prepare(manifest)
+                .expect_err("inconsistent policy must fail");
+            assert!(error.contains(expected), "{pointer}: {error}");
+        }
     }
 
     #[test]

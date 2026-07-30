@@ -4,6 +4,7 @@ import {
   buildLogDiagnosticReport,
   LOG_DIAGNOSTIC_NOTE_MAX_CHARS,
   LOG_DIAGNOSTIC_REPORT_MAX_BYTES,
+  type LogDiagnosticSuppressionPolicyInput,
 } from "./logDiagnosticReport";
 
 function privateCorpus(): LogCorpusSummaryDto {
@@ -138,15 +139,13 @@ describe("buildLogDiagnosticReport", () => {
       LOG_DIAGNOSTIC_NOTE_MAX_CHARS,
     );
     expect(report.manifest.currentStatus?.message.length).toBe(800);
-    expect(
-      report.manifest.corpus?.stats?.basenameExamples,
-    ).toHaveLength(12);
+    expect(report.manifest.corpus?.stats?.basenameExamples).toHaveLength(12);
     expect(
       Object.keys(report.manifest.corpus?.stats?.levelCounts ?? {}),
     ).toHaveLength(32);
-    expect(new TextEncoder().encode(report.markdown).length).toBeLessThanOrEqual(
-      LOG_DIAGNOSTIC_REPORT_MAX_BYTES,
-    );
+    expect(
+      new TextEncoder().encode(report.markdown).length,
+    ).toBeLessThanOrEqual(LOG_DIAGNOSTIC_REPORT_MAX_BYTES);
     expect(new TextEncoder().encode(report.json).length).toBeLessThanOrEqual(
       LOG_DIAGNOSTIC_REPORT_MAX_BYTES,
     );
@@ -234,9 +233,7 @@ describe("buildLogDiagnosticReport", () => {
     expect(report.markdown).toContain("empty: 2");
     expect(report.markdown).toContain("read_failed: 1");
     expect(report.markdown).toContain("binary: core.bin");
-    expect(report.markdown).toContain(
-      "7 additional observation(s) omitted",
-    );
+    expect(report.markdown).toContain("7 additional observation(s) omitted");
     expect(report.manifest.failedIngest?.evidence.transcript).toEqual([
       { reason: "binary", basename: "core.bin" },
       { reason: "read_failed", basename: "[REDACTED_TOKEN]" },
@@ -305,9 +302,9 @@ describe("buildLogDiagnosticReport", () => {
     });
 
     expect(report.manifest.failedIngest?.evidence.transcript).toHaveLength(20);
-    expect(
-      report.manifest.failedIngest?.evidence.transcript[0]?.basename,
-    ).toBe("item-0.bin");
+    expect(report.manifest.failedIngest?.evidence.transcript[0]?.basename).toBe(
+      "item-0.bin",
+    );
     expect(report.manifest.failedIngest?.evidence.omittedEntries).toBe(80);
     expect(report.markdown).not.toContain("/Users/");
     expect(report.json).not.toContain("parent-99");
@@ -394,5 +391,157 @@ describe("buildLogDiagnosticReport", () => {
     expect(new TextEncoder().encode(report.json).length).toBeLessThanOrEqual(
       LOG_DIAGNOSTIC_REPORT_MAX_BYTES,
     );
+  });
+
+  it("exports a bounded payload-free suppression policy without representatives or preview identities", () => {
+    const rules: Array<
+      LogDiagnosticSuppressionPolicyInput["rules"][number] & {
+        representative: string;
+        previewToken: string;
+        sourcePath: string;
+      }
+    > = Array.from({ length: 40 }, (_, index) => ({
+      ruleId: `019fab76-18ff-7361-8dd8-${(index + 1)
+        .toString(16)
+        .padStart(12, "0")}`,
+      name:
+        index === 0
+          ? "Noisy rule for private.internal"
+          : `Bounded rule ${index}`,
+      rationale:
+        index === 0
+          ? "Hide /Users/chris/private.log with Bearer top-secret-token"
+          : `Confirmed repetitive family ${index}`,
+      state: index === 1 ? ("enabled" as const) : ("disabled" as const),
+      resolutionKind:
+        index === 1 ? ("stale_target_missing" as const) : ("inactive" as const),
+      matchingEventCount: 0,
+      representative: "RAW_PRIVATE_EVENT",
+      previewToken: "fixture-preview-token",
+      sourcePath: "/Users/chris/private.log",
+    }));
+    rules[0] = {
+      ...rules[0],
+      state: "enabled",
+      resolutionKind: "matches_current",
+      matchingEventCount: 12_452,
+    };
+    const audit = Array.from({ length: 70 }, (_, index) => ({
+      action: index % 2 === 0 ? ("previewed" as const) : ("activated" as const),
+      revision: index + 1,
+      ruleId: index % 2 === 0 ? null : "019fab76-18ff-7361-8dd8-000000000001",
+      createdAt: 1_753_680_000 + index,
+      previewToken: `private-preview-${index}`,
+      rawPayload: `private-payload-${index}`,
+    }));
+
+    const report = buildLogDiagnosticReport({
+      corpus: privateCorpus(),
+      environment: {
+        appVersion: "0.1.0",
+        channel: "dev",
+        gitSha: null,
+        os: "macOS",
+      },
+      suppressionPolicy: {
+        policyRevision: 70,
+        resolvedTemplateRevision: 9,
+        enabledRuleCount: 2,
+        appliedRuleCount: 1,
+        staleRuleCount: 1,
+        rules,
+        audit,
+      },
+    });
+
+    expect(report.manifest.suppressionPolicy?.rules).toHaveLength(32);
+    expect(report.manifest.suppressionPolicy?.audit).toHaveLength(64);
+    expect(report.manifest.suppressionPolicy?.omittedRuleEntries).toBe(8);
+    expect(report.manifest.suppressionPolicy?.omittedAuditEntries).toBe(6);
+    expect(report.manifest.suppressionPolicy?.audit[0]?.revision).toBe(7);
+    expect(report.markdown).toContain("Rules: 2 enabled / 1 applied / 1 stale");
+    expect(report.markdown).toContain("stale_target_missing");
+    expect(report.markdown).toContain(
+      "8 additional rule entry/entries omitted",
+    );
+    expect(report.markdown).toContain("6 older audit entry/entries omitted");
+
+    const exported = `${report.markdown}\n${report.json}`;
+    for (const forbidden of [
+      "private.internal",
+      "/Users/chris",
+      "top-secret-token",
+      "RAW_PRIVATE_EVENT",
+      "private-preview",
+      "private-payload",
+      '"representative":',
+      "previewToken",
+      "rawPayload",
+      "sourcePath",
+    ]) {
+      expect(exported).not.toContain(forbidden);
+    }
+  });
+
+  it("keeps suppression diagnostics absent for legacy and failed-ingest reports", () => {
+    const legacy = buildLogDiagnosticReport({
+      corpus: privateCorpus(),
+      environment: {
+        appVersion: "0.1.0",
+        channel: "dev",
+        gitSha: null,
+        os: "Linux",
+      },
+    });
+    expect(legacy.manifest.suppressionPolicy).toBeNull();
+    expect(legacy.markdown).not.toContain("Suppression policy");
+
+    const failed = buildLogDiagnosticReport({
+      failedIngest: {
+        schemaVersion: 2,
+        generatedAt: 1,
+        sourceKind: "directory",
+        reasonCode: "cancelled",
+        summary: "Cancelled before publication.",
+        cancelled: true,
+        progress: {
+          lastPhase: "parse",
+          linesProcessed: 1,
+          filesProcessed: 1,
+          bytesProcessed: 1,
+          templates: 0,
+          updatesSeen: 1,
+        },
+        evidence: {
+          scanCounts: {
+            binary: 0,
+            empty: 0,
+            hidden: 0,
+            oversized: 0,
+            readFailed: 0,
+            parseFailed: 0,
+          },
+          transcript: [],
+          omittedEntries: 0,
+        },
+        redacted: true,
+      },
+      suppressionPolicy: {
+        policyRevision: 1,
+        resolvedTemplateRevision: 1,
+        enabledRuleCount: 0,
+        appliedRuleCount: 0,
+        staleRuleCount: 0,
+        rules: [],
+        audit: [],
+      },
+      environment: {
+        appVersion: "0.1.0",
+        channel: "dev",
+        gitSha: null,
+        os: "Linux",
+      },
+    });
+    expect(failed.manifest.suppressionPolicy).toBeNull();
   });
 });
