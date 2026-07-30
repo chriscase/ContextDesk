@@ -10,6 +10,7 @@ use super::query::{classify_ts, TimeQuality};
 use chrono::{LocalResult, NaiveDateTime, Offset, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::str::FromStr;
 use thiserror::Error;
 
@@ -21,6 +22,22 @@ pub const MAX_TIMEZONE_SOURCE_BYTES: usize = 4_096;
 
 /// Maximum UTF-8 bytes in an IANA timezone identifier.
 pub const MAX_IANA_TIMEZONE_BYTES: usize = 128;
+
+/// Earliest exact instant accepted by the current whole-second event store.
+pub const MIN_RESOLVED_WALL_SECONDS: i64 = 0;
+
+/// Latest exact instant accepted by the current whole-second event store.
+pub const MAX_RESOLVED_WALL_SECONDS: i64 = 4_102_444_800;
+
+/// Durable corpus snapshot against which one preview was calculated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TimezoneResolutionScope {
+    /// Exact corpus identity.
+    pub corpus_id: String,
+    /// Durable event revision observed before preview.
+    pub event_revision: u64,
+}
 
 /// How a timezone declaration became authoritative for this resolution.
 ///
@@ -84,6 +101,8 @@ pub enum UnresolvedTimestampReason {
     AmbiguousDstFold,
     /// The local time does not exist when clocks move forward or rules skip it.
     NonexistentDstGap,
+    /// The resolved instant falls outside the event store's documented range.
+    ResolvedInstantOutOfRange,
 }
 
 /// Pure event-level resolution decision.
@@ -113,6 +132,12 @@ pub enum TimestampResolution {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimezoneResolutionPreview {
+    /// Exact corpus identity against which this preview was calculated.
+    pub corpus_id: String,
+    /// Durable event revision against which this preview was calculated.
+    pub event_revision: u64,
+    /// Stable declaration/snapshot binding that apply must recompute.
+    pub declaration_fingerprint: String,
     /// Portable source identity being previewed.
     pub source: String,
     /// Validated IANA zone supplied by the user.
@@ -133,11 +158,20 @@ pub struct TimezoneResolutionPreview {
     pub dst_fold_count: u64,
     /// Recognized timestamp prefixes lacking enough precision for resolution.
     pub unsupported_timestamp_count: u64,
+    /// Resolved instants rejected by the documented event-store range.
+    pub out_of_range_count: u64,
 }
 
 impl TimezoneResolutionPreview {
-    fn new(declaration: &SourceTimezoneDeclaration) -> Self {
+    fn new(
+        scope: &TimezoneResolutionScope,
+        declaration: &SourceTimezoneDeclaration,
+        declaration_fingerprint: String,
+    ) -> Self {
         Self {
+            corpus_id: scope.corpus_id.clone(),
+            event_revision: scope.event_revision,
+            declaration_fingerprint,
             source: declaration.source.clone(),
             iana_timezone: declaration.iana_timezone.clone(),
             affected_records: 0,
@@ -148,6 +182,7 @@ impl TimezoneResolutionPreview {
             dst_gap_count: 0,
             dst_fold_count: 0,
             unsupported_timestamp_count: 0,
+            out_of_range_count: 0,
         }
     }
 
@@ -179,6 +214,9 @@ impl TimezoneResolutionPreview {
                     self.unsupported_timestamp_count =
                         self.unsupported_timestamp_count.saturating_add(1);
                 }
+                UnresolvedTimestampReason::ResolvedInstantOutOfRange => {
+                    self.out_of_range_count = self.out_of_range_count.saturating_add(1);
+                }
                 UnresolvedTimestampReason::NoRecognizedLocalTimestamp => {
                     self.unchanged_order_only_records =
                         self.unchanged_order_only_records.saturating_add(1);
@@ -209,6 +247,15 @@ pub enum TimezoneResolutionError {
     /// The caller attempted to apply one source's declaration to another.
     #[error("timezone declaration source does not match record source")]
     SourceMismatch,
+    /// Preview was not bound to one safe exact corpus identity.
+    #[error("invalid timezone preview corpus identity")]
+    InvalidCorpusIdentity,
+    /// The declaration's intended revision is not the next preview revision.
+    #[error("timezone declaration revision does not match preview snapshot")]
+    AppliedRevisionMismatch,
+    /// The current revision cannot be advanced safely.
+    #[error("timezone event revision overflow")]
+    EventRevisionOverflow,
 }
 
 /// Validated resolver reusable across a source scan.
@@ -272,18 +319,27 @@ impl SourceTimezoneResolver {
         };
 
         match self.timezone.from_local_datetime(&local) {
-            LocalResult::Single(resolved) => Ok(TimestampResolution::Resolved {
-                unix_seconds: resolved.timestamp(),
-                provenance: TimestampResolutionProvenance {
-                    source: self.declaration.source.clone(),
-                    iana_timezone: self.declaration.iana_timezone.clone(),
-                    basis: self.declaration.basis,
-                    declared_at: self.declaration.declared_at,
-                    applied_revision: self.declaration.applied_revision,
-                    original_local_timestamp: local_text.to_string(),
-                    resolved_utc_offset_seconds: resolved.offset().fix().local_minus_utc(),
-                },
-            }),
+            LocalResult::Single(resolved) => {
+                let unix_seconds = resolved.timestamp();
+                if !(MIN_RESOLVED_WALL_SECONDS..=MAX_RESOLVED_WALL_SECONDS).contains(&unix_seconds)
+                {
+                    return Ok(TimestampResolution::Unresolved {
+                        reason: UnresolvedTimestampReason::ResolvedInstantOutOfRange,
+                    });
+                }
+                Ok(TimestampResolution::Resolved {
+                    unix_seconds,
+                    provenance: TimestampResolutionProvenance {
+                        source: self.declaration.source.clone(),
+                        iana_timezone: self.declaration.iana_timezone.clone(),
+                        basis: self.declaration.basis,
+                        declared_at: self.declaration.declared_at,
+                        applied_revision: self.declaration.applied_revision,
+                        original_local_timestamp: local_text.to_string(),
+                        resolved_utc_offset_seconds: resolved.offset().fix().local_minus_utc(),
+                    },
+                })
+            }
             LocalResult::Ambiguous(_, _) => Ok(TimestampResolution::Unresolved {
                 reason: UnresolvedTimestampReason::AmbiguousDstFold,
             }),
@@ -299,15 +355,59 @@ impl SourceTimezoneResolver {
     /// again while staging exact event revisions in one DuckDB transaction.
     pub fn preview<'a>(
         &self,
+        scope: &TimezoneResolutionScope,
         records: impl IntoIterator<Item = (&'a str, &'a ParsedLine)>,
     ) -> Result<TimezoneResolutionPreview, TimezoneResolutionError> {
-        let mut preview = TimezoneResolutionPreview::new(&self.declaration);
+        validate_scope(scope, &self.declaration)?;
+        let declaration_fingerprint = declaration_fingerprint(scope, &self.declaration);
+        let mut preview =
+            TimezoneResolutionPreview::new(scope, &self.declaration, declaration_fingerprint);
         for (source, parsed) in records {
             let resolution = self.resolve(source, parsed)?;
             preview.observe(&resolution);
         }
         Ok(preview)
     }
+}
+
+fn validate_scope(
+    scope: &TimezoneResolutionScope,
+    declaration: &SourceTimezoneDeclaration,
+) -> Result<(), TimezoneResolutionError> {
+    if scope.corpus_id.is_empty()
+        || scope.corpus_id.len() > 128
+        || !scope
+            .corpus_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(TimezoneResolutionError::InvalidCorpusIdentity);
+    }
+    let next_revision = scope
+        .event_revision
+        .checked_add(1)
+        .ok_or(TimezoneResolutionError::EventRevisionOverflow)?;
+    if next_revision != declaration.applied_revision {
+        return Err(TimezoneResolutionError::AppliedRevisionMismatch);
+    }
+    Ok(())
+}
+
+fn declaration_fingerprint(
+    scope: &TimezoneResolutionScope,
+    declaration: &SourceTimezoneDeclaration,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"contextdesk.timezone-preview.v1\0");
+    hasher.update(scope.corpus_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(scope.event_revision.to_le_bytes());
+    hasher.update(b"\0");
+    hasher.update(
+        serde_json::to_vec(declaration)
+            .expect("validated timezone declaration must serialize deterministically"),
+    );
+    format!("{:x}", hasher.finalize())
 }
 
 fn validate_declaration(
@@ -394,6 +494,13 @@ mod tests {
             basis: TimezoneDeclarationBasis::UserDeclared,
             declared_at: 1_753_833_600,
             applied_revision: 7,
+        }
+    }
+
+    fn scope() -> TimezoneResolutionScope {
+        TimezoneResolutionScope {
+            corpus_id: "corpus-779".into(),
+            event_revision: 6,
         }
     }
 
@@ -517,9 +624,15 @@ mod tests {
         let resolver =
             SourceTimezoneResolver::new(declaration("America/New_York")).expect("valid resolver");
         let preview = resolver
-            .preview([(SOURCE, &local), (SOURCE, &explicit), (SOURCE, &order_only)])
+            .preview(
+                &scope(),
+                [(SOURCE, &local), (SOURCE, &explicit), (SOURCE, &order_only)],
+            )
             .unwrap();
 
+        assert_eq!(preview.corpus_id, "corpus-779");
+        assert_eq!(preview.event_revision, 6);
+        assert_eq!(preview.declaration_fingerprint.len(), 64);
         assert_eq!(preview.affected_records, 1);
         assert_eq!(preview.existing_wall_clock_records, 1);
         assert_eq!(preview.unchanged_order_only_records, 1);
@@ -569,6 +682,46 @@ mod tests {
         assert_eq!(
             resolver.resolve("other/server.log", &parsed).unwrap_err(),
             TimezoneResolutionError::SourceMismatch
+        );
+    }
+
+    #[test]
+    fn preview_is_bound_to_exact_corpus_revision_and_declaration() {
+        let resolver = SourceTimezoneResolver::new(declaration("Europe/Berlin")).expect("resolver");
+        let empty: [(&str, &ParsedLine); 0] = [];
+        let preview = resolver.preview(&scope(), empty).expect("empty preview");
+        assert_eq!(preview.affected_records, 0);
+        assert_eq!(preview.existing_wall_clock_records, 0);
+        assert_eq!(preview.unchanged_order_only_records, 0);
+
+        let mut stale = scope();
+        stale.event_revision = 7;
+        assert_eq!(
+            resolver.preview(&stale, empty).unwrap_err(),
+            TimezoneResolutionError::AppliedRevisionMismatch
+        );
+
+        let mut invalid = scope();
+        invalid.corpus_id = "../corpus".into();
+        assert_eq!(
+            resolver.preview(&invalid, empty).unwrap_err(),
+            TimezoneResolutionError::InvalidCorpusIdentity
+        );
+    }
+
+    #[test]
+    fn resolved_local_instants_outside_the_store_range_fail_closed() {
+        let resolver = SourceTimezoneResolver::new(declaration("UTC")).expect("resolver");
+        let line = parse_line(
+            "1960-03-05 02:53:53,654 ERROR [org.jboss.Clock] (worker) old",
+            None,
+            12,
+        );
+        assert_eq!(
+            resolver.resolve(SOURCE, &line).unwrap(),
+            TimestampResolution::Unresolved {
+                reason: UnresolvedTimestampReason::ResolvedInstantOutOfRange
+            }
         );
     }
 

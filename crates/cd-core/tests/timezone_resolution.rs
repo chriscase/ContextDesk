@@ -1,6 +1,7 @@
 use cd_core::log_analysis::{
     parse_line, SourceTimezoneDeclaration, SourceTimezoneResolver, TimestampResolution,
-    TimezoneDeclarationBasis, UnresolvedTimestampReason, TIMEZONE_DECLARATION_SCHEMA_VERSION,
+    TimezoneDeclarationBasis, TimezoneResolutionScope, UnresolvedTimestampReason,
+    TIMEZONE_DECLARATION_SCHEMA_VERSION,
 };
 
 const SOURCE: &str = "company/server.log";
@@ -31,7 +32,13 @@ fn owner_jboss_and_elasticsearch_examples_resolve_from_user_iana_declaration() {
     );
     let resolver = resolver("America/New_York");
     let preview = resolver
-        .preview([(SOURCE, &jboss), (SOURCE, &elasticsearch)])
+        .preview(
+            &TimezoneResolutionScope {
+                corpus_id: "company-corpus".into(),
+                event_revision: 11,
+            },
+            [(SOURCE, &jboss), (SOURCE, &elasticsearch)],
+        )
         .unwrap();
 
     assert_eq!(preview.affected_records, 2);

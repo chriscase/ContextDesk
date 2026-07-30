@@ -134,8 +134,9 @@ pub use suppression::{
 pub use timezone_resolution::{
     SourceTimezoneDeclaration, SourceTimezoneResolver, TimestampResolution,
     TimestampResolutionProvenance, TimezoneDeclarationBasis, TimezoneResolutionError,
-    TimezoneResolutionPreview, UnresolvedTimestampReason, MAX_IANA_TIMEZONE_BYTES,
-    MAX_TIMEZONE_SOURCE_BYTES, TIMEZONE_DECLARATION_SCHEMA_VERSION,
+    TimezoneResolutionPreview, TimezoneResolutionScope, UnresolvedTimestampReason,
+    MAX_IANA_TIMEZONE_BYTES, MAX_RESOLVED_WALL_SECONDS, MAX_TIMEZONE_SOURCE_BYTES,
+    MIN_RESOLVED_WALL_SECONDS, TIMEZONE_DECLARATION_SCHEMA_VERSION,
 };
 pub use tools::{
     anomalies_tool_spec, cluster_problems_tool_spec, correlate_tool_spec, ingest_logs_tool_spec,
