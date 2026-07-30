@@ -119,7 +119,7 @@ export function NoisePolicyControl({
         ?.querySelector<HTMLElement>('[data-noise-policy-close="true"]')
         ?.focus();
     });
-    const onClick = (event: MouseEvent) => {
+    const onPointerDown = (event: PointerEvent) => {
       const target = event.target as Node | null;
       const branch =
         target instanceof Element &&
@@ -139,10 +139,13 @@ export function NoisePolicyControl({
         dismiss();
       }
     };
-    document.addEventListener("click", onClick);
+    // Detect the outside interaction before a child click can replace the
+    // policy contents. A document-level click can otherwise observe the
+    // detached Review suggestions button and mistake it for an outside click.
+    document.addEventListener("pointerdown", onPointerDown);
     document.addEventListener("keydown", onKey);
     return () => {
-      document.removeEventListener("click", onClick);
+      document.removeEventListener("pointerdown", onPointerDown);
       document.removeEventListener("keydown", onKey);
     };
     // Trigger focus is stable; dismiss is intentionally local to this render.

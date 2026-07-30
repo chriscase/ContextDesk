@@ -198,7 +198,7 @@ describe("NoisePolicyControl", () => {
     expect(screen.getByTestId("noise-policy-disclosure").textContent).toMatch(
       /not analyzed/i,
     );
-    fireEvent.click(document.body);
+    fireEvent.pointerDown(document.body);
     await waitFor(() =>
       expect(screen.queryByTestId("noise-policy-panel")).toBeNull(),
     );
@@ -356,9 +356,11 @@ describe("NoisePolicyControl", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Noise · 1 rule · 250 hidden" }),
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Review suggestions" }),
-    );
+    const reviewSuggestions = screen.getByRole("button", {
+      name: "Review suggestions",
+    });
+    fireEvent.pointerDown(reviewSuggestions);
+    fireEvent.click(reviewSuggestions);
     expect(await screen.findByText("routine health probe <*>")).toBeTruthy();
     expect(host.hostLogActivateTemplateSuppression).not.toHaveBeenCalled();
     expect(host.hostLogPreviewTemplateSuppression).not.toHaveBeenCalled();
