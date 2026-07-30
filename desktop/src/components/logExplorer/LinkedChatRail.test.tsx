@@ -2379,6 +2379,37 @@ describe("LinkedChatRail", () => {
     expect(document.activeElement).toBe(toggle);
   });
 
+  it("dismisses the switcher through stopped pointer propagation without stealing focus", async () => {
+    vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([]);
+
+    render(
+      <div>
+        <LinkedChatRail
+          corpusId="c1"
+          corpusName="fixture"
+          agentContext={baseContext}
+          onApplyNav={() => undefined}
+        />
+        <button onPointerDown={(event) => event.stopPropagation()}>
+          Outside destination
+        </button>
+      </div>,
+    );
+    const toggle = await screen.findByTestId("linked-chat-switcher-toggle");
+    fireEvent.click(toggle);
+    expect(await screen.findByTestId("linked-chat-switcher")).toBeTruthy();
+
+    const outside = screen.getByRole("button", {
+      name: "Outside destination",
+    });
+    fireEvent.pointerDown(outside);
+    await waitFor(() =>
+      expect(screen.queryByTestId("linked-chat-switcher")).toBeNull(),
+    );
+    outside.focus();
+    expect(document.activeElement).toBe(outside);
+  });
+
   it("scopes drafts per chat when switching", async () => {
     const a = sessionDto("a", "Chat A");
     const b = sessionDto("b", "Chat B");

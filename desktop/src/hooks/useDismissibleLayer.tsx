@@ -11,6 +11,7 @@ type DismissibleLayerOptions = {
   layerId: string;
   peerGroup?: string;
   rootRef: RefObject<HTMLElement | null>;
+  triggerRef?: RefObject<HTMLElement | null>;
   onDismiss: (restoreFocus: boolean) => void;
 };
 
@@ -19,6 +20,14 @@ const peerGroups = new Map<
   string,
   Map<string, (restoreFocus: boolean) => void>
 >();
+const FOCUSABLE_DESTINATION_SELECTOR = [
+  "button:not(:disabled)",
+  "a[href]",
+  "input:not(:disabled)",
+  "select:not(:disabled)",
+  "textarea:not(:disabled)",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
 
 function removeOpenLayer(layerId: string) {
   const index = openLayerStack.lastIndexOf(layerId);
@@ -28,19 +37,40 @@ function removeOpenLayer(layerId: string) {
 function eventStaysInsideLayer(
   event: Event,
   root: HTMLElement | null,
+  trigger: HTMLElement | null,
   layerId: string,
 ): boolean {
   const target = event.target;
   if (root && target instanceof Node && root.contains(target)) return true;
+  if (trigger && target instanceof Node && trigger.contains(target)) return true;
 
   const path =
     typeof event.composedPath === "function" ? event.composedPath() : [];
   if (root && path.includes(root)) return true;
+  if (trigger && path.includes(trigger)) return true;
 
   return path.some(
     (candidate) =>
       candidate instanceof HTMLElement &&
       candidate.dataset.dismissibleLayerBranch === layerId,
+  );
+}
+
+function eventHasFocusableDestination(event: Event): boolean {
+  const path =
+    typeof event.composedPath === "function" ? event.composedPath() : [];
+  if (
+    path.some(
+      (candidate) =>
+        candidate instanceof Element &&
+        candidate.matches(FOCUSABLE_DESTINATION_SELECTOR),
+    )
+  ) {
+    return true;
+  }
+  return (
+    event.target instanceof Element &&
+    event.target.closest(FOCUSABLE_DESTINATION_SELECTOR) !== null
   );
 }
 
@@ -57,6 +87,7 @@ export function useDismissibleLayer({
   layerId,
   peerGroup,
   rootRef,
+  triggerRef,
   onDismiss,
 }: DismissibleLayerOptions) {
   useEffect(() => {
@@ -74,8 +105,17 @@ export function useDismissibleLayer({
     }
 
     const dismissOutside = (event: Event) => {
-      if (eventStaysInsideLayer(event, rootRef.current, layerId)) return;
-      onDismiss(false);
+      if (
+        eventStaysInsideLayer(
+          event,
+          rootRef.current,
+          triggerRef?.current ?? null,
+          layerId,
+        )
+      ) {
+        return;
+      }
+      onDismiss(!eventHasFocusableDestination(event));
     };
     const dismissWithEscape = (event: KeyboardEvent) => {
       if (
@@ -105,5 +145,5 @@ export function useDismissibleLayer({
         if (peers?.size === 0) peerGroups.delete(peerGroup);
       }
     };
-  }, [layerId, onDismiss, open, peerGroup, rootRef]);
+  }, [layerId, onDismiss, open, peerGroup, rootRef, triggerRef]);
 }

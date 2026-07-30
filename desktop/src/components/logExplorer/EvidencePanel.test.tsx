@@ -276,6 +276,33 @@ describe("EvidencePanel", () => {
     expect(change).toHaveBeenCalledWith("chat");
   });
 
+  it("restores the mode trigger after blank-space dismissal", async () => {
+    render(
+      <div>
+        <InvestigationModeControl
+          mode="investigation"
+          investigationCount={3}
+          chatCount={2}
+          onChange={() => undefined}
+        />
+        <div data-testid="outside-blank">Outside blank space</div>
+      </div>,
+    );
+
+    const trigger = screen.getByRole("button", {
+      name: /Investigation workspace view: Investigation, 3 items/,
+    });
+    fireEvent.click(trigger);
+    expect(screen.getByRole("menu", { name: "Investigation view" })).toBeTruthy();
+    fireEvent.pointerDown(screen.getByTestId("outside-blank"));
+    await vi.waitFor(() =>
+      expect(
+        screen.queryByRole("menu", { name: "Investigation view" }),
+      ).toBeNull(),
+    );
+    await vi.waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
   it("collapses to a compact Investigation rail and restores focus both ways", async () => {
     const toggle = vi.fn();
     const view = render(
