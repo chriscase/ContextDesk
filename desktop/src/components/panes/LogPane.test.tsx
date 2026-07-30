@@ -13,6 +13,7 @@ import {
 import type {
   LogClusterDto,
   LogCorpusSummaryDto,
+  LogIngestReportDto,
   LogTemplateRowDto,
 } from "../../lib/host";
 import {
@@ -41,6 +42,7 @@ const hostMocks = vi.hoisted(() => ({
   releaseDiagnostic: vi.fn(),
   saveDiagnostic: vi.fn(),
   saveFile: vi.fn(),
+  openDirectory: vi.fn(),
   openFile: vi.fn(),
   listenProgress: vi.fn(),
 }));
@@ -49,8 +51,7 @@ vi.mock("../../lib/host", () => ({
   hostListLogCorpora: hostMocks.listCorpora,
   hostListenProcessProgress: hostMocks.listenProgress,
   hostCancelLogIngest: vi.fn(async () => true),
-  hostClearFailedLogIngestDiagnostic:
-    hostMocks.clearFailedIngestDiagnostic,
+  hostClearFailedLogIngestDiagnostic: hostMocks.clearFailedIngestDiagnostic,
   hostCancelLogReanalysis: hostMocks.cancelReanalysis,
   hostDiscardLogCorpus: hostMocks.discard,
   hostExportLogCorpusPackage: vi.fn(),
@@ -72,7 +73,7 @@ vi.mock("../../lib/host", () => ({
 
 vi.mock("../../lib/dialogs", () => ({
   dialogConfirm: hostMocks.confirm,
-  openDirectoryDialog: vi.fn(async () => null),
+  openDirectoryDialog: hostMocks.openDirectory,
   openFileDialog: hostMocks.openFile,
   saveFileDialog: hostMocks.saveFile,
 }));
@@ -104,6 +105,31 @@ function corpus(id: string, name: string): LogCorpusSummaryDto {
   };
 }
 
+function successfulImport(corpusId: string): LogIngestReportDto {
+  return {
+    corpusId,
+    lines: 1,
+    templates: 1,
+    reductionRatio: 1,
+    embedded: 0,
+    files: 1,
+    discoveredFiles: 1,
+    excludedFiles: 0,
+    failedFiles: 0,
+    ignoredFiles: 0,
+    exclusionCounts: {},
+    exclusionExamples: [],
+    partial: false,
+    sourceBytes: 24,
+    corpusBytes: 128,
+    levelCounts: { info: 1 },
+    tsMin: 1,
+    tsMax: 1,
+    formatCounts: { plain: 1 },
+    topTemplates: [],
+  };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -112,6 +138,17 @@ function deferred<T>() {
     reject = rejectPromise;
   });
   return { promise, resolve, reject };
+}
+
+async function chooseImportMode(
+  name: "Import a folder…" | "Import a log file or ZIP…",
+  triggerIndex = 0,
+) {
+  fireEvent.click(
+    screen.getAllByRole("button", { name: "Import logs…" })[triggerIndex]!,
+  );
+  const menu = await screen.findByRole("menu", { name: "Import logs" });
+  fireEvent.click(within(menu).getByRole("menuitem", { name }));
 }
 
 describe("LogPane", () => {
@@ -163,6 +200,7 @@ describe("LogPane", () => {
       }),
     );
     hostMocks.saveFile.mockResolvedValue(null);
+    hostMocks.openDirectory.mockResolvedValue(null);
     hostMocks.openFile.mockResolvedValue(null);
   });
 
@@ -228,9 +266,7 @@ describe("LogPane", () => {
     ).toBeTruthy();
 
     const help = within(toolbar).getByRole("group", { name: "Help" });
-    fireEvent.click(
-      within(help).getByRole("button", { name: "Learn more" }),
-    );
+    fireEvent.click(within(help).getByRole("button", { name: "Learn more" }));
     expect(onOpenHelp).toHaveBeenCalledWith("log-explorer");
   });
 
@@ -298,9 +334,7 @@ describe("LogPane", () => {
     const reanalyze = screen.getByRole("button", {
       name: "Re-analyze locally…",
     });
-    await waitFor(() =>
-      expect(reanalyze.hasAttribute("disabled")).toBe(true),
-    );
+    await waitFor(() => expect(reanalyze.hasAttribute("disabled")).toBe(true));
     const completeId = reanalyze.getAttribute("aria-describedby");
     expect(completeId).toBeTruthy();
     expect(document.getElementById(completeId!)?.textContent).toContain(
@@ -309,6 +343,143 @@ describe("LogPane", () => {
     expect(reanalyze.getAttribute("title")).toContain(
       "already fully analyzed locally",
     );
+  });
+
+  it("offers intentional folder and file import modes from both entry points", async () => {
+    hostMocks.openDirectory.mockResolvedValue("/tmp/incident-folder");
+    hostMocks.openFile.mockResolvedValue("/tmp/server.log");
+    hostMocks.confirm.mockResolvedValue(true);
+    hostMocks.ingest.mockResolvedValue(successfulImport("chosen-corpus"));
+
+    render(<LogPane />);
+    await screen.findByText(/No corpora yet/i);
+    const emptyTrigger = screen.getAllByRole("button", {
+      name: "Import logs…",
+    })[1]!;
+
+    await chooseImportMode("Import a folder…");
+    await waitFor(() =>
+      expect(hostMocks.ingest).toHaveBeenCalledWith(
+        "/tmp/incident-folder",
+        "incident",
+      ),
+    );
+    expect(hostMocks.openDirectory).toHaveBeenCalledWith("Choose log folder");
+    expect(hostMocks.openFile).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(emptyTrigger.hasAttribute("disabled")).toBe(false),
+    );
+
+    await chooseImportMode("Import a log file or ZIP…", 1);
+    await waitFor(() =>
+      expect(hostMocks.ingest).toHaveBeenCalledWith(
+        "/tmp/server.log",
+        "incident",
+      ),
+    );
+    expect(hostMocks.openFile).toHaveBeenCalledWith("Choose log file or ZIP", [
+      {
+        name: "Logs",
+        extensions: ["log", "txt", "json", "jsonl", "zip"],
+      },
+    ]);
+    expect(hostMocks.openDirectory).toHaveBeenCalledTimes(1);
+    expect(hostMocks.ingest).toHaveBeenCalledTimes(2);
+    expect(hostMocks.confirm).toHaveBeenCalledTimes(2);
+  });
+
+  it("ends the action when either native import chooser is cancelled", async () => {
+    render(<LogPane />);
+    await screen.findByText(/No corpora yet/i);
+    const toolbarTrigger = screen.getAllByRole("button", {
+      name: "Import logs…",
+    })[0]!;
+    const emptyTrigger = screen.getAllByRole("button", {
+      name: "Import logs…",
+    })[1]!;
+
+    await chooseImportMode("Import a folder…");
+    await waitFor(() => expect(document.activeElement).toBe(toolbarTrigger));
+    expect(hostMocks.openDirectory).toHaveBeenCalledTimes(1);
+    expect(hostMocks.openFile).not.toHaveBeenCalled();
+    expect(hostMocks.confirm).not.toHaveBeenCalled();
+    expect(hostMocks.ingest).not.toHaveBeenCalled();
+
+    await chooseImportMode("Import a log file or ZIP…", 1);
+    await waitFor(() => expect(document.activeElement).toBe(emptyTrigger));
+    expect(hostMocks.openFile).toHaveBeenCalledTimes(1);
+    expect(hostMocks.openDirectory).toHaveBeenCalledTimes(1);
+    expect(hostMocks.confirm).not.toHaveBeenCalled();
+    expect(hostMocks.ingest).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText("Cancel ingest")).toBeNull();
+    expect(screen.getByText(/No corpora yet/i)).toBeTruthy();
+    expect(hostMocks.listCorpora).toHaveBeenCalledTimes(1);
+  });
+
+  it("dismisses the import menu with Escape or outside input and restores focus", async () => {
+    render(<LogPane />);
+    await screen.findByText(/No corpora yet/i);
+    const [toolbarTrigger, emptyTrigger] = screen.getAllByRole("button", {
+      name: "Import logs…",
+    });
+
+    fireEvent.click(toolbarTrigger!);
+    expect(
+      await screen.findByRole("menu", { name: "Import logs" }),
+    ).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByRole("menu", { name: "Import logs" })).toBeNull(),
+    );
+    expect(document.activeElement).toBe(toolbarTrigger);
+
+    fireEvent.click(emptyTrigger!);
+    expect(
+      await screen.findByRole("menu", { name: "Import logs" }),
+    ).toBeTruthy();
+    fireEvent.pointerDown(
+      screen.getByRole("button", { name: "Import package…" }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("menu", { name: "Import logs" })).toBeNull(),
+    );
+    expect(document.activeElement).toBe(emptyTrigger);
+    expect(hostMocks.openDirectory).not.toHaveBeenCalled();
+    expect(hostMocks.openFile).not.toHaveBeenCalled();
+  });
+
+  it("supports keyboard opening and navigation in the import menu", async () => {
+    render(<LogPane />);
+    const trigger = screen.getAllByRole("button", {
+      name: "Import logs…",
+    })[0]!;
+    trigger.focus();
+
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    const menu = await screen.findByRole("menu", { name: "Import logs" });
+    const folder = within(menu).getByRole("menuitem", {
+      name: "Import a folder…",
+    });
+    const file = within(menu).getByRole("menuitem", {
+      name: "Import a log file or ZIP…",
+    });
+    expect(document.activeElement).toBe(folder);
+
+    fireEvent.keyDown(folder, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(file);
+    fireEvent.keyDown(file, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(folder);
+    fireEvent.keyDown(folder, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(file);
+    fireEvent.keyDown(file, { key: "Home" });
+    expect(document.activeElement).toBe(folder);
+    fireEvent.keyDown(folder, { key: "End" });
+    expect(document.activeElement).toBe(file);
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(screen.queryByRole("menu", { name: "Import logs" })).toBeNull();
   });
 
   it("preserves primary corpus selection and keeps only one named overflow menu open", async () => {
@@ -596,9 +767,7 @@ describe("LogPane", () => {
     expect(copied).not.toContain("private-provider");
     expect(copied).not.toContain(item.sourceLabel);
 
-    fireEvent.click(
-      primarySave,
-    );
+    fireEvent.click(primarySave);
     await waitFor(() =>
       expect(
         within(dialog).getByText("Save cancelled. No file was written."),
@@ -705,9 +874,7 @@ describe("LogPane", () => {
         }
       />,
     );
-    fireEvent.click(
-      screen.getAllByRole("button", { name: "Import logs…" })[0]!,
-    );
+    await chooseImportMode("Import a folder…");
 
     const available = await screen.findByRole("region", {
       name: "Failed import diagnostic",
@@ -756,9 +923,7 @@ describe("LogPane", () => {
     expect(jsonPreview).toContain('"scanCounts"');
     expect(jsonPreview).toContain('"binary": 1');
     expect(jsonPreview).toContain('"basename": "malformed.log"');
-    fireEvent.click(
-      within(dialog).getByRole("button", { name: "Copy JSON" }),
-    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "Copy JSON" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2));
 
     fireEvent.keyDown(dialog, { key: "Escape" });
@@ -854,17 +1019,13 @@ describe("LogPane", () => {
 
     render(<LogPane pickDirectory={async () => "/tmp/logs"} />);
 
-    fireEvent.click(
-      screen.getAllByRole("button", { name: "Import logs…" })[0]!,
-    );
+    await chooseImportMode("Import a folder…");
     let available = await screen.findByRole("region", {
       name: "Failed import diagnostic",
     });
     expect(available.textContent).toContain("First failed attempt.");
 
-    fireEvent.click(
-      screen.getAllByRole("button", { name: "Import logs…" })[0]!,
-    );
+    await chooseImportMode("Import a folder…");
     await waitFor(() => {
       available = screen.getByRole("region", {
         name: "Failed import diagnostic",
@@ -873,9 +1034,7 @@ describe("LogPane", () => {
       expect(available.textContent).not.toContain("First failed attempt.");
     });
 
-    fireEvent.click(
-      screen.getAllByRole("button", { name: "Import logs…" })[0]!,
-    );
+    await chooseImportMode("Import a folder…");
     await waitFor(() => expect(hostMocks.ingest).toHaveBeenCalledTimes(3));
     await waitFor(() =>
       expect(
@@ -977,9 +1136,7 @@ describe("LogPane", () => {
       />,
     );
     await screen.findByText(/No corpora yet/i);
-    fireEvent.click(
-      screen.getAllByRole("button", { name: "Import logs…" })[0]!,
-    );
+    await chooseImportMode("Import a folder…");
 
     const confidence = await screen.findByTestId("log-import-confidence");
     expect(confidence.textContent).toContain(
@@ -1075,9 +1232,7 @@ describe("LogPane", () => {
       }),
     ).toBeTruthy();
 
-    fireEvent.click(
-      screen.getByRole("button", { name: /Import package/i }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: /Import package/i }));
     await waitFor(() =>
       expect(hostMocks.importPackage).toHaveBeenCalledWith(
         "/tmp/package.cdlog.zip",
@@ -1139,7 +1294,9 @@ describe("LogPane", () => {
       await screen.findByRole("menuitem", { name: "Discard corpus…" }),
     );
 
-    await waitFor(() => expect(hostMocks.discard).toHaveBeenCalledWith(first.id));
+    await waitFor(() =>
+      expect(hostMocks.discard).toHaveBeenCalledWith(first.id),
+    );
     const secondCard = await screen.findByRole("button", {
       name: corpusButtonName(second.name),
     });
@@ -1581,7 +1738,9 @@ describe("LogPane", () => {
       screen.getByRole("button", { name: `More actions for ${item.name}` }),
     );
     fireEvent.click(await screen.findByRole("menuitem", { name: /Discard/i }));
-    await waitFor(() => expect(hostMocks.discard).toHaveBeenCalledWith(item.id));
+    await waitFor(() =>
+      expect(hostMocks.discard).toHaveBeenCalledWith(item.id),
+    );
 
     hostMocks.listCorpora.mockResolvedValue([item]);
     // Trigger remount path by re-render list: call refresh via re-import simulation —
@@ -1752,9 +1911,7 @@ describe("LogPane", () => {
     expect(
       screen.getByRole("button", { name: "Loading analysis…" }),
     ).toBeTruthy();
-    expect(
-      screen.queryByRole("button", { name: "Retry analysis" }),
-    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry analysis" })).toBeNull();
 
     await act(async () => {
       pendingTemplates.resolve([]);
@@ -1937,9 +2094,9 @@ describe("LogPane", () => {
     });
     await screen.findByText(/Local re-analysis complete:/);
     expect(screen.getByRole("heading", { name: second.name })).toBeTruthy();
-    expect(
-      hostMocks.setActiveCorpus.mock.calls.map(([id]) => id).at(-1),
-    ).toBe(second.id);
+    expect(hostMocks.setActiveCorpus.mock.calls.map(([id]) => id).at(-1)).toBe(
+      second.id,
+    );
   });
 
   it("shows progress and routes cancellation to re-analysis", async () => {

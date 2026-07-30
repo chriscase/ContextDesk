@@ -372,7 +372,11 @@
   gap: var(--space-2);
   padding: var(--space-3) var(--space-4);
   border-top: 1px solid var(--border-soft);
-  background: color-mix(in srgb, var(--surface-chrome, var(--bg-panel)) 85%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--surface-chrome, var(--bg-panel)) 85%,
+    transparent
+  );
 }
 
 .mem-view-toggle {
@@ -441,7 +445,11 @@
   gap: var(--space-2);
   padding: var(--space-2) var(--space-3);
   border-bottom: 1px solid var(--border-soft);
-  background: color-mix(in srgb, var(--surface-chrome, var(--bg-panel)) 80%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--surface-chrome, var(--bg-panel)) 80%,
+    transparent
+  );
 }
 
 .source-view__path {
@@ -482,7 +490,11 @@
   padding: 0 var(--space-2) 0 var(--space-3);
   color: var(--text-faint);
   border-right: 1px solid var(--border-soft);
-  background: color-mix(in srgb, var(--surface-chrome, var(--bg-panel)) 55%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--surface-chrome, var(--bg-panel)) 55%,
+    transparent
+  );
 }
 
 .source-line__t {
@@ -730,8 +742,7 @@
     white-space: normal;
   }
 
-  .log-pane__action-group[data-intent="help"]
-    .log-pane__action-group-controls {
+  .log-pane__action-group[data-intent="help"] .log-pane__action-group-controls {
     grid-template-columns: minmax(0, 1fr);
   }
 }
@@ -953,6 +964,10 @@
   border-radius: var(--radius-sm);
   background: var(--surface-chrome, var(--bg-elevated));
   box-shadow: var(--shadow-md);
+}
+
+.log-import-menu {
+  width: min(17rem, calc(100vw - 16px));
 }
 
 .log-card__menu-item {

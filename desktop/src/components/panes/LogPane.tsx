@@ -151,6 +151,9 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   /** In-app Explorer escape hatch when multi-window fails (#503). */
   const [inAppExplorerId, setInAppExplorerId] = useState<string | null>(null);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [importMenuTriggerKey, setImportMenuTriggerKey] = useState<
+    "toolbar" | "empty" | null
+  >(null);
   const [diagnostic, setDiagnostic] = useState<{
     corpus: LogCorpusSummaryDto | null;
     failedIngest: FailedLogIngestDiagnosticDto | null;
@@ -161,8 +164,15 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     left: number;
     top: number;
   } | null>(null);
+  const [importMenuPosition, setImportMenuPosition] = useState<{
+    left: number;
+    top: number;
+  } | null>(null);
   const menuId = useId();
+  const importMenuId = useId();
   const menuRef = useRef<HTMLDivElement>(null);
+  const importMenuRef = useRef<HTMLDivElement>(null);
+  const importMenuTriggerRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLElement>(null);
   const analysisCacheRef = useRef(new Map<string, CorpusAnalysis>());
   const analysisInFlightRef = useRef(new Map<string, Promise<void>>());
@@ -224,10 +234,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     const generation = ++refreshGenerationRef.current;
     try {
       const list = (await hostListLogCorpora()) ?? [];
-      if (
-        !mountedRef.current ||
-        generation !== refreshGenerationRef.current
-      ) {
+      if (!mountedRef.current || generation !== refreshGenerationRef.current) {
         return;
       }
       const liveIds = new Set(list.map((c) => c.id));
@@ -254,10 +261,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       }
       setCorpora(list);
     } catch (e) {
-      if (
-        !mountedRef.current ||
-        generation !== refreshGenerationRef.current
-      ) {
+      if (!mountedRef.current || generation !== refreshGenerationRef.current) {
         return;
       }
       setError(String(e));
@@ -380,6 +384,97 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     }
   }, [corpora, openMenuId]);
 
+  const closeImportMenu = useCallback((restoreFocus = true) => {
+    const trigger = importMenuTriggerRef.current;
+    setImportMenuTriggerKey(null);
+    setImportMenuPosition(null);
+    if (restoreFocus) {
+      queueMicrotask(() => trigger?.focus());
+    }
+  }, []);
+
+  const positionImportMenu = useCallback(() => {
+    if (!importMenuTriggerKey) return;
+    const trigger = importMenuTriggerRef.current;
+    const menu = importMenuRef.current;
+    if (!trigger || !menu) return;
+
+    const gutter = 8;
+    const offset = 4;
+    const triggerRect = trigger.getBoundingClientRect();
+    const menuRect = menu.getBoundingClientRect();
+    const maxLeft = Math.max(
+      gutter,
+      window.innerWidth - menuRect.width - gutter,
+    );
+    const left = Math.min(Math.max(gutter, triggerRect.left), maxLeft);
+    const below = triggerRect.bottom + offset;
+    const top =
+      below + menuRect.height <= window.innerHeight - gutter
+        ? below
+        : Math.max(gutter, triggerRect.top - menuRect.height - offset);
+
+    setImportMenuPosition({ left, top });
+  }, [importMenuTriggerKey]);
+
+  useLayoutEffect(() => {
+    if (!importMenuTriggerKey) return;
+    positionImportMenu();
+    importMenuRef.current
+      ?.querySelector<HTMLButtonElement>('[role="menuitem"]')
+      ?.focus();
+  }, [importMenuTriggerKey, positionImportMenu]);
+
+  useEffect(() => {
+    if (!importMenuTriggerKey) return;
+
+    const trigger = importMenuTriggerRef.current;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (
+        !target ||
+        importMenuRef.current?.contains(target) ||
+        trigger?.contains(target)
+      ) {
+        return;
+      }
+      const otherTrigger =
+        target instanceof Element
+          ? target.closest("[data-log-import-trigger]")
+          : null;
+      closeImportMenu(!otherTrigger);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeImportMenu();
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      const target = event.target as Node | null;
+      if (
+        !target ||
+        importMenuRef.current?.contains(target) ||
+        trigger?.contains(target)
+      ) {
+        return;
+      }
+      closeImportMenu(false);
+    };
+
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("focusin", onFocusIn);
+    document.addEventListener("scroll", positionImportMenu, true);
+    window.addEventListener("resize", positionImportMenu);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("focusin", onFocusIn);
+      document.removeEventListener("scroll", positionImportMenu, true);
+      window.removeEventListener("resize", positionImportMenu);
+    };
+  }, [closeImportMenu, importMenuTriggerKey, positionImportMenu]);
+
   useEffect(() => {
     const pendingId = pendingDiscardFocusRef.current;
     if (pendingId === undefined) return;
@@ -457,8 +552,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       analysisRequestTokenRef.current.set(id, requestToken);
       // Fingerprint at request start so a later re-ingest of the same id cannot
       // accept results computed against the previous event count.
-      const fingerprintAtStart =
-        analysisFingerprintRef.current.get(id) ?? null;
+      const fingerprintAtStart = analysisFingerprintRef.current.get(id) ?? null;
       const request = Promise.allSettled([
         hostLogClusterProblems(id, 12),
         hostListLogTemplates(id, 100),
@@ -466,16 +560,15 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
         .then(([clusterResult, templateResult]) => {
           if (analysisRequestTokenRef.current.get(id) !== requestToken) return;
           const fpNow = analysisFingerprintRef.current.get(id) ?? null;
-          if (fingerprintAtStart !== null && fpNow !== fingerprintAtStart) return;
+          if (fingerprintAtStart !== null && fpNow !== fingerprintAtStart)
+            return;
           if (
             clusterResult.status === "rejected" ||
             templateResult.status === "rejected"
           ) {
             const reasons = [clusterResult, templateResult]
               .filter(
-                (
-                  result,
-                ): result is PromiseRejectedResult =>
+                (result): result is PromiseRejectedResult =>
                   result.status === "rejected",
               )
               .map((result) => String(result.reason));
@@ -541,22 +634,32 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       ? corpusActionDescription
       : "This corpus is already fully analyzed locally.";
 
-  async function onImportLogs() {
-    const picker =
-      pickDirectory ?? (() => openDirectoryDialog("Choose log directory"));
-    const dir = await picker();
-    let path = dir;
+  async function onImportLogs(mode: "directory" | "file") {
+    const trigger = importMenuTriggerRef.current;
+    closeImportMenu(false);
+    const path =
+      mode === "directory"
+        ? await (
+            pickDirectory ?? (() => openDirectoryDialog("Choose log folder"))
+          )()
+        : await openFileDialog("Choose log file or ZIP", [
+            {
+              name: "Logs",
+              extensions: ["log", "txt", "json", "jsonl", "zip"],
+            },
+          ]);
     if (!path) {
-      path = await openFileDialog("Choose log file or zip", [
-        { name: "Logs", extensions: ["log", "txt", "json", "jsonl", "zip"] },
-      ]);
+      queueMicrotask(() => trigger?.focus());
+      return;
     }
-    if (!path) return;
     const ok = await dialogConfirm(
       "SoftWrite: ingest into a disposable analysis corpus (secrets redacted). Continue?",
       { title: "Import logs" },
     );
-    if (!ok) return;
+    if (!ok) {
+      queueMicrotask(() => trigger?.focus());
+      return;
+    }
     setBusy(true);
     setIngesting(true);
     setError(null);
@@ -575,9 +678,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     } catch (e) {
       setError(String(e));
       try {
-        setFailedIngestDiagnostic(
-          await hostGetFailedLogIngestDiagnostic(),
-        );
+        setFailedIngestDiagnostic(await hostGetFailedLogIngestDiagnostic());
       } catch {
         /* Preserve the visible ingest error if diagnostic retrieval fails. */
       }
@@ -808,8 +909,19 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     event?: ReactKeyboardEvent<HTMLButtonElement>,
   ) {
     event?.preventDefault();
+    closeImportMenu(false);
     setMenuPosition(null);
     setOpenMenuId(id);
+  }
+
+  function openImportMenu(
+    key: "toolbar" | "empty",
+    trigger: HTMLButtonElement,
+  ) {
+    closeCorpusMenu(false);
+    importMenuTriggerRef.current = trigger;
+    setImportMenuPosition(null);
+    setImportMenuTriggerKey(key);
   }
 
   function onMenuItemKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
@@ -823,6 +935,35 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       const items = Array.from(
         menuRef.current?.querySelectorAll<HTMLButtonElement>(
           '[role="menuitem"]:not(:disabled)',
+        ) ?? [],
+      );
+      if (items.length === 0) return;
+      const current = Math.max(items.indexOf(event.currentTarget), 0);
+      const target =
+        event.key === "Home"
+          ? items[0]
+          : event.key === "End"
+            ? items.at(-1)
+            : event.key === "ArrowDown"
+              ? items[(current + 1) % items.length]
+              : items[(current - 1 + items.length) % items.length];
+      target?.focus();
+    }
+  }
+
+  function onImportMenuItemKeyDown(
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) {
+    if (
+      event.key === "ArrowDown" ||
+      event.key === "ArrowUp" ||
+      event.key === "Home" ||
+      event.key === "End"
+    ) {
+      event.preventDefault();
+      const items = Array.from(
+        importMenuRef.current?.querySelectorAll<HTMLButtonElement>(
+          '[role="menuitem"]',
         ) ?? [],
       );
       if (items.length === 0) return;
@@ -941,12 +1082,25 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                 ref={importLogsTriggerRef}
                 type="button"
                 className="btn btn--ghost"
-                disabled={busy}
-                aria-describedby={
-                  busy ? busyActionDescriptionId : undefined
+                data-log-import-trigger
+                aria-haspopup="menu"
+                aria-expanded={importMenuTriggerKey === "toolbar"}
+                aria-controls={
+                  importMenuTriggerKey === "toolbar" ? importMenuId : undefined
                 }
+                disabled={busy}
+                aria-describedby={busy ? busyActionDescriptionId : undefined}
                 title={busy ? busyActionDescription : undefined}
-                onClick={() => void onImportLogs()}
+                onClick={(event) => {
+                  if (importMenuTriggerKey === "toolbar") closeImportMenu();
+                  else openImportMenu("toolbar", event.currentTarget);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                    event.preventDefault();
+                    openImportMenu("toolbar", event.currentTarget);
+                  }
+                }}
               >
                 Import logs…
               </button>
@@ -954,9 +1108,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                 type="button"
                 className="btn btn--ghost"
                 disabled={busy}
-                aria-describedby={
-                  busy ? busyActionDescriptionId : undefined
-                }
+                aria-describedby={busy ? busyActionDescriptionId : undefined}
                 title={busy ? busyActionDescription : undefined}
                 onClick={() => void onImportPackage()}
               >
@@ -982,9 +1134,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                 aria-describedby={
                   busy || !activeId ? corpusActionDescriptionId : undefined
                 }
-                title={
-                  busy || !activeId ? corpusActionDescription : undefined
-                }
+                title={busy || !activeId ? corpusActionDescription : undefined}
                 onClick={() => void onExportPackage()}
               >
                 Export package…
@@ -993,21 +1143,15 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                 type="button"
                 className="btn btn--ghost"
                 disabled={
-                  busy ||
-                  !activeId ||
-                  activeEmbedding.state === "complete"
+                  busy || !activeId || activeEmbedding.state === "complete"
                 }
                 aria-describedby={
-                  busy ||
-                  !activeId ||
-                  activeEmbedding.state === "complete"
+                  busy || !activeId || activeEmbedding.state === "complete"
                     ? reanalysisActionDescriptionId
                     : undefined
                 }
                 title={
-                  busy ||
-                  !activeId ||
-                  activeEmbedding.state === "complete"
+                  busy || !activeId || activeEmbedding.state === "complete"
                     ? reanalysisActionDescription
                     : undefined
                 }
@@ -1036,9 +1180,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                 aria-describedby={
                   busy || !activeId ? corpusActionDescriptionId : undefined
                 }
-                title={
-                  busy || !activeId ? corpusActionDescription : undefined
-                }
+                title={busy || !activeId ? corpusActionDescription : undefined}
                 data-testid="open-log-explorer"
                 onClick={() => {
                   if (!activeId) return;
@@ -1086,10 +1228,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
               aria-label="Help"
               data-intent="help"
             >
-              <span
-                className="log-pane__action-group-label"
-                aria-hidden="true"
-              >
+              <span className="log-pane__action-group-label" aria-hidden="true">
                 Help
               </span>
               <div className="log-pane__action-group-controls">
@@ -1189,7 +1328,26 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
           {corpora.length === 0 ? (
             <div className="pane-empty">
               <p className="muted">No corpora yet.</p>
-              <button type="button" onClick={() => void onImportLogs()}>
+              <button
+                type="button"
+                data-log-import-trigger
+                aria-haspopup="menu"
+                aria-expanded={importMenuTriggerKey === "empty"}
+                aria-controls={
+                  importMenuTriggerKey === "empty" ? importMenuId : undefined
+                }
+                disabled={busy}
+                onClick={(event) => {
+                  if (importMenuTriggerKey === "empty") closeImportMenu();
+                  else openImportMenu("empty", event.currentTarget);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                    event.preventDefault();
+                    openImportMenu("empty", event.currentTarget);
+                  }
+                }}
+              >
                 Import logs…
               </button>
             </div>
@@ -1600,6 +1758,45 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
           onDismiss={closeDiagnostics}
         />
       ) : null}
+      {importMenuTriggerKey && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              ref={importMenuRef}
+              id={importMenuId}
+              className="log-card__menu log-import-menu"
+              role="menu"
+              aria-label="Import logs"
+              style={
+                importMenuPosition
+                  ? {
+                      left: importMenuPosition.left,
+                      top: importMenuPosition.top,
+                    }
+                  : { left: 0, top: 0, visibility: "hidden" }
+              }
+            >
+              <button
+                type="button"
+                role="menuitem"
+                className="log-card__menu-item"
+                onKeyDown={onImportMenuItemKeyDown}
+                onClick={() => void onImportLogs("directory")}
+              >
+                Import a folder…
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className="log-card__menu-item"
+                onKeyDown={onImportMenuItemKeyDown}
+                onClick={() => void onImportLogs("file")}
+              >
+                Import a log file or ZIP…
+              </button>
+            </div>,
+            document.body,
+          )
+        : null}
       {openMenuId && typeof document !== "undefined"
         ? createPortal(
             <div
