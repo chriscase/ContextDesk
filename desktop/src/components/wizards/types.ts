@@ -121,7 +121,13 @@ export function wizardNavCancel(state: WizardNavState): WizardNavState {
   return { ...state, cancelled: true };
 }
 
-/** Log ingest pipeline phase order for ProcessProgressPanel (#824). */
+/**
+ * Log ingest pipeline phase order for ProcessProgressPanel (#824).
+ *
+ * Matches core emission order: optional embedding may be skipped (deferred /
+ * keyword-only) between store and validate; validate always runs before atomic
+ * publication.
+ */
 export const LOG_INGEST_PIPELINE: ProcessProgressPhase[] = [
   "scan",
   "parse",
@@ -129,6 +135,7 @@ export const LOG_INGEST_PIPELINE: ProcessProgressPhase[] = [
   "redact",
   "store",
   "embed",
+  "validate",
   "publish",
 ];
 

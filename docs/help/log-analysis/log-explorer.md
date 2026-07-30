@@ -515,8 +515,10 @@ one-machine observations, not universal claims. Full generator docs:
 
 Cancel an in-progress SoftWrite with **Cancel ingest** on the progress panel.
 The progress panel shows the current phase (discover/read → parse/frame →
-template analysis → persist/index → optional embedding → publication), wall-clock
-**Elapsed** time, and whether cancel is still available. Cancel or failure before
+template analysis → persist/index → optional embedding → validate → publication),
+wall-clock **Elapsed** time, and whether cancel is still available. Optional
+embedding is only marked complete when it actually ran; deferred or keyword-only
+imports leave that step un-checked. Cancel or failure before
 **Publication** never lists a partial corpus; source files are left intact.
 Keyword-only and deferred corpora remain searchable after publication when
 embedding was skipped or deferred (the completion message states that keyword/

@@ -5642,6 +5642,84 @@ mod tests {
         );
     }
 
+    /// #824 — cancel mid-parse leaves a clean library; the same path can SoftWrite again.
+    #[test]
+    fn ingest_cancel_then_retry_succeeds_with_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let mut f = std::fs::File::create(logs.join("bulk.log")).unwrap();
+        for i in 0..6_000 {
+            writeln!(f, "warn bulk line {i} padding-padding").unwrap();
+        }
+        drop(f);
+
+        let flag = CancelFlag::new();
+        struct CancelMidParse {
+            flag: CancelFlag,
+            rec: RecordingProcessProgress,
+        }
+        impl ProcessProgressObserver for CancelMidParse {
+            fn progress(&self, update: ProcessProgress) {
+                if update.phase == ProcessProgressPhase::Parse
+                    && update.lines_processed.unwrap_or(0) >= 1_500
+                {
+                    self.flag.cancel();
+                }
+                self.rec.progress(update);
+            }
+        }
+        let cancel_obs = CancelMidParse {
+            flag: flag.clone(),
+            rec: RecordingProcessProgress::default(),
+        };
+        let err = ingest_path_with_observer(
+            &cache,
+            &logs,
+            "cancel-then-retry",
+            None,
+            "none",
+            &cancel_obs,
+            Some(&flag),
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("cancelled"), "{err}");
+        assert!(
+            LogCorpus::list_ids(&cache).unwrap().is_empty(),
+            "cancel must not publish a partial corpus"
+        );
+        assert_no_ingest_staging(&cache);
+
+        // Retry the same SoftWrite path without cancel — must publish cleanly.
+        let retry_rec = RecordingProcessProgress::default();
+        let report = ingest_path_with_observer(
+            &cache,
+            &logs,
+            "cancel-then-retry",
+            None,
+            "none",
+            &retry_rec,
+            None,
+        )
+        .unwrap();
+        assert_eq!(report.stats.lines, 6_000);
+        assert!(
+            retry_rec.phases().contains(&ProcessProgressPhase::Publish),
+            "retry must reach atomic publication: {:?}",
+            retry_rec.phases()
+        );
+        assert_eq!(
+            retry_rec.phases().last().copied(),
+            Some(ProcessProgressPhase::Completed)
+        );
+        let ids = LogCorpus::list_ids(&cache).unwrap();
+        assert_eq!(ids, vec![report.corpus_id.clone()]);
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        assert_eq!(corpus.event_count() as u64, 6_000);
+        assert_no_ingest_staging(&cache);
+    }
+
     /// #824 — deterministic 25k scale proof with phase timings (one-machine observation).
     #[test]
     fn scale_proof_25k_records_phase_timings_and_first_page() {
