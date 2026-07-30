@@ -127,10 +127,12 @@ describe("SessionContextBar compact disclosure", () => {
     await waitFor(() =>
       expect(onLinkedCorpusChange).toHaveBeenCalledWith("corpus-a"),
     );
-    expect(screen.queryByRole("dialog", { name: "Add context" })).toBeNull();
-    expect(document.activeElement).toBe(
-      screen.getByRole("button", { name: /Add context/ }),
-    );
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Add context" })).toBeNull();
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: /Add context/ }),
+      );
+    });
   });
 
   it("shows availability, event count, Explorer action, and reversible detach", async () => {
@@ -196,5 +198,27 @@ describe("SessionContextBar compact disclosure", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: triggerName })).toBeNull();
     expect(document.activeElement).toBe(trigger);
+  });
+
+  it("dismisses Add context on an outside pointer without stealing destination focus", async () => {
+    render(
+      <>
+        <SessionContextBar sessionId="session-1" />
+        <button type="button">Outside destination</button>
+      </>,
+    );
+
+    const trigger = screen.getByRole("button", { name: /Add context/ });
+    fireEvent.click(trigger);
+    expect(screen.getByRole("dialog", { name: "Add context" })).toBeTruthy();
+
+    const destination = screen.getByRole("button", {
+      name: "Outside destination",
+    });
+    fireEvent.mouseDown(destination);
+    destination.focus();
+
+    expect(screen.queryByRole("dialog", { name: "Add context" })).toBeNull();
+    expect(document.activeElement).toBe(destination);
   });
 });

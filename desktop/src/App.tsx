@@ -120,6 +120,7 @@ export function App() {
     y: number;
     sessionId: string;
   } | null>(null);
+  const chatCtxMenuTriggerRef = useRef<HTMLElement | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   /** Optional session wizards (#442) — never blocks blank new chat. */
   const [wizardCatalogOpen, setWizardCatalogOpen] = useState(false);
@@ -255,14 +256,11 @@ export function App() {
 
   const openChatCtxMenu = (e: ReactMouseEvent, id: string) => {
     e.preventDefault();
+    chatCtxMenuTriggerRef.current =
+      e.currentTarget instanceof HTMLElement ? e.currentTarget : null;
     setChatCtxMenu({ x: e.clientX, y: e.clientY, sessionId: id });
   };
-  useEffect(() => {
-    if (!chatCtxMenu) return;
-    const close = () => setChatCtxMenu(null);
-    window.addEventListener("click", close);
-    return () => window.removeEventListener("click", close);
-  }, [chatCtxMenu]);
+  const closeChatCtxMenu = useCallback(() => setChatCtxMenu(null), []);
 
   const ctxTarget = chatCtxMenu
     ? sessions.find((s) => s.id === chatCtxMenu.sessionId)
@@ -1072,6 +1070,8 @@ export function App() {
           x={chatCtxMenu.x}
           y={chatCtxMenu.y}
           target={ctxTarget}
+          origin={chatCtxMenuTriggerRef.current}
+          onDismiss={closeChatCtxMenu}
           onOpen={() => {
             setChatCtxMenu(null);
             setActiveSessionId(ctxTarget.id);
