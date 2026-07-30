@@ -141,7 +141,7 @@ function deferred<T>() {
 }
 
 async function chooseImportMode(
-  name: "Import a folder…" | "Import a log file or ZIP…",
+  name: "Import a folder…" | "Import a raw log file or ZIP…",
   triggerIndex = 0,
 ) {
   fireEvent.click(
@@ -212,7 +212,7 @@ describe("LogPane", () => {
       screen.getAllByRole("button", { name: /Import logs/i }).length,
     ).toBeGreaterThanOrEqual(1);
     expect(
-      screen.getByRole("button", { name: /Import package/i }),
+      screen.getByRole("button", { name: /Import ContextDesk package/i }),
     ).toBeTruthy();
     expect(
       screen.getByRole("button", { name: /Export package/i }),
@@ -236,7 +236,9 @@ describe("LogPane", () => {
       within(imports).getByRole("button", { name: "Import logs…" }),
     ).toBeTruthy();
     expect(
-      within(imports).getByRole("button", { name: "Import package…" }),
+      within(imports).getByRole("button", {
+        name: "Import ContextDesk package…",
+      }),
     ).toBeTruthy();
 
     const corpusActions = within(toolbar).getByRole("group", {
@@ -270,35 +272,19 @@ describe("LogPane", () => {
     expect(onOpenHelp).toHaveBeenCalledWith("log-explorer");
   });
 
-  it.each([520, 960, 1440, 2560])(
-    "keeps grouped actions discoverable without overflow at %ipx",
-    (width) => {
-      const originalWidth = window.innerWidth;
-      Object.defineProperty(window, "innerWidth", {
-        configurable: true,
-        value: width,
-      });
-
-      try {
-        render(<LogPane onOpenHelp={vi.fn()} />);
-        const toolbar = screen.getByRole("navigation", {
-          name: "Logs actions",
-        });
-        expect(within(toolbar).getAllByRole("group")).toHaveLength(4);
-        expect(within(toolbar).getAllByRole("button")).toHaveLength(7);
-        expect(
-          within(toolbar).queryByRole("button", {
-            name: /more logs actions/i,
-          }),
-        ).toBeNull();
-      } finally {
-        Object.defineProperty(window, "innerWidth", {
-          configurable: true,
-          value: originalWidth,
-        });
-      }
-    },
-  );
+  it("keeps every action in one semantic toolbar without a JS-only overflow mode", () => {
+    render(<LogPane onOpenHelp={vi.fn()} />);
+    const toolbar = screen.getByRole("navigation", {
+      name: "Logs actions",
+    });
+    expect(within(toolbar).getAllByRole("group")).toHaveLength(4);
+    expect(within(toolbar).getAllByRole("button")).toHaveLength(7);
+    expect(
+      within(toolbar).queryByRole("button", {
+        name: /more logs actions/i,
+      }),
+    ).toBeNull();
+  });
 
   it("explains unavailable corpus actions and completed re-analysis", async () => {
     const complete = {
@@ -370,7 +356,7 @@ describe("LogPane", () => {
       expect(emptyTrigger.hasAttribute("disabled")).toBe(false),
     );
 
-    await chooseImportMode("Import a log file or ZIP…", 1);
+    await chooseImportMode("Import a raw log file or ZIP…", 1);
     await waitFor(() =>
       expect(hostMocks.ingest).toHaveBeenCalledWith(
         "/tmp/server.log",
@@ -405,7 +391,7 @@ describe("LogPane", () => {
     expect(hostMocks.confirm).not.toHaveBeenCalled();
     expect(hostMocks.ingest).not.toHaveBeenCalled();
 
-    await chooseImportMode("Import a log file or ZIP…", 1);
+    await chooseImportMode("Import a raw log file or ZIP…", 1);
     await waitFor(() => expect(document.activeElement).toBe(emptyTrigger));
     expect(hostMocks.openFile).toHaveBeenCalledTimes(1);
     expect(hostMocks.openDirectory).toHaveBeenCalledTimes(1);
@@ -417,7 +403,7 @@ describe("LogPane", () => {
     expect(hostMocks.listCorpora).toHaveBeenCalledTimes(1);
   });
 
-  it("dismisses the import menu with Escape or outside input and restores focus", async () => {
+  it("restores focus on Escape but lets outside actions retain focus", async () => {
     render(<LogPane />);
     await screen.findByText(/No corpora yet/i);
     const [toolbarTrigger, emptyTrigger] = screen.getAllByRole("button", {
@@ -438,13 +424,15 @@ describe("LogPane", () => {
     expect(
       await screen.findByRole("menu", { name: "Import logs" }),
     ).toBeTruthy();
-    fireEvent.pointerDown(
-      screen.getByRole("button", { name: "Import package…" }),
-    );
+    const packageAction = screen.getByRole("button", {
+      name: "Import ContextDesk package…",
+    });
+    fireEvent.pointerDown(packageAction);
+    act(() => packageAction.focus());
     await waitFor(() =>
       expect(screen.queryByRole("menu", { name: "Import logs" })).toBeNull(),
     );
-    expect(document.activeElement).toBe(emptyTrigger);
+    expect(document.activeElement).toBe(packageAction);
     expect(hostMocks.openDirectory).not.toHaveBeenCalled();
     expect(hostMocks.openFile).not.toHaveBeenCalled();
   });
@@ -462,7 +450,7 @@ describe("LogPane", () => {
       name: "Import a folder…",
     });
     const file = within(menu).getByRole("menuitem", {
-      name: "Import a log file or ZIP…",
+      name: "Import a raw log file or ZIP…",
     });
     expect(document.activeElement).toBe(folder);
 
@@ -480,6 +468,16 @@ describe("LogPane", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     await waitFor(() => expect(document.activeElement).toBe(trigger));
     expect(screen.queryByRole("menu", { name: "Import logs" })).toBeNull();
+
+    fireEvent.keyDown(trigger, { key: "ArrowUp" });
+    const reopened = await screen.findByRole("menu", {
+      name: "Import logs",
+    });
+    expect(
+      within(reopened).getByRole("menuitem", {
+        name: "Import a raw log file or ZIP…",
+      }),
+    ).toBe(document.activeElement);
   });
 
   it("preserves primary corpus selection and keeps only one named overflow menu open", async () => {
@@ -557,7 +555,7 @@ describe("LogPane", () => {
 
     const logsHeading = screen.getByRole("heading", { name: "Logs" });
     const outsideButton = screen.getByRole("button", {
-      name: /Import package/i,
+      name: /Import ContextDesk package/i,
     });
     act(() => outsideButton.focus());
 
@@ -1232,7 +1230,9 @@ describe("LogPane", () => {
       }),
     ).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: /Import package/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /Import ContextDesk package/i }),
+    );
     await waitFor(() =>
       expect(hostMocks.importPackage).toHaveBeenCalledWith(
         "/tmp/package.cdlog.zip",
@@ -1535,7 +1535,9 @@ describe("LogPane", () => {
     });
 
     render(<LogPane />);
-    fireEvent.click(screen.getByRole("button", { name: "Import package…" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Import ContextDesk package…" }),
+    );
     await waitFor(() => expect(hostMocks.listCorpora).toHaveBeenCalledTimes(2));
 
     await act(async () => {
@@ -1756,7 +1758,9 @@ describe("LogPane", () => {
       originCorpusId: "origin",
     });
     hostMocks.openFile.mockResolvedValue("/tmp/synthetic-package.cdlogpkg");
-    fireEvent.click(screen.getByRole("button", { name: "Import package…" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Import ContextDesk package…" }),
+    );
     await waitFor(() =>
       expect(hostMocks.setActiveCorpus).toHaveBeenCalledWith(item.id),
     );
@@ -1808,7 +1812,9 @@ describe("LogPane", () => {
       name: v2.name,
       originCorpusId: "origin",
     });
-    fireEvent.click(screen.getByRole("button", { name: "Import package…" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Import ContextDesk package…" }),
+    );
     await waitFor(() =>
       expect(hostMocks.setActiveCorpus).toHaveBeenCalledWith(v2.id),
     );

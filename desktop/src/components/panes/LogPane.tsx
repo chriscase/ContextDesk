@@ -173,6 +173,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const menuRef = useRef<HTMLDivElement>(null);
   const importMenuRef = useRef<HTMLDivElement>(null);
   const importMenuTriggerRef = useRef<HTMLButtonElement>(null);
+  const importMenuInitialFocusRef = useRef<"first" | "last">("first");
   const listRef = useRef<HTMLElement>(null);
   const analysisCacheRef = useRef(new Map<string, CorpusAnalysis>());
   const analysisInFlightRef = useRef(new Map<string, Promise<void>>());
@@ -420,9 +421,15 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   useLayoutEffect(() => {
     if (!importMenuTriggerKey) return;
     positionImportMenu();
-    importMenuRef.current
-      ?.querySelector<HTMLButtonElement>('[role="menuitem"]')
-      ?.focus();
+    const items =
+      importMenuRef.current?.querySelectorAll<HTMLButtonElement>(
+        '[role="menuitem"]',
+      );
+    const target =
+      importMenuInitialFocusRef.current === "last"
+        ? items?.item((items?.length ?? 1) - 1)
+        : items?.item(0);
+    target?.focus();
   }, [importMenuTriggerKey, positionImportMenu]);
 
   useEffect(() => {
@@ -438,11 +445,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       ) {
         return;
       }
-      const otherTrigger =
-        target instanceof Element
-          ? target.closest("[data-log-import-trigger]")
-          : null;
-      closeImportMenu(!otherTrigger);
+      closeImportMenu(false);
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
@@ -917,9 +920,11 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   function openImportMenu(
     key: "toolbar" | "empty",
     trigger: HTMLButtonElement,
+    initialFocus: "first" | "last" = "first",
   ) {
     closeCorpusMenu(false);
     importMenuTriggerRef.current = trigger;
+    importMenuInitialFocusRef.current = initialFocus;
     setImportMenuPosition(null);
     setImportMenuTriggerKey(key);
   }
@@ -1074,9 +1079,6 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
             aria-label="Import"
             data-intent="import"
           >
-            <span className="log-pane__action-group-label" aria-hidden="true">
-              Import
-            </span>
             <div className="log-pane__action-group-controls">
               <button
                 ref={importLogsTriggerRef}
@@ -1098,7 +1100,11 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                 onKeyDown={(event) => {
                   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
                     event.preventDefault();
-                    openImportMenu("toolbar", event.currentTarget);
+                    openImportMenu(
+                      "toolbar",
+                      event.currentTarget,
+                      event.key === "ArrowUp" ? "last" : "first",
+                    );
                   }
                 }}
               >
@@ -1112,7 +1118,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                 title={busy ? busyActionDescription : undefined}
                 onClick={() => void onImportPackage()}
               >
-                Import package…
+                Import ContextDesk package…
               </button>
             </div>
           </div>
@@ -1123,9 +1129,6 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
             aria-label="Corpus operations"
             data-intent="corpus"
           >
-            <span className="log-pane__action-group-label" aria-hidden="true">
-              Corpus
-            </span>
             <div className="log-pane__action-group-controls">
               <button
                 type="button"
@@ -1169,9 +1172,6 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
             aria-label="Open and explore"
             data-intent="explore"
           >
-            <span className="log-pane__action-group-label" aria-hidden="true">
-              Explore
-            </span>
             <div className="log-pane__action-group-controls">
               <button
                 type="button"
@@ -1228,9 +1228,6 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
               aria-label="Help"
               data-intent="help"
             >
-              <span className="log-pane__action-group-label" aria-hidden="true">
-                Help
-              </span>
               <div className="log-pane__action-group-controls">
                 <button
                   type="button"
@@ -1344,7 +1341,11 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                 onKeyDown={(event) => {
                   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
                     event.preventDefault();
-                    openImportMenu("empty", event.currentTarget);
+                    openImportMenu(
+                      "empty",
+                      event.currentTarget,
+                      event.key === "ArrowUp" ? "last" : "first",
+                    );
                   }
                 }}
               >
@@ -1791,7 +1792,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                 onKeyDown={onImportMenuItemKeyDown}
                 onClick={() => void onImportLogs("file")}
               >
-                Import a log file or ZIP…
+                Import a raw log file or ZIP…
               </button>
             </div>,
             document.body,
