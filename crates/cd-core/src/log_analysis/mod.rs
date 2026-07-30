@@ -148,10 +148,11 @@ pub use suppression::{
     preview_template_suppression, ActivateSuppressionPreview, NewSuppressionPreview,
     SuppressionAuditAction, SuppressionAuditEntry, SuppressionDocument, SuppressionLevelCount,
     SuppressionMutationResult, SuppressionPreview, SuppressionRepresentativeEvent, SuppressionRule,
-    SuppressionRuleMutation, SuppressionRuleOrigin, SuppressionRuleState,
-    SuppressionTemplatePredicate, SuppressionTimeSpan, MAX_SUPPRESSION_AUDIT_ENTRIES,
-    MAX_SUPPRESSION_LEVEL_BUCKETS, MAX_SUPPRESSION_PREVIEWS, MAX_SUPPRESSION_REPRESENTATIVES,
-    MAX_SUPPRESSION_RULES, SUPPRESSION_SCHEMA_VERSION,
+    SuppressionRuleMutation, SuppressionRuleOrigin, SuppressionRuleResolution,
+    SuppressionRuleResolutionKind, SuppressionRuleState, SuppressionTemplatePredicate,
+    SuppressionTimeSpan, MAX_SUPPRESSION_AUDIT_ENTRIES, MAX_SUPPRESSION_LEVEL_BUCKETS,
+    MAX_SUPPRESSION_PREVIEWS, MAX_SUPPRESSION_REPRESENTATIVES, MAX_SUPPRESSION_RULES,
+    SUPPRESSION_SCHEMA_VERSION,
 };
 pub use timezone_application::{
     apply_source_timezone, clear_source_timezone, load_timezone_resolution_state,
