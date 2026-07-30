@@ -409,3 +409,75 @@ export function pointFallsInGap(
 ): boolean {
   return gaps.some((gap) => timestamp >= gap.from && timestamp <= gap.to);
 }
+
+/** Exact copy when corpus is order-only (#670 / #707). */
+export const METRIC_LOAD_BLOCKED_ORDER_ONLY =
+  "Metrics need a wall clock. This corpus is order-only, so metric tracks cannot be aligned.";
+
+/** Exact copy when corpus has mixed/unresolved time sources. */
+export const METRIC_LOAD_BLOCKED_MIXED =
+  "Metrics need a reliable shared wall clock. Some sources in this corpus have unresolved time.";
+
+/** Honest failure when the timeline is empty, failed, or not yet loaded. */
+export const METRIC_LOAD_BLOCKED_TIMELINE_UNAVAILABLE =
+  "Metrics need a reliable shared wall clock. The timeline is not ready yet.";
+
+export type MetricLoadTimelineSummary = {
+  timeQuality: TimeQuality | string;
+  spanFrom?: number | null;
+  spanTo?: number | null;
+  bucketCount?: number;
+};
+
+export type MetricLoadGate =
+  | { allowed: true }
+  | { allowed: false; reason: string };
+
+/**
+ * Pure gate: session metric loading requires a loaded timeline with reliable
+ * shared wall-clock quality. Does not upgrade clocks or invent timezones.
+ */
+export function metricLoadGate(
+  summary: MetricLoadTimelineSummary | null | undefined,
+  options?: {
+    loading?: boolean;
+    error?: string | null;
+  },
+): MetricLoadGate {
+  if (options?.loading) {
+    return {
+      allowed: false,
+      reason: METRIC_LOAD_BLOCKED_TIMELINE_UNAVAILABLE,
+    };
+  }
+  if (options?.error) {
+    return {
+      allowed: false,
+      reason: METRIC_LOAD_BLOCKED_TIMELINE_UNAVAILABLE,
+    };
+  }
+  if (
+    !summary ||
+    summary.spanFrom == null ||
+    summary.spanTo == null ||
+    (summary.bucketCount != null && summary.bucketCount <= 0)
+  ) {
+    return {
+      allowed: false,
+      reason: METRIC_LOAD_BLOCKED_TIMELINE_UNAVAILABLE,
+    };
+  }
+  if (summary.timeQuality === "wall") {
+    return { allowed: true };
+  }
+  if (summary.timeQuality === "order_only") {
+    return { allowed: false, reason: METRIC_LOAD_BLOCKED_ORDER_ONLY };
+  }
+  if (summary.timeQuality === "mixed") {
+    return { allowed: false, reason: METRIC_LOAD_BLOCKED_MIXED };
+  }
+  return {
+    allowed: false,
+    reason: METRIC_LOAD_BLOCKED_TIMELINE_UNAVAILABLE,
+  };
+}

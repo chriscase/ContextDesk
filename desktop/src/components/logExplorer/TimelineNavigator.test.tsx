@@ -1339,4 +1339,119 @@ describe("TimelineNavigator", () => {
       "seek unavailable",
     );
   });
+
+  it("disables metric load for order_only with the exact accessible explanation", async () => {
+    vi.mocked(host.hostLogSharedTimelineSummary).mockResolvedValue({
+      ...summary,
+      timeQuality: "order_only",
+    });
+    const file = metricFile(sessionMetrics);
+    const textSpy = vi.spyOn(file, "text");
+
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("timeline-navigator-track");
+    const load = screen.getByTestId("timeline-metric-load");
+    expect(load.getAttribute("aria-disabled")).toBe("true");
+    expect(load.getAttribute("aria-describedby")).toBe(
+      "timeline-metric-load-reason",
+    );
+    const reason = screen.getByTestId("timeline-metric-load-reason");
+    expect(reason.textContent).toBe(
+      "Metrics need a wall clock. This corpus is order-only, so metric tracks cannot be aligned.",
+    );
+    // Keyboard users: focus the control (aria-disabled, not HTML disabled) and
+    // the visible supporting copy which is itself tabbable.
+    load.focus();
+    expect(document.activeElement).toBe(load);
+    expect(
+      document.getElementById(load.getAttribute("aria-describedby")!),
+    ).toBe(reason);
+    reason.focus();
+    expect(document.activeElement).toBe(reason);
+
+    fireEvent.click(load);
+    fireEvent.change(screen.getByTestId("timeline-metric-input"), {
+      target: { files: [file] },
+    });
+    expect(textSpy).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("timeline-session-metrics")).toBeNull();
+  });
+
+  it("disables metric load for mixed with the distinct unresolved-time explanation", async () => {
+    vi.mocked(host.hostLogSharedTimelineSummary).mockResolvedValue({
+      ...summary,
+      timeQuality: "mixed",
+    });
+    const file = metricFile(sessionMetrics);
+    const textSpy = vi.spyOn(file, "text");
+
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("timeline-navigator-track");
+    const load = screen.getByTestId("timeline-metric-load");
+    expect(load.getAttribute("aria-disabled")).toBe("true");
+    expect(screen.getByTestId("timeline-metric-load-reason").textContent).toBe(
+      "Metrics need a reliable shared wall clock. Some sources in this corpus have unresolved time.",
+    );
+    fireEvent.change(screen.getByTestId("timeline-metric-input"), {
+      target: { files: [file] },
+    });
+    expect(textSpy).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("timeline-session-metrics")).toBeNull();
+  });
+
+  it("re-enables metric load when the timeline becomes wall-clock", async () => {
+    vi.mocked(host.hostLogSharedTimelineSummary).mockResolvedValue({
+      ...summary,
+      timeQuality: "order_only",
+    });
+    const { rerender } = render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("timeline-navigator-track");
+    expect(
+      screen.getByTestId("timeline-metric-load").getAttribute("aria-disabled"),
+    ).toBe("true");
+
+    vi.mocked(host.hostLogSharedTimelineSummary).mockResolvedValue(summary);
+    rerender(
+      <TimelineNavigator
+        corpusId="c2"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    await waitFor(() =>
+      expect(
+        screen
+          .getByTestId("timeline-metric-load")
+          .getAttribute("aria-disabled"),
+      ).not.toBe("true"),
+    );
+    expect(screen.queryByTestId("timeline-metric-load-reason")).toBeNull();
+
+    fireEvent.change(screen.getByTestId("timeline-metric-input"), {
+      target: { files: [metricFile(sessionMetrics)] },
+    });
+    expect(await screen.findByTestId("timeline-session-metrics")).toBeTruthy();
+  });
 });

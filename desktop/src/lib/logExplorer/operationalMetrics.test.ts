@@ -4,6 +4,10 @@ import { describe, expect, it } from "vitest";
 import {
   clampMetricRange,
   downsampleMetricPoints,
+  METRIC_LOAD_BLOCKED_MIXED,
+  METRIC_LOAD_BLOCKED_ORDER_ONLY,
+  METRIC_LOAD_BLOCKED_TIMELINE_UNAVAILABLE,
+  metricLoadGate,
   metricPointsForRange,
   pointFallsInGap,
   validateOperationalMetricsDocument,
@@ -237,5 +241,58 @@ describe("operational metric rendering helpers", () => {
       from: 2,
       to: 8,
     });
+  });
+});
+
+describe("metricLoadGate (corpus wall-clock requirement)", () => {
+  const readyWall = {
+    timeQuality: "wall" as const,
+    spanFrom: 1_700_000_000,
+    spanTo: 1_700_000_100,
+    bucketCount: 4,
+  };
+
+  it("allows loading only for a ready wall-clock timeline", () => {
+    expect(metricLoadGate(readyWall)).toEqual({ allowed: true });
+  });
+
+  it("blocks order_only with the exact corpus-clock explanation", () => {
+    const gate = metricLoadGate({ ...readyWall, timeQuality: "order_only" });
+    expect(gate.allowed).toBe(false);
+    if (gate.allowed) throw new Error("expected blocked");
+    expect(gate.reason).toBe(METRIC_LOAD_BLOCKED_ORDER_ONLY);
+  });
+
+  it("blocks mixed with the distinct unresolved-time explanation", () => {
+    const gate = metricLoadGate({ ...readyWall, timeQuality: "mixed" });
+    expect(gate.allowed).toBe(false);
+    if (gate.allowed) throw new Error("expected blocked");
+    expect(gate.reason).toBe(METRIC_LOAD_BLOCKED_MIXED);
+  });
+
+  it("fails honestly when the timeline is empty, loading, or errored", () => {
+    expect(metricLoadGate(null).allowed).toBe(false);
+    expect(metricLoadGate(null)).toEqual({
+      allowed: false,
+      reason: METRIC_LOAD_BLOCKED_TIMELINE_UNAVAILABLE,
+    });
+    const loading = metricLoadGate(readyWall, { loading: true });
+    expect(loading.allowed).toBe(false);
+    if (!loading.allowed) {
+      expect(loading.reason).toBe(METRIC_LOAD_BLOCKED_TIMELINE_UNAVAILABLE);
+    }
+    const errored = metricLoadGate(readyWall, { error: "summary failed" });
+    expect(errored.allowed).toBe(false);
+    if (!errored.allowed) {
+      expect(errored.reason).toBe(METRIC_LOAD_BLOCKED_TIMELINE_UNAVAILABLE);
+    }
+    const empty = metricLoadGate({
+      ...readyWall,
+      bucketCount: 0,
+    });
+    expect(empty.allowed).toBe(false);
+    if (!empty.allowed) {
+      expect(empty.reason).toBe(METRIC_LOAD_BLOCKED_TIMELINE_UNAVAILABLE);
+    }
   });
 });

@@ -27,6 +27,7 @@ import { HelpTip } from "../HelpTip";
 import { OperationalMetricTracks } from "./OperationalMetricTracks";
 import {
   metricDocumentTimeRange,
+  metricLoadGate,
   validateOperationalMetricsDocument,
   type OperationalMetricRange,
   type OperationalMetricsDocumentV1,
@@ -504,10 +505,28 @@ export function TimelineNavigator({
     [previewTimestamp, summary],
   );
 
+  const loadGate = useMemo(
+    () =>
+      metricLoadGate(summary, {
+        loading,
+        error,
+      }),
+    [summary, loading, error],
+  );
+  const metricsBlocked = !loadGate.allowed;
+  const metricsBlockReason = loadGate.allowed ? null : loadGate.reason;
+  const metricsHelpId = "timeline-metric-load-reason";
+
   const importSessionMetrics = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
     if (!file) return;
+    // Fail closed before reading the file when the corpus clock cannot align.
+    const gate = metricLoadGate(summary, { loading, error });
+    if (!gate.allowed) {
+      setMetricError(gate.reason);
+      return;
+    }
     setMetricError(null);
     if (file.size > MAX_SESSION_METRIC_BYTES) {
       setMetricError("Metric bundle exceeds the 8 MB session import limit.");
@@ -739,12 +758,24 @@ export function TimelineNavigator({
                       type="file"
                       accept="application/json,.json"
                       aria-label="Choose operational metric bundle"
+                      // Keep in DOM but never open when the corpus clock is unusable.
+                      tabIndex={metricsBlocked ? -1 : 0}
                       onChange={(event) => void importSessionMetrics(event)}
                     />
                     <button
                       type="button"
                       className="timeline-navigator__metric-action"
-                      onClick={() => metricInputRef.current?.click()}
+                      data-testid="timeline-metric-load"
+                      // aria-disabled (not disabled) so keyboard users can focus and
+                      // hear the linked reason; click is a no-op when blocked.
+                      aria-disabled={metricsBlocked ? true : undefined}
+                      aria-describedby={
+                        metricsBlocked ? metricsHelpId : undefined
+                      }
+                      onClick={() => {
+                        if (metricsBlocked) return;
+                        metricInputRef.current?.click();
+                      }}
                     >
                       {metricDocument ? "Replace metrics" : "Load metrics…"}
                     </button>
@@ -781,6 +812,17 @@ export function TimelineNavigator({
                       content={HELP_TIMELINE_NAVIGATOR}
                     />
                   </div>
+                  {metricsBlocked && metricsBlockReason ? (
+                    <p
+                      id={metricsHelpId}
+                      className="timeline-navigator__metric-gate"
+                      data-testid="timeline-metric-load-reason"
+                      role="note"
+                      tabIndex={0}
+                    >
+                      {metricsBlockReason}
+                    </p>
+                  ) : null}
                 </div>
                 <div
                   className="log-explorer__navigator-bars timeline-navigator__chart"
