@@ -1852,7 +1852,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
         }
         if linked_broad_triage {
             trail.push(format!(
-                "linked_broad_triage:search_logs(error,semantic=false,k<={broad_triage_search_k})->cluster_problems->timeline"
+                "linked_broad_triage:host_brief(error_templates<={broad_triage_search_k},facets,clusters,timeline,correlations)->tool_closed_synthesis"
             ));
         }
         if linked_workspace_search_required {
@@ -1869,6 +1869,84 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
     let mut successful_read_tools = HashSet::new();
     let mut nudged_required_tools = HashSet::new();
     let mut linked_invalid_synthesis_retry = false;
+
+    // Broad triage starts with one host-owned deterministic brief. Large or
+    // noisy corpora must not depend on a model correctly inventing the first
+    // search/cluster/timeline tool sequence before it has any evidence.
+    // Failure falls back to the existing staged native-tool path.
+    if linked_broad_triage {
+        let id = uuid::Uuid::new_v4().to_string();
+        enter_phase(
+            &mut out,
+            &mut trail,
+            &mut clock,
+            AgentPhase::RetrievingEvidence,
+        );
+        out.push(StreamEvent::Tool {
+            id: id.clone(),
+            name: "broad_log_triage".into(),
+            phase: crate::events::ToolPhase::Started,
+            summary: "Preparing deterministic large-corpus triage".into(),
+            detail: None,
+            ok: None,
+        });
+        match host.build_broad_log_triage_brief() {
+            Ok(brief) => {
+                current_turn_evidence.push(&brief.model_text);
+                extend_linked_log_identities(&mut linked_log_evidence_identities, &brief.evidence);
+                if brief.deterministic_complete && !brief.evidence.is_empty() {
+                    successful_log_tools = successful_log_tools.saturating_add(1);
+                    for tool in [
+                        crate::log_analysis::SEARCH_LOGS,
+                        crate::log_analysis::CLUSTER_PROBLEMS,
+                        crate::log_analysis::TIMELINE,
+                    ] {
+                        successful_read_tools.insert(tool.to_string());
+                    }
+                }
+                trail.push(format!(
+                    "linked_broad_triage_brief:bytes={},identities={},truncated={}",
+                    brief.model_text_bytes,
+                    brief.evidence.len(),
+                    brief.model_text_truncated
+                ));
+                out.push(StreamEvent::Tool {
+                    id,
+                    name: "broad_log_triage".into(),
+                    phase: crate::events::ToolPhase::Finished,
+                    summary: format!(
+                        "Prepared bounded triage brief · {} evidence identities{}",
+                        brief.evidence.len(),
+                        if brief.model_text_truncated {
+                            " · truncated"
+                        } else {
+                            ""
+                        }
+                    ),
+                    detail: Some(format!(
+                        "Host-computed levels, sources, services, templates, timeline, and \
+                         correlations are ready for synthesis. {} unsuppressed events · {} · \
+                         suppression revision {}.",
+                        brief.unsuppressed_event_count,
+                        brief.time_quality.label(),
+                        brief.suppression_revision
+                    )),
+                    ok: Some(true),
+                });
+            }
+            Err(error) => {
+                trail.push(format!("linked_broad_triage_brief_failed:{error}"));
+                out.push(StreamEvent::Tool {
+                    id,
+                    name: "broad_log_triage".into(),
+                    phase: crate::events::ToolPhase::Finished,
+                    summary: "Deterministic triage brief failed; using staged tools".into(),
+                    detail: Some(error.to_string()),
+                    ok: Some(false),
+                });
+            }
+        }
+    }
 
     for round in 0..opts.max_rounds {
         if cancelled(opts) {
@@ -3433,7 +3511,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broad_linked_triage_forces_search_cluster_timeline_before_synthesis() {
+    async fn broad_linked_triage_builds_deterministic_brief_before_first_model_call() {
         use std::collections::VecDeque;
         use std::io::Write;
         use std::sync::Mutex;
@@ -3462,44 +3540,20 @@ mod tests {
                     .join("\n");
                 match call {
                     0 => {
-                        assert_eq!(
-                            tool_names,
-                            HashSet::from([crate::log_analysis::SEARCH_LOGS])
-                        );
-                        assert!(context.contains("level=\"error\""), "{context}");
-                        assert!(context.contains("semantic=false"), "{context}");
-                        assert!(context.contains("Omit query entirely"), "{context}");
-                    }
-                    1 => {
-                        assert_eq!(
-                            tool_names,
-                            HashSet::from([crate::log_analysis::SEARCH_LOGS])
-                        );
-                        assert!(
-                            context.contains("structured bounded error retrieval"),
-                            "{context}"
-                        );
-                    }
-                    2 => {
-                        assert_eq!(
-                            tool_names,
-                            HashSet::from([crate::log_analysis::CLUSTER_PROBLEMS])
-                        );
-                        assert!(context.contains("Call cluster_problems"), "{context}");
-                    }
-                    3 => {
-                        assert_eq!(tool_names, HashSet::from([crate::log_analysis::TIMELINE]));
-                        assert!(context.contains("Call timeline"), "{context}");
-                    }
-                    4 => {
-                        assert!(tools.is_empty(), "synthesis tools={tools:?}");
+                        assert!(tool_names.is_empty(), "synthesis tools={tools:?}");
                         assert!(
                             context.contains("No more tools are available in this synthesis step"),
                             "{context}"
                         );
                         assert!(context.contains("pool exhausted"), "{context}");
-                        assert!(context.contains("source_kind: log_clusters"), "{context}");
-                        assert!(context.contains("source_kind: log_timeline"), "{context}");
+                        assert!(
+                            context.contains("source_kind: deterministic_broad_log_triage"),
+                            "{context}"
+                        );
+                        assert!(context.contains("time_quality:"), "{context}");
+                        assert!(context.contains("suppression_"), "{context}");
+                        assert!(context.contains("seq=0"), "{context}");
+                        assert!(context.contains("source=\"api.log\""), "{context}");
                     }
                     _ => panic!("unexpected provider round {call}"),
                 }
@@ -3540,49 +3594,17 @@ mod tests {
         let mut host = ToolHost::new(workspace, index, None);
         host.set_log_analysis(true, Some(cache));
         host.set_active_log_corpus(Some(report.corpus_id.clone()));
+        host.set_log_corpus_scope(Some(report.corpus_id.clone()));
+        host.pin_log_suppression_lens(&report.corpus_id).unwrap();
 
-        let tool_call = |id: &str, name: &str, arguments: &str| ChatCompletion {
-            content: String::new(),
-            tool_calls: vec![ToolCallMsg {
-                id: id.into(),
-                kind: "function".into(),
-                function: FunctionCall {
-                    name: name.into(),
-                    arguments: arguments.into(),
-                },
-            }],
-            finish_reason: "tool_calls".into(),
-        };
         let backend = BroadTriageBackend {
             script: Mutex::new(
-                vec![
-                    tool_call(
-                        "generic-search",
-                        crate::log_analysis::SEARCH_LOGS,
-                        r#"{"query":"What problems do you see in these logs?","semantic":true,"k":1000}"#,
-                    ),
-                    tool_call(
-                        "bounded-errors",
-                        crate::log_analysis::SEARCH_LOGS,
-                        r#"{"level":"error","semantic":false,"k":12}"#,
-                    ),
-                    tool_call(
-                        "clusters",
-                        crate::log_analysis::CLUSTER_PROBLEMS,
-                        r#"{"max_clusters":4}"#,
-                    ),
-                    tool_call(
-                        "timeline",
-                        crate::log_analysis::TIMELINE,
-                        r#"{"width_secs":60}"#,
-                    ),
-                    ChatCompletion {
+                vec![ChatCompletion {
                         content: "Observed repeated checkout pool exhaustion at seq=0 source=api.log; deterministic clusters and timeline indicate a concentrated error pattern."
                             .into(),
                         tool_calls: vec![],
                         finish_reason: "stop".into(),
-                    },
-                ]
+                    }]
                 .into(),
             ),
             calls: std::sync::atomic::AtomicUsize::new(0),
@@ -3599,7 +3621,7 @@ mod tests {
                 session_id: "broad-triage".into(),
                 log_explorer_context: Some(context),
                 max_results_per_source: 12,
-                max_rounds: 6,
+                max_rounds: 2,
                 ..Default::default()
             },
         )
@@ -3622,17 +3644,11 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("|");
+        assert!(trail.contains("linked_broad_triage_brief:"), "{trail}");
         assert!(
-            trail.contains("linked_broad_triage_generic_search_rejected"),
+            !trail.contains("linked_broad_triage_generic_search_rejected"),
             "{trail}"
         );
-        for tool in [
-            crate::log_analysis::SEARCH_LOGS,
-            crate::log_analysis::CLUSTER_PROBLEMS,
-            crate::log_analysis::TIMELINE,
-        ] {
-            assert!(trail.contains(&format!("tool:{tool}")), "{trail}");
-        }
         assert!(
             !events
                 .iter()
@@ -3640,13 +3656,20 @@ mod tests {
             "{events:?}"
         );
         assert!(
-            history
-                .iter()
-                .filter(|message| message.role == Role::Tool)
-                .count()
-                >= 4,
+            history.iter().all(|message| message.role != Role::Tool),
             "{history:?}"
         );
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::Tool {
+                    name,
+                    phase: crate::events::ToolPhase::Finished,
+                    ok: Some(true),
+                    ..
+                } if name == "broad_log_triage"
+            )
+        }));
     }
 
     /// Fake-model production path: tool request → search_logs → evidence answer (#530).
