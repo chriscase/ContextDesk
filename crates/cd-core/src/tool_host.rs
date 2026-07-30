@@ -93,11 +93,12 @@ pub const BROAD_LOG_TRIAGE_BRIEF_MAX_BYTES: usize = 32 * 1024;
 pub const BROAD_LOG_TRIAGE_IDENTITY_CAP: usize = 128;
 
 const BROAD_LOG_TRIAGE_DISTRIBUTION_CAP: usize = 12;
-const BROAD_LOG_TRIAGE_ERROR_SEARCH_CAP: usize = 100;
 const BROAD_LOG_TRIAGE_ERROR_DISPLAY_CAP: usize = 16;
 const BROAD_LOG_TRIAGE_RARE_ERROR_RESERVE: usize = 4;
+const BROAD_LOG_TRIAGE_ERROR_EXEMPLAR_CAP: usize = 3;
 const BROAD_LOG_TRIAGE_CLUSTER_CAP: usize = 10;
 const BROAD_LOG_TRIAGE_TIMELINE_BUCKET_CAP: usize = 12;
+const BROAD_LOG_TRIAGE_TIMELINE_ERROR_RESERVE: usize = 4;
 const BROAD_LOG_TRIAGE_CORRELATION_SEED_CAP: usize = 3;
 const BROAD_LOG_TRIAGE_CORRELATION_RESULT_CAP: usize = 5;
 const BROAD_LOG_TRIAGE_LINE_MAX_BYTES: usize = 192;
@@ -224,6 +225,140 @@ fn bound_broad_triage_model_text(body: &str) -> (String, bool) {
         wrapped = deterministic_untrusted_log_brief(&bounded_body);
     }
     (wrapped, true)
+}
+
+#[derive(Debug, Clone)]
+struct BroadTriageErrorTemplate {
+    template_id: u64,
+    error_event_count: u64,
+    severity: u8,
+}
+
+fn broad_triage_exclusion_sql(excluded_template_ids: &[u64]) -> CoreResult<String> {
+    let excluded = excluded_template_ids
+        .iter()
+        .copied()
+        .map(|template_id| {
+            i64::try_from(template_id).map_err(|_| {
+                CoreError::Message(
+                    "suppressed template id exceeds signed database storage range".into(),
+                )
+            })
+        })
+        .collect::<CoreResult<Vec<_>>>()?;
+    Ok(if excluded.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " AND template_id NOT IN ({})",
+            excluded
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    })
+}
+
+fn broad_triage_time_quality(
+    corpus: &crate::log_analysis::LogCorpus,
+    excluded_template_ids: &[u64],
+) -> CoreResult<crate::log_analysis::TimeQuality> {
+    let exclusion_sql = broad_triage_exclusion_sql(excluded_template_ids)?;
+    let sql = format!(
+        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN ts >= {} THEN 1 ELSE 0 END), 0) \
+         FROM events WHERE 1=1{exclusion_sql}",
+        crate::log_analysis::MIN_WALL_TS
+    );
+    corpus.with_connection(|connection| {
+        let (total, wall) = connection
+            .query_row(&sql, [], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|error| {
+                CoreError::Message(format!("broad triage time-quality query: {error}"))
+            })?;
+        Ok(match (total.max(0), wall.max(0)) {
+            (0, _) | (_, 0) => crate::log_analysis::TimeQuality::OrderOnly,
+            (total, wall) if total == wall => crate::log_analysis::TimeQuality::Wall,
+            _ => crate::log_analysis::TimeQuality::Mixed,
+        })
+    })
+}
+
+fn broad_triage_error_templates(
+    corpus: &crate::log_analysis::LogCorpus,
+    excluded_template_ids: &[u64],
+) -> CoreResult<(u64, Vec<BroadTriageErrorTemplate>)> {
+    let exclusion_sql = broad_triage_exclusion_sql(excluded_template_ids)?;
+    let impact_cap =
+        BROAD_LOG_TRIAGE_ERROR_DISPLAY_CAP.saturating_sub(BROAD_LOG_TRIAGE_RARE_ERROR_RESERVE);
+    let sql = format!(
+        r#"
+        WITH error_counts AS (
+            SELECT template_id,
+                   COUNT(*) AS error_event_count,
+                   MAX(CASE WHEN lower(level) = 'fatal' THEN 5 ELSE 4 END) AS severity
+            FROM events
+            WHERE lower(level) IN ('error', 'fatal'){exclusion_sql}
+            GROUP BY template_id
+        ),
+        ranked AS (
+            SELECT template_id,
+                   error_event_count,
+                   severity,
+                   COUNT(*) OVER () AS templates_available,
+                   ROW_NUMBER() OVER (
+                       ORDER BY severity DESC, error_event_count DESC, template_id ASC
+                   ) AS impact_rank,
+                   ROW_NUMBER() OVER (
+                       ORDER BY error_event_count ASC, severity DESC, template_id ASC
+                   ) AS rare_rank
+            FROM error_counts
+        )
+        SELECT template_id, error_event_count, severity, templates_available
+        FROM ranked
+        WHERE impact_rank <= {impact_cap}
+           OR rare_rank <= {BROAD_LOG_TRIAGE_RARE_ERROR_RESERVE}
+        ORDER BY severity DESC, error_event_count DESC, template_id ASC
+        "#
+    );
+    corpus.with_connection(|connection| {
+        let mut statement = connection.prepare(&sql).map_err(|error| {
+            CoreError::Message(format!("broad triage ERROR aggregation prepare: {error}"))
+        })?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(|error| {
+                CoreError::Message(format!("broad triage ERROR aggregation query: {error}"))
+            })?;
+        let mut available = 0_u64;
+        let mut selected = Vec::new();
+        for row in rows {
+            let (template_id, error_event_count, severity, templates_available) =
+                row.map_err(|error| {
+                    CoreError::Message(format!("broad triage ERROR aggregation row: {error}"))
+                })?;
+            available = templates_available.max(0) as u64;
+            selected.push(BroadTriageErrorTemplate {
+                template_id: u64::try_from(template_id).map_err(|_| {
+                    CoreError::Message("negative template id in ERROR aggregation".into())
+                })?,
+                error_event_count: error_event_count.max(0) as u64,
+                severity: u8::try_from(severity).map_err(|_| {
+                    CoreError::Message("invalid severity in ERROR aggregation".into())
+                })?,
+            });
+        }
+        Ok((available, selected))
+    })
 }
 
 /// Host context for tools.
@@ -1176,6 +1311,7 @@ impl ToolHost {
                 "pinned log suppression belongs to a different corpus".into(),
             ));
         }
+        let event_revision = corpus.event_revision();
         let suppression = suppression.clone();
         let event_query = crate::log_analysis::EventQuery {
             excluded_template_ids: suppression.excluded_template_ids.clone(),
@@ -1183,37 +1319,8 @@ impl ToolHost {
         };
         let unsuppressed_event_count =
             crate::log_analysis::query_event_count(&corpus, &event_query)?.total_matched;
-
-        let excluded = suppression
-            .excluded_template_ids
-            .iter()
-            .copied()
-            .collect::<std::collections::HashSet<_>>();
-        let mut saw_wall = false;
-        let mut saw_order_only = false;
-        corpus.with_events(|events| {
-            for event in events {
-                if excluded.contains(&event.template_id) {
-                    continue;
-                }
-                match crate::log_analysis::classify_ts(event.ts) {
-                    crate::log_analysis::TimeQuality::Wall => saw_wall = true,
-                    crate::log_analysis::TimeQuality::OrderOnly => saw_order_only = true,
-                    crate::log_analysis::TimeQuality::Mixed => {
-                        saw_wall = true;
-                        saw_order_only = true;
-                    }
-                }
-                if saw_wall && saw_order_only {
-                    break;
-                }
-            }
-        });
-        let time_quality = match (saw_wall, saw_order_only) {
-            (true, false) => crate::log_analysis::TimeQuality::Wall,
-            (true, true) => crate::log_analysis::TimeQuality::Mixed,
-            _ => crate::log_analysis::TimeQuality::OrderOnly,
-        };
+        let facets = crate::log_analysis::query_facets(&corpus, &event_query)?;
+        let time_quality = broad_triage_time_quality(&corpus, &suppression.excluded_template_ids)?;
 
         let mut body = format!(
             "source_kind: deterministic_broad_log_triage\ncorpus_id: {}\n\
@@ -1235,7 +1342,6 @@ impl ToolHost {
             broad_triage_section_disclosure(&suppression, 1, false, false)
         );
 
-        let facets = crate::log_analysis::query_facets(&corpus, &event_query)?;
         body.push_str("\n## Top distributions\n");
         let facet_partial = [
             facets.levels.len(),
@@ -1275,76 +1381,15 @@ impl ToolHost {
             }
         }
 
-        let error_search = crate::log_analysis::SearchLogsQuery {
-            level: Some("ERROR".into()),
-            semantic: false,
-            k: BROAD_LOG_TRIAGE_ERROR_SEARCH_CAP,
-            ..Default::default()
-        };
-        let error_candidates = crate::log_analysis::search_logs_with_excluded_templates(
-            &corpus,
-            &error_search,
-            None,
-            &suppression.excluded_template_ids,
-        )?;
-        let error_partial = error_candidates.len() >= BROAD_LOG_TRIAGE_ERROR_SEARCH_CAP
-            || error_candidates.len() > BROAD_LOG_TRIAGE_ERROR_DISPLAY_CAP;
-        let mut impact = (0..error_candidates.len()).collect::<Vec<_>>();
-        impact.sort_by(|left, right| {
-            error_candidates[*right]
-                .severity
-                .cmp(&error_candidates[*left].severity)
-                .then_with(|| {
-                    error_candidates[*right]
-                        .count
-                        .cmp(&error_candidates[*left].count)
-                })
-                .then_with(|| {
-                    error_candidates[*left]
-                        .template_id
-                        .cmp(&error_candidates[*right].template_id)
-                })
-        });
-        let mut rare = (0..error_candidates.len()).collect::<Vec<_>>();
-        rare.sort_by(|left, right| {
-            error_candidates[*left]
-                .count
-                .cmp(&error_candidates[*right].count)
-                .then_with(|| {
-                    error_candidates[*right]
-                        .severity
-                        .cmp(&error_candidates[*left].severity)
-                })
-                .then_with(|| {
-                    error_candidates[*left]
-                        .template_id
-                        .cmp(&error_candidates[*right].template_id)
-                })
-        });
-        let impact_slots =
-            BROAD_LOG_TRIAGE_ERROR_DISPLAY_CAP.saturating_sub(BROAD_LOG_TRIAGE_RARE_ERROR_RESERVE);
-        let mut selected_error_ids = std::collections::HashSet::new();
-        for index in impact.into_iter().take(impact_slots) {
-            selected_error_ids.insert(error_candidates[index].template_id);
-        }
-        for index in rare {
-            if selected_error_ids.len() >= BROAD_LOG_TRIAGE_ERROR_DISPLAY_CAP {
-                break;
-            }
-            selected_error_ids.insert(error_candidates[index].template_id);
-        }
-        let mut selected_errors = error_candidates
-            .iter()
-            .filter(|hit| selected_error_ids.contains(&hit.template_id))
-            .cloned()
-            .collect::<Vec<_>>();
-        selected_errors.sort_by(|left, right| {
-            right
-                .severity
-                .cmp(&left.severity)
-                .then_with(|| right.count.cmp(&left.count))
-                .then_with(|| left.template_id.cmp(&right.template_id))
-        });
+        let templates_by_id = corpus
+            .list_templates()
+            .into_iter()
+            .map(|row| (row.info.template_id, row))
+            .collect::<std::collections::HashMap<_, _>>();
+        let (error_templates_available, selected_errors) =
+            broad_triage_error_templates(&corpus, &suppression.excluded_template_ids)?;
+        let error_partial =
+            error_templates_available > u64::try_from(selected_errors.len()).unwrap_or(u64::MAX);
 
         body.push_str("\n## Structured ERROR templates\n");
         body.push_str(&broad_triage_section_disclosure(
@@ -1354,32 +1399,74 @@ impl ToolHost {
             false,
         ));
         body.push_str(&format!(
-            "structured_search_cap: {BROAD_LOG_TRIAGE_ERROR_SEARCH_CAP}\n\
-             candidates_within_search_cap: {}\nrare_candidate_reserve: {BROAD_LOG_TRIAGE_RARE_ERROR_RESERVE}\n",
-            error_candidates.len()
+            "error_templates_available: {error_templates_available}\n\
+             selected_error_templates: {}\n\
+             impact_slots: {}\n\
+             rare_candidate_reserve: {BROAD_LOG_TRIAGE_RARE_ERROR_RESERVE}\n\
+             exemplars_per_template_cap: {BROAD_LOG_TRIAGE_ERROR_EXEMPLAR_CAP}\n",
+            selected_errors.len(),
+            BROAD_LOG_TRIAGE_ERROR_DISPLAY_CAP.saturating_sub(BROAD_LOG_TRIAGE_RARE_ERROR_RESERVE)
         ));
         let mut evidence = Vec::new();
         let mut seen_evidence = std::collections::HashSet::new();
+        let mut correlation_seeds = Vec::new();
+        let mut identity_partial = false;
         for hit in &selected_errors {
-            let pattern = broad_triage_bounded_line(&hit.pattern);
+            let pattern = templates_by_id
+                .get(&hit.template_id)
+                .map(|row| row.info.pattern.as_str())
+                .unwrap_or("<template metadata unavailable>");
+            let pattern = broad_triage_bounded_line(pattern);
             let pattern =
                 serde_json::to_string(&pattern).unwrap_or_else(|_| "\"<invalid>\"".into());
             body.push_str(&format!(
-                "- template_id={} severity={} count={} pattern={pattern}\n",
-                hit.template_id, hit.severity, hit.count
+                "- template_id={} severity={} error_event_count={} pattern={pattern}\n",
+                hit.template_id, hit.severity, hit.error_event_count
             ));
-            for identity in &hit.evidence {
+            let rows = crate::log_analysis::query_event_rows(
+                &corpus,
+                &crate::log_analysis::EventQuery {
+                    levels: vec![
+                        "error".into(),
+                        "fatal".into(),
+                        "ERROR".into(),
+                        "FATAL".into(),
+                    ],
+                    template_id: Some(hit.template_id),
+                    excluded_template_ids: suppression.excluded_template_ids.clone(),
+                    limit: BROAD_LOG_TRIAGE_ERROR_EXEMPLAR_CAP,
+                    sort_by_time: false,
+                    ..Default::default()
+                },
+            )?;
+            if rows.events.is_empty() {
+                return Err(CoreError::Message(format!(
+                    "broad triage ERROR aggregate lost exemplar rows for template {}",
+                    hit.template_id
+                )));
+            }
+            identity_partial |= hit.error_event_count > rows.events.len() as u64;
+            if let Some(seed) = rows.events.first() {
+                correlation_seeds.push(seed.clone());
+            }
+            for event in &rows.events {
                 if evidence.len() >= BROAD_LOG_TRIAGE_IDENTITY_CAP {
+                    identity_partial = true;
                     break;
                 }
+                let identity = crate::log_analysis::SearchEvidenceIdentity {
+                    seq: event.seq,
+                    source: event.source.clone(),
+                    template_id: event.template_id,
+                };
                 if seen_evidence.insert(identity.clone()) {
                     evidence.push(identity.clone());
                     let source = broad_triage_bounded_line(&identity.source);
                     let source =
                         serde_json::to_string(&source).unwrap_or_else(|_| "\"<invalid>\"".into());
                     body.push_str(&format!(
-                        "  identity seq={} source={source} template_id={}\n",
-                        identity.seq, identity.template_id
+                        "  identity seq={} source={source} template_id={} ts={}\n",
+                        identity.seq, identity.template_id, event.ts
                     ));
                 }
             }
@@ -1387,7 +1474,7 @@ impl ToolHost {
         body.push_str(&format!(
             "trusted_identity_count: {}\ntrusted_identity_partial: {}\n",
             evidence.len(),
-            evidence.len() >= BROAD_LOG_TRIAGE_IDENTITY_CAP
+            identity_partial
         ));
 
         let clusters = crate::log_analysis::analysis::cluster_problems_with_excluded_templates(
@@ -1433,14 +1520,56 @@ impl ToolHost {
             None,
             &suppression.excluded_template_ids,
         )?;
-        let mut concentrated_buckets = timeline.buckets.iter().collect::<Vec<_>>();
-        concentrated_buckets.sort_by(|left, right| {
+        let mut volume_buckets = timeline.buckets.iter().collect::<Vec<_>>();
+        volume_buckets.sort_by(|left, right| {
             right
                 .count
                 .cmp(&left.count)
                 .then_with(|| left.start.cmp(&right.start))
         });
-        let timeline_partial = concentrated_buckets.len() > BROAD_LOG_TRIAGE_TIMELINE_BUCKET_CAP;
+        let error_count = |bucket: &&crate::log_analysis::TimelineBucket| {
+            bucket
+                .by_level
+                .iter()
+                .filter(|(level, _)| matches!(level.as_str(), "error" | "fatal"))
+                .map(|(_, count)| *count)
+                .sum::<u64>()
+        };
+        let mut error_buckets = timeline
+            .buckets
+            .iter()
+            .filter(|bucket| error_count(bucket) > 0)
+            .collect::<Vec<_>>();
+        error_buckets.sort_by(|left, right| {
+            error_count(right)
+                .cmp(&error_count(left))
+                .then_with(|| right.count.cmp(&left.count))
+                .then_with(|| left.start.cmp(&right.start))
+        });
+        let volume_slots = BROAD_LOG_TRIAGE_TIMELINE_BUCKET_CAP
+            .saturating_sub(BROAD_LOG_TRIAGE_TIMELINE_ERROR_RESERVE);
+        let mut selected_bucket_starts = std::collections::HashSet::new();
+        let mut concentrated_buckets = Vec::new();
+        for bucket in volume_buckets.into_iter().take(volume_slots) {
+            selected_bucket_starts.insert(bucket.start);
+            concentrated_buckets.push(bucket);
+        }
+        for bucket in error_buckets {
+            if concentrated_buckets.len() >= BROAD_LOG_TRIAGE_TIMELINE_BUCKET_CAP {
+                break;
+            }
+            if selected_bucket_starts.insert(bucket.start) {
+                concentrated_buckets.push(bucket);
+            }
+        }
+        concentrated_buckets.sort_by(|left, right| {
+            right
+                .count
+                .cmp(&left.count)
+                .then_with(|| error_count(right).cmp(&error_count(left)))
+                .then_with(|| left.start.cmp(&right.start))
+        });
+        let timeline_partial = timeline.buckets.len() > concentrated_buckets.len();
         body.push_str("\n## Timeline concentration\n");
         body.push_str(&broad_triage_section_disclosure(
             &suppression,
@@ -1450,7 +1579,7 @@ impl ToolHost {
         ));
         body.push_str(&format!(
             "axis_basis: {}\nrequested_bucket_width: {}\neffective_bucket_width: {}\n\
-             total_events: {}\noccupied_buckets: {}\n",
+             total_events: {}\noccupied_buckets: {}\nerror_bucket_reserve: {}\n",
             match time_quality {
                 crate::log_analysis::TimeQuality::Wall => "unix wall-clock seconds",
                 crate::log_analysis::TimeQuality::Mixed =>
@@ -1461,17 +1590,18 @@ impl ToolHost {
             timeline.requested_width,
             timeline.effective_width,
             timeline.total_count,
-            timeline.buckets.len()
+            timeline.buckets.len(),
+            BROAD_LOG_TRIAGE_TIMELINE_ERROR_RESERVE
         ));
-        for bucket in concentrated_buckets
-            .into_iter()
-            .take(BROAD_LOG_TRIAGE_TIMELINE_BUCKET_CAP)
-        {
+        for bucket in concentrated_buckets {
             let mut levels = bucket.by_level.iter().collect::<Vec<_>>();
             levels.sort_by(|(left, _), (right, _)| left.cmp(right));
             let line = format!(
-                "- start={} width={} count={} levels={levels:?}\n",
-                bucket.start, bucket.width, bucket.count
+                "- start={} width={} count={} error_or_fatal_count={} levels={levels:?}\n",
+                bucket.start,
+                bucket.width,
+                bucket.count,
+                error_count(&bucket)
             );
             body.push_str(&broad_triage_bounded_line(&line));
             body.push('\n');
@@ -1480,13 +1610,13 @@ impl ToolHost {
         body.push_str("\n## Bounded correlations\n");
         let correlations_safe = time_quality == crate::log_analysis::TimeQuality::Wall;
         let correlation_seed_count = if correlations_safe {
-            selected_errors
+            correlation_seeds
                 .len()
                 .min(BROAD_LOG_TRIAGE_CORRELATION_SEED_CAP)
         } else {
             0
         };
-        let correlation_partial = selected_errors.len() > BROAD_LOG_TRIAGE_CORRELATION_SEED_CAP;
+        let correlation_partial = correlation_seeds.len() > BROAD_LOG_TRIAGE_CORRELATION_SEED_CAP;
         body.push_str(&broad_triage_section_disclosure(
             &suppression,
             BROAD_LOG_TRIAGE_CORRELATION_RESULT_CAP,
@@ -1499,31 +1629,78 @@ impl ToolHost {
              seeds_used: {correlation_seed_count}\n"
         ));
         if correlations_safe {
-            for seed in selected_errors
+            for seed in correlation_seeds
                 .iter()
                 .take(BROAD_LOG_TRIAGE_CORRELATION_SEED_CAP)
             {
-                let correlations = crate::log_analysis::why::correlate_with_excluded_templates(
+                let window_from = seed.ts.saturating_sub(60);
+                let window_to = seed.ts.saturating_add(61);
+                let window = crate::log_analysis::query_event_rows(
                     &corpus,
-                    seed.template_id,
-                    None,
-                    60,
-                    BROAD_LOG_TRIAGE_CORRELATION_RESULT_CAP,
-                    &suppression.excluded_template_ids,
+                    &crate::log_analysis::EventQuery {
+                        time_from: Some(window_from),
+                        time_to: Some(window_to),
+                        excluded_template_ids: suppression.excluded_template_ids.clone(),
+                        limit: crate::log_analysis::MAX_EVENT_PAGE,
+                        ..Default::default()
+                    },
                 )?;
+                let window_partial = window.next_cursor.is_some();
+                let mut counts = std::collections::HashMap::<u64, (u64, i64)>::new();
+                for event in &window.events {
+                    if event.template_id == seed.template_id {
+                        continue;
+                    }
+                    let entry = counts.entry(event.template_id).or_default();
+                    entry.0 = entry.0.saturating_add(1);
+                    entry.1 += if event.ts < seed.ts { 1 } else { -1 };
+                }
+                let mut correlations = counts
+                    .into_iter()
+                    .map(|(template_id, (count, precedence_vote))| {
+                        (template_id, count, precedence_vote > 0)
+                    })
+                    .collect::<Vec<_>>();
+                correlations.sort_by(
+                    |(left_id, left_count, left_precedes),
+                     (right_id, right_count, right_precedes)| {
+                        right_count
+                            .cmp(left_count)
+                            .then_with(|| right_precedes.cmp(left_precedes))
+                            .then_with(|| left_id.cmp(right_id))
+                    },
+                );
+                correlations.truncate(BROAD_LOG_TRIAGE_CORRELATION_RESULT_CAP);
+                let seed_source = broad_triage_bounded_line(&seed.source);
+                let seed_source =
+                    serde_json::to_string(&seed_source).unwrap_or_else(|_| "\"<invalid>\"".into());
                 body.push_str(&format!(
-                    "seed_template_id: {} result_count: {} result_cap_reached: {}\n",
+                    "seed_template_id: {} seed_seq: {} seed_source: {} seed_ts: {} \
+                     window_from: {} window_to_exclusive: {} window_row_cap: {} \
+                     window_rows_returned: {} window_partial: {} result_count: {}\n",
                     seed.template_id,
-                    correlations.len(),
-                    correlations.len() >= BROAD_LOG_TRIAGE_CORRELATION_RESULT_CAP
+                    seed.seq,
+                    seed_source,
+                    seed.ts,
+                    window_from,
+                    window_to,
+                    crate::log_analysis::MAX_EVENT_PAGE,
+                    window.events.len(),
+                    window_partial,
+                    correlations.len()
                 ));
-                for hit in correlations {
-                    let pattern = broad_triage_bounded_line(&hit.pattern);
+                for (template_id, count, precedes_focus) in correlations {
+                    let pattern = templates_by_id
+                        .get(&template_id)
+                        .map(|row| row.info.pattern.as_str())
+                        .unwrap_or("<template metadata unavailable>");
+                    let pattern = broad_triage_bounded_line(pattern);
                     let pattern =
                         serde_json::to_string(&pattern).unwrap_or_else(|_| "\"<invalid>\"".into());
+                    let score = count as f32 * if precedes_focus { 1.2 } else { 1.0 };
                     body.push_str(&format!(
                         "- template_id={} score={:.3} count={} precedes_focus={} pattern={pattern}\n",
-                        hit.template_id, hit.score, hit.count, hit.precedes_focus
+                        template_id, score, count, precedes_focus
                     ));
                 }
             }
@@ -1533,6 +1710,12 @@ impl ToolHost {
             );
         }
 
+        if corpus.event_revision() != event_revision {
+            return Err(CoreError::Message(
+                "log corpus changed while deterministic broad triage was being prepared; retry"
+                    .into(),
+            ));
+        }
         let (model_text, model_text_truncated) = bound_broad_triage_model_text(&body);
         debug_assert!(model_text.len() <= BROAD_LOG_TRIAGE_BRIEF_MAX_BYTES);
         Ok(BroadLogTriageBrief {
@@ -7222,10 +7405,10 @@ mod tests {
         let mut templates = Vec::new();
         let mut events = Vec::new();
         let mut seq = 1_u64;
-        for index in 0..100_u64 {
+        for index in 0..125_u64 {
             let template_id = index + 1;
-            let count = if template_id == 100 { 1 } else { 3 };
-            let pattern = if template_id == 100 {
+            let count = if template_id == 125 { 1 } else { 3 };
+            let pattern = if template_id == 125 {
                 format!("RARE_ERROR_SIGNAL {repeated}")
             } else {
                 format!("frequent failure {template_id} {repeated}")
@@ -7304,7 +7487,7 @@ mod tests {
         assert!(brief
             .evidence
             .iter()
-            .any(|identity| identity.template_id == 100));
+            .any(|identity| identity.template_id == 125));
 
         let oversized = "界".repeat(BROAD_LOG_TRIAGE_BRIEF_MAX_BYTES);
         let (bounded, truncated) = bound_broad_triage_model_text(&oversized);
@@ -7312,6 +7495,77 @@ mod tests {
         assert!(bounded.len() <= BROAD_LOG_TRIAGE_BRIEF_MAX_BYTES);
         assert!(bounded.contains("truncated: true"));
         assert!(std::str::from_utf8(bounded.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn broad_log_triage_error_counts_use_only_error_events() {
+        let dir = tempdir().unwrap();
+        let corpus =
+            crate::log_analysis::LogCorpus::create(&dir.path().join("cache"), "mixed-level")
+                .unwrap();
+        corpus
+            .upsert_templates([crate::log_analysis::TemplateRow {
+                info: crate::log_analysis::TemplateInfo {
+                    template_id: 7,
+                    pattern: "request completed with status <*>".into(),
+                    token_count: 5,
+                    count: 1_000,
+                    first_seen: 1_700_000_000,
+                    last_seen: 1_700_000_999,
+                    severity: 4,
+                    example: "request completed with status 200".into(),
+                },
+                content_hash: "mixed-level-template".into(),
+                vector: None,
+            }])
+            .unwrap();
+        let events = (0..1_000_u64)
+            .map(|index| crate::log_analysis::LogEvent {
+                seq: index + 1,
+                ts: 1_700_000_000 + index as i64,
+                level: if index == 999 { "ERROR" } else { "INFO" }.into(),
+                service: Some("api".into()),
+                host: Some("app-01".into()),
+                template_id: 7,
+                params: vec![],
+                trace_id: None,
+                message: format!(
+                    "request completed with status {}",
+                    if index == 999 { 500 } else { 200 }
+                ),
+                source: "api.log".into(),
+            })
+            .collect::<Vec<_>>();
+        corpus.push_events(&events).unwrap();
+        corpus.flush().unwrap();
+
+        let (available, selected) = broad_triage_error_templates(&corpus, &[]).unwrap();
+        assert_eq!(available, 1);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].template_id, 7);
+        assert_eq!(
+            selected[0].error_event_count, 1,
+            "the brief must not present the template's 999 INFO rows as ERROR count"
+        );
+    }
+
+    #[test]
+    fn broad_log_triage_brief_propagates_event_store_failures() {
+        let (_dir, corpus, host) = broad_triage_fixture(crate::log_analysis::TimeQuality::Wall);
+        corpus
+            .with_connection(|connection| {
+                connection
+                    .execute_batch("DROP TABLE events")
+                    .map_err(|error| CoreError::Message(format!("drop test table: {error}")))
+            })
+            .unwrap();
+        let error = host
+            .build_broad_log_triage_brief()
+            .expect_err("a failed event query must never become a plausible complete brief");
+        assert!(
+            error.to_string().contains("events"),
+            "typed database failure should remain visible: {error}"
+        );
     }
 
     #[test]
@@ -7374,7 +7628,7 @@ mod tests {
         assert_eq!(empty.unsuppressed_event_count, 0);
         assert!(empty.evidence.is_empty());
         assert!(
-            empty.model_text.contains("candidates_within_search_cap: 0")
+            empty.model_text.contains("error_templates_available: 0")
                 && empty.model_text.contains("occupied_buckets: 0")
                 && empty.model_text.contains("seeds_used: 0")
         );
@@ -7417,9 +7671,7 @@ mod tests {
         let no_error = host.build_broad_log_triage_brief().unwrap();
         assert_eq!(no_error.unsuppressed_event_count, 1);
         assert!(no_error.evidence.is_empty());
-        assert!(no_error
-            .model_text
-            .contains("candidates_within_search_cap: 0"));
+        assert!(no_error.model_text.contains("error_templates_available: 0"));
     }
 
     #[tokio::test]

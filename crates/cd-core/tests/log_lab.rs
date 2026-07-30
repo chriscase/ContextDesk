@@ -1,6 +1,7 @@
 #[path = "support/log_lab_generator.rs"]
 mod log_lab_generator;
 
+use cd_core::index::KeywordIndex;
 use cd_core::investigations::InvestigationStore;
 use cd_core::log_analysis::{
     activate_template_suppression, add_line_bookmark, cluster_problems, export_corpus_zip,
@@ -16,6 +17,10 @@ use cd_core::log_analysis::{
 use cd_core::process_progress::{
     CancelFlag, ProcessProgress, ProcessProgressObserver, RecordingProcessProgress,
 };
+use cd_core::tool_host::{
+    ToolHost, BROAD_LOG_TRIAGE_BRIEF_MAX_BYTES, BROAD_LOG_TRIAGE_IDENTITY_CAP,
+};
+use cd_core::workspace::Workspace;
 use log_lab_generator::{
     generate_behavior, generate_scale, generate_triage_stress, load_behavior_manifest,
     load_triage_stress_manifest, verify_safety, write_performance_template, BehaviorControls,
@@ -992,6 +997,34 @@ fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
     let suppression_timeline_ms = suppression_timeline_started.elapsed().as_millis();
     assert_eq!(suppression_timeline.total_matched, expected_visible);
 
+    let broad_triage_started = Instant::now();
+    let mut triage_host = ToolHost::new(
+        Workspace::new("triage-stress-250k", vec![workspace.path().to_path_buf()]),
+        KeywordIndex::new(),
+        None,
+    );
+    triage_host.set_log_analysis(true, Some(cache.clone()));
+    triage_host.set_active_log_corpus(Some(report.corpus_id.clone()));
+    triage_host.set_log_corpus_scope(Some(report.corpus_id.clone()));
+    triage_host
+        .pin_log_suppression_lens(&report.corpus_id)
+        .unwrap();
+    let broad_triage = triage_host.build_broad_log_triage_brief().unwrap();
+    let broad_triage_ms = broad_triage_started.elapsed().as_millis();
+    assert_eq!(broad_triage.unsuppressed_event_count, expected_visible);
+    assert_eq!(broad_triage.suppression_revision, active_policy.revision);
+    assert_eq!(broad_triage.time_quality, TimeQuality::Wall);
+    assert!(broad_triage.deterministic_complete);
+    assert!(broad_triage.model_text_bytes <= BROAD_LOG_TRIAGE_BRIEF_MAX_BYTES);
+    assert!(broad_triage.evidence.len() <= BROAD_LOG_TRIAGE_IDENTITY_CAP);
+    assert!(!broad_triage.evidence.is_empty());
+    assert!(
+        ["CDLAB2004", "CDLAB3102", "CDLAB4203"]
+            .iter()
+            .any(|signal| broad_triage.model_text.contains(signal)),
+        "bounded deterministic brief lost every labeled rare severe incident"
+    );
+
     let first_rows_started = Instant::now();
     let first_rows = query_event_rows(
         &corpus,
@@ -1104,7 +1137,7 @@ fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
     );
 
     eprintln!(
-        "PASS triage-stress-250k events={} files={} templates={} source_bytes={} generation_ms={} import_ms={} cold_open_ms={} summary_ms={} first_rows_ms={} exact_count_ms={} facets_ms={} source_catalog_ms={} bookmarks_ms={} investigation_ms={} shared_timeline_ms={} agent_timeline_ms={} cluster_ms={} suppression_template_id={} suppression_hidden={} suppression_preview_ms={} suppression_activate_ms={} suppression_rows_ms={} suppression_count_ms={} suppression_facets_ms={} suppression_timeline_ms={} suppression_disable_ms={} tree_sha256={} (one-machine observation; not a universal claim)",
+        "PASS triage-stress-250k events={} files={} templates={} source_bytes={} generation_ms={} import_ms={} cold_open_ms={} summary_ms={} first_rows_ms={} exact_count_ms={} facets_ms={} source_catalog_ms={} bookmarks_ms={} investigation_ms={} shared_timeline_ms={} agent_timeline_ms={} cluster_ms={} broad_triage_ms={} broad_triage_bytes={} broad_triage_identities={} suppression_template_id={} suppression_hidden={} suppression_preview_ms={} suppression_activate_ms={} suppression_rows_ms={} suppression_count_ms={} suppression_facets_ms={} suppression_timeline_ms={} suppression_disable_ms={} tree_sha256={} (one-machine observation; not a universal claim)",
         report.stats.lines,
         report.stats.files,
         report.stats.templates,
@@ -1122,6 +1155,9 @@ fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
         shared_timeline_ms,
         timeline_ms,
         cluster_ms,
+        broad_triage_ms,
+        broad_triage.model_text_bytes,
+        broad_triage.evidence.len(),
         dominant_template.info.template_id,
         preview.matching_event_count,
         suppression_preview_ms,
