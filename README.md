@@ -39,10 +39,10 @@ the product remains rename-friendly through [`branding.toml`](branding.toml).
 
 ![ContextDesk Logs library showing an installed synthetic demonstration corpus](docs/media/gallery/logs-library-demo.png)
 
-**Hand off incident evidence with a versioned contract.** Producers can build a
-directory-form **Incident Evidence Bundle** (`contextdesk.incident_evidence.v1`)
-with hashed logs, optional operational-metrics v1 documents, and privacy
-declarations. Validate offline before transfer:
+**Hand off incident evidence with a versioned contract.** Producers can build an
+**Incident Evidence Bundle** (`contextdesk.incident_evidence.v1`) as a directory
+or deterministic ZIP with hashed logs, optional operational-metrics v1
+documents, and privacy declarations. Validate offline before transfer:
 
 ```bash
 cargo run -p cd-core --bin cd-validate-incident-evidence -- validate ./my-bundle

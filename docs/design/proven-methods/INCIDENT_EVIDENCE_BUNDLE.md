@@ -58,7 +58,7 @@ flowchart LR
 
 | Field/concept | Type or shape | Required | Validation |
 | --- | --- | --- | --- |
-| Bundle root | Directory | yes | Contains capped `manifest.json` |
+| Bundle root | Directory or deterministic ZIP | yes | Contains capped root `manifest.json` |
 | Component path | Relative POSIX path | yes | No absolute/traversal/drive prefixes |
 | Component hash | 64 lowercase hex | yes | Stream-verified SHA-256 |
 | Operational metrics document | Existing v1 series JSON | when role used | `schemaVersion: 1` + `series` array; no second series schema |
@@ -86,7 +86,8 @@ flowchart LR
 1. Cap-read and parse `manifest.json`.
 2. Enforce schema id, reader version, privacy, and time-basis honesty.
 3. For each component: validate relative path; resolve under root; reject symlink escape; compare size; stream SHA-256.
-4. For `operational_metrics` roles, lightly check JSON `schemaVersion` and `series`.
+4. For `operational_metrics` roles, apply the same bounded operational-metrics
+   v1 structural and provenance validation used by the production UI.
 5. Emit sorted diagnostics; `ok` only when empty.
 
 ![Bundle anatomy with manifest, logs, metrics, attachments](../../help/assets/incident-evidence-anatomy.svg)
@@ -107,7 +108,7 @@ flowchart LR
 Failures are fail-closed with stable diagnostic codes (`unsafe_path`,
 `hash_mismatch`, `byte_count_mismatch`, `unsupported_schema_id`,
 `timezone_dishonest`, `forbidden_sentinel`, `payload_missing`, `unknown_role`,
-`archive_validation_residual`). Producers re-hash after any rewrite and re-run
+and archive safety diagnostics). Producers re-hash after any rewrite and re-run
 validation. Partial product publication is forbidden when import exists.
 
 ## 9. Observability
@@ -151,7 +152,7 @@ be claimed shipped by this chapter. Diagrams use theme-safe SVG with
 | Dishonest timezone | fail `timezone_dishonest` |
 | Evaluator-truth sentinel | fail `forbidden_sentinel` |
 | Unknown role | fail `unknown_role` |
-| Archive path | residual diagnostic (not faked) |
+| Deterministic archive pack + validate | byte-identical output; directory/ZIP rule parity |
 
 ## 13. ContextDesk production anchors
 

@@ -16,23 +16,31 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-fn usage() -> ExitCode {
-    eprintln!(
-        "Usage:\n\
-         \tcd-validate-incident-evidence validate <directory-or-zip>\n\
-         \tcd-validate-incident-evidence pack <directory> --output <bundle.zip> [--force]\n\
-         \n\
-         Offline tool for contextdesk.incident_evidence.v1.\n\
-         Pack uses Stored compression, fixed 1980-01-01 timestamps, sorted paths.\n\
-         Product import/attachment UX remains residual (#763)."
-    );
+const USAGE: &str = "Usage:\n\
+\tcd-validate-incident-evidence validate <directory-or-zip>\n\
+\tcd-validate-incident-evidence pack <directory> --output <bundle.zip> [--force]\n\
+\n\
+Offline tool for contextdesk.incident_evidence.v1.\n\
+Pack uses Stored compression, fixed 1980-01-01 timestamps, sorted paths.\n\
+Product import/attachment UX remains residual (#763).";
+
+fn usage_error() -> ExitCode {
+    eprintln!("{USAGE}");
     ExitCode::from(2)
+}
+
+fn help() -> ExitCode {
+    println!("{USAGE}");
+    ExitCode::SUCCESS
 }
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = env::args().skip(1).collect();
-    if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
-        return usage();
+    if args.is_empty() {
+        return usage_error();
+    }
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        return help();
     }
 
     // Back-compat: bare path implies validate.
@@ -45,7 +53,7 @@ fn main() -> ExitCode {
     match cmd.as_str() {
         "validate" => {
             if args.is_empty() {
-                return usage();
+                return usage_error();
             }
             let path = PathBuf::from(&args[0]);
             let report = if path.is_file()
@@ -67,7 +75,7 @@ fn main() -> ExitCode {
         }
         "pack" => {
             if args.is_empty() {
-                return usage();
+                return usage_error();
             }
             let dir = PathBuf::from(&args[0]);
             let mut output: Option<PathBuf> = None;
@@ -78,18 +86,18 @@ fn main() -> ExitCode {
                     "--output" | "-o" => {
                         i += 1;
                         if i >= args.len() {
-                            return usage();
+                            return usage_error();
                         }
                         output = Some(PathBuf::from(&args[i]));
                     }
                     "--force" | "-f" => force = true,
-                    _ => return usage(),
+                    _ => return usage_error(),
                 }
                 i += 1;
             }
             let Some(out) = output else {
                 eprintln!("pack requires --output <bundle.zip>");
-                return usage();
+                return usage_error();
             };
             match pack_directory(&dir, &out, force) {
                 Ok(r) => {
@@ -110,6 +118,6 @@ fn main() -> ExitCode {
                 }
             }
         }
-        _ => usage(),
+        _ => usage_error(),
     }
 }

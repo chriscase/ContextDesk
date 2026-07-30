@@ -18,11 +18,11 @@ related:
 ---
 # Incident Evidence Bundles
 
-An **Incident Evidence Bundle** is a producer-facing folder (or future archive)
-that carries authorized raw logs, optional operational metrics, and bounded
-supporting files with a versioned `manifest.json`. ContextDesk can validate the
-contract offline today; **product import and attachment UX** remain a later
-delivery slice of the broader evidence-bundle program.
+An **Incident Evidence Bundle** is a producer-facing directory or deterministic
+ZIP that carries authorized raw logs, optional operational metrics, and bounded
+supporting files with a versioned `manifest.json`. ContextDesk can validate
+either transport offline today; **product import and attachment UX** remain a
+later delivery slice of the broader evidence-bundle program.
 
 ![Producer builds a bundle, offline validation gates transfer, product import remains residual](../assets/incident-evidence-lifecycle.svg)
 
