@@ -4772,11 +4772,15 @@ fn is_governed_log_citation_id(source_id: &str) -> bool {
 ///
 /// The renderer may carry transcript chips, but it cannot invent or broaden
 /// corpus identity. Rules:
-/// 1. Preserve durable per-citation corpusId for an existing message (survives
-///    detach/relink and restart).
-/// 2. Otherwise stamp with the session's host-governed linked_corpus_id when set.
-/// 3. Otherwise leave unbound (legacy fail-closed) — never accept a free-form
-///    renderer/model corpus id that differs from those host sources.
+/// 1. If a citation id already exists on the durable message with a host corpus
+///    id, preserve that id (survives detach/relink and restart).
+/// 2. If a citation id already exists on the durable message **without** a
+///    corpus id (legacy unbound), leave it unbound forever — never stamp the
+///    current linked corpus onto historical unbound chips (no substitution).
+/// 3. Only **new** citation ids (not present on the durable message) may be
+///    stamped with the session's host-governed linked_corpus_id when set.
+/// 4. Never accept a free-form renderer/model corpus id that differs from those
+///    host sources.
 fn sanitize_log_citation_provenance(session: &mut Session, durable: Option<&Session>) {
     use std::collections::HashMap;
     let durable_by_msg: HashMap<&str, &cd_core::sessions::StoredMessage> = durable
@@ -4791,7 +4795,8 @@ fn sanitize_log_citation_provenance(session: &mut Session, durable: Option<&Sess
         let Some(items) = citations.as_array_mut() else {
             continue;
         };
-        let durable_items: HashMap<String, String> = durable_by_msg
+        // value = Some(corpus) when durable bound; None when durable present but unbound
+        let durable_log: HashMap<String, Option<String>> = durable_by_msg
             .get(message.id.as_str())
             .and_then(|m| m.citations.as_ref())
             .and_then(|v| v.as_array())
@@ -4807,8 +4812,9 @@ fn sanitize_log_citation_provenance(session: &mut Session, durable: Option<&Sess
                             .get("corpusId")
                             .or_else(|| obj.get("corpus_id"))
                             .and_then(|v| v.as_str())
-                            .filter(|s| !s.trim().is_empty())?
-                            .to_string();
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string);
                         Some((id, corpus))
                     })
                     .collect()
@@ -4828,7 +4834,14 @@ fn sanitize_log_citation_provenance(session: &mut Session, durable: Option<&Sess
                 obj.remove("corpus_id");
                 continue;
             }
-            let trusted = durable_items.get(&id).cloned().or_else(|| linked.clone());
+            let trusted = match durable_log.get(&id) {
+                // Historical bound provenance — never let renderer change it.
+                Some(Some(corpus_id)) => Some(corpus_id.clone()),
+                // Historical unbound — fail closed; do not stamp current link.
+                Some(None) => None,
+                // Truly new citation id on this message — stamp host link if any.
+                None => linked.clone(),
+            };
             match trusted {
                 Some(corpus_id) => {
                     obj.insert("corpusId".into(), serde_json::Value::String(corpus_id));
@@ -14209,6 +14222,81 @@ mod startup_host_tests {
             .cloned()
             .expect("new cite");
         assert_eq!(new_cite["corpusId"].as_str(), Some("trusted-corpus"));
+    }
+
+    /// #698 — durable legacy log citations without corpusId stay unbound even
+    /// when the session remains linked; save must not rewrite history onto the
+    /// current corpus (substitution).
+    #[test]
+    fn generic_save_leaves_durable_unbound_log_citations_unbound() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let mut durable = cd_core::sessions::Session::new("Legacy unbound");
+        durable.set_linked_corpus_id(Some("trusted-corpus".into()));
+        durable.messages.push(cd_core::sessions::StoredMessage {
+            id: "assistant-legacy".into(),
+            role: "assistant".into(),
+            content: "old finding".into(),
+            tools: None,
+            // Present on disk without corpusId — historical fail-closed.
+            citations: Some(serde_json::json!([
+                {
+                    "id": "log_event:99",
+                    "label": "log_event:99"
+                },
+                {
+                    "id": "log_template:3",
+                    "label": "log_template:3"
+                }
+            ])),
+            trail: None,
+            meta: None,
+        });
+        store.save(&durable).expect("save durable unbound");
+
+        // Renderer still linked and tries to invent provenance for history.
+        let mut renderer = store.load(&durable.id).expect("load");
+        assert_eq!(renderer.linked_corpus_id.as_deref(), Some("trusted-corpus"));
+        renderer.messages[0].citations = Some(serde_json::json!([
+            {
+                "id": "log_event:99",
+                "label": "log_event:99",
+                "corpusId": "attacker-or-current-link"
+            },
+            {
+                "id": "log_template:3",
+                "label": "log_template:3",
+                "corpusId": "trusted-corpus"
+            }
+        ]));
+        let saved = save_chat_session_at(&store, renderer).expect("save");
+        let citations = saved.messages[0]
+            .citations
+            .as_ref()
+            .and_then(|v| v.as_array())
+            .cloned()
+            .expect("citations");
+        assert_eq!(citations.len(), 2);
+        for item in &citations {
+            assert!(
+                item.get("corpusId").is_none() && item.get("corpus_id").is_none(),
+                "durable unbound log citation must stay unbound: {item}"
+            );
+        }
+        // Reopen proves persistence.
+        let reopened = store.load(&durable.id).expect("reopen");
+        let reopened_cites = reopened.messages[0]
+            .citations
+            .as_ref()
+            .and_then(|v| v.as_array())
+            .cloned()
+            .expect("reopened citations");
+        for item in &reopened_cites {
+            assert!(
+                item.get("corpusId").is_none() && item.get("corpus_id").is_none(),
+                "reopened unbound citation must remain unbound: {item}"
+            );
+        }
     }
 
     #[test]
