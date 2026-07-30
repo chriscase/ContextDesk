@@ -372,7 +372,11 @@
   gap: var(--space-2);
   padding: var(--space-3) var(--space-4);
   border-top: 1px solid var(--border-soft);
-  background: color-mix(in srgb, var(--surface-chrome, var(--bg-panel)) 85%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--surface-chrome, var(--bg-panel)) 85%,
+    transparent
+  );
 }
 
 .mem-view-toggle {
@@ -441,7 +445,11 @@
   gap: var(--space-2);
   padding: var(--space-2) var(--space-3);
   border-bottom: 1px solid var(--border-soft);
-  background: color-mix(in srgb, var(--surface-chrome, var(--bg-panel)) 80%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--surface-chrome, var(--bg-panel)) 80%,
+    transparent
+  );
 }
 
 .source-view__path {
@@ -482,7 +490,11 @@
   padding: 0 var(--space-2) 0 var(--space-3);
   color: var(--text-faint);
   border-right: 1px solid var(--border-soft);
-  background: color-mix(in srgb, var(--surface-chrome, var(--bg-panel)) 55%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--surface-chrome, var(--bg-panel)) 55%,
+    transparent
+  );
 }
 
 .source-line__t {
@@ -591,6 +603,143 @@
   flex-direction: column;
   min-height: 0;
   gap: var(--space-2);
+}
+
+.log-pane__chrome {
+  display: grid;
+  grid-template-columns: minmax(7rem, auto) minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+}
+
+.log-pane__identity {
+  display: grid;
+  align-content: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.log-pane__identity .pane-chrome__title {
+  margin: 0;
+  font-size: var(--text-md);
+}
+
+.log-pane__identity > span {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.log-pane__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.log-pane__action-group {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.log-pane__action-group + .log-pane__action-group {
+  margin-inline-start: var(--space-1);
+  padding-inline-start: var(--space-2);
+  border-inline-start: 1px solid var(--border-soft);
+}
+
+.log-pane__action-group-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.log-pane__toolbar .btn {
+  min-height: 28px;
+  white-space: nowrap;
+}
+
+.log-pane__toolbar .btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.log-pane__toolbar .btn:disabled {
+  opacity: 0.52;
+  cursor: not-allowed;
+}
+
+@media (max-width: 78rem) {
+  .log-pane__chrome {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .log-pane__identity {
+    grid-template-columns: auto 1fr;
+    align-items: baseline;
+    gap: var(--space-2);
+  }
+
+  .log-pane__toolbar {
+    display: grid;
+    grid-template-columns: repeat(4, max-content);
+    justify-content: flex-start;
+    gap: var(--space-1);
+  }
+}
+
+@media (max-width: 54rem) {
+  .log-pane__toolbar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-2);
+  }
+
+  .log-pane__action-group,
+  .log-pane__action-group + .log-pane__action-group {
+    align-items: stretch;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+
+  .log-pane__action-group-controls {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .log-pane__action-group-controls .btn {
+    justify-content: center;
+    min-width: 0;
+    white-space: normal;
+  }
+
+  .log-pane__action-group[data-intent="help"] .log-pane__action-group-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 40rem) {
+  .log-pane__chrome {
+    padding-inline: var(--space-2);
+  }
+
+  .log-pane__toolbar {
+    gap: var(--space-1);
+  }
+}
+
+@media (max-width: 30rem) {
+  .log-pane__toolbar {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .log-pane__note {
@@ -810,6 +959,10 @@
   border-radius: var(--radius-sm);
   background: var(--surface-chrome, var(--bg-elevated));
   box-shadow: var(--shadow-md);
+}
+
+.log-import-menu {
+  width: min(17rem, calc(100vw - 16px));
 }
 
 .log-card__menu-item {
