@@ -1,12 +1,18 @@
 //! cluster_problems + timeline (#361).
 
+use super::drain::TemplateInfo;
 use super::search::normalize_excluded_template_ids;
 use super::store::LogCorpus;
 use crate::error::{CoreError, CoreResult};
 use duckdb::types::Value;
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 /// Maximum number of templates admitted to pairwise problem clustering.
 ///
@@ -100,25 +106,39 @@ pub fn cluster_problems_with_excluded_templates(
     max_clusters: usize,
     excluded_template_ids: &[u64],
 ) -> CoreResult<Vec<ClusterSummary>> {
+    cluster_problems_with_excluded_templates_and_cancel(
+        corpus,
+        max_clusters,
+        excluded_template_ids,
+        None,
+    )
+}
+
+/// Cluster templates with a cooperative cancellation flag for blocking hosts.
+pub fn cluster_problems_with_excluded_templates_and_cancel(
+    corpus: &LogCorpus,
+    max_clusters: usize,
+    excluded_template_ids: &[u64],
+    cancel: Option<&AtomicBool>,
+) -> CoreResult<Vec<ClusterSummary>> {
     let excluded = normalize_excluded_template_ids(excluded_template_ids)?;
-    let all_templates = corpus
-        .list_templates()
-        .into_iter()
-        .filter(|template| !excluded.contains(&template.info.template_id))
-        .collect::<Vec<_>>();
-    if all_templates.is_empty() {
+    check_analysis_cancel(cancel)?;
+    let candidates = load_cluster_candidates(corpus, &excluded, cancel)?;
+    if candidates.templates.is_empty() {
         return Ok(vec![]);
     }
-    let templates_available = all_templates.len();
-    let candidate_indices = select_cluster_candidate_indices(&all_templates);
-    let candidate_tokens: Vec<_> = candidate_indices
+    let templates_available = candidates.templates_available;
+    let templates_considered = candidates.templates.len();
+    let candidate_tokens: Vec<_> = candidates
+        .templates
         .iter()
-        .map(|&index| tokenize(&all_templates[index].info.pattern))
+        .map(|template| tokenize(&template.info.pattern))
         .collect();
 
     // Greedy clustering: assign each template to first cluster with sim >= 0.4
     let mut clusters: Vec<Vec<usize>> = Vec::new();
-    for candidate_position in 0..candidate_indices.len() {
+    for candidate_position in 0..candidates.templates.len() {
+        check_analysis_cancel(cancel)?;
         let mut placed = false;
         for c in clusters.iter_mut() {
             let prototype_position = c[0];
@@ -141,7 +161,6 @@ pub fn cluster_problems_with_excluded_templates(
     // tokenized nor compared with prototypes. Their exclusion is explicit in
     // every summary, and each count is exact only for the candidate members
     // actually considered.
-    let templates_considered = candidate_indices.len();
     let partial = templates_considered < templates_available;
 
     let mut out = Vec::new();
@@ -152,11 +171,8 @@ pub fn cluster_problems_with_excluded_templates(
         let mut label = String::new();
         let mut ex = Vec::new();
         let mut min_id = u64::MAX;
-        let member_indices = c
-            .into_iter()
-            .map(|candidate_position| candidate_indices[candidate_position]);
-        for index in member_indices {
-            let t = &all_templates[index];
+        for candidate_position in c {
+            let t = &candidates.templates[candidate_position];
             tids.push(t.info.template_id);
             count += t.info.count;
             severity = severity.max(t.info.severity);
@@ -195,77 +211,191 @@ pub fn cluster_problems_with_excluded_templates(
     Ok(out)
 }
 
-fn select_cluster_candidate_indices(templates: &[super::store::TemplateRow]) -> Vec<usize> {
-    if templates.len() <= MAX_CLUSTER_TEMPLATE_CANDIDATES {
-        return (0..templates.len()).collect();
-    }
-
-    let ranked =
-        bounded_ranked_indices(templates, MAX_CLUSTER_TEMPLATE_CANDIDATES, false, |_| true);
-    let rare = bounded_ranked_indices(templates, MAX_CLUSTER_TEMPLATE_CANDIDATES, true, |row| {
-        row.info.count <= RARE_TEMPLATE_MAX_COUNT
-    });
-
-    let impact_slots =
-        MAX_CLUSTER_TEMPLATE_CANDIDATES.saturating_sub(RARE_TEMPLATE_CANDIDATE_RESERVE);
-    let mut selected_ids: HashSet<u64> = ranked
-        .iter()
-        .take(impact_slots)
-        .map(|&index| templates[index].info.template_id)
-        .collect();
-
-    for index in rare {
-        if selected_ids.len() >= MAX_CLUSTER_TEMPLATE_CANDIDATES {
-            break;
-        }
-        selected_ids.insert(templates[index].info.template_id);
-    }
-    for &index in &ranked {
-        if selected_ids.len() >= MAX_CLUSTER_TEMPLATE_CANDIDATES {
-            break;
-        }
-        selected_ids.insert(templates[index].info.template_id);
-    }
-
-    let mut selected: Vec<_> = (0..templates.len())
-        .filter(|&index| selected_ids.contains(&templates[index].info.template_id))
-        .collect();
-    selected.sort_by(|&a, &b| template_impact_cmp(&templates[a], &templates[b]));
-    selected
+#[derive(Debug)]
+struct ClusterCandidateSet {
+    templates: Vec<ClusterTemplateCandidate>,
+    templates_available: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+struct ClusterTemplateCandidate {
+    info: ClusterTemplateInfo,
+}
+
+#[derive(Debug)]
+struct ClusterTemplateInfo {
+    template_id: u64,
+    pattern: String,
+    count: u64,
+    severity: u8,
+    example: String,
+}
+
+impl From<TemplateInfo> for ClusterTemplateInfo {
+    fn from(info: TemplateInfo) -> Self {
+        Self {
+            template_id: info.template_id,
+            pattern: info.pattern,
+            count: info.count,
+            severity: info.severity,
+            example: info.example,
+        }
+    }
+}
+
+fn load_cluster_candidates(
+    corpus: &LogCorpus,
+    excluded: &BTreeSet<u64>,
+    cancel: Option<&AtomicBool>,
+) -> CoreResult<ClusterCandidateSet> {
+    check_analysis_cancel(cancel)?;
+    let total_templates = corpus.template_count();
+    if total_templates <= MAX_CLUSTER_TEMPLATE_CANDIDATES {
+        let mut templates = corpus
+            .list_template_infos()
+            .into_iter()
+            .filter(|info| !excluded.contains(&info.template_id))
+            .map(|info| ClusterTemplateCandidate { info: info.into() })
+            .collect::<Vec<_>>();
+        check_analysis_cancel(cancel)?;
+        templates.sort_by(template_impact_cmp);
+        return Ok(ClusterCandidateSet {
+            templates_available: templates.len(),
+            templates,
+        });
+    }
+
+    let path = corpus.root().join("templates.json");
+    let mut sidecar = File::open(path)?;
+    let sidecar_before = template_sidecar_digest(&mut sidecar, cancel)?;
+    let rank_scan = scan_template_ranks(&mut sidecar, excluded, cancel).map_err(|error| {
+        CoreError::Message(format!(
+            "bounded template analysis requires a current templates.json sidecar: {error}"
+        ))
+    })?;
+    if rank_scan.templates_total != total_templates {
+        return Err(CoreError::Message(format!(
+            "bounded template analysis refused a stale templates.json sidecar: \
+             in-memory templates={total_templates}, persisted templates={}",
+            rank_scan.templates_total
+        )));
+    }
+
+    let templates_available = rank_scan.templates_available;
+    let selected_ranks = select_cluster_candidate_ranks(rank_scan);
+    let selected_by_id = selected_ranks
+        .iter()
+        .map(|rank| (rank.template_id, rank))
+        .collect::<HashMap<_, _>>();
+    let payload_scan =
+        scan_selected_template_payloads(&mut sidecar, &selected_by_id, excluded, cancel)?;
+    if template_sidecar_digest(&mut sidecar, cancel)? != sidecar_before {
+        return Err(CoreError::Message(
+            "bounded template analysis refused a templates.json sidecar that changed during analysis"
+                .into(),
+        ));
+    }
+    if payload_scan.templates_total != total_templates
+        || payload_scan.templates_available != templates_available
+    {
+        return Err(CoreError::Message(
+            "bounded template analysis refused a templates.json sidecar that changed during analysis"
+                .into(),
+        ));
+    }
+    if payload_scan.templates.len() != selected_ranks.len() {
+        return Err(CoreError::Message(format!(
+            "bounded template analysis could not materialize every selected template: \
+             selected={}, materialized={}",
+            selected_ranks.len(),
+            payload_scan.templates.len()
+        )));
+    }
+
+    let mut templates = payload_scan.templates;
+    templates.sort_by(template_impact_cmp);
+    Ok(ClusterCandidateSet {
+        templates,
+        templates_available: payload_scan.templates_available,
+    })
+}
+
+fn check_analysis_cancel(cancel: Option<&AtomicBool>) -> CoreResult<()> {
+    if cancel.is_some_and(|flag| flag.load(AtomicOrdering::Relaxed)) {
+        return Err(CoreError::Message(
+            "deterministic broad log triage cancelled".into(),
+        ));
+    }
+    Ok(())
+}
+
+struct CancelReader<'a, R> {
+    inner: R,
+    cancel: Option<&'a AtomicBool>,
+}
+
+impl<R: Read> Read for CancelReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self
+            .cancel
+            .is_some_and(|flag| flag.load(AtomicOrdering::Relaxed))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "deterministic broad log triage cancelled",
+            ));
+        }
+        self.inner.read(buffer)
+    }
+}
+
+fn template_sidecar_digest(file: &mut File, cancel: Option<&AtomicBool>) -> CoreResult<[u8; 32]> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        check_analysis_cancel(cancel)?;
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().into())
+}
+
+#[derive(Debug, Clone, Copy)]
 struct TemplateRank {
-    index: usize,
     score: f32,
     severity: u8,
     count: u64,
     template_id: u64,
+    severity_first: bool,
 }
 
 impl TemplateRank {
-    fn new(index: usize, row: &super::store::TemplateRow, severity_first: bool) -> Self {
+    fn new(info: &TemplateRankInfo, severity_first: bool) -> Self {
         Self {
-            index,
             score: if severity_first {
-                row.info.severity as f32
+                info.severity as f32
             } else {
-                problem_score(row.info.severity, row.info.count)
+                problem_score(info.severity, info.count)
             },
-            severity: row.info.severity,
-            count: row.info.count,
-            template_id: row.info.template_id,
+            severity: info.severity,
+            count: info.count,
+            template_id: info.template_id,
+            severity_first,
         }
     }
 }
 
 impl PartialEq for TemplateRank {
     fn eq(&self, other: &Self) -> bool {
-        self.index == other.index
-            && self.score.to_bits() == other.score.to_bits()
+        self.score.to_bits() == other.score.to_bits()
             && self.severity == other.severity
             && self.count == other.count
             && self.template_id == other.template_id
+            && self.severity_first == other.severity_first
     }
 }
 
@@ -287,49 +417,407 @@ impl Ord for TemplateRank {
             .then_with(|| other.severity.cmp(&self.severity))
             .then_with(|| other.count.cmp(&self.count))
             .then_with(|| self.template_id.cmp(&other.template_id))
-            .then_with(|| self.index.cmp(&other.index))
+            .then_with(|| self.severity_first.cmp(&other.severity_first))
     }
 }
 
-fn bounded_ranked_indices(
-    templates: &[super::store::TemplateRow],
-    limit: usize,
-    severity_first: bool,
-    include: impl Fn(&super::store::TemplateRow) -> bool,
-) -> Vec<usize> {
-    let mut retained = BinaryHeap::with_capacity(limit.saturating_add(1));
-    for (index, row) in templates.iter().enumerate() {
-        if !include(row) {
-            continue;
+#[derive(Debug, Deserialize)]
+struct TemplateRankEnvelope {
+    info: TemplateRankInfo,
+}
+
+#[derive(Debug, Deserialize)]
+struct TemplateRankInfo {
+    template_id: u64,
+    count: u64,
+    severity: u8,
+}
+
+#[derive(Debug)]
+struct TemplateRankScan {
+    templates_total: usize,
+    templates_available: usize,
+    impact: BinaryHeap<TemplateRank>,
+    rare: BinaryHeap<TemplateRank>,
+}
+
+struct TemplateRankScanSeed<'a> {
+    excluded: &'a BTreeSet<u64>,
+    cancel: Option<&'a AtomicBool>,
+}
+
+impl<'de> DeserializeSeed<'de> for TemplateRankScanSeed<'_> {
+    type Value = TemplateRankScan;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct TemplateRankScanVisitor<'a> {
+            excluded: &'a BTreeSet<u64>,
+            cancel: Option<&'a AtomicBool>,
         }
-        let rank = TemplateRank::new(index, row, severity_first);
-        if retained.len() < limit {
-            retained.push(rank);
-        } else if retained.peek().is_some_and(|worst| rank < *worst) {
-            retained.pop();
-            retained.push(rank);
+
+        impl<'de> Visitor<'de> for TemplateRankScanVisitor<'_> {
+            type Value = TemplateRankScan;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a template row array")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut scan = TemplateRankScan {
+                    templates_total: 0,
+                    templates_available: 0,
+                    impact: BinaryHeap::with_capacity(MAX_CLUSTER_TEMPLATE_CANDIDATES + 1),
+                    rare: BinaryHeap::with_capacity(MAX_CLUSTER_TEMPLATE_CANDIDATES + 1),
+                };
+                while let Some(row) = seq.next_element::<TemplateRankEnvelope>()? {
+                    if self
+                        .cancel
+                        .is_some_and(|flag| flag.load(AtomicOrdering::Relaxed))
+                    {
+                        return Err(serde::de::Error::custom(
+                            "deterministic broad log triage cancelled",
+                        ));
+                    }
+                    scan.templates_total = scan.templates_total.saturating_add(1);
+                    if self.excluded.contains(&row.info.template_id) {
+                        continue;
+                    }
+                    scan.templates_available = scan.templates_available.saturating_add(1);
+                    retain_bounded_rank(&mut scan.impact, TemplateRank::new(&row.info, false));
+                    if row.info.count <= RARE_TEMPLATE_MAX_COUNT {
+                        retain_bounded_rank(&mut scan.rare, TemplateRank::new(&row.info, true));
+                    }
+                }
+                Ok(scan)
+            }
         }
+
+        deserializer.deserialize_seq(TemplateRankScanVisitor {
+            excluded: self.excluded,
+            cancel: self.cancel,
+        })
+    }
+}
+
+fn retain_bounded_rank(heap: &mut BinaryHeap<TemplateRank>, rank: TemplateRank) {
+    if heap.len() < MAX_CLUSTER_TEMPLATE_CANDIDATES {
+        heap.push(rank);
+    } else if heap.peek().is_some_and(|worst| rank < *worst) {
+        heap.pop();
+        heap.push(rank);
+    }
+}
+
+fn scan_template_ranks(
+    file: &mut File,
+    excluded: &BTreeSet<u64>,
+    cancel: Option<&AtomicBool>,
+) -> CoreResult<TemplateRankScan> {
+    file.seek(SeekFrom::Start(0))?;
+    let reader = CancelReader {
+        inner: file,
+        cancel,
+    };
+    let mut deserializer = serde_json::Deserializer::from_reader(BufReader::new(reader));
+    let scan = TemplateRankScanSeed { excluded, cancel }.deserialize(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(scan)
+}
+
+fn select_cluster_candidate_ranks(scan: TemplateRankScan) -> Vec<TemplateRank> {
+    let templates_available = scan.templates_available;
+    let mut impact = scan.impact.into_vec();
+    impact.sort_by(template_rank_impact_cmp);
+    if templates_available <= MAX_CLUSTER_TEMPLATE_CANDIDATES {
+        return impact;
     }
 
-    let mut indices = retained
-        .into_iter()
-        .map(|rank| rank.index)
+    let mut rare = scan.rare.into_vec();
+    rare.sort_by(template_rank_rare_cmp);
+    let impact_slots =
+        MAX_CLUSTER_TEMPLATE_CANDIDATES.saturating_sub(RARE_TEMPLATE_CANDIDATE_RESERVE);
+    let mut selected = impact
+        .iter()
+        .take(impact_slots)
+        .copied()
         .collect::<Vec<_>>();
-    indices.sort_by(|&a, &b| {
-        if severity_first {
-            templates[b]
-                .info
-                .severity
-                .cmp(&templates[a].info.severity)
-                .then_with(|| template_impact_cmp(&templates[a], &templates[b]))
-        } else {
-            template_impact_cmp(&templates[a], &templates[b])
+    let mut selected_ids = selected
+        .iter()
+        .map(|rank| rank.template_id)
+        .collect::<HashSet<_>>();
+    for rank in rare.into_iter().chain(impact.iter().copied()) {
+        if selected.len() >= MAX_CLUSTER_TEMPLATE_CANDIDATES {
+            break;
         }
-    });
-    indices
+        if selected_ids.insert(rank.template_id) {
+            selected.push(rank);
+        }
+    }
+    selected.sort_by(template_rank_impact_cmp);
+    selected
 }
 
-fn template_impact_cmp(a: &super::store::TemplateRow, b: &super::store::TemplateRow) -> Ordering {
+fn template_rank_impact_cmp(a: &TemplateRank, b: &TemplateRank) -> Ordering {
+    b.score
+        .total_cmp(&a.score)
+        .then_with(|| b.severity.cmp(&a.severity))
+        .then_with(|| b.count.cmp(&a.count))
+        .then_with(|| a.template_id.cmp(&b.template_id))
+}
+
+fn template_rank_rare_cmp(a: &TemplateRank, b: &TemplateRank) -> Ordering {
+    b.severity
+        .cmp(&a.severity)
+        .then_with(|| template_rank_impact_cmp(a, b))
+}
+
+#[derive(Debug)]
+struct TemplatePayloadScan {
+    templates_total: usize,
+    templates_available: usize,
+    templates: Vec<ClusterTemplateCandidate>,
+}
+
+struct TemplatePayloadScanSeed<'a> {
+    selected_by_id: &'a HashMap<u64, &'a TemplateRank>,
+    excluded: &'a BTreeSet<u64>,
+}
+
+struct TemplatePayloadRowSeed<'a> {
+    selected_by_id: &'a HashMap<u64, &'a TemplateRank>,
+}
+
+struct TemplatePayloadRow {
+    template_id: u64,
+    candidate: Option<ClusterTemplateCandidate>,
+}
+
+impl<'de> DeserializeSeed<'de> for TemplatePayloadRowSeed<'_> {
+    type Value = TemplatePayloadRow;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct TemplatePayloadRowVisitor<'a> {
+            selected_by_id: &'a HashMap<u64, &'a TemplateRank>,
+        }
+
+        impl<'de> Visitor<'de> for TemplatePayloadRowVisitor<'_> {
+            type Value = TemplatePayloadRow;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a persisted template row")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut info = None;
+                while let Some(field) = map.next_key::<String>()? {
+                    if field == "info" {
+                        info = Some(map.next_value_seed(TemplateInfoPayloadSeed {
+                            selected_by_id: self.selected_by_id,
+                        })?);
+                    } else {
+                        // In particular, the optional embedding vector is
+                        // consumed without allocating or cloning its values.
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                }
+                info.ok_or_else(|| serde::de::Error::missing_field("info"))
+            }
+        }
+
+        deserializer.deserialize_map(TemplatePayloadRowVisitor {
+            selected_by_id: self.selected_by_id,
+        })
+    }
+}
+
+struct TemplateInfoPayloadSeed<'a> {
+    selected_by_id: &'a HashMap<u64, &'a TemplateRank>,
+}
+
+impl<'de> DeserializeSeed<'de> for TemplateInfoPayloadSeed<'_> {
+    type Value = TemplatePayloadRow;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct TemplateInfoPayloadVisitor<'a> {
+            selected_by_id: &'a HashMap<u64, &'a TemplateRank>,
+        }
+
+        impl<'de> Visitor<'de> for TemplateInfoPayloadVisitor<'_> {
+            type Value = TemplatePayloadRow;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("persisted template info")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut template_id = None;
+                let mut pattern = None;
+                let mut count = None;
+                let mut severity = None;
+                let mut example = None;
+                while let Some(field) = map.next_key::<String>()? {
+                    let selected =
+                        template_id.is_some_and(|id| self.selected_by_id.contains_key(&id));
+                    match field.as_str() {
+                        "template_id" => template_id = Some(map.next_value()?),
+                        "pattern" if selected || template_id.is_none() => {
+                            pattern = Some(map.next_value()?)
+                        }
+                        "count" if selected || template_id.is_none() => {
+                            count = Some(map.next_value()?)
+                        }
+                        "severity" if selected || template_id.is_none() => {
+                            severity = Some(map.next_value()?)
+                        }
+                        "example" if selected || template_id.is_none() => {
+                            example = Some(map.next_value()?)
+                        }
+                        _ => {
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                }
+
+                let template_id =
+                    template_id.ok_or_else(|| serde::de::Error::missing_field("template_id"))?;
+                if !self.selected_by_id.contains_key(&template_id) {
+                    return Ok(TemplatePayloadRow {
+                        template_id,
+                        candidate: None,
+                    });
+                }
+                Ok(TemplatePayloadRow {
+                    template_id,
+                    candidate: Some(ClusterTemplateCandidate {
+                        info: ClusterTemplateInfo {
+                            template_id,
+                            pattern: pattern
+                                .ok_or_else(|| serde::de::Error::missing_field("pattern"))?,
+                            count: count.ok_or_else(|| serde::de::Error::missing_field("count"))?,
+                            severity: severity
+                                .ok_or_else(|| serde::de::Error::missing_field("severity"))?,
+                            example: example
+                                .ok_or_else(|| serde::de::Error::missing_field("example"))?,
+                        },
+                    }),
+                })
+            }
+        }
+
+        deserializer.deserialize_map(TemplateInfoPayloadVisitor {
+            selected_by_id: self.selected_by_id,
+        })
+    }
+}
+
+impl<'de> DeserializeSeed<'de> for TemplatePayloadScanSeed<'_> {
+    type Value = TemplatePayloadScan;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct TemplatePayloadScanVisitor<'a> {
+            selected_by_id: &'a HashMap<u64, &'a TemplateRank>,
+            excluded: &'a BTreeSet<u64>,
+        }
+
+        impl<'de> Visitor<'de> for TemplatePayloadScanVisitor<'_> {
+            type Value = TemplatePayloadScan;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a template row array")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut scan = TemplatePayloadScan {
+                    templates_total: 0,
+                    templates_available: 0,
+                    templates: Vec::with_capacity(self.selected_by_id.len()),
+                };
+                while let Some(row) = seq.next_element_seed(TemplatePayloadRowSeed {
+                    selected_by_id: self.selected_by_id,
+                })? {
+                    scan.templates_total = scan.templates_total.saturating_add(1);
+                    if self.excluded.contains(&row.template_id) {
+                        continue;
+                    }
+                    scan.templates_available = scan.templates_available.saturating_add(1);
+                    let Some(candidate) = row.candidate else {
+                        continue;
+                    };
+                    let expected = self
+                        .selected_by_id
+                        .get(&candidate.info.template_id)
+                        .ok_or_else(|| {
+                            serde::de::Error::custom(
+                                "template payload materialized outside the bounded selection",
+                            )
+                        })?;
+                    if candidate.info.count != expected.count
+                        || candidate.info.severity != expected.severity
+                    {
+                        return Err(serde::de::Error::custom(format!(
+                            "template {} ranking metadata changed between bounded scans",
+                            candidate.info.template_id
+                        )));
+                    }
+                    scan.templates.push(candidate);
+                }
+                Ok(scan)
+            }
+        }
+
+        deserializer.deserialize_seq(TemplatePayloadScanVisitor {
+            selected_by_id: self.selected_by_id,
+            excluded: self.excluded,
+        })
+    }
+}
+
+fn scan_selected_template_payloads(
+    file: &mut File,
+    selected_by_id: &HashMap<u64, &TemplateRank>,
+    excluded: &BTreeSet<u64>,
+    cancel: Option<&AtomicBool>,
+) -> CoreResult<TemplatePayloadScan> {
+    file.seek(SeekFrom::Start(0))?;
+    let reader = CancelReader {
+        inner: file,
+        cancel,
+    };
+    let mut deserializer = serde_json::Deserializer::from_reader(BufReader::new(reader));
+    let scan = TemplatePayloadScanSeed {
+        selected_by_id,
+        excluded,
+    }
+    .deserialize(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(scan)
+}
+
+fn template_impact_cmp(a: &ClusterTemplateCandidate, b: &ClusterTemplateCandidate) -> Ordering {
     problem_score(b.info.severity, b.info.count)
         .partial_cmp(&problem_score(a.info.severity, a.info.count))
         .unwrap_or(Ordering::Equal)
@@ -597,6 +1085,7 @@ mod tests {
     use crate::log_analysis::ingest::ingest_path;
     use crate::log_analysis::store::TemplateRow;
     use std::io::Write;
+    use std::sync::Arc;
 
     #[test]
     fn clusters_and_timeline_on_fixture() {
@@ -635,44 +1124,148 @@ mod tests {
         let corpus = LogCorpus::create(dir.path(), "bounded clustering").unwrap();
         corpus
             .upsert_templates(
-                (1..=700).map(|id| template_row(id, &format!("uniquecomponent{id}"), 3, 100 + id)),
+                (1..=2_048)
+                    .map(|id| template_row(id, &format!("uniquecomponent{id}"), 3, 100 + id)),
             )
             .unwrap();
+        corpus.flush().unwrap();
+
+        // A full TemplateRow decoder would reject this field. The bounded
+        // projection deliberately ignores embeddings while retaining ranking
+        // scalars and selected template payloads.
+        let templates_path = corpus.root().join("templates.json");
+        let persisted = std::fs::read_to_string(&templates_path).unwrap();
+        assert!(persisted.contains("\"vector\": null"));
+        std::fs::write(
+            &templates_path,
+            persisted.replace(
+                "\"vector\": null",
+                "\"vector\": {\"must_not_deserialize\": true}",
+            ),
+        )
+        .unwrap();
 
         let first = cluster_problems(&corpus, 1_000).unwrap();
+        let mut persisted_rows: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(&templates_path).unwrap()).unwrap();
+        persisted_rows.reverse();
+        std::fs::write(
+            &templates_path,
+            serde_json::to_vec_pretty(&persisted_rows).unwrap(),
+        )
+        .unwrap();
         let second = cluster_problems(&corpus, 1_000).unwrap();
         assert_eq!(first.len(), MAX_CLUSTER_TEMPLATE_CANDIDATES);
         let selected_ids: HashSet<_> = first.iter().map(|cluster| cluster.cluster_id).collect();
         assert_eq!(
             selected_ids,
-            (189..=700).collect(),
+            (1_537..=2_048).collect(),
             "the cap must retain the 512 highest-impact templates exactly"
         );
         assert!(first.iter().all(|cluster| {
             cluster.partial
                 && cluster.templates_considered == MAX_CLUSTER_TEMPLATE_CANDIDATES
-                && cluster.templates_available == 700
+                && cluster.templates_available == 2_048
         }));
         assert_eq!(
-            first
-                .iter()
-                .map(|cluster| (
-                    cluster.cluster_id,
-                    cluster.template_ids.clone(),
-                    cluster.count,
-                    cluster.severity
-                ))
-                .collect::<Vec<_>>(),
-            second
-                .iter()
-                .map(|cluster| (
-                    cluster.cluster_id,
-                    cluster.template_ids.clone(),
-                    cluster.count,
-                    cluster.severity
-                ))
-                .collect::<Vec<_>>()
+            serde_json::to_value(&first).unwrap(),
+            serde_json::to_value(&second).unwrap(),
+            "candidate and cluster ordering must not depend on sidecar row order"
         );
+    }
+
+    #[test]
+    fn high_cardinality_exclusions_preserve_bounded_order_and_scope_honesty() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "bounded exclusions").unwrap();
+        corpus
+            .upsert_templates(
+                (1..=2_000).map(|id| template_row(id, &format!("isolatedpattern{id}"), 3, 10 + id)),
+            )
+            .unwrap();
+        corpus.flush().unwrap();
+
+        let mut excluded = (1_980..=2_000).collect::<Vec<_>>();
+        excluded.extend([1, 1]);
+        let clusters = cluster_problems_with_excluded_templates(&corpus, 1_000, &excluded).unwrap();
+        let selected_ids = clusters
+            .iter()
+            .flat_map(|cluster| cluster.template_ids.iter().copied())
+            .collect::<HashSet<_>>();
+        assert_eq!(selected_ids, (1_468..=1_979).collect());
+        assert_eq!(selected_ids.len(), MAX_CLUSTER_TEMPLATE_CANDIDATES);
+        assert!(selected_ids.is_disjoint(&excluded.into_iter().collect()));
+        assert!(clusters.iter().all(|cluster| {
+            cluster.partial
+                && cluster.templates_available == 1_978
+                && cluster.templates_considered == MAX_CLUSTER_TEMPLATE_CANDIDATES
+        }));
+    }
+
+    #[test]
+    fn sidecar_reader_interrupts_during_a_real_read_sequence() {
+        struct CancelAfterFirstRead {
+            bytes: std::io::Cursor<Vec<u8>>,
+            cancel: Arc<AtomicBool>,
+            reads: usize,
+        }
+
+        impl Read for CancelAfterFirstRead {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let read = self.bytes.read(buffer)?;
+                self.reads += 1;
+                if self.reads == 1 {
+                    self.cancel.store(true, AtomicOrdering::SeqCst);
+                }
+                Ok(read)
+            }
+        }
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let source = CancelAfterFirstRead {
+            bytes: std::io::Cursor::new(vec![b'x'; 32]),
+            cancel: Arc::clone(&cancel),
+            reads: 0,
+        };
+        let mut reader = CancelReader {
+            inner: source,
+            cancel: Some(cancel.as_ref()),
+        };
+        let mut buffer = [0_u8; 8];
+        assert_eq!(reader.read(&mut buffer).unwrap(), buffer.len());
+        let error = reader.read(&mut buffer).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert!(error.to_string().contains("triage cancelled"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sidecar_scans_stay_on_one_open_snapshot_across_path_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("templates.json");
+        let original =
+            serde_json::to_vec(&vec![template_row(7, "original pattern", 4, 9)]).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        let mut opened = File::open(&path).unwrap();
+        let digest = template_sidecar_digest(&mut opened, None).unwrap();
+
+        std::fs::rename(&path, dir.path().join("original-retained.json")).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&vec![template_row(99, "replacement pattern", 1, 1)]).unwrap(),
+        )
+        .unwrap();
+
+        let scan = scan_template_ranks(&mut opened, &BTreeSet::new(), None).unwrap();
+        let selected = select_cluster_candidate_ranks(scan);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|rank| rank.template_id)
+                .collect::<Vec<_>>(),
+            vec![7]
+        );
+        assert_eq!(template_sidecar_digest(&mut opened, None).unwrap(), digest);
     }
 
     #[test]
@@ -733,6 +1326,7 @@ mod tests {
             1,
         ));
         corpus.upsert_templates(templates).unwrap();
+        corpus.flush().unwrap();
 
         let clusters = cluster_problems(&corpus, 10).unwrap();
         assert!(

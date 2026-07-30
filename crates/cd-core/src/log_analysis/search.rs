@@ -192,6 +192,13 @@ pub struct SearchEvidenceIdentity {
     pub seq: u64,
     /// Source provenance stored separately from the event payload.
     pub source: String,
+    /// Optional bounded model-visible source reference.
+    ///
+    /// Deterministic broad triage uses this only when an exact source identity
+    /// is too large for its bounded brief. Validation maps the reference back
+    /// to `source`; ordinary search identities leave it unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub citation_source: Option<String>,
     /// Trusted template identifier assigned during ingest.
     pub template_id: u64,
 }
@@ -208,6 +215,7 @@ fn search_exemplar(event: &LogEvent, query: Option<&str>) -> SearchExemplar {
         identity: SearchEvidenceIdentity {
             seq: event.seq,
             source: event.source.clone(),
+            citation_source: None,
             template_id: event.template_id,
         },
     }
@@ -307,6 +315,7 @@ pub fn search_logs_with_excluded_templates(
                         identity: SearchEvidenceIdentity {
                             seq: e.seq,
                             source: e.source.clone(),
+                            citation_source: None,
                             template_id: e.template_id,
                         },
                     };

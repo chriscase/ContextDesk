@@ -116,6 +116,9 @@ pub struct LinkedSynthesisCheckpoint {
     corpus_id: String,
     provider_profile_id: Option<String>,
     model_id: Option<String>,
+    event_revision: u64,
+    template_analysis_revision: u64,
+    suppression_revision: u64,
     user_text: String,
     evidence: String,
     identities: HashSet<crate::log_analysis::SearchEvidenceIdentity>,
@@ -153,6 +156,9 @@ impl LinkedSynthesisCheckpoint {
             + self.corpus_id.len()
             + self.provider_profile_id.as_ref().map_or(0, String::len)
             + self.model_id.as_ref().map_or(0, String::len)
+            + std::mem::size_of_val(&self.event_revision)
+            + std::mem::size_of_val(&self.template_analysis_revision)
+            + std::mem::size_of_val(&self.suppression_revision)
             + self.user_text.len()
             + self.evidence.len()
             + std::mem::size_of_val(&self.allow_empty_evidence)
@@ -938,29 +944,13 @@ fn linked_source_values(text: &str) -> Option<Vec<String>> {
     while let Some(relative) = lower.get(offset..)?.find("source=") {
         let value_start = offset + relative + "source=".len();
         let suffix = text.get(value_start..)?;
-        let (value, consumed) = if let Some(quoted) = suffix.strip_prefix('"') {
-            let mut value = String::new();
-            let mut escaped = false;
-            let mut consumed = 1usize;
-            let mut closed = false;
-            for (index, character) in quoted.char_indices() {
-                consumed = 1 + index + character.len_utf8();
-                if escaped {
-                    value.push(character);
-                    escaped = false;
-                } else if character == '\\' {
-                    escaped = true;
-                } else if character == '"' {
-                    closed = true;
-                    break;
-                } else {
-                    value.push(character);
-                }
-            }
-            if !closed || value.is_empty() {
+        let (value, consumed) = if suffix.starts_with('"') {
+            let mut values = serde_json::Deserializer::from_str(suffix).into_iter::<String>();
+            let value = values.next()?.ok()?;
+            if value.is_empty() || value.len() > 4_096 {
                 return None;
             }
-            (value, consumed)
+            (value, values.byte_offset())
         } else {
             let value = suffix
                 .chars()
@@ -987,45 +977,41 @@ fn linked_answer_references_available_event_identities(
     text: &str,
     available_evidence: &HashSet<crate::log_analysis::SearchEvidenceIdentity>,
 ) -> bool {
-    let mut cited_tuples = Vec::new();
-    for clause in text.split(['\n', ';']) {
-        let sequences = linked_marker_values(clause, "seq=");
-        let Some(sources) = linked_source_values(clause) else {
+    let sequences = linked_marker_values(text, "seq=");
+    let Some(sources) = linked_source_values(text) else {
+        return false;
+    };
+    let mut templates = linked_marker_values(text, "template_id=");
+    templates.extend(linked_marker_values(text, "template id="));
+    if sequences.len() != sources.len() || sequences.is_empty() {
+        return false;
+    }
+    if !templates.is_empty() && templates.len() != sequences.len() {
+        return false;
+    }
+    let mut cited_tuples = Vec::with_capacity(sequences.len());
+    for (index, (sequence, source)) in sequences.into_iter().zip(sources).enumerate() {
+        let Ok(sequence) = sequence.parse::<u64>() else {
             return false;
         };
-        let mut templates = linked_marker_values(clause, "template_id=");
-        templates.extend(linked_marker_values(clause, "template id="));
-        if sequences.is_empty() && sources.is_empty() {
-            if !templates.is_empty() {
-                return false;
-            }
-            continue;
-        }
-        if sequences.len() != sources.len() || sequences.is_empty() {
-            return false;
-        }
-        if !templates.is_empty() && templates.len() != sequences.len() {
-            return false;
-        }
-        for (index, (sequence, source)) in sequences.into_iter().zip(sources).enumerate() {
-            let Ok(sequence) = sequence.parse::<u64>() else {
-                return false;
-            };
-            let template_id = match templates.get(index) {
-                Some(template) => match template.parse::<u64>() {
-                    Ok(template) => Some(template),
-                    Err(_) => return false,
-                },
-                None => None,
-            };
-            cited_tuples.push((sequence, source, template_id));
-        }
+        let template_id = match templates.get(index) {
+            Some(template) => match template.parse::<u64>() {
+                Ok(template) => Some(template),
+                Err(_) => return false,
+            },
+            None => None,
+        };
+        cited_tuples.push((sequence, source, template_id));
     }
     !cited_tuples.is_empty()
         && cited_tuples.iter().all(|(sequence, source, template_id)| {
             available_evidence.iter().any(|evidence| {
                 evidence.seq == *sequence
-                    && evidence.source.eq_ignore_ascii_case(source)
+                    && (evidence.source.eq_ignore_ascii_case(source)
+                        || evidence
+                            .citation_source
+                            .as_deref()
+                            .is_some_and(|citation| citation.eq_ignore_ascii_case(source)))
                     && template_id.is_none_or(|template_id| evidence.template_id == template_id)
             })
         })
@@ -1356,6 +1342,29 @@ where
     }
 }
 
+async fn run_broad_triage_worker(
+    job: crate::tool_host::BroadLogTriageBuildJob,
+    clock: &TurnClock,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<
+    Result<CoreResult<crate::tool_host::BroadLogTriageBrief>, tokio::task::JoinError>,
+    TurnAwaitError,
+> {
+    let abort = job.abort_handle();
+    let mut worker = tokio::task::spawn_blocking(move || job.build());
+    match within_turn_deadline(clock, cancel, &mut worker).await {
+        Ok(result) => Ok(result),
+        Err(reason) => {
+            abort.abort();
+            // `spawn_blocking` tasks cannot be safely aborted after starting.
+            // Interrupt the active DuckDB query and join the cooperative worker
+            // before returning so repeated retries cannot accumulate scans.
+            let _ = worker.await;
+            Err(reason)
+        }
+    }
+}
+
 fn terminal_budget_time(
     mut out: EventCollector<'_>,
     trail: &[String],
@@ -1477,9 +1486,41 @@ fn enter_phase(
     }
 }
 
+fn validate_linked_turn_snapshot(host: &ToolHost, opts: &AgentOptions) -> CoreResult<()> {
+    let Some(context) = opts.log_explorer_context.as_ref() else {
+        return Ok(());
+    };
+    if !host.has_pinned_log_suppression_lens() {
+        return Ok(());
+    }
+    host.pinned_linked_log_revisions(&context.corpus_id)
+        .map(|_| ())
+}
+
+fn terminal_linked_snapshot_stale(
+    mut out: EventCollector<'_>,
+    trail: &[String],
+    error: impl std::fmt::Display,
+) -> CoreResult<Vec<StreamEvent>> {
+    let mut steps = trail.to_vec();
+    steps.push(format!("linked_log_snapshot_stale:{error}"));
+    out.push(StreamEvent::SearchTrail { steps });
+    out.push(StreamEvent::Error {
+        code: "linked_log_snapshot_stale".into(),
+        message: format!(
+            "The linked corpus or noise policy changed during this investigation. \
+             ContextDesk withheld a mixed-revision answer; retry from the current view. {error}"
+        ),
+    });
+    out.push(StreamEvent::TurnCompleted {
+        reason: "linked_log_snapshot_stale".into(),
+    });
+    Ok(out.into_events())
+}
+
 async fn run_linked_synthesis_retry(
     backend: &dyn ChatBackend,
-    _request_text: &str,
+    host: &mut ToolHost,
     history: &mut Vec<ChatMessage>,
     opts: &AgentOptions,
     checkpoint: &LinkedSynthesisCheckpoint,
@@ -1507,6 +1548,24 @@ async fn run_linked_synthesis_retry(
             message: "The preserved evidence belongs to a different chat, corpus, or model. \
                       Run a new linked investigation instead."
                 .into(),
+        });
+        out.push(StreamEvent::TurnCompleted {
+            reason: "linked_synthesis_retry_stale".into(),
+        });
+        return Ok(out.into_events());
+    }
+    if let Err(error) = host.validate_linked_log_checkpoint(
+        &context.corpus_id,
+        checkpoint.event_revision,
+        checkpoint.template_analysis_revision,
+        checkpoint.suppression_revision,
+    ) {
+        out.push(StreamEvent::Error {
+            code: "linked_synthesis_retry_stale".into(),
+            message: format!(
+                "The preserved evidence is stale because the linked corpus or noise policy changed. \
+                 Run a new linked investigation instead. {error}"
+            ),
         });
         out.push(StreamEvent::TurnCompleted {
             reason: "linked_synthesis_retry_stale".into(),
@@ -1782,7 +1841,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
     if let Some(checkpoint) = opts.linked_synthesis_retry.as_ref() {
         return run_linked_synthesis_retry(
             backend,
-            user_text,
+            host,
             history,
             opts,
             checkpoint,
@@ -1796,6 +1855,11 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
     // the host's normal governed read surface (#601). Write tools are not
     // offered, and ToolHost still enforces connector/session permission policy.
     let linked_turn = opts.log_explorer_context.is_some();
+    if let Some(context) = opts.log_explorer_context.as_ref() {
+        if let Err(error) = host.pin_log_suppression_lens_if_present(&context.corpus_id) {
+            return terminal_linked_snapshot_stale(out, &["started".into()], error);
+        }
+    }
     let mut specs = host.specs();
     if linked_turn {
         specs.retain(|tool| {
@@ -1974,10 +2038,10 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
             ok: None,
         });
         let brief_result = match host.prepare_broad_log_triage_brief() {
-            Ok(job) => match within_turn_deadline(
+            Ok(job) => match run_broad_triage_worker(
+                job,
                 &clock,
                 opts.cancel.as_ref().map(|cancel| cancel.as_ref()),
-                tokio::task::spawn_blocking(move || job.build()),
             )
             .await
             {
@@ -1997,6 +2061,15 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
             },
             Err(error) => Err(error),
         };
+        let brief_result = brief_result.and_then(|brief| {
+            host.validate_linked_log_checkpoint(
+                &brief.corpus_id,
+                brief.event_revision,
+                brief.template_analysis_revision,
+                brief.suppression_revision,
+            )?;
+            Ok(brief)
+        });
         match brief_result {
             Ok(brief) => {
                 current_turn_evidence.push(&brief.model_text);
@@ -2064,6 +2137,9 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                             corpus_id: context.corpus_id.clone(),
                             provider_profile_id: opts.provider_profile_id.clone(),
                             model_id: opts.model.clone(),
+                            event_revision: brief.event_revision,
+                            template_analysis_revision: brief.template_analysis_revision,
+                            suppression_revision: brief.suppression_revision,
                             user_text: user_text.to_string(),
                             evidence,
                             identities: linked_log_evidence_identities.clone(),
@@ -2357,6 +2433,11 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
             } else {
                 &specs
             };
+            if linked_turn {
+                if let Err(error) = validate_linked_turn_snapshot(host, opts) {
+                    return terminal_linked_snapshot_stale(out, &trail, error);
+                }
+            }
             let result = match within_turn_deadline(
                 &clock,
                 cancel_ref,
@@ -3063,16 +3144,27 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                     opts.log_explorer_context.as_ref(),
                     checkpoint_out.as_deref_mut(),
                 ) {
-                    *slot = Some(LinkedSynthesisCheckpoint {
-                        session_id: opts.session_id.clone(),
-                        corpus_id: context.corpus_id.clone(),
-                        provider_profile_id: opts.provider_profile_id.clone(),
-                        model_id: opts.model.clone(),
-                        user_text: user_text.to_string(),
-                        evidence,
-                        identities: linked_log_evidence_identities.clone(),
-                        allow_empty_evidence: linked_allow_empty_evidence,
-                    });
+                    match host.pinned_linked_log_revisions(&context.corpus_id) {
+                        Ok((event_revision, template_analysis_revision, suppression_revision)) => {
+                            *slot = Some(LinkedSynthesisCheckpoint {
+                                session_id: opts.session_id.clone(),
+                                corpus_id: context.corpus_id.clone(),
+                                provider_profile_id: opts.provider_profile_id.clone(),
+                                model_id: opts.model.clone(),
+                                event_revision,
+                                template_analysis_revision,
+                                suppression_revision,
+                                user_text: user_text.to_string(),
+                                evidence,
+                                identities: linked_log_evidence_identities.clone(),
+                                allow_empty_evidence: linked_allow_empty_evidence,
+                            });
+                        }
+                        Err(error) => {
+                            *slot = None;
+                            trail.push(format!("linked_checkpoint_stale:{error}"));
+                        }
+                    }
                 }
             }
         }
@@ -3224,6 +3316,11 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
             }
         }
     };
+    if linked_turn {
+        if let Err(error) = validate_linked_turn_snapshot(host, opts) {
+            return terminal_linked_snapshot_stale(out, &trail, error);
+        }
+    }
     let synthesis = match within_turn_deadline(
         &clock,
         cancel_ref,
@@ -3580,6 +3677,7 @@ mod tests {
         let evidence = HashSet::from([crate::log_analysis::SearchEvidenceIdentity {
             seq: 101,
             source: "worker.log".into(),
+            citation_source: None,
             template_id: 7,
         }]);
         assert!(linked_answer_references_available_event_identities(
@@ -3601,6 +3699,7 @@ mod tests {
         let spaced_source = HashSet::from([crate::log_analysis::SearchEvidenceIdentity {
             seq: 202,
             source: "service logs/worker—west.log".into(),
+            citation_source: None,
             template_id: 8,
         }]);
         assert!(linked_answer_references_available_event_identities(
@@ -3610,6 +3709,25 @@ mod tests {
         assert!(!linked_answer_references_available_event_identities(
             r#"Observed seq=202 source="service logs/worker—west.log" template_id=7."#,
             &spaced_source,
+        ));
+        let complex_source_value = format!(
+            "nested/{}/worker;west\n\"quoted\"\\tail—日志.log",
+            "segment".repeat(40)
+        );
+        let complex_source = HashSet::from([crate::log_analysis::SearchEvidenceIdentity {
+            seq: 303,
+            source: complex_source_value.clone(),
+            citation_source: Some("nested/segment…#trusted-source-ref".into()),
+            template_id: 9,
+        }]);
+        let quoted_source = serde_json::to_string(&complex_source_value).unwrap();
+        assert!(linked_answer_references_available_event_identities(
+            &format!("Observed seq=303 source={quoted_source} template_id=9."),
+            &complex_source,
+        ));
+        assert!(linked_answer_references_available_event_identities(
+            r#"Observed seq=303 source="nested/segment…#trusted-source-ref" template_id=9."#,
+            &complex_source,
         ));
         assert!(!linked_answer_references_available_event_identities(
             "The logs show a serious timeout.",
@@ -3622,6 +3740,7 @@ mod tests {
         let evidence = HashSet::from([crate::log_analysis::SearchEvidenceIdentity {
             seq: 101,
             source: "worker.log".into(),
+            citation_source: None,
             template_id: 7,
         }]);
 
@@ -5940,6 +6059,125 @@ mod tests {
             .any(|event| matches!(event, StreamEvent::TextDelta { .. })));
     }
 
+    #[tokio::test]
+    async fn broad_host_brief_mid_build_cancel_interrupts_and_joins_worker() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let (_dir, mut host, context) = linked_timeout_fixture();
+        host.set_log_corpus_scope(Some(context.corpus_id.clone()));
+        host.pin_log_suppression_lens(&context.corpus_id)
+            .expect("pin broad triage lens");
+
+        let entered = Arc::new(AtomicBool::new(false));
+        let exited = Arc::new(AtomicBool::new(false));
+        let entered_hook = Arc::clone(&entered);
+        let exited_hook = Arc::clone(&exited);
+        host.set_broad_triage_phase_hook(Some(Arc::new(move |phase, abort| {
+            if phase != "facets" {
+                return;
+            }
+            entered_hook.store(true, Ordering::SeqCst);
+            while !abort.is_aborted() {
+                std::thread::yield_now();
+            }
+            exited_hook.store(true, Ordering::SeqCst);
+        })));
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_task = Arc::clone(&cancel);
+        let entered_task = Arc::clone(&entered);
+        let trigger = tokio::spawn(async move {
+            while !entered_task.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+            cancel_task.store(true, Ordering::SeqCst);
+        });
+
+        let mut history = Vec::new();
+        let events = run_agent_turn(
+            &FirstCallProviderFailureBackend,
+            &mut host,
+            "What problems do you see in these logs?",
+            &mut history,
+            &AgentOptions {
+                session_id: "broad-mid-build-cancelled".into(),
+                cancel: Some(cancel),
+                deadline_ms: 5_000,
+                log_explorer_context: Some(context),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("mid-build cancellation is a typed terminal turn");
+        trigger.await.expect("cancel trigger");
+
+        assert!(entered.load(Ordering::SeqCst));
+        assert!(
+            exited.load(Ordering::SeqCst),
+            "the blocking worker must finish before the turn returns"
+        );
+        assert!(events.iter().any(
+            |event| matches!(event, StreamEvent::TurnCompleted { reason } if reason == "cancel")
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { .. })));
+    }
+
+    #[tokio::test]
+    async fn broad_host_brief_mid_build_deadline_interrupts_and_joins_worker() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let (_dir, mut host, context) = linked_timeout_fixture();
+        host.set_log_corpus_scope(Some(context.corpus_id.clone()));
+        host.pin_log_suppression_lens(&context.corpus_id)
+            .expect("pin broad triage lens");
+        let entered = Arc::new(AtomicBool::new(false));
+        let exited = Arc::new(AtomicBool::new(false));
+        let entered_hook = Arc::clone(&entered);
+        let exited_hook = Arc::clone(&exited);
+        host.set_broad_triage_phase_hook(Some(Arc::new(move |phase, abort| {
+            if phase != "facets" {
+                return;
+            }
+            entered_hook.store(true, Ordering::SeqCst);
+            while !abort.is_aborted() {
+                std::thread::yield_now();
+            }
+            exited_hook.store(true, Ordering::SeqCst);
+        })));
+
+        let mut history = Vec::new();
+        let events = run_agent_turn(
+            &FirstCallProviderFailureBackend,
+            &mut host,
+            "What problems do you see in these logs?",
+            &mut history,
+            &AgentOptions {
+                session_id: "broad-mid-build-deadline".into(),
+                deadline_ms: 25,
+                log_explorer_context: Some(context),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("mid-build deadline is a typed terminal turn");
+
+        assert!(entered.load(Ordering::SeqCst));
+        assert!(
+            exited.load(Ordering::SeqCst),
+            "the blocking worker must finish before the deadline turn returns"
+        );
+        assert!(events.iter().any(
+            |event| matches!(event, StreamEvent::Error { code, .. } if code == "budget_time")
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { .. })));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn linked_retrieval_survives_synthesis_timeout_and_retries_without_tools() {
         let (_dir, mut host, context) = linked_timeout_fixture();
@@ -6122,6 +6360,7 @@ mod tests {
             .map(|seq| crate::log_analysis::SearchEvidenceIdentity {
                 seq: seq as u64,
                 source: format!("source-{seq}.log"),
+                citation_source: None,
                 template_id: seq as u64,
             })
             .collect::<Vec<_>>();
@@ -6183,11 +6422,15 @@ mod tests {
             corpus_id: context.corpus_id.clone(),
             provider_profile_id: Some("provider-a".into()),
             model_id: Some("model-a".into()),
+            event_revision: 0,
+            template_analysis_revision: 0,
+            suppression_revision: 0,
             user_text: "question".into(),
             evidence: "redacted bounded evidence".into(),
             identities: HashSet::from([crate::log_analysis::SearchEvidenceIdentity {
                 seq: 0,
                 source: "worker.log".into(),
+                citation_source: None,
                 template_id: 1,
             }]),
             allow_empty_evidence: false,
@@ -6237,6 +6480,82 @@ mod tests {
                 |event| matches!(event, StreamEvent::Error { code, .. } if code == "linked_synthesis_retry_stale")
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn synthesis_checkpoint_rejects_template_metadata_changed_after_capture() {
+        let (dir, mut host, context) = linked_timeout_fixture();
+        host.set_log_corpus_scope(Some(context.corpus_id.clone()));
+        host.pin_log_suppression_lens(&context.corpus_id)
+            .expect("pin linked log revisions");
+        let (event_revision, template_analysis_revision, suppression_revision) = host
+            .pinned_linked_log_revisions(&context.corpus_id)
+            .expect("read pinned linked log revisions");
+        let checkpoint = LinkedSynthesisCheckpoint {
+            session_id: "chat-a".into(),
+            corpus_id: context.corpus_id.clone(),
+            provider_profile_id: Some("provider-a".into()),
+            model_id: Some("model-a".into()),
+            event_revision,
+            template_analysis_revision,
+            suppression_revision,
+            user_text: "question".into(),
+            evidence: "redacted bounded evidence".into(),
+            identities: HashSet::from([crate::log_analysis::SearchEvidenceIdentity {
+                seq: 0,
+                source: "worker.log".into(),
+                citation_source: None,
+                template_id: 1,
+            }]),
+            allow_empty_evidence: false,
+        };
+
+        let corpus =
+            crate::log_analysis::LogCorpus::open(&dir.path().join("cache"), &context.corpus_id)
+                .expect("open linked corpus through a second handle");
+        corpus
+            .upsert_templates([crate::log_analysis::TemplateRow {
+                info: crate::log_analysis::TemplateInfo {
+                    template_id: 99_999,
+                    pattern: "changed after checkpoint".into(),
+                    token_count: 3,
+                    count: 1,
+                    first_seen: 1_700_000_200,
+                    last_seen: 1_700_000_200,
+                    severity: 1,
+                    example: "changed after checkpoint".into(),
+                },
+                content_hash: "changed-after-checkpoint".into(),
+                vector: None,
+            }])
+            .expect("change template metadata after checkpoint");
+
+        let backend = ScriptedBackend::new(Vec::new());
+        let mut history = Vec::new();
+        let events = run_agent_turn(
+            &backend,
+            &mut host,
+            "",
+            &mut history,
+            &AgentOptions {
+                session_id: "chat-a".into(),
+                model: Some("model-a".into()),
+                provider_profile_id: Some("provider-a".into()),
+                log_explorer_context: Some(context),
+                linked_synthesis_retry: Some(checkpoint),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(events.iter().any(
+            |event| matches!(event, StreamEvent::Error { code, .. } if code == "linked_synthesis_retry_stale")
+        ));
+        assert!(
+            history.is_empty(),
+            "stale evidence must fail before provider-facing history changes"
+        );
     }
 
     #[tokio::test(start_paused = true)]

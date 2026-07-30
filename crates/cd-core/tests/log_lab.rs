@@ -121,6 +121,7 @@ struct Literal250kLinkedBackend {
     calls: AtomicUsize,
     expected_corpus_id: String,
     expected_suppression_revision: u64,
+    forbidden_context: String,
     max_context_bytes: AtomicUsize,
     max_seq_markers: AtomicUsize,
     cited_identity: Mutex<Option<(u64, String)>>,
@@ -152,6 +153,10 @@ impl ChatBackend for Literal250kLinkedBackend {
         assert!(
             context.matches("seq=").count() <= BROAD_LOG_TRIAGE_IDENTITY_CAP + 32,
             "provider received an implausibly large raw-row surface"
+        );
+        assert!(
+            !context.contains(&self.forbidden_context),
+            "evaluator-only truth escaped into provider context"
         );
         assert!(
             context.contains(&format!(
@@ -1031,17 +1036,17 @@ async fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
     let generation_ms = generation_started.elapsed().as_millis();
     verify_safety(&generated).unwrap();
     let manifest = load_triage_stress_manifest(&generated).unwrap();
-
-    let cache = workspace.path().join("cache");
-    let import_started = Instant::now();
-    let report = ingest_path(
-        &cache,
-        &generated.join("scenarios/triage-stress/import"),
-        "triage-stress-250k",
-        None,
-        "none",
+    let evaluator_truth_sentinel = "EVALUATOR_ONLY_745_EXPECTED_ROOT_CAUSE";
+    fs::write(
+        workspace.path().join("evaluator-only-745.txt"),
+        evaluator_truth_sentinel,
     )
     .unwrap();
+
+    let cache = workspace.path().join("cache");
+    let import_root = generated.join("scenarios/triage-stress/import");
+    let import_started = Instant::now();
+    let report = ingest_path(&cache, &import_root, "triage-stress-250k", None, "none").unwrap();
     let import_ms = import_started.elapsed().as_millis();
     assert_eq!(report.stats.lines, DEFAULT_TRIAGE_STRESS_EVENT_COUNT as u64);
     assert_eq!(report.stats.files as usize, TRIAGE_STRESS_SOURCE_COUNT);
@@ -1151,7 +1156,7 @@ async fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
 
     let broad_triage_started = Instant::now();
     let mut triage_host = ToolHost::new(
-        Workspace::new("triage-stress-250k", vec![workspace.path().to_path_buf()]),
+        Workspace::new("triage-stress-250k", vec![import_root]),
         KeywordIndex::new(),
         None,
     );
@@ -1181,6 +1186,7 @@ async fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
         calls: AtomicUsize::new(0),
         expected_corpus_id: report.corpus_id.clone(),
         expected_suppression_revision: active_policy.revision,
+        forbidden_context: evaluator_truth_sentinel.into(),
         max_context_bytes: AtomicUsize::new(0),
         max_seq_markers: AtomicUsize::new(0),
         cited_identity: Mutex::new(None),

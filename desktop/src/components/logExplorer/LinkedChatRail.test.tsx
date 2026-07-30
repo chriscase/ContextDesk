@@ -2588,6 +2588,88 @@ describe("LinkedChatRail", () => {
     });
   });
 
+  it("shows deterministic broad-triage preparation and bounded completion", async () => {
+    let resolveTurn: ((events: host.EventDto[]) => void) | null = null;
+    vi.mocked(host.agentTurn).mockImplementation(
+      async (_id, _text, _fl, _m, _p, onEvent) =>
+        new Promise((resolve) => {
+          resolveTurn = (events) => {
+            for (const event of events) onEvent?.(event);
+            resolve(events);
+          };
+        }),
+    );
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (s) => s);
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async (id) =>
+      sessionDto(id, "Logs · fixture"),
+    );
+
+    const { container } = render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    fireEvent.click(await screen.findByTestId("new-linked-chat"));
+    await waitFor(() => expect(host.hostSaveChatSession).toHaveBeenCalled());
+    fireEvent.change(await screen.findByLabelText("Chat message"), {
+      target: { value: "What problems do you see in these logs?" },
+    });
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+    const onEvent = vi.mocked(host.agentTurn).mock.calls[0]?.[5] as
+      | ((ev: host.EventDto) => void)
+      | undefined;
+
+    await act(async () => {
+      onEvent?.({
+        kind: "tool",
+        payload: {
+          id: "broad-1",
+          name: "broad_log_triage",
+          summary: "Preparing deterministic large-corpus triage",
+          ok: null,
+        },
+      });
+    });
+    expect(
+      screen.getByText("Preparing deterministic large-corpus triage"),
+    ).toBeTruthy();
+    expect(
+      container.querySelector('[data-state="running"]')?.getAttribute(
+        "aria-busy",
+      ),
+    ).toBe("true");
+
+    await act(async () => {
+      onEvent?.({
+        kind: "tool",
+        payload: {
+          id: "broad-1",
+          name: "broad_log_triage",
+          summary: "Prepared bounded triage brief · 60 evidence identities",
+          detail:
+            "Host-computed levels, sources, services, templates, timeline, and correlations are ready for synthesis.",
+          ok: true,
+        },
+      });
+    });
+    expect(
+      screen.getByText("Prepared bounded triage brief · 60 evidence identities"),
+    ).toBeTruthy();
+    expect(container.querySelector('[data-state="success"]')).toBeTruthy();
+    await act(async () => {
+      resolveTurn?.([
+        {
+          kind: "text_delta",
+          payload: { text: "Grounded triage completed." },
+        },
+        { kind: "turn_completed", payload: { reason: "stop" } },
+      ]);
+    });
+  });
+
   it("marks collapsed rail busy while a turn is in flight", async () => {
     let resolveTurn: ((events: host.EventDto[]) => void) | undefined;
     vi.mocked(host.agentTurn).mockImplementation(

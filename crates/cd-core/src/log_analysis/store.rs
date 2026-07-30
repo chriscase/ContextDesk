@@ -48,6 +48,16 @@ const EVENT_COUNT_CACHE_CAP: usize = 64;
 static EVENT_REVISION_CLOCKS: LazyLock<Mutex<HashMap<PathBuf, Weak<AtomicU64>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Process-local revision for deterministic template metadata.
+///
+/// Template patterns/counts are immutable after import in production. This
+/// clock nevertheless lets concurrent in-process maintenance or tests make a
+/// pinned investigation fail closed instead of mixing old and new metadata.
+/// Embedding-vector updates intentionally do not advance it because vectors are
+/// not part of deterministic broad-log triage.
+static TEMPLATE_ANALYSIS_REVISION_CLOCKS: LazyLock<Mutex<HashMap<PathBuf, Weak<AtomicU64>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// Reopened handles for one corpus share one serialized DuckDB connection.
 ///
 /// A separately opened DuckDB connection can retain the snapshot from before
@@ -445,6 +455,8 @@ pub struct LogCorpus {
     event_count_cache: Mutex<EventCountCache>,
     /// Changes only after a successful event append or revision publication.
     event_revision: Arc<AtomicU64>,
+    /// Changes when deterministic template metadata is replaced in-process.
+    template_analysis_revision: Arc<AtomicU64>,
     /// Test instrumentation: physical `COUNT(*)` scans, not cache reads.
     #[cfg(test)]
     event_count_scans: AtomicUsize,
@@ -476,6 +488,7 @@ impl LogCorpus {
         let db_path = root.join("events.duckdb");
         let db = shared_corpus_connection(&db_path)?;
         let event_revision = shared_event_revision_clock(&db_path, 0);
+        let template_analysis_revision = shared_template_analysis_revision_clock(&db_path);
         Ok(Self {
             id,
             name: name_s,
@@ -487,6 +500,7 @@ impl LogCorpus {
             index_backend: Mutex::new(backend_name(0)),
             event_count_cache: Mutex::new(EventCountCache::default()),
             event_revision,
+            template_analysis_revision,
             #[cfg(test)]
             event_count_scans: AtomicUsize::new(0),
         })
@@ -544,6 +558,7 @@ impl LogCorpus {
             .and_then(|connection| persisted_event_revision(&connection))
             .unwrap_or(0);
         let event_revision = shared_event_revision_clock(&db_path, durable_revision);
+        let template_analysis_revision = shared_template_analysis_revision_clock(&db_path);
 
         let mut templates = HashMap::new();
         let t_path = root.join("templates.json");
@@ -571,6 +586,7 @@ impl LogCorpus {
             index_backend: Mutex::new(backend_name(n_tpl)),
             event_count_cache: Mutex::new(EventCountCache::default()),
             event_revision,
+            template_analysis_revision,
             #[cfg(test)]
             event_count_scans: AtomicUsize::new(0),
         })
@@ -908,10 +924,21 @@ impl LogCorpus {
     /// Upsert template rows (JSON sidecar; not in DuckDB).
     pub fn upsert_templates(&self, rows: impl IntoIterator<Item = TemplateRow>) -> CoreResult<()> {
         let mut g = self.templates.lock().map_err(|_| lock_err())?;
+        let mut changed = false;
         for r in rows {
+            changed = true;
             g.insert(r.info.template_id, r);
         }
+        if changed {
+            self.template_analysis_revision
+                .fetch_add(1, Ordering::SeqCst);
+        }
         Ok(())
+    }
+
+    /// Current deterministic template-metadata revision.
+    pub(crate) fn template_analysis_revision(&self) -> u64 {
+        self.template_analysis_revision.load(Ordering::SeqCst)
     }
 
     /// Set embedding for a template (content-hash cached by caller).
@@ -986,6 +1013,26 @@ impl LogCorpus {
         let mut v: Vec<_> = g.values().cloned().collect();
         v.sort_by_key(|t| t.info.template_id);
         v
+    }
+
+    /// Snapshot template metadata without cloning optional embedding vectors.
+    pub fn list_template_infos(&self) -> Vec<TemplateInfo> {
+        let g = self.templates.lock().unwrap_or_else(|e| e.into_inner());
+        let mut v = g
+            .values()
+            .map(|template| template.info.clone())
+            .collect::<Vec<_>>();
+        v.sort_by_key(|info| info.template_id);
+        v
+    }
+
+    /// Clone one bounded display pattern without cloning its embedding vector.
+    pub fn template_pattern(&self, template_id: u64) -> Option<String> {
+        self.templates
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&template_id)
+            .map(|template| template.info.pattern.clone())
     }
 
     /// Load all events into memory for a callback (fine for tests / moderate corpora).
@@ -1516,6 +1563,20 @@ fn shared_event_revision_clock(db_path: &Path, durable_revision: u64) -> Arc<Ato
         return clock;
     }
     let clock = Arc::new(AtomicU64::new(durable_revision));
+    clocks.insert(key, Arc::downgrade(&clock));
+    clock
+}
+
+fn shared_template_analysis_revision_clock(db_path: &Path) -> Arc<AtomicU64> {
+    let key = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
+    let mut clocks = TEMPLATE_ANALYSIS_REVISION_CLOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clocks.retain(|_, clock| clock.strong_count() > 0);
+    if let Some(clock) = clocks.get(&key).and_then(Weak::upgrade) {
+        return clock;
+    }
+    let clock = Arc::new(AtomicU64::new(0));
     clocks.insert(key, Arc::downgrade(&clock));
     clock
 }
