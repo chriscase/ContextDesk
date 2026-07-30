@@ -24,6 +24,7 @@ pub mod redact_log;
 pub mod search;
 pub mod store;
 pub mod suppression;
+pub mod timezone_resolution;
 pub mod tools;
 pub mod view_context;
 pub mod why;
@@ -123,6 +124,12 @@ pub use suppression::{
     SuppressionTemplatePredicate, SuppressionTimeSpan, MAX_SUPPRESSION_AUDIT_ENTRIES,
     MAX_SUPPRESSION_LEVEL_BUCKETS, MAX_SUPPRESSION_PREVIEWS, MAX_SUPPRESSION_REPRESENTATIVES,
     MAX_SUPPRESSION_RULES, SUPPRESSION_SCHEMA_VERSION,
+};
+pub use timezone_resolution::{
+    SourceTimezoneDeclaration, SourceTimezoneResolver, TimestampResolution,
+    TimestampResolutionProvenance, TimezoneDeclarationBasis, TimezoneResolutionError,
+    TimezoneResolutionPreview, UnresolvedTimestampReason, MAX_IANA_TIMEZONE_BYTES,
+    MAX_TIMEZONE_SOURCE_BYTES, TIMEZONE_DECLARATION_SCHEMA_VERSION,
 };
 pub use tools::{
     anomalies_tool_spec, cluster_problems_tool_spec, correlate_tool_spec, ingest_logs_tool_spec,
