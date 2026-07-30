@@ -796,10 +796,22 @@ fn undo_event_revision_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::log_analysis::{ingest_path, query_event_count, EventQuery};
+    use crate::investigations::{
+        AddFindingInput, EvidenceReferenceStatus, FindingKind, FindingViewFilters, FindingViewLane,
+        FindingViewRecipe, FindingViewTimeLinkMode, FindingViewViewportAnchor, InvestigationStore,
+    };
+    use crate::log_analysis::{
+        add_evidence_bookmark, ingest_path, list_resolved_bookmarks,
+        load_operational_metrics_attachment, query_event_count,
+        save_operational_metrics_attachment, BookmarkEventRef, BookmarkEvidenceStatus, EventQuery,
+        LogEvent, NewEvidenceBookmark, OperationalMetricsAttachment,
+        OperationalMetricsAttachmentSource, TimeQuality,
+    };
+    use crate::sessions::{Session, SessionStore};
     use std::collections::BTreeMap;
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::path::PathBuf;
+    use std::process::Command;
     use std::sync::{Arc, Barrier};
 
     fn fixture() -> (tempfile::TempDir, String) {
@@ -820,15 +832,68 @@ mod tests {
             "none",
         )
         .unwrap();
-        let root = cache.path().join("log_corpora").join(&report.corpus_id);
-        std::fs::write(root.join("bookmarks.json"), b"bookmark-sidecar").unwrap();
-        std::fs::write(root.join("suppression.json"), b"suppression-sidecar").unwrap();
-        std::fs::write(
-            root.join("operational-metrics-attachment.v1.json"),
-            b"metrics-sidecar",
-        )
-        .unwrap();
         (cache, report.corpus_id)
+    }
+
+    fn multi_source_fixture() -> (tempfile::TempDir, String) {
+        let cache = tempfile::tempdir().expect("cache");
+        let corpus = LogCorpus::create(cache.path(), "multi-source event revision").unwrap();
+        corpus
+            .push_events(&[
+                LogEvent {
+                    seq: 0,
+                    ts: 1_700_000_000,
+                    level: "error".into(),
+                    service: Some("api".into()),
+                    host: Some("host-a".into()),
+                    template_id: 10,
+                    params: vec!["request-a".into()],
+                    trace_id: Some("trace-a".into()),
+                    message: "API failure boundary".into(),
+                    source: "api/app.log".into(),
+                },
+                LogEvent {
+                    seq: 1,
+                    ts: 1_700_000_010,
+                    level: "info".into(),
+                    service: Some("api".into()),
+                    host: Some("host-a".into()),
+                    template_id: 11,
+                    params: vec!["request-b".into()],
+                    trace_id: Some("trace-b".into()),
+                    message: "API local timestamp to revise".into(),
+                    source: "api/app.log".into(),
+                },
+                LogEvent {
+                    seq: 2,
+                    ts: 1_700_000_020,
+                    level: "warn".into(),
+                    service: Some("worker".into()),
+                    host: Some("host-b".into()),
+                    template_id: 12,
+                    params: vec!["job-a".into()],
+                    trace_id: Some("trace-a".into()),
+                    message: "Worker warning boundary".into(),
+                    source: "worker/worker.log".into(),
+                },
+                LogEvent {
+                    seq: 3,
+                    ts: 1_700_000_030,
+                    level: "error".into(),
+                    service: Some("worker".into()),
+                    host: Some("host-b".into()),
+                    template_id: 13,
+                    params: vec!["job-b".into()],
+                    trace_id: Some("trace-b".into()),
+                    message: "Worker local timestamp to revise".into(),
+                    source: "worker/worker.log".into(),
+                },
+            ])
+            .unwrap();
+        corpus.flush().unwrap();
+        let corpus_id = corpus.id().to_string();
+        drop(corpus);
+        (cache, corpus_id)
     }
 
     fn root(cache: &Path, corpus_id: &str) -> PathBuf {
@@ -865,12 +930,240 @@ mod tests {
     }
 
     fn update(seq: u64, expected_ts: i64, revised_ts: i64) -> EventTimestampUpdate {
+        update_for_source(seq, "app.log", expected_ts, revised_ts)
+    }
+
+    fn update_for_source(
+        seq: u64,
+        source: &str,
+        expected_ts: i64,
+        revised_ts: i64,
+    ) -> EventTimestampUpdate {
         EventTimestampUpdate {
             seq,
-            source: "app.log".into(),
+            source: source.into(),
             expected_ts,
             revised_ts,
         }
+    }
+
+    fn event_ref(corpus_id: &str, seq: u64, source: &str, timestamp_hint: i64) -> BookmarkEventRef {
+        BookmarkEventRef {
+            corpus_id: corpus_id.to_string(),
+            seq,
+            source: source.to_string(),
+            timestamp_hint,
+            time_quality_hint: TimeQuality::Wall,
+        }
+    }
+
+    fn saved_view_recipe(corpus_id: &str) -> FindingViewRecipe {
+        let api_ref = event_ref(corpus_id, 0, "api/app.log", 1_700_000_000);
+        let worker_ref = event_ref(corpus_id, 2, "worker/worker.log", 1_700_000_020);
+        FindingViewRecipe {
+            filters: FindingViewFilters {
+                levels: vec![],
+                sources: vec!["api/app.log".into(), "worker/worker.log".into()],
+                services: vec![],
+                hosts: vec![],
+                time_from: Some(1_700_000_000),
+                time_to: Some(1_700_000_100),
+                seq_from: None,
+                seq_to: None,
+                template_id: None,
+                trace_id: None,
+                keyword: None,
+            },
+            lanes: vec![
+                FindingViewLane {
+                    id: "lane-api".into(),
+                    label: "API".into(),
+                    sources: vec!["api/app.log".into()],
+                },
+                FindingViewLane {
+                    id: "lane-worker".into(),
+                    label: "Worker".into(),
+                    sources: vec!["worker/worker.log".into()],
+                },
+            ],
+            visible_lane_count: 2,
+            time_link_mode: FindingViewTimeLinkMode::AlignTime,
+            focused_lane_id: Some("lane-api".into()),
+            focused_event: Some(api_ref.clone()),
+            selection: vec![api_ref.clone(), worker_ref.clone()],
+            highlights: vec![worker_ref.clone()],
+            find: None,
+            viewport_anchors: vec![
+                FindingViewViewportAnchor {
+                    lane_id: "lane-api".into(),
+                    event_ref: api_ref,
+                },
+                FindingViewViewportAnchor {
+                    lane_id: "lane-worker".into(),
+                    event_ref: worker_ref,
+                },
+            ],
+        }
+    }
+
+    fn metric_document() -> String {
+        serde_json::json!({
+            "schemaVersion": 1,
+            "id": "event-revision-metrics",
+            "name": "Event revision metrics",
+            "series": [{
+                "id": "cpu",
+                "name": "CPU",
+                "unit": "%",
+                "provenance": {"source": "revision-test-monitor"},
+                "timeQuality": "wall",
+                "points": [
+                    {"timestamp": 1_700_000_000.0, "value": 42.0},
+                    {"timestamp": 1_700_000_100.0, "value": 73.0}
+                ]
+            }]
+        })
+        .to_string()
+    }
+
+    struct ProductIdentityFixture {
+        bookmark_id: String,
+        investigation_id: String,
+        finding_id: String,
+        evidence_id: String,
+        linked_chat_id: String,
+        recipe: FindingViewRecipe,
+        metric_attachment: OperationalMetricsAttachment,
+    }
+
+    fn create_product_identities(
+        cache: &Path,
+        corpus: &LogCorpus,
+        durable_root: &Path,
+    ) -> ProductIdentityFixture {
+        let selected = vec![
+            event_ref(corpus.id(), 0, "api/app.log", 1_700_000_000),
+            event_ref(corpus.id(), 2, "worker/worker.log", 1_700_000_020),
+        ];
+        let bookmark = add_evidence_bookmark(
+            corpus,
+            NewEvidenceBookmark {
+                event_refs: selected.clone(),
+                label: "Failure boundaries".into(),
+                note: Some("Stable exact identities around revised events".into()),
+                color: Some("red".into()),
+            },
+        )
+        .unwrap();
+
+        let store = InvestigationStore::new(durable_root.join("investigations"));
+        let investigation = store.create("Timestamp investigation", corpus).unwrap();
+        let recipe = saved_view_recipe(corpus.id());
+        let resolved = store
+            .add_human_finding(
+                &investigation.id,
+                investigation.revision,
+                corpus,
+                AddFindingInput {
+                    kind: FindingKind::Observation,
+                    title: "Cross-source failure boundaries".into(),
+                    why_it_matters:
+                        "The saved view spans both source timestamps selected for revision.".into(),
+                    event_refs: selected,
+                    view_recipe: Some(recipe.clone()),
+                },
+            )
+            .unwrap();
+        let finding_id = resolved.document.findings[0].id.clone();
+        let evidence_id = resolved.document.evidence[0].id.clone();
+
+        let sessions = SessionStore::new(durable_root.join("sessions"));
+        let mut linked_chat = Session::new("Linked timestamp investigation");
+        linked_chat.set_linked_corpus_id(Some(corpus.id().to_string()));
+        sessions.save(&linked_chat).unwrap();
+
+        let metric_attachment = save_operational_metrics_attachment(
+            cache,
+            corpus.id(),
+            &metric_document(),
+            "/private/monitor/event-revision-metrics.json",
+            OperationalMetricsAttachmentSource::ManualLoad,
+        )
+        .unwrap();
+
+        ProductIdentityFixture {
+            bookmark_id: bookmark.id,
+            investigation_id: investigation.id,
+            finding_id,
+            evidence_id,
+            linked_chat_id: linked_chat.id,
+            recipe,
+            metric_attachment,
+        }
+    }
+
+    fn assert_product_identities(
+        cache: &Path,
+        corpus: &LogCorpus,
+        durable_root: &Path,
+        expected: &ProductIdentityFixture,
+        expected_window_count: u64,
+    ) {
+        let bookmarks = list_resolved_bookmarks(corpus).unwrap();
+        assert_eq!(bookmarks.len(), 1);
+        assert_eq!(bookmarks[0].bookmark.id, expected.bookmark_id);
+        assert_eq!(
+            bookmarks[0].evidence_status,
+            BookmarkEvidenceStatus::Verified
+        );
+
+        let store = InvestigationStore::new(durable_root.join("investigations"));
+        let investigation = store.load(&expected.investigation_id, corpus).unwrap();
+        assert_eq!(investigation.document.findings[0].id, expected.finding_id);
+        assert_eq!(investigation.document.evidence[0].id, expected.evidence_id);
+        assert!(investigation.evidence[0]
+            .references
+            .iter()
+            .all(|reference| reference.status == EvidenceReferenceStatus::Verified));
+
+        let preview = store
+            .preview_evidence(&expected.investigation_id, &expected.evidence_id, corpus)
+            .unwrap();
+        assert!(preview
+            .references
+            .iter()
+            .all(|reference| reference.status == EvidenceReferenceStatus::Verified));
+        let recipe = store
+            .resolve_finding_view_recipe(&expected.investigation_id, &expected.finding_id, corpus)
+            .unwrap();
+        assert_eq!(recipe.missing_count, 0);
+        assert_eq!(recipe.stale_count, 0);
+        assert_eq!(recipe.view_recipe, expected.recipe);
+
+        let count = query_event_count(
+            corpus,
+            &EventQuery {
+                time_from: recipe.view_recipe.filters.time_from,
+                time_to: recipe.view_recipe.filters.time_to,
+                sources: recipe.view_recipe.filters.sources,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(count.total_matched, expected_window_count);
+
+        let sessions = SessionStore::new(durable_root.join("sessions"));
+        let linked_chat = sessions.load(&expected.linked_chat_id).unwrap();
+        assert_eq!(linked_chat.id, expected.linked_chat_id);
+        assert_eq!(linked_chat.linked_corpus_id.as_deref(), Some(corpus.id()));
+        let linked_meta = sessions.list_meta_for_corpus(corpus.id()).unwrap();
+        assert_eq!(linked_meta.len(), 1);
+        assert_eq!(linked_meta[0].id, expected.linked_chat_id);
+
+        assert_eq!(
+            load_operational_metrics_attachment(cache, corpus.id()).unwrap(),
+            expected.metric_attachment
+        );
     }
 
     fn event_snapshot(cache: &Path, corpus_id: &str) -> Vec<super::super::LogEvent> {
@@ -979,21 +1272,102 @@ mod tests {
     }
 
     #[test]
-    fn successful_publish_preserves_identity_sidecars_and_supports_one_step_undo() {
-        let (cache, corpus_id) = fixture();
+    fn process_exit_child_aborts_after_active_events_change() {
+        if std::env::var_os("CONTEXTDESK_EVENT_REVISION_CRASH_CHILD").is_none() {
+            return;
+        }
+        let cache_root = PathBuf::from(
+            std::env::var_os("CONTEXTDESK_EVENT_REVISION_CRASH_CACHE")
+                .expect("crash child cache root"),
+        );
+        let corpus_id =
+            std::env::var("CONTEXTDESK_EVENT_REVISION_CRASH_CORPUS").expect("crash child corpus");
+        let terminate = |checkpoint| {
+            if checkpoint == EventRevisionCheckpoint::ActiveEventsChanged {
+                std::process::exit(86);
+            }
+            Ok(())
+        };
+        let result = apply_event_timestamp_revision_inner(
+            &cache_root,
+            &corpus_id,
+            0,
+            metadata(),
+            [
+                update_for_source(1, "api/app.log", 1_700_000_010, 1_700_003_610),
+                update_for_source(3, "worker/worker.log", 1_700_000_030, 1_700_003_630),
+            ],
+            None,
+            Some(&terminate),
+        );
+        panic!("crash child unexpectedly returned: {result:?}");
+    }
+
+    #[test]
+    fn abrupt_process_exit_before_commit_restores_prior_multi_source_revision() {
+        let (cache, corpus_id) = multi_source_fixture();
+        let durable = tempfile::tempdir().expect("durable investigation root");
+        let corpus = LogCorpus::open(cache.path(), &corpus_id).unwrap();
+        let product_identities = create_product_identities(cache.path(), &corpus, durable.path());
+        let before = event_snapshot(cache.path(), &corpus_id);
+        drop(corpus);
+
+        let status = Command::new(std::env::current_exe().expect("current test executable"))
+            .arg("--exact")
+            .arg(
+                "log_analysis::event_revision::tests::process_exit_child_aborts_after_active_events_change",
+            )
+            .env("CONTEXTDESK_EVENT_REVISION_CRASH_CHILD", "1")
+            .env(
+                "CONTEXTDESK_EVENT_REVISION_CRASH_CACHE",
+                cache.path().as_os_str(),
+            )
+            .env("CONTEXTDESK_EVENT_REVISION_CRASH_CORPUS", &corpus_id)
+            .status()
+            .expect("run abrupt-exit child");
+        assert_eq!(status.code(), Some(86));
+
+        assert_eq!(
+            serde_json::to_value(event_snapshot(cache.path(), &corpus_id)).unwrap(),
+            serde_json::to_value(&before).unwrap(),
+            "DuckDB recovery must roll back both sources after a no-destructor process exit"
+        );
+        let reopened = LogCorpus::open(cache.path(), &corpus_id).unwrap();
+        assert_product_identities(
+            cache.path(),
+            &reopened,
+            durable.path(),
+            &product_identities,
+            4,
+        );
+    }
+
+    #[test]
+    fn real_product_identities_and_saved_view_survive_multi_source_apply_and_undo() {
+        let (cache, corpus_id) = multi_source_fixture();
+        let durable = tempfile::tempdir().expect("durable investigation root");
         let corpus_root = root(cache.path(), &corpus_id);
         let events_before = event_snapshot(cache.path(), &corpus_id);
         let already_open = LogCorpus::open(cache.path(), &corpus_id).unwrap();
+        let product_identities =
+            create_product_identities(cache.path(), &already_open, durable.path());
         let initial_window = query_event_count(
             &already_open,
             &EventQuery {
                 time_from: Some(1_700_000_000),
-                time_to: Some(1_700_001_000),
+                time_to: Some(1_700_000_100),
                 ..Default::default()
             },
         )
         .unwrap();
-        assert_eq!(initial_window.total_matched, 3);
+        assert_eq!(initial_window.total_matched, 4);
+        assert_product_identities(
+            cache.path(),
+            &already_open,
+            durable.path(),
+            &product_identities,
+            4,
+        );
         let sidecars_before = snapshot(&corpus_root)
             .into_iter()
             .filter(|(name, _)| is_corpus_sidecar(name))
@@ -1005,8 +1379,8 @@ mod tests {
             0,
             metadata(),
             [
-                update(0, 1_700_000_000, 1_700_003_600),
-                update(1, 1_700_000_010, 1_700_003_610),
+                update_for_source(1, "api/app.log", 1_700_000_010, 1_700_003_610),
+                update_for_source(3, "worker/worker.log", 1_700_000_030, 1_700_003_630),
             ],
             None,
         )
@@ -1014,26 +1388,28 @@ mod tests {
         assert_eq!(report.revision, 1);
         assert_eq!(report.previous_revision, 0);
         assert_eq!(report.changed_events, 2);
-        assert_eq!(report.event_count, 3);
-        assert_eq!(report.ts_min, Some(1_700_000_020));
-        assert_eq!(report.ts_max, Some(1_700_003_610));
+        assert_eq!(report.event_count, 4);
+        assert_eq!(report.ts_min, Some(1_700_000_000));
+        assert_eq!(report.ts_max, Some(1_700_003_630));
         let revised_window = query_event_count(
             &already_open,
             &EventQuery {
                 time_from: Some(1_700_000_000),
-                time_to: Some(1_700_001_000),
+                time_to: Some(1_700_000_100),
                 ..Default::default()
             },
         )
         .unwrap();
         assert_eq!(
-            revised_window.total_matched, 1,
+            revised_window.total_matched, 2,
             "an already-open corpus handle must reject its cached old time-window count"
         );
 
         let events_after = event_snapshot(cache.path(), &corpus_id);
-        assert_eq!(events_after[0].ts, 1_700_003_600);
+        assert_eq!(events_after[0].ts, 1_700_000_000);
         assert_eq!(events_after[1].ts, 1_700_003_610);
+        assert_eq!(events_after[2].ts, 1_700_000_020);
+        assert_eq!(events_after[3].ts, 1_700_003_630);
         for (before, after) in events_before.iter().zip(&events_after) {
             assert_eq!(before.seq, after.seq);
             assert_eq!(before.source, after.source);
@@ -1050,22 +1426,108 @@ mod tests {
             .filter(|(name, _)| is_corpus_sidecar(name))
             .collect::<BTreeMap<_, _>>();
         assert_eq!(sidecars_after, sidecars_before);
+        assert_product_identities(
+            cache.path(),
+            &already_open,
+            durable.path(),
+            &product_identities,
+            2,
+        );
 
         let undone = undo_event_revision(cache.path(), &corpus_id, 1, None).expect("undo revision");
         assert_eq!(undone.revision, 2);
         assert_eq!(undone.previous_revision, 1);
         assert_eq!(undone.changed_events, 2);
-        assert_eq!(undone.event_count, 3);
+        assert_eq!(undone.event_count, 4);
         assert_eq!(
             serde_json::to_value(event_snapshot(cache.path(), &corpus_id)).unwrap(),
             serde_json::to_value(&events_before).unwrap(),
             "undo must restore the complete prior event set"
+        );
+        assert_product_identities(
+            cache.path(),
+            &already_open,
+            durable.path(),
+            &product_identities,
+            4,
         );
         let second_undo = undo_event_revision(cache.path(), &corpus_id, 2, None);
         assert!(second_undo
             .unwrap_err()
             .to_string()
             .contains("no prior event revision"));
+    }
+
+    #[test]
+    fn multi_source_validation_and_publish_faults_are_all_or_nothing() {
+        let (cache, corpus_id) = multi_source_fixture();
+        let durable = tempfile::tempdir().expect("durable investigation root");
+        let corpus = LogCorpus::open(cache.path(), &corpus_id).unwrap();
+        let product_identities = create_product_identities(cache.path(), &corpus, durable.path());
+        let before = event_snapshot(cache.path(), &corpus_id);
+
+        let identity_conflict = apply_event_timestamp_revision(
+            cache.path(),
+            &corpus_id,
+            0,
+            metadata(),
+            [
+                update_for_source(1, "api/app.log", 1_700_000_010, 1_700_003_610),
+                update_for_source(3, "worker/worker.log", 123, 1_700_003_630),
+            ],
+            None,
+        )
+        .unwrap_err();
+        assert!(identity_conflict.to_string().contains("identity conflict"));
+        assert_eq!(
+            serde_json::to_value(event_snapshot(cache.path(), &corpus_id)).unwrap(),
+            serde_json::to_value(&before).unwrap()
+        );
+        assert_product_identities(
+            cache.path(),
+            &corpus,
+            durable.path(),
+            &product_identities,
+            4,
+        );
+
+        let fault = |checkpoint| {
+            if checkpoint == EventRevisionCheckpoint::ActiveEventsChanged {
+                Err(CoreError::Message(
+                    "injected multi-source publication fault".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        let publication_fault = apply_event_timestamp_revision_inner(
+            cache.path(),
+            &corpus_id,
+            0,
+            metadata(),
+            [
+                update_for_source(1, "api/app.log", 1_700_000_010, 1_700_003_610),
+                update_for_source(3, "worker/worker.log", 1_700_000_030, 1_700_003_630),
+            ],
+            None,
+            Some(&fault),
+        )
+        .unwrap_err();
+        assert!(publication_fault
+            .to_string()
+            .contains("multi-source publication fault"));
+        assert_eq!(
+            serde_json::to_value(event_snapshot(cache.path(), &corpus_id)).unwrap(),
+            serde_json::to_value(&before).unwrap(),
+            "neither source may publish when one transaction fails"
+        );
+        assert_product_identities(
+            cache.path(),
+            &corpus,
+            durable.path(),
+            &product_identities,
+            4,
+        );
     }
 
     #[test]
