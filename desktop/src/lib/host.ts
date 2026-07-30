@@ -2485,6 +2485,22 @@ export type SuppressionPreviewDto = {
   createdAt: number;
 };
 
+/** Trusted-core resolution of one durable rule against the open corpus (#819). */
+export type SuppressionRuleResolutionKind =
+  | "matches_current"
+  | "stale_target_missing"
+  | "stale_fingerprint_changed"
+  | "invalid_predicate"
+  | "conflicting_predicate"
+  | "inactive";
+
+export type SuppressionRuleResolutionDto = {
+  kind: SuppressionRuleResolutionKind;
+  /** Fail-closed: only `matches_current` can exclude events. */
+  matchesNothing: boolean;
+  explanation: string;
+};
+
 export type SuppressionRuleDto = {
   id: string;
   name: string;
@@ -2494,6 +2510,8 @@ export type SuppressionRuleDto = {
   state: SuppressionRuleState;
   createdAt: number;
   updatedAt: number;
+  /** Ephemeral host resolution; omitted from durable sidecar. */
+  resolution?: SuppressionRuleResolutionDto | null;
 };
 
 export type SuppressionAuditEntryDto = {
@@ -2512,7 +2530,12 @@ export type SuppressionDocumentDto = {
   rules: SuppressionRuleDto[];
   previews: SuppressionPreviewDto[];
   audit: SuppressionAuditEntryDto[];
+  /** Template-analysis revision used when host resolved every rule. */
+  resolvedTemplateRevision?: number | null;
 };
+
+/** Active = enabled matches_current rules apply; Suspended = exclude nothing. */
+export type InvestigationNoiseLens = "active" | "suspended";
 
 export type SuppressionMutationResultDto = {
   revision: number;
@@ -2818,6 +2841,30 @@ export type InvestigationViewRecipeDto = {
   viewportAnchors: InvestigationViewAnchorDto[];
 };
 
+/** Durable host-authored suppression-policy binding on a finding (#819). */
+export type InvestigationPolicyBindingDto = {
+  suppressionPolicyRevision: number;
+  resolvedTemplateRevision: number;
+  effectivePolicySha256: string;
+  noiseLens: InvestigationNoiseLens;
+};
+
+export type InvestigationPolicyBindingStatus =
+  | "unbound_legacy"
+  | "current"
+  | "made_under_different_policy"
+  | "made_under_different_lens"
+  | "current_lens_unknown";
+
+export type InvestigationPolicyBindingResolutionDto = {
+  binding?: InvestigationPolicyBindingDto | null;
+  currentSuppressionPolicyRevision: number;
+  currentResolvedTemplateRevision: number;
+  currentEffectivePolicySha256: string;
+  currentNoiseLens?: InvestigationNoiseLens | null;
+  status: InvestigationPolicyBindingStatus;
+};
+
 export type InvestigationFindingItemDto = {
   id: string;
   kind: InvestigationFindingKind;
@@ -2826,9 +2873,16 @@ export type InvestigationFindingItemDto = {
   whyItMatters: string;
   evidenceIds: string[];
   viewRecipe?: InvestigationViewRecipeDto | null;
+  /** Durable binding; absent on readable pre-#819 legacy findings. */
+  policyBinding?: InvestigationPolicyBindingDto | null;
   provenance: "human";
   createdAt: number;
   updatedAt: number;
+};
+
+export type ResolvedInvestigationFindingDto = {
+  item: InvestigationFindingItemDto;
+  policyBinding: InvestigationPolicyBindingResolutionDto;
 };
 
 export type InvestigationNoteItemDto = {
@@ -2870,6 +2924,8 @@ export type ResolvedInvestigationEvidenceDto = {
 export type ResolvedInvestigationDocumentDto = {
   document: InvestigationDocumentDto;
   evidence: ResolvedInvestigationEvidenceDto[];
+  /** Host-resolved findings with current-vs-durable policy comparison (#819). */
+  findings?: ResolvedInvestigationFindingDto[];
 };
 
 export type InvestigationEvidencePreviewDto = {
@@ -2883,6 +2939,7 @@ export type InvestigationFindingViewPreviewDto = {
   investigationId: string;
   revision: number;
   findingId: string;
+  policyBinding: InvestigationPolicyBindingResolutionDto;
   recipe: InvestigationViewRecipeDto;
   missingCount: number;
   staleCount: number;
@@ -3301,11 +3358,12 @@ export async function hostLogDeleteBookmark(
 
 export async function hostLogLoadActiveInvestigation(
   corpusId: string,
+  noiseLens: InvestigationNoiseLens = "active",
 ): Promise<ResolvedInvestigationDocumentDto | null> {
   if (!isTauri()) return null;
   return invoke<ResolvedInvestigationDocumentDto | null>(
     "log_load_active_investigation",
-    { corpusId },
+    { corpusId, noiseLens },
   );
 }
 
@@ -3316,6 +3374,7 @@ export async function hostLogAddInvestigationEvidence(
     expectedRevision?: number | null;
     title: string;
     eventRefs: LogBookmarkEventRefDto[];
+    noiseLens?: InvestigationNoiseLens;
   },
 ): Promise<ResolvedInvestigationDocumentDto> {
   if (!isTauri()) throw new Error("Investigation evidence requires Tauri host");
@@ -3328,6 +3387,7 @@ export async function hostLogAddInvestigationEvidence(
         expectedRevision: args.expectedRevision ?? null,
         title: args.title,
         eventRefs: args.eventRefs,
+        noiseLens: args.noiseLens ?? "active",
       },
     },
   );
@@ -3343,6 +3403,7 @@ export async function hostLogAddInvestigationFinding(
     whyItMatters: string;
     eventRefs: LogBookmarkEventRefDto[];
     viewRecipe?: InvestigationViewRecipeDto | null;
+    noiseLens?: InvestigationNoiseLens;
   },
 ): Promise<ResolvedInvestigationDocumentDto> {
   if (!isTauri()) throw new Error("Investigation findings require Tauri host");
@@ -3358,6 +3419,7 @@ export async function hostLogAddInvestigationFinding(
         whyItMatters: args.whyItMatters,
         eventRefs: args.eventRefs,
         viewRecipe: args.viewRecipe ?? null,
+        noiseLens: args.noiseLens ?? "active",
       },
     },
   );
@@ -3372,6 +3434,7 @@ export async function hostLogAddInvestigationNote(
     body: string;
     eventRefs: LogBookmarkEventRefDto[];
     findingIds?: string[];
+    noiseLens?: InvestigationNoiseLens;
   },
 ): Promise<ResolvedInvestigationDocumentDto> {
   if (!isTauri()) throw new Error("Investigation notes require Tauri host");
@@ -3386,6 +3449,7 @@ export async function hostLogAddInvestigationNote(
         body: args.body,
         eventRefs: args.eventRefs,
         findingIds: args.findingIds ?? [],
+        noiseLens: args.noiseLens ?? "active",
       },
     },
   );
@@ -3401,12 +3465,19 @@ export async function hostLogEditInvestigationFinding(
     lifecycle: InvestigationFindingLifecycle;
     title: string;
     whyItMatters: string;
+    noiseLens?: InvestigationNoiseLens;
   },
 ): Promise<ResolvedInvestigationDocumentDto> {
   if (!isTauri()) throw new Error("Investigation findings require Tauri host");
   return invoke<ResolvedInvestigationDocumentDto>(
     "log_edit_investigation_finding",
-    { args: { corpusId, ...args } },
+    {
+      args: {
+        corpusId,
+        ...args,
+        noiseLens: args.noiseLens ?? "active",
+      },
+    },
   );
 }
 
@@ -3420,6 +3491,7 @@ export async function hostLogEditInvestigationNote(
     body: string;
     evidenceIds: string[];
     findingIds?: string[];
+    noiseLens?: InvestigationNoiseLens;
   },
 ): Promise<ResolvedInvestigationDocumentDto> {
   if (!isTauri()) throw new Error("Investigation notes require Tauri host");
@@ -3430,6 +3502,7 @@ export async function hostLogEditInvestigationNote(
         corpusId,
         ...args,
         findingIds: args.findingIds ?? [],
+        noiseLens: args.noiseLens ?? "active",
       },
     },
   );
@@ -3453,13 +3526,46 @@ export async function hostLogPreviewInvestigationFindingView(
   corpusId: string,
   investigationId: string,
   findingId: string,
+  noiseLens: InvestigationNoiseLens = "active",
 ): Promise<InvestigationFindingViewPreviewDto> {
   if (!isTauri()) {
     throw new Error("Investigation view preview requires Tauri host");
   }
   return invoke<InvestigationFindingViewPreviewDto>(
     "log_preview_investigation_finding_view",
-    { corpusId, investigationId, findingId },
+    { corpusId, investigationId, findingId, noiseLens },
+  );
+}
+
+/**
+ * Explicitly recompute one saved finding view under the exact current policy
+ * and lens (#819). Uses optimistic investigation revision.
+ */
+export async function hostLogRecomputeInvestigationFindingView(
+  corpusId: string,
+  args: {
+    investigationId: string;
+    expectedRevision: number;
+    findingId: string;
+    viewRecipe: InvestigationViewRecipeDto;
+    noiseLens?: InvestigationNoiseLens;
+  },
+): Promise<ResolvedInvestigationDocumentDto> {
+  if (!isTauri()) {
+    throw new Error("Investigation recompute requires Tauri host");
+  }
+  return invoke<ResolvedInvestigationDocumentDto>(
+    "log_recompute_investigation_finding_view",
+    {
+      args: {
+        corpusId,
+        investigationId: args.investigationId,
+        expectedRevision: args.expectedRevision,
+        findingId: args.findingId,
+        viewRecipe: args.viewRecipe,
+        noiseLens: args.noiseLens ?? "active",
+      },
+    },
   );
 }
 

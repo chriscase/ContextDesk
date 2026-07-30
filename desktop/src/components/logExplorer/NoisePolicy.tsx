@@ -15,6 +15,10 @@ import {
   type SuppressionPreviewDto,
   type SuppressionRuleMutation,
 } from "../../lib/host";
+import {
+  formatSuppressionResolution,
+  ruleContributesToExclusion,
+} from "../../lib/logExplorer/policyBinding";
 import { formatCanonicalUtc } from "../../lib/logExplorer/types";
 import { NoiseCandidateReview } from "./NoiseCandidateReview";
 
@@ -217,8 +221,11 @@ export function NoisePolicyControl({
                 {reviewOpen ? "Noise candidate review" : "Noise policy"}
               </strong>
               <span>
-                Revision {policyDocument?.revision ?? "—"} · exact templates
-                only
+                Revision {policyDocument?.revision ?? "—"}
+                {policyDocument?.resolvedTemplateRevision != null
+                  ? ` · templates r${policyDocument.resolvedTemplateRevision}`
+                  : ""}{" "}
+                · exact templates only
               </span>
             </div>
             <button
@@ -321,11 +328,23 @@ export function NoisePolicyControl({
                     its exact template.
                   </div>
                 ) : (
-                  visibleRules.map((rule) => (
+                  visibleRules.map((rule) => {
+                    const resolutionLabel = formatSuppressionResolution(
+                      rule.resolution,
+                      rule.state,
+                    );
+                    const excludes = ruleContributesToExclusion(
+                      rule.state,
+                      rule.resolution ?? null,
+                    );
+                    return (
                     <article
                       key={rule.id}
                       className="log-explorer__noise-rule"
                       data-state={rule.state}
+                      data-resolution={rule.resolution?.kind ?? "unresolved"}
+                      data-excludes={excludes ? "true" : "false"}
+                      data-testid={`noise-rule-${rule.id}`}
                     >
                       <div className="log-explorer__noise-rule-heading">
                         <div>
@@ -333,6 +352,16 @@ export function NoisePolicyControl({
                           <span>
                             Template {rule.predicate.templateId} ·{" "}
                             {rule.state === "enabled" ? "Enabled" : "Disabled"}
+                          </span>
+                          <span
+                            className="log-explorer__noise-rule-resolution"
+                            data-testid={`noise-rule-resolution-${rule.id}`}
+                            role="status"
+                          >
+                            {resolutionLabel}
+                            {rule.resolution?.explanation
+                              ? ` — ${rule.resolution.explanation}`
+                              : ""}
                           </span>
                         </div>
                         <span className="log-explorer__noise-rule-revision">
@@ -368,7 +397,8 @@ export function NoisePolicyControl({
                         </button>
                       </div>
                     </article>
-                  ))
+                    );
+                  })
                 )}
               </div>
               {actionError ? (

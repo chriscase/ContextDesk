@@ -41,6 +41,15 @@ export type FindingItemView = {
   evidenceIds: string[];
   viewRecipe: InvestigationViewRecipeDto | null;
   provenanceLabel: string;
+  /** Host-authored current-vs-durable policy comparison (#819). */
+  policyStatus?:
+    | "unbound_legacy"
+    | "current"
+    | "made_under_different_policy"
+    | "made_under_different_lens"
+    | "current_lens_unknown"
+    | null;
+  policyStatusLabel?: string | null;
 };
 
 export type FindingViewPreviewView = {
@@ -49,6 +58,16 @@ export type FindingViewPreviewView = {
   changes: string[];
   missingCount: number;
   staleCount: number;
+  policyStatus?:
+    | "unbound_legacy"
+    | "current"
+    | "made_under_different_policy"
+    | "made_under_different_lens"
+    | "current_lens_unknown"
+    | null;
+  policyStatusLabel?: string | null;
+  /** True when Apply is blocked for policy mismatch. */
+  policyBlocksApply?: boolean;
 };
 
 export type NoteItemView = {
@@ -258,6 +277,7 @@ export function EvidencePanel({
   onReveal,
   onPreviewFindingView,
   onApplyFindingView,
+  onRecomputeFindingView,
   onEditFinding,
   onEditNote,
   onActivateBookmark,
@@ -283,6 +303,8 @@ export function EvidencePanel({
   onReveal: (item: EvidenceItemView) => void;
   onPreviewFindingView?: (item: FindingItemView) => void;
   onApplyFindingView?: (preview: FindingViewPreviewView) => void;
+  /** Explicit recompute under current Explorer recipe + policy/lens (#819). */
+  onRecomputeFindingView?: (item: FindingItemView) => void;
   onEditFinding?: (item: FindingItemView, trigger: HTMLButtonElement) => void;
   onEditNote?: (item: NoteItemView, trigger: HTMLButtonElement) => void;
   onActivateBookmark?: (item: BookmarkItemView) => void;
@@ -639,6 +661,15 @@ export function EvidencePanel({
           <div className="log-explorer__evidence-provenance">
             {activeFinding.provenanceLabel}
           </div>
+          {activeFinding.policyStatusLabel ? (
+            <div
+              className="log-explorer__finding-policy"
+              data-testid={`finding-policy-${activeFinding.id}`}
+              data-policy-status={activeFinding.policyStatus ?? "unknown"}
+            >
+              {activeFinding.policyStatusLabel}
+            </div>
+          ) : null}
           {activeFinding.viewRecipe && onPreviewFindingView ? (
             <div className="log-explorer__finding-view">
               <div className="log-explorer__material-section-label">
@@ -652,29 +683,40 @@ export function EvidencePanel({
                   <div className="log-explorer__chat-header-meta">
                     Preview only · current Explorer unchanged
                   </div>
+                  {viewPreview.policyStatusLabel ? (
+                    <div
+                      className="log-explorer__finding-policy"
+                      data-testid={`finding-view-policy-${activeFinding.id}`}
+                      data-policy-status={
+                        viewPreview.policyStatus ?? "unknown"
+                      }
+                    >
+                      {viewPreview.policyStatusLabel}
+                    </div>
+                  ) : null}
                   <ul>
                     {viewPreview.changes.map((change) => (
                       <li key={change}>{change}</li>
                     ))}
                   </ul>
                   {viewPreview.missingCount > 0 ||
-                  viewPreview.staleCount > 0 ? (
+                  viewPreview.staleCount > 0 ||
+                  viewPreview.policyBlocksApply ? (
                     <div
                       className="log-explorer__evidence-warning"
                       role="status"
                     >
-                      Apply blocked ·{" "}
+                      Apply blocked
+                      {viewPreview.policyBlocksApply
+                        ? " · review under current noise policy first"
+                        : null}
                       {viewPreview.missingCount > 0
-                        ? `${viewPreview.missingCount} missing reference${
+                        ? ` · ${viewPreview.missingCount} missing reference${
                             viewPreview.missingCount === 1 ? "" : "s"
                           }`
                         : null}
-                      {viewPreview.missingCount > 0 &&
-                      viewPreview.staleCount > 0
-                        ? " · "
-                        : null}
                       {viewPreview.staleCount > 0
-                        ? `${viewPreview.staleCount} changed reference${
+                        ? ` · ${viewPreview.staleCount} changed reference${
                             viewPreview.staleCount === 1 ? "" : "s"
                           }`
                         : null}
@@ -687,12 +729,24 @@ export function EvidencePanel({
                       disabled={
                         busy ||
                         viewPreview.missingCount > 0 ||
-                        viewPreview.staleCount > 0
+                        viewPreview.staleCount > 0 ||
+                        Boolean(viewPreview.policyBlocksApply)
                       }
                       onClick={() => onApplyFindingView?.(viewPreview)}
                     >
                       Apply saved view
                     </button>
+                    {onRecomputeFindingView ? (
+                      <button
+                        type="button"
+                        className="log-explorer__btn"
+                        data-testid={`finding-recompute-${activeFinding.id}`}
+                        disabled={busy}
+                        onClick={() => onRecomputeFindingView(activeFinding)}
+                      >
+                        Recompute from current view
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       className="log-explorer__btn"
@@ -703,14 +757,27 @@ export function EvidencePanel({
                   </div>
                 </div>
               ) : (
-                <button
-                  type="button"
-                  className="log-explorer__btn"
-                  disabled={busy}
-                  onClick={() => onPreviewFindingView(activeFinding)}
-                >
-                  Preview saved view
-                </button>
+                <div className="log-explorer__evidence-card-actions">
+                  <button
+                    type="button"
+                    className="log-explorer__btn"
+                    disabled={busy}
+                    onClick={() => onPreviewFindingView(activeFinding)}
+                  >
+                    Preview saved view
+                  </button>
+                  {onRecomputeFindingView ? (
+                    <button
+                      type="button"
+                      className="log-explorer__btn"
+                      data-testid={`finding-recompute-${activeFinding.id}`}
+                      disabled={busy}
+                      onClick={() => onRecomputeFindingView(activeFinding)}
+                    >
+                      Recompute from current view
+                    </button>
+                  ) : null}
+                </div>
               )}
             </div>
           ) : null}

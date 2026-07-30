@@ -38,6 +38,7 @@ import {
   hostLogMutateTemplateSuppressionRule,
   hostLogPreviewInvestigationEvidence,
   hostLogPreviewInvestigationFindingView,
+  hostLogRecomputeInvestigationFindingView,
   hostLogQueryEventOriginal,
   hostLogQueryEventNeighborhood,
   hostLogQueryEventRows,
@@ -71,6 +72,10 @@ import {
 import { applyLogNav, type LogNavAction } from "../../lib/logExplorer/logNav";
 import { governedIdToSafeInteger } from "../../lib/citations";
 import { subscribeLogExplorerNavTargets } from "../../lib/engine/platform";
+import {
+  formatPolicyBindingStatus,
+  policyBindingBlocksApply,
+} from "../../lib/logExplorer/policyBinding";
 import {
   clampLaneCount,
   computeGaps,
@@ -697,6 +702,26 @@ function investigationEvidenceViews(
 function investigationFindingViews(
   resolved: ResolvedInvestigationDocumentDto | null,
 ): FindingItemView[] {
+  // Prefer host-resolved findings (policy binding comparison). Fall back to
+  // durable document findings without status when the host omitted them.
+  const resolvedFindings = resolved?.findings;
+  if (resolvedFindings && resolvedFindings.length > 0) {
+    return resolvedFindings.map(({ item, policyBinding }) => {
+      const status = policyBinding.status;
+      return {
+        id: item.id,
+        kind: item.kind,
+        lifecycle: item.lifecycle,
+        title: item.title,
+        whyItMatters: item.whyItMatters,
+        evidenceIds: item.evidenceIds,
+        viewRecipe: item.viewRecipe ?? null,
+        provenanceLabel: "Authored manually",
+        policyStatus: status,
+        policyStatusLabel: formatPolicyBindingStatus(status),
+      };
+    });
+  }
   return (resolved?.document.findings ?? []).map((item) => ({
     id: item.id,
     kind: item.kind,
@@ -706,6 +731,10 @@ function investigationFindingViews(
     evidenceIds: item.evidenceIds,
     viewRecipe: item.viewRecipe ?? null,
     provenanceLabel: "Authored manually",
+    policyStatus: item.policyBinding ? null : "unbound_legacy",
+    policyStatusLabel: item.policyBinding
+      ? null
+      : formatPolicyBindingStatus("unbound_legacy"),
   }));
 }
 
@@ -720,6 +749,10 @@ function investigationNoteViews(
     findingIds: item.findingIds ?? [],
     provenanceLabel: "Authored manually",
   }));
+}
+
+function currentNoiseLens(lensSuspended: boolean): "active" | "suspended" {
+  return lensSuspended ? "suspended" : "active";
 }
 
 function investigationBookmarkViews(
@@ -1707,7 +1740,7 @@ export function LogExplorer({ corpusId }: Props) {
       const investigationRequest = ++investigationLoadRequestRef.current;
       setInvestigationLoadState("loading");
       setInvestigationError(null);
-      void hostLogLoadActiveInvestigation(corpusId)
+      void hostLogLoadActiveInvestigation(corpusId, currentNoiseLens(lensSuspended))
         .then((activeInvestigation) => {
           if (investigationRequest !== investigationLoadRequestRef.current) {
             return;
@@ -3297,6 +3330,7 @@ export function LogExplorer({ corpusId }: Props) {
         expectedRevision: investigation?.document.revision ?? null,
         title,
         eventRefs: selection.eventRefs,
+        noiseLens: currentNoiseLens(lensSuspended),
       });
       setInvestigation(updated);
       setInvestigationLoadState("ready");
@@ -3321,7 +3355,7 @@ export function LogExplorer({ corpusId }: Props) {
       setInvestigationError(message);
       if (message.toLowerCase().includes("stale investigation revision")) {
         try {
-          setInvestigation(await hostLogLoadActiveInvestigation(corpusId));
+          setInvestigation(await hostLogLoadActiveInvestigation(corpusId, currentNoiseLens(lensSuspended)));
         } catch {
           // Keep the original optimistic-concurrency error visible.
         }
@@ -3386,10 +3420,12 @@ export function LogExplorer({ corpusId }: Props) {
               kind: draft.kind,
               whyItMatters: draft.body,
               viewRecipe,
+              noiseLens: currentNoiseLens(lensSuspended),
             })
           : await hostLogAddInvestigationNote(corpusId, {
               ...common,
               body: draft.body,
+              noiseLens: currentNoiseLens(lensSuspended),
             });
       setInvestigation(updated);
       setInvestigationLoadState("ready");
@@ -3417,7 +3453,7 @@ export function LogExplorer({ corpusId }: Props) {
       setInvestigationError(message);
       if (message.toLowerCase().includes("stale investigation revision")) {
         try {
-          setInvestigation(await hostLogLoadActiveInvestigation(corpusId));
+          setInvestigation(await hostLogLoadActiveInvestigation(corpusId, currentNoiseLens(lensSuspended)));
         } catch {
           // Keep the original optimistic-concurrency error visible.
         }
@@ -3459,6 +3495,7 @@ export function LogExplorer({ corpusId }: Props) {
               lifecycle: draft.lifecycle,
               title: draft.title,
               whyItMatters: draft.body,
+              noiseLens: currentNoiseLens(lensSuspended),
             })
           : draft.type === "note" && editInvestigationItem.type === "note"
             ? await hostLogEditInvestigationNote(corpusId, {
@@ -3469,6 +3506,7 @@ export function LogExplorer({ corpusId }: Props) {
                 body: draft.body,
                 evidenceIds: editInvestigationItem.item.evidenceIds,
                 findingIds: editInvestigationItem.item.findingIds,
+                noiseLens: currentNoiseLens(lensSuspended),
               })
             : null;
       if (!updated) {
@@ -3483,7 +3521,7 @@ export function LogExplorer({ corpusId }: Props) {
       setInvestigationError(message);
       if (message.toLowerCase().includes("stale investigation revision")) {
         try {
-          setInvestigation(await hostLogLoadActiveInvestigation(corpusId));
+          setInvestigation(await hostLogLoadActiveInvestigation(corpusId, currentNoiseLens(lensSuspended)));
         } catch {
           // Keep the original optimistic-concurrency error visible.
         }
@@ -4031,19 +4069,73 @@ export function LogExplorer({ corpusId }: Props) {
         corpusId,
         investigation.document.id,
         item.id,
+        currentNoiseLens(lensSuspended),
       );
+      const policyStatus = preview.policyBinding.status;
       setFindingViewPreview({
         findingId: item.id,
         recipe: preview.recipe,
         changes: describeInvestigationViewDiff(current, preview.recipe),
         missingCount: preview.missingCount,
         staleCount: preview.staleCount,
+        policyStatus,
+        policyStatusLabel: formatPolicyBindingStatus(policyStatus),
+        policyBlocksApply: policyBindingBlocksApply(policyStatus),
       });
       setStatus("Previewed saved Explorer view · current view unchanged");
     } catch (previewError) {
       setInvestigationError(String(previewError));
     } finally {
       setInvestigationBusy(false);
+    }
+  };
+
+  const recomputeInvestigationFindingView = async (item: FindingItemView) => {
+    if (!investigation) return;
+    const current = captureCurrentInvestigationView();
+    if (!current) {
+      setInvestigationError(
+        "The current Explorer view cannot be recomputed exactly. Rerun Find or clear the stale highlight first.",
+      );
+      return;
+    }
+    const request = ++investigationLoadRequestRef.current;
+    investigationMetadataStartedRef.current = true;
+    setInvestigationBusy(true);
+    setInvestigationError(null);
+    try {
+      const updated = await hostLogRecomputeInvestigationFindingView(corpusId, {
+        investigationId: investigation.document.id,
+        expectedRevision: investigation.document.revision,
+        findingId: item.id,
+        viewRecipe: current,
+        noiseLens: currentNoiseLens(lensSuspended),
+      });
+      if (request !== investigationLoadRequestRef.current) return;
+      setInvestigation(updated);
+      setInvestigationLoadState("ready");
+      setFindingViewPreview(null);
+      setStatus("Recomputed saved Explorer view under the current noise policy");
+    } catch (recomputeError) {
+      if (request !== investigationLoadRequestRef.current) return;
+      const message = String(recomputeError);
+      setInvestigationError(message);
+      if (message.toLowerCase().includes("stale investigation revision")) {
+        try {
+          setInvestigation(
+            await hostLogLoadActiveInvestigation(
+              corpusId,
+              currentNoiseLens(lensSuspended),
+            ),
+          );
+        } catch {
+          // Keep the original concurrency error visible.
+        }
+      }
+    } finally {
+      if (request === investigationLoadRequestRef.current) {
+        setInvestigationBusy(false);
+      }
     }
   };
 
@@ -4065,17 +4157,28 @@ export function LogExplorer({ corpusId }: Props) {
         corpusId,
         investigation.document.id,
         preview.findingId,
+        currentNoiseLens(lensSuspended),
       );
-      if (fresh.missingCount > 0 || fresh.staleCount > 0) {
+      const policyStatus = fresh.policyBinding.status;
+      if (
+        fresh.missingCount > 0 ||
+        fresh.staleCount > 0 ||
+        policyBindingBlocksApply(policyStatus)
+      ) {
         setFindingViewPreview({
           findingId: preview.findingId,
           recipe: fresh.recipe,
           changes: preview.changes,
           missingCount: fresh.missingCount,
           staleCount: fresh.staleCount,
+          policyStatus,
+          policyStatusLabel: formatPolicyBindingStatus(policyStatus),
+          policyBlocksApply: policyBindingBlocksApply(policyStatus),
         });
         setInvestigationError(
-          "Apply blocked because the saved view no longer resolves to exact authoritative event identities.",
+          policyBindingBlocksApply(policyStatus)
+            ? `${formatPolicyBindingStatus(policyStatus)}. Review or recompute under the current noise policy before applying.`
+            : "Apply blocked because the saved view no longer resolves to exact authoritative event identities.",
         );
         return;
       }
@@ -4166,7 +4269,7 @@ export function LogExplorer({ corpusId }: Props) {
         setInvestigationError(
           "Reveal was blocked because the authoritative evidence changed after the rail loaded",
         );
-        setInvestigation(await hostLogLoadActiveInvestigation(corpusId));
+        setInvestigation(await hostLogLoadActiveInvestigation(corpusId, currentNoiseLens(lensSuspended)));
         return;
       }
       const eventRefs = current.item.eventRefs;
@@ -7093,6 +7196,9 @@ export function LogExplorer({ corpusId }: Props) {
           }
           onApplyFindingView={(preview) =>
             void applyInvestigationFindingView(preview)
+          }
+          onRecomputeFindingView={(item) =>
+            void recomputeInvestigationFindingView(item)
           }
           onEditFinding={openEditFinding}
           onEditNote={openEditNote}

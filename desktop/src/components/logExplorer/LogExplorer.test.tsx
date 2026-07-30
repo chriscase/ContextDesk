@@ -209,6 +209,7 @@ vi.mock("../../lib/host", () => ({
   hostLogEditInvestigationNote: vi.fn(),
   hostLogPreviewInvestigationEvidence: vi.fn(),
   hostLogPreviewInvestigationFindingView: vi.fn(),
+  hostLogRecomputeInvestigationFindingView: vi.fn(),
   hostPrepareLogDiagnosticReport: vi.fn(async (manifest) => {
     const actual = await vi.importActual<
       typeof import("../../lib/logDiagnosticReport")
@@ -1904,7 +1905,10 @@ describe("LogExplorer shell", () => {
     expect(await screen.findByText(c2Event.message)).toBeTruthy();
     await waitFor(() => {
       expect(host.hostLogListBookmarks).toHaveBeenCalledWith("c2");
-      expect(host.hostLogLoadActiveInvestigation).toHaveBeenCalledWith("c2");
+      expect(host.hostLogLoadActiveInvestigation).toHaveBeenCalledWith(
+        "c2",
+        "active",
+      );
     });
 
     await act(async () => {
@@ -4070,6 +4074,7 @@ describe("LogExplorer shell", () => {
         expectedRevision: null,
         title: item.title,
         eventRefs: [eventRef],
+        noiseLens: "active",
       }),
     );
     const evidencePanel = await screen.findByTestId("log-explorer-evidence");
@@ -4213,6 +4218,7 @@ describe("LogExplorer shell", () => {
           selection: [eventRef],
           focusedEvent: eventRef,
         }),
+        noiseLens: "active",
       }),
     );
     const panel = await screen.findByTestId("log-explorer-evidence");
@@ -4245,6 +4251,7 @@ describe("LogExplorer shell", () => {
         title: note.title,
         body: note.body,
         eventRefs: [eventRef],
+        noiseLens: "active",
       }),
     );
     expect(await screen.findByText(note.title)).toBeTruthy();
@@ -4269,6 +4276,7 @@ describe("LogExplorer shell", () => {
         lifecycle: "resolved",
         title: finding.title,
         whyItMatters: finding.whyItMatters,
+        noiseLens: "active",
       }),
     );
     expect(
@@ -4350,6 +4358,14 @@ describe("LogExplorer shell", () => {
       investigationId: loaded.document.id,
       revision: loaded.document.revision,
       findingId: finding.id,
+      policyBinding: {
+        binding: null,
+        currentSuppressionPolicyRevision: 1,
+        currentResolvedTemplateRevision: 1,
+        currentEffectivePolicySha256: "sha",
+        currentNoiseLens: "active" as const,
+        status: "current" as const,
+      },
       recipe,
       missingCount: 0,
       staleCount: 0,
@@ -4495,6 +4511,14 @@ describe("LogExplorer shell", () => {
     };
     vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(loaded);
     vi.mocked(host.hostLogPreviewInvestigationFindingView).mockResolvedValue({
+      policyBinding: {
+        binding: null,
+        currentSuppressionPolicyRevision: 1,
+        currentResolvedTemplateRevision: 1,
+        currentEffectivePolicySha256: "sha",
+        currentNoiseLens: "active",
+        status: "current",
+      },
       investigationId: loaded.document.id,
       revision: loaded.document.revision,
       findingId: finding.id,
