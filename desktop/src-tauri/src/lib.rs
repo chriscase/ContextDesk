@@ -652,8 +652,13 @@ fn build_linked_log_fallback_host(
     host.set_log_only_tool_surface(true);
     host.set_log_corpus_scope(Some(context.corpus_id.clone()));
     host.set_active_log_corpus(Some(context.corpus_id.clone()));
-    host.pin_log_suppression_lens(&context.corpus_id)
-        .map_err(|error| error.to_string())?;
+    if context.noise_lens_suspended {
+        host.pin_log_suppression_lens_suspended(&context.corpus_id)
+            .map_err(|error| error.to_string())?;
+    } else {
+        host.pin_log_suppression_lens(&context.corpus_id)
+            .map_err(|error| error.to_string())?;
+    }
     Ok(host)
 }
 
@@ -3007,6 +3012,9 @@ struct AgentTurnReq {
 struct LogExplorerTurnContextReq {
     corpus_id: String,
     brief: String,
+    /// When true, do not apply durable noise exclusions for this turn (#817).
+    #[serde(default)]
+    noise_lens_suspended: bool,
 }
 
 fn validate_log_explorer_turn_context(
@@ -3017,7 +3025,9 @@ fn validate_log_explorer_turn_context(
     if session.linked_corpus_id.as_deref() != Some(request.corpus_id.as_str()) {
         return Err("Log Explorer context does not match this chat session's linked corpus".into());
     }
+    let suspended = request.noise_lens_suspended;
     cd_core::agent::LogExplorerTurnContext::new(window_id, request.corpus_id, request.brief)
+        .map(|context| context.with_noise_lens_suspended(suspended))
         .map_err(|e| e.to_string())
 }
 
@@ -4270,6 +4280,7 @@ async fn agent_turn(
             &context.corpus_id,
             Some(profile.id.as_str()),
             Some(profile.chat_model.as_str()),
+            context.noise_lens_suspended,
         ) {
             state
                 .linked_synthesis_checkpoints
@@ -4285,7 +4296,8 @@ async fn agent_turn(
                     code: "linked_synthesis_retry_stale".into(),
                     message:
                         "The preserved evidence belongs to a different chat, corpus, provider \
-                              profile, or model. Run a new linked investigation instead."
+                              profile, model, or noise-lens mode. Run a new linked investigation \
+                              instead."
                             .into(),
                 },
                 cd_core::events::StreamEvent::TurnCompleted {
@@ -4500,7 +4512,12 @@ async fn agent_turn(
                 return Ok(());
             }
         }
-        if let Err(error) = host.pin_log_suppression_lens(&context.corpus_id) {
+        let pin_result = if context.noise_lens_suspended {
+            host.pin_log_suppression_lens_suspended(&context.corpus_id)
+        } else {
+            host.pin_log_suppression_lens(&context.corpus_id)
+        };
+        if let Err(error) = pin_result {
             tracing::warn!(error = %error, "linked suppression preflight failed");
             host.set_log_corpus_scope(previous_log_scope.clone());
             host.set_active_log_corpus(previous_log_corpus.clone());
@@ -14126,10 +14143,12 @@ mod chat_session_host_tests {
             LogExplorerTurnContextReq {
                 corpus_id: "corpus-a".into(),
                 brief: "levels=error; selectedSeqs=[1,2]".into(),
+                noise_lens_suspended: true,
             },
         )
         .expect("matching linked context");
         assert_eq!(context.corpus_id, "corpus-a");
+        assert!(context.noise_lens_suspended);
         assert!(matches!(
             context.origin,
             cd_core::agent::LinkedLogTurnOrigin::Explorer { ref window_id, .. }
@@ -14142,6 +14161,7 @@ mod chat_session_host_tests {
             LogExplorerTurnContextReq {
                 corpus_id: "corpus-b".into(),
                 brief: "levels=info".into(),
+                noise_lens_suspended: false,
             },
         )
         .unwrap_err();
@@ -14154,6 +14174,7 @@ mod chat_session_host_tests {
             LogExplorerTurnContextReq {
                 corpus_id: "corpus-a".into(),
                 brief: "levels=error".into(),
+                noise_lens_suspended: false,
             },
         )
         .is_err());

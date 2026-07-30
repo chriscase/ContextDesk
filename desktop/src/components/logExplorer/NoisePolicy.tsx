@@ -54,21 +54,30 @@ export function NoisePolicyControl({
   state,
   error,
   narrow,
+  lensSuspended = false,
   triggerRef,
   onRetry,
   onMutate,
+  onSuspendAll,
+  onResume,
 }: {
   document: SuppressionDocumentDto | null;
   hiddenCount: number | null;
   state: PolicyState;
   error: string | null;
   narrow: boolean;
+  /** When true, queries do not apply enabled rules (rules stay enabled). */
+  lensSuspended?: boolean;
   triggerRef: RefObject<HTMLButtonElement | null>;
   onRetry: () => void;
   onMutate: (
     ruleId: string,
     mutation: SuppressionRuleMutation,
   ) => Promise<SuppressionMutationResultDto>;
+  /** Suspend the Explorer lens without disabling durable rules. */
+  onSuspendAll?: () => void;
+  /** Resume applying the durable enabled rules. */
+  onResume?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [auditOpen, setAuditOpen] = useState(false);
@@ -137,9 +146,13 @@ export function NoisePolicyControl({
       ? "Noise · loading"
       : state === "error"
         ? "Noise · unavailable"
-        : `Noise · ${enabledRules.length} ${
-            enabledRules.length === 1 ? "rule" : "rules"
-          } · ${formatCount(hiddenCount)} hidden`;
+        : lensSuspended && enabledRules.length > 0
+          ? `Noise · suspended · ${enabledRules.length} ${
+              enabledRules.length === 1 ? "rule" : "rules"
+            } · 0 excluded`
+          : `Noise · ${enabledRules.length} ${
+              enabledRules.length === 1 ? "rule" : "rules"
+            } · ${formatCount(hiddenCount)} hidden`;
 
   return (
     <div className="log-explorer__noise-control">
@@ -147,11 +160,16 @@ export function NoisePolicyControl({
         ref={triggerRef}
         type="button"
         className={`log-explorer__btn ${
-          enabledRules.length > 0 ? "log-explorer__btn--active" : ""
+          enabledRules.length > 0 && !lensSuspended
+            ? "log-explorer__btn--active"
+            : lensSuspended
+              ? "log-explorer__btn--warn"
+              : ""
         }`}
         data-testid="noise-policy-trigger"
         aria-haspopup="dialog"
         aria-expanded={open}
+        aria-label={label}
         disabled={state === "loading"}
         onClick={() => setOpen((current) => !current)}
       >
@@ -200,11 +218,53 @@ export function NoisePolicyControl({
             </div>
           ) : (
             <>
-              <p className="log-explorer__noise-policy-disclosure">
-                {formatCount(hiddenCount)} of the raw corpus events are hidden
-                from this Explorer view and linked analysis. Original evidence
-                remains in the corpus.
+              <p
+                className="log-explorer__noise-policy-disclosure"
+                data-testid="noise-policy-disclosure"
+                role="status"
+              >
+                {lensSuspended
+                  ? `Noise lens is suspended. ${enabledRules.length} enabled ${
+                      enabledRules.length === 1 ? "rule remains" : "rules remain"
+                    } durable (not disabled). This view excludes 0 events now; the policy would hide ${formatCount(
+                      hiddenCount,
+                    )} when resumed. Original evidence remains in the corpus.`
+                  : `${formatCount(hiddenCount)} of the raw corpus events are hidden from this Explorer view and linked analysis (${enabledRules.length} enabled ${
+                      enabledRules.length === 1 ? "rule" : "rules"
+                    }). Excluded events are not analyzed. Original evidence remains in the corpus.`}
               </p>
+              {enabledRules.length > 0 && onSuspendAll && onResume ? (
+                <div className="log-explorer__noise-policy-lens-actions">
+                  {lensSuspended ? (
+                    <button
+                      type="button"
+                      className="log-explorer__btn log-explorer__btn--active"
+                      data-testid="noise-lens-resume"
+                      aria-label="Resume noise lens and re-apply enabled rules"
+                      onClick={() => {
+                        onResume();
+                      }}
+                    >
+                      Resume
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="log-explorer__btn"
+                      data-testid="noise-lens-suspend-all"
+                      aria-label="Suspend all noise rules from this view without disabling them"
+                      onClick={() => {
+                        onSuspendAll();
+                      }}
+                    >
+                      Suspend all
+                    </button>
+                  )}
+                  <span className="log-explorer__chat-preview">
+                    Suspend does not disable or delete rules.
+                  </span>
+                </div>
+              ) : null}
               <div className="log-explorer__noise-policy-list">
                 {visibleRules.length === 0 ? (
                   <div className="log-explorer__noise-policy-empty">

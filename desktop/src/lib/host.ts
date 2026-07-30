@@ -2280,6 +2280,8 @@ export async function hostGetActiveLogCorpus(): Promise<string | null> {
 export type LogExplorerTurnContextDto = {
   corpus_id: string;
   brief: string;
+  /** Explorer Suspend-all: tools must not apply durable exclusions (#817). */
+  noise_lens_suspended?: boolean;
 };
 
 export async function hostGetLogCorpus(

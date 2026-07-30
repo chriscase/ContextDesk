@@ -160,6 +160,13 @@ import {
   eventRef as investigationEventRef,
 } from "../../lib/logExplorer/investigationView";
 import {
+  activeNoiseExclusionTemplateIds,
+  formatNoiseLensDisclosure,
+  readNoiseLensSuspended,
+  writeNoiseLensSuspended,
+  type NoiseLensDisclosureInput,
+} from "../../lib/logExplorer/noiseLens";
+import {
   applyThemeToDocument,
   subscribeThemeChanges,
   THEME_STORAGE_KEY,
@@ -744,6 +751,10 @@ export function LogExplorer({ corpusId }: Props) {
   const [suppressedEventCount, setSuppressedEventCount] = useState<
     number | null
   >(null);
+  /** Suspend lens only — durable #671 rules stay enabled (#817). */
+  const [lensSuspended, setLensSuspended] = useState(() =>
+    readNoiseLensSuspended(corpusId),
+  );
   const [revealSuppressedEvidence, setRevealSuppressedEvidence] =
     useState(false);
   const [suppressedBookmarkOffer, setSuppressedBookmarkOffer] = useState<{
@@ -1112,8 +1123,41 @@ export function LogExplorer({ corpusId }: Props) {
     [suppressionDocument],
   );
   const activeSuppressionTemplateIds = useMemo(
-    () => (revealSuppressedEvidence ? [] : enabledSuppressionTemplateIds),
-    [enabledSuppressionTemplateIds, revealSuppressedEvidence],
+    () =>
+      activeNoiseExclusionTemplateIds({
+        enabledTemplateIds: enabledSuppressionTemplateIds,
+        lensSuspended,
+        temporaryReveal: revealSuppressedEvidence,
+      }),
+    [
+      enabledSuppressionTemplateIds,
+      lensSuspended,
+      revealSuppressedEvidence,
+    ],
+  );
+  const noiseLensDisclosure = useMemo((): NoiseLensDisclosureInput => {
+    const ruleCount = enabledSuppressionTemplateIds.length;
+    return {
+      policyState: suppressionLoadState,
+      enabledRuleCount: ruleCount,
+      policyHiddenCount: suppressedEventCount,
+      lensApplying: activeSuppressionTemplateIds.length > 0,
+      lensSuspended,
+      temporaryReveal: revealSuppressedEvidence,
+      policyRevision: suppressionDocument?.revision ?? null,
+    };
+  }, [
+    enabledSuppressionTemplateIds.length,
+    suppressionLoadState,
+    suppressedEventCount,
+    activeSuppressionTemplateIds.length,
+    lensSuspended,
+    revealSuppressedEvidence,
+    suppressionDocument?.revision,
+  ]);
+  const noiseLensDisclosureText = useMemo(
+    () => formatNoiseLensDisclosure(noiseLensDisclosure),
+    [noiseLensDisclosure],
   );
   const queryWithNoise = useCallback(
     (
@@ -2081,6 +2125,7 @@ export function LogExplorer({ corpusId }: Props) {
     setSuppressionLoadState("loading");
     setSuppressionLoadError(null);
     setSuppressedEventCount(null);
+    setLensSuspended(readNoiseLensSuspended(corpusId));
     setRevealSuppressedEvidence(false);
     setSuppressedBookmarkOffer(null);
     setSuppressTemplateId(null);
@@ -2163,14 +2208,24 @@ export function LogExplorer({ corpusId }: Props) {
       filters.traceId ? `traceId=${filters.traceId}` : null,
       filters.keyword ? `keyword=${filters.keyword}` : null,
       `noisePolicy=${
-        activeSuppressionTemplateIds.length > 0 ? "active" : "inactive"
+        lensSuspended
+          ? "suspended"
+          : activeSuppressionTemplateIds.length > 0
+            ? "active"
+            : "inactive"
       }`,
       `noisePolicyRevision=${suppressionDocument?.revision ?? "unavailable"}`,
       `noiseRuleCount=${enabledSuppressionTemplateIds.length}`,
       `noiseHiddenCount=${suppressedEventCount ?? "unavailable"}`,
+      `noiseExcludedFromView=${
+        activeSuppressionTemplateIds.length > 0
+          ? (suppressedEventCount ?? "unavailable")
+          : 0
+      }`,
       activeSuppressionTemplateIds.length > 0
         ? "noiseExcludedEventsNotAnalyzed=true"
-        : null,
+        : "noiseExcludedEventsNotAnalyzed=false",
+      lensSuspended ? "noiseLensSuspended=true" : null,
       revealSuppressedEvidence ? "noiseTemporaryEvidenceReveal=true" : null,
       `linkMode=${linkMode}`,
       `lanes=${lanes
@@ -2199,6 +2254,7 @@ export function LogExplorer({ corpusId }: Props) {
     bookmarks,
     activeSuppressionTemplateIds,
     enabledSuppressionTemplateIds.length,
+    lensSuspended,
     revealSuppressedEvidence,
     suppressedEventCount,
     suppressionDocument?.revision,
@@ -3487,10 +3543,10 @@ export function LogExplorer({ corpusId }: Props) {
         filter: queryWithNoise(filters, undefined, !allowSuppressed),
         sortByTime: true,
       });
-      if (!allowSuppressed && enabledSuppressionTemplateIds.length > 0) {
+      if (!allowSuppressed && activeSuppressionTemplateIds.length > 0) {
         const maybeSuppressed =
           resolved.target &&
-          enabledSuppressionTemplateIds.includes(resolved.target.templateId)
+          activeSuppressionTemplateIds.includes(resolved.target.templateId)
             ? resolved
             : resolved.status !== "found"
               ? await hostLogQueryEventNeighborhood(corpusId, {
@@ -3503,7 +3559,7 @@ export function LogExplorer({ corpusId }: Props) {
               : null;
         if (
           maybeSuppressed?.target &&
-          enabledSuppressionTemplateIds.includes(
+          activeSuppressionTemplateIds.includes(
             maybeSuppressed.target.templateId,
           )
         ) {
@@ -4068,6 +4124,20 @@ export function LogExplorer({ corpusId }: Props) {
       selectedCount: selected.size,
       bookmarkCount: bookmarks.length,
       brief: `${viewBrief}; timeLink=${linkMode}`,
+      noisePolicyLabel: lensSuspended
+        ? "suspended"
+        : activeSuppressionTemplateIds.length > 0
+          ? "active"
+          : "inactive",
+      noiseRuleCount: enabledSuppressionTemplateIds.length,
+      noiseExcludedEventCount:
+        activeSuppressionTemplateIds.length > 0
+          ? suppressedEventCount
+          : 0,
+      noisePolicyHiddenCount: suppressedEventCount,
+      noiseExcludedNotAnalyzed: activeSuppressionTemplateIds.length > 0,
+      noiseLensSuspended: lensSuspended,
+      noiseDisclosure: noiseLensDisclosureText,
     }),
     [
       corpusId,
@@ -4081,7 +4151,21 @@ export function LogExplorer({ corpusId }: Props) {
       selected.size,
       bookmarks.length,
       viewBrief,
+      lensSuspended,
+      activeSuppressionTemplateIds.length,
+      enabledSuppressionTemplateIds.length,
+      suppressedEventCount,
+      noiseLensDisclosureText,
     ],
+  );
+
+  const setNoiseLensSuspended = useCallback(
+    (suspended: boolean) => {
+      writeNoiseLensSuspended(corpusId, suspended);
+      setLensSuspended(suspended);
+      // loadEvents / facets re-run when activeSuppressionTemplateIds changes.
+    },
+    [corpusId],
   );
 
   const laneSourceFilter = (laneId: string) => {
@@ -4756,6 +4840,16 @@ export function LogExplorer({ corpusId }: Props) {
               {laneCount} lane queries
             </span>
           )}
+          {enabledSuppressionTemplateIds.length > 0 || lensSuspended ? (
+            <span
+              className="log-explorer__badge"
+              data-testid="noise-lens-disclosure-header"
+              role="note"
+              title={noiseLensDisclosureText}
+            >
+              {noiseLensDisclosureText}
+            </span>
+          ) : null}
         </div>
         <div className="log-explorer__toolbar">
           <ToolbarPicker
@@ -4833,6 +4927,7 @@ export function LogExplorer({ corpusId }: Props) {
             state={suppressionLoadState}
             error={suppressionLoadError}
             narrow={breakpoint === "narrow"}
+            lensSuspended={lensSuspended}
             triggerRef={noisePolicyTriggerRef}
             onRetry={() => {
               void loadSuppressionPolicy().catch(() => {
@@ -4840,6 +4935,8 @@ export function LogExplorer({ corpusId }: Props) {
               });
             }}
             onMutate={mutateSuppressionRule}
+            onSuspendAll={() => setNoiseLensSuspended(true)}
+            onResume={() => setNoiseLensSuspended(false)}
           />
           {breakpoint !== "narrow" ? (
             <ToolbarPicker
@@ -5848,6 +5945,15 @@ export function LogExplorer({ corpusId }: Props) {
                   ? ` · ${laneCount} lanes (per-lane counts in headers)`
                   : ""}
               </div>
+              {enabledSuppressionTemplateIds.length > 0 || lensSuspended ? (
+                <p
+                  className="log-explorer__chat-preview"
+                  data-testid="noise-lens-disclosure-counts"
+                  role="note"
+                >
+                  {noiseLensDisclosureText} · rows and facet counts above
+                </p>
+              ) : null}
 
               {facetsLoading ? (
                 <div
@@ -5860,6 +5966,15 @@ export function LogExplorer({ corpusId }: Props) {
               ) : null}
 
               <div className="log-explorer__section-title">Levels</div>
+              {enabledSuppressionTemplateIds.length > 0 || lensSuspended ? (
+                <p
+                  className="log-explorer__chat-preview"
+                  data-testid="noise-lens-disclosure-facets"
+                  role="note"
+                >
+                  {noiseLensDisclosureText} · facet counts
+                </p>
+              ) : null}
               <div className="log-explorer__facet">
                 {Object.entries(facets?.levels ?? {})
                   .sort((a, b) => b[1] - a[1])
@@ -6143,6 +6258,15 @@ export function LogExplorer({ corpusId }: Props) {
             </div>
           ) : null}
           <div className="log-explorer__lane-strip">
+            {enabledSuppressionTemplateIds.length > 0 || lensSuspended ? (
+              <p
+                className="log-explorer__chat-preview"
+                data-testid="noise-lens-disclosure-timeline"
+                role="note"
+              >
+                {noiseLensDisclosureText} · timeline
+              </p>
+            ) : null}
             <TimelineNavigator
               corpusId={corpusId}
               ready={timelineReady}
@@ -6297,6 +6421,16 @@ export function LogExplorer({ corpusId }: Props) {
                       {laneMatchedHint(lane.id)}
                       {focusLaneId === lane.id ? " · focused" : ""}
                     </span>
+                    {enabledSuppressionTemplateIds.length > 0 ||
+                    lensSuspended ? (
+                      <span
+                        className="log-explorer__chat-preview"
+                        data-testid={`noise-lens-disclosure-lane-${lane.id}`}
+                        role="note"
+                      >
+                        {noiseLensDisclosureText}
+                      </span>
+                    ) : null}
                   </div>
                   <div
                     className="log-explorer__col-header-viewport"
