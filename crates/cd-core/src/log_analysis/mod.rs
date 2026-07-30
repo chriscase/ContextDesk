@@ -13,6 +13,7 @@ pub mod drain;
 pub mod embed_policy;
 pub mod format_profile;
 pub mod ingest;
+mod ingest_confidence;
 pub mod lanes;
 pub mod operational_metrics;
 pub mod package;
@@ -57,6 +58,10 @@ pub use ingest::{
     ingest_path, ingest_path_with_observer, ingest_path_with_policy,
     ingest_path_with_policy_and_observer, ingest_path_with_policy_and_observer_managed,
     IngestReport, IngestStats,
+};
+pub use ingest_confidence::{
+    IngestConfidenceCounts, IngestConfidenceReport, IngestFormatOutcome, SourceIngestConfidence,
+    UnresolvedTimeReason, MAX_TIMESTAMP_PREFIX_SAMPLES, MAX_TIMESTAMP_PREFIX_SAMPLE_CHARS,
 };
 pub use lanes::{
     clamp_lane_count, compute_gaps, link_allowed, nearest_at_or_after, scrub_linked, GapRegion,
