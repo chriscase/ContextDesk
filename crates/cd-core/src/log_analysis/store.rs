@@ -58,6 +58,16 @@ static EVENT_REVISION_CLOCKS: LazyLock<Mutex<HashMap<PathBuf, Weak<AtomicU64>>>>
 static TEMPLATE_ANALYSIS_REVISION_CLOCKS: LazyLock<Mutex<HashMap<PathBuf, Weak<AtomicU64>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+type TemplateIdentityStore = Mutex<HashMap<u64, TemplateIdentity>>;
+
+/// Process-local shared deterministic identity metadata for reopened handles.
+///
+/// The revision clock alone cannot make a handle coherent if each handle owns
+/// a different stale identity snapshot. Vectors intentionally remain
+/// handle-local with their corresponding vector indexes.
+static TEMPLATE_IDENTITY_STORES: LazyLock<Mutex<HashMap<PathBuf, Weak<TemplateIdentityStore>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// Reopened handles for one corpus share one serialized DuckDB connection.
 ///
 /// A separately opened DuckDB connection can retain the snapshot from before
@@ -439,6 +449,21 @@ pub struct TemplateRow {
     pub vector: Option<Vec<f32>>,
 }
 
+#[derive(Debug, Clone)]
+struct TemplateIdentity {
+    pattern: String,
+    content_hash: String,
+}
+
+impl From<&TemplateRow> for TemplateIdentity {
+    fn from(row: &TemplateRow) -> Self {
+        Self {
+            pattern: row.info.pattern.clone(),
+            content_hash: row.content_hash.clone(),
+        }
+    }
+}
+
 /// Disposable log corpus under app cache (events in DuckDB; templates + vectors aside).
 pub struct LogCorpus {
     id: CorpusId,
@@ -447,6 +472,7 @@ pub struct LogCorpus {
     meta: Mutex<CorpusMeta>,
     db: Arc<Mutex<Connection>>,
     templates: Mutex<HashMap<u64, TemplateRow>>,
+    template_identities: Arc<TemplateIdentityStore>,
     /// Vector index over template ids (Exact or Hnsw by size) — pure Rust.
     index: Mutex<Box<dyn VectorIndex>>,
     /// Diagnostics: "exact" | "hnsw".
@@ -489,6 +515,7 @@ impl LogCorpus {
         let db = shared_corpus_connection(&db_path)?;
         let event_revision = shared_event_revision_clock(&db_path, 0);
         let template_analysis_revision = shared_template_analysis_revision_clock(&db_path);
+        let template_identities = shared_template_identity_store(&db_path, HashMap::new());
         Ok(Self {
             id,
             name: name_s,
@@ -496,6 +523,7 @@ impl LogCorpus {
             meta: Mutex::new(meta),
             db,
             templates: Mutex::new(HashMap::new()),
+            template_identities,
             index: Mutex::new(select_backend(0)),
             index_backend: Mutex::new(backend_name(0)),
             event_count_cache: Mutex::new(EventCountCache::default()),
@@ -569,6 +597,11 @@ impl LogCorpus {
             }
         }
         let n_tpl = templates.len();
+        let initial_identities = templates
+            .iter()
+            .map(|(template_id, row)| (*template_id, TemplateIdentity::from(row)))
+            .collect();
+        let template_identities = shared_template_identity_store(&db_path, initial_identities);
         let idx = select_backend(n_tpl);
         for (tid, row) in &templates {
             if let Some(ref v) = row.vector {
@@ -582,6 +615,7 @@ impl LogCorpus {
             meta: Mutex::new(meta),
             db,
             templates: Mutex::new(templates),
+            template_identities,
             index: Mutex::new(idx),
             index_backend: Mutex::new(backend_name(n_tpl)),
             event_count_cache: Mutex::new(EventCountCache::default()),
@@ -924,12 +958,17 @@ impl LogCorpus {
     /// Upsert template rows (JSON sidecar; not in DuckDB).
     pub fn upsert_templates(&self, rows: impl IntoIterator<Item = TemplateRow>) -> CoreResult<()> {
         let mut g = self.templates.lock().map_err(|_| lock_err())?;
+        let mut identity_updates = Vec::new();
         let mut changed = false;
         for r in rows {
             changed = true;
+            identity_updates.push((r.info.template_id, TemplateIdentity::from(&r)));
             g.insert(r.info.template_id, r);
         }
+        drop(g);
         if changed {
+            let mut identities = self.template_identities.lock().map_err(|_| lock_err())?;
+            identities.extend(identity_updates);
             self.template_analysis_revision
                 .fetch_add(1, Ordering::SeqCst);
         }
@@ -1033,6 +1072,59 @@ impl LogCorpus {
             .unwrap_or_else(|e| e.into_inner())
             .get(&template_id)
             .map(|template| template.info.pattern.clone())
+    }
+
+    /// Clone deterministic identity metadata for a bounded set of templates
+    /// without cloning optional embedding vectors.
+    pub(crate) fn template_candidate_metadata(
+        &self,
+        template_ids: &[u64],
+        fingerprint_max_bytes: usize,
+        pattern_scan_max_bytes: usize,
+    ) -> HashMap<u64, (String, String)> {
+        let templates = self
+            .template_identities
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        template_ids
+            .iter()
+            .filter_map(|template_id| {
+                templates.get(template_id).and_then(|template| {
+                    if template.content_hash.len() > fingerprint_max_bytes {
+                        return None;
+                    }
+                    Some((
+                        *template_id,
+                        (
+                            template.content_hash.clone(),
+                            crate::text::truncate_bytes(&template.pattern, pattern_scan_max_bytes)
+                                .to_string(),
+                        ),
+                    ))
+                })
+            })
+            .collect()
+    }
+
+    /// Clone only trusted template fingerprints for a bounded id set.
+    pub(crate) fn template_fingerprints(
+        &self,
+        template_ids: &[u64],
+        max_bytes: usize,
+    ) -> HashMap<u64, String> {
+        let templates = self
+            .template_identities
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        template_ids
+            .iter()
+            .filter_map(|template_id| {
+                templates
+                    .get(template_id)
+                    .filter(|template| template.content_hash.len() <= max_bytes)
+                    .map(|template| (*template_id, template.content_hash.clone()))
+            })
+            .collect()
     }
 
     /// Load all events into memory for a callback (fine for tests / moderate corpora).
@@ -1579,6 +1671,23 @@ fn shared_template_analysis_revision_clock(db_path: &Path) -> Arc<AtomicU64> {
     let clock = Arc::new(AtomicU64::new(0));
     clocks.insert(key, Arc::downgrade(&clock));
     clock
+}
+
+fn shared_template_identity_store(
+    db_path: &Path,
+    initial: HashMap<u64, TemplateIdentity>,
+) -> Arc<TemplateIdentityStore> {
+    let key = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
+    let mut stores = TEMPLATE_IDENTITY_STORES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    stores.retain(|_, store| store.strong_count() > 0);
+    if let Some(store) = stores.get(&key).and_then(Weak::upgrade) {
+        return store;
+    }
+    let store = Arc::new(Mutex::new(initial));
+    stores.insert(key, Arc::downgrade(&store));
+    store
 }
 
 fn shared_corpus_connection(db_path: &Path) -> CoreResult<Arc<Mutex<Connection>>> {
