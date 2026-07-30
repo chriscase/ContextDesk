@@ -32,6 +32,7 @@ import {
   type LogClusterDto,
   type LogCorpusSummaryDto,
   type FailedLogIngestDiagnosticDto,
+  type LogImportConfidenceDto,
   type LogSearchHitDto,
   type LogTemplateRowDto,
   type ProcessProgressDto,
@@ -60,6 +61,7 @@ import { ProcessProgressPanel } from "../wizards/ProcessProgressPanel";
 import type { ProcessProgressDto as WizardProgressDto } from "../wizards/types";
 import { LogExplorer } from "../logExplorer/LogExplorer";
 import { LogDiagnosticDialog } from "./LogDiagnosticDialog";
+import { LogImportConfidence } from "./LogImportConfidence";
 
 function hostProgressToWizard(p: ProcessProgressDto): WizardProgressDto {
   return {
@@ -133,6 +135,10 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const [reanalyzing, setReanalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [importConfidence, setImportConfidence] = useState<{
+    corpusId: string;
+    report: LogImportConfidenceDto;
+  } | null>(null);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<LogSearchHitDto[]>([]);
   const [analysisByCorpus, setAnalysisByCorpus] = useState<
@@ -542,11 +548,15 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     setIngesting(true);
     setError(null);
     setNote(null);
+    setImportConfidence(null);
     setProgress(null);
     setFailedIngestDiagnostic(null);
     try {
       const r = await hostIngestLogPath(path, "incident");
       setNote(statsBlurb(r));
+      setImportConfidence(
+        r.confidence ? { corpusId: r.corpusId, report: r.confidence } : null,
+      );
       await refresh();
       await selectCorpus(r.corpusId);
     } catch (e) {
@@ -577,6 +587,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     setBusy(true);
     setError(null);
     setNote(null);
+    setImportConfidence(null);
     setFailedIngestDiagnostic(null);
     try {
       const r = await hostImportLogCorpusPackagePath(path);
@@ -1040,6 +1051,9 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
         </section>
       ) : null}
       {note ? <p className="muted log-pane__note">{note}</p> : null}
+      {importConfidence?.corpusId === activeId ? (
+        <LogImportConfidence confidence={importConfidence.report} />
+      ) : null}
 
       <div className="pane__split pane__split--logs">
         <aside

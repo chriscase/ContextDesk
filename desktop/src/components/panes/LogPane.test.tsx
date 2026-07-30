@@ -758,6 +758,151 @@ describe("LogPane", () => {
     expect(hostMocks.getFailedIngestDiagnostic).toHaveBeenCalledTimes(3);
   });
 
+  it("shows a bounded truthful source review after import without exposing the selected path or payload", async () => {
+    hostMocks.confirm.mockResolvedValue(true);
+    const importedCorpus = corpus("company-corpus", "Company import");
+    const otherCorpus = corpus("other-corpus", "Previous import");
+    hostMocks.listCorpora
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([importedCorpus, otherCorpus]);
+    hostMocks.ingest.mockResolvedValue({
+      corpusId: "company-corpus",
+      lines: 3,
+      templates: 2,
+      reductionRatio: 1.5,
+      embedded: 0,
+      files: 2,
+      discoveredFiles: 2,
+      excludedFiles: 0,
+      failedFiles: 0,
+      ignoredFiles: 0,
+      exclusionCounts: {},
+      exclusionExamples: [],
+      partial: false,
+      sourceBytes: 256,
+      corpusBytes: 512,
+      levelCounts: { info: 2, error: 1 },
+      tsMin: 1,
+      tsMax: 2,
+      formatCounts: {
+        "date-level-logger-thread-record": 2,
+        json: 1,
+      },
+      topTemplates: [],
+      confidence: {
+        corpusTimeQuality: "mixed",
+        counts: {
+          wall: 1,
+          orderOnly: 1,
+          mixed: 0,
+          matched: 2,
+          ambiguous: 0,
+          unknown: 0,
+          unresolved: 1,
+        },
+        sources: [
+          {
+            source: "api/events.jsonl",
+            lines: 1,
+            formatId: "json",
+            formatVersion: 1,
+            outcome: "matched",
+            runnerUpMargin: 100,
+            producerHint: null,
+            timeQuality: "wall",
+            unresolvedReasons: [],
+            timestampPrefixSamples: [],
+          },
+          {
+            source: "app/server.log",
+            lines: 2,
+            formatId: "date-level-logger-thread-record",
+            formatVersion: 1,
+            outcome: "matched",
+            runnerUpMargin: 30,
+            producerHint: "wildfly-or-jboss-family",
+            timeQuality: "order_only",
+            unresolvedReasons: ["no_timezone"],
+            timestampPrefixSamples: [
+              "2021-03-05 02:53:53,654",
+              "2021-03-05 02:53:54,101",
+            ],
+          },
+        ],
+      },
+      embedding: {
+        state: "keyword_only",
+        modelId: null,
+        embeddedTemplates: 0,
+        totalTemplates: 2,
+        reason: "embedding_not_requested",
+        updatedAt: 1,
+      },
+    });
+
+    render(
+      <LogPane
+        pickDirectory={async () =>
+          "/Users/employee/private.internal/customer-incident"
+        }
+      />,
+    );
+    await screen.findByText(/No corpora yet/i);
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Import logs…" })[0]!,
+    );
+
+    const confidence = await screen.findByTestId("log-import-confidence");
+    expect(confidence.textContent).toContain(
+      "1 exact wall-clock source · 1 source needs review",
+    );
+    expect(confidence.textContent).toContain(
+      "ContextDesk did not guess a timezone",
+    );
+    expect(confidence.textContent).not.toContain("/Users/employee");
+    expect(confidence.textContent).not.toContain("customer-incident");
+    expect(confidence.textContent).not.toContain("Remote connection failed");
+
+    const review = within(confidence).getByRole("button", {
+      name: "Review 1 source",
+    });
+    expect(review.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(review);
+    expect(review.getAttribute("aria-expanded")).toBe("true");
+    expect(confidence.textContent).toContain("app/server.log");
+    expect(confidence.textContent).toContain("No timezone — order-only");
+    expect(confidence.textContent).toContain(
+      "date-level-logger-thread-record v1 — margin 30",
+    );
+    expect(confidence.textContent).toContain(
+      "Family hint: wildfly or jboss family (not verified)",
+    );
+    expect(
+      within(confidence).getByLabelText("Timestamp examples for app/server.log")
+        .textContent,
+    ).toContain("2021-03-05 02:53:53,654");
+
+    fireEvent.click(review);
+    expect(
+      within(confidence).queryByText("No timezone — order-only"),
+    ).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: corpusButtonName(otherCorpus.name),
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByTestId("log-import-confidence")).toBeNull(),
+    );
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: corpusButtonName(importedCorpus.name),
+      }),
+    );
+    expect(await screen.findByTestId("log-import-confidence")).toBeTruthy();
+  });
+
   it("clears a stale raw-ingest diagnostic when a package import attempt begins", async () => {
     hostMocks.getFailedIngestDiagnostic.mockResolvedValue({
       schemaVersion: 2,
@@ -865,9 +1010,7 @@ describe("LogPane", () => {
       await screen.findByRole("menuitem", { name: "Discard corpus…" }),
     );
 
-    await waitFor(() =>
-      expect(hostMocks.discard).toHaveBeenCalledWith(first.id),
-    );
+    await waitFor(() => expect(hostMocks.discard).toHaveBeenCalledWith(first.id));
     const secondCard = await screen.findByRole("button", {
       name: corpusButtonName(second.name),
     });
@@ -1155,7 +1298,9 @@ describe("LogPane", () => {
     fireEvent.click(
       await screen.findByRole("menuitem", { name: /Discard corpus/i }),
     );
-    await waitFor(() => expect(hostMocks.discard).toHaveBeenCalledWith(first.id));
+    await waitFor(() =>
+      expect(hostMocks.discard).toHaveBeenCalledWith(first.id),
+    );
 
     fireEvent.click(
       screen.getByRole("button", {

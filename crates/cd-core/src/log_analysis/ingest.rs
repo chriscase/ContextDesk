@@ -2,6 +2,7 @@
 
 use super::drain::DrainMiner;
 use super::embed_policy::{LogEmbedMode, LogEmbedPolicy};
+use super::ingest_confidence::{IngestConfidenceAggregator, IngestConfidenceReport};
 use super::parse::{parse_line_with_fingerprint, LogFormat};
 use super::redact_log::{prepare_original_record, redact_message, redact_params};
 use super::store::{
@@ -140,6 +141,8 @@ pub struct IngestReport {
     pub corpus_id: String,
     /// Stats.
     pub stats: IngestStats,
+    /// Bounded per-source grammar and time-confidence report.
+    pub confidence: IngestConfidenceReport,
     /// Top templates by count (for summary UI).
     pub top_templates: Vec<(u64, String, u64, u8)>,
     /// Persisted semantic-vector availability.
@@ -1426,6 +1429,7 @@ fn ingest_lines_from_reader(
     corpus: &LogCorpus,
     miner: &mut DrainMiner,
     stats: &mut IngestStats,
+    confidence: &mut IngestConfidenceAggregator,
     seq: &mut u64,
     batch: &mut Vec<IngestedLogEvent>,
     files_done: u64,
@@ -1481,7 +1485,9 @@ fn ingest_lines_from_reader(
         // Every bounded physical record is fingerprinted independently. A
         // plain banner cannot lock the rest of a file to Plain, and mixed
         // structured records remain independently explainable.
-        let parsed = parse_line_with_fingerprint(line, file_hint, *seq).parsed;
+        let fingerprinted = parse_line_with_fingerprint(line, file_hint, *seq);
+        confidence.observe(source_label, &fingerprinted);
+        let parsed = fingerprinted.parsed;
         let fmt_key = match parsed.format {
             LogFormat::Json => "json",
             LogFormat::Logfmt => "logfmt",
@@ -1647,6 +1653,7 @@ fn ingest_from_zip(
     corpus: &LogCorpus,
     miner: &mut DrainMiner,
     stats: &mut IngestStats,
+    confidence: &mut IngestConfidenceAggregator,
     seq: &mut u64,
     batch: &mut Vec<IngestedLogEvent>,
     progress: &dyn ProcessProgressObserver,
@@ -1666,6 +1673,7 @@ fn ingest_from_zip(
         corpus,
         miner,
         stats,
+        confidence,
         seq,
         batch,
         progress,
@@ -1686,6 +1694,7 @@ fn ingest_from_zip_file(
     corpus: &LogCorpus,
     miner: &mut DrainMiner,
     stats: &mut IngestStats,
+    confidence: &mut IngestConfidenceAggregator,
     seq: &mut u64,
     batch: &mut Vec<IngestedLogEvent>,
     progress: &dyn ProcessProgressObserver,
@@ -1945,6 +1954,7 @@ fn ingest_from_zip_file(
                 corpus,
                 miner,
                 stats,
+                confidence,
                 seq,
                 batch,
                 progress,
@@ -1976,6 +1986,7 @@ fn ingest_from_zip_file(
             corpus,
             miner,
             stats,
+            confidence,
             seq,
             batch,
             files_done,
@@ -2255,6 +2266,7 @@ fn ingest_path_into_cache(
     check_ingest_fault(fault, IngestCheckpoint::CorpusCreated)?;
     let mut miner = DrainMiner::default();
     let mut stats = IngestStats::default();
+    let mut confidence = IngestConfidenceAggregator::default();
     let mut seq = 0u64;
     let mut batch = Vec::with_capacity(256);
     let mut budget = RawIngestBudget::default();
@@ -2268,6 +2280,7 @@ fn ingest_path_into_cache(
             &corpus,
             &mut miner,
             &mut stats,
+            &mut confidence,
             &mut seq,
             &mut batch,
             progress,
@@ -2407,6 +2420,7 @@ fn ingest_path_into_cache(
                     &corpus,
                     &mut miner,
                     &mut stats,
+                    &mut confidence,
                     &mut seq,
                     &mut batch,
                     progress,
@@ -2477,6 +2491,7 @@ fn ingest_path_into_cache(
                 &corpus,
                 &mut miner,
                 &mut stats,
+                &mut confidence,
                 &mut seq,
                 &mut batch,
                 files_done,
@@ -2739,10 +2754,12 @@ fn ingest_path_into_cache(
         top_snap,
         embedding.clone(),
     )?;
+    let confidence = confidence.finish();
 
     Ok(IngestReport {
         corpus_id: corpus.id().to_string(),
         stats,
+        confidence,
         top_templates: top,
         embedding,
     })
@@ -2955,6 +2972,7 @@ mod tests {
     use crate::embed::ConceptEmbedBackend;
     use crate::log_analysis::{
         FailedIngestDiagnostic, FailedIngestDiagnosticRecorder, FailedIngestSourceKind,
+        IngestFormatOutcome, TimeQuality, UnresolvedTimeReason, MAX_TIMESTAMP_PREFIX_SAMPLES,
     };
     use crate::process_progress::{
         CancelFlag, LogIngestEvidence, ProcessProgressPhase, RecordingProcessProgress,
@@ -4524,6 +4542,68 @@ mod tests {
             report.stats.reduction_ratio,
             report.stats.embedded
         );
+    }
+
+    #[test]
+    fn ingest_report_publishes_bounded_portable_source_confidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("private-absolute-root");
+        std::fs::create_dir_all(logs.join("nested")).unwrap();
+        std::fs::write(
+            logs.join("wall.jsonl"),
+            concat!(
+                "{\"ts\":\"2025-01-01T12:00:00Z\",\"message\":\"wall one\"}\n",
+                "{\"ts\":\"2025-01-01T12:00:01+00:00\",\"message\":\"wall two\"}\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            logs.join("nested/server.log"),
+            concat!(
+                "Synthetic startup banner\n",
+                "2021-03-05 02:53:53,654 ERROR [org.jboss] (worker) private payload one\n",
+                "2021-03-05 02:53:54,654 ERROR [org.jboss] (worker) private payload two\n",
+                "2021-03-05 02:53:55,654 ERROR [org.jboss] (worker) private payload three\n",
+                "2021-03-05 02:53:56,654 ERROR [org.jboss] (worker) private payload four\n",
+            ),
+        )
+        .unwrap();
+
+        let cache = dir.path().join("cache");
+        let report = ingest_path(&cache, &logs, "confidence", None, "none").unwrap();
+        assert_eq!(report.confidence.corpus_time_quality, TimeQuality::Mixed);
+        assert_eq!(report.confidence.counts.wall, 1);
+        assert_eq!(report.confidence.counts.order_only, 1);
+        assert_eq!(report.confidence.counts.matched, 2);
+        assert_eq!(report.confidence.counts.unresolved, 1);
+        assert_eq!(report.confidence.sources.len(), 2);
+
+        let server = report
+            .confidence
+            .sources
+            .iter()
+            .find(|source| source.source == "nested/server.log")
+            .unwrap();
+        assert_eq!(server.lines, 5);
+        assert_eq!(
+            server.format_id.as_deref(),
+            Some("date-level-logger-thread-record")
+        );
+        assert_eq!(server.format_version, Some(1));
+        assert_eq!(server.outcome, IngestFormatOutcome::Matched);
+        assert_eq!(server.time_quality, TimeQuality::OrderOnly);
+        assert_eq!(
+            server.unresolved_reasons,
+            vec![UnresolvedTimeReason::NoTimezone]
+        );
+        assert_eq!(
+            server.timestamp_prefix_samples.len(),
+            MAX_TIMESTAMP_PREFIX_SAMPLES
+        );
+
+        let encoded = serde_json::to_string(&report.confidence).unwrap();
+        assert!(!encoded.contains(dir.path().to_string_lossy().as_ref()));
+        assert!(!encoded.contains("private payload"));
     }
 
     #[test]

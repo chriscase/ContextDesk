@@ -61,6 +61,32 @@ const richReport: LogIngestReportDto = {
   tsMin: 1_700_000_000,
   tsMax: 1_700_000_300,
   formatCounts: { json: 1_200 },
+  confidence: {
+    corpusTimeQuality: "wall",
+    counts: {
+      wall: 1,
+      orderOnly: 0,
+      mixed: 0,
+      matched: 1,
+      ambiguous: 0,
+      unknown: 0,
+      unresolved: 0,
+    },
+    sources: [
+      {
+        source: "api/events.jsonl",
+        lines: 1_200,
+        formatId: "json",
+        formatVersion: 1,
+        outcome: "matched",
+        runnerUpMargin: 100,
+        producerHint: null,
+        timeQuality: "wall",
+        unresolvedReasons: [],
+        timestampPrefixSamples: [],
+      },
+    ],
+  },
   embedding: {
     state: "partial",
     modelId: "local-onnx-default",
@@ -166,6 +192,14 @@ function expectRichStatsHero() {
   ).toBeTruthy();
 }
 
+function expectExactImportConfidence() {
+  const confidence = screen.getByTestId("log-import-confidence");
+  expect(confidence.textContent).toContain(
+    "1 exact wall-clock source · all source formats matched",
+  );
+  expect(within(confidence).queryByRole("button", { name: /Review/ })).toBeNull();
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   hostMocks.listenProgress.mockResolvedValue(() => {});
@@ -198,6 +232,7 @@ describe("LogTroubleshootingWizard product path", () => {
     expect(hostMocks.importSessionContext).not.toHaveBeenCalled();
     expect(await screen.findByText(/Import finished/)).toBeTruthy();
     expectRichStatsHero();
+    expectExactImportConfidence();
     fireEvent.click(
       screen.getByRole("button", {
         name: "Help: Events per template",
@@ -220,6 +255,7 @@ describe("LogTroubleshootingWizard product path", () => {
     await screen.findByRole("heading", { name: "Ready" });
     expect(screen.getByText("local-corpus-raw-123")).toBeTruthy();
     expectRichStatsHero();
+    expectExactImportConfidence();
 
     fireEvent.click(screen.getByRole("button", { name: "Finish" }));
     expect(onComplete).toHaveBeenCalledTimes(1);

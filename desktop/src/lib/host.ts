@@ -1767,6 +1767,40 @@ export type LogCorpusSummaryDto = {
   embedding?: LogEmbeddingStatusDto | null;
 };
 
+export type LogFormatConfidenceOutcome = "matched" | "ambiguous" | "unknown";
+
+export type LogTimeUnresolvedReason =
+  "no_timezone" | "zone_abbreviation_not_resolved";
+
+export type LogSourceConfidenceDto = {
+  source: string;
+  lines: number;
+  formatId: string | null;
+  formatVersion: number | null;
+  outcome: LogFormatConfidenceOutcome;
+  runnerUpMargin: number | null;
+  producerHint: string | null;
+  timeQuality: TimeQuality;
+  unresolvedReasons: LogTimeUnresolvedReason[];
+  timestampPrefixSamples: string[];
+};
+
+export type LogImportConfidenceCountsDto = {
+  wall: number;
+  orderOnly: number;
+  mixed: number;
+  matched: number;
+  ambiguous: number;
+  unknown: number;
+  unresolved: number;
+};
+
+export type LogImportConfidenceDto = {
+  corpusTimeQuality: TimeQuality;
+  counts: LogImportConfidenceCountsDto;
+  sources: LogSourceConfidenceDto[];
+};
+
 export type LogIngestReportDto = {
   corpusId: string;
   lines: number;
@@ -1789,6 +1823,7 @@ export type LogIngestReportDto = {
   formatCounts: Record<string, number>;
   topTemplates: LogTopTemplateDto[];
   embedding?: LogEmbeddingStatusDto | null;
+  confidence?: LogImportConfidenceDto | null;
 };
 
 export type DemoLogInstallDto = {

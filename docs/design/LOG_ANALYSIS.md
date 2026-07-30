@@ -59,6 +59,35 @@ decide the result, and a file's first non-empty line does not lock later
 records to one parser. Unknown, ambiguous, and failed parses fall back to
 `message = whole line`, `ts = ingest order`.
 
+### Import confidence contract
+
+Raw-log ingest produces a bounded per-source confidence report in the same
+streaming pass that publishes the corpus. Format detection and time
+interpretation remain separate:
+
+- **Format confidence** reports the versioned grammar identity, matched /
+  ambiguous / unknown outcome, runner-up margin, and an optional producer
+  family hint. A family hint is always labelled **not verified** and never
+  establishes a timezone or product identity.
+- **Time quality** reports exact wall clock, mixed, or order-only. An
+  offsetless local timestamp is distinguished from a present-but-unresolved
+  zone abbreviation. Neither is guessed.
+- A source review may include at most three redacted timestamp-prefix samples.
+  It contains a portable source identity, never the selected absolute import
+  path or a message payload.
+
+The Logs pane shows the report after a successful direct import. The collapsed
+summary states how many sources have an exact wall clock and how many need
+review; an accessible, internally bounded disclosure lists only the sources
+that are not both wall-clock and grammar-matched. Unresolved records remain
+searchable, while exact alignment and metric correlation continue to fail
+closed.
+
+This report is explanatory, not a resolution mechanism. Per-source timezone
+declarations and their preview are tracked by #779; applying those declarations
+requires the atomic event-level corpus revision tracked by #780. Until both
+exist, the product must say that ContextDesk did not guess a timezone.
+
 **Templating (Drain-style):** collapse `"GET /users/8123 200 14ms"` and `"GET /users/9971 200 9ms"` into template `"GET /users/<*> <*> <*>ms"` + extracted params. Maintain a template table: `template_id, pattern, token_count, count, first_seen, last_seen, severity`. This is a 100–1000× reduction in what must be embedded and is itself the "what problems exist" clustering. Use an incremental parse tree (Drain3 algorithm, reimplemented in Rust — small) so ingest is single‑pass and streaming‑ready.
 
 **Redaction on ingest** (reuse `cd_core::redact` from the memory work): logs are full of secrets/PII/tokens — scrub params before persist and before embed. Params can be kept structurally (typed placeholders) without keeping raw secret values.
