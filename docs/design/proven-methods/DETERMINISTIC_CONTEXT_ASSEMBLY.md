@@ -2,10 +2,14 @@
 
 **Method status:** **Partial.** ContextDesk ships bounded retrieval, context
 budgets, ordinary-versus-linked chat isolation, native tool-capability checks,
-required log grounding, structured log evidence identities, withholding of
-ungrounded linked-chat prose, phase-aware provider deadlines, and
-evidence-preserving synthesis retry. A genuine slow, tools-enabled provider run
-remains an environment-dependent acceptance step for #649.
+required log grounding, a host-owned deterministic brief for conservatively
+classified broad linked-log prompts, structured log evidence identities,
+withholding of ungrounded linked-chat prose, phase-aware provider deadlines,
+and evidence-preserving synthesis retry. Exact packaged acceptance on a
+250,000+ event corpus with a real tools-enabled provider remains open on #745;
+a genuine slow-provider run also remains an environment-dependent acceptance
+step for #649. Neither deterministic retrieval nor passing component tests is a
+universal model-quality claim.
 
 ## 1. Problem
 
@@ -38,6 +42,7 @@ synthesis only after required deterministic steps succeed.
 | Structured evidence identity, not rendered-text reconstruction | **Shipped** | [`tool_host.rs`](../../../crates/cd-core/src/tool_host.rs) `ToolResult.log_evidence`                             | Other source types have source-specific citation contracts                                         |
 | Viewport snapshot is bounded and treated as data               | **Shipped** | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs)                                    | Snapshot is a hint, not authoritative event content                                                |
 | Session file packs are scoped and bounded                      | **Shipped** | [`session_context.rs`](../../../crates/cd-core/src/session_context.rs)                                           | Not the path for multi-million-line log corpora                                                    |
+| Broad linked-log triage brief                                  | **Shipped (agent-testable)** | [`tool_host.rs`](../../../crates/cd-core/src/tool_host.rs) `build_broad_log_triage_brief` and [`agent.rs`](../../../crates/cd-core/src/agent.rs) broad-turn admission | Exact packaged 250,000+ event proof with a tools-enabled provider remains #745 |
 | Slow-provider phase lifecycle and synthesis-only retry         | **Shipped (agent-testable)** | One monotonic turn ceiling, bounded phases, immediate cancellation, host-only evidence checkpoint, and tool-closed retry | Native cold/slow tools-enabled provider acceptance remains on #649                                 |
 | Name-based model-role guidance                                 | **Partial** | Versioned hints inform setup, Settings, and preflight without claiming measured capability                       | Provider-scoped hidden-model integration remains #678; exact qualification remains #724            |
 | Ranked multi-source context planner                            | **Partial** | Deterministic eligibility and simple ranking ship                                                                | Richer planning must not weaken host policy                                                        |
@@ -54,8 +59,10 @@ The method has six gates:
 2. **Compute eligibility in trusted code.** Intersect source attachment,
    allowlists, read/write classification, first-use approval, profile
    capability, and turn scope.
-3. **Retrieve in constrained stages.** Use one reliable grounding operation
-   first when a small model is likely to struggle with a broad tool menu.
+3. **Retrieve in constrained stages.** For a conservatively recognized broad
+   linked-log prompt, build one deterministic host-owned brief before the first
+   model request. For focused prompts, use one reliable bounded grounding
+   operation first.
 4. **Canonicalize evidence.** Return stable identities, provenance, quality,
    bounds, and failures as typed host data.
 5. **Synthesize from a closed package.** When all requested retrieval is
@@ -73,6 +80,8 @@ flowchart TB
     H["Trusted host<br/>classify scope + capabilities"]
     X["Required capability unavailable"]
     XU["Visible unavailable-tools state"]
+    Q{"Broad linked-log<br/>request?"}
+    B["Trusted host builds deterministic brief<br/>one corpus + one suppression revision"]
     G["Model grounding round<br/>constrained native Read tool"]
     T["Trusted host validates + executes<br/>the native tool request"]
     R["Deterministic retriever<br/>bounded + policy checked"]
@@ -85,22 +94,41 @@ flowchart TB
     F["Visible retrieval or grounding failure"]
 
     U --> UI --> H
-    H --> X --> XU
-    H --> G --> T --> R
+    H -->|required capability unavailable| X --> XU
+    H -->|eligible read surface| Q
+    Q -->|yes| B --> E
+    Q -->|no| G --> T --> R
     R --> E --> S --> Y --> D --> V --> A
+    B --> F
     T --> F
     R --> F
     V --> F
 ```
 
-### Why staged retrieval helps smaller models
+### Why host-first and staged retrieval help smaller models
 
 A broad menu of logs, files, memory, SQL, connectors, and Help tools requires
 the model to solve routing and syntax before it can inspect evidence. A staged
-turn instead constrains the first choice to the source that defines success.
-For a linked log question, a general bounded log search is the first gate.
-After that succeeds, the host can expose a requested workspace/runbook search
-or a broader read surface.
+turn constrains the first choice to the source that defines success. A
+conservatively classified prompt such as a general request to triage or identify
+problems in the linked logs takes a stronger path: the trusted host computes the
+first evidence brief before model participation, so success does not depend on
+the model inventing a search/cluster/timeline sequence.
+
+That brief uses one pinned corpus and one pinned suppression-policy revision.
+It contains bounded level, source, service, and host distributions; structured
+ERROR templates with capacity reserved for rare candidates; problem clusters;
+timeline concentration; and bounded correlations only when time quality is
+reliably wall-clock-safe. It does not invoke a semantic/embedding backend or a
+network backend. The model-facing untrusted text is capped at 32 KiB, while at
+most 128 structured event identities travel separately through the trusted
+identity channel.
+
+The broad brief is a starting evidence package, not an exhaustive diagnosis.
+When the request explicitly needs another eligible read source, the host may
+stage that governed source after the brief. Focused follow-ups use the ordinary
+bounded log tools. Tools are offered only when they are needed and eligible;
+the brief does not widen permissions or bypass first-use approval.
 
 This is not merely prompting. The host changes the offered tool set and checks
 the actual native tool result. Printed JSON, prose such as “I will search,” and
@@ -184,6 +212,28 @@ It excludes:
 - first-use or write capabilities not approved for the turn; and
 - model-generated “tool results.”
 
+### Deterministic broad-log brief
+
+For a conservatively classified broad linked-log prompt, the host assembles a
+brief before the first provider request. Its portable contract is:
+
+| Field / section | Contract |
+| --------------- | -------- |
+| corpus binding | Exactly the host-resolved linked corpus |
+| suppression lens | One revision pinned before assembly and reused by every section |
+| distributions | Bounded level, source, service, and host counts |
+| ERROR templates | Structured candidates, including a reserved rare-candidate slice |
+| clusters | Bounded deterministic problem clusters |
+| timeline | Bounded concentration summary with explicit wall/mixed/order-only quality |
+| correlations | Bounded and present only when wall-clock time is safe |
+| model-facing text | Complete untrusted-data envelope, no more than 32 KiB UTF-8 |
+| evidence identity | At most 128 trusted event identities carried separately from text |
+| external dependency | No semantic/embedding or network backend |
+
+The text can describe an identity, but only the separate structured identity
+collection is authoritative. A model cannot promote a sequence or source
+string found in untrusted content into trusted evidence.
+
 ## 5. Invariants and trust boundaries
 
 1. **Binding is explicit.** An ordinary conversation cannot inherit a
@@ -207,6 +257,8 @@ It excludes:
    ungrounded are distinct from success.
 10. **Write authority is separate.** Read-only context assembly never implies
     permission to persist memory, change a view, or mutate a remote system.
+11. **Broad triage is revision-consistent.** Every section of one broad-log
+    brief uses the same corpus and pinned suppression-policy revision.
 
 ```mermaid
 flowchart TB
@@ -260,7 +312,11 @@ could request writes in another workflow.
 
 ### 6.3 Retrieve
 
-- Linked log: offer bounded `search_logs` first.
+- Broad linked log: before the first model request, assemble the host-owned
+  deterministic brief when the conservative classifier matches. On successful
+  completion, the first provider round is tool-closed synthesis unless another
+  explicitly requested, eligible source still needs retrieval.
+- Focused linked log: offer bounded `search_logs` first.
 - Explicit runbook/workspace request: after log grounding, offer bounded
   workspace search.
 - Memory: use tightly capped ambient recall or explicit recall, with citations.
@@ -277,6 +333,11 @@ The host records success separately from the model-facing string. For logs,
 ContextDesk carries structured `SearchEvidenceIdentity` values alongside the
 redacted result detail. A portable implementation should do the same for every
 high-value source.
+
+The broad-log brief follows the same rule. Its bounded text is an untrusted
+data block; its separately carried event identities are the only trusted
+identity channel. The host never reconstructs trust by parsing model-facing
+text.
 
 Retrieved text should be enclosed in an unambiguous untrusted-data envelope.
 The envelope marker itself must never be interpreted as observed content or
@@ -310,6 +371,8 @@ universal recommendations:
 | Model-facing context        |                 120,000 characters default | [`sessions.rs`](../../../crates/cd-core/src/sessions.rs)                      | Pair-safe compaction then deterministic truncation or fail |
 | Current-turn evidence payload |                                 256 KiB | [`agent.rs`](../../../crates/cd-core/src/agent.rs)                            | UTF-8-safe truncation; successful governed results only    |
 | Current-turn log identities |                                     512 | [`agent.rs`](../../../crates/cd-core/src/agent.rs)                            | Independent deduplicated identity cap                      |
+| Broad-log brief text        |                                  32 KiB | [`tool_host.rs`](../../../crates/cd-core/src/tool_host.rs)                    | UTF-8-safe deterministic truncation inside the data envelope |
+| Broad-log brief identities  |                                     128 | [`tool_host.rs`](../../../crates/cd-core/src/tool_host.rs)                    | Separate trusted identity cap; never reconstructed from text |
 | Retry checkpoint store      | 30-minute TTL; 16 entries; 2 MiB retained payload bytes total | [`lib.rs`](../../../desktop/src-tauri/src/lib.rs) | Deterministic oldest-first eviction; this is a payload-byte bound, not an allocator/heap-size claim |
 | View selection identities   |                                         64 | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs) | Sort, deduplicate, truncate                                |
 | View bookmark summaries     |                                         24 | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs) | Truncate                                                   |
@@ -345,6 +408,7 @@ setting; new installs default to adaptive.
 | Cancellation                            | Per-turn cancel race around every provider/tool await | Cancelled terminal state                                           | Start another turn or retry preserved synthesis   | Cancellation is immediate and session-specific |
 | Malicious retrieved instructions        | Untrusted wrapper and system policy           | Usually not surfaced as instructions                                  | Continue with data-only interpretation            | No permission elevation                  |
 | Citation mismatch                       | Host validation against structured identities | Reject/downgrade answer                                               | Correct synthesis retry                           | Rendered text cannot forge identity      |
+| Broad-brief assembly fails               | Typed host error before the first provider request | Visible failed deterministic-triage tool event; staged bounded tools remain available | Retry through the existing staged retrieval path | Failure does not become fabricated evidence |
 
 Retry evidence comes only from a dedicated, bounded current-turn buffer
 populated by successful governed tool results for the resolved corpus. Every
@@ -368,6 +432,8 @@ A useful trail records:
 - offered tool names after policy filtering;
 - budget values actually enforced;
 - each tool start/finish, source, result count, and success;
+- broad-brief byte count, trusted-identity count, truncation state, time quality,
+  and pinned suppression revision;
 - unavailable source classes;
 - grounding, cross-source, and synthesis phases;
 - compaction/truncation notices;
@@ -417,11 +483,11 @@ synthesis step.
 | Layer            | Required proof                                                                                                                                                                                   |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Contract/unit    | Source ranking and caps; context fitting; capability matrix; binding serialization; untrusted wrapper cannot forge delimiters                                                                    |
-| Core integration | Linked turn requires successful log tool; ordinary turn excludes log tools; requested workspace search is staged; tools-disabled linked turn fails before provider; structured identity required |
+| Core integration | Linked turn requires successful log evidence; a broad prompt receives its deterministic brief before the first provider call; one corpus/revision is pinned; ordinary turn excludes log tools; requested workspace search is staged; tools-disabled linked turn fails before provider; structured identity required |
 | Adversarial      | Model prints call-shaped JSON; wrapper metadata appears in output; user asks to reveal evaluator truth; malicious tool text asks for permissions                                                 |
 | Host/session     | Empty-chat link persists; stale/corrupt corpus fails before capability/provider handling; attach failure leaves durable state unchanged; ordinary session has no log scope; cancellation targets exact session |
 | Component UI     | Add context attaches/detaches one corpus; availability/event count/Open Explorer remain visible; Return/Shift+Return/IME; errors remain visible; autoscroll/unread semantics |
-| Packaged/native  | Tools-enabled provider performs a general zero-prep log question from main chat and Explorer; tools-disabled profile is honest; ordinary chat has no corpus; linked chat keeps corpus after switch/reopen |
+| Packaged/native  | On an exact 250,000+ event build, a tools-enabled provider receives the host brief before synthesis for a general zero-prep question from main chat and Explorer; visible status is truthful; cited identities reopen; tools-disabled profile is honest; ordinary chat has no corpus; linked chat keeps corpus after switch/reopen |
 | Slow provider    | Deterministic cold/slow provider defaults; retrieval success then synthesis timeout; cancellation in choosing/retrieving/synthesizing; synthesis-only recovery; explicit deadline precedence |
 
 Evaluator fixtures must store expected findings outside every imported corpus,
@@ -463,6 +529,7 @@ assert the sentinel is absent from model-facing messages.
 | Ordinary chat isolation     | **Shipped** | No ambient log-tool inheritance                                            | No claim that every future source is automatically isolated without tests |
 | Main-chat log attachment    | **Shipped** | One host-validated durable corpus, bounded linked-log tools, and reversible detach | Multi-corpus context remains #693; no hidden all-corpus fallback |
 | Linked log grounding        | **Shipped** | Required bounded log result and evidence identity                          | No success under tools-disabled profile                                   |
+| Broad linked-log triage     | **Shipped (agent-testable)** | Conservative broad prompts receive a deterministic 32 KiB/128-identity host brief before model participation | Exact packaged 250,000+ tools-enabled provider proof remains #745; no universal model-quality claim |
 | Cross-source read           | **Partial** | Requested governed reads can be offered after log grounding                | No unrestricted autonomous source crawl                                   |
 | Small-model staging         | **Shipped** | Constrained first log search and tool-closed synthesis path                | No guarantee every small model follows native tools                       |
 | Slow provider lifecycle     | **Shipped (agent-testable)** | Adaptive or explicit whole-turn ceiling, bounded truthful phases, immediate Stop, evidence-preserving synthesis retry | Native cold/slow tools-enabled profile acceptance remains #649 |
@@ -499,6 +566,11 @@ Avoid these shortcuts:
 
 ## 16. Open residuals
 
+- #745: exact packaged 250,000+ event acceptance with a real tools-enabled
+  provider, including visible host-brief status, grounded identity resolution,
+  bounded completion, and honest failure. The deterministic builder and agent
+  sequencing are agent-testable; model quality remains provider/model
+  dependent.
 - #649: native acceptance with a real cold/slow tools-enabled provider profile;
   the deterministic core/component lifecycle and synthesis-only retry ship.
 - #646/#532: ranked proposals, review history, walkthroughs, and report
