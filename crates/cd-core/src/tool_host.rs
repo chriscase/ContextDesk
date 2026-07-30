@@ -2587,7 +2587,7 @@ impl ToolHost {
         let event_revision = corpus.event_revision();
         let template_analysis_revision = corpus.template_analysis_revision();
         let document = crate::log_analysis::load_suppression_document(corpus)?;
-        let excluded_template_ids = document.enabled_template_ids()?;
+        let excluded_template_ids = document.enabled_template_ids_for_corpus(corpus)?;
         let suppressed_event_count = if excluded_template_ids.is_empty() {
             0
         } else {

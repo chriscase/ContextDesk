@@ -10,6 +10,7 @@ use crate::error::{CoreError, CoreResult};
 use crate::redact::redact_candidate;
 use duckdb::params;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -117,6 +118,23 @@ pub struct SuppressionRuleResolution {
     pub matches_nothing: bool,
     /// Actionable, payload-free explanation.
     pub explanation: String,
+}
+
+/// Payload-free identity of the exact effective suppression policy.
+///
+/// The durable sidecar revision alone is insufficient after re-analysis:
+/// template resolution can change while `suppression.json` remains byte-for-byte
+/// unchanged. Findings bind to all three fields so a same-revision policy can
+/// never silently reinterpret evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SuppressionPolicyBindingSnapshot {
+    /// Durable sidecar mutation revision.
+    pub suppression_policy_revision: u64,
+    /// Template-analysis revision against which every rule was resolved.
+    pub resolved_template_revision: u64,
+    /// SHA-256 of the canonical payload-free effective rule/resolution set.
+    pub effective_policy_sha256: String,
 }
 
 /// One bounded level-distribution bucket in a preview.
@@ -381,6 +399,99 @@ impl SuppressionDocument {
         }
         Ok(template_ids)
     }
+
+    /// Return an exact, payload-free binding for findings and saved views.
+    ///
+    /// This rejects a concurrently superseded resolution snapshot before
+    /// hashing it. The digest contains durable rule identity/lifecycle and the
+    /// trusted-core resolution kind, but no representatives, event payloads,
+    /// rule rationale text, or source paths.
+    pub fn policy_binding_snapshot(
+        &self,
+        corpus: &LogCorpus,
+    ) -> CoreResult<SuppressionPolicyBindingSnapshot> {
+        let resolved_template_revision = self.resolved_template_revision.ok_or_else(|| {
+            CoreError::Message(
+                "suppression_policy_unresolved: reload the suppression policy before binding a finding"
+                    .into(),
+            )
+        })?;
+        let _ = self.enabled_template_ids_for_corpus(corpus)?;
+
+        let mut rules = self.rules.iter().collect::<Vec<_>>();
+        rules.sort_by(|left, right| left.id.cmp(&right.id));
+        let mut hasher = Sha256::new();
+        update_policy_digest(&mut hasher, b"contextdesk.suppression-policy-binding.v1");
+        update_policy_digest(&mut hasher, self.corpus_id.as_bytes());
+        update_policy_digest(&mut hasher, &self.schema_version.to_le_bytes());
+        update_policy_digest(&mut hasher, &self.revision.to_le_bytes());
+        update_policy_digest(&mut hasher, &resolved_template_revision.to_le_bytes());
+        for rule in rules {
+            let resolution = rule.resolution.as_ref().ok_or_else(|| {
+                CoreError::Message(format!(
+                    "suppression_rule_unresolved: rule {} has no trusted-core resolution",
+                    rule.id
+                ))
+            })?;
+            update_policy_digest(&mut hasher, rule.id.as_bytes());
+            update_policy_digest(&mut hasher, &[suppression_origin_code(rule.origin)]);
+            update_policy_digest(&mut hasher, &[suppression_state_code(rule.state)]);
+            update_policy_digest(&mut hasher, &rule.predicate.template_id.to_le_bytes());
+            update_policy_digest(&mut hasher, rule.predicate.template_fingerprint.as_bytes());
+            update_policy_digest(&mut hasher, &[suppression_resolution_code(resolution.kind)]);
+            update_policy_digest(&mut hasher, &[u8::from(resolution.matches_nothing)]);
+        }
+        if corpus.template_analysis_revision() != resolved_template_revision {
+            return Err(CoreError::Message(
+                "suppression_policy_snapshot_stale: template revision changed while binding the policy; retry"
+                    .into(),
+            ));
+        }
+        Ok(SuppressionPolicyBindingSnapshot {
+            suppression_policy_revision: self.revision,
+            resolved_template_revision,
+            effective_policy_sha256: format!("{:x}", hasher.finalize()),
+        })
+    }
+}
+
+fn update_policy_digest(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn suppression_origin_code(origin: SuppressionRuleOrigin) -> u8 {
+    match origin {
+        SuppressionRuleOrigin::Human => 1,
+        SuppressionRuleOrigin::DetectorProposal => 2,
+        SuppressionRuleOrigin::ModelProposal => 3,
+    }
+}
+
+fn suppression_state_code(state: SuppressionRuleState) -> u8 {
+    match state {
+        SuppressionRuleState::Enabled => 1,
+        SuppressionRuleState::Disabled => 2,
+        SuppressionRuleState::Removed => 3,
+    }
+}
+
+fn suppression_resolution_code(kind: SuppressionRuleResolutionKind) -> u8 {
+    match kind {
+        SuppressionRuleResolutionKind::MatchesCurrent => 1,
+        SuppressionRuleResolutionKind::StaleTargetMissing => 2,
+        SuppressionRuleResolutionKind::StaleFingerprintChanged => 3,
+        SuppressionRuleResolutionKind::InvalidPredicate => 4,
+        SuppressionRuleResolutionKind::ConflictingPredicate => 5,
+        SuppressionRuleResolutionKind::Inactive => 6,
+    }
+}
+
+/// Capture an exact suppression-policy binding from one authoritative corpus.
+pub fn capture_suppression_policy_binding(
+    corpus: &LogCorpus,
+) -> CoreResult<SuppressionPolicyBindingSnapshot> {
+    load_suppression_document(corpus)?.policy_binding_snapshot(corpus)
 }
 
 /// Human activation request for one durable preview token.

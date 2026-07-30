@@ -15,12 +15,14 @@
 //! meta.json
 //! events.duckdb
 //! templates.json
+//! suppression.json (optional)
 //! README.txt
 //! ```
 
 use super::store::{
     dir_size, write_meta_file, CorpusMeta, CorpusStats, LogCorpus, EVENT_ENGINE, META_VERSION,
 };
+use super::suppression::{load_suppression_document, SuppressionDocument};
 use crate::error::{CoreError, CoreResult};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -52,10 +54,15 @@ pub const MAX_EXPANDED_ENTRY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 /// Explicit cap for the imported metadata document.
 pub const MAX_META_BYTES: u64 = 4 * 1024 * 1024;
+/// Explicit cap for the optional durable suppression-policy document.
+pub const MAX_SUPPRESSION_POLICY_BYTES: u64 = 8 * 1024 * 1024;
 /// Expanded payload transfer buffer. No package file body is retained in memory.
 pub const IMPORT_BUFFER_BYTES: usize = 64 * 1024;
 /// Flat package entry names are intentionally short and non-hierarchical.
 pub const MAX_ENTRY_NAME_BYTES: usize = 255;
+
+const SUPPRESSION_PAYLOAD: &str = "suppression.json";
+const SUPPRESSION_STAGING_PAYLOAD: &str = "suppression.package.json";
 
 /// Version-specific package reader selected only after shared ZIP/path/cap
 /// validation has completed.
@@ -195,13 +202,14 @@ pub fn export_corpus_zip(
 ) -> CoreResult<PackageManifest> {
     // Open, flush, snapshot meta, then **drop** the handle before reading
     // `events.duckdb` — Windows exclusive-locks the DuckDB file while open.
-    let (root, meta, has_original_representations) = {
+    let (root, meta, has_original_representations, suppression_policy) = {
         let corpus = LogCorpus::open(cache_root, corpus_id)?;
         corpus.flush()?;
         let root = corpus.root().to_path_buf();
         let meta = corpus.meta()?;
         let has_original_representations = corpus.has_original_representations()?;
-        (root, meta, has_original_representations)
+        let suppression_policy = portable_suppression_policy(&corpus)?;
+        (root, meta, has_original_representations, suppression_policy)
     };
 
     let payloads = ["meta.json", "events.duckdb", "templates.json"];
@@ -248,6 +256,21 @@ pub fn export_corpus_zip(
         // Additive v1 capability: old readers ignore the advisory tag and keep
         // reading their explicit historical event columns.
         features.push("original_redacted_v1".into());
+    }
+    if let Some(policy) = suppression_policy {
+        let data = serde_json::to_vec_pretty(&policy)?;
+        if data.len() as u64 > MAX_SUPPRESSION_POLICY_BYTES {
+            return Err(CoreError::Policy(format!(
+                "suppression policy exceeds {MAX_SUPPRESSION_POLICY_BYTES} bytes"
+            )));
+        }
+        files.push(PackageFileEntry {
+            path: SUPPRESSION_PAYLOAD.into(),
+            sha256: hex_sha256(&data),
+            bytes: data.len() as u64,
+        });
+        file_bytes.push((SUPPRESSION_PAYLOAD.into(), data));
+        features.push("suppression_policy_v1".into());
     }
 
     let manifest = PackageManifest {
@@ -392,6 +415,7 @@ struct ScannedArchive {
 #[derive(Debug, Clone, Copy)]
 struct PackageReadPlan {
     import_templates: bool,
+    import_suppression: bool,
 }
 
 fn build_package_read_plan(
@@ -421,6 +445,21 @@ fn build_package_read_plan(
                     "package hash missing for required payload `templates.json`".into(),
                 ));
             }
+            let import_suppression = scanned.by_name.contains_key(SUPPRESSION_PAYLOAD);
+            if import_suppression && !manifest_files.contains_key(SUPPRESSION_PAYLOAD) {
+                return Err(CoreError::Message(format!(
+                    "package hash missing for optional payload `{SUPPRESSION_PAYLOAD}`"
+                )));
+            }
+            if scanned
+                .by_name
+                .get(SUPPRESSION_PAYLOAD)
+                .is_some_and(|entry| entry.expanded_bytes > MAX_SUPPRESSION_POLICY_BYTES)
+            {
+                return Err(CoreError::Policy(format!(
+                    "package suppression policy exceeds {MAX_SUPPRESSION_POLICY_BYTES} bytes"
+                )));
+            }
 
             // All v1 feature tags, including known tags, are advisory. The
             // hashed payload list and optional `stats` field are authoritative;
@@ -428,7 +467,10 @@ fn build_package_read_plan(
             // or bypass shared validation.
             let _v1_advisory_features = &manifest.features;
 
-            Ok(PackageReadPlan { import_templates })
+            Ok(PackageReadPlan {
+                import_templates,
+                import_suppression,
+            })
         }
     }
 }
@@ -533,6 +575,9 @@ fn import_corpus_zip_reader_with_limits<R: Read + Seek>(
             limits,
             &mut metrics,
         )?;
+        if read_plan.import_suppression {
+            materialize_package_suppression(&staging, &origin_id, &new_id)?;
+        }
         materialize_package_metadata(&staging, &manifest, &new_id, &origin_id, limits.meta_bytes)?;
 
         // Validate metadata, templates, and DuckDB while the corpus is still
@@ -540,6 +585,13 @@ fn import_corpus_zip_reader_with_limits<R: Read + Seek>(
         // Windows compatibility.
         let report = {
             let opened = LogCorpus::open_import_staging(cache_root, &staging_id, &new_id)?;
+            if read_plan.import_suppression {
+                // The regular loader supplies the same schema, path-safety, and
+                // exact-template resolution checks used after publication.
+                // Running it here keeps malformed or stale-looking policies
+                // hidden in staging until they have failed closed.
+                load_suppression_document(&opened)?;
+            }
             let opened_meta = opened.meta()?;
             PackageImportReport {
                 corpus_id: new_id.clone(),
@@ -896,6 +948,11 @@ fn stream_archive_entries<R: Read + Seek>(
                 std::fs::File::create(staging.join("templates.json"))
                     .map_err(|e| CoreError::Message(format!("create template staging: {e}")))?,
             ),
+            SUPPRESSION_PAYLOAD if read_plan.import_suppression => Box::new(
+                std::fs::File::create(staging.join(SUPPRESSION_STAGING_PAYLOAD)).map_err(|e| {
+                    CoreError::Message(format!("create suppression-policy staging: {e}"))
+                })?,
+            ),
             _ => Box::new(std::io::sink()),
         };
         let mut buffer = vec![0u8; limits.buffer_bytes];
@@ -1011,6 +1068,75 @@ fn materialize_package_metadata(
         stats.corpus_bytes = stats_bytes;
     }
     write_meta_file(dest, &meta)?;
+    Ok(())
+}
+
+fn portable_suppression_policy(corpus: &LogCorpus) -> CoreResult<Option<SuppressionDocument>> {
+    let mut document = load_suppression_document(corpus)?;
+    if document.revision == 0
+        && document.rules.is_empty()
+        && document.previews.is_empty()
+        && document.audit.is_empty()
+    {
+        return Ok(None);
+    }
+
+    // Preview tokens are live, corpus/revision-bound authority rather than
+    // durable policy. A package preserves rules and their audit lifecycle, but
+    // never transfers an actionable preview or runtime resolution snapshot.
+    document.previews.clear();
+    document.resolved_template_revision = None;
+    for rule in &mut document.rules {
+        rule.resolution = None;
+    }
+    Ok(Some(document))
+}
+
+fn materialize_package_suppression(
+    staging: &Path,
+    origin_corpus_id: &str,
+    new_corpus_id: &str,
+) -> CoreResult<()> {
+    let package_path = staging.join(SUPPRESSION_STAGING_PAYLOAD);
+    let length = std::fs::metadata(&package_path)
+        .map_err(|error| {
+            CoreError::Message(format!("inspect suppression-policy staging: {error}"))
+        })?
+        .len();
+    if length > MAX_SUPPRESSION_POLICY_BYTES {
+        return Err(CoreError::Policy(format!(
+            "package suppression policy exceeds {MAX_SUPPRESSION_POLICY_BYTES} bytes"
+        )));
+    }
+    let bytes = std::fs::read(&package_path)
+        .map_err(|error| CoreError::Message(format!("read suppression-policy staging: {error}")))?;
+    let mut document: SuppressionDocument = serde_json::from_slice(&bytes).map_err(|error| {
+        CoreError::Message(format!("parse package suppression policy: {error}"))
+    })?;
+    if document.corpus_id != origin_corpus_id {
+        return Err(CoreError::Message(
+            "package suppression policy corpus id does not match its manifest".into(),
+        ));
+    }
+
+    document.corpus_id = new_corpus_id.to_string();
+    document.previews.clear();
+    document.resolved_template_revision = None;
+    for rule in &mut document.rules {
+        rule.resolution = None;
+    }
+
+    let rewritten = serde_json::to_vec_pretty(&document)?;
+    if rewritten.len() as u64 > MAX_SUPPRESSION_POLICY_BYTES {
+        return Err(CoreError::Policy(format!(
+            "rewritten suppression policy exceeds {MAX_SUPPRESSION_POLICY_BYTES} bytes"
+        )));
+    }
+    std::fs::remove_file(&package_path).map_err(|error| {
+        CoreError::Message(format!("remove suppression-policy staging: {error}"))
+    })?;
+    std::fs::write(staging.join(SUPPRESSION_PAYLOAD), rewritten)
+        .map_err(|error| CoreError::Message(format!("write suppression policy: {error}")))?;
     Ok(())
 }
 
@@ -1139,6 +1265,12 @@ fn zip_from_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::log_analysis::suppression::{
+        activate_template_suppression, mutate_template_suppression_rule,
+        preview_template_suppression, ActivateSuppressionPreview, NewSuppressionPreview,
+        SuppressionRuleMutation, SuppressionRuleOrigin, SuppressionRuleResolutionKind,
+        SuppressionRuleState,
+    };
     use std::collections::BTreeSet;
     use std::io::Write;
 
@@ -1177,6 +1309,74 @@ mod tests {
             writer.finish().unwrap();
         }
         buf.into_inner()
+    }
+
+    fn owned_zip_entries(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut entries = Vec::with_capacity(archive.len());
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).unwrap();
+            let name = entry.name().to_string();
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).unwrap();
+            entries.push((name, data));
+        }
+        entries
+    }
+
+    fn replace_manifested_payload(
+        package: &[u8],
+        payload_name: &str,
+        replacement: Vec<u8>,
+    ) -> Vec<u8> {
+        let mut entries = owned_zip_entries(package);
+        let manifest_index = entries
+            .iter()
+            .position(|(name, _)| name == "manifest.json")
+            .unwrap();
+        let payload_index = entries
+            .iter()
+            .position(|(name, _)| name == payload_name)
+            .unwrap();
+        entries[payload_index].1 = replacement.clone();
+
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&entries[manifest_index].1).unwrap();
+        let file = manifest["files"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|file| file["path"] == payload_name)
+            .unwrap();
+        file["sha256"] = serde_json::json!(hex_sha256(&replacement));
+        file["bytes"] = serde_json::json!(replacement.len());
+        entries[manifest_index].1 = serde_json::to_vec_pretty(&manifest).unwrap();
+        zip_from_owned(&entries, zip::CompressionMethod::Deflated)
+    }
+
+    fn active_suppression(
+        corpus: &LogCorpus,
+    ) -> crate::log_analysis::suppression::SuppressionMutationResult {
+        let template_id = corpus.list_templates()[0].info.template_id;
+        let preview = preview_template_suppression(
+            corpus,
+            0,
+            NewSuppressionPreview {
+                name: "Known retry chatter".into(),
+                rationale: "Confirmed repetitive infrastructure retry".into(),
+                template_id,
+                origin: SuppressionRuleOrigin::Human,
+            },
+        )
+        .unwrap();
+        activate_template_suppression(
+            corpus,
+            preview.rule_revision,
+            ActivateSuppressionPreview {
+                preview_token: preview.token,
+            },
+        )
+        .unwrap()
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -1627,6 +1827,265 @@ mod tests {
             }
             other => panic!("package round-trip lost original representation: {other:?}"),
         }
+    }
+
+    #[test]
+    fn suppression_policy_round_trip_preserves_lifecycle_but_drops_preview_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cache, corpus_id) = seed_corpus(dir.path());
+        let corpus = LogCorpus::open(&cache, &corpus_id).unwrap();
+        let activated = active_suppression(&corpus);
+        let disabled = mutate_template_suppression_rule(
+            &corpus,
+            activated.revision,
+            &activated.rule.id,
+            SuppressionRuleMutation::Disable,
+        )
+        .unwrap();
+        let reenabled = mutate_template_suppression_rule(
+            &corpus,
+            disabled.revision,
+            &activated.rule.id,
+            SuppressionRuleMutation::Reenable,
+        )
+        .unwrap();
+        let pending = preview_template_suppression(
+            &corpus,
+            reenabled.revision,
+            NewSuppressionPreview {
+                name: "Replacement preview must not transfer".into(),
+                rationale: "Package imports require a fresh local confirmation".into(),
+                template_id: activated.rule.predicate.template_id,
+                origin: SuppressionRuleOrigin::Human,
+            },
+        )
+        .unwrap();
+        let expected = load_suppression_document(&corpus).unwrap();
+        assert_eq!(expected.rules[0].state, SuppressionRuleState::Enabled);
+        assert_eq!(
+            expected.enabled_template_ids_for_corpus(&corpus).unwrap(),
+            vec![activated.rule.predicate.template_id]
+        );
+        assert_eq!(expected.previews.len(), 1);
+        drop(corpus);
+
+        let out = dir.path().join("suppression-round-trip.cdlog.zip");
+        let manifest = export_corpus_zip(&cache, &corpus_id, &out).unwrap();
+        assert!(manifest
+            .features
+            .contains(&"suppression_policy_v1".to_string()));
+        assert!(manifest
+            .files
+            .iter()
+            .any(|file| file.path == SUPPRESSION_PAYLOAD));
+
+        let package_bytes = std::fs::read(&out).unwrap();
+        let package_entries = owned_zip_entries(&package_bytes);
+        let package_policy: SuppressionDocument = serde_json::from_slice(
+            &package_entries
+                .iter()
+                .find(|(name, _)| name == SUPPRESSION_PAYLOAD)
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        assert_eq!(package_policy.corpus_id, corpus_id);
+        assert!(package_policy.previews.is_empty());
+        assert!(package_policy.resolved_template_revision.is_none());
+        assert!(package_policy
+            .rules
+            .iter()
+            .all(|rule| rule.resolution.is_none()));
+
+        let imported_cache = dir.path().join("imported-cache");
+        let report = import_corpus_zip_path(&imported_cache, &out).unwrap();
+        assert_ne!(report.corpus_id, corpus_id);
+        assert_eq!(report.origin_corpus_id, corpus_id);
+        let imported = LogCorpus::open(&imported_cache, &report.corpus_id).unwrap();
+        let imported_policy = load_suppression_document(&imported).unwrap();
+        assert_eq!(imported_policy.corpus_id, report.corpus_id);
+        assert_eq!(imported_policy.revision, expected.revision);
+        assert_eq!(imported_policy.audit, expected.audit);
+        assert_eq!(imported_policy.rules, expected.rules);
+        assert!(imported_policy.previews.is_empty());
+        assert_eq!(
+            imported_policy
+                .enabled_template_ids_for_corpus(&imported)
+                .unwrap(),
+            vec![activated.rule.predicate.template_id]
+        );
+
+        let stale_token_error = activate_template_suppression(
+            &imported,
+            imported_policy.revision,
+            ActivateSuppressionPreview {
+                preview_token: pending.token,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            stale_token_error.to_string().contains("missing or stale"),
+            "{stale_token_error}"
+        );
+
+        let persisted: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(imported.root().join(SUPPRESSION_PAYLOAD)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted["corpusId"], report.corpus_id);
+        assert!(persisted
+            .get("previews")
+            .is_some_and(|value| { value.as_array().is_some_and(|previews| previews.is_empty()) }));
+        assert!(persisted.get("resolvedTemplateRevision").is_none());
+        assert!(persisted["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|rule| rule.get("resolution").is_none()));
+    }
+
+    #[test]
+    fn stale_suppression_target_round_trip_remains_durable_and_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cache, corpus_id) = seed_corpus(dir.path());
+        let corpus = LogCorpus::open(&cache, &corpus_id).unwrap();
+        let activated = active_suppression(&corpus);
+
+        let mut replaced_template = corpus
+            .list_templates()
+            .into_iter()
+            .find(|row| row.info.template_id == activated.rule.predicate.template_id)
+            .unwrap();
+        replaced_template.content_hash = "reused-template-id-with-new-fingerprint".into();
+        corpus.upsert_templates([replaced_template]).unwrap();
+        corpus.flush().unwrap();
+
+        let stale_before_export = load_suppression_document(&corpus).unwrap();
+        assert_eq!(
+            stale_before_export.rules[0]
+                .resolution
+                .as_ref()
+                .unwrap()
+                .kind,
+            SuppressionRuleResolutionKind::StaleFingerprintChanged
+        );
+        assert!(stale_before_export
+            .enabled_template_ids_for_corpus(&corpus)
+            .unwrap()
+            .is_empty());
+        drop(corpus);
+
+        let out = dir.path().join("stale-suppression.cdlog.zip");
+        export_corpus_zip(&cache, &corpus_id, &out).unwrap();
+        let imported_cache = dir.path().join("stale-import");
+        let report = import_corpus_zip_path(&imported_cache, &out).unwrap();
+        let imported = LogCorpus::open(&imported_cache, &report.corpus_id).unwrap();
+        let stale_after_import = load_suppression_document(&imported).unwrap();
+
+        assert_eq!(stale_after_import.revision, stale_before_export.revision);
+        assert_eq!(stale_after_import.audit, stale_before_export.audit);
+        assert_eq!(
+            stale_after_import.rules[0].id,
+            stale_before_export.rules[0].id
+        );
+        assert_eq!(
+            stale_after_import.rules[0].predicate,
+            stale_before_export.rules[0].predicate
+        );
+        assert_eq!(
+            stale_after_import.rules[0]
+                .resolution
+                .as_ref()
+                .unwrap()
+                .kind,
+            SuppressionRuleResolutionKind::StaleFingerprintChanged
+        );
+        assert!(stale_after_import
+            .enabled_template_ids_for_corpus(&imported)
+            .unwrap()
+            .is_empty());
+        assert_eq!(imported.event_count(), 50);
+    }
+
+    #[test]
+    fn suppression_payload_requires_hash_and_valid_matching_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let meta = br#"{"id":"old","name":"fixture","createdAt":1,"engine":"duckdb"}"#;
+        let unmanifested = valid_package(
+            meta,
+            b"not-opened",
+            Some(b"[]"),
+            &[(SUPPRESSION_PAYLOAD, b"{}")],
+        );
+        let error = import_corpus_zip(&cache, &unmanifested).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("hash missing for optional payload"),
+            "{error}"
+        );
+        assert!(cache_entries(&cache).is_empty());
+
+        let (source_cache, corpus_id) = seed_corpus(&dir.path().join("source"));
+        let corpus = LogCorpus::open(&source_cache, &corpus_id).unwrap();
+        active_suppression(&corpus);
+        drop(corpus);
+        let out = dir.path().join("valid-policy.zip");
+        export_corpus_zip(&source_cache, &corpus_id, &out).unwrap();
+        let package = std::fs::read(&out).unwrap();
+        let entries = owned_zip_entries(&package);
+        let mut mismatched_policy: serde_json::Value = serde_json::from_slice(
+            &entries
+                .iter()
+                .find(|(name, _)| name == SUPPRESSION_PAYLOAD)
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        mismatched_policy["corpusId"] = serde_json::json!("different-origin");
+        let mismatched = replace_manifested_payload(
+            &package,
+            SUPPRESSION_PAYLOAD,
+            serde_json::to_vec_pretty(&mismatched_policy).unwrap(),
+        );
+
+        let before = cache_entries(&cache);
+        let error = import_corpus_zip(&cache, &mismatched).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("corpus id does not match its manifest"),
+            "{error}"
+        );
+        assert_eq!(cache_entries(&cache), before);
+        assert!(cache_entries(&cache)
+            .iter()
+            .all(|name| !name.starts_with(".import-")));
+
+        let mut future_policy: serde_json::Value = serde_json::from_slice(
+            &entries
+                .iter()
+                .find(|(name, _)| name == SUPPRESSION_PAYLOAD)
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        future_policy["schemaVersion"] = serde_json::json!(u32::MAX);
+        let future = replace_manifested_payload(
+            &package,
+            SUPPRESSION_PAYLOAD,
+            serde_json::to_vec_pretty(&future_policy).unwrap(),
+        );
+        let error = import_corpus_zip(&cache, &future).unwrap_err();
+        assert!(
+            error.to_string().contains("newer than supported"),
+            "{error}"
+        );
+        assert_eq!(cache_entries(&cache), before);
+        assert!(cache_entries(&cache)
+            .iter()
+            .all(|name| !name.starts_with(".import-")));
     }
 
     #[test]

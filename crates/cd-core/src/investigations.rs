@@ -18,7 +18,8 @@ use crate::log_analysis::event_revision::{
 };
 use crate::log_analysis::query::fetch_events_by_seqs;
 use crate::log_analysis::{
-    load_suppression_document, BookmarkEventRef, ExplorerEvent, LogCorpus, MAX_BOOKMARK_EVENT_REFS,
+    capture_suppression_policy_binding, BookmarkEventRef, ExplorerEvent, LogCorpus,
+    SuppressionPolicyBindingSnapshot, MAX_BOOKMARK_EVENT_REFS,
 };
 use crate::redact::redact_candidate;
 use serde::{Deserialize, Serialize};
@@ -133,11 +134,15 @@ pub enum InvestigationNoiseLens {
 }
 
 /// Exact, payload-free suppression-policy binding for a durable finding.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InvestigationPolicyBinding {
     /// Monotonic suppression sidecar revision observed when the finding was made.
     pub suppression_policy_revision: u64,
+    /// Template-analysis revision against which every rule resolved.
+    pub resolved_template_revision: u64,
+    /// Canonical payload-free identity of the effective rule/resolution set.
+    pub effective_policy_sha256: String,
     /// Whether the suppression lens was active or temporarily suspended.
     pub noise_lens: InvestigationNoiseLens,
 }
@@ -145,8 +150,11 @@ pub struct InvestigationPolicyBinding {
 impl InvestigationPolicyBinding {
     /// Capture the exact current suppression revision with an explicit lens mode.
     pub fn capture(corpus: &LogCorpus, noise_lens: InvestigationNoiseLens) -> CoreResult<Self> {
+        let snapshot = capture_suppression_policy_binding(corpus)?;
         Ok(Self {
-            suppression_policy_revision: load_suppression_document(corpus)?.revision,
+            suppression_policy_revision: snapshot.suppression_policy_revision,
+            resolved_template_revision: snapshot.resolved_template_revision,
+            effective_policy_sha256: snapshot.effective_policy_sha256,
             noise_lens,
         })
     }
@@ -176,6 +184,10 @@ pub struct InvestigationPolicyBindingResolution {
     pub binding: Option<InvestigationPolicyBinding>,
     /// Current authoritative suppression sidecar revision.
     pub current_suppression_policy_revision: u64,
+    /// Current authoritative template-analysis revision for rule resolution.
+    pub current_resolved_template_revision: u64,
+    /// Current payload-free identity of the effective suppression policy.
+    pub current_effective_policy_sha256: String,
     /// Caller-supplied current lens mode, when known.
     pub current_noise_lens: Option<InvestigationNoiseLens>,
     /// Exact comparison result; never inferred from finding content.
@@ -850,7 +862,14 @@ impl InvestigationStore {
         corpus: &LogCorpus,
         input: AddFindingInput,
     ) -> CoreResult<ResolvedInvestigationDocument> {
-        self.add_human_finding_internal(investigation_id, expected_revision, corpus, None, input)
+        let binding = InvestigationPolicyBinding::capture(corpus, InvestigationNoiseLens::Active)?;
+        self.add_human_finding_internal(
+            investigation_id,
+            expected_revision,
+            corpus,
+            Some(binding),
+            input,
+        )
     }
 
     /// Atomically save a finding bound to an exact suppression policy and lens.
@@ -884,7 +903,7 @@ impl InvestigationStore {
         policy_binding: Option<InvestigationPolicyBinding>,
         input: AddFindingInput,
     ) -> CoreResult<ResolvedInvestigationDocument> {
-        if let Some(binding) = policy_binding {
+        if let Some(binding) = policy_binding.as_ref() {
             require_current_policy_binding(corpus, binding)?;
         }
         let title = sanitize_title("finding title", input.title)?;
@@ -919,7 +938,7 @@ impl InvestigationStore {
             return resolve_document_with_policy_lens(
                 document,
                 corpus,
-                policy_binding.map(|binding| binding.noise_lens),
+                policy_binding.as_ref().map(|binding| binding.noise_lens),
             );
         }
         if document.revision != expected_revision {
@@ -946,14 +965,14 @@ impl InvestigationStore {
             why_it_matters: why_it_matters.clone(),
             evidence_ids: vec![evidence_id],
             view_recipe: view_recipe.clone(),
-            policy_binding,
+            policy_binding: policy_binding.clone(),
             provenance: HumanProvenance::Human,
             created_at: now,
             updated_at: now,
         });
         advance_revision(&mut document, now)?;
 
-        if let Some(binding) = policy_binding {
+        if let Some(binding) = policy_binding.as_ref() {
             require_current_policy_binding(corpus, binding)?;
         }
         let directory = self.investigation_directory(investigation_id)?;
@@ -961,7 +980,7 @@ impl InvestigationStore {
             Ok(()) => resolve_document_with_policy_lens(
                 document,
                 corpus,
-                policy_binding.map(|binding| binding.noise_lens),
+                policy_binding.as_ref().map(|binding| binding.noise_lens),
             ),
             Err(publication_error) => {
                 let latest = self.load_document(investigation_id)?;
@@ -982,13 +1001,70 @@ impl InvestigationStore {
                     resolve_document_with_policy_lens(
                         latest,
                         corpus,
-                        policy_binding.map(|binding| binding.noise_lens),
+                        policy_binding.as_ref().map(|binding| binding.noise_lens),
                     )
                 } else {
                     Err(publication_error)
                 }
             }
         }
+    }
+
+    /// Recompute one saved Explorer view under an exact current policy binding.
+    ///
+    /// This explicit human mutation replaces only the durable view recipe and
+    /// policy binding. Finding prose, citations, lifecycle, and provenance stay
+    /// unchanged. The policy is checked before work and immediately before
+    /// append-only publication so a late response cannot masquerade as current.
+    pub fn recompute_human_finding_view(
+        &self,
+        investigation_id: &str,
+        expected_revision: u64,
+        corpus: &LogCorpus,
+        policy_binding: InvestigationPolicyBinding,
+        finding_id: &str,
+        view_recipe: FindingViewRecipe,
+    ) -> CoreResult<ResolvedInvestigationDocument> {
+        validate_uuid_v7("finding id", finding_id)?;
+        require_current_policy_binding(corpus, &policy_binding)?;
+        let mut document = self.load_document(investigation_id)?;
+        ensure_active_single_corpus(&document, corpus)?;
+        if document.revision != expected_revision {
+            return Err(stale_revision_error(
+                investigation_id,
+                expected_revision,
+                document.revision,
+            ));
+        }
+        let view_recipe = canonicalize_finding_view_recipe(view_recipe, corpus)?;
+        let finding = document
+            .findings
+            .iter_mut()
+            .find(|finding| finding.id == finding_id)
+            .ok_or_else(|| {
+                CoreError::Message(format!(
+                    "finding {finding_id} not found in investigation {investigation_id}"
+                ))
+            })?;
+        if finding.view_recipe.as_ref() == Some(&view_recipe)
+            && finding.policy_binding.as_ref() == Some(&policy_binding)
+        {
+            return resolve_document_with_policy_lens(
+                document,
+                corpus,
+                Some(policy_binding.noise_lens),
+            );
+        }
+
+        let now = crate::embed::now_unix_secs();
+        finding.view_recipe = Some(view_recipe);
+        finding.policy_binding = Some(policy_binding.clone());
+        finding.updated_at = now;
+        advance_revision(&mut document, now)?;
+        require_current_policy_binding(corpus, &policy_binding)?;
+        let directory = self.investigation_directory(investigation_id)?;
+        publish_revision(&directory, &document)?;
+        resolve_document_with_policy_lens(document, corpus, Some(policy_binding.noise_lens))
     }
 
     /// Atomically save exact selected evidence and a human-authored note.
@@ -1356,8 +1432,8 @@ impl InvestigationStore {
             revision: document.revision,
             finding_id: finding_id.to_string(),
             policy_binding: resolve_policy_binding(
-                finding.policy_binding,
-                load_suppression_document(corpus)?.revision,
+                finding.policy_binding.clone(),
+                capture_suppression_policy_binding(corpus)?,
                 current_noise_lens,
             ),
             view_recipe: recipe,
@@ -2460,13 +2536,19 @@ fn ensure_corpus_link(document: &InvestigationDocument, corpus_id: &str) -> Core
 
 fn require_current_policy_binding(
     corpus: &LogCorpus,
-    binding: InvestigationPolicyBinding,
+    binding: &InvestigationPolicyBinding,
 ) -> CoreResult<()> {
-    let current = load_suppression_document(corpus)?.revision;
-    if binding.suppression_policy_revision != current {
+    let current = capture_suppression_policy_binding(corpus)?;
+    if binding.suppression_policy_revision != current.suppression_policy_revision
+        || binding.resolved_template_revision != current.resolved_template_revision
+        || binding.effective_policy_sha256 != current.effective_policy_sha256
+    {
         return Err(CoreError::Message(format!(
-            "stale suppression policy binding: expected revision {}, current {current}",
-            binding.suppression_policy_revision
+            "stale suppression policy binding: saved sidecar/template revisions {}/{}, current {}/{}; recompute under the current noise policy",
+            binding.suppression_policy_revision,
+            binding.resolved_template_revision,
+            current.suppression_policy_revision,
+            current.resolved_template_revision
         )));
     }
     Ok(())
@@ -2474,13 +2556,15 @@ fn require_current_policy_binding(
 
 fn resolve_policy_binding(
     binding: Option<InvestigationPolicyBinding>,
-    current_suppression_policy_revision: u64,
+    current: SuppressionPolicyBindingSnapshot,
     current_noise_lens: Option<InvestigationNoiseLens>,
 ) -> InvestigationPolicyBindingResolution {
-    let status = match binding {
+    let status = match binding.as_ref() {
         None => InvestigationPolicyBindingStatus::UnboundLegacy,
         Some(binding)
-            if binding.suppression_policy_revision != current_suppression_policy_revision =>
+            if binding.suppression_policy_revision != current.suppression_policy_revision
+                || binding.resolved_template_revision != current.resolved_template_revision
+                || binding.effective_policy_sha256 != current.effective_policy_sha256 =>
         {
             InvestigationPolicyBindingStatus::MadeUnderDifferentPolicy
         }
@@ -2494,7 +2578,9 @@ fn resolve_policy_binding(
     };
     InvestigationPolicyBindingResolution {
         binding,
-        current_suppression_policy_revision,
+        current_suppression_policy_revision: current.suppression_policy_revision,
+        current_resolved_template_revision: current.resolved_template_revision,
+        current_effective_policy_sha256: current.effective_policy_sha256,
         current_noise_lens,
         status,
     }
@@ -2555,15 +2641,15 @@ fn resolve_document_with_policy_lens(
             item,
         })
         .collect();
-    let current_suppression_policy_revision = load_suppression_document(corpus)?.revision;
+    let current_policy = capture_suppression_policy_binding(corpus)?;
     let findings = document
         .findings
         .iter()
         .cloned()
         .map(|item| ResolvedFindingItem {
             policy_binding: resolve_policy_binding(
-                item.policy_binding,
-                current_suppression_policy_revision,
+                item.policy_binding.clone(),
+                current_policy.clone(),
                 current_noise_lens,
             ),
             item,
@@ -3011,7 +3097,7 @@ mod tests {
                 vector: None,
             }])
             .unwrap();
-        let current = load_suppression_document(corpus).unwrap();
+        let current = crate::log_analysis::load_suppression_document(corpus).unwrap();
         preview_template_suppression(
             corpus,
             current.revision,
@@ -3073,6 +3159,10 @@ mod tests {
         let revision_path = durable.path().join(&document.id).join(revision_filename(2));
         let mut legacy = serde_json::to_value(&with_legacy_finding.document).unwrap();
         legacy["schemaVersion"] = serde_json::json!(2);
+        legacy["findings"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("policyBinding");
         let legacy_bytes = serde_json::to_vec_pretty(&legacy).unwrap();
         std::fs::write(&revision_path, &legacy_bytes).unwrap();
 
@@ -3113,10 +3203,13 @@ mod tests {
         input.view_recipe = Some(finding_view_recipe(&corpus));
 
         let saved = store
-            .add_human_finding_bound(&document.id, 1, &corpus, binding, input)
+            .add_human_finding_bound(&document.id, 1, &corpus, binding.clone(), input)
             .unwrap();
         assert_eq!(saved.document.schema_version, 4);
-        assert_eq!(saved.document.findings[0].policy_binding, Some(binding));
+        assert_eq!(
+            saved.document.findings[0].policy_binding,
+            Some(binding.clone())
+        );
         assert_eq!(
             saved.findings[0].policy_binding.status,
             InvestigationPolicyBindingStatus::Current
@@ -3133,7 +3226,10 @@ mod tests {
                 InvestigationNoiseLens::Active,
             )
             .unwrap();
-        assert_eq!(reopened.document.findings[0].policy_binding, Some(binding));
+        assert_eq!(
+            reopened.document.findings[0].policy_binding,
+            Some(binding.clone())
+        );
         assert_eq!(
             reopened.findings[0].policy_binding.status,
             InvestigationPolicyBindingStatus::Current
@@ -3179,7 +3275,7 @@ mod tests {
         input.view_recipe = Some(finding_view_recipe(&corpus));
         let same_finding_under_new_policy = input.clone();
         let saved = store
-            .add_human_finding_bound(&document.id, 1, &corpus, binding, input)
+            .add_human_finding_bound(&document.id, 1, &corpus, binding.clone(), input)
             .unwrap();
         let finding_id = saved.document.findings[0].id.clone();
 
@@ -3227,7 +3323,7 @@ mod tests {
                 &document.id,
                 saved.document.revision,
                 &corpus,
-                current_binding,
+                current_binding.clone(),
                 same_finding_under_new_policy,
             )
             .unwrap();
@@ -3278,6 +3374,7 @@ mod tests {
             suspended.findings[0]
                 .policy_binding
                 .binding
+                .as_ref()
                 .unwrap()
                 .noise_lens,
             InvestigationNoiseLens::Suspended
@@ -3308,7 +3405,7 @@ mod tests {
             InvestigationPolicyBinding::capture(&corpus, InvestigationNoiseLens::Active).unwrap();
         let mut invalid_schema_three = legacy_finding.document.clone();
         invalid_schema_three.schema_version = 3;
-        invalid_schema_three.findings[0].policy_binding = Some(binding);
+        invalid_schema_three.findings[0].policy_binding = Some(binding.clone());
         assert!(validate_document(&invalid_schema_three, None, None)
             .unwrap_err()
             .to_string()
@@ -3327,7 +3424,7 @@ mod tests {
         let mut distinct = finding_input(&corpus);
         distinct.title = "Bound follow-up".into();
         let upgraded = store
-            .add_human_finding_bound(&document.id, 2, &corpus, binding, distinct)
+            .add_human_finding_bound(&document.id, 2, &corpus, binding.clone(), distinct)
             .unwrap();
         assert_eq!(upgraded.document.schema_version, 4);
         assert_eq!(upgraded.document.findings.len(), 2);
@@ -3366,7 +3463,7 @@ mod tests {
                 &document.id,
                 1,
                 &corpus,
-                current_binding,
+                current_binding.clone(),
                 finding_input(&corpus),
             )
             .unwrap();

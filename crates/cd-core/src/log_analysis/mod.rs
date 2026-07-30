@@ -144,15 +144,15 @@ pub use store::{
     LogCorpus, LogEvent, TemplateRow, TopTemplateSnapshot, EVENT_ENGINE, META_VERSION,
 };
 pub use suppression::{
-    activate_template_suppression, load_suppression_document, mutate_template_suppression_rule,
-    preview_template_suppression, ActivateSuppressionPreview, NewSuppressionPreview,
-    SuppressionAuditAction, SuppressionAuditEntry, SuppressionDocument, SuppressionLevelCount,
-    SuppressionMutationResult, SuppressionPreview, SuppressionRepresentativeEvent, SuppressionRule,
-    SuppressionRuleMutation, SuppressionRuleOrigin, SuppressionRuleResolution,
-    SuppressionRuleResolutionKind, SuppressionRuleState, SuppressionTemplatePredicate,
-    SuppressionTimeSpan, MAX_SUPPRESSION_AUDIT_ENTRIES, MAX_SUPPRESSION_LEVEL_BUCKETS,
-    MAX_SUPPRESSION_PREVIEWS, MAX_SUPPRESSION_REPRESENTATIVES, MAX_SUPPRESSION_RULES,
-    SUPPRESSION_SCHEMA_VERSION,
+    activate_template_suppression, capture_suppression_policy_binding, load_suppression_document,
+    mutate_template_suppression_rule, preview_template_suppression, ActivateSuppressionPreview,
+    NewSuppressionPreview, SuppressionAuditAction, SuppressionAuditEntry, SuppressionDocument,
+    SuppressionLevelCount, SuppressionMutationResult, SuppressionPolicyBindingSnapshot,
+    SuppressionPreview, SuppressionRepresentativeEvent, SuppressionRule, SuppressionRuleMutation,
+    SuppressionRuleOrigin, SuppressionRuleResolution, SuppressionRuleResolutionKind,
+    SuppressionRuleState, SuppressionTemplatePredicate, SuppressionTimeSpan,
+    MAX_SUPPRESSION_AUDIT_ENTRIES, MAX_SUPPRESSION_LEVEL_BUCKETS, MAX_SUPPRESSION_PREVIEWS,
+    MAX_SUPPRESSION_REPRESENTATIVES, MAX_SUPPRESSION_RULES, SUPPRESSION_SCHEMA_VERSION,
 };
 pub use timezone_application::{
     apply_source_timezone, clear_source_timezone, load_timezone_resolution_state,
