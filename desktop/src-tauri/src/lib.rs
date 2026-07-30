@@ -8836,6 +8836,50 @@ fn cancel_log_search(state: State<'_, AppState>, request_id: String) -> Result<b
     Ok(false)
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LogProposeNoiseCandidatesArgs {
+    corpus_id: String,
+    max_candidates: Option<usize>,
+    max_representatives: Option<usize>,
+}
+
+fn propose_log_noise_candidates_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    args: LogProposeNoiseCandidatesArgs,
+) -> Result<cd_core::log_analysis::NoiseCandidateReport, String> {
+    let corpus = handles.open(cache, &args.corpus_id)?;
+    cd_core::log_analysis::propose_noise_candidates(
+        &corpus,
+        &cd_core::log_analysis::NoiseCandidateOptions {
+            max_candidates: args
+                .max_candidates
+                .unwrap_or(cd_core::log_analysis::DEFAULT_NOISE_CANDIDATE_CAP),
+            max_representatives: args
+                .max_representatives
+                .unwrap_or(cd_core::log_analysis::DEFAULT_NOISE_REPRESENTATIVE_CAP),
+            include_already_suppressed: false,
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Propose bounded exact-template suppression candidates for human review.
+///
+/// This command is read-only. It cannot preview or activate a suppression rule.
+#[tauri::command]
+async fn log_propose_noise_candidates(
+    state: State<'_, AppState>,
+    args: LogProposeNoiseCandidatesArgs,
+) -> Result<cd_core::log_analysis::NoiseCandidateReport, String> {
+    let cache = log_cache_dir(&state)?;
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || propose_log_noise_candidates_at(&handles, &cache, args))
+        .await
+        .map_err(|error| format!("log noise candidate task join: {error}"))?
+}
+
 fn load_log_suppression_at(
     handles: &LogCorpusHandleCache,
     cache: &std::path::Path,
@@ -10568,6 +10612,7 @@ pub fn run() {
             log_source_catalog,
             log_search_events,
             cancel_log_search,
+            log_propose_noise_candidates,
             log_load_suppression,
             log_preview_template_suppression,
             log_activate_template_suppression,
@@ -10933,6 +10978,172 @@ mod log_timezone_host_tests {
 }
 
 #[cfg(test)]
+mod log_noise_candidate_host_tests {
+    use super::*;
+    use cd_core::log_analysis::{
+        ActiveTimestampBasis, LogEvent, TemplateInfo, TemplateRow, TimestampProvenance,
+    };
+
+    fn candidate_fixture() -> (tempfile::TempDir, PathBuf, String) {
+        let root = tempfile::tempdir().expect("temp root");
+        let cache = root.path().join("cache");
+        let corpus =
+            cd_core::log_analysis::LogCorpus::create(&cache, "noise-wire").expect("create corpus");
+        corpus
+            .upsert_templates((1..=3u64).map(|template_id| TemplateRow {
+                info: TemplateInfo {
+                    template_id,
+                    pattern: format!("candidate family {template_id}"),
+                    token_count: 3,
+                    count: 40,
+                    first_seen: 1_700_000_000,
+                    last_seen: 1_700_002_340,
+                    severity: if template_id == 3 { 4 } else { 1 },
+                    example: format!("candidate family {template_id}"),
+                },
+                content_hash: format!("fp-{template_id}"),
+                vector: None,
+            }))
+            .expect("templates");
+        let mut events = Vec::new();
+        let mut seq = 1u64;
+        for template_id in 1..=3u64 {
+            for minute in 0..40u64 {
+                events.push(LogEvent {
+                    seq,
+                    ts: 1_700_000_000 + (minute * 60 + template_id) as i64,
+                    timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
+                    level: if template_id == 3 {
+                        "ERROR".into()
+                    } else {
+                        "INFO".into()
+                    },
+                    service: Some("svc".into()),
+                    host: Some(format!("host-{}", minute % 3)),
+                    template_id,
+                    params: Vec::new(),
+                    trace_id: None,
+                    message: format!("candidate family {template_id}"),
+                    source: format!("source-{}.log", minute % 3),
+                });
+                seq += 1;
+            }
+        }
+        corpus.push_events(&events).expect("events");
+        corpus.flush().expect("flush");
+        let corpus_id = corpus.id().to_string();
+        drop(corpus);
+        (root, cache, corpus_id)
+    }
+
+    #[test]
+    fn proposal_command_wire_is_bounded_honest_and_read_only() {
+        let (_root, cache, corpus_id) = candidate_fixture();
+        let handles = LogCorpusHandleCache::default();
+        let before =
+            load_log_suppression_at(&handles, &cache, &corpus_id).expect("policy before proposal");
+
+        let capped = propose_log_noise_candidates_at(
+            &handles,
+            &cache,
+            LogProposeNoiseCandidatesArgs {
+                corpus_id: corpus_id.clone(),
+                max_candidates: Some(1),
+                max_representatives: Some(1),
+            },
+        )
+        .expect("capped proposals");
+        assert_eq!(capped.candidates.len(), 1);
+        assert_eq!(capped.eligible_candidate_count, 3);
+        assert!(capped.candidate_cap_truncated);
+
+        let report = propose_log_noise_candidates_at(
+            &handles,
+            &cache,
+            LogProposeNoiseCandidatesArgs {
+                corpus_id: corpus_id.clone(),
+                max_candidates: Some(32),
+                max_representatives: Some(2),
+            },
+        )
+        .expect("full proposals");
+        let wire = serde_json::to_value(&report).expect("serialize report");
+        assert_eq!(wire["eligibleCandidateCount"], 3);
+        assert!(wire.get("eligible_candidate_count").is_none());
+        for candidate in wire["candidates"].as_array().expect("candidate array") {
+            assert!(
+                matches!(
+                    candidate["shape"].as_str(),
+                    Some("steady" | "bursty" | "insufficient_time")
+                ),
+                "shape must use the closed wire vocabulary: {candidate}"
+            );
+        }
+        let risky = wire["candidates"]
+            .as_array()
+            .expect("candidate array")
+            .iter()
+            .find(|candidate| candidate["templateId"] == 3)
+            .expect("ERROR-heavy proposal");
+        assert_eq!(risky["proposalKind"], "suppression_candidate");
+        assert!(risky["reasonCodes"]
+            .as_array()
+            .expect("reason codes")
+            .iter()
+            .any(|reason| reason == "repetitive_error_risky"));
+        assert!(wire["disclaimer"]
+            .as_str()
+            .expect("disclaimer")
+            .contains("Nothing was auto-suppressed"));
+
+        let after =
+            load_log_suppression_at(&handles, &cache, &corpus_id).expect("policy after proposal");
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(after.rules, before.rules);
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn proposal_command_is_registered_strict_local_and_has_no_activation_path() {
+        let source = include_str!("lib.rs");
+        assert!(source.contains("log_propose_noise_candidates,"));
+        let args: Result<LogProposeNoiseCandidatesArgs, _> =
+            serde_json::from_value(serde_json::json!({"corpusId": "c", "unexpected": true}));
+        assert!(args.is_err(), "unknown IPC fields must fail closed");
+
+        let helper_start = source
+            .find("fn propose_log_noise_candidates_at(")
+            .expect("proposal helper");
+        let helper_end = source[helper_start..]
+            .find("/// Propose bounded exact-template")
+            .map(|offset| helper_start + offset)
+            .expect("proposal helper boundary");
+        let helper = &source[helper_start..helper_end];
+        assert!(helper.contains("handles.open("));
+        assert!(helper.contains("propose_noise_candidates("));
+        assert!(!helper.contains("LogCorpus::open"));
+        assert!(!helper.contains("preview_template_suppression"));
+        assert!(!helper.contains("activate_template_suppression"));
+        assert!(!helper.contains("mutate_template_suppression_rule"));
+
+        let command_start = source
+            .find("async fn log_propose_noise_candidates(")
+            .expect("proposal command");
+        let command_end = source[command_start..]
+            .find("fn load_log_suppression_at(")
+            .map(|offset| command_start + offset)
+            .expect("proposal command boundary");
+        let command = &source[command_start..command_end];
+        assert!(command.contains("tokio::task::spawn_blocking"));
+        assert!(command.contains("propose_log_noise_candidates_at"));
+        assert!(!command.contains("ensure_host("));
+        assert!(!command.contains("LogCorpus::open"));
+    }
+}
+
+#[cfg(test)]
 mod log_explorer_async_query_host_tests {
     use super::*;
 
@@ -11035,6 +11246,11 @@ mod log_explorer_async_query_host_tests {
                 "async fn log_source_catalog(",
                 "/// IPC args for advanced log search",
                 "query_log_source_catalog_at",
+            ),
+            (
+                "async fn log_propose_noise_candidates(",
+                "fn load_log_suppression_at(",
+                "propose_log_noise_candidates_at",
             ),
             (
                 "async fn log_load_suppression(",

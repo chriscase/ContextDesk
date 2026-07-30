@@ -131,6 +131,30 @@ ContextDesk does not automatically learn or activate noise rules. Exact-template
 Slice 1 is reversible and evidence-preserving, but it is only one predicate
 family and is not a substitute for retaining the authoritative source bundle.
 
+### Review noise suggestions
+
+Open **Noise**, then choose **Review suggestions** to inspect bounded,
+deterministic candidates from the current corpus. The review shows exact event
+count and share, source count, level distribution, time coverage and quality,
+steady/bursty shape, the reasons for the ranking, and redacted representative
+rows. **Showing N of M** describes the current bounded result; a separate note
+appears if the broader template scan reached its safety limit.
+
+These are suggestions, not decisions. Nothing is preselected, there is no
+**Accept all**, and ERROR/WARN-heavy, bursty, rare, or novel evidence is
+deliberately treated as risky.
+
+- Choose **Not noise…** only after review, then record why the proposal should
+  remain visible. That dismissal applies only to the current corpus,
+  template-analysis, and noise-policy revisions.
+- Choose **Suppress…** to enter the existing **Preview impact → Confirm
+  suppression** workflow. Review the exact impact before confirming.
+- If the corpus or policy changes, actions stop and **Refresh suggestions**
+  becomes the safe path forward.
+
+Candidate review never deletes evidence and never lets the detector activate a
+rule.
+
 ## Counts
 
 **Corpus events** is the persisted corpus size. **Matched** belongs to the

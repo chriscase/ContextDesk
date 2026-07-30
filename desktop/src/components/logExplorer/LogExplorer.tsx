@@ -4922,6 +4922,7 @@ export function LogExplorer({ corpusId }: Props) {
             Lanes…
           </button>
           <NoisePolicyControl
+            corpusId={corpusId}
             document={suppressionDocument}
             hiddenCount={suppressedEventCount}
             state={suppressionLoadState}
@@ -4937,6 +4938,12 @@ export function LogExplorer({ corpusId }: Props) {
             onMutate={mutateSuppressionRule}
             onSuspendAll={() => setNoiseLensSuspended(true)}
             onResume={() => setNoiseLensSuspended(false)}
+            onReloadPolicy={async () =>
+              (await loadSuppressionPolicy({ refreshing: true })).revision
+            }
+            onCandidateActivated={async () => {
+              await refreshSuppressionPolicy();
+            }}
           />
           {breakpoint !== "narrow" ? (
             <ToolbarPicker

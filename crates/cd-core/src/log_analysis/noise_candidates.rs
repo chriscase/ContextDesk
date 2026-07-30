@@ -119,6 +119,18 @@ impl NoiseCandidateReasonCode {
     }
 }
 
+/// Coarse wall-clock distribution shape for one candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoiseCandidateShape {
+    /// No defensible wall span or too little bucket evidence to classify.
+    InsufficientTime,
+    /// No coarse wall-clock bucket contains more than 25% of candidate events.
+    Steady,
+    /// More than 25% of candidate events occur in one coarse wall-clock bucket.
+    Bursty,
+}
+
 // ─── Public DTOs ─────────────────────────────────────────────────────────────
 
 /// Caller options for one proposal pass.
@@ -182,6 +194,8 @@ pub struct NoiseCandidate {
     pub corpus_share_bps: u64,
     /// Distinct sources.
     pub source_count: u64,
+    /// Coarse wall-clock distribution shape derived from bounded bucket facts.
+    pub shape: NoiseCandidateShape,
     /// Inclusive time span of matches.
     ///
     /// Wall-clock and order coordinates are deliberately separate. A mixed
@@ -241,6 +255,8 @@ pub struct NoiseCandidateReport {
     pub raw_time_quality: TimeQuality,
     /// Ranked proposals (score DESC, template_id ASC).
     pub candidates: Vec<NoiseCandidate>,
+    /// Exact eligible proposal count before caller and report-size caps.
+    pub eligible_candidate_count: u64,
     /// Templates considered by the aggregate query before ranking/caps.
     pub templates_scanned: u64,
     /// Whether the candidate list was truncated by the hard cap.
@@ -451,6 +467,26 @@ fn repetition_stability_component(
         6
     } else {
         0
+    }
+}
+
+fn noise_candidate_shape(
+    facts: &TemplateNoiseFacts,
+    corpus_time_span: Option<(i64, i64)>,
+) -> NoiseCandidateShape {
+    if corpus_time_span.is_none()
+        || facts.event_count == 0
+        || facts.last_ts <= facts.first_ts
+        || facts.distinct_buckets < 4
+        || facts.peak_bucket_events == 0
+    {
+        return NoiseCandidateShape::InsufficientTime;
+    }
+    let peak_share_bps = scaled_ratio(facts.peak_bucket_events, facts.event_count, 10_000);
+    if peak_share_bps <= 2_500 {
+        NoiseCandidateShape::Steady
+    } else {
+        NoiseCandidateShape::Bursty
     }
 }
 
@@ -665,6 +701,7 @@ pub fn propose_noise_candidates_with_cancel(
 
         let (mut score, mut reasons) =
             score_noise_candidate_facts(&pure, share_denominator, score_span);
+        let shape = noise_candidate_shape(&pure, score_span);
         if already_suppressed {
             reasons.push(NoiseCandidateReasonCode::AlreadySuppressed);
             reasons.sort();
@@ -678,9 +715,11 @@ pub fn propose_noise_candidates_with_cancel(
             facts,
             reasons,
             already_suppressed,
+            shape,
         });
     }
 
+    let eligible_candidate_count = scored.len() as u64;
     scored.sort_by(|left, right| {
         right
             .score
@@ -831,6 +870,7 @@ pub fn propose_noise_candidates_with_cancel(
             event_count: pure.event_count,
             corpus_share_bps: share_bps,
             source_count: pure.source_count,
+            shape: ranked.shape,
             time_quality: candidate_time_quality(&ranked.facts),
             wall_time_span: optional_span(ranked.facts.wall_first_ts, ranked.facts.wall_last_ts),
             order_span: optional_span(ranked.facts.order_first, ranked.facts.order_last),
@@ -865,6 +905,7 @@ pub fn propose_noise_candidates_with_cancel(
         time_quality: snapshot.time_quality,
         raw_time_quality: snapshot.raw_time_quality,
         candidates,
+        eligible_candidate_count,
         templates_scanned,
         truncated: candidate_cap_truncated || snapshot.template_scan_truncated,
         candidate_cap_truncated,
@@ -926,6 +967,7 @@ fn empty_report_with_meta(
         time_quality,
         raw_time_quality,
         candidates: Vec::new(),
+        eligible_candidate_count: 0,
         templates_scanned: 0,
         truncated: false,
         candidate_cap_truncated: false,
@@ -1006,6 +1048,7 @@ struct RankedCandidate {
     facts: TemplateFacts,
     reasons: Vec<NoiseCandidateReasonCode>,
     already_suppressed: bool,
+    shape: NoiseCandidateShape,
 }
 
 #[derive(Debug)]
@@ -1778,6 +1821,20 @@ mod tests {
                     .contains(&NoiseCandidateReasonCode::HighCorpusShare)
         );
         assert_eq!(hit.proposal_kind, "suppression_candidate");
+        assert_eq!(hit.shape, NoiseCandidateShape::Steady);
+        let wire = serde_json::to_value(&report).expect("serialize candidate report");
+        let hit_wire = wire["candidates"]
+            .as_array()
+            .expect("candidate array")
+            .iter()
+            .find(|candidate| candidate["templateId"] == 1)
+            .expect("steady candidate wire");
+        assert_eq!(hit_wire["shape"], "steady");
+        assert_eq!(
+            wire["eligibleCandidateCount"],
+            report.eligible_candidate_count
+        );
+        assert!(wire.get("eligible_candidate_count").is_none());
         assert!(
             !hit.explanation.to_lowercase().contains("confirmed noise")
                 || hit.explanation.contains("not confirmed")
@@ -1931,9 +1988,11 @@ mod tests {
         assert!(steady
             .reason_codes
             .contains(&NoiseCandidateReasonCode::SteadyBackground));
+        assert_eq!(steady.shape, NoiseCandidateShape::Steady);
         assert!(!burst
             .reason_codes
             .contains(&NoiseCandidateReasonCode::SteadyBackground));
+        assert_eq!(burst.shape, NoiseCandidateShape::InsufficientTime);
     }
 
     #[test]
@@ -2408,6 +2467,8 @@ mod tests {
         )
         .unwrap();
         assert!(report.candidates.len() <= 8);
+        assert_eq!(report.eligible_candidate_count, 40);
+        assert!(report.candidate_cap_truncated);
         assert_eq!(report.templates_scanned, 40);
         for c in &report.candidates {
             assert!(c.representatives.len() <= 2);
@@ -3122,6 +3183,69 @@ mod tests {
         let (_, sparse_reasons) =
             score_noise_candidate_facts(&sparse_info, 2_000, Some((0, 10_000)));
         assert!(!sparse_reasons.contains(&NoiseCandidateReasonCode::LevelDominatedInfo));
+    }
+
+    #[test]
+    fn shape_contract_uses_only_defensible_wall_bucket_facts() {
+        let steady = TemplateNoiseFacts {
+            template_id: 1,
+            event_count: 100,
+            source_count: 1,
+            first_ts: 1_700_000_000,
+            last_ts: 1_700_000_600,
+            error_or_fatal_count: 0,
+            warn_count: 0,
+            info_count: 100,
+            distinct_buckets: 10,
+            peak_bucket_events: 25,
+        };
+        assert_eq!(
+            noise_candidate_shape(&steady, Some((1_700_000_000, 1_700_000_600))),
+            NoiseCandidateShape::Steady
+        );
+
+        let bursty = TemplateNoiseFacts {
+            peak_bucket_events: 26,
+            ..steady.clone()
+        };
+        assert_eq!(
+            noise_candidate_shape(&bursty, Some((1_700_000_000, 1_700_000_600))),
+            NoiseCandidateShape::Bursty
+        );
+
+        for insufficient in [
+            TemplateNoiseFacts {
+                distinct_buckets: 3,
+                ..steady.clone()
+            },
+            TemplateNoiseFacts {
+                peak_bucket_events: 0,
+                ..steady.clone()
+            },
+            TemplateNoiseFacts {
+                last_ts: steady.first_ts,
+                ..steady.clone()
+            },
+        ] {
+            assert_eq!(
+                noise_candidate_shape(&insufficient, Some((1_700_000_000, 1_700_000_600))),
+                NoiseCandidateShape::InsufficientTime
+            );
+        }
+        assert_eq!(
+            noise_candidate_shape(&steady, None),
+            NoiseCandidateShape::InsufficientTime
+        );
+
+        let wire = serde_json::json!([
+            NoiseCandidateShape::Steady,
+            NoiseCandidateShape::Bursty,
+            NoiseCandidateShape::InsufficientTime,
+        ]);
+        assert_eq!(
+            wire,
+            serde_json::json!(["steady", "bursty", "insufficient_time"])
+        );
     }
 
     #[test]

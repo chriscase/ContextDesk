@@ -7,6 +7,7 @@ import { NoisePolicyControl, SuppressTemplateDialog } from "./NoisePolicy";
 vi.mock("../../lib/host", () => ({
   hostLogPreviewTemplateSuppression: vi.fn(),
   hostLogActivateTemplateSuppression: vi.fn(),
+  hostLogProposeNoiseCandidates: vi.fn(),
 }));
 
 function policy(
@@ -81,6 +82,71 @@ function preview(): host.SuppressionPreviewDto {
   };
 }
 
+function candidateReport(): host.NoiseCandidateReportDto {
+  return {
+    corpusId: "c1",
+    unsuppressedEventCount: 1_000,
+    corpusEventCount: 1_000,
+    suppressionRevision: 7,
+    eventRevision: 4,
+    templateAnalysisRevision: 2,
+    alreadySuppressedTemplateIds: [],
+    timeQuality: "wall",
+    rawTimeQuality: "wall",
+    candidates: [
+      {
+        templateId: 44,
+        templateFingerprint: "candidate-template-44",
+        pattern: "routine health probe <*>",
+        score: 62,
+        eventCount: 400,
+        corpusShareBps: 4_000,
+        sourceCount: 3,
+        timeQuality: "wall",
+        wallTimeSpan: { from: 1_700_000_000, to: 1_700_003_600 },
+        orderSpan: null,
+        levelCounts: [{ level: "INFO", count: 400 }],
+        otherLevelCount: 0,
+        levelCountsTruncated: false,
+        errorOrFatalCount: 0,
+        warnCount: 0,
+        infoCount: 400,
+        reasonCodes: [
+          "high_frequency",
+          "high_corpus_share",
+          "steady_background",
+        ],
+        explanation:
+          "High-volume steady informational traffic; human review required.",
+        alreadySuppressed: false,
+        shareBasis: "unsuppressed_events",
+        proposalKind: "suppression_candidate",
+        representatives: [
+          {
+            seq: 4,
+            source: "health.log",
+            timestamp: 1_700_000_000,
+            timeQuality: "wall",
+            level: "INFO",
+            redactedExcerpt: "routine health probe token=[REDACTED]",
+          },
+        ],
+        shape: "steady",
+      },
+    ],
+    templatesScanned: 7,
+    eligibleCandidateCount: 1,
+    truncated: false,
+    candidateCapTruncated: false,
+    templateScanTruncated: false,
+    responseBytesTruncated: false,
+    metadataMissingTemplateIds: [],
+    databaseQueryCount: 4,
+    disclaimer: "Human review only.",
+    cancelled: false,
+  };
+}
+
 function Trigger({
   triggerRef,
 }: {
@@ -94,12 +160,18 @@ function Trigger({
 }
 
 describe("NoisePolicyControl", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(host.hostLogProposeNoiseCandidates).mockResolvedValue(
+      candidateReport(),
+    );
+  });
 
   it("opens as a bounded popover, dismisses outside or with Escape, and restores focus", async () => {
     const triggerRef = createRef<HTMLButtonElement>();
     render(
       <NoisePolicyControl
+        corpusId="c1"
         document={policy()}
         hiddenCount={250}
         state="ready"
@@ -110,6 +182,8 @@ describe("NoisePolicyControl", () => {
         onMutate={vi.fn()}
         onSuspendAll={vi.fn()}
         onResume={vi.fn()}
+        onReloadPolicy={async () => 7}
+        onCandidateActivated={async () => {}}
       />,
     );
 
@@ -146,6 +220,7 @@ describe("NoisePolicyControl", () => {
     const onMutate = vi.fn();
     const { unmount } = render(
       <NoisePolicyControl
+        corpusId="c1"
         document={policy()}
         hiddenCount={250}
         state="ready"
@@ -157,6 +232,8 @@ describe("NoisePolicyControl", () => {
         onMutate={onMutate}
         onSuspendAll={onSuspendAll}
         onResume={onResume}
+        onReloadPolicy={async () => 7}
+        onCandidateActivated={async () => {}}
       />,
     );
 
@@ -170,6 +247,7 @@ describe("NoisePolicyControl", () => {
 
     render(
       <NoisePolicyControl
+        corpusId="c1"
         document={policy()}
         hiddenCount={250}
         state="ready"
@@ -181,6 +259,8 @@ describe("NoisePolicyControl", () => {
         onMutate={onMutate}
         onSuspendAll={onSuspendAll}
         onResume={onResume}
+        onReloadPolicy={async () => 7}
+        onCandidateActivated={async () => {}}
       />,
     );
     const suspendedTrigger = screen.getByRole("button", {
@@ -203,6 +283,7 @@ describe("NoisePolicyControl", () => {
     }));
     const { rerender } = render(
       <NoisePolicyControl
+        corpusId="c1"
         document={policy()}
         hiddenCount={250}
         state="ready"
@@ -211,6 +292,8 @@ describe("NoisePolicyControl", () => {
         triggerRef={triggerRef}
         onRetry={vi.fn()}
         onMutate={onMutate}
+        onReloadPolicy={async () => 7}
+        onCandidateActivated={async () => {}}
       />,
     );
 
@@ -227,6 +310,7 @@ describe("NoisePolicyControl", () => {
 
     rerender(
       <NoisePolicyControl
+        corpusId="c1"
         document={policy("disabled")}
         hiddenCount={0}
         state="ready"
@@ -235,6 +319,8 @@ describe("NoisePolicyControl", () => {
         triggerRef={triggerRef}
         onRetry={vi.fn()}
         onMutate={onMutate}
+        onReloadPolicy={async () => 7}
+        onCandidateActivated={async () => {}}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Re-enable" }));
@@ -247,6 +333,55 @@ describe("NoisePolicyControl", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /Show audit/ }));
     expect(screen.getByText("revision 7")).toBeTruthy();
+  });
+
+  it("reviews suggestions without activating them and reuses explicit suppression preview", async () => {
+    const triggerRef = createRef<HTMLButtonElement>();
+    render(
+      <NoisePolicyControl
+        corpusId="c1"
+        document={policy()}
+        hiddenCount={250}
+        state="ready"
+        error={null}
+        narrow={false}
+        triggerRef={triggerRef}
+        onRetry={vi.fn()}
+        onMutate={vi.fn()}
+        onReloadPolicy={async () => 7}
+        onCandidateActivated={async () => {}}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Noise · 1 rule · 250 hidden" }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Review suggestions" }),
+    );
+    expect(await screen.findByText("routine health probe <*>")).toBeTruthy();
+    expect(host.hostLogActivateTemplateSuppression).not.toHaveBeenCalled();
+    expect(host.hostLogPreviewTemplateSuppression).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Suppress…" }));
+    expect(
+      await screen.findByRole("dialog", { name: "Suppress exact template" }),
+    ).toBeTruthy();
+    expect(
+      screen.getAllByText(/Template 44/).some((element) =>
+        element.textContent?.includes("policy revision 7"),
+      ),
+    ).toBe(true);
+    expect(host.hostLogActivateTemplateSuppression).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(screen.getByTestId("suppress-template-backdrop"), {
+      key: "Escape",
+    });
+    await waitFor(() =>
+      expect(screen.queryByTestId("suppress-template-backdrop")).toBeNull(),
+    );
+    expect(screen.getByTestId("noise-candidate-review")).toBeTruthy();
+    expect(host.hostLogPreviewTemplateSuppression).not.toHaveBeenCalled();
   });
 });
 

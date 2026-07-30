@@ -54,6 +54,28 @@ vi.mock("../../lib/host", () => ({
     previews: [],
     audit: [],
   })),
+  hostLogProposeNoiseCandidates: vi.fn(async () => ({
+    corpusId: "c1",
+    unsuppressedEventCount: 10,
+    corpusEventCount: 10,
+    suppressionRevision: 0,
+    eventRevision: 0,
+    templateAnalysisRevision: 0,
+    alreadySuppressedTemplateIds: [],
+    timeQuality: "wall",
+    rawTimeQuality: "wall",
+    candidates: [],
+    templatesScanned: 2,
+    eligibleCandidateCount: 0,
+    truncated: false,
+    candidateCapTruncated: false,
+    templateScanTruncated: false,
+    responseBytesTruncated: false,
+    metadataMissingTemplateIds: [],
+    databaseQueryCount: 2,
+    disclaimer: "Human review only. Nothing was auto-suppressed.",
+    cancelled: false,
+  })),
   hostLogPreviewTemplateSuppression: vi.fn(),
   hostLogActivateTemplateSuppression: vi.fn(),
   hostLogMutateTemplateSuppressionRule: vi.fn(),
@@ -649,6 +671,28 @@ describe("LogExplorer shell", () => {
       previews: [],
       audit: [],
     });
+    vi.mocked(host.hostLogProposeNoiseCandidates).mockResolvedValue({
+      corpusId: "c1",
+      unsuppressedEventCount: 10,
+      corpusEventCount: 10,
+      suppressionRevision: 0,
+      eventRevision: 0,
+      templateAnalysisRevision: 0,
+      alreadySuppressedTemplateIds: [],
+      timeQuality: "wall",
+      rawTimeQuality: "wall",
+      candidates: [],
+      templatesScanned: 2,
+      eligibleCandidateCount: 0,
+      truncated: false,
+      candidateCapTruncated: false,
+      templateScanTruncated: false,
+      responseBytesTruncated: false,
+      metadataMissingTemplateIds: [],
+      databaseQueryCount: 2,
+      disclaimer: "Human review only. Nothing was auto-suppressed.",
+      cancelled: false,
+    });
     vi.mocked(host.hostLogPreviewTemplateSuppression).mockReset();
     vi.mocked(host.hostLogActivateTemplateSuppression).mockReset();
     vi.mocked(host.hostLogMutateTemplateSuppressionRule).mockReset();
@@ -1144,6 +1188,86 @@ describe("LogExplorer shell", () => {
     expect(disclosure.textContent).toMatch(/counts unknown/i);
     expect(disclosure.textContent).not.toMatch(/inactive|0 rules|0 excluded/i);
     vi.unstubAllGlobals();
+  });
+
+  it("opens bounded explainable suggestions without mutating evidence (#818)", async () => {
+    vi.mocked(host.hostLogProposeNoiseCandidates).mockResolvedValue({
+      corpusId: "c1",
+      unsuppressedEventCount: 10,
+      corpusEventCount: 10,
+      suppressionRevision: 0,
+      eventRevision: 3,
+      templateAnalysisRevision: 2,
+      alreadySuppressedTemplateIds: [],
+      timeQuality: "wall",
+      rawTimeQuality: "wall",
+      candidates: [
+        {
+          templateId: 1,
+          templateFingerprint: "template-1-fingerprint",
+          pattern: "auth failure account=<*>",
+          score: 31,
+          eventCount: 6,
+          corpusShareBps: 6_000,
+          sourceCount: 2,
+          timeQuality: "wall",
+          wallTimeSpan: { from: 1_700_000_000, to: 1_700_000_009 },
+          orderSpan: null,
+          levelCounts: [{ level: "ERROR", count: 6 }],
+          otherLevelCount: 0,
+          levelCountsTruncated: false,
+          errorOrFatalCount: 6,
+          warnCount: 0,
+          infoCount: 0,
+          reasonCodes: ["high_frequency", "repetitive_error_risky"],
+          explanation:
+            "High volume is a proposal fact, not confirmation that this failure is noise.",
+          alreadySuppressed: false,
+          shareBasis: "unsuppressed_events",
+          proposalKind: "suppression_candidate",
+          representatives: [
+            {
+              seq: 1,
+              source: "api.log",
+              timestamp: 1_700_000_000,
+              timeQuality: "wall",
+              level: "ERROR",
+              redactedExcerpt: "auth failure account=[REDACTED]",
+            },
+          ],
+          shape: "bursty",
+        },
+      ],
+      templatesScanned: 2,
+      eligibleCandidateCount: 1,
+      truncated: false,
+      candidateCapTruncated: false,
+      templateScanTruncated: false,
+      responseBytesTruncated: false,
+      metadataMissingTemplateIds: [],
+      databaseQueryCount: 4,
+      disclaimer: "Human review only. Nothing was auto-suppressed.",
+      cancelled: false,
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Noise · 0 rules · 0 hidden",
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Review suggestions" }),
+    );
+
+    expect(await screen.findByText("auth failure account=<*>")).toBeTruthy();
+    expect(screen.getByText(/Showing 1 of 1/)).toBeTruthy();
+    expect(screen.getByText("Bursty or uneven")).toBeTruthy();
+    expect(screen.getByText("Repetitive errors — risky to hide")).toBeTruthy();
+    expect(screen.getByText("auth failure account=[REDACTED]")).toBeTruthy();
+    expect(host.hostLogPreviewTemplateSuppression).not.toHaveBeenCalled();
+    expect(host.hostLogActivateTemplateSuppression).not.toHaveBeenCalled();
+    expect(host.hostLogMutateTemplateSuppressionRule).not.toHaveBeenCalled();
   });
 
   it("previews and confirms a human suppression before atomically refreshing evidence", async () => {
