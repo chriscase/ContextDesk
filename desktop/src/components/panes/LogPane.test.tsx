@@ -182,6 +182,135 @@ describe("LogPane", () => {
     expect(await screen.findByText(/No corpora yet/i)).toBeTruthy();
   });
 
+  it("groups every Logs action by intent while keeping page identity separate", () => {
+    const onOpenHelp = vi.fn();
+    render(<LogPane onOpenHelp={onOpenHelp} />);
+
+    const toolbar = screen.getByRole("navigation", {
+      name: "Logs actions",
+    });
+    expect(
+      toolbar.contains(screen.getByRole("heading", { name: "Logs" })),
+    ).toBe(false);
+
+    const imports = within(toolbar).getByRole("group", { name: "Import" });
+    expect(
+      within(imports).getByRole("button", { name: "Import logs…" }),
+    ).toBeTruthy();
+    expect(
+      within(imports).getByRole("button", { name: "Import package…" }),
+    ).toBeTruthy();
+
+    const corpusActions = within(toolbar).getByRole("group", {
+      name: "Corpus operations",
+    });
+    expect(
+      within(corpusActions).getByRole("button", {
+        name: "Export package…",
+      }),
+    ).toBeTruthy();
+    expect(
+      within(corpusActions).getByRole("button", {
+        name: "Re-analyze locally…",
+      }),
+    ).toBeTruthy();
+
+    const explorerActions = within(toolbar).getByRole("group", {
+      name: "Open and explore",
+    });
+    expect(
+      within(explorerActions).getByRole("button", {
+        name: "Open Explorer…",
+      }),
+    ).toBeTruthy();
+    expect(
+      within(explorerActions).getByRole("button", { name: "Open in app" }),
+    ).toBeTruthy();
+
+    const help = within(toolbar).getByRole("group", { name: "Help" });
+    fireEvent.click(
+      within(help).getByRole("button", { name: "Learn more" }),
+    );
+    expect(onOpenHelp).toHaveBeenCalledWith("log-explorer");
+  });
+
+  it.each([520, 960, 1440, 2560])(
+    "keeps grouped actions discoverable without overflow at %ipx",
+    (width) => {
+      const originalWidth = window.innerWidth;
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        value: width,
+      });
+
+      try {
+        render(<LogPane onOpenHelp={vi.fn()} />);
+        const toolbar = screen.getByRole("navigation", {
+          name: "Logs actions",
+        });
+        expect(within(toolbar).getAllByRole("group")).toHaveLength(4);
+        expect(within(toolbar).getAllByRole("button")).toHaveLength(7);
+        expect(
+          within(toolbar).queryByRole("button", {
+            name: /more logs actions/i,
+          }),
+        ).toBeNull();
+      } finally {
+        Object.defineProperty(window, "innerWidth", {
+          configurable: true,
+          value: originalWidth,
+        });
+      }
+    },
+  );
+
+  it("explains unavailable corpus actions and completed re-analysis", async () => {
+    const complete = {
+      ...corpus("corpus-complete", "Complete corpus"),
+      embedding: {
+        state: "complete" as const,
+        modelId: "fixture-local",
+        embeddedTemplates: 3,
+        totalTemplates: 3,
+        reason: "complete",
+        updatedAt: 2,
+      },
+    };
+    hostMocks.listCorpora.mockResolvedValue([complete]);
+
+    render(<LogPane />);
+    const exportAction = screen.getByRole("button", {
+      name: "Export package…",
+    });
+    expect(exportAction.hasAttribute("disabled")).toBe(true);
+    const unavailableId = exportAction.getAttribute("aria-describedby");
+    expect(unavailableId).toBeTruthy();
+    expect(document.getElementById(unavailableId!)?.textContent).toContain(
+      "Select a corpus",
+    );
+    expect(exportAction.getAttribute("title")).toContain("Select a corpus");
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: corpusButtonName(complete.name),
+      }),
+    );
+    const reanalyze = screen.getByRole("button", {
+      name: "Re-analyze locally…",
+    });
+    await waitFor(() =>
+      expect(reanalyze.hasAttribute("disabled")).toBe(true),
+    );
+    const completeId = reanalyze.getAttribute("aria-describedby");
+    expect(completeId).toBeTruthy();
+    expect(document.getElementById(completeId!)?.textContent).toContain(
+      "already fully analyzed locally",
+    );
+    expect(reanalyze.getAttribute("title")).toContain(
+      "already fully analyzed locally",
+    );
+  });
+
   it("preserves primary corpus selection and keeps only one named overflow menu open", async () => {
     const first = corpus("corpus-a", "API incident");
     const second = corpus("corpus-b", "Worker incident");

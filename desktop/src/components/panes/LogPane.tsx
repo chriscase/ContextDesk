@@ -182,6 +182,9 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const importLogsTriggerRef = useRef<HTMLButtonElement>(null);
   const analysisStatusId = useId();
   const analysisDescriptionId = useId();
+  const busyActionDescriptionId = useId();
+  const corpusActionDescriptionId = useId();
+  const reanalysisActionDescriptionId = useId();
 
   useEffect(() => {
     mountedRef.current = true;
@@ -527,6 +530,16 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     updatedAt: 0,
   };
   const semanticAvailable = activeEmbedding.embeddedTemplates > 0;
+  const busyActionDescription =
+    "Logs actions are unavailable while the current operation finishes.";
+  const corpusActionDescription = busy
+    ? busyActionDescription
+    : "Select a corpus to export, re-analyze, or open it.";
+  const reanalysisActionDescription = busy
+    ? busyActionDescription
+    : !activeId
+      ? corpusActionDescription
+      : "This corpus is already fully analyzed locally.";
 
   async function onImportLogs() {
     const picker =
@@ -908,87 +921,198 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
 
   return (
     <div className="log-pane pane--fill" data-testid="log-pane">
-      <header className="pane-chrome">
-        <h2 className="pane-chrome__title">Logs</h2>
-        <div className="pane-chrome__actions">
-          <button
-            ref={importLogsTriggerRef}
-            type="button"
-            className="btn btn--ghost"
-            disabled={busy}
-            onClick={() => void onImportLogs()}
-          >
-            Import logs…
-          </button>
-          <button
-            type="button"
-            className="btn btn--ghost"
-            disabled={busy}
-            onClick={() => void onImportPackage()}
-          >
-            Import package…
-          </button>
-          <button
-            type="button"
-            className="btn btn--ghost"
-            disabled={busy || !activeId}
-            onClick={() => void onExportPackage()}
-          >
-            Export package…
-          </button>
-          <button
-            type="button"
-            className="btn btn--ghost"
-            disabled={busy || !activeId || activeEmbedding.state === "complete"}
-            data-testid="reanalyze-log-corpus"
-            onClick={() => void onReanalyze()}
-          >
-            Re-analyze locally…
-          </button>
-          <button
-            type="button"
-            className="btn btn--primary"
-            disabled={busy || !activeId}
-            data-testid="open-log-explorer"
-            onClick={() => {
-              if (!activeId) return;
-              void hostOpenLogExplorer(activeId)
-                .then(() => setNote("Opened Log Explorer window"))
-                .catch((e) => {
-                  // Escape hatch: full-surface explorer inside Logs (#503)
-                  setInAppExplorerId(activeId);
-                  setNote(
-                    `Multi-window open failed (${String(e)}); opened Explorer in-app.`,
-                  );
-                });
-            }}
-          >
-            Open Explorer…
-          </button>
-          <button
-            type="button"
-            className="btn btn--ghost"
-            disabled={busy || !activeId}
-            data-testid="open-log-explorer-in-app"
-            title="Open Explorer inside this window (no multi-window)"
-            onClick={() => {
-              if (!activeId) return;
-              setInAppExplorerId(activeId);
-              void hostSetActiveLogCorpus(activeId);
-            }}
-          >
-            Open in app
-          </button>
-          {onOpenHelp ? (
-            <button
-              type="button"
-              className="btn btn--ghost"
-              onClick={() => onOpenHelp("log-explorer")}
-            >
-              Learn more
-            </button>
-          ) : null}
+      <header className="pane-chrome log-pane__chrome">
+        <div className="log-pane__identity">
+          <h2 className="pane-chrome__title">Logs</h2>
+          <span>Corpus library</span>
         </div>
+        <nav className="log-pane__toolbar" aria-label="Logs actions">
+          <div
+            className="log-pane__action-group"
+            role="group"
+            aria-label="Import"
+            data-intent="import"
+          >
+            <span className="log-pane__action-group-label" aria-hidden="true">
+              Import
+            </span>
+            <div className="log-pane__action-group-controls">
+              <button
+                ref={importLogsTriggerRef}
+                type="button"
+                className="btn btn--ghost"
+                disabled={busy}
+                aria-describedby={
+                  busy ? busyActionDescriptionId : undefined
+                }
+                title={busy ? busyActionDescription : undefined}
+                onClick={() => void onImportLogs()}
+              >
+                Import logs…
+              </button>
+              <button
+                type="button"
+                className="btn btn--ghost"
+                disabled={busy}
+                aria-describedby={
+                  busy ? busyActionDescriptionId : undefined
+                }
+                title={busy ? busyActionDescription : undefined}
+                onClick={() => void onImportPackage()}
+              >
+                Import package…
+              </button>
+            </div>
+          </div>
+
+          <div
+            className="log-pane__action-group"
+            role="group"
+            aria-label="Corpus operations"
+            data-intent="corpus"
+          >
+            <span className="log-pane__action-group-label" aria-hidden="true">
+              Corpus
+            </span>
+            <div className="log-pane__action-group-controls">
+              <button
+                type="button"
+                className="btn btn--ghost"
+                disabled={busy || !activeId}
+                aria-describedby={
+                  busy || !activeId ? corpusActionDescriptionId : undefined
+                }
+                title={
+                  busy || !activeId ? corpusActionDescription : undefined
+                }
+                onClick={() => void onExportPackage()}
+              >
+                Export package…
+              </button>
+              <button
+                type="button"
+                className="btn btn--ghost"
+                disabled={
+                  busy ||
+                  !activeId ||
+                  activeEmbedding.state === "complete"
+                }
+                aria-describedby={
+                  busy ||
+                  !activeId ||
+                  activeEmbedding.state === "complete"
+                    ? reanalysisActionDescriptionId
+                    : undefined
+                }
+                title={
+                  busy ||
+                  !activeId ||
+                  activeEmbedding.state === "complete"
+                    ? reanalysisActionDescription
+                    : undefined
+                }
+                data-testid="reanalyze-log-corpus"
+                onClick={() => void onReanalyze()}
+              >
+                Re-analyze locally…
+              </button>
+            </div>
+          </div>
+
+          <div
+            className="log-pane__action-group"
+            role="group"
+            aria-label="Open and explore"
+            data-intent="explore"
+          >
+            <span className="log-pane__action-group-label" aria-hidden="true">
+              Explore
+            </span>
+            <div className="log-pane__action-group-controls">
+              <button
+                type="button"
+                className="btn btn--primary"
+                disabled={busy || !activeId}
+                aria-describedby={
+                  busy || !activeId ? corpusActionDescriptionId : undefined
+                }
+                title={
+                  busy || !activeId ? corpusActionDescription : undefined
+                }
+                data-testid="open-log-explorer"
+                onClick={() => {
+                  if (!activeId) return;
+                  void hostOpenLogExplorer(activeId)
+                    .then(() => setNote("Opened Log Explorer window"))
+                    .catch((e) => {
+                      // Escape hatch: full-surface explorer inside Logs (#503)
+                      setInAppExplorerId(activeId);
+                      setNote(
+                        `Multi-window open failed (${String(e)}); opened Explorer in-app.`,
+                      );
+                    });
+                }}
+              >
+                Open Explorer…
+              </button>
+              <button
+                type="button"
+                className="btn btn--ghost"
+                disabled={busy || !activeId}
+                aria-describedby={
+                  busy || !activeId ? corpusActionDescriptionId : undefined
+                }
+                data-testid="open-log-explorer-in-app"
+                title={
+                  busy || !activeId
+                    ? corpusActionDescription
+                    : "Open Explorer inside this window (no multi-window)"
+                }
+                onClick={() => {
+                  if (!activeId) return;
+                  setInAppExplorerId(activeId);
+                  void hostSetActiveLogCorpus(activeId);
+                }}
+              >
+                Open in app
+              </button>
+            </div>
+          </div>
+
+          {onOpenHelp ? (
+            <div
+              className="log-pane__action-group"
+              role="group"
+              aria-label="Help"
+              data-intent="help"
+            >
+              <span
+                className="log-pane__action-group-label"
+                aria-hidden="true"
+              >
+                Help
+              </span>
+              <div className="log-pane__action-group-controls">
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  onClick={() => onOpenHelp("log-explorer")}
+                >
+                  Learn more
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </nav>
+        <span id={busyActionDescriptionId} className="sr-only">
+          {busyActionDescription}
+        </span>
+        <span id={corpusActionDescriptionId} className="sr-only">
+          {corpusActionDescription}
+        </span>
+        <span id={reanalysisActionDescriptionId} className="sr-only">
+          {reanalysisActionDescription}
+        </span>
       </header>
 
       {ingesting || reanalyzing || progress ? (
