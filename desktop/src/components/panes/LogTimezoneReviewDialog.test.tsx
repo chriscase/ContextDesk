@@ -140,13 +140,33 @@ describe("LogTimezoneReviewDialog", () => {
     const leaveUnresolved = within(dialog).getByRole("radio", {
       name: /Leave unresolved — order-only/,
     }) as HTMLInputElement;
-    const zone = within(dialog).getByRole("textbox", {
+    const zone = within(dialog).getByRole("combobox", {
       name: /^IANA timezone/,
     }) as HTMLInputElement;
 
     expect(leaveUnresolved.checked).toBe(true);
     expect(zone.value).toBe("America/Chicago");
     expect(zone.disabled).toBe(true);
+    const timezoneList = document.getElementById(
+      zone.getAttribute("list") ?? "",
+    );
+    expect(timezoneList).not.toBeNull();
+    expect(
+      Array.from(timezoneList?.querySelectorAll("option") ?? []).map(
+        (option) => option.getAttribute("value"),
+      ),
+    ).toEqual(expect.arrayContaining(["America/Chicago", "UTC"]));
+    expect(
+      timezoneList
+        ?.querySelector('option[value="America/Chicago"]')
+        ?.getAttribute("label"),
+    ).toMatch(/Chicago.*UTC/);
+    expect(dialog.textContent).toContain(
+      "Browse or type to filter by location",
+    );
+    expect(dialog.textContent).toContain(
+      "historical daylight-saving rules to each log time",
+    );
     expect(dialog.textContent).toContain(
       "This computer’s timezone filled this field as a convenience; it is not active",
     );
@@ -166,7 +186,7 @@ describe("LogTimezoneReviewDialog", () => {
     const useZone = within(dialog).getByRole("radio", {
       name: /Use an IANA timezone/,
     }) as HTMLInputElement;
-    const zone = within(dialog).getByRole("textbox", {
+    const zone = within(dialog).getByRole("combobox", {
       name: /^IANA timezone/,
     }) as HTMLInputElement;
     const previewButton = within(dialog).getByRole("button", {
@@ -229,7 +249,7 @@ describe("LogTimezoneReviewDialog", () => {
       }),
     );
     fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /^IANA timezone/ }),
+      within(dialog).getByRole("combobox", { name: /^IANA timezone/ }),
       { target: { value: "Europe/Berlin" } },
     );
     const previewButton = within(dialog).getByRole("button", {
@@ -278,7 +298,7 @@ describe("LogTimezoneReviewDialog", () => {
     const useZone = within(dialog).getByRole("radio", {
       name: /Use an IANA timezone/,
     });
-    const zone = within(dialog).getByRole("textbox", {
+    const zone = within(dialog).getByRole("combobox", {
       name: /^IANA timezone/,
     }) as HTMLInputElement;
 
@@ -356,7 +376,7 @@ describe("LogTimezoneReviewDialog", () => {
         name: /Use an IANA timezone/,
       }),
     );
-    const zone = within(dialog).getByRole("textbox", {
+    const zone = within(dialog).getByRole("combobox", {
       name: /^IANA timezone/,
     }) as HTMLInputElement;
     const previewButton = within(dialog).getByRole("button", {
@@ -393,7 +413,7 @@ describe("LogTimezoneReviewDialog", () => {
       }),
     );
     fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /^IANA timezone/ }),
+      within(dialog).getByRole("combobox", { name: /^IANA timezone/ }),
       { target: { value: "Europe/Berlin" } },
     );
     fireEvent.click(within(dialog).getByRole("button", { name: "Preview" }));
@@ -424,7 +444,7 @@ describe("LogTimezoneReviewDialog", () => {
       }),
     );
     fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /^IANA timezone/ }),
+      within(dialog).getByRole("combobox", { name: /^IANA timezone/ }),
       { target: { value: "Europe/Berlin" } },
     );
     fireEvent.click(within(dialog).getByRole("button", { name: "Preview" }));
@@ -468,7 +488,7 @@ describe("LogTimezoneReviewDialog", () => {
       }),
     );
     fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /^IANA timezone/ }),
+      within(dialog).getByRole("combobox", { name: /^IANA timezone/ }),
       { target: { value: "Europe/Berlin" } },
     );
     fireEvent.click(within(dialog).getByRole("button", { name: "Preview" }));

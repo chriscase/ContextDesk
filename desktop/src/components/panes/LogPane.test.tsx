@@ -2482,7 +2482,7 @@ describe("LogPane", () => {
       within(dialog).getByRole("radio", { name: /Use an IANA timezone/ }),
     );
     fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /^IANA timezone/ }),
+      within(dialog).getByRole("combobox", { name: /^IANA timezone/ }),
       { target: { value: "America/Chicago" } },
     );
     fireEvent.click(within(dialog).getByRole("button", { name: "Preview" }));
@@ -2594,7 +2594,7 @@ describe("LogPane", () => {
       within(dialog).getByRole("radio", { name: /Use an IANA timezone/ }),
     );
     fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /^IANA timezone/ }),
+      within(dialog).getByRole("combobox", { name: /^IANA timezone/ }),
       { target: { value: "America/Chicago" } },
     );
     fireEvent.click(within(dialog).getByRole("button", { name: "Preview" }));
