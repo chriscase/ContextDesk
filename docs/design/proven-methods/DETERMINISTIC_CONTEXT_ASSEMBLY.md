@@ -99,7 +99,7 @@ flowchart TB
     Q -->|yes| B --> E
     Q -->|no| G --> T --> R
     R --> E --> S --> Y --> D --> V --> A
-    B --> F
+    B -->|assembly failure: visible status + staged fallback| G
     T --> F
     R --> F
     V --> F

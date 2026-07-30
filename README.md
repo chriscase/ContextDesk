@@ -11,11 +11,12 @@ Allowlist a workspace, import a post-mortem log corpus, or connect a governed
 read source. ContextDesk searches, filters, ranks, and caps that material on
 the host before a model sees it. The model synthesizes bounded evidence rather
 than receiving an indiscriminate corpus dump. Ordinary chats stay separate
-from log investigations; corpus-linked chats must obtain a successful governed
-tool result before an answer is presented as log-grounded. If the selected
-profile cannot use tools, the application says so instead of treating model
-prose as retrieved evidence. Every write still requires the appropriate
-confirmation.
+from log investigations; broad corpus-linked questions begin with a
+deterministic host-built triage brief, while focused questions use governed
+bounded tools. Both paths require trusted event identities before an answer is
+presented as log-grounded. If the selected profile cannot use tools, the
+application says so instead of treating model prose as retrieved evidence.
+Every write still requires the appropriate confirmation.
 
 Run it **fully local** with [Ollama](https://ollama.com), connect a
 self-hosted/company or hosted **OpenAI-compatible gateway**, use the
@@ -132,9 +133,11 @@ machine-checked against production symbols. Partial work is listed separately.
   be previewed, explicitly applied, and restored without hidden mutations —
   `desktop/src/components/logExplorer/EvidencePanel.tsx`
 - **Governed linked chat:** a corpus link persists with the chat, each turn gets
-  a bounded privacy-safe view snapshot, and a linked answer requires successful
-  read-only log-tool evidence. Tools-disabled profiles and provider failures
-  remain visible; ordinary chats do not inherit a log corpus —
+  a bounded privacy-safe view snapshot, and broad triage starts from a
+  deterministic 32 KiB host brief with separately trusted identities rather
+  than raw corpus rows. Focused follow-ups use bounded read-only log tools.
+  Tools-disabled profiles and provider failures remain visible; ordinary chats
+  do not inherit a log corpus —
   `crates/cd-core/src/agent.rs:run_agent_turn_with_sink`
 - **Log template embedding default (product):** local in-process ONNX via **fastembed** on the desktop host (`log-fastembed` feature on; `embed.rs:default_log_embed_backend`); cloud embed is per-corpus opt-in with a “log content leaves this machine” confirm. Offline `cargo test` stays hermetic (deterministic `ConceptEmbedBackend`, no model download)
 - Opt-in web research (`web_search` / `web_fetch`) behind SSRF gates
