@@ -1707,6 +1707,36 @@ export function LogExplorer({ corpusId }: Props) {
     ],
   );
 
+  /**
+   * Host-resolved findings include policyBinding against the caller's lens.
+   * Always re-fetch after Suspend all / Resume so statuses stay honest (#819).
+   */
+  const reloadActiveInvestigation = useCallback(
+    (noiseLens: "active" | "suspended" = currentNoiseLens(lensSuspended)) => {
+      const investigationRequest = ++investigationLoadRequestRef.current;
+      setInvestigationLoadState("loading");
+      setInvestigationError(null);
+      return hostLogLoadActiveInvestigation(corpusId, noiseLens)
+        .then((activeInvestigation) => {
+          if (investigationRequest !== investigationLoadRequestRef.current) {
+            return;
+          }
+          setInvestigation(activeInvestigation);
+          setInvestigationLoadState("ready");
+          // A lens/policy change invalidates any open saved-view preview.
+          setFindingViewPreview(null);
+        })
+        .catch((investigationLoadError) => {
+          if (investigationRequest !== investigationLoadRequestRef.current) {
+            return;
+          }
+          setInvestigationLoadState("error");
+          setInvestigationError(String(investigationLoadError));
+        });
+    },
+    [corpusId, lensSuspended],
+  );
+
   const loadOptionalMetadata = useCallback(() => {
     if (!bookmarkMetadataStartedRef.current) {
       bookmarkMetadataStartedRef.current = true;
@@ -1737,26 +1767,9 @@ export function LogExplorer({ corpusId }: Props) {
 
     if (!investigationMetadataStartedRef.current) {
       investigationMetadataStartedRef.current = true;
-      const investigationRequest = ++investigationLoadRequestRef.current;
-      setInvestigationLoadState("loading");
-      setInvestigationError(null);
-      void hostLogLoadActiveInvestigation(corpusId, currentNoiseLens(lensSuspended))
-        .then((activeInvestigation) => {
-          if (investigationRequest !== investigationLoadRequestRef.current) {
-            return;
-          }
-          setInvestigation(activeInvestigation);
-          setInvestigationLoadState("ready");
-        })
-        .catch((investigationLoadError) => {
-          if (investigationRequest !== investigationLoadRequestRef.current) {
-            return;
-          }
-          setInvestigationLoadState("error");
-          setInvestigationError(String(investigationLoadError));
-        });
+      void reloadActiveInvestigation(currentNoiseLens(lensSuspended));
     }
-  }, [corpusId]);
+  }, [corpusId, lensSuspended, reloadActiveInvestigation]);
 
   const loadFacets = useCallback(async () => {
     if (suppressionLoadState !== "ready") return;
@@ -4379,8 +4392,12 @@ export function LogExplorer({ corpusId }: Props) {
       writeNoiseLensSuspended(corpusId, suspended);
       setLensSuspended(suspended);
       // loadEvents / facets re-run when activeSuppressionTemplateIds changes.
+      // Findings must re-resolve against the new active|suspended lens (#819).
+      if (investigationMetadataStartedRef.current) {
+        void reloadActiveInvestigation(currentNoiseLens(suspended));
+      }
     },
-    [corpusId],
+    [corpusId, reloadActiveInvestigation],
   );
 
   const laneSourceFilter = (laneId: string) => {

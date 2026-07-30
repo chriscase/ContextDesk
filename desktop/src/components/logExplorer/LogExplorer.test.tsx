@@ -4547,6 +4547,261 @@ describe("LogExplorer shell", () => {
     expect(host.hostLogQueryEventNeighborhood).not.toHaveBeenCalled();
   });
 
+  it("reloads investigation with suspended lens and blocks Apply under different noise policy (#819)", async () => {
+    const event = defaultEventPage().events[0]!;
+    const eventRef: host.LogBookmarkEventRefDto = {
+      corpusId: "c1",
+      seq: event.seq,
+      source: event.source,
+      timestampHint: event.ts,
+      timeQualityHint: event.timeQuality,
+    };
+    const recipe: host.InvestigationViewRecipeDto = {
+      filters: {
+        levels: ["error"],
+        sources: [],
+        services: [],
+        hosts: [],
+        timeFrom: null,
+        timeTo: null,
+        seqFrom: null,
+        seqTo: null,
+        templateId: null,
+        traceId: null,
+        keyword: null,
+      },
+      lanes: [{ id: "lane-0", label: "All sources", sources: [] }],
+      visibleLaneCount: 1,
+      linkMode: "independent",
+      focusedLaneId: "lane-0",
+      focusedEvent: eventRef,
+      selection: [eventRef],
+      highlights: [eventRef],
+      find: null,
+      viewportAnchors: [{ laneId: "lane-0", eventRef }],
+    };
+    const finding: host.InvestigationFindingItemDto = {
+      id: "019fa8d0-0000-7000-8000-000000000031",
+      kind: "observation",
+      lifecycle: "accepted",
+      title: "Policy-bound failure",
+      whyItMatters: "Must recompute after policy change.",
+      evidenceIds: [],
+      viewRecipe: recipe,
+      policyBinding: {
+        suppressionPolicyRevision: 1,
+        resolvedTemplateRevision: 1,
+        effectivePolicySha256: "old-sha",
+        noiseLens: "active",
+      },
+      provenance: "human",
+      createdAt: 3,
+      updatedAt: 3,
+    };
+    const currentBinding = {
+      binding: finding.policyBinding,
+      currentSuppressionPolicyRevision: 2,
+      currentResolvedTemplateRevision: 2,
+      currentEffectivePolicySha256: "new-sha",
+      currentNoiseLens: "active" as const,
+      status: "made_under_different_policy" as const,
+    };
+    const loaded: host.ResolvedInvestigationDocumentDto = {
+      document: {
+        schemaVersion: 4,
+        id: "019fa8d0-0000-7000-8000-000000000030",
+        revision: 4,
+        title: "Investigation · fixture",
+        status: "active",
+        corpusLinks: [{ corpusId: "c1" }],
+        evidence: [],
+        findings: [finding],
+        notes: [],
+        createdAt: 1,
+        updatedAt: 4,
+      },
+      evidence: [],
+      findings: [
+        {
+          item: finding,
+          policyBinding: currentBinding,
+        },
+      ],
+    };
+    const suspendedLoaded: host.ResolvedInvestigationDocumentDto = {
+      ...loaded,
+      findings: [
+        {
+          item: finding,
+          policyBinding: {
+            ...currentBinding,
+            currentNoiseLens: "suspended",
+            status: "made_under_different_lens",
+          },
+        },
+      ],
+    };
+    const recomputed: host.ResolvedInvestigationDocumentDto = {
+      ...loaded,
+      document: {
+        ...loaded.document,
+        revision: 5,
+        findings: [
+          {
+            ...finding,
+            policyBinding: {
+              suppressionPolicyRevision: 2,
+              resolvedTemplateRevision: 2,
+              effectivePolicySha256: "new-sha",
+              noiseLens: "active",
+            },
+          },
+        ],
+      },
+      findings: [
+        {
+          item: {
+            ...finding,
+            policyBinding: {
+              suppressionPolicyRevision: 2,
+              resolvedTemplateRevision: 2,
+              effectivePolicySha256: "new-sha",
+              noiseLens: "active",
+            },
+          },
+          policyBinding: {
+            binding: {
+              suppressionPolicyRevision: 2,
+              resolvedTemplateRevision: 2,
+              effectivePolicySha256: "new-sha",
+              noiseLens: "active",
+            },
+            currentSuppressionPolicyRevision: 2,
+            currentResolvedTemplateRevision: 2,
+            currentEffectivePolicySha256: "new-sha",
+            currentNoiseLens: "active",
+            status: "current",
+          },
+        },
+      ],
+    };
+
+    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue({
+      schemaVersion: 1,
+      corpusId: "c1",
+      revision: 2,
+      resolvedTemplateRevision: 2,
+      rules: [
+        {
+          id: "rule-1",
+          name: "Heartbeat",
+          rationale: "noise",
+          predicate: { templateId: 1, templateFingerprint: "fp" },
+          origin: "human",
+          state: "enabled",
+          createdAt: 1,
+          updatedAt: 1,
+          resolution: {
+            kind: "matches_current",
+            matchesNothing: false,
+            explanation: "ok",
+          },
+        },
+      ],
+      previews: [],
+      audit: [],
+    });
+    vi.mocked(host.hostLogLoadActiveInvestigation)
+      .mockResolvedValueOnce(loaded)
+      .mockResolvedValueOnce(suspendedLoaded)
+      .mockResolvedValue(loaded);
+    vi.mocked(host.hostLogPreviewInvestigationFindingView).mockResolvedValue({
+      investigationId: loaded.document.id,
+      revision: loaded.document.revision,
+      findingId: finding.id,
+      policyBinding: currentBinding,
+      recipe,
+      missingCount: 0,
+      staleCount: 0,
+    });
+    vi.mocked(host.hostLogRecomputeInvestigationFindingView).mockResolvedValue(
+      recomputed,
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    await openInvestigationView(1);
+    await waitFor(() =>
+      expect(host.hostLogLoadActiveInvestigation).toHaveBeenCalledWith(
+        "c1",
+        "active",
+      ),
+    );
+
+    // Suspend lens must re-fetch investigation under suspended policy.
+    fireEvent.click(screen.getByTestId("noise-policy-trigger"));
+    fireEvent.click(await screen.findByTestId("noise-lens-suspend-all"));
+    await waitFor(() =>
+      expect(host.hostLogLoadActiveInvestigation).toHaveBeenCalledWith(
+        "c1",
+        "suspended",
+      ),
+    );
+
+    // Resume while the policy panel is still open (do not toggle it closed).
+    fireEvent.click(await screen.findByTestId("noise-lens-resume"));
+    await waitFor(() => {
+      const calls = vi.mocked(host.hostLogLoadActiveInvestigation).mock.calls;
+      const activeAfterSuspend = calls.filter(
+        (call) => call[0] === "c1" && call[1] === "active",
+      );
+      // Initial load + resume reload (at least two active loads).
+      expect(activeAfterSuspend.length).toBeGreaterThanOrEqual(2);
+    });
+
+    fireEvent.click(await screen.findByTestId(`finding-item-${finding.id}`));
+    expect(
+      screen.getByTestId(`finding-policy-${finding.id}`).textContent,
+    ).toBe("Made under a different noise policy");
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview saved view" }));
+    const viewPreview = await screen.findByTestId(
+      `finding-view-preview-${finding.id}`,
+    );
+    expect(viewPreview.textContent).toContain(
+      "Made under a different noise policy",
+    );
+    expect(viewPreview.textContent).toMatch(/Apply blocked/);
+    const applyBtn = within(viewPreview).getByRole("button", {
+      name: "Apply saved view",
+    }) as HTMLButtonElement;
+    expect(applyBtn.disabled).toBe(true);
+    fireEvent.click(applyBtn);
+    // Host apply re-preview must not schedule neighborhood mutation while blocked.
+    expect(host.hostLogQueryEventNeighborhood).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId(`finding-recompute-${finding.id}`));
+    await waitFor(() =>
+      expect(host.hostLogRecomputeInvestigationFindingView).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({
+          investigationId: loaded.document.id,
+          expectedRevision: loaded.document.revision,
+          findingId: finding.id,
+          noiseLens: "active",
+          viewRecipe: expect.objectContaining({
+            visibleLaneCount: expect.any(Number),
+          }),
+        }),
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Recomputed saved Explorer view under the current noise policy/i),
+      ).toBeTruthy(),
+    );
+  });
+
   it("revalidates every evidence identity at Reveal time and blocks a changed corpus", async () => {
     const event = defaultEventPage().events[0]!;
     const eventRef: host.LogBookmarkEventRefDto = {

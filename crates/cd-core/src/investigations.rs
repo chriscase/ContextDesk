@@ -3338,6 +3338,78 @@ mod tests {
         );
     }
 
+    /// #819 — explicit recompute replaces only the durable view recipe + binding.
+    #[test]
+    fn recompute_human_finding_view_updates_recipe_and_policy_under_current_lens() {
+        let cache = tempfile::tempdir().unwrap();
+        let durable = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&cache);
+        let store = InvestigationStore::new(durable.path());
+        let document = store.create("Recompute finding", &corpus).unwrap();
+        let binding =
+            InvestigationPolicyBinding::capture(&corpus, InvestigationNoiseLens::Active).unwrap();
+        let mut input = finding_input(&corpus);
+        let mut original_recipe = finding_view_recipe(&corpus);
+        original_recipe.filters.levels = vec!["error".into()];
+        input.view_recipe = Some(original_recipe.clone());
+        let saved = store
+            .add_human_finding_bound(&document.id, 1, &corpus, binding.clone(), input)
+            .unwrap();
+        let finding_id = saved.document.findings[0].id.clone();
+        let title_before = saved.document.findings[0].title.clone();
+        let why_before = saved.document.findings[0].why_it_matters.clone();
+
+        // Change the Explorer recipe under the same (still current) policy.
+        let mut next_recipe = original_recipe;
+        next_recipe.filters.levels = vec!["warn".into()];
+        next_recipe.filters.keyword = Some("retry".into());
+        let recomputed = store
+            .recompute_human_finding_view(
+                &document.id,
+                saved.document.revision,
+                &corpus,
+                binding.clone(),
+                &finding_id,
+                next_recipe.clone(),
+            )
+            .unwrap();
+        assert_eq!(recomputed.document.revision, saved.document.revision + 1);
+        assert_eq!(recomputed.document.findings.len(), 1);
+        let finding = &recomputed.document.findings[0];
+        assert_eq!(finding.title, title_before, "prose must not rewrite");
+        assert_eq!(finding.why_it_matters, why_before);
+        let stored_recipe = finding.view_recipe.as_ref().expect("recipe stored");
+        assert_eq!(stored_recipe.filters.levels, ["warn"]);
+        assert_eq!(stored_recipe.filters.keyword.as_deref(), Some("retry"));
+        assert_eq!(finding.policy_binding.as_ref(), Some(&binding));
+        assert_eq!(
+            recomputed.findings[0].policy_binding.status,
+            InvestigationPolicyBindingStatus::Current
+        );
+
+        // Stale expected revision must not mutate.
+        let stale = store.recompute_human_finding_view(
+            &document.id,
+            saved.document.revision,
+            &corpus,
+            binding,
+            &finding_id,
+            next_recipe,
+        );
+        assert!(stale.is_err(), "stale revision must fail closed");
+        let reopened = store
+            .load_with_policy_lens(&document.id, &corpus, InvestigationNoiseLens::Active)
+            .unwrap();
+        assert_eq!(reopened.document.revision, recomputed.document.revision);
+        assert_eq!(
+            reopened.document.findings[0]
+                .view_recipe
+                .as_ref()
+                .and_then(|r| r.filters.keyword.as_deref()),
+            Some("retry")
+        );
+    }
+
     #[test]
     fn investigation_policy_binding_distinguishes_suspended_and_active_lenses() {
         let cache = tempfile::tempdir().unwrap();
