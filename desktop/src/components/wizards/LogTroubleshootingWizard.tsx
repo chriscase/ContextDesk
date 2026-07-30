@@ -22,6 +22,7 @@ import {
 } from "../../lib/logStats";
 import { HELP_TEMPLATE_GROUPING } from "../../lib/helpContent";
 import { HelpTip } from "../HelpTip";
+import { LogImportConfidence } from "../panes/LogImportConfidence";
 import { ProcessProgressPanel } from "./ProcessProgressPanel";
 import {
   buildLogTriageStarterPrompt,
@@ -505,7 +506,12 @@ export function LogTroubleshootingWizard({
                 </p>
               ) : null}
               {ingestReport ? (
-                <IngestStatsHero report={ingestReport} />
+                <>
+                  <IngestStatsHero report={ingestReport} />
+                  {ingestReport.confidence ? (
+                    <LogImportConfidence confidence={ingestReport.confidence} />
+                  ) : null}
+                </>
               ) : null}
             </>
           ) : (
@@ -535,7 +541,14 @@ export function LogTroubleshootingWizard({
               {sessionPackNote}
             </p>
           ) : null}
-          {ingestReport ? <IngestStatsHero report={ingestReport} /> : null}
+          {ingestReport ? (
+            <>
+              <IngestStatsHero report={ingestReport} />
+              {ingestReport.confidence ? (
+                <LogImportConfidence confidence={ingestReport.confidence} />
+              ) : null}
+            </>
+          ) : null}
         </div>
       ) : null}
     </SessionWizardShell>

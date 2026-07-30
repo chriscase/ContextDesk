@@ -6188,6 +6188,7 @@ struct LogIngestReportDto {
     ts_min: Option<i64>,
     ts_max: Option<i64>,
     format_counts: std::collections::BTreeMap<String, u64>,
+    confidence: cd_core::log_analysis::IngestConfidenceReport,
     top_templates: Vec<LogTopTemplateDto>,
     embedding: cd_core::log_analysis::CorpusEmbeddingStatus,
 }
@@ -7400,6 +7401,7 @@ async fn run_log_ingest(
         ts_min: report.stats.ts_min,
         ts_max: report.stats.ts_max,
         format_counts: report.stats.format_counts.clone(),
+        confidence: report.confidence,
         top_templates: report
             .top_templates
             .into_iter()
