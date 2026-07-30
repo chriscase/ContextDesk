@@ -3164,7 +3164,7 @@
   display: grid;
   place-items: center;
   padding: clamp(12px, 3vw, 32px);
-  background: color-mix(in srgb, var(--surface-0) 58%, transparent);
+  background: var(--overlay-scrim, rgb(0 0 0 / 62%));
 }
 
 .log-explorer-time-resolution {
@@ -3174,7 +3174,8 @@
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 20px;
-  background: var(--surface-1);
+  color: var(--text, #f5f7fa);
+  background: var(--bg-panel, #15181d);
   box-shadow: var(--shadow-lg);
 }
 

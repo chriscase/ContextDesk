@@ -1,6 +1,7 @@
 import {
   useEffect,
   useId,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -80,6 +81,83 @@ function systemIanaZone(): string | null {
   }
 }
 
+const FALLBACK_IANA_ZONES = [
+  "UTC",
+  "America/Anchorage",
+  "America/Chicago",
+  "America/Denver",
+  "America/Los_Angeles",
+  "America/New_York",
+  "America/Phoenix",
+  "America/Toronto",
+  "America/Vancouver",
+  "Asia/Hong_Kong",
+  "Asia/Kolkata",
+  "Asia/Seoul",
+  "Asia/Shanghai",
+  "Asia/Singapore",
+  "Asia/Tokyo",
+  "Australia/Brisbane",
+  "Australia/Melbourne",
+  "Australia/Sydney",
+  "Europe/Amsterdam",
+  "Europe/Berlin",
+  "Europe/Dublin",
+  "Europe/London",
+  "Europe/Madrid",
+  "Europe/Paris",
+  "Europe/Prague",
+  "Europe/Rome",
+  "Europe/Stockholm",
+  "Europe/Zurich",
+] as const;
+
+function supportedIanaZones(preferred: Array<string | null>): string[] {
+  const supportedValuesOf = (
+    Intl as typeof Intl & {
+      supportedValuesOf?: (key: "timeZone") => string[];
+    }
+  ).supportedValuesOf;
+  const available = (() => {
+    try {
+      return supportedValuesOf?.("timeZone") ?? [];
+    } catch {
+      return [];
+    }
+  })();
+  return Array.from(
+    new Set([
+      ...preferred.filter((value): value is string => Boolean(value)),
+      "UTC",
+      ...available,
+      ...FALLBACK_IANA_ZONES,
+    ]),
+  ).filter(isValidIanaZone);
+}
+
+function currentUtcOffset(zone: string): string {
+  try {
+    const offset = new Intl.DateTimeFormat("en-US", {
+      timeZone: zone,
+      timeZoneName: "longOffset",
+    })
+      .formatToParts(new Date())
+      .find((part) => part.type === "timeZoneName")?.value;
+    if (!offset) return "current offset unavailable";
+    return offset.replace(/^GMT/, "UTC").replace("-", "−");
+  } catch {
+    return "current offset unavailable";
+  }
+}
+
+function friendlyZoneLabel(zone: string): string {
+  if (zone === "UTC") return "Coordinated Universal Time · UTC+00:00";
+  const parts = zone.split("/");
+  const city = (parts.at(-1) ?? zone).replaceAll("_", " ");
+  const region = parts.slice(0, -1).join(" · ").replaceAll("_", " ");
+  return `${city}${region ? ` · ${region}` : ""} · ${currentUtcOffset(zone)} now`;
+}
+
 function countLabel(value: number, noun: string): string {
   return `${value.toLocaleString()} ${noun}${value === 1 ? "" : "s"}`;
 }
@@ -139,7 +217,18 @@ export function LogTimezoneReviewDialog({
   const titleId = useId();
   const descriptionId = useId();
   const zoneHelpId = useId();
+  const zoneListId = useId();
   const resultId = useId();
+  const timezoneOptions = useMemo(
+    () =>
+      supportedIanaZones([declarationZone, effectiveSuggestedZone]).map(
+        (ianaZone) => ({
+          ianaZone,
+          label: friendlyZoneLabel(ianaZone),
+        }),
+      ),
+    [declarationZone, effectiveSuggestedZone],
+  );
   const busy = status !== "idle";
   const mutationBusy = status === "applying" || status === "clearing";
   const trimmedZone = zone.trim();
@@ -383,6 +472,7 @@ export function LogTimezoneReviewDialog({
             <span>IANA timezone</span>
             <input
               type="text"
+              list={zoneListId}
               value={zone}
               placeholder="For example, America/Chicago"
               autoComplete="off"
@@ -397,9 +487,20 @@ export function LogTimezoneReviewDialog({
                 setZone(event.target.value);
               }}
             />
+            <datalist id={zoneListId}>
+              {timezoneOptions.map((option) => (
+                <option
+                  key={option.ianaZone}
+                  value={option.ianaZone}
+                  label={option.label}
+                />
+              ))}
+            </datalist>
             <small id={zoneHelpId}>
-              Use a regional name such as Europe/Berlin—not an abbreviation such
-              as CET.
+              Browse or type to filter by location. Options show the current UTC
+              offset; preview applies the region’s historical daylight-saving
+              rules to each log time. The precise regional identifier is saved,
+              and abbreviations such as CET are not accepted.
               {effectiveSuggestedZone && !declaration ? (
                 <>
                   {" "}
