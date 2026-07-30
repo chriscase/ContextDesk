@@ -1,10 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="640" height="200" viewBox="0 0 640 200" role="img" aria-labelledby="title" aria-label="Bundle anatomy with manifest, logs, metrics, and attachments">
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="200" viewBox="0 0 640 200" role="img" aria-labelledby="title" aria-label="Incident Evidence Bundle directory anatomy">
   <title id="title">Incident Evidence Bundle directory anatomy</title>
-  <rect width="640" height="200" fill="none"/>
-  <rect x="20" y="20" width="600" height="160" rx="10" fill="none" stroke="currentColor" stroke-width="2"/>
-  <text x="40" y="48" font-family="system-ui,sans-serif" font-size="14" fill="currentColor">incident-evidence/</text>
-  <text x="56" y="78" font-family="ui-monospace,monospace" font-size="12" fill="currentColor">manifest.json   (authoritative inventory + hashes)</text>
-  <text x="56" y="104" font-family="ui-monospace,monospace" font-size="12" fill="currentColor">logs/…          (relative paths preserve sources)</text>
-  <text x="56" y="130" font-family="ui-monospace,monospace" font-size="12" fill="currentColor">metrics/…       (operational-metrics v1 documents)</text>
-  <text x="56" y="156" font-family="ui-monospace,monospace" font-size="12" fill="currentColor">attachments/…   (optional bounded supporting files)</text>
+  <!-- Explicit hex colors for light and dark page backgrounds when embedded as img. -->
+  <rect width="640" height="200" fill="#0f172a"/>
+  <rect x="20" y="20" width="600" height="160" rx="10" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
+  <text x="40" y="48" font-family="system-ui,sans-serif" font-size="14" fill="#e5e7eb">incident-evidence/</text>
+  <text x="56" y="78" font-family="ui-monospace,monospace" font-size="12" fill="#bae6fd">manifest.json   (authoritative inventory + hashes)</text>
+  <text x="56" y="104" font-family="ui-monospace,monospace" font-size="12" fill="#9ca3af">logs/…          (relative paths preserve sources)</text>
+  <text x="56" y="130" font-family="ui-monospace,monospace" font-size="12" fill="#9ca3af">metrics/…       (operational-metrics v1 documents)</text>
+  <text x="56" y="156" font-family="ui-monospace,monospace" font-size="12" fill="#9ca3af">attachments/…   (optional bounded supporting files)</text>
 </svg>

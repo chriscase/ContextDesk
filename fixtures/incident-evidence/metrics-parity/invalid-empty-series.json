@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "id": "empty-series",
+  "name": "Empty series array",
+  "series": []
+}

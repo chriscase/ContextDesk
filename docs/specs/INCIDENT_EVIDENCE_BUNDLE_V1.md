@@ -64,6 +64,9 @@ A conforming ZIP transport **MUST**:
 | Max compressed archive size | 2 GiB | `MAX_ARCHIVE_COMPRESSED_BYTES` |
 | Max zip entries | 513 (512 components + manifest) | `MAX_ARCHIVE_ENTRIES` |
 | Max expanded/compressed ratio (Deflated) | 100 | `MAX_COMPRESSION_RATIO` |
+| Max operational-metrics document | 8 MiB | `MAX_METRICS_DOC_BYTES` |
+| Max series per metrics document | 256 | `MAX_METRICS_SERIES` |
+| Max points per series | 100000 | `MAX_METRICS_POINTS_PER_SERIES` |
 
 #### Deterministic pack guarantees
 
@@ -130,7 +133,7 @@ Optional:
 | Role | Meaning |
 | --- | --- |
 | `log` | Raw authorized log payload (text/JSONL/etc.). Nested relative paths preserve multi-source identity. |
-| `operational_metrics` | One operational-metrics **v1 document** (series/points). Referenced schema is the shipped metrics v1 document, not redefined here. |
+| `operational_metrics` | One operational-metrics **v1 document** (series/points). Referenced schema is the shipped metrics v1 document (same rules as the production TypeScript `validateOperationalMetricsDocument`, including **required series `provenance.source`** and `timeQuality`). |
 | `attachment` | Bounded supporting artifact (screenshot, config excerpt). Not ambient chat context without future product governance. |
 | `readme` | Optional human notes. **MUST NOT** contain evaluator truth, expected diagnoses, or private credentials. |
 

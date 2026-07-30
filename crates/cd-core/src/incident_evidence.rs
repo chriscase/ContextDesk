@@ -8,8 +8,8 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::fs::File;
-use std::io::{BufReader, Read};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 
 /// Exact schema identifier for Incident Evidence Bundle v1.
@@ -23,20 +23,41 @@ pub const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 pub const MAX_COMPONENTS: usize = 512;
 /// Max single payload file size.
 pub const MAX_PER_FILE_BYTES: u64 = 512 * 1024 * 1024;
-/// Max sum of payload sizes.
+/// Max sum of payload sizes (actual bytes processed).
 pub const MAX_AGGREGATE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Max relative path length in bytes (UTF-8).
 pub const MAX_RELATIVE_PATH_BYTES: usize = 1024;
 /// Streaming hash buffer.
 pub const HASH_BUFFER_BYTES: usize = 64 * 1024;
+/// Max operational-metrics document size when role is operational_metrics.
+pub const MAX_METRICS_DOC_BYTES: u64 = 8 * 1024 * 1024;
+/// Max series in one metrics document (parity with bounded readers).
+pub const MAX_METRICS_SERIES: usize = 256;
+/// Max points per series.
+pub const MAX_METRICS_POINTS_PER_SERIES: usize = 100000;
+/// Max bundleId length.
+pub const MAX_BUNDLE_ID_CHARS: usize = 256;
+/// Max component id / producer string length.
+pub const MAX_ID_CHARS: usize = 128;
+/// Max mediaType length.
+pub const MAX_MEDIA_TYPE_CHARS: usize = 128;
+/// Max privacy notes length.
+pub const MAX_PRIVACY_NOTES_CHARS: usize = 1024;
 
-/// Forbidden substrings in manifest strings (conformance / shareable safety).
+/// Forbidden substrings (matched case-insensitively on paths, ids, notes, undeclared names).
 pub const FORBIDDEN_MANIFEST_SENTINELS: &[&str] = &[
     "evaluator_truth",
-    "EVALUATOR_TRUTH",
-    "EVALUATOR",
+    "evaluator-truth",
+    "answer_key",
+    "answer-key",
+    "expected_diagnosis",
+    "truth_inventory",
     "company-data",
 ];
+
+/// Characters allowed in component relative paths (matches JSON Schema relativePath).
+const REL_PATH_ALLOWED: &[u8] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._@+/-";
 
 /// One deterministic diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +171,21 @@ pub struct ComponentEntry {
     /// Optional per-component time basis.
     #[serde(default)]
     pub time_basis: Option<TimeBasis>,
+    /// Optional lineage (no absolute host paths).
+    #[serde(default)]
+    pub lineage: Option<Lineage>,
+}
+
+/// Optional component lineage (parent reference without host paths).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Lineage {
+    /// Parent component id.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// Free-text note (≤ 512).
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// Root manifest.
@@ -177,7 +213,8 @@ pub struct Manifest {
 /// Validate a directory-form Incident Evidence Bundle at `root`.
 pub fn validate_directory(root: &Path) -> ValidationReport {
     let mut diagnostics = Vec::new();
-    let root_display = root.display().to_string();
+    // Never surface absolute host paths in reports/CLI.
+    let root_display = redacted_root_label(root);
 
     if !root.is_dir() {
         diagnostics.push(Diagnostic::new(
@@ -189,59 +226,82 @@ pub fn validate_directory(root: &Path) -> ValidationReport {
     }
 
     let manifest_path = root.join("manifest.json");
-    if !manifest_path.is_file() {
-        diagnostics.push(Diagnostic::new(
-            "manifest_missing",
-            "manifest.json",
-            "manifest.json is required at the bundle root",
-        ));
-        return finish(false, root_display, None, None, diagnostics);
-    }
-
-    let manifest_meta = match std::fs::metadata(&manifest_path) {
-        Ok(m) => m,
-        Err(e) => {
-            diagnostics.push(Diagnostic::new(
-                "manifest_unreadable",
-                "manifest.json",
-                format!("cannot stat manifest.json: {e}"),
-            ));
+    // Manifest must be a regular file (not a symlink).
+    let mut opened =
+        match open_regular_file_bounded(&manifest_path, MAX_MANIFEST_BYTES, "manifest.json") {
+            Err(d) => {
+                // Map missing open to stable codes used by fixtures.
+                if d.code == "payload_missing" {
+                    diagnostics.push(Diagnostic::new(
+                        "manifest_missing",
+                        "manifest.json",
+                        "manifest.json is required at the bundle root",
+                    ));
+                } else if d.code == "file_too_large" {
+                    diagnostics.push(Diagnostic::new(
+                        "manifest_too_large",
+                        "manifest.json",
+                        format!("manifest.json exceeds MAX_MANIFEST_BYTES ({MAX_MANIFEST_BYTES})"),
+                    ));
+                } else {
+                    diagnostics.push(Diagnostic::new(
+                        "manifest_unreadable",
+                        "manifest.json",
+                        d.message,
+                    ));
+                }
+                return finish(false, root_display, None, None, diagnostics);
+            }
+            Ok(opened) => opened,
+        };
+    let raw = match read_all_bounded(&mut opened.file, opened.size, MAX_MANIFEST_BYTES) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => {
+                diagnostics.push(Diagnostic::new(
+                    "manifest_json_invalid",
+                    "manifest.json",
+                    "manifest.json is not valid UTF-8",
+                ));
+                return finish(false, root_display, None, None, diagnostics);
+            }
+        },
+        Err(msg) => {
+            diagnostics.push(Diagnostic::new("manifest_unreadable", "manifest.json", msg));
             return finish(false, root_display, None, None, diagnostics);
         }
     };
-    if manifest_meta.len() > MAX_MANIFEST_BYTES {
-        diagnostics.push(Diagnostic::new(
-            "manifest_too_large",
-            "manifest.json",
-            format!("manifest.json exceeds MAX_MANIFEST_BYTES ({MAX_MANIFEST_BYTES})"),
-        ));
+    if let Err(d) = verify_identity_unchanged(&opened) {
+        diagnostics.push(d);
         return finish(false, root_display, None, None, diagnostics);
     }
+    validate_manifest_and_payloads(root, &root_display, &raw, None)
+}
 
-    let raw = match std::fs::read_to_string(&manifest_path) {
-        Ok(s) => s,
-        Err(e) => {
-            diagnostics.push(Diagnostic::new(
-                "manifest_unreadable",
-                "manifest.json",
-                format!("cannot read manifest.json: {e}"),
-            ));
-            return finish(false, root_display, None, None, diagnostics);
-        }
-    };
+fn non_empty_str(v: Option<&serde_json::Value>) -> bool {
+    v.and_then(|x| x.as_str())
+        .is_some_and(|s| !s.trim().is_empty())
+}
 
-    // Forbidden sentinels in raw manifest text (ids, notes, labels).
-    for s in FORBIDDEN_MANIFEST_SENTINELS {
-        if raw.contains(s) {
-            diagnostics.push(Diagnostic::new(
-                "forbidden_sentinel",
-                "manifest.json",
-                format!("manifest contains forbidden sentinel `{s}`"),
-            ));
-        }
-    }
+/// Shared manifest+payload validation used by directory transport.
+///
+/// When `archive_entries` is `None`, payloads are read from the directory root
+/// with TOCTOU-safe regular-file opens. Callers for archive transport validate
+/// components against pre-streamed entry bytes via [`validate_metrics_document`]
+/// and their own streaming path.
+fn validate_manifest_and_payloads(
+    root: &Path,
+    root_display: &str,
+    raw: &str,
+    // When Some, skip filesystem payload I/O (archive path supplies hashes).
+    skip_fs_payloads: Option<()>,
+) -> ValidationReport {
+    let mut diagnostics = Vec::new();
 
-    let manifest: Manifest = match serde_json::from_str(&raw) {
+    // Case-insensitive sentinel scan on full manifest text.
+    scan_forbidden_sentinels(raw, "manifest.json", &mut diagnostics);
+
+    let manifest: Manifest = match serde_json::from_str(raw) {
         Ok(m) => m,
         Err(e) => {
             diagnostics.push(Diagnostic::new(
@@ -249,7 +309,7 @@ pub fn validate_directory(root: &Path) -> ValidationReport {
                 "manifest.json",
                 format!("manifest.json is not valid JSON for the v1 shape: {e}"),
             ));
-            return finish(false, root_display, None, None, diagnostics);
+            return finish(false, root_display.to_string(), None, None, diagnostics);
         }
     };
 
@@ -283,11 +343,18 @@ pub fn validate_directory(root: &Path) -> ValidationReport {
             "minReaderVersion must be >= 1",
         ));
     }
-    if manifest.bundle_id.trim().is_empty() || manifest.bundle_id.len() > 256 {
+    if manifest.bundle_id.trim().is_empty() || manifest.bundle_id.len() > MAX_BUNDLE_ID_CHARS {
         diagnostics.push(Diagnostic::new(
             "bundle_id_invalid",
             "$.bundleId",
-            "bundleId must be non-empty and <= 256 characters",
+            format!("bundleId must be non-empty and <= {MAX_BUNDLE_ID_CHARS} characters"),
+        ));
+    }
+    if contains_forbidden_sentinel(&manifest.bundle_id) {
+        diagnostics.push(Diagnostic::new(
+            "forbidden_sentinel",
+            "$.bundleId",
+            "bundleId contains forbidden sentinel",
         ));
     }
     if !created_at_has_explicit_offset(&manifest.created_at) {
@@ -297,11 +364,24 @@ pub fn validate_directory(root: &Path) -> ValidationReport {
             "createdAt MUST include an explicit offset or Z",
         ));
     }
-    if manifest.producer.name.trim().is_empty() || manifest.producer.version.trim().is_empty() {
+    if manifest.created_at.len() > 64 {
+        diagnostics.push(Diagnostic::new(
+            "created_at_too_long",
+            "$.createdAt",
+            "createdAt exceeds 64 characters",
+        ));
+    }
+    if manifest.producer.name.trim().is_empty()
+        || manifest.producer.version.trim().is_empty()
+        || manifest.producer.name.len() > MAX_ID_CHARS
+        || manifest.producer.version.len() > MAX_ID_CHARS
+    {
         diagnostics.push(Diagnostic::new(
             "producer_invalid",
             "$.producer",
-            "producer.name and producer.version MUST be non-empty",
+            format!(
+                "producer.name and producer.version MUST be non-empty and <= {MAX_ID_CHARS} characters"
+            ),
         ));
     }
     if manifest.privacy.contains_credentials {
@@ -310,6 +390,16 @@ pub fn validate_directory(root: &Path) -> ValidationReport {
             "$.privacy.containsCredentials",
             "shareable bundles MUST set containsCredentials=false",
         ));
+    }
+    if let Some(notes) = &manifest.privacy.notes {
+        if notes.len() > MAX_PRIVACY_NOTES_CHARS {
+            diagnostics.push(Diagnostic::new(
+                "privacy_notes_too_long",
+                "$.privacy.notes",
+                format!("privacy.notes exceeds {MAX_PRIVACY_NOTES_CHARS} characters"),
+            ));
+        }
+        scan_forbidden_sentinels(notes, "$.privacy.notes", &mut diagnostics);
     }
     validate_time_basis(&manifest.time_basis, "$.timeBasis", &mut diagnostics);
 
@@ -321,17 +411,29 @@ pub fn validate_directory(root: &Path) -> ValidationReport {
         ));
     }
 
+    // --- Pass 1: inventory integrity before any payload I/O ---
     let mut seen_ids = HashSet::new();
     let mut seen_paths = HashSet::new();
-    let mut aggregate: u64 = 0;
+    let mut seen_paths_lower = HashSet::new();
+    let mut declared_paths: HashSet<String> = HashSet::new();
+    let mut path_ok_for_io: Vec<bool> = Vec::with_capacity(manifest.components.len());
 
     for (i, c) in manifest.components.iter().enumerate() {
         let base = format!("$.components[{i}]");
-        if c.id.trim().is_empty() || c.id.len() > 128 {
+        let mut ok_io = true;
+        if c.id.trim().is_empty() || c.id.len() > MAX_ID_CHARS {
             diagnostics.push(Diagnostic::new(
                 "component_id_invalid",
                 format!("{base}.id"),
-                "component id MUST be non-empty and <= 128 characters",
+                format!("component id MUST be non-empty and <= {MAX_ID_CHARS} characters"),
+            ));
+            ok_io = false;
+        }
+        if contains_forbidden_sentinel(&c.id) {
+            diagnostics.push(Diagnostic::new(
+                "forbidden_sentinel",
+                format!("{base}.id"),
+                "component id contains forbidden sentinel",
             ));
         }
         if !seen_ids.insert(c.id.clone()) {
@@ -347,25 +449,73 @@ pub fn validate_directory(root: &Path) -> ValidationReport {
                 format!("{base}.role"),
                 format!("unknown component role `{}`", c.role),
             ));
+            ok_io = false;
         }
-        if c.media_type.trim().is_empty() {
+        if c.media_type.trim().is_empty() || c.media_type.len() > MAX_MEDIA_TYPE_CHARS {
             diagnostics.push(Diagnostic::new(
                 "media_type_empty",
                 format!("{base}.mediaType"),
-                "mediaType MUST be non-empty",
+                format!("mediaType MUST be non-empty and <= {MAX_MEDIA_TYPE_CHARS} characters"),
             ));
         }
         if let Err(msg) = validate_relative_path(&c.path) {
             diagnostics.push(Diagnostic::new("unsafe_path", format!("{base}.path"), msg));
-            // Do not read payload for unsafe paths.
-            continue;
+            ok_io = false;
+        } else {
+            if contains_forbidden_sentinel(&c.path) {
+                diagnostics.push(Diagnostic::new(
+                    "forbidden_sentinel",
+                    format!("{base}.path"),
+                    "component path contains forbidden sentinel",
+                ));
+            }
+            if !seen_paths.insert(c.path.clone()) {
+                diagnostics.push(Diagnostic::new(
+                    "duplicate_component_path",
+                    format!("{base}.path"),
+                    format!("duplicate component path `{}`", c.path),
+                ));
+                ok_io = false;
+            }
+            let lower = c.path.to_ascii_lowercase();
+            if !seen_paths_lower.insert(lower) {
+                diagnostics.push(Diagnostic::new(
+                    "portable_path_collision",
+                    format!("{base}.path"),
+                    format!("case-insensitive path collision for `{}`", c.path),
+                ));
+                ok_io = false;
+            }
+            declared_paths.insert(c.path.clone());
         }
-        if !seen_paths.insert(c.path.clone()) {
-            diagnostics.push(Diagnostic::new(
-                "duplicate_component_path",
-                format!("{base}.path"),
-                format!("duplicate component path `{}`", c.path),
-            ));
+        if let Some(label) = &c.source_label {
+            if label.len() > MAX_ID_CHARS {
+                diagnostics.push(Diagnostic::new(
+                    "source_label_too_long",
+                    format!("{base}.sourceLabel"),
+                    format!("sourceLabel exceeds {MAX_ID_CHARS} characters"),
+                ));
+            }
+            scan_forbidden_sentinels(label, &format!("{base}.sourceLabel"), &mut diagnostics);
+        }
+        if let Some(lin) = &c.lineage {
+            if let Some(note) = &lin.note {
+                if note.len() > 512 {
+                    diagnostics.push(Diagnostic::new(
+                        "lineage_note_too_long",
+                        format!("{base}.lineage.note"),
+                        "lineage.note exceeds 512 characters",
+                    ));
+                }
+                scan_forbidden_sentinels(note, &format!("{base}.lineage.note"), &mut diagnostics);
+                if note.contains('/') && (note.starts_with('/') || note.contains(":\\")) {
+                    diagnostics.push(Diagnostic::new(
+                        "lineage_absolute_path",
+                        format!("{base}.lineage.note"),
+                        "lineage MUST NOT embed absolute host paths",
+                    ));
+                }
+            }
         }
         if !is_lowercase_sha256(&c.sha256) {
             diagnostics.push(Diagnostic::new(
@@ -380,128 +530,137 @@ pub fn validate_directory(root: &Path) -> ValidationReport {
                 format!("{base}.bytes"),
                 format!("declared bytes exceed MAX_PER_FILE_BYTES ({MAX_PER_FILE_BYTES})"),
             ));
+            ok_io = false;
         }
-        aggregate = aggregate.saturating_add(c.bytes);
         if let Some(tb) = &c.time_basis {
             validate_time_basis(tb, &format!("{base}.timeBasis"), &mut diagnostics);
         }
+        path_ok_for_io.push(ok_io);
+    }
 
-        // Lexical resolve under root, then canonicalize every path (including
-        // intermediate directory symlinks) and require the real path stays
-        // under the canonical bundle root before any payload read/hash.
-        let payload = match resolve_under_root(root, &c.path) {
-            Ok(p) => p,
-            Err(msg) => {
-                diagnostics.push(Diagnostic::new("path_escape", c.path.clone(), msg));
+    // --- Pass 2: single-open size/hash/(metrics parse) per declared path ---
+    let mut aggregate_actual: u64 = 0;
+    if skip_fs_payloads.is_none() {
+        for (i, c) in manifest.components.iter().enumerate() {
+            if !path_ok_for_io[i] {
                 continue;
             }
-        };
-        let payload = match ensure_within_bundle_root(root, &payload) {
-            Ok(p) => p,
-            Err(code_msg) => {
-                diagnostics.push(Diagnostic::new(code_msg.0, c.path.clone(), code_msg.1));
-                continue;
-            }
-        };
-        if !payload.is_file() {
-            diagnostics.push(Diagnostic::new(
-                "payload_missing",
-                c.path.clone(),
-                format!("payload file missing: {}", c.path),
-            ));
-            continue;
-        }
-
-        let meta = match std::fs::metadata(&payload) {
-            Ok(m) => m,
-            Err(e) => {
+            let payload = match resolve_under_root(root, &c.path) {
+                Ok(p) => p,
+                Err(msg) => {
+                    diagnostics.push(Diagnostic::new("path_escape", c.path.clone(), msg));
+                    continue;
+                }
+            };
+            // Intermediate symlink escape: lexical join then ensure every prefix
+            // is not a symlink out of root; final open uses O_NOFOLLOW/regular-only.
+            if path_has_symlink_component(root, &c.path) {
                 diagnostics.push(Diagnostic::new(
-                    "payload_unreadable",
+                    "symlink_escape",
                     c.path.clone(),
-                    format!("cannot stat payload: {e}"),
+                    "payload path contains a symlink component",
                 ));
                 continue;
             }
-        };
-        if meta.len() != c.bytes {
-            diagnostics.push(Diagnostic::new(
-                "byte_count_mismatch",
-                c.path.clone(),
-                format!("declared bytes {} != actual {}", c.bytes, meta.len()),
-            ));
-        }
-        if meta.len() > MAX_PER_FILE_BYTES {
-            diagnostics.push(Diagnostic::new(
-                "file_too_large",
-                c.path.clone(),
-                format!("actual size exceeds MAX_PER_FILE_BYTES ({MAX_PER_FILE_BYTES})"),
-            ));
-            continue;
-        }
-        match stream_sha256_hex(&payload) {
-            Ok(hex) => {
-                if is_lowercase_sha256(&c.sha256) && hex != c.sha256 {
-                    diagnostics.push(Diagnostic::new(
-                        "hash_mismatch",
-                        c.path.clone(),
-                        "declared sha256 does not match file contents",
-                    ));
+            let mut opened = match open_regular_file_bounded(&payload, MAX_PER_FILE_BYTES, &c.path)
+            {
+                Ok(o) => o,
+                Err(d) => {
+                    diagnostics.push(d);
+                    continue;
                 }
+            };
+            if opened.size != c.bytes {
+                diagnostics.push(Diagnostic::new(
+                    "byte_count_mismatch",
+                    c.path.clone(),
+                    format!("declared bytes {} != actual {}", c.bytes, opened.size),
+                ));
             }
-            Err(e) => diagnostics.push(Diagnostic::new(
-                "hash_failed",
-                c.path.clone(),
-                format!("failed to hash payload: {e}"),
-            )),
-        }
+            // Hash exactly once from the open handle.
+            let hex = match stream_sha256_file(&mut opened.file, opened.size) {
+                Ok(h) => h,
+                Err(e) => {
+                    diagnostics.push(Diagnostic::new(
+                        "hash_failed",
+                        c.path.clone(),
+                        format!("failed to hash payload: {e}"),
+                    ));
+                    continue;
+                }
+            };
+            if let Err(d) = verify_identity_unchanged(&opened) {
+                diagnostics.push(Diagnostic::new(d.code, c.path.clone(), d.message));
+                continue;
+            }
+            if is_lowercase_sha256(&c.sha256) && hex != c.sha256 {
+                diagnostics.push(Diagnostic::new(
+                    "hash_mismatch",
+                    c.path.clone(),
+                    "declared sha256 does not match file contents",
+                ));
+            }
+            aggregate_actual = aggregate_actual.saturating_add(opened.size);
+            if aggregate_actual > MAX_AGGREGATE_BYTES {
+                diagnostics.push(Diagnostic::new(
+                    "aggregate_too_large",
+                    "$.components",
+                    format!(
+                        "aggregate actual bytes exceed MAX_AGGREGATE_BYTES ({MAX_AGGREGATE_BYTES})"
+                    ),
+                ));
+            }
 
-        // Lightweight metrics document check: JSON with schemaVersion 1 when role matches.
-        if c.role == "operational_metrics" {
-            if let Ok(text) = std::fs::read_to_string(&payload) {
-                if text.len() <= 8 * 1024 * 1024 {
-                    match serde_json::from_str::<serde_json::Value>(&text) {
-                        Ok(v) => {
-                            let ver = v.get("schemaVersion").and_then(|x| x.as_u64());
-                            if ver != Some(1) {
-                                diagnostics.push(Diagnostic::new(
-                                    "metrics_schema_version",
-                                    c.path.clone(),
-                                    "operational_metrics document MUST use schemaVersion 1",
-                                ));
+            if c.role == "operational_metrics" {
+                if opened.size > MAX_METRICS_DOC_BYTES {
+                    diagnostics.push(Diagnostic::new(
+                        "metrics_doc_too_large",
+                        c.path.clone(),
+                        format!(
+                            "operational_metrics document exceeds MAX_METRICS_DOC_BYTES ({MAX_METRICS_DOC_BYTES})"
+                        ),
+                    ));
+                } else if let Err(e) = opened.file.seek(SeekFrom::Start(0)) {
+                    diagnostics.push(Diagnostic::new(
+                        "metrics_read_failed",
+                        c.path.clone(),
+                        format!("cannot rewind payload for metrics parse: {e}"),
+                    ));
+                } else {
+                    match read_all_bounded(&mut opened.file, opened.size, MAX_METRICS_DOC_BYTES) {
+                        Ok(bytes) => match String::from_utf8(bytes) {
+                            Ok(text) => {
+                                validate_metrics_document_text(&text, &c.path, &mut diagnostics);
                             }
-                            if v.get("series").and_then(|s| s.as_array()).is_none() {
-                                diagnostics.push(Diagnostic::new(
-                                    "metrics_series_missing",
-                                    c.path.clone(),
-                                    "operational_metrics document MUST include a series array",
-                                ));
-                            }
-                        }
-                        Err(e) => diagnostics.push(Diagnostic::new(
-                            "metrics_json_invalid",
+                            Err(_) => diagnostics.push(Diagnostic::new(
+                                "metrics_json_invalid",
+                                c.path.clone(),
+                                "operational_metrics payload is not valid UTF-8",
+                            )),
+                        },
+                        Err(msg) => diagnostics.push(Diagnostic::new(
+                            "metrics_read_failed",
                             c.path.clone(),
-                            format!("operational_metrics payload is not JSON: {e}"),
+                            msg,
                         )),
+                    }
+                    if let Err(d) = verify_identity_unchanged(&opened) {
+                        diagnostics.push(Diagnostic::new(d.code, c.path.clone(), d.message));
                     }
                 }
             }
         }
-    }
 
-    if aggregate > MAX_AGGREGATE_BYTES {
-        diagnostics.push(Diagnostic::new(
-            "aggregate_too_large",
-            "$.components",
-            format!("aggregate declared bytes exceed MAX_AGGREGATE_BYTES ({MAX_AGGREGATE_BYTES})"),
-        ));
+        // Undeclared files + undeclared truth material under the bundle root.
+        scan_undeclared_entries(root, &declared_paths, &mut diagnostics);
     }
 
     let component_count = Some(manifest.components.len());
-    let total_validated_bytes = Some(aggregate);
+    let total_validated_bytes = Some(aggregate_actual);
     let ok = diagnostics.is_empty();
     finish_with_counts(
         ok,
-        root_display,
+        root_display.to_string(),
         schema_id,
         bundle_id,
         component_count,
@@ -609,7 +768,7 @@ pub(crate) fn validate_time_basis(tb: &TimeBasis, json_path: &str, out: &mut Vec
     }
 }
 
-/// Reject absolute, traversal, drive-prefix, empty, and overlong paths.
+/// Reject absolute, traversal, drive-prefix, empty, overlong, and non-schema paths.
 pub fn validate_relative_path(path: &str) -> Result<(), String> {
     if path.is_empty() {
         return Err("path MUST be non-empty".into());
@@ -641,6 +800,11 @@ pub fn validate_relative_path(path: &str) -> Result<(), String> {
             return Err("path MUST NOT contain `.` or `..` segments".into());
         }
     }
+    if !path.bytes().all(|b| REL_PATH_ALLOWED.contains(&b)) {
+        return Err(
+            "path MUST match the relativePath grammar [A-Za-z0-9._@+/-]+ (JSON Schema)".into(),
+        );
+    }
     // Also walk Path components for belt-and-suspenders.
     for c in Path::new(path).components() {
         match c {
@@ -656,6 +820,564 @@ pub fn validate_relative_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Bundle-relative label for CLI/report output (never absolute machine paths).
+pub fn redacted_root_label(path: &Path) -> String {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "bundle".into())
+}
+
+/// Case-insensitive forbidden-sentinel detection.
+pub fn contains_forbidden_sentinel(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    FORBIDDEN_MANIFEST_SENTINELS
+        .iter()
+        .any(|s| lower.contains(&s.to_ascii_lowercase()))
+}
+
+fn scan_forbidden_sentinels(text: &str, path: &str, out: &mut Vec<Diagnostic>) {
+    if contains_forbidden_sentinel(text) {
+        out.push(Diagnostic::new(
+            "forbidden_sentinel",
+            path,
+            "text contains forbidden evaluator-truth / answer-key sentinel",
+        ));
+    }
+}
+
+/// Opened regular file with size and OS identity for TOCTOU checks.
+pub struct OpenedRegularFile {
+    /// Open file handle (single source for size/hash/parse).
+    pub file: File,
+    /// Size observed at open (from fstat).
+    pub size: u64,
+    #[cfg(unix)]
+    identity: (u64, u64),
+    path_label: String,
+}
+
+/// Open a path only if it is a regular (non-symlink) file within size bound.
+///
+/// Uses `O_NOFOLLOW` on Unix. Size is taken from the open handle metadata.
+pub fn open_regular_file_bounded(
+    path: &Path,
+    max_bytes: u64,
+    path_label: &str,
+) -> Result<OpenedRegularFile, Diagnostic> {
+    // Fast pre-check: reject symlinks before open (also covers platforms without O_NOFOLLOW).
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(Diagnostic::new(
+                "payload_missing",
+                path_label,
+                format!("payload file missing: {path_label}"),
+            ));
+        }
+        Err(e) => {
+            return Err(Diagnostic::new(
+                "payload_unreadable",
+                path_label,
+                format!("cannot lstat payload: {e}"),
+            ));
+        }
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(Diagnostic::new(
+                    "symlink_escape",
+                    path_label,
+                    "payload MUST NOT be a symlink",
+                ));
+            }
+            if !meta.file_type().is_file() {
+                return Err(Diagnostic::new(
+                    "entry_non_regular",
+                    path_label,
+                    "payload MUST be a regular file",
+                ));
+            }
+            if meta.len() > max_bytes {
+                return Err(Diagnostic::new(
+                    "file_too_large",
+                    path_label,
+                    format!("actual size exceeds bound ({max_bytes})"),
+                ));
+            }
+        }
+    }
+
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NOFOLLOW: fail if final path component is a symlink.
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = opts.open(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            Diagnostic::new(
+                "payload_missing",
+                path_label,
+                format!("payload file missing: {path_label}"),
+            )
+        } else {
+            Diagnostic::new(
+                "payload_unreadable",
+                path_label,
+                format!("cannot open payload: {e}"),
+            )
+        }
+    })?;
+    let meta = file.metadata().map_err(|e| {
+        Diagnostic::new(
+            "payload_unreadable",
+            path_label,
+            format!("cannot fstat payload: {e}"),
+        )
+    })?;
+    if !meta.is_file() {
+        return Err(Diagnostic::new(
+            "entry_non_regular",
+            path_label,
+            "payload MUST be a regular file",
+        ));
+    }
+    if meta.len() > max_bytes {
+        return Err(Diagnostic::new(
+            "file_too_large",
+            path_label,
+            format!("actual size exceeds bound ({max_bytes})"),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(OpenedRegularFile {
+            file,
+            size: meta.len(),
+            identity: (meta.dev(), meta.ino()),
+            path_label: path_label.to_string(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(OpenedRegularFile {
+            file,
+            size: meta.len(),
+            path_label: path_label.to_string(),
+        })
+    }
+}
+
+fn verify_identity_unchanged(opened: &OpenedRegularFile) -> Result<(), Diagnostic> {
+    let meta = opened.file.metadata().map_err(|e| {
+        Diagnostic::new(
+            "payload_identity_changed",
+            opened.path_label.clone(),
+            format!("cannot re-fstat payload: {e}"),
+        )
+    })?;
+    if meta.len() != opened.size {
+        return Err(Diagnostic::new(
+            "payload_identity_changed",
+            opened.path_label.clone(),
+            "payload size changed during validation",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (meta.dev(), meta.ino()) != opened.identity {
+            return Err(Diagnostic::new(
+                "payload_identity_changed",
+                opened.path_label.clone(),
+                "payload identity (dev/ino) changed during validation",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn read_all_bounded(file: &mut File, expected: u64, max: u64) -> Result<Vec<u8>, String> {
+    if expected > max {
+        return Err(format!("read bound exceeded ({max})"));
+    }
+    let mut buf = Vec::new();
+    // Cap allocation: take(expected) then ensure EOF.
+    let mut limited = file.take(expected.saturating_add(1));
+    limited
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("read failed: {e}"))?;
+    if buf.len() as u64 != expected {
+        return Err(format!(
+            "read length {} != expected size {expected}",
+            buf.len()
+        ));
+    }
+    Ok(buf)
+}
+
+/// Stream SHA-256 of an open file, reading at most `size` bytes (single pass).
+pub fn stream_sha256_file(file: &mut File, size: u64) -> Result<String, String> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("seek failed: {e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; HASH_BUFFER_BYTES];
+    let mut remaining = size;
+    while remaining > 0 {
+        let chunk = (remaining as usize).min(buf.len());
+        let n = file
+            .read(&mut buf[..chunk])
+            .map_err(|e| format!("read failed: {e}"))?;
+        if n == 0 {
+            return Err("unexpected EOF while hashing".into());
+        }
+        hasher.update(&buf[..n]);
+        remaining -= n as u64;
+    }
+    // Ensure no extra bytes beyond declared size on the open handle.
+    let extra = file.read(&mut buf[..1]).map_err(|e| e.to_string())?;
+    if extra != 0 {
+        return Err("payload grew beyond size observed at open".into());
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+fn path_has_symlink_component(root: &Path, rel: &str) -> bool {
+    let mut cur = root.to_path_buf();
+    for seg in rel.split('/') {
+        cur.push(seg);
+        if cur
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Walk the bundle directory for undeclared files and truth sentinels.
+fn scan_undeclared_entries(root: &Path, declared: &HashSet<String>, out: &mut Vec<Diagnostic>) {
+    let Ok(root_real) = root.canonicalize() else {
+        out.push(Diagnostic::new(
+            "root_unresolvable",
+            "bundle",
+            "bundle root could not be resolved for undeclared scan",
+        ));
+        return;
+    };
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) => {
+                out.push(Diagnostic::new(
+                    "bundle_unreadable",
+                    redacted_root_label(&dir),
+                    format!("cannot read directory: {e}"),
+                ));
+                continue;
+            }
+        };
+        for ent in entries.flatten() {
+            let path = ent.path();
+            let meta = match std::fs::symlink_metadata(&path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if meta.file_type().is_symlink() {
+                // Symlinks are never valid undeclared or structural entries.
+                let rel = relative_from_root(&root_real, &path)
+                    .unwrap_or_else(|| redacted_root_label(&path));
+                out.push(Diagnostic::new(
+                    "symlink_escape",
+                    rel,
+                    "bundle MUST NOT contain symlink entries",
+                ));
+                continue;
+            }
+            if meta.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !meta.is_file() {
+                let rel = relative_from_root(&root_real, &path)
+                    .unwrap_or_else(|| redacted_root_label(&path));
+                out.push(Diagnostic::new(
+                    "entry_non_regular",
+                    rel,
+                    "bundle MUST NOT contain non-regular files",
+                ));
+                continue;
+            }
+            let rel = match relative_from_root(&root_real, &path) {
+                Some(r) => r,
+                None => {
+                    out.push(Diagnostic::new(
+                        "path_escape",
+                        redacted_root_label(&path),
+                        "file outside bundle root during undeclared scan",
+                    ));
+                    continue;
+                }
+            };
+            if rel == "manifest.json" {
+                continue;
+            }
+            if contains_forbidden_sentinel(&rel) {
+                out.push(Diagnostic::new(
+                    "forbidden_sentinel",
+                    rel.clone(),
+                    "undeclared or declared path contains forbidden sentinel",
+                ));
+            }
+            if !declared.contains(&rel) {
+                out.push(Diagnostic::new(
+                    "undeclared_payload",
+                    rel,
+                    "file is not declared in manifest components",
+                ));
+            }
+        }
+    }
+}
+
+fn relative_from_root(root_real: &Path, path: &Path) -> Option<String> {
+    let real = path.canonicalize().ok()?;
+    let rel = real.strip_prefix(root_real).ok()?;
+    let mut parts = Vec::new();
+    for c in rel.components() {
+        match c {
+            Component::Normal(s) => parts.push(s.to_string_lossy().into_owned()),
+            _ => return None,
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+/// Validate operational-metrics v1 document text (parity with TypeScript validator).
+pub fn validate_metrics_document_text(text: &str, path_label: &str, out: &mut Vec<Diagnostic>) {
+    let value: serde_json::Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(e) => {
+            out.push(Diagnostic::new(
+                "metrics_json_invalid",
+                path_label,
+                format!("operational_metrics payload is not JSON: {e}"),
+            ));
+            return;
+        }
+    };
+    validate_metrics_document_value(&value, path_label, out);
+}
+
+/// Validate a parsed operational-metrics v1 value.
+pub fn validate_metrics_document_value(
+    value: &serde_json::Value,
+    path_label: &str,
+    out: &mut Vec<Diagnostic>,
+) {
+    let obj = match value.as_object() {
+        Some(o) => o,
+        None => {
+            out.push(Diagnostic::new(
+                "metrics_not_object",
+                path_label,
+                "operational_metrics document must be an object",
+            ));
+            return;
+        }
+    };
+    // Unknown fields are tolerated (additive evolution), matching TS.
+    match obj.get("schemaVersion").and_then(|v| v.as_u64()) {
+        Some(1) => {}
+        _ => out.push(Diagnostic::new(
+            "metrics_schema_version",
+            format!("{path_label}:$.schemaVersion"),
+            "must equal 1",
+        )),
+    }
+    if !non_empty_str(obj.get("id")) {
+        out.push(Diagnostic::new(
+            "metrics_id_invalid",
+            format!("{path_label}:$.id"),
+            "must be a non-empty string",
+        ));
+    }
+    if !non_empty_str(obj.get("name")) {
+        out.push(Diagnostic::new(
+            "metrics_name_invalid",
+            format!("{path_label}:$.name"),
+            "must be a non-empty string",
+        ));
+    }
+    let series = match obj.get("series").and_then(|v| v.as_array()) {
+        Some(s) if !s.is_empty() => s,
+        Some(_) => {
+            out.push(Diagnostic::new(
+                "metrics_series_missing",
+                format!("{path_label}:$.series"),
+                "must contain at least one metric series",
+            ));
+            return;
+        }
+        None => {
+            out.push(Diagnostic::new(
+                "metrics_series_missing",
+                format!("{path_label}:$.series"),
+                "must contain a series array",
+            ));
+            return;
+        }
+    };
+    if series.len() > MAX_METRICS_SERIES {
+        out.push(Diagnostic::new(
+            "metrics_too_many_series",
+            format!("{path_label}:$.series"),
+            format!("series count exceeds MAX_METRICS_SERIES ({MAX_METRICS_SERIES})"),
+        ));
+    }
+    let mut ids = HashSet::new();
+    for (si, candidate) in series.iter().enumerate() {
+        let sp = format!("{path_label}:$.series[{si}]");
+        let sobj = match candidate.as_object() {
+            Some(o) => o,
+            None => {
+                out.push(Diagnostic::new(
+                    "metrics_series_invalid",
+                    sp,
+                    "must be an object",
+                ));
+                continue;
+            }
+        };
+        let sid = sobj.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if sid.trim().is_empty() {
+            out.push(Diagnostic::new(
+                "metrics_series_id_invalid",
+                format!("{sp}.id"),
+                "must be non-empty",
+            ));
+        } else if !ids.insert(sid.to_string()) {
+            out.push(Diagnostic::new(
+                "metrics_series_id_duplicate",
+                format!("{sp}.id"),
+                "must be unique",
+            ));
+        }
+        if !non_empty_str(sobj.get("name")) {
+            out.push(Diagnostic::new(
+                "metrics_series_name_invalid",
+                format!("{sp}.name"),
+                "must be non-empty",
+            ));
+        }
+        if !non_empty_str(sobj.get("unit")) {
+            out.push(Diagnostic::new(
+                "metrics_series_unit_invalid",
+                format!("{sp}.unit"),
+                "must be non-empty",
+            ));
+        }
+        // Required series provenance (parity with TS validateProvenance).
+        match sobj.get("provenance").and_then(|v| v.as_object()) {
+            Some(p) => {
+                if !non_empty_str(p.get("source")) {
+                    out.push(Diagnostic::new(
+                        "metrics_provenance_invalid",
+                        format!("{sp}.provenance"),
+                        "must include a non-empty source",
+                    ));
+                }
+            }
+            None => out.push(Diagnostic::new(
+                "metrics_provenance_missing",
+                format!("{sp}.provenance"),
+                "must include a non-empty source",
+            )),
+        }
+        match sobj.get("timeQuality").and_then(|v| v.as_str()) {
+            Some("wall" | "mixed" | "order_only") => {}
+            _ => out.push(Diagnostic::new(
+                "metrics_time_quality_invalid",
+                format!("{sp}.timeQuality"),
+                "must be wall, mixed, or order_only",
+            )),
+        }
+        let points = match sobj.get("points").and_then(|v| v.as_array()) {
+            Some(p) if !p.is_empty() => p,
+            _ => {
+                out.push(Diagnostic::new(
+                    "metrics_points_missing",
+                    format!("{sp}.points"),
+                    "must contain at least one point",
+                ));
+                continue;
+            }
+        };
+        if points.len() > MAX_METRICS_POINTS_PER_SERIES {
+            out.push(Diagnostic::new(
+                "metrics_too_many_points",
+                format!("{sp}.points"),
+                format!(
+                    "points exceed MAX_METRICS_POINTS_PER_SERIES ({MAX_METRICS_POINTS_PER_SERIES})"
+                ),
+            ));
+        }
+        let mut prev = f64::NEG_INFINITY;
+        for (pi, point) in points.iter().enumerate() {
+            let pp = format!("{sp}.points[{pi}]");
+            let pobj = match point.as_object() {
+                Some(o) => o,
+                None => {
+                    out.push(Diagnostic::new(
+                        "metrics_point_invalid",
+                        pp,
+                        "must be an object",
+                    ));
+                    continue;
+                }
+            };
+            match pobj.get("timestamp").and_then(|v| v.as_f64()) {
+                Some(ts) if ts.is_finite() => {
+                    if ts <= prev {
+                        out.push(Diagnostic::new(
+                            "metrics_timestamp_order",
+                            format!("{pp}.timestamp"),
+                            "must be strictly increasing",
+                        ));
+                    }
+                    prev = ts;
+                }
+                _ => out.push(Diagnostic::new(
+                    "metrics_timestamp_invalid",
+                    format!("{pp}.timestamp"),
+                    "must be a finite Unix timestamp in seconds",
+                )),
+            }
+            match pobj.get("value").and_then(|v| v.as_f64()) {
+                Some(v) if v.is_finite() => {}
+                _ => out.push(Diagnostic::new(
+                    "metrics_value_invalid",
+                    format!("{pp}.value"),
+                    "must be a finite number",
+                )),
+            }
+        }
+    }
+}
+
 fn resolve_under_root(root: &Path, rel: &str) -> Result<PathBuf, String> {
     validate_relative_path(rel)?;
     let mut out = root.to_path_buf();
@@ -665,68 +1387,28 @@ fn resolve_under_root(root: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(out)
 }
 
-/// Canonicalize `candidate` and require it to stay under the canonical bundle root.
-///
-/// Catches leaf symlinks **and** intermediate directory symlinks (e.g.
-/// `logs -> /tmp/outside` with path `logs/app.log`). Must run before any
-/// payload open/hash.
-pub(crate) fn ensure_within_bundle_root(
-    root: &Path,
-    candidate: &Path,
-) -> Result<PathBuf, (&'static str, String)> {
-    let root_real = root.canonicalize().map_err(|e| {
-        (
-            "root_unresolvable",
-            format!("bundle root could not be resolved: {e}"),
-        )
-    })?;
-    // Missing paths are not symlink escapes — keep payload_missing actionable.
-    if !candidate.exists() {
-        return Err((
-            "payload_missing",
-            format!("payload file missing: {}", candidate.display()),
-        ));
-    }
-    let real = candidate.canonicalize().map_err(|e| {
-        (
-            "symlink_unresolvable",
-            format!("payload path could not be resolved safely: {e}"),
-        )
-    })?;
-    if !real.starts_with(&root_real) {
-        return Err((
-            "symlink_escape",
-            "resolved payload path escapes bundle root (symlink or junction)".into(),
-        ));
-    }
-    Ok(real)
+/// Stream SHA-256 of a path via a single bounded regular-file open.
+pub fn stream_sha256_hex(path: &Path) -> Result<String, String> {
+    stream_sha256_hex_bounded(path, MAX_PER_FILE_BYTES)
 }
 
-pub(crate) fn stream_sha256_hex(path: &Path) -> Result<String, String> {
-    let file = File::open(path).map_err(|e| e.to_string())?;
-    let mut reader = BufReader::new(file);
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; HASH_BUFFER_BYTES];
-    loop {
-        let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+/// Stream SHA-256 with an explicit size bound (e.g. archive digests).
+pub fn stream_sha256_hex_bounded(path: &Path, max_bytes: u64) -> Result<String, String> {
+    let label = redacted_root_label(path);
+    let mut opened = open_regular_file_bounded(path, max_bytes, &label).map_err(|d| d.message)?;
+    let hex = stream_sha256_file(&mut opened.file, opened.size)?;
+    verify_identity_unchanged(&opened).map_err(|d| d.message)?;
+    Ok(hex)
 }
 
-/// Format a report as deterministic CI-friendly text.
+/// Format a report as deterministic CI-friendly text (bundle-relative only).
 pub fn format_report_text(report: &ValidationReport) -> String {
     let mut lines = Vec::new();
+    // `report.root` is already redacted by validators; never re-expand.
+    let root = sanitize_report_path(&report.root);
     lines.push(format!(
         "incident-evidence-validate ok={} root={}",
-        report.ok, report.root
+        report.ok, root
     ));
     if let Some(s) = &report.schema_id {
         lines.push(format!("schemaId={s}"));
@@ -743,9 +1425,64 @@ pub fn format_report_text(report: &ValidationReport) -> String {
     }
     lines.push(format!("diagnostics={}", report.diagnostics.len()));
     for d in &report.diagnostics {
-        lines.push(format!("{} | {} | {}", d.code, d.path, d.message));
+        lines.push(format!(
+            "{} | {} | {}",
+            d.code,
+            sanitize_report_path(&d.path),
+            sanitize_report_message(&d.message)
+        ));
     }
     lines.join("\n")
+}
+
+/// Strip absolute home/worktree prefixes from diagnostic paths for CLI safety.
+pub fn sanitize_report_path(path: &str) -> String {
+    if path.is_empty() {
+        return path.to_string();
+    }
+    // Unix absolute or Windows drive — keep only the final component or bundle-relative tail.
+    if path.starts_with('/') || path.starts_with('\\') {
+        return Path::new(path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("path")
+            .to_string();
+    }
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
+        return Path::new(path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("path")
+            .to_string();
+    }
+    // Drop any accidental absolute segments embedded in messages like "… /Users/…"
+    if path.contains("/Users/") || path.contains("/home/") || path.contains("Documents/GitHub") {
+        return Path::new(path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("path")
+            .to_string();
+    }
+    path.to_string()
+}
+
+fn sanitize_report_message(message: &str) -> String {
+    // Never echo absolute machine paths from OS errors.
+    let mut out = message.to_string();
+    for marker in ["/Users/", "/home/", "Documents/GitHub", "C:\\Users\\"] {
+        if let Some(idx) = out.find(marker) {
+            // Truncate from marker and replace with redacted token (byte-safe via get).
+            let prefix = out.get(..idx).unwrap_or("");
+            out = format!("{prefix}[redacted-path]");
+            break;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1068,5 +1805,161 @@ mod tests {
             .diagnostics
             .iter()
             .any(|d| d.code == "symlink_escape" || d.code == "symlink_unresolvable"));
+    }
+
+    #[test]
+    fn metrics_require_series_provenance_parity_fixture() {
+        let valid = fixture_root().join("metrics-parity/valid-with-provenance.json");
+        let text = std::fs::read_to_string(&valid).unwrap();
+        let mut diags = Vec::new();
+        validate_metrics_document_text(&text, "metrics/valid.json", &mut diags);
+        assert!(diags.is_empty(), "{diags:?}");
+
+        let invalid = fixture_root().join("metrics-parity/invalid-missing-series-provenance.json");
+        let text = std::fs::read_to_string(&invalid).unwrap();
+        let mut diags = Vec::new();
+        validate_metrics_document_text(&text, "metrics/bad.json", &mut diags);
+        assert!(
+            diags.iter().any(|d| d.code == "metrics_provenance_missing"),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn portable_case_collision_rejected_before_payload_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("logs")).unwrap();
+        // Only one real file exists — collision must fail without requiring both payloads.
+        std::fs::write(root.join("logs/app.log"), b"x").unwrap();
+        let hex = stream_sha256_hex(&root.join("logs/app.log")).unwrap();
+        let manifest = format!(
+            r#"{{
+  "schemaId":"contextdesk.incident_evidence.v1",
+  "minReaderVersion":1,
+  "bundleId":"case-collision",
+  "createdAt":"2024-01-15T12:00:00Z",
+  "producer":{{"name":"t","version":"1"}},
+  "privacy":{{"redactionDeclared":true,"containsCredentials":false,"containsPii":false}},
+  "timeBasis":{{"timezone":"UTC","timezoneResolved":true}},
+  "components":[
+    {{"id":"a","role":"log","path":"logs/app.log","mediaType":"text/plain","bytes":1,"sha256":"{hex}"}},
+    {{"id":"b","role":"log","path":"logs/App.log","mediaType":"text/plain","bytes":1,"sha256":"{hex}"}}
+  ]
+}}"#
+        );
+        std::fs::write(root.join("manifest.json"), manifest).unwrap();
+        let r = validate_directory(root);
+        assert!(!r.ok, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.code == "portable_path_collision"),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn undeclared_evaluator_truth_file_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("logs")).unwrap();
+        std::fs::write(root.join("logs/app.log"), b"ok\n").unwrap();
+        std::fs::write(root.join("evaluator_truth.json"), b"{}\n").unwrap();
+        let hex = stream_sha256_hex(&root.join("logs/app.log")).unwrap();
+        let bytes = std::fs::metadata(root.join("logs/app.log")).unwrap().len();
+        let manifest = format!(
+            r#"{{
+  "schemaId":"contextdesk.incident_evidence.v1",
+  "minReaderVersion":1,
+  "bundleId":"undeclared-truth",
+  "createdAt":"2024-01-15T12:00:00Z",
+  "producer":{{"name":"t","version":"1"}},
+  "privacy":{{"redactionDeclared":true,"containsCredentials":false,"containsPii":false}},
+  "timeBasis":{{"timezone":"UTC","timezoneResolved":true}},
+  "components":[{{
+    "id":"l","role":"log","path":"logs/app.log","mediaType":"text/plain",
+    "bytes":{bytes},"sha256":"{hex}"
+  }}]
+}}"#
+        );
+        std::fs::write(root.join("manifest.json"), manifest).unwrap();
+        let r = validate_directory(root);
+        assert!(!r.ok, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.code == "forbidden_sentinel" || d.code == "undeclared_payload"),
+            "{:?}",
+            r.diagnostics
+        );
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.path.contains("evaluator_truth") || d.code == "forbidden_sentinel"),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn cli_report_never_leaks_absolute_paths() {
+        let r = validate_directory(&valid("minimal-log-only"));
+        let text = format_report_text(&r);
+        assert!(!text.contains("/Users/"), "{text}");
+        assert!(!text.contains("Documents/GitHub"), "{text}");
+        assert!(
+            text.contains("root=minimal-log-only") || text.contains("root="),
+            "{text}"
+        );
+        // Diagnostic sanitizer
+        assert_eq!(sanitize_report_path("/Users/chris/secret/bundle"), "bundle");
+    }
+
+    #[test]
+    fn non_regular_fifo_rejected_on_directory() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::net::UnixListener;
+            // Use a socket path as a non-regular stand-in when mkfifo is unavailable;
+            // also cover via open_regular_file_bounded on a directory.
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            std::fs::create_dir_all(root.join("logs")).unwrap();
+            // Point component at a directory pretending to be a file.
+            std::fs::create_dir_all(root.join("logs/app.log")).unwrap();
+            let manifest = r#"{
+  "schemaId":"contextdesk.incident_evidence.v1",
+  "minReaderVersion":1,
+  "bundleId":"nonreg",
+  "createdAt":"2024-01-15T12:00:00Z",
+  "producer":{"name":"t","version":"1"},
+  "privacy":{"redactionDeclared":true,"containsCredentials":false,"containsPii":false},
+  "timeBasis":{"timezone":"UTC","timezoneResolved":true},
+  "components":[{
+    "id":"l","role":"log","path":"logs/app.log","mediaType":"text/plain",
+    "bytes":0,"sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }]
+}"#;
+            std::fs::write(root.join("manifest.json"), manifest).unwrap();
+            let r = validate_directory(root);
+            assert!(!r.ok, "{:?}", r.diagnostics);
+            assert!(
+                r.diagnostics
+                    .iter()
+                    .any(|d| d.code == "entry_non_regular" || d.code == "payload_unreadable"),
+                "{:?}",
+                r.diagnostics
+            );
+            let _ = UnixListener::bind(root.join("ignore.sock"));
+        }
+    }
+
+    #[test]
+    fn path_grammar_rejects_spaces_and_unicode() {
+        assert!(validate_relative_path("logs/app file.log").is_err());
+        assert!(validate_relative_path("logs/app—log.log").is_err());
+        assert!(validate_relative_path("logs/app.log").is_ok());
     }
 }

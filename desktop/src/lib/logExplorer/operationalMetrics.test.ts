@@ -109,6 +109,56 @@ describe("operational metrics schema", () => {
       ]),
     );
   });
+
+  it("shares valid metrics-parity fixture with Rust (required series provenance)", () => {
+    const doc = JSON.parse(
+      readFileSync(
+        resolve(
+          process.cwd(),
+          "../fixtures/incident-evidence/metrics-parity/valid-with-provenance.json",
+        ),
+        "utf8",
+      ),
+    ) as unknown;
+    const result = validateOperationalMetricsDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(JSON.stringify(result.issues));
+    expect(
+      result.data.series.every((series) => series.provenance.source.length > 0),
+    ).toBe(true);
+  });
+
+  it("rejects shared invalid-missing-series-provenance fixture", () => {
+    const doc = JSON.parse(
+      readFileSync(
+        resolve(
+          process.cwd(),
+          "../fixtures/incident-evidence/metrics-parity/invalid-missing-series-provenance.json",
+        ),
+        "utf8",
+      ),
+    ) as unknown;
+    const result = validateOperationalMetricsDocument(doc);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected missing provenance to fail");
+    expect(result.issues.map((issue) => issue.path)).toEqual(
+      expect.arrayContaining(["$.series[0].provenance"]),
+    );
+  });
+
+  it("accepts logs-plus-metrics operational-metrics.v1.json from IEB fixtures", () => {
+    const doc = JSON.parse(
+      readFileSync(
+        resolve(
+          process.cwd(),
+          "../fixtures/incident-evidence/valid/logs-plus-metrics/metrics/operational-metrics.v1.json",
+        ),
+        "utf8",
+      ),
+    ) as unknown;
+    const result = validateOperationalMetricsDocument(doc);
+    expect(result.ok).toBe(true);
+  });
 });
 
 describe("operational metric rendering helpers", () => {

@@ -3,13 +3,19 @@
   "minReaderVersion": 1,
   "bundleId": "synthetic-logs-plus-metrics",
   "createdAt": "2024-01-15T12:10:00Z",
-  "producer": { "name": "fixture-generator", "version": "0.1.0" },
+  "producer": {
+    "name": "fixture-generator",
+    "version": "0.1.0"
+  },
   "privacy": {
     "redactionDeclared": true,
     "containsCredentials": false,
     "containsPii": false
   },
-  "timeBasis": { "timezone": "UTC", "timezoneResolved": true },
+  "timeBasis": {
+    "timezone": "UTC",
+    "timezoneResolved": true
+  },
   "components": [
     {
       "id": "log-api",
@@ -25,8 +31,8 @@
       "role": "operational_metrics",
       "path": "metrics/operational-metrics.v1.json",
       "mediaType": "application/json",
-      "bytes": 1144,
-      "sha256": "99fe852541493618a413023e05d6a952a82d2f8622403d4e7f1e4e10bb2b36ec"
+      "bytes": 1776,
+      "sha256": "0509168abfab96cf686d5f1955af6ffec10480151fdd262e42336a5835ac96a1"
     }
   ]
 }

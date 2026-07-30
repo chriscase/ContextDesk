@@ -69,9 +69,10 @@ Duplicate basenames are fine when relative paths differ
 ## Operational metrics
 
 Reuse the existing **operational-metrics v1** document shape (series, units,
-points, wall-clock quality). Do not invent a second series schema. Metrics sit
-beside logs only because the manifest lists both roles; a sibling folder alone
-does not create a product attachment.
+points, wall-clock quality, and **required series `provenance.source`** — the
+same rules as the production TypeScript validator). Do not invent a second
+series schema. Metrics sit beside logs only because the manifest lists both
+roles; a sibling folder alone does not create a product attachment.
 
 ## Privacy review before sharing
 
