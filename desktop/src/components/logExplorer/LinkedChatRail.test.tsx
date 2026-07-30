@@ -120,6 +120,7 @@ vi.mock("../../lib/host", () => ({
   hostRenameChatSession: vi.fn(),
   hostPinChatSession: vi.fn(),
   hostArchiveChatSession: vi.fn(),
+  hostOpenLogExplorer: vi.fn(async () => "opened"),
   agentTurn: vi.fn(async () => []),
 }));
 
@@ -818,6 +819,101 @@ describe("LinkedChatRail", () => {
     expect(host.agentTurn).not.toHaveBeenCalled();
     expect(host.hostSaveChatSession).not.toHaveBeenCalled();
     expect(screen.getByText("No chat selected")).toBeTruthy();
+  });
+
+  it("reveals same-corpus log_event citations and fails closed for legacy/malformed (#701/#698)", async () => {
+    const onApplyNav = vi.fn();
+    let stored = sessionDto("chat-cite", "Citation chat");
+    stored.messages = [
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "Grounded finding",
+        tools: null,
+        citations: [
+          {
+            id: "log_event:42",
+            label: "log_event:42",
+            corpusId: "c1",
+          },
+          {
+            id: "log_template:7",
+            label: "log_template:7",
+            // legacy unbound — no corpusId
+          },
+          {
+            id: "unknown://x",
+            label: "unknown://x",
+          },
+        ],
+        trail: null,
+        meta: null,
+      },
+    ] as host.ChatSessionDto["messages"];
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
+      async () => [
+        {
+          id: stored.id,
+          title: stored.title,
+          archived: false,
+          pinned: false,
+          created_at: stored.created_at,
+          updated_at: stored.updated_at,
+          message_count: stored.messages.length,
+          preview: "Grounded finding",
+          linked_corpus_id: "c1",
+        },
+      ],
+    );
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async () => stored);
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      stored = session;
+      return session;
+    });
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={onApplyNav}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("linked-chat-switcher-toggle"));
+    fireEvent.click(
+      within(screen.getByTestId("linked-chat-switcher")).getByText(
+        "Citation chat",
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("linked-chat-msg-assistant")).toBeTruthy(),
+    );
+
+    // Open Sources and activate log_event with host-authored corpus.
+    fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+    fireEvent.click(screen.getByRole("button", { name: "log_event:42" }));
+    expect(onApplyNav).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "log_nav",
+        corpusId: "c1",
+        highlightSeq: [42],
+      }),
+    );
+    expect(host.hostOpenLogExplorer).not.toHaveBeenCalled();
+
+    // Legacy unbound fails closed — no substitute.
+    fireEvent.click(screen.getByRole("button", { name: "log_template:7" }));
+    expect(
+      await screen.findByText(/does not record its original corpus/i),
+    ).toBeTruthy();
+    expect(host.hostOpenLogExplorer).not.toHaveBeenCalled();
+
+    // Malformed scheme never becomes file I/O.
+    fireEvent.click(screen.getByRole("button", { name: "unknown://x" }));
+    expect(
+      await screen.findByText(/unsupported or malformed/i),
+    ).toBeTruthy();
   });
 
   it("stops the exact active session once and waits for the host terminal event", async () => {

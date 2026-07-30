@@ -55,6 +55,13 @@ import {
   LOG_NAV_UNREADABLE_MESSAGE,
   type LogNavAction,
 } from "../../lib/logExplorer/logNav";
+import {
+  classifyCompletedCitation,
+  openPersistedLogCitation,
+  parseLogEventSeq,
+  parseLogTemplateId,
+} from "../../lib/citations";
+import { hostOpenLogExplorer } from "../../lib/host";
 import { useMessageWindow } from "../../hooks/useMessageWindow";
 import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
 import { HELP_LINKED_CHAT_CONTEXT } from "../../lib/helpContent";
@@ -284,12 +291,14 @@ function LinkedChatBubble({
   onHeightChange,
   virtualized,
   top,
+  onOpenCitation,
 }: {
   message: ChatMsg;
   developerMode: boolean;
   onHeightChange?: (id: string, height: number) => void;
   virtualized: boolean;
   top: number;
+  onOpenCitation?: (sourceId: string, corpusId?: string) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -340,7 +349,19 @@ function LinkedChatBubble({
         <ToolCallList tools={message.tools} collapseAfter={4} />
       ) : null}
       {message.citations && message.citations.length > 0 ? (
-        <SourceCitations citations={message.citations} />
+        <SourceCitations
+          citations={message.citations.map((c) => ({
+            id: c.id,
+            label: c.label,
+            title: c.title,
+          }))}
+          onOpenFile={(path) => {
+            const corpusId = message.citations?.find(
+              (citation) => citation.id === path,
+            )?.corpusId;
+            onOpenCitation?.(path, corpusId);
+          }}
+        />
       ) : null}
       <LinkedAssistantBody
         content={message.content}
@@ -755,6 +776,82 @@ export function LinkedChatRail({
       setMessages([]);
     }
   };
+
+  /**
+   * Open a host-authored log citation without workspace file I/O (#701/#698).
+   * Same-corpus log_event:* reuses the Explorer highlight path; original-corpus
+   * navigation for detach/replacement uses openPersistedLogCitation.
+   */
+  const openLinkedCitation = useCallback(
+    (sourceId: string, citationCorpusId?: string) => {
+      const route = classifyCompletedCitation(sourceId);
+      if (route === "invalid") {
+        setRailError(
+          "This citation is unsupported or malformed and was not opened.",
+        );
+        return;
+      }
+      if (route !== "log") {
+        // Linked rail is log-evidence first; Help/file are not auto-opened here.
+        setRailError(
+          "This citation is not a governed log evidence identity for this rail.",
+        );
+        return;
+      }
+      const original = citationCorpusId?.trim() || undefined;
+      if (!original) {
+        setRailError(
+          "This older log citation does not record its original corpus. ContextDesk will not substitute the chat’s current corpus.",
+        );
+        return;
+      }
+      if (original !== corpusId) {
+        void openPersistedLogCitation(
+          sourceId,
+          original,
+          (_id, message) => {
+            setRailError(message);
+          },
+          hostOpenLogExplorer,
+        );
+        return;
+      }
+      // Same Explorer corpus: reveal without mutating unrelated filters.
+      const seq = parseLogEventSeq(sourceId);
+      if (seq != null) {
+        onApplyNav({
+          type: "log_nav",
+          corpusId,
+          sources: [],
+          levels: [],
+          tsFrom: null,
+          tsTo: null,
+          highlightSeq: [seq],
+          focusLane: null,
+          label: sourceId,
+        });
+        if (activeChatId) {
+          setStatusByChat((m) => ({
+            ...m,
+            [activeChatId]: `Revealed ${sourceId}`,
+          }));
+        }
+        return;
+      }
+      const templateId = parseLogTemplateId(sourceId);
+      if (templateId != null) {
+        if (activeChatId) {
+          setStatusByChat((m) => ({
+            ...m,
+            [activeChatId]: `Template ${templateId} — use Templates or search to inspect this pattern`,
+          }));
+        }
+        return;
+      }
+      setRailError(`Could not interpret log citation ${sourceId}.`);
+    },
+    [activeChatId, corpusId, onApplyNav],
+  );
 
   const createLinkedChat = async (): Promise<string | null> => {
     setRailError(null);
@@ -1831,6 +1928,7 @@ export function LinkedChatRail({
                   onHeightChange={
                     windowed.virtualized ? windowed.onHeightChange : undefined
                   }
+                  onOpenCitation={openLinkedCitation}
                 />
               ))}
             </div>

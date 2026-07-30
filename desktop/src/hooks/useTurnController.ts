@@ -28,51 +28,9 @@ import {
   finalizeMessagesAfterStop,
   shouldProcessEventWhileStopped,
 } from "../lib/turn";
-import { parseHelpLocator } from "../lib/help";
+import { classifyCompletedCitation } from "../lib/citations";
 
-type CompletedCitationRoute =
-  | "help"
-  | "log"
-  | "file"
-  | "deferred"
-  | "invalid";
-
-const GOVERNED_LOG_CITATION =
-  /^(?:log_template|log_event):[a-z0-9][a-z0-9._-]*$/i;
-const URI_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
-const WINDOWS_ABSOLUTE_PATH = /^[a-z]:[\\/]/i;
-
-/**
- * Classify a completed turn's first citation before any automatic I/O.
- * Governed/in-app identities are click-routed elsewhere and must never be
- * interpreted as workspace paths.
- */
-export function classifyCompletedCitation(
-  citationId: string,
-): CompletedCitationRoute {
-  const id = citationId.trim();
-  if (!id || id.includes("\0")) return "invalid";
-  if (parseHelpLocator(id)) return "help";
-  if (GOVERNED_LOG_CITATION.test(id)) return "log";
-
-  if (
-    id.startsWith("help://") ||
-    id.startsWith("log_template:") ||
-    id.startsWith("log_event:")
-  ) {
-    return "invalid";
-  }
-
-  // These are handled only after an explicit citation click.
-  if (/^https?:\/\//i.test(id) || /^memory:[a-z0-9._-]+$/i.test(id)) {
-    return "deferred";
-  }
-
-  if (URI_SCHEME.test(id) && !WINDOWS_ABSOLUTE_PATH.test(id)) {
-    return "invalid";
-  }
-  return "file";
-}
+export { classifyCompletedCitation } from "../lib/citations";
 
 type Args = {
   sessionId: string;

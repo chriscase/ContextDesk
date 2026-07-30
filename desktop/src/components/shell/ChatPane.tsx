@@ -12,6 +12,7 @@ import {
   type BrandingDto,
   type ModelOptionDto,
 } from "../../lib/host";
+import { openPersistedLogCitation as openPersistedLogCitationCore } from "../../lib/citations";
 import { IconPin } from "../icons";
 import { MessageRow } from "./MessageRow";
 
@@ -63,28 +64,18 @@ const CONTEXT_SAFE_STARTERS: Starter[] = [
   },
 ];
 
+/** Open a host-authored log citation; never substitutes the active corpus (#698). */
 export async function openPersistedLogCitation(
   sourceId: string,
   corpusId: string | undefined,
   showUnavailable: (sourceId: string, message: string) => void,
 ): Promise<void> {
-  if (!corpusId) {
-    showUnavailable(
-      sourceId,
-      "This older log citation does not record its original corpus. ContextDesk will not substitute the chat’s current corpus.",
-    );
-    return;
-  }
-  try {
-    await hostOpenLogExplorer(corpusId);
-  } catch (error) {
-    showUnavailable(
-      sourceId,
-      `The original log corpus for this citation is unavailable:\n${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-  }
+  return openPersistedLogCitationCore(
+    sourceId,
+    corpusId,
+    showUnavailable,
+    hostOpenLogExplorer,
+  );
 }
 
 export type ChatPaneProps = {

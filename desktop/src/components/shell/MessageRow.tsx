@@ -18,6 +18,7 @@ import {
   type Msg,
 } from "../../lib/session";
 import { hostOpenExternalUrl, hostReadFile } from "../../lib/host";
+import { classifyCompletedCitation } from "../../lib/citations";
 
 function isHttpUrl(s: string): boolean {
   return /^https?:\/\//i.test(s.trim());
@@ -168,14 +169,12 @@ function MessageRowImpl({
             title: c.title,
           }))}
           onOpenFile={(path) => {
-            if (path.startsWith("help://")) {
+            const route = classifyCompletedCitation(path);
+            if (route === "help") {
               onOpenHelpCitation?.(path);
               return;
             }
-            if (
-              path.startsWith("log_template:") ||
-              path.startsWith("log_event:")
-            ) {
+            if (route === "log") {
               onOpenLogCitation?.(
                 path,
                 m.citations?.find((citation) => citation.id === path)?.corpusId,
@@ -190,6 +189,21 @@ function MessageRowImpl({
                 setPane("memory");
                 setMemoryPath?.(path);
               }
+              return;
+            }
+            if (route === "invalid" || route === "deferred") {
+              // Never broaden access for unknown schemes; HTTP is handled above
+              // via SourceCitations when external. Deferred non-file chips stay
+              // click-only without automatic file I/O.
+              if (isHttpUrl(path)) {
+                openExternalUrl(path);
+                return;
+              }
+              setSourcePath(path);
+              setPane("source");
+              setSourceContent(
+                "This citation is unsupported or malformed and was not opened.",
+              );
               return;
             }
             setSourcePath(path);
@@ -234,14 +248,12 @@ function MessageRowImpl({
                   const citeEl = t.closest("[data-cite]") as HTMLElement | null;
                   const cite = citeEl?.getAttribute("data-cite");
                   if (!cite) return;
-                  if (cite.startsWith("help://")) {
+                  const route = classifyCompletedCitation(cite);
+                  if (route === "help") {
                     onOpenHelpCitation?.(cite);
                     return;
                   }
-                  if (
-                    cite.startsWith("log_template:") ||
-                    cite.startsWith("log_event:")
-                  ) {
+                  if (route === "log") {
                     onOpenLogCitation?.(
                       cite,
                       m.citations?.find((citation) => citation.id === cite)
@@ -251,6 +263,14 @@ function MessageRowImpl({
                   }
                   if (isHttpUrl(cite)) {
                     openExternalUrl(cite);
+                    return;
+                  }
+                  if (route === "invalid" || route === "deferred") {
+                    setSourcePath(cite);
+                    setPane("source");
+                    setSourceContent(
+                      "This citation is unsupported or malformed and was not opened.",
+                    );
                     return;
                   }
                   setSourcePath(cite);

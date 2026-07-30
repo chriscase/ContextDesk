@@ -4747,6 +4747,102 @@ fn should_persist_chat_session(session: &Session) -> bool {
     !session.messages.is_empty() || session.linked_corpus_id.is_some()
 }
 
+/// Whether a citation id is a governed log evidence identity (#701 / #698).
+fn is_governed_log_citation_id(source_id: &str) -> bool {
+    let id = source_id.trim();
+    if id.is_empty() {
+        return false;
+    }
+    let (prefix, rest) = match id.split_once(':') {
+        Some(parts) => parts,
+        None => return false,
+    };
+    if !matches!(prefix, "log_template" | "log_event") || rest.is_empty() {
+        return false;
+    }
+    rest.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+        && rest
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+}
+
+/// Host-owned log citation provenance (#698).
+///
+/// The renderer may carry transcript chips, but it cannot invent or broaden
+/// corpus identity. Rules:
+/// 1. Preserve durable per-citation corpusId for an existing message (survives
+///    detach/relink and restart).
+/// 2. Otherwise stamp with the session's host-governed linked_corpus_id when set.
+/// 3. Otherwise leave unbound (legacy fail-closed) — never accept a free-form
+///    renderer/model corpus id that differs from those host sources.
+fn sanitize_log_citation_provenance(session: &mut Session, durable: Option<&Session>) {
+    use std::collections::HashMap;
+    let durable_by_msg: HashMap<&str, &cd_core::sessions::StoredMessage> = durable
+        .map(|s| s.messages.iter().map(|m| (m.id.as_str(), m)).collect())
+        .unwrap_or_default();
+    let linked = session.linked_corpus_id.clone();
+
+    for message in &mut session.messages {
+        let Some(citations) = message.citations.as_mut() else {
+            continue;
+        };
+        let Some(items) = citations.as_array_mut() else {
+            continue;
+        };
+        let durable_items: HashMap<String, String> = durable_by_msg
+            .get(message.id.as_str())
+            .and_then(|m| m.citations.as_ref())
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| {
+                        let obj = item.as_object()?;
+                        let id = obj.get("id")?.as_str()?.to_string();
+                        if !is_governed_log_citation_id(&id) {
+                            return None;
+                        }
+                        let corpus = obj
+                            .get("corpusId")
+                            .or_else(|| obj.get("corpus_id"))
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.trim().is_empty())?
+                            .to_string();
+                        Some((id, corpus))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for item in items.iter_mut() {
+            let Some(obj) = item.as_object_mut() else {
+                continue;
+            };
+            let Some(id) = obj.get("id").and_then(|v| v.as_str()).map(str::to_string) else {
+                continue;
+            };
+            if !is_governed_log_citation_id(&id) {
+                // Non-log chips never carry corpus provenance.
+                obj.remove("corpusId");
+                obj.remove("corpus_id");
+                continue;
+            }
+            let trusted = durable_items.get(&id).cloned().or_else(|| linked.clone());
+            match trusted {
+                Some(corpus_id) => {
+                    obj.insert("corpusId".into(), serde_json::Value::String(corpus_id));
+                    obj.remove("corpus_id");
+                }
+                None => {
+                    obj.remove("corpusId");
+                    obj.remove("corpus_id");
+                }
+            }
+        }
+    }
+}
+
 fn save_chat_session_at(
     store: &cd_core::sessions::SessionStore,
     mut session: Session,
@@ -4754,14 +4850,17 @@ fn save_chat_session_at(
     // The renderer owns transcript/view fields, but never the governed corpus
     // grant. Preserve the durable host value for an existing chat and strip an
     // attempted grant from a new chat; only set_chat_linked_corpus may change it.
-    if store.exists(&session.id).map_err(|e| e.to_string())? {
+    let durable = if store.exists(&session.id).map_err(|e| e.to_string())? {
         let durable = store
             .load(&session.id)
             .map_err(|e| format!("chat session is unavailable or corrupt: {e}"))?;
-        session.linked_corpus_id = durable.linked_corpus_id;
+        session.linked_corpus_id = durable.linked_corpus_id.clone();
+        Some(durable)
     } else {
         session.linked_corpus_id = None;
-    }
+        None
+    };
+    sanitize_log_citation_provenance(&mut session, durable.as_ref());
     session.maybe_auto_title_from_first_user();
     session.touch();
     if should_persist_chat_session(&session) {
@@ -12690,16 +12789,17 @@ mod startup_host_tests {
         admit_agent_turn, build_and_install_background_index, chat_provider_binding_changed,
         chat_turn_cancel_key, desktop_log_ingest_embed_plan_nonblocking,
         event_to_dto_with_linked_corpus, finish_agent_turn, host_readiness_terminal_events,
-        install_prepared_durable_memory, linked_log_fallback_notice,
-        linked_log_host_terminal_events, linked_log_preflight_at, log_search_cancel_key,
-        normalize_log_corpus_id, persist_host_terminal_turn_at,
-        persist_linked_provider_loop_terminal_at, prepare_linked_turn_with,
-        provider_profile_for_turn, request_agent_turn_cancel, restore_host_if_generation_matches,
-        save_chat_session_at, set_chat_linked_corpus_at, take_ready_linked_host,
-        validate_linked_log_corpus_at, wait_for_host_readiness, BackgroundIndexBuild,
-        HostInitFlight, HostReadinessFailure, LinkedCheckpointStore, LinkedTurnPreparation,
-        StdInstant, LINKED_CHECKPOINT_ENTRY_CAP, LINKED_CHECKPOINT_TOTAL_BYTES,
-        LINKED_CHECKPOINT_TTL, LOG_INGEST_CANCEL_KEY, LOG_REANALYZE_CANCEL_KEY,
+        install_prepared_durable_memory, is_governed_log_citation_id, linked_log_fallback_notice,
+        linked_log_host_terminal_events, linked_log_preflight_at, linked_log_turn_context,
+        load_session_for_turn, log_search_cancel_key, normalize_log_corpus_id,
+        persist_host_terminal_turn_at, persist_linked_provider_loop_terminal_at,
+        prepare_linked_turn_with, provider_profile_for_turn, request_agent_turn_cancel,
+        restore_host_if_generation_matches, save_chat_session_at, set_chat_linked_corpus_at,
+        take_ready_linked_host, validate_linked_log_corpus_at, wait_for_host_readiness,
+        BackgroundIndexBuild, HostInitFlight, HostReadinessFailure, LinkedCheckpointStore,
+        LinkedTurnPreparation, LogExplorerTurnContextReq, StdInstant, LINKED_CHECKPOINT_ENTRY_CAP,
+        LINKED_CHECKPOINT_TOTAL_BYTES, LINKED_CHECKPOINT_TTL, LOG_INGEST_CANCEL_KEY,
+        LOG_REANALYZE_CANCEL_KEY,
     };
     use cd_core::events::StreamEvent;
     use cd_core::index::{KeywordIndex, ReindexStats};
@@ -13944,6 +14044,171 @@ mod startup_host_tests {
         .expect_err("nonempty draft must fail");
         assert!(error.contains("draft chat identity is invalid"));
         assert!(!store.exists(&draft_id).expect("draft existence"));
+    }
+
+    #[test]
+    fn concurrent_empty_linked_create_does_not_duplicate_or_orphan() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let cache = tempfile::tempdir().expect("cache");
+        let logs = tempfile::tempdir().expect("logs");
+        std::fs::write(
+            logs.path().join("app.log"),
+            b"2026-07-28T12:00:00Z ERROR checkout failed\n",
+        )
+        .expect("fixture");
+        let report =
+            cd_core::log_analysis::ingest_path(cache.path(), logs.path(), "incident", None, "none")
+                .expect("ingest");
+
+        let draft_a = cd_core::sessions::Session::new("A");
+        let draft_b = cd_core::sessions::Session::new("B");
+        let a = set_chat_linked_corpus_at(
+            &store,
+            cache.path(),
+            &draft_a.id,
+            Some(report.corpus_id.clone()),
+            Some(draft_a.clone()),
+            Some(wire_session_revision(&draft_a)),
+        )
+        .expect("first create");
+        let b = set_chat_linked_corpus_at(
+            &store,
+            cache.path(),
+            &draft_b.id,
+            Some(report.corpus_id.clone()),
+            Some(draft_b.clone()),
+            Some(wire_session_revision(&draft_b)),
+        )
+        .expect("second create");
+        assert_ne!(a.id, b.id);
+        assert_eq!(
+            a.linked_corpus_id.as_deref(),
+            Some(report.corpus_id.as_str())
+        );
+        assert_eq!(
+            b.linked_corpus_id.as_deref(),
+            Some(report.corpus_id.as_str())
+        );
+
+        // Invalid corpus creates no orphan.
+        let orphan = cd_core::sessions::Session::new("Orphan");
+        let err = set_chat_linked_corpus_at(
+            &store,
+            cache.path(),
+            &orphan.id,
+            Some("missing-corpus".into()),
+            Some(orphan.clone()),
+            Some(wire_session_revision(&orphan)),
+        )
+        .expect_err("missing corpus");
+        assert!(!err.is_empty());
+        assert!(!store.exists(&orphan.id).expect("orphan existence"));
+
+        // First-turn load path sees the durable linked session (no "not available").
+        let loaded = load_session_for_turn(&store, &a.id)
+            .expect("load")
+            .expect("session present");
+        assert_eq!(
+            loaded.linked_corpus_id.as_deref(),
+            Some(report.corpus_id.as_str())
+        );
+        let ctx = linked_log_turn_context(
+            Some(&loaded),
+            "win-1",
+            Some(LogExplorerTurnContextReq {
+                corpus_id: report.corpus_id.clone(),
+                brief: "privacy-safe brief".into(),
+                noise_lens_suspended: false,
+            }),
+        )
+        .expect("turn context");
+        assert!(ctx.is_some());
+    }
+
+    #[test]
+    fn generic_save_cannot_forge_or_broaden_log_citation_corpus_id() {
+        assert!(is_governed_log_citation_id("log_event:42"));
+        assert!(!is_governed_log_citation_id("log_event:"));
+        assert!(!is_governed_log_citation_id("log_event:42/../x"));
+
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let mut durable = cd_core::sessions::Session::new("Grounded");
+        durable.set_linked_corpus_id(Some("trusted-corpus".into()));
+        durable.messages.push(cd_core::sessions::StoredMessage {
+            id: "assistant-1".into(),
+            role: "assistant".into(),
+            content: "finding".into(),
+            tools: None,
+            citations: Some(serde_json::json!([{
+                "id": "log_event:42",
+                "label": "event 42",
+                "corpusId": "trusted-corpus"
+            }])),
+            trail: None,
+            meta: None,
+        });
+        store.save(&durable).expect("save durable");
+
+        // Detach: clear linked_corpus_id but keep historical citation provenance.
+        let mut detached = store.load(&durable.id).expect("load");
+        detached.set_linked_corpus_id(None);
+        store.save(&detached).expect("detach save");
+
+        let mut renderer = store.load(&durable.id).expect("load");
+        renderer.messages[0].citations = Some(serde_json::json!([{
+            "id": "log_event:42",
+            "label": "event 42",
+            "corpusId": "attacker-corpus"
+        },{
+            "id": "runbook.md",
+            "label": "runbook",
+            "corpusId": "must-not-apply"
+        }]));
+        let saved = save_chat_session_at(&store, renderer).expect("save");
+        let citations = saved.messages[0]
+            .citations
+            .as_ref()
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            citations[0]["corpusId"].as_str(),
+            Some("trusted-corpus"),
+            "historical host provenance must win over renderer forgery"
+        );
+        assert!(citations[1].get("corpusId").is_none());
+
+        // New log citation while linked stamps host corpus; model corpus ignored.
+        let mut linked = store.load(&durable.id).expect("load");
+        linked.set_linked_corpus_id(Some("trusted-corpus".into()));
+        store.save(&linked).expect("relink");
+        let mut renderer2 = store.load(&durable.id).expect("load");
+        renderer2.messages.push(cd_core::sessions::StoredMessage {
+            id: "assistant-2".into(),
+            role: "assistant".into(),
+            content: "new finding".into(),
+            tools: None,
+            citations: Some(serde_json::json!([{
+                "id": "log_template:7",
+                "label": "template 7",
+                "corpusId": "smuggled"
+            }])),
+            trail: None,
+            meta: None,
+        });
+        let saved2 = save_chat_session_at(&store, renderer2).expect("save2");
+        let new_cite = saved2
+            .messages
+            .iter()
+            .find(|m| m.id == "assistant-2")
+            .and_then(|m| m.citations.as_ref())
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .cloned()
+            .expect("new cite");
+        assert_eq!(new_cite["corpusId"].as_str(), Some("trusted-corpus"));
     }
 
     #[test]
