@@ -186,7 +186,7 @@ Bundle and component `timeBasis` objects:
 
 1. If `timezone` is null or absent, `timezoneResolved` **MUST** be `false`.
 2. If `timezoneResolved` is `true`, `timezone` **MUST** be a non-empty explicit value.
-3. Validators **MUST** reject unknown IANA identifiers and malformed or out-of-range numeric offsets.
+3. Validators **MUST** reject unknown IANA identifiers, malformed or out-of-range numeric offsets, and RFC 3339 `-00:00` because it denotes an unknown local offset rather than a resolved zone.
 4. Validators **MUST NOT** invent or guess timezones.
 5. Per-record offsets inside log/metric payloads remain authoritative when present; bundle defaults **MUST NOT** silently rewrite them.
 

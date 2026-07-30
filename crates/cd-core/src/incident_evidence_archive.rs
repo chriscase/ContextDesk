@@ -7,10 +7,10 @@
 use crate::incident_evidence::{
     contains_forbidden_sentinel, is_lowercase_sha256, redacted_root_label,
     stream_sha256_hex_bounded, validate_component_inventory, validate_directory,
-    validate_manifest_header, validate_metrics_document_text, validate_relative_path, Diagnostic,
-    ForbiddenSentinelStream, Manifest, ValidationReport, HASH_BUFFER_BYTES, MAX_AGGREGATE_BYTES,
-    MAX_COMPONENTS, MAX_MANIFEST_BYTES, MAX_METRICS_DOC_BYTES, MAX_PER_FILE_BYTES,
-    MAX_RELATIVE_PATH_BYTES, SCHEMA_ID,
+    validate_manifest_header, validate_metrics_document_text, validate_relative_path, BundleRoot,
+    Diagnostic, ForbiddenSentinelStream, Manifest, ValidationReport, HASH_BUFFER_BYTES,
+    MAX_AGGREGATE_BYTES, MAX_COMPONENTS, MAX_MANIFEST_BYTES, MAX_METRICS_DOC_BYTES,
+    MAX_PER_FILE_BYTES, MAX_RELATIVE_PATH_BYTES, SCHEMA_ID,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -66,6 +66,9 @@ fn pack_directory_with_before_write(
     overwrite: bool,
     before_write: impl FnOnce(),
 ) -> Result<PackReport, Vec<Diagnostic>> {
+    // Pin the user-selected root before validation. All later pack reads are
+    // relative to this handle so path swaps cannot redirect payload I/O.
+    let bundle_root = BundleRoot::open(root).map_err(|diagnostic| vec![diagnostic])?;
     let dir_report = validate_directory(root);
     if !dir_report.ok {
         return Err(dir_report.diagnostics);
@@ -79,8 +82,7 @@ fn pack_directory_with_before_write(
         )]);
     }
 
-    let manifest_path = root.join("manifest.json");
-    let raw = read_pack_manifest(&manifest_path)?;
+    let raw = read_pack_manifest(&bundle_root)?;
     let manifest: Manifest = serde_json::from_str(&raw).map_err(|e| {
         vec![Diagnostic::new(
             "manifest_json_invalid",
@@ -89,39 +91,16 @@ fn pack_directory_with_before_write(
         )]
     })?;
 
-    // Collect (archive_path, filesystem_path) with stable order.
-    let mut entries: Vec<(String, PathBuf)> = Vec::new();
-    entries.push((
-        ARCHIVE_MANIFEST_PATH.to_string(),
-        root.join("manifest.json"),
-    ));
+    // Collect archive paths with stable order. Filesystem reads happen later
+    // through the pinned root handle, never through reconstructed paths.
+    let mut entries: Vec<String> = vec![ARCHIVE_MANIFEST_PATH.to_string()];
     for c in &manifest.components {
         validate_relative_path(&c.path)
             .map_err(|msg| vec![Diagnostic::new("unsafe_path", c.path.clone(), msg)])?;
-        let fs_path = resolve_pack_path(root, &c.path).map_err(|d| vec![d])?;
-        // Refuse any symlink (leaf or intermediate) — pack never follows links.
-        if path_has_symlink_component(root, &c.path) {
-            return Err(vec![Diagnostic::new(
-                "symlink_refused",
-                c.path.clone(),
-                "packing refuses symlink path components",
-            )]);
-        }
-        if fs_path
-            .symlink_metadata()
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
-        {
-            return Err(vec![Diagnostic::new(
-                "symlink_refused",
-                c.path.clone(),
-                "packing refuses symlink payloads",
-            )]);
-        }
-        entries.push((c.path.clone(), fs_path));
+        entries.push(c.path.clone());
     }
     // Stable order: lexicographic by archive path (manifest.json first among equals).
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries.sort();
     let expected_components: HashMap<&str, (u64, &str)> = manifest
         .components
         .iter()
@@ -148,7 +127,7 @@ fn pack_directory_with_before_write(
         let mut zip = ZipWriter::new(file);
         let opts = pack_options();
         let mut total = 0u64;
-        for (name, path) in &entries {
+        for name in &entries {
             zip.start_file(name.as_str(), opts).map_err(|e| {
                 vec![Diagnostic::new(
                     "pack_zip_failed",
@@ -180,9 +159,9 @@ fn pack_directory_with_before_write(
 
             // Bound + TOCTOU-safe open; stream into zip without full-file allocation
             // and verify the bytes still match the already-validated manifest.
-            let mut opened =
-                crate::incident_evidence::open_regular_file_bounded(path, MAX_PER_FILE_BYTES, name)
-                    .map_err(|d| vec![d])?;
+            let mut opened = bundle_root
+                .open_regular_file_bounded(name, MAX_PER_FILE_BYTES, name)
+                .map_err(|d| vec![d])?;
             let size_at_open = opened.size;
             if size_at_open != expected_bytes {
                 return Err(vec![Diagnostic::new(
@@ -307,13 +286,14 @@ fn pack_directory_with_before_write(
     }
 }
 
-fn read_pack_manifest(path: &Path) -> Result<String, Vec<Diagnostic>> {
-    let opened = crate::incident_evidence::open_regular_file_bounded(
-        path,
-        MAX_MANIFEST_BYTES,
-        ARCHIVE_MANIFEST_PATH,
-    )
-    .map_err(|d| vec![d])?;
+fn read_pack_manifest(root: &BundleRoot) -> Result<String, Vec<Diagnostic>> {
+    let opened = root
+        .open_regular_file_bounded(
+            ARCHIVE_MANIFEST_PATH,
+            MAX_MANIFEST_BYTES,
+            ARCHIVE_MANIFEST_PATH,
+        )
+        .map_err(|d| vec![d])?;
     let mut bytes = Vec::with_capacity(usize::try_from(opened.size).unwrap_or(0));
     opened
         .file
@@ -429,64 +409,43 @@ fn publish_archive_overwrite(temp: &Path, output: &Path) -> Result<(), Diagnosti
         });
     }
 
-    let parent = output.parent().unwrap_or_else(|| Path::new("."));
-    let output_name = output
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("bundle.zip");
-    let backup = (0..128u16)
-        .find_map(|attempt| {
-            let candidate = parent.join(format!(
-                ".{output_name}.backup.{}.{}",
-                unique_suffix(),
-                attempt
-            ));
-            match fs::hard_link(output, &candidate) {
-                Ok(()) => Some(Ok(candidate)),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
-                Err(error) => Some(Err(error)),
-            }
-        })
-        .transpose()
-        .map_err(|error| {
-            Diagnostic::new(
-                "output_replace_failed",
-                redacted_root_label(output),
-                format!("cannot preserve existing output before replacement: {error}"),
-            )
-        })?
-        .ok_or_else(|| {
-            Diagnostic::new(
-                "output_replace_failed",
-                redacted_root_label(output),
-                "cannot allocate a unique replacement backup",
-            )
-        })?;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{ReplaceFileW, REPLACEFILE_WRITE_THROUGH};
 
-    if let Err(error) = fs::remove_file(output) {
-        let _ = fs::remove_file(&backup);
-        return Err(Diagnostic::new(
+    let output_wide: Vec<u16> = output
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let temp_wide: Vec<u16> = temp
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // ReplaceFileW atomically replaces the destination on the same volume and
+    // leaves the existing file intact when replacement fails.
+    let replaced = unsafe {
+        ReplaceFileW(
+            output_wide.as_ptr(),
+            temp_wide.as_ptr(),
+            std::ptr::null(),
+            REPLACEFILE_WRITE_THROUGH,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if replaced == 0 {
+        Err(Diagnostic::new(
             "output_replace_failed",
             redacted_root_label(output),
-            format!("cannot prepare existing output for replacement: {error}"),
-        ));
+            format!(
+                "atomic replacement failed: {}",
+                std::io::Error::last_os_error()
+            ),
+        ))
+    } else {
+        Ok(())
     }
-    if let Err(error) = fs::rename(temp, output) {
-        let rollback = fs::rename(&backup, output);
-        return Err(Diagnostic::new(
-            "output_replace_failed",
-            redacted_root_label(output),
-            match rollback {
-                Ok(()) => format!("replacement failed; previous output restored: {error}"),
-                Err(rollback_error) => format!(
-                    "replacement failed and previous output remains at a recovery backup: \
-                     {error}; restore failed: {rollback_error}"
-                ),
-            },
-        ));
-    }
-    let _ = fs::remove_file(backup);
-    Ok(())
 }
 
 /// Result of a successful pack.
@@ -505,29 +464,6 @@ pub struct PackReport {
     pub total_bytes: u64,
     /// SHA-256 of the produced archive file.
     pub archive_sha256: String,
-}
-
-fn resolve_pack_path(root: &Path, rel: &str) -> Result<PathBuf, Diagnostic> {
-    let mut out = root.to_path_buf();
-    for seg in rel.split('/') {
-        out.push(seg);
-    }
-    Ok(out)
-}
-
-fn path_has_symlink_component(root: &Path, rel: &str) -> bool {
-    let mut cur = root.to_path_buf();
-    for seg in rel.split('/') {
-        cur.push(seg);
-        if cur
-            .symlink_metadata()
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
-        {
-            return true;
-        }
-    }
-    false
 }
 
 /// Validate a ZIP archive form without extracting to a temp directory tree.
@@ -2441,6 +2377,48 @@ mod tests {
                     .starts_with(".m.zip.partial.")),
             "failed mutation pack must remove its unique partial"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pack_cannot_escape_after_intermediate_directory_swap() {
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(
+            outside.path().join("app.log"),
+            b"outside payload that must never be packed\n",
+        )
+        .unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("bundle");
+        fs::create_dir_all(dir.join("logs")).unwrap();
+        fs::copy(
+            valid_dir("minimal-log-only").join("manifest.json"),
+            dir.join("manifest.json"),
+        )
+        .unwrap();
+        fs::copy(
+            valid_dir("minimal-log-only").join("logs/app.log"),
+            dir.join("logs/app.log"),
+        )
+        .unwrap();
+        let output = tmp.path().join("swapped.zip");
+        let original = dir.join("logs-original");
+        let active = dir.join("logs");
+
+        let diagnostics = pack_directory_with_before_write(&dir, &output, false, || {
+            fs::rename(&active, &original).unwrap();
+            std::os::unix::fs::symlink(outside.path(), &active).unwrap();
+        })
+        .unwrap_err();
+
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "symlink_escape"),
+            "{diagnostics:?}"
+        );
+        assert!(!output.exists());
     }
 
     #[test]

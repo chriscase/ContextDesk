@@ -213,6 +213,87 @@ pub struct Manifest {
     pub components: Vec<ComponentEntry>,
 }
 
+pub(crate) struct BundleRoot {
+    path: PathBuf,
+    #[cfg(unix)]
+    directory: File,
+}
+
+impl BundleRoot {
+    pub(crate) fn open(path: &Path) -> Result<Self, Diagnostic> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            let mut options = OpenOptions::new();
+            options
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC);
+            let directory = options.open(path).map_err(|error| {
+                Diagnostic::new(
+                    "root_unreadable",
+                    redacted_root_label(path),
+                    format!("cannot open bundle root: {error}"),
+                )
+            })?;
+            let metadata = directory.metadata().map_err(|error| {
+                Diagnostic::new(
+                    "root_unreadable",
+                    redacted_root_label(path),
+                    format!("cannot inspect bundle root: {error}"),
+                )
+            })?;
+            if !metadata.is_dir() {
+                return Err(Diagnostic::new(
+                    "root_not_directory",
+                    redacted_root_label(path),
+                    "bundle root is not a directory",
+                ));
+            }
+            Ok(Self {
+                path: path.to_path_buf(),
+                directory,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {
+                path: path.to_path_buf(),
+            })
+        }
+    }
+
+    pub(crate) fn open_regular_file_bounded(
+        &self,
+        relative_path: &str,
+        max_bytes: u64,
+        path_label: &str,
+    ) -> Result<OpenedRegularFile, Diagnostic> {
+        #[cfg(unix)]
+        {
+            open_regular_file_relative_to_directory_bounded(
+                &self.directory,
+                relative_path,
+                max_bytes,
+                path_label,
+            )
+        }
+        #[cfg(not(unix))]
+        {
+            let path = resolve_under_root(&self.path, relative_path)
+                .map_err(|message| Diagnostic::new("path_escape", path_label, message))?;
+            if path_has_symlink_component(&self.path, relative_path) {
+                return Err(Diagnostic::new(
+                    "symlink_escape",
+                    path_label,
+                    "payload path contains a symlink component",
+                ));
+            }
+            open_regular_file_bounded(&path, max_bytes, path_label)
+        }
+    }
+}
+
 /// Validate a directory-form Incident Evidence Bundle at `root`.
 pub fn validate_directory(root: &Path) -> ValidationReport {
     let mut diagnostics = Vec::new();
@@ -228,35 +309,44 @@ pub fn validate_directory(root: &Path) -> ValidationReport {
         return finish(false, root_display, None, None, diagnostics);
     }
 
-    let manifest_path = root.join("manifest.json");
+    let bundle_root = match BundleRoot::open(root) {
+        Ok(bundle_root) => bundle_root,
+        Err(diagnostic) => {
+            diagnostics.push(diagnostic);
+            return finish(false, root_display, None, None, diagnostics);
+        }
+    };
     // Manifest must be a regular file (not a symlink).
-    let mut opened =
-        match open_regular_file_bounded(&manifest_path, MAX_MANIFEST_BYTES, "manifest.json") {
-            Err(d) => {
-                // Map missing open to stable codes used by fixtures.
-                if d.code == "payload_missing" {
-                    diagnostics.push(Diagnostic::new(
-                        "manifest_missing",
-                        "manifest.json",
-                        "manifest.json is required at the bundle root",
-                    ));
-                } else if d.code == "file_too_large" {
-                    diagnostics.push(Diagnostic::new(
-                        "manifest_too_large",
-                        "manifest.json",
-                        format!("manifest.json exceeds MAX_MANIFEST_BYTES ({MAX_MANIFEST_BYTES})"),
-                    ));
-                } else {
-                    diagnostics.push(Diagnostic::new(
-                        "manifest_unreadable",
-                        "manifest.json",
-                        d.message,
-                    ));
-                }
-                return finish(false, root_display, None, None, diagnostics);
+    let mut opened = match bundle_root.open_regular_file_bounded(
+        "manifest.json",
+        MAX_MANIFEST_BYTES,
+        "manifest.json",
+    ) {
+        Err(d) => {
+            // Map missing open to stable codes used by fixtures.
+            if d.code == "payload_missing" {
+                diagnostics.push(Diagnostic::new(
+                    "manifest_missing",
+                    "manifest.json",
+                    "manifest.json is required at the bundle root",
+                ));
+            } else if d.code == "file_too_large" {
+                diagnostics.push(Diagnostic::new(
+                    "manifest_too_large",
+                    "manifest.json",
+                    format!("manifest.json exceeds MAX_MANIFEST_BYTES ({MAX_MANIFEST_BYTES})"),
+                ));
+            } else {
+                diagnostics.push(Diagnostic::new(
+                    "manifest_unreadable",
+                    "manifest.json",
+                    d.message,
+                ));
             }
-            Ok(opened) => opened,
-        };
+            return finish(false, root_display, None, None, diagnostics);
+        }
+        Ok(opened) => opened,
+    };
     let raw = match read_all_bounded(&mut opened.file, opened.size, MAX_MANIFEST_BYTES) {
         Ok(bytes) => match String::from_utf8(bytes) {
             Ok(s) => s,
@@ -278,7 +368,7 @@ pub fn validate_directory(root: &Path) -> ValidationReport {
         diagnostics.push(d);
         return finish(false, root_display, None, None, diagnostics);
     }
-    validate_manifest_and_payloads(root, &root_display, &raw, None)
+    validate_manifest_and_payloads(&bundle_root, &root_display, &raw, None)
 }
 
 fn non_empty_str(v: Option<&serde_json::Value>) -> bool {
@@ -584,7 +674,7 @@ pub fn validate_manifest_header(manifest: &Manifest, diagnostics: &mut Vec<Diagn
 /// components against pre-streamed entry bytes via [`validate_metrics_document`]
 /// and their own streaming path.
 fn validate_manifest_and_payloads(
-    root: &Path,
+    root: &BundleRoot,
     root_display: &str,
     raw: &str,
     // When Some, skip filesystem payload I/O (archive path supplies hashes).
@@ -625,31 +715,14 @@ fn validate_manifest_and_payloads(
             if !path_ok_for_io[i] {
                 continue;
             }
-            let payload = match resolve_under_root(root, &c.path) {
-                Ok(p) => p,
-                Err(msg) => {
-                    diagnostics.push(Diagnostic::new("path_escape", c.path.clone(), msg));
-                    continue;
-                }
-            };
-            // Intermediate symlink escape: lexical join then ensure every prefix
-            // is not a symlink out of root; final open uses O_NOFOLLOW/regular-only.
-            if path_has_symlink_component(root, &c.path) {
-                diagnostics.push(Diagnostic::new(
-                    "symlink_escape",
-                    c.path.clone(),
-                    "payload path contains a symlink component",
-                ));
-                continue;
-            }
-            let mut opened = match open_regular_file_bounded(&payload, MAX_PER_FILE_BYTES, &c.path)
-            {
-                Ok(o) => o,
-                Err(d) => {
-                    diagnostics.push(d);
-                    continue;
-                }
-            };
+            let mut opened =
+                match root.open_regular_file_bounded(&c.path, MAX_PER_FILE_BYTES, &c.path) {
+                    Ok(o) => o,
+                    Err(d) => {
+                        diagnostics.push(d);
+                        continue;
+                    }
+                };
             if opened.size != c.bytes {
                 diagnostics.push(Diagnostic::new(
                     "byte_count_mismatch",
@@ -749,7 +822,7 @@ fn validate_manifest_and_payloads(
         }
 
         // Undeclared files + undeclared truth material under the bundle root.
-        scan_undeclared_entries(root, &declared_paths, &mut diagnostics);
+        scan_undeclared_entries(&root.path, &declared_paths, &mut diagnostics);
     }
 
     let component_count = Some(manifest.components.len());
@@ -881,7 +954,11 @@ fn is_valid_numeric_utc_offset(value: &str) -> bool {
     }
     let hours = (bytes[1] - b'0') * 10 + (bytes[2] - b'0');
     let minutes = (bytes[4] - b'0') * 10 + (bytes[5] - b'0');
-    hours <= 23 && minutes <= 59
+    hours <= 23
+        && minutes <= 59
+        // RFC3339 reserves `-00:00` for an unknown local offset. It cannot
+        // substantiate a resolved timezone; explicit positive zero remains valid.
+        && !(bytes[0] == b'-' && hours == 0 && minutes == 0)
 }
 
 /// Reject absolute, traversal, drive-prefix, empty, overlong, and non-schema paths.
@@ -997,6 +1074,172 @@ impl ForbiddenSentinelStream {
     }
 }
 
+#[cfg(unix)]
+fn open_regular_file_relative_to_directory_bounded(
+    root_directory: &File,
+    relative_path: &str,
+    max_bytes: u64,
+    path_label: &str,
+) -> Result<OpenedRegularFile, Diagnostic> {
+    open_regular_file_relative_to_directory_bounded_with_hook(
+        root_directory,
+        relative_path,
+        max_bytes,
+        path_label,
+        |_, _| {},
+    )
+}
+
+#[cfg(unix)]
+fn open_regular_file_relative_to_directory_bounded_with_hook<F>(
+    root_directory: &File,
+    relative_path: &str,
+    max_bytes: u64,
+    path_label: &str,
+    mut after_intermediate_open: F,
+) -> Result<OpenedRegularFile, Diagnostic>
+where
+    F: FnMut(usize, &str),
+{
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    validate_relative_path(relative_path)
+        .map_err(|message| Diagnostic::new("path_escape", path_label, message))?;
+    let segments: Vec<&str> = relative_path.split('/').collect();
+    let (final_segment, intermediate_segments) = segments
+        .split_last()
+        .expect("validated relative paths contain at least one segment");
+    let mut directory = root_directory.try_clone().map_err(|error| {
+        Diagnostic::new(
+            "payload_unreadable",
+            path_label,
+            format!("cannot duplicate bundle root handle: {error}"),
+        )
+    })?;
+
+    for (index, segment) in intermediate_segments.iter().enumerate() {
+        let name = CString::new(*segment).expect("relative path grammar excludes NUL");
+        // SAFETY: `directory` owns a valid directory descriptor, `name` is a
+        // NUL-terminated single path segment, and the returned descriptor is
+        // immediately adopted by `File` on success.
+        let descriptor = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if descriptor < 0 {
+            return Err(openat_diagnostic(
+                std::io::Error::last_os_error(),
+                path_label,
+                true,
+            ));
+        }
+        // SAFETY: `openat` returned a new owned descriptor on success.
+        directory = unsafe { File::from_raw_fd(descriptor) };
+        after_intermediate_open(index, segment);
+    }
+
+    let name = CString::new(*final_segment).expect("relative path grammar excludes NUL");
+    // O_NONBLOCK prevents a hostile FIFO/device from stalling validation before
+    // the opened handle is rejected as non-regular. It has no effect on regular
+    // file reads.
+    // SAFETY: `directory` owns a valid directory descriptor, `name` is a
+    // NUL-terminated single path segment, and the returned descriptor is
+    // immediately adopted by `File` on success.
+    let descriptor = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
+    };
+    if descriptor < 0 {
+        return Err(openat_diagnostic(
+            std::io::Error::last_os_error(),
+            path_label,
+            false,
+        ));
+    }
+    // SAFETY: `openat` returned a new owned descriptor on success.
+    let file = unsafe { File::from_raw_fd(descriptor) };
+    opened_regular_file_from_handle(file, max_bytes, path_label)
+}
+
+#[cfg(unix)]
+fn openat_diagnostic(error: std::io::Error, path_label: &str, intermediate: bool) -> Diagnostic {
+    match error.raw_os_error() {
+        Some(libc::ENOENT) => Diagnostic::new(
+            "payload_missing",
+            path_label,
+            format!("payload file missing: {path_label}"),
+        ),
+        Some(libc::ELOOP) => Diagnostic::new(
+            "symlink_escape",
+            path_label,
+            "payload path contains a symlink component",
+        ),
+        Some(libc::ENOTDIR) if intermediate => Diagnostic::new(
+            "symlink_escape",
+            path_label,
+            "payload path contains an untrusted symlink or non-directory component",
+        ),
+        _ => Diagnostic::new(
+            "payload_unreadable",
+            path_label,
+            format!("cannot open payload relative to bundle root: {error}"),
+        ),
+    }
+}
+
+fn opened_regular_file_from_handle(
+    file: File,
+    max_bytes: u64,
+    path_label: &str,
+) -> Result<OpenedRegularFile, Diagnostic> {
+    let metadata = file.metadata().map_err(|error| {
+        Diagnostic::new(
+            "payload_unreadable",
+            path_label,
+            format!("cannot fstat payload: {error}"),
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(Diagnostic::new(
+            "entry_non_regular",
+            path_label,
+            "payload MUST be a regular file",
+        ));
+    }
+    if metadata.len() > max_bytes {
+        return Err(Diagnostic::new(
+            "file_too_large",
+            path_label,
+            format!("actual size exceeds bound ({max_bytes})"),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(OpenedRegularFile {
+            file,
+            size: metadata.len(),
+            identity: (metadata.dev(), metadata.ino()),
+            path_label: path_label.to_string(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(OpenedRegularFile {
+            file,
+            size: metadata.len(),
+            path_label: path_label.to_string(),
+        })
+    }
+}
+
 /// Opened regular file with size and OS identity for TOCTOU checks.
 pub struct OpenedRegularFile {
     /// Open file handle (single source for size/hash/parse).
@@ -1080,45 +1323,7 @@ pub fn open_regular_file_bounded(
             )
         }
     })?;
-    let meta = file.metadata().map_err(|e| {
-        Diagnostic::new(
-            "payload_unreadable",
-            path_label,
-            format!("cannot fstat payload: {e}"),
-        )
-    })?;
-    if !meta.is_file() {
-        return Err(Diagnostic::new(
-            "entry_non_regular",
-            path_label,
-            "payload MUST be a regular file",
-        ));
-    }
-    if meta.len() > max_bytes {
-        return Err(Diagnostic::new(
-            "file_too_large",
-            path_label,
-            format!("actual size exceeds bound ({max_bytes})"),
-        ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        Ok(OpenedRegularFile {
-            file,
-            size: meta.len(),
-            identity: (meta.dev(), meta.ino()),
-            path_label: path_label.to_string(),
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        Ok(OpenedRegularFile {
-            file,
-            size: meta.len(),
-            path_label: path_label.to_string(),
-        })
-    }
+    opened_regular_file_from_handle(file, max_bytes, path_label)
 }
 
 fn verify_identity_unchanged(opened: &OpenedRegularFile) -> Result<(), Diagnostic> {
@@ -1214,6 +1419,7 @@ fn stream_sha256_file_with_sentinel_scan(
     ))
 }
 
+#[cfg(not(unix))]
 fn path_has_symlink_component(root: &Path, rel: &str) -> bool {
     let mut cur = root.to_path_buf();
     for seg in rel.split('/') {
@@ -1721,6 +1927,7 @@ fn validate_metrics_gaps(value: Option<&serde_json::Value>, path: &str, out: &mu
     }
 }
 
+#[cfg(not(unix))]
 fn resolve_under_root(root: &Path, rel: &str) -> Result<PathBuf, String> {
     validate_relative_path(rel)?;
     let mut out = root.to_path_buf();
@@ -2134,6 +2341,36 @@ mod tests {
     }
 
     #[test]
+    fn resolved_timezone_rejects_rfc3339_unknown_negative_zero_offset() {
+        let mut diagnostics = Vec::new();
+        validate_time_basis(
+            &TimeBasis {
+                timezone: Some("-00:00".into()),
+                timezone_resolved: true,
+            },
+            "$.timeBasis",
+            &mut diagnostics,
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "timezone_invalid"),
+            "{diagnostics:?}"
+        );
+
+        diagnostics.clear();
+        validate_time_basis(
+            &TimeBasis {
+                timezone: Some("+00:00".into()),
+                timezone_resolved: true,
+            },
+            "$.timeBasis",
+            &mut diagnostics,
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
     fn manifest_and_component_grammars_match_the_normative_schema() {
         let mut manifest = Manifest {
             schema_id: SCHEMA_ID.into(),
@@ -2251,6 +2488,65 @@ mod tests {
             "{:?}",
             report.diagnostics
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_rooted_open_refuses_intermediate_symlink() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("app.log"), b"outside\n").unwrap();
+
+        let bundle = tempfile::tempdir().unwrap();
+        let root = bundle.path();
+        std::os::unix::fs::symlink(outside.path(), root.join("logs")).unwrap();
+        let bundle_root = BundleRoot::open(root).unwrap();
+
+        let diagnostic = match bundle_root.open_regular_file_bounded(
+            "logs/app.log",
+            MAX_PER_FILE_BYTES,
+            "logs/app.log",
+        ) {
+            Ok(_) => panic!("intermediate symlink unexpectedly opened"),
+            Err(diagnostic) => diagnostic,
+        };
+        assert_eq!(diagnostic.code, "symlink_escape", "{diagnostic:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_rooted_open_cannot_escape_during_synchronized_intermediate_swap() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("app.log"), b"outside\n").unwrap();
+
+        let bundle = tempfile::tempdir().unwrap();
+        let root = bundle.path();
+        std::fs::create_dir(root.join("logs")).unwrap();
+        std::fs::write(root.join("logs/app.log"), b"trusted\n").unwrap();
+        let bundle_root = BundleRoot::open(root).unwrap();
+        let original_directory = root.join("logs-original");
+        let replacement_link = root.join("logs");
+        let mut swap_ran = false;
+
+        let mut opened = open_regular_file_relative_to_directory_bounded_with_hook(
+            &bundle_root.directory,
+            "logs/app.log",
+            MAX_PER_FILE_BYTES,
+            "logs/app.log",
+            |index, segment| {
+                assert_eq!(index, 0);
+                assert_eq!(segment, "logs");
+                std::fs::rename(&replacement_link, &original_directory).unwrap();
+                std::os::unix::fs::symlink(outside.path(), &replacement_link).unwrap();
+                swap_ran = true;
+            },
+        )
+        .unwrap();
+
+        let mut contents = String::new();
+        opened.file.read_to_string(&mut contents).unwrap();
+        assert!(swap_ran);
+        assert_eq!(contents, "trusted\n");
+        assert_ne!(contents, "outside\n");
     }
 
     #[test]
