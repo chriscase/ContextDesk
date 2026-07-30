@@ -164,6 +164,15 @@ vi.mock("../../lib/host", () => ({
     corpusTotal: 0,
     timeQuality: "order_only",
   })),
+  hostLoadLogTimezoneState: vi.fn(async (corpusId: string) => ({
+    corpusId,
+    eventRevision: 0,
+    declarations: {},
+    sources: [],
+  })),
+  hostPreviewLogSourceTimezone: vi.fn(),
+  hostApplyLogSourceTimezone: vi.fn(),
+  hostClearLogSourceTimezone: vi.fn(),
   hostLogAddBookmark: vi.fn(),
   hostLogDeleteBookmark: vi.fn(),
   hostLogLoadActiveInvestigation: vi.fn(async () => null),
@@ -625,6 +634,15 @@ describe("LogExplorer shell", () => {
       corpusTotal: 10,
       timeQuality: "wall",
     });
+    vi.mocked(host.hostLoadLogTimezoneState).mockResolvedValue({
+      corpusId: "c1",
+      eventRevision: 0,
+      declarations: {},
+      sources: [],
+    });
+    vi.mocked(host.hostPreviewLogSourceTimezone).mockReset();
+    vi.mocked(host.hostApplyLogSourceTimezone).mockReset();
+    vi.mocked(host.hostClearLogSourceTimezone).mockReset();
     vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([]);
     vi.mocked(host.hostLoadChatSession).mockResolvedValue(null);
     vi.mocked(host.hostSaveChatSession).mockResolvedValue(null);
@@ -2221,9 +2239,9 @@ describe("LogExplorer shell", () => {
     expect(metadata.textContent).toContain(
       "Source timestamp 2021-03-05 02:53:53,654; timezone unresolved.",
     );
-    expect(metadata.textContent).toContain(
-      "Logs → Overview → Time interpretation",
-    );
+    const resolveTime = within(metadata).getByRole("button", {
+      name: "Resolve time…",
+    });
     expect(metadata.textContent).not.toContain("1970");
     expect(metadata.textContent).not.toContain("· UTC");
 
@@ -2237,6 +2255,53 @@ describe("LogExplorer shell", () => {
       "source-local 2021-03-05 02:53:53,654 (timezone unresolved)",
     );
     expect(copied).not.toContain("1970");
+
+    vi.mocked(host.hostLoadLogTimezoneState).mockResolvedValue({
+      corpusId: "c1",
+      eventRevision: 0,
+      declarations: {},
+      sources: [
+        {
+          source: "server.log",
+          unresolvedLocalRecords: 1,
+          resolvedLocalRecords: 0,
+          explicitWallClockRecords: 0,
+          otherOrderOnlyRecords: 0,
+        },
+      ],
+    });
+
+    fireEvent.click(resolveTime);
+    const dialog = await screen.findByRole("dialog", {
+      name: "Resolve timestamp ambiguity",
+    });
+    expect(host.hostLoadLogTimezoneState).toHaveBeenCalledWith("c1");
+    expect(within(dialog).getByText(/Review 1 source/)).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", {
+          name: "Resolve timestamp ambiguity",
+        }),
+      ).toBeNull(),
+    );
+    expect(document.activeElement).toBe(resolveTime);
+
+    fireEvent.click(resolveTime);
+    await screen.findByRole("dialog", {
+      name: "Resolve timestamp ambiguity",
+    });
+    fireEvent.mouseDown(
+      screen.getByTestId("explorer-time-resolution-backdrop"),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", {
+          name: "Resolve timestamp ambiguity",
+        }),
+      ).toBeNull(),
+    );
+    expect(document.activeElement).toBe(resolveTime);
   });
 
   it("tells legacy corpus users to re-import instead of offering unusable timezone resolution", async () => {

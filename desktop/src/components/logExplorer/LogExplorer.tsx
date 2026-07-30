@@ -144,6 +144,7 @@ import { InvestigationAddMenu } from "./InvestigationAddMenu";
 import { SaveEvidenceDialog } from "./SaveEvidenceDialog";
 import { TimelineNavigator } from "./TimelineNavigator";
 import { LogDiagnosticDialog } from "../panes/LogDiagnosticDialog";
+import { ExplorerTimeResolutionDialog } from "./ExplorerTimeResolutionDialog";
 import { NoisePolicyControl, SuppressTemplateDialog } from "./NoisePolicy";
 import {
   centeredLiteralExcerpt,
@@ -769,6 +770,8 @@ export function LogExplorer({ corpusId }: Props) {
     useState(false);
   const [laneSourceQuery, setLaneSourceQuery] = useState("");
   const [timeQuality, setTimeQuality] = useState<TimeQuality>("order_only");
+  const [timeResolutionOpen, setTimeResolutionOpen] = useState(false);
+  const timeResolutionTriggerRef = useRef<HTMLButtonElement>(null);
   const [totalMatched, setTotalMatched] = useState(0);
   /** Unfiltered corpus event total for truthful count labeling (#534). */
   const [corpusTotal, setCorpusTotal] = useState(0);
@@ -4723,6 +4726,17 @@ export function LogExplorer({ corpusId }: Props) {
           >
             {timeQualityLabel(timeQuality)}
           </span>
+          {timeQuality !== "wall" ? (
+            <button
+              ref={timeResolutionTriggerRef}
+              type="button"
+              className="log-explorer__badge log-explorer__badge-action"
+              aria-haspopup="dialog"
+              onClick={() => setTimeResolutionOpen(true)}
+            >
+              Resolve time…
+            </button>
+          ) : null}
           <span className="log-explorer__badge">
             {corpusTotal.toLocaleString()} corpus events
           </span>
@@ -6602,9 +6616,20 @@ export function LogExplorer({ corpusId }: Props) {
                               <>
                                 Source timestamp{" "}
                                 {detail.unresolvedLocalTimestamp}; timezone
-                                unresolved. Resolve the source timezone in Logs
-                                → Overview → Time interpretation to enable
-                                timeline alignment.
+                                unresolved.{" "}
+                                <button
+                                  type="button"
+                                  className="log-explorer__inline-action"
+                                  aria-haspopup="dialog"
+                                  onClick={(event) => {
+                                    timeResolutionTriggerRef.current =
+                                      event.currentTarget;
+                                    setTimeResolutionOpen(true);
+                                  }}
+                                >
+                                  Resolve time…
+                                </button>{" "}
+                                to enable timeline alignment.
                               </>
                             ) : detail.timestampProvenance ===
                               "legacy_unknown" ? (
@@ -6934,6 +6959,18 @@ export function LogExplorer({ corpusId }: Props) {
           environment={diagnostic.environment}
           currentStatus={null}
           onDismiss={closeDiagnostics}
+        />
+      ) : null}
+
+      {timeResolutionOpen ? (
+        <ExplorerTimeResolutionDialog
+          corpusId={corpusId}
+          triggerRef={timeResolutionTriggerRef}
+          onDismiss={() => setTimeResolutionOpen(false)}
+          onChanged={async () => {
+            await refreshSummary();
+            await loadEvents();
+          }}
         />
       ) : null}
 
