@@ -80,10 +80,9 @@ pub fn parse_governed_log_citation_id(raw: &str) -> Option<GovernedLogCitationId
 
     let (kind, rest) = if let Some(rest) = s.strip_prefix(GovernedLogCitationKind::Event.prefix()) {
         (GovernedLogCitationKind::Event, rest)
-    } else if let Some(rest) = s.strip_prefix(GovernedLogCitationKind::Template.prefix()) {
-        (GovernedLogCitationKind::Template, rest)
     } else {
-        return None;
+        let rest = s.strip_prefix(GovernedLogCitationKind::Template.prefix())?;
+        (GovernedLogCitationKind::Template, rest)
     };
 
     parse_canonical_u64_digits(rest).map(|value| GovernedLogCitationId {
