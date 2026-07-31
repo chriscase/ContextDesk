@@ -36,6 +36,7 @@ import {
   hostLogSuppressionDiagnosticSnapshot,
   hostLogListBookmarks,
   hostLogLoadSuppression,
+  hostLogSuppressionLens,
   hostLogMutateTemplateSuppressionRule,
   hostLogPreviewInvestigationEvidence,
   hostLogPreviewInvestigationFindingView,
@@ -60,6 +61,7 @@ import {
   type InvestigationViewRecipeDto,
   type ResolvedInvestigationDocumentDto,
   type SuppressionDocumentDto,
+  type TrustedSuppressionLensDto,
   type SuppressionMutationResultDto,
   type SuppressionRuleMutation,
   type TimeQuality,
@@ -78,7 +80,6 @@ import { refreshAfterTimeRevision } from "../../lib/logExplorer/timeRevisionRefr
 import {
   formatPolicyBindingStatus,
   policyBindingBlocksApply,
-  ruleContributesToExclusion,
 } from "../../lib/logExplorer/policyBinding";
 import {
   clampLaneCount,
@@ -792,6 +793,15 @@ export function LogExplorer({ corpusId }: Props) {
   const [suppressedEventCount, setSuppressedEventCount] = useState<
     number | null
   >(null);
+  /**
+   * The exclusion set the host says it will honour (#819).
+   *
+   * The renderer no longer derives this from the policy document: the host
+   * re-derives and intersects on every query regardless, so deriving it here
+   * too would only risk disclosing a different number than is enforced.
+   */
+  const [suppressionLens, setSuppressionLens] =
+    useState<TrustedSuppressionLensDto | null>(null);
   /** Suspend lens only — durable #671 rules stay enabled (#817). */
   const [lensSuspended, setLensSuspended] = useState(() =>
     readNoiseLensSuspended(corpusId),
@@ -1157,18 +1167,13 @@ export function LogExplorer({ corpusId }: Props) {
   // Fail-closed product lens (#819): only enabled rules the host resolved as
   // matches_current may exclude events. Stale/fingerprint/invalid/conflicting
   // rules remain visible but contribute zero exclusions.
+  //
+  // The host is the authority here. It re-derives this set and intersects the
+  // request on every query, so what the renderer sends can only ever hide less
+  // — never more — than the durable policy allows.
   const enabledSuppressionTemplateIds = useMemo(
-    () =>
-      [
-        ...new Set(
-          (suppressionDocument?.rules ?? [])
-            .filter((rule) =>
-              ruleContributesToExclusion(rule.state, rule.resolution ?? null),
-            )
-            .map((rule) => rule.predicate.templateId),
-        ),
-      ].sort((a, b) => a - b),
-    [suppressionDocument],
+    () => suppressionLens?.templateIds ?? [],
+    [suppressionLens],
   );
   const activeSuppressionTemplateIds = useMemo(
     () =>
@@ -1643,17 +1648,13 @@ export function LogExplorer({ corpusId }: Props) {
         setSuppressedEventCount(null);
       }
       try {
-        const document = await hostLogLoadSuppression(corpusId);
-        // Hidden-count preview must use the same fail-closed lens as queries.
-        const enabledTemplateIds = [
-          ...new Set(
-            document.rules
-              .filter((rule) =>
-                ruleContributesToExclusion(rule.state, rule.resolution ?? null),
-              )
-              .map((rule) => rule.predicate.templateId),
-          ),
-        ].sort((a, b) => a - b);
+        const [document, lens] = await Promise.all([
+          hostLogLoadSuppression(corpusId),
+          hostLogSuppressionLens(corpusId),
+        ]);
+        // The disclosed count must describe the set the host actually
+        // enforces, so it is taken from the host lens rather than re-derived.
+        const enabledTemplateIds = lens.templateIds;
         const hidden =
           enabledTemplateIds.length === 0
             ? 0
@@ -1667,14 +1668,25 @@ export function LogExplorer({ corpusId }: Props) {
               ).totalMatched;
         if (requestId !== suppressionRequestRef.current) return document;
         setSuppressionDocument(document);
+        setSuppressionLens(lens);
         setSuppressedEventCount(hidden);
-        setSuppressionLoadState("ready");
+        if (lens.state === "unavailable") {
+          // The rules are readable but the lens is not, so counts are unknown.
+          // Nothing is being hidden; say so rather than imply a live policy.
+          setSuppressionLoadState("error");
+          setSuppressionLoadError(
+            lens.reason ?? "suppression lens unavailable; no events are hidden",
+          );
+        } else {
+          setSuppressionLoadState("ready");
+        }
         return document;
       } catch (policyError) {
         if (requestId === suppressionRequestRef.current) {
           setSuppressionLoadState("error");
           setSuppressionLoadError(String(policyError));
           setSuppressionDocument(null);
+          setSuppressionLens(null);
           setSuppressedEventCount(null);
         }
         throw policyError;
