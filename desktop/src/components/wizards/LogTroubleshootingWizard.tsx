@@ -20,7 +20,10 @@ import {
   levelEntries,
   statsBlurb,
 } from "../../lib/logStats";
-import { HELP_TEMPLATE_GROUPING } from "../../lib/helpContent";
+import {
+  HELP_PHASE_TIMINGS,
+  HELP_TEMPLATE_GROUPING,
+} from "../../lib/helpContent";
 import { HelpTip } from "../HelpTip";
 import { LogImportConfidence } from "../panes/LogImportConfidence";
 import { ProcessProgressPanel } from "./ProcessProgressPanel";
@@ -643,7 +646,7 @@ function IngestStatsHero({ report }: { report: LogIngestReportDto }) {
             <HelpTip
               label="Phase timings"
               title="Import phase timings"
-              content="Separate wall-clock time for discover/read, parse/frame, template analysis, persist/index, optional embedding, validation, and publication. Progress chrome keeps one streaming phase while work interleaves; these numbers are completion diagnostics (one-machine observation, not a SLA)."
+              content={HELP_PHASE_TIMINGS}
             />
           </p>
           <dl className="process-progress__stats wizard-stats__grid wizard-stats__phase-grid">

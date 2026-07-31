@@ -341,9 +341,7 @@ fn token_params(pat: &[String], msg: &[&str]) -> Vec<String> {
         return params;
     }
     for (p, m) in pat.iter().zip(msg.iter()) {
-        if p.as_str() == "<*>"
-            || (p.as_str() != *m && looks_variable(p) && looks_variable(m))
-        {
+        if p.as_str() == "<*>" || (p.as_str() != *m && looks_variable(p) && looks_variable(m)) {
             params.push((*m).to_string());
         }
     }

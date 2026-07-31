@@ -21,6 +21,18 @@ export const HELP_TEMPLATE_GROUPING: HelpTipContent = {
   helpLocator: "help://log-analysis-pipeline#events-per-template",
 };
 
+/** SoftWrite completion diagnostics for measured ingest operations (#824). */
+export const HELP_PHASE_TIMINGS: HelpTipContent = {
+  title: "Import phase timings",
+  definition:
+    "Separate wall-clock time for discover/read, parse/frame, template analysis, persist/index, optional embedding, validation, and publication.",
+  currentState:
+    "Progress chrome keeps one streaming phase while work interleaves; these numbers are completion diagnostics only.",
+  consequence:
+    "One-machine observation — not a product SLA. Optional embedding may show as deferred when source bytes cross the local defer threshold.",
+  helpLocator: "help://log-analysis-pipeline#import-phases",
+};
+
 export const HELP_FIND_VS_FILTER: HelpTipContent = {
   title: "Find vs Filter",
   definition:
