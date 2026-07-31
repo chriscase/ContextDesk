@@ -199,7 +199,9 @@ fn line_has_leading_timestamp(line: &str) -> bool {
     if t.len() >= 19
         && t.as_bytes().get(4) == Some(&b'-')
         && t.as_bytes().get(7) == Some(&b'-')
-        && t.as_bytes().get(..4).is_some_and(|b| b.iter().all(u8::is_ascii_digit))
+        && t.as_bytes()
+            .get(..4)
+            .is_some_and(|b| b.iter().all(u8::is_ascii_digit))
     {
         return true;
     }
@@ -207,7 +209,9 @@ fn line_has_leading_timestamp(line: &str) -> bool {
     if t.len() >= 10
         && t.as_bytes().get(4) == Some(&b'/')
         && t.as_bytes().get(7) == Some(&b'/')
-        && t.as_bytes().get(..4).is_some_and(|b| b.iter().all(u8::is_ascii_digit))
+        && t.as_bytes()
+            .get(..4)
+            .is_some_and(|b| b.iter().all(u8::is_ascii_digit))
     {
         return true;
     }

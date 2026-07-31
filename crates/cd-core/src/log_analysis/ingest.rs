@@ -2,9 +2,9 @@
 
 use super::drain::DrainMiner;
 use super::embed_policy::{LogEmbedMode, LogEmbedPolicy};
+use super::frame::LogicalRecordFramer;
 use super::import_preview::{ImportPreviewItem, ImportPreviewReport};
 use super::ingest_confidence::{IngestConfidenceAggregator, IngestConfidenceReport};
-use super::frame::LogicalRecordFramer;
 use super::parse::{parse_line_with_fingerprint, LogFormat};
 use super::redact_log::{prepare_original_record, redact_message, redact_params};
 use super::store::{
@@ -1822,7 +1822,9 @@ fn ingest_framed_record(
         LogFormat::Plain => "plain",
     };
     *stats.format_counts.entry(fmt_key.into()).or_insert(0) += 1;
-    let msg = time_op_ms(ops, IngestOp::ParseFrame, || redact_message(&parsed.message));
+    let msg = time_op_ms(ops, IngestOp::ParseFrame, || {
+        redact_message(&parsed.message)
+    });
     let ts = parsed.ts.unwrap_or(*seq as i64);
     stats.ts_min = Some(stats.ts_min.map_or(ts, |m| m.min(ts)));
     stats.ts_max = Some(stats.ts_max.map_or(ts, |m| m.max(ts)));
@@ -1867,7 +1869,9 @@ fn ingest_framed_record(
                 .with_bytes(stats.source_bytes),
             );
         }
-        time_op_result_ms(ops, IngestOp::Persist, || corpus.push_ingested_events(batch))?;
+        time_op_result_ms(ops, IngestOp::Persist, || {
+            corpus.push_ingested_events(batch)
+        })?;
         batch.clear();
     }
     if stats.lines.is_multiple_of(PROGRESS_EVERY_LINES) {

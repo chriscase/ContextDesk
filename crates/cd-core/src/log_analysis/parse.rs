@@ -439,8 +439,10 @@ fn parse_json(raw: &str, ingest_seq: u64) -> ParsedLine {
     let obj = v.as_object();
     // First-wins for duplicate JSON keys: serde_json keeps the last write, so
     // scan the raw text for the first occurrence of known timestamp keys (#789).
-    let first_ts_hint =
-        first_json_ts_field(raw, &["ts", "timestamp", "time", "@timestamp", "@t", "eventTime"]);
+    let first_ts_hint = first_json_ts_field(
+        raw,
+        &["ts", "timestamp", "time", "@timestamp", "@t", "eventTime"],
+    );
     let get_str = |keys: &[&str]| -> Option<String> {
         let o = obj?;
         for k in keys {
@@ -2572,7 +2574,10 @@ mod tests {
     fn postgres_jsonlog_error_severity_and_conflicting_level_field() {
         let line = r#"{"timestamp":"2025-06-15 12:20:05.250 UTC","error_severity":"ERROR","level":"info","message":"duplicate key value violates"}"#;
         let p = parse_line(line, Some(LogFormat::Json), 0);
-        assert_eq!(p.level, "error", "error_severity must win over generic level");
+        assert_eq!(
+            p.level, "error",
+            "error_severity must win over generic level"
+        );
     }
 
     #[test]
@@ -2596,5 +2601,4 @@ mod tests {
         assert_ne!(normalize_level("TRACE"), normalize_level("DEBUG"));
         assert_ne!(normalize_level("CRITICAL"), normalize_level("FATAL"));
     }
-
 }
