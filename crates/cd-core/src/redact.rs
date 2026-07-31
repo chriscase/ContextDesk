@@ -386,11 +386,24 @@ fn redact_bearer(out: &mut String) -> bool {
             search_from = i + "Bearer ***".len();
             continue;
         }
+        // Consume exactly the token run. A previous `.max(8)` floor raised this
+        // to eight characters even when the token was shorter — but the token
+        // charset excludes whitespace, so the floor could only ever swallow
+        // characters that are *not* part of the credential. It therefore added
+        // no protection and silently deleted the following words: "Bearer ab
+        // plus the retry count" became "Bearer ***the retry count". That loss
+        // used to be masked by the canonical-form rejection above; once notes
+        // mentioning an auth header became saveable it would have reached
+        // durable investigation prose (#656).
         let tok_len = rest
             .chars()
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
-            .count()
-            .max(8);
+            .count();
+        if tok_len == 0 {
+            // "Bearer " with no token after it: nothing to redact.
+            search_from = i + "Bearer ".len();
+            continue;
+        }
         let end = (i
             + "Bearer ".len()
             + rest
@@ -483,10 +496,19 @@ mod tests {
         assert_eq!(twice, once, "second pass changed the redacted text");
         assert_eq!(scrub_secrets(&twice), twice);
 
-        // A short token is still over-consumed on the first pass, unchanged.
-        let short = scrub_secrets("Bearer ab plus trailing words here");
-        assert!(short.contains("Bearer ***"), "{short}");
+        // A short token is fully redacted without eating the words after it.
+        // The token charset excludes whitespace, so anything past the token run
+        // is prose, never credential material.
+        let short = scrub_secrets("Header was Bearer ab plus the retry count.");
+        assert_eq!(short, "Header was Bearer *** plus the retry count.");
         assert_eq!(scrub_secrets(&short), short);
+        let tiny = scrub_secrets("Saw Bearer xyz then the pod restarted.");
+        assert_eq!(tiny, "Saw Bearer *** then the pod restarted.");
+        assert_eq!(scrub_secrets(&tiny), tiny);
+
+        // "Bearer " with no token is left alone rather than eating prose.
+        let bare = scrub_secrets("The Bearer  header was absent entirely.");
+        assert_eq!(bare, "The Bearer  header was absent entirely.");
     }
 
     #[test]
