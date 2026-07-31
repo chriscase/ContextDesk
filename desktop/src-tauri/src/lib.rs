@@ -6260,16 +6260,30 @@ async fn list_chat_models(
 ) -> Result<Vec<ModelOptionDto>, String> {
     let cfg = state.config.lock().expect("config").clone();
     let mut out = build_model_options(&cfg, &state.secrets).await;
-    if !include_hidden.unwrap_or(false) {
-        let keep: std::collections::BTreeSet<String> = keep_keys
-            .unwrap_or_default()
-            .into_iter()
-            .map(|k| k.trim().to_string())
-            .filter(|k| !k.is_empty())
-            .collect();
-        out.retain(|m| !m.hidden || m.is_default || keep.contains(&m.selection_key));
-    }
+    retain_picker_visible(&mut out, include_hidden.unwrap_or(false), keep_keys);
     Ok(out)
+}
+
+/// Drop curated-away options for an ordinary picker.
+///
+/// The app default and any explicitly kept selection always survive: a picker
+/// that cannot render its own value would silently show a different model
+/// (#678). Pure, so the rule is testable without a host.
+fn retain_picker_visible(
+    out: &mut Vec<ModelOptionDto>,
+    include_hidden: bool,
+    keep_keys: Option<Vec<String>>,
+) {
+    if include_hidden {
+        return;
+    }
+    let keep: std::collections::BTreeSet<String> = keep_keys
+        .unwrap_or_default()
+        .into_iter()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .collect();
+    out.retain(|m| !m.hidden || m.is_default || keep.contains(&m.selection_key));
 }
 
 /// Build the full annotated, ordered model list for a given configuration.
@@ -16155,6 +16169,64 @@ mod startup_host_tests {
 #[cfg(test)]
 mod chat_session_host_tests {
     use super::*;
+
+    fn opt(key: &str, hidden: bool, is_default: bool) -> ModelOptionDto {
+        ModelOptionDto {
+            id: key.into(),
+            label: key.into(),
+            selection_key: key.into(),
+            provider_id: "p".into(),
+            provider_label: "P".into(),
+            group: "P".into(),
+            is_default,
+            tools_enabled: true,
+            tools_disabled_reason: None,
+            hidden,
+            hidden_by: hidden.then(|| "model".to_string()),
+            pinned_rank: None,
+        }
+    }
+
+    #[test]
+    fn ordinary_pickers_do_not_receive_curated_away_models() {
+        let mut out = vec![opt("p::keep", false, false), opt("p::gone", true, false)];
+        retain_picker_visible(&mut out, false, None);
+        assert_eq!(
+            out.iter()
+                .map(|m| m.selection_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["p::keep"]
+        );
+    }
+
+    #[test]
+    fn a_hidden_default_is_still_offered_so_new_chats_have_a_model() {
+        let mut out = vec![opt("p::a", false, false), opt("p::def", true, true)];
+        retain_picker_visible(&mut out, false, None);
+        assert!(out.iter().any(|m| m.selection_key == "p::def"));
+    }
+
+    #[test]
+    fn an_explicitly_kept_selection_survives_the_filter() {
+        // A chat pinned to a hidden model must still get an option for it.
+        let mut out = vec![opt("p::a", false, false), opt("p::mine", true, false)];
+        retain_picker_visible(&mut out, false, Some(vec!["  p::mine  ".into()]));
+        assert!(out.iter().any(|m| m.selection_key == "p::mine"));
+    }
+
+    #[test]
+    fn the_management_surface_receives_everything() {
+        let mut out = vec![opt("p::a", false, false), opt("p::b", true, false)];
+        retain_picker_visible(&mut out, true, None);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn blank_keep_keys_do_not_accidentally_keep_everything() {
+        let mut out = vec![opt("p::a", false, false), opt("p::b", true, false)];
+        retain_picker_visible(&mut out, false, Some(vec!["".into(), "   ".into()]));
+        assert_eq!(out.len(), 1);
+    }
 
     fn impact(
         affects_default: bool,
