@@ -9667,6 +9667,27 @@ fn log_preview_investigation_finding_view(
         .map_err(|e| e.to_string())
 }
 
+/// SoftWrite-path Apply gate for a finding view recipe (#656).
+///
+/// Opens the corpus through the shared handle cache (same authority path as
+/// Explorer load), then revalidates every exact reference. Returns the durable
+/// recipe only when every reference is verified; missing/stale refs fail closed.
+/// Does not mutate the Investigation document — the UI applies the returned
+/// recipe locally on success only.
+fn apply_log_investigation_finding_view_at(
+    store: &cd_core::investigations::InvestigationStore,
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+    investigation_id: &str,
+    finding_id: &str,
+) -> Result<cd_core::investigations::FindingViewRecipeResolution, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    store
+        .apply_finding_view_recipe(investigation_id, finding_id, &corpus)
+        .map_err(|e| e.to_string())
+}
+
 /// Trusted-host Apply gate for a finding view recipe (#656).
 ///
 /// Revalidates every exact reference. Returns the recipe only when every
@@ -9680,11 +9701,15 @@ fn log_apply_investigation_finding_view(
     finding_id: String,
 ) -> Result<cd_core::investigations::FindingViewRecipeResolution, String> {
     let cache = log_cache_dir(&state)?;
-    let corpus =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    investigation_store(&state)?
-        .apply_finding_view_recipe(&investigation_id, &finding_id, &corpus)
-        .map_err(|e| e.to_string())
+    let store = investigation_store(&state)?;
+    apply_log_investigation_finding_view_at(
+        &store,
+        &state.log_corpus_handles,
+        &cache,
+        &corpus_id,
+        &investigation_id,
+        &finding_id,
+    )
 }
 
 /// List chat sessions linked to a corpus (any chat may link).
@@ -15471,6 +15496,274 @@ mod log_embedding_host_tests {
             policy.model_id,
             cd_core::embed::LOCAL_LOG_EMBED_MODEL_ID,
             "cancel/retry path must use product ONNX model id"
+        );
+    }
+}
+
+/// Host-layer SoftWrite Apply authority for Investigation finding view recipes (#656).
+///
+/// Exercises the real `apply_log_investigation_finding_view_at` path used by the
+/// Tauri command — open corpus through the handle cache, revalidate exact refs,
+/// fail closed on missing/stale — not string greps alone.
+#[cfg(test)]
+mod log_investigation_apply_host_tests {
+    use super::*;
+    use cd_core::investigations::{
+        AddFindingInput, FindingKind, FindingViewFilters, FindingViewLane, FindingViewRecipe,
+        FindingViewTimeLinkMode, InvestigationStore,
+    };
+    use cd_core::log_analysis::{
+        ActiveTimestampBasis, BookmarkEventRef, LogCorpus, LogEvent, TimeQuality,
+        TimestampProvenance,
+    };
+
+    fn fixture_corpus(cache: &std::path::Path) -> LogCorpus {
+        let corpus = LogCorpus::create(cache, "host apply investigation").expect("create corpus");
+        corpus
+            .push_events(&[
+                LogEvent {
+                    seq: 10,
+                    ts: 1_700_000_010,
+                    timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
+                    level: "error".into(),
+                    service: Some("api".into()),
+                    host: None,
+                    template_id: 1,
+                    params: vec![],
+                    trace_id: None,
+                    message: "checkout failed".into(),
+                    source: "api/app.log".into(),
+                },
+                LogEvent {
+                    seq: 11,
+                    ts: 1_700_000_011,
+                    timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
+                    level: "info".into(),
+                    service: Some("api".into()),
+                    host: None,
+                    template_id: 2,
+                    params: vec![],
+                    trace_id: None,
+                    message: "retry scheduled".into(),
+                    source: "api/app.log".into(),
+                },
+            ])
+            .expect("push events");
+        corpus.flush().expect("flush");
+        corpus
+    }
+
+    fn event_ref(corpus: &LogCorpus, seq: u64, source: &str, ts: i64) -> BookmarkEventRef {
+        BookmarkEventRef {
+            corpus_id: corpus.id().to_string(),
+            seq,
+            source: source.into(),
+            timestamp_hint: ts,
+            time_quality_hint: TimeQuality::Wall,
+        }
+    }
+
+    fn minimal_recipe(corpus: &LogCorpus) -> FindingViewRecipe {
+        let focused = event_ref(corpus, 10, "api/app.log", 1_700_000_010);
+        FindingViewRecipe {
+            filters: FindingViewFilters {
+                levels: vec!["error".into()],
+                sources: vec![],
+                services: vec![],
+                hosts: vec![],
+                time_from: None,
+                time_to: None,
+                seq_from: None,
+                seq_to: None,
+                template_id: None,
+                trace_id: None,
+                keyword: None,
+            },
+            lanes: vec![FindingViewLane {
+                id: "lane-0".into(),
+                label: "All sources".into(),
+                sources: vec![],
+            }],
+            visible_lane_count: 1,
+            time_link_mode: FindingViewTimeLinkMode::Independent,
+            focused_lane_id: Some("lane-0".into()),
+            focused_event: Some(focused.clone()),
+            selection: vec![focused],
+            highlights: vec![],
+            find: None,
+            viewport_anchors: vec![],
+        }
+    }
+
+    #[test]
+    fn apply_helper_is_registered_and_used_by_trusted_host_command() {
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("log_apply_investigation_finding_view,"),
+            "Apply command must be registered on the SoftWrite host"
+        );
+        assert!(
+            src.contains("fn apply_log_investigation_finding_view_at("),
+            "Apply must use a testable host helper like load_active_log_investigation_at"
+        );
+        let command_start = src
+            .find("fn log_apply_investigation_finding_view(")
+            .expect("Apply command");
+        let command_end = src[command_start..]
+            .find("/// List chat sessions linked to a corpus")
+            .map(|offset| command_start + offset)
+            .expect("command boundary");
+        let command_body = &src[command_start..command_end];
+        assert!(
+            command_body.contains("apply_log_investigation_finding_view_at("),
+            "Tauri Apply command must delegate to the SoftWrite helper, not open corpus ad-hoc"
+        );
+        assert!(
+            !command_body.contains("LogCorpus::open"),
+            "Apply command must not bypass the shared handle-cache SoftWrite path"
+        );
+    }
+
+    #[test]
+    fn host_apply_finding_view_succeeds_only_when_exact_refs_verify() {
+        let root = tempfile::tempdir().expect("temp root");
+        let cache = root.path().join("cache");
+        std::fs::create_dir_all(&cache).expect("cache dir");
+        let corpus = fixture_corpus(&cache);
+        let corpus_id = corpus.id().to_string();
+        let store = InvestigationStore::new(root.path().join("investigations"));
+        let handles = LogCorpusHandleCache::default();
+
+        let document = store
+            .create("Host Apply gate", &corpus)
+            .expect("create investigation");
+        let added = store
+            .add_human_finding(
+                &document.id,
+                document.revision,
+                &corpus,
+                AddFindingInput {
+                    kind: FindingKind::Observation,
+                    title: "Checkout failure view".into(),
+                    why_it_matters: "Anchors the first error for Apply.".into(),
+                    event_refs: vec![event_ref(&corpus, 10, "api/app.log", 1_700_000_010)],
+                    view_recipe: Some(minimal_recipe(&corpus)),
+                },
+            )
+            .expect("add finding with view recipe");
+        let finding_id = added.document.findings[0].id.clone();
+        let revision_before = added.document.revision;
+
+        let clean = apply_log_investigation_finding_view_at(
+            &store,
+            &handles,
+            &cache,
+            &corpus_id,
+            &document.id,
+            &finding_id,
+        )
+        .expect("verified SoftWrite Apply must succeed");
+        assert_eq!(clean.missing_count, 0);
+        assert_eq!(clean.stale_count, 0);
+        assert_eq!(clean.finding_id, finding_id);
+        assert_eq!(
+            clean.view_recipe.filters.levels,
+            vec!["error".to_string()],
+            "returned recipe must be the durable payload-free recipe"
+        );
+        // Apply is non-mutating for the Investigation document.
+        assert_eq!(
+            store
+                .load(&document.id, &corpus)
+                .expect("reload")
+                .document
+                .revision,
+            revision_before
+        );
+    }
+
+    #[test]
+    fn host_apply_finding_view_fails_closed_on_missing_refs_and_unknown_finding() {
+        let root = tempfile::tempdir().expect("temp root");
+        let cache = root.path().join("cache");
+        std::fs::create_dir_all(&cache).expect("cache dir");
+        let corpus = fixture_corpus(&cache);
+        let corpus_id = corpus.id().to_string();
+        let store = InvestigationStore::new(root.path().join("investigations"));
+        let handles = LogCorpusHandleCache::default();
+
+        let document = store
+            .create("Host Apply fail-closed", &corpus)
+            .expect("create investigation");
+        let added = store
+            .add_human_finding(
+                &document.id,
+                document.revision,
+                &corpus,
+                AddFindingInput {
+                    kind: FindingKind::Hypothesis,
+                    title: "Potentially stale Apply".into(),
+                    why_it_matters: "Missing exact identity must block Apply.".into(),
+                    event_refs: vec![event_ref(&corpus, 10, "api/app.log", 1_700_000_010)],
+                    view_recipe: Some(minimal_recipe(&corpus)),
+                },
+            )
+            .expect("add finding");
+        let finding_id = added.document.findings[0].id.clone();
+        let revision_before = added.document.revision;
+
+        // Warm the SoftWrite handle cache the same way Explorer would.
+        let warm = handles
+            .open(&cache, &corpus_id)
+            .expect("open corpus handle");
+        warm.with_connection(|connection| {
+            connection
+                .execute("DELETE FROM events WHERE seq = 10", [])
+                .map_err(|error| cd_core::CoreError::Message(format!("test delete: {error}")))?;
+            Ok(())
+        })
+        .expect("delete exact event");
+
+        let err = apply_log_investigation_finding_view_at(
+            &store,
+            &handles,
+            &cache,
+            &corpus_id,
+            &document.id,
+            &finding_id,
+        )
+        .expect_err("missing exact refs must fail closed on SoftWrite Apply path");
+        assert!(
+            err.contains("Apply blocked") && err.contains("missing"),
+            "typed fail-closed explanation required, got: {err}"
+        );
+
+        let missing_finding = apply_log_investigation_finding_view_at(
+            &store,
+            &handles,
+            &cache,
+            &corpus_id,
+            &document.id,
+            "019fa8d0-0000-7000-8000-00000000dead",
+        )
+        .expect_err("unknown finding must fail closed");
+        assert!(
+            !missing_finding.is_empty(),
+            "unknown finding must return a non-empty host error"
+        );
+
+        // Failed Apply must not advance or rewrite the Investigation revision.
+        assert_eq!(
+            store
+                .load(&document.id, &corpus)
+                .expect("reload after fail-closed Apply")
+                .document
+                .revision,
+            revision_before
         );
     }
 }
