@@ -194,6 +194,20 @@ describe("large inventories stay bounded", () => {
     expect(keysOf(view.available)).toContain("gw::model-0999");
   });
 
+  it("keeps the limit an actual bound when the selection is outside it", () => {
+    const view = curateModels(many, {
+      limit: 5,
+      selectedKey: "gw::model-0999",
+    });
+    // Making room for the selection must displace a row, not add one — a caller
+    // sizing a list on `limit` would otherwise render one row too many.
+    expect(view.available).toHaveLength(5);
+    expect(
+      keysOf(view.available).filter((k) => k === "gw::model-0999"),
+    ).toHaveLength(1);
+    expect(view.truncated).toBe(many.length - 5);
+  });
+
   it("search narrows a large inventory to a usable list", () => {
     const view = curateModels(many, { query: "model-0042" });
     expect(keysOf(view.available)).toEqual(["gw::model-0042"]);
