@@ -826,7 +826,11 @@ describe("LinkedChatRail", () => {
     expect(screen.getByText("No chat selected")).toBeTruthy();
   });
 
-  it("coalesces concurrent Return and Send into one durable linked session (#709)", async () => {
+  it("coalesces concurrent New and Send into one durable linked session (#709)", async () => {
+    // Dual-enter createLinkedChat itself (New button + Send with no active
+    // chat). This is not satisfied by creatingTurnChatRef alone — both paths
+    // call createLinkedChat, so only createLinkedChatInflightRef coalesce
+    // keeps a single host create.
     let resolveCreate:
       | ((session: host.ChatSessionDto) => void)
       | null = null;
@@ -834,16 +838,18 @@ describe("LinkedChatRail", () => {
       resolveCreate = resolve;
     });
     const createdIds: string[] = [];
+    let createEntries = 0;
     vi.mocked(host.hostSetChatLinkedCorpus).mockImplementation(
       async (sessionId, corpusId, draftSession) => {
         if (!draftSession) return null;
+        createEntries += 1;
         createdIds.push(sessionId);
         const saved: host.ChatSessionDto = {
           ...draftSession,
           id: sessionId,
           linked_corpus_id: corpusId,
         };
-        // Hold the first create open so a concurrent Return/Send races.
+        // Hold the first create open so New+Send both enter createLinkedChat.
         await createGate;
         return host.hostSaveChatSession(saved);
       },
@@ -889,13 +895,14 @@ describe("LinkedChatRail", () => {
     )) as HTMLTextAreaElement;
     fireEvent.change(composer, { target: { value: "race me" } });
 
-    // Same empty-session intent: Return and Send fire while create is in flight.
-    fireEvent.keyDown(composer, { key: "Enter" });
+    // New starts createLinkedChat; Send (no activeChatId yet) also enters it.
+    fireEvent.click(screen.getByTestId("new-linked-chat"));
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
       expect(host.hostSetChatLinkedCorpus).toHaveBeenCalledTimes(1),
     );
+    expect(createEntries).toBe(1);
     expect(createdIds).toHaveLength(1);
 
     await act(async () => {
@@ -908,6 +915,7 @@ describe("LinkedChatRail", () => {
       });
     });
 
+    // Send's turn proceeds on the single created session.
     await waitFor(() => expect(host.agentTurn).toHaveBeenCalledTimes(1));
     expect(host.agentTurn).toHaveBeenCalledWith(
       createdIds[0],
@@ -921,7 +929,6 @@ describe("LinkedChatRail", () => {
       false,
       expect.any(Object),
     );
-    // Exactly one durable session for the race.
     expect(new Set(createdIds).size).toBe(1);
   });
 
@@ -1005,19 +1012,93 @@ describe("LinkedChatRail", () => {
     );
     // Local log_nav shortcut is no longer used — host owns exact reveal.
     expect(onApplyNav).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(screen.getByText(/Opened log_event:42/i)).toBeTruthy(),
+    );
 
     // Legacy unbound fails closed — no substitute.
     fireEvent.click(screen.getByRole("button", { name: "log_template:7" }));
     expect(
       await screen.findByText(/does not record its original corpus/i),
     ).toBeTruthy();
-    expect(host.hostOpenLogExplorerTarget).toHaveBeenCalledTimes(1);
 
     // Malformed scheme never becomes file I/O.
     fireEvent.click(screen.getByRole("button", { name: "unknown://x" }));
     expect(
       await screen.findByText(/unsupported or malformed/i),
     ).toBeTruthy();
+  });
+
+  it("does not claim Opened status when host exact-nav fails", async () => {
+    let stored = sessionDto("chat-cite-fail", "Citation fail");
+    stored.messages = [
+      {
+        id: "a1",
+        role: "assistant",
+        content: "see source",
+        tools: undefined,
+        citations: [
+          {
+            id: "log_event:42",
+            label: "log_event:42",
+            title: undefined,
+            corpusId: "c1",
+          },
+        ],
+        trail: undefined,
+        meta: undefined,
+      },
+    ];
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
+      async () => [
+        {
+          id: stored.id,
+          title: stored.title,
+          archived: false,
+          pinned: false,
+          created_at: stored.created_at,
+          updated_at: stored.updated_at,
+          message_count: stored.messages.length,
+          preview: "",
+          linked_corpus_id: "c1",
+        },
+      ],
+    );
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async () => stored);
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      stored = session;
+      return session;
+    });
+    vi.mocked(host.hostOpenLogExplorerTarget).mockRejectedValue(
+      new Error("event 42 was not found in this corpus"),
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("linked-chat-switcher-toggle"));
+    fireEvent.click(
+      within(screen.getByTestId("linked-chat-switcher")).getByText(
+        "Citation fail",
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("linked-chat-msg-assistant")).toBeTruthy(),
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+    fireEvent.click(screen.getByRole("button", { name: "log_event:42" }));
+
+    expect(
+      await screen.findByText(/original log corpus.*unavailable[\s\S]*not found/i),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Opened log_event:42/i)).toBeNull();
   });
 
   it("stops the exact active session once and waits for the host terminal event", async () => {

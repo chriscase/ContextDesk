@@ -200,6 +200,9 @@ export function governedCitationToNavTarget(
  * When `openExplorerTarget` is provided, routes through the host exact-nav
  * command (validate corpus + target, one-shot deliver). Otherwise falls back
  * to open-only (legacy callers / tests).
+ *
+ * @returns `true` only when the host open path succeeded; callers must not
+ * treat swallowed host errors as a successful open.
  */
 export async function openPersistedLogCitation(
   sourceId: string,
@@ -210,13 +213,13 @@ export async function openPersistedLogCitation(
     corpusId: string,
     target: GovernedLogCitationId,
   ) => Promise<unknown>,
-): Promise<void> {
+): Promise<boolean> {
   if (!corpusId) {
     showUnavailable(
       sourceId,
       "This older log citation does not record its original corpus. ContextDesk will not substitute the chat’s current corpus.",
     );
-    return;
+    return false;
   }
   const target = parseGovernedLogCitationId(sourceId);
   if (!target) {
@@ -224,7 +227,7 @@ export async function openPersistedLogCitation(
       sourceId,
       "This log citation is not a canonical log_event:<id> or log_template:<id> identity and was not opened.",
     );
-    return;
+    return false;
   }
   try {
     if (openExplorerTarget) {
@@ -232,6 +235,7 @@ export async function openPersistedLogCitation(
     } else {
       await openExplorer(corpusId);
     }
+    return true;
   } catch (error) {
     showUnavailable(
       sourceId,
@@ -239,5 +243,6 @@ export async function openPersistedLogCitation(
         error instanceof Error ? error.message : String(error)
       }`,
     );
+    return false;
   }
 }

@@ -14,13 +14,14 @@ describe("persisted log citation routing (#698)", () => {
     openExplorer.mockResolvedValue("log-explorer-original");
     const unavailable = vi.fn();
 
-    await openPersistedLogCitation(
+    const ok = await openPersistedLogCitation(
       "log_template:7",
       "corpus-original",
       unavailable,
       openExplorer,
     );
 
+    expect(ok).toBe(true);
     expect(openExplorer).toHaveBeenCalledWith("corpus-original");
     expect(unavailable).not.toHaveBeenCalled();
   });
@@ -33,7 +34,7 @@ describe("persisted log citation routing (#698)", () => {
     });
     const unavailable = vi.fn();
 
-    await openPersistedLogCitation(
+    const ok = await openPersistedLogCitation(
       "log_event:9007199254740993",
       "c1",
       unavailable,
@@ -41,6 +42,7 @@ describe("persisted log citation routing (#698)", () => {
       openExplorerTarget,
     );
 
+    expect(ok).toBe(true);
     expect(openExplorer).not.toHaveBeenCalled();
     expect(openExplorerTarget).toHaveBeenCalledWith("c1", {
       kind: "event",
@@ -57,13 +59,14 @@ describe("persisted log citation routing (#698)", () => {
     openExplorer.mockRejectedValue(new Error("corpus not found"));
     const unavailable = vi.fn();
 
-    await openPersistedLogCitation(
+    const ok = await openPersistedLogCitation(
       "log_event:42",
       "corpus-discarded",
       unavailable,
       openExplorer,
     );
 
+    expect(ok).toBe(false);
     expect(unavailable).toHaveBeenCalledWith(
       "log_event:42",
       expect.stringMatching(/original log corpus.*unavailable[\s\S]*not found/i),
@@ -73,13 +76,14 @@ describe("persisted log citation routing (#698)", () => {
   it("fails closed for legacy citations without substituting current context", async () => {
     const unavailable = vi.fn();
 
-    await openPersistedLogCitation(
+    const ok = await openPersistedLogCitation(
       "log_template:7",
       undefined,
       unavailable,
       openExplorer,
     );
 
+    expect(ok).toBe(false);
     expect(openExplorer).not.toHaveBeenCalled();
     expect(openExplorerTarget).not.toHaveBeenCalled();
     expect(unavailable).toHaveBeenCalledWith(

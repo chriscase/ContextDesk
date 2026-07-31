@@ -826,8 +826,10 @@ export function LinkedChatRail({
         },
         hostOpenLogExplorer,
         (id, target) => hostOpenLogExplorerTarget(id, target),
-      ).then(() => {
-        if (activeChatId) {
+      ).then((opened) => {
+        // Only claim success when the host exact-nav path actually succeeded;
+        // showUnavailable already records failures on the rail error surface.
+        if (opened && activeChatId) {
           setStatusByChat((m) => ({
             ...m,
             [activeChatId]: `Opened ${sourceId}`,

@@ -148,13 +148,49 @@ describe("openPersistedLogCitation (#698)", () => {
   it("never substitutes when provenance is missing", async () => {
     const open = vi.fn();
     const unavailable = vi.fn();
-    await openPersistedLogCitation(
+    const ok = await openPersistedLogCitation(
       "log_template:7",
       undefined,
       unavailable,
       open,
     );
+    expect(ok).toBe(false);
     expect(open).not.toHaveBeenCalled();
     expect(unavailable).toHaveBeenCalled();
+  });
+
+  it("returns false when host exact-nav fails (callers must not claim success)", async () => {
+    const open = vi.fn();
+    const openTarget = vi.fn().mockRejectedValue(new Error("corpus discarded"));
+    const unavailable = vi.fn();
+    const ok = await openPersistedLogCitation(
+      "log_event:42",
+      "gone-corpus",
+      unavailable,
+      open,
+      openTarget,
+    );
+    expect(ok).toBe(false);
+    expect(open).not.toHaveBeenCalled();
+    expect(openTarget).toHaveBeenCalled();
+    expect(unavailable).toHaveBeenCalledWith(
+      "log_event:42",
+      expect.stringMatching(/unavailable[\s\S]*discarded/i),
+    );
+  });
+
+  it("returns true only when host exact-nav succeeds", async () => {
+    const open = vi.fn();
+    const openTarget = vi.fn().mockResolvedValue({ windowLabel: "x" });
+    const unavailable = vi.fn();
+    const ok = await openPersistedLogCitation(
+      "log_event:42",
+      "c1",
+      unavailable,
+      open,
+      openTarget,
+    );
+    expect(ok).toBe(true);
+    expect(unavailable).not.toHaveBeenCalled();
   });
 });

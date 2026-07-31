@@ -9897,25 +9897,18 @@ async fn open_log_explorer_target(
     .await
     .map_err(|error| format!("open log explorer target task join: {error}"))??;
 
-    {
-        let mut store = state
-            .log_explorer_nav_targets
-            .lock()
-            .map_err(|_| "log explorer nav target store poisoned".to_string())?;
-        // Replace any prior pending target for this corpus (last writer wins;
-        // previous undelivered target is dropped — never stale multi-queue).
-        store.set(corpus_id.clone(), staged.clone());
-    }
-
     let title = format!("Log Explorer · {corpus_name}");
     set_active_log_corpus_state_nonblocking(&state, Some(corpus_id.clone()));
     let label = log_explorer_window_label(&corpus_id);
     use tauri::Emitter;
     use tauri::Manager;
+
+    // Existing window: stage only after we know the window is reachable, then
+    // emit so take() delivers once.
     if let Some(w) = app.get_webview_window(&label) {
+        stage_log_explorer_nav_target(&state, &corpus_id, staged.clone())?;
         let _ = w.set_focus();
         let _ = w.unminimize();
-        // Notify an already-open Explorer so it can take the new one-shot target.
         let _ = w.emit(LOG_EXPLORER_NAV_TARGET_EVENT, staged.clone());
         return Ok(OpenLogExplorerTargetResult {
             window_label: label,
@@ -9924,8 +9917,11 @@ async fn open_log_explorer_target(
         });
     }
 
+    // New window: resolve URL *before* staging so a URL failure never leaves a
+    // pending target for a later generic open to take (stale replay).
     let url = log_explorer_webview_url(&app, &corpus_id)?;
-    tauri::WebviewWindowBuilder::new(&app, &label, url)
+    stage_log_explorer_nav_target(&state, &corpus_id, staged.clone())?;
+    if let Err(error) = tauri::WebviewWindowBuilder::new(&app, &label, url)
         .title(title)
         .inner_size(1400.0, 900.0)
         .min_inner_size(800.0, 600.0)
@@ -9936,13 +9932,39 @@ async fn open_log_explorer_target(
         .decorations(true)
         .background_color(tauri::window::Color(0x0b, 0x0c, 0x0e, 0xff))
         .build()
-        .map_err(|e| format!("open log explorer window: {e}"))?;
+    {
+        // Window never opened — clear the staged target so a later Explorer
+        // open for this corpus cannot take a failed citation.
+        clear_log_explorer_nav_target(&state, &corpus_id);
+        return Err(format!("open log explorer window: {error}"));
+    }
     // Fresh window will take the pending target on mount (no emit required).
     Ok(OpenLogExplorerTargetResult {
         window_label: label,
         corpus_id,
         target: staged,
     })
+}
+
+/// Stage a one-shot exact-nav target (last writer wins for the corpus).
+fn stage_log_explorer_nav_target(
+    state: &AppState,
+    corpus_id: &str,
+    target: LogExplorerNavTarget,
+) -> Result<(), String> {
+    let mut store = state
+        .log_explorer_nav_targets
+        .lock()
+        .map_err(|_| "log explorer nav target store poisoned".to_string())?;
+    store.set(corpus_id.to_string(), target);
+    Ok(())
+}
+
+/// Clear any undelivered exact-nav target for a corpus (failed open path).
+fn clear_log_explorer_nav_target(state: &AppState, corpus_id: &str) {
+    if let Ok(mut store) = state.log_explorer_nav_targets.lock() {
+        store.clear(corpus_id);
+    }
 }
 
 /// Deliver and clear the one-shot exact-nav target for this corpus's Explorer.
@@ -14447,6 +14469,16 @@ mod startup_host_tests {
         store.clear_for_window_label(&label);
         assert!(store.peek(&corpus_a).is_none());
         assert!(store.peek("other").is_some());
+
+        // Failed window open after stage must clear so a later generic open
+        // cannot take a failed citation (stale replay).
+        store.set(corpus_a.clone(), target_a.clone());
+        assert!(store.peek(&corpus_a).is_some());
+        store.clear(&corpus_a);
+        assert!(
+            store.take(&corpus_a).is_none(),
+            "cleared staged target must not replay on a later take"
+        );
     }
 
     #[test]

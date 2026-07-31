@@ -70,7 +70,7 @@ export async function openPersistedLogCitation(
   sourceId: string,
   corpusId: string | undefined,
   showUnavailable: (sourceId: string, message: string) => void,
-): Promise<void> {
+): Promise<boolean> {
   return openPersistedLogCitationCore(
     sourceId,
     corpusId,
