@@ -4,12 +4,25 @@ Help diagrams are trusted, bundled explanatory assets. They render through an
 `<img>` data URL after the Rust host verifies the asset belongs to the selected
 page. They are never inserted as live DOM markup.
 
-Use a transparent canvas and this calm, dark-friendly palette:
+Diagrams cannot inherit the page theme: the host serves them as a base64
+`data:` URL and Help renders them through `<img>`, so nothing inside the file
+sees the reader's skin. The `.help-figure` surface behind them resolves to
+near-white in the **Light** and **Sand** skins.
+
+Therefore **every label must sit on an opaque shape you filled yourself**.
+A transparent canvas is fine where all text already sits on inset panels; when
+a title, caption, or footnote would otherwise float on the canvas, give the
+diagram a full-bleed background rect (`<rect width="W" height="H"
+fill="#0f172a"/>` as the first child), as `incident-evidence-*.svg` do. This is
+enforced: `scripts/check_help_corpus.mjs` rejects text on the bare canvas and
+text below 4.5:1 against the shape it sits on.
+
+Use this calm, dark-friendly palette:
 
 | Role | Color |
 | --- | --- |
 | Primary text | `#e5e7eb` |
-| Secondary text and strokes | `#9ca3af` |
+| Secondary text and strokes | `#9ca3af` (on the `#111827` panel fill only — it fails AA on lighter accent fills, so use primary text there) |
 | Panel fill | `#111827` |
 | Panel border | `#475569` |
 | Blue accent | `#38bdf8` |

@@ -21,7 +21,7 @@
     <path d="M578 176H637" stroke="#38bdf8" stroke-width="4" marker-end="url(#a)"/>
     <rect x="648" y="86" width="204" height="76" rx="12" fill="#064e3b" stroke="#34d399" stroke-width="2"/>
     <text x="750" y="118" fill="#e5e7eb" font-size="16" font-weight="700">Read evidence</text>
-    <text x="750" y="142" fill="#9ca3af" font-size="13">bounded + cited</text>
+    <text x="750" y="142" fill="#e5e7eb" font-size="13">bounded + cited</text>
     <rect x="648" y="194" width="204" height="76" rx="12" fill="#451a03" stroke="#fbbf24" stroke-width="2"/>
     <text x="750" y="226" fill="#e5e7eb" font-size="16" font-weight="700">Proposed change</text>
     <text x="750" y="250" fill="#fde68a" font-size="13">waits for confirmation</text>

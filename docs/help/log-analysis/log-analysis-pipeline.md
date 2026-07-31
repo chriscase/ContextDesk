@@ -240,4 +240,4 @@ independently; versioned learned application baselines are not shipped (#690).
 
 ## Share a corpus package
 
-See [Share a log analysis package](portable-package.md) for versioned export/import.
+See [Share a log analysis package](help://log-portable-package) for versioned export/import.

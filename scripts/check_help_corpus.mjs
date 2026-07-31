@@ -434,6 +434,126 @@ export function validateSvgPresentation(svg, source = "<svg>") {
   }
 }
 
+function relativeLuminance(hex) {
+  let value = hex.replace("#", "");
+  if (value.length === 3) {
+    value = [...value].map((c) => c + c).join("");
+  }
+  const channel = (pair) => {
+    const c = Number.parseInt(pair, 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  return (
+    0.2126 * channel(value.slice(0, 2)) +
+    0.7152 * channel(value.slice(2, 4)) +
+    0.0722 * channel(value.slice(4, 6))
+  );
+}
+
+export function contrastRatio(foreground, background) {
+  const a = relativeLuminance(foreground);
+  const b = relativeLuminance(background);
+  const [hi, lo] = a > b ? [a, b] : [b, a];
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+const HEX_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+
+function opaqueShapes(svg) {
+  const shapes = [];
+  for (const match of svg.matchAll(/<rect\b([^>]*)>/gi)) {
+    const attributes = svgAttributes(match[1]);
+    const fill = attributes.fill;
+    if (!fill || !HEX_RE.test(fill)) continue;
+    const x = finiteNumber(attributes.x, 0);
+    const y = finiteNumber(attributes.y, 0);
+    const width = finiteNumber(attributes.width);
+    const height = finiteNumber(attributes.height);
+    if (!Number.isFinite(width) || !Number.isFinite(height)) continue;
+    shapes.push({ left: x, top: y, right: x + width, bottom: y + height, fill });
+  }
+  for (const match of svg.matchAll(/<polygon\b([^>]*)>/gi)) {
+    const attributes = svgAttributes(match[1]);
+    const fill = attributes.fill;
+    if (!fill || !HEX_RE.test(fill)) continue;
+    const points = (attributes.points ?? "")
+      .split(/\s+/)
+      .filter((pair) => pair.includes(","))
+      .map((pair) => pair.split(",").map(Number))
+      .filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y));
+    if (points.length === 0) continue;
+    const xs = points.map(([x]) => x);
+    const ys = points.map(([, y]) => y);
+    shapes.push({
+      left: Math.min(...xs),
+      top: Math.min(...ys),
+      right: Math.max(...xs),
+      bottom: Math.max(...ys),
+      fill,
+    });
+  }
+  return shapes;
+}
+
+/**
+ * Theme-independent legibility (#540).
+ *
+ * Help renders diagrams through `<img src="data:image/svg+xml;base64,…">`
+ * (crates side: desktop/src-tauri/src/lib.rs `get_help_asset`; React side:
+ * HelpMarkdown's `.help-figure`), so a diagram cannot inherit the page theme.
+ * The `.help-figure` surface resolves to near-white in the Light and Sand
+ * skins, which are real user-selectable themes. Any text left on the bare
+ * canvas therefore renders against near-white with whatever fill it declares —
+ * the shipped `#e5e7eb` diagram title measured 1.22:1 and six `#9ca3af`
+ * captions measured 2.50:1 before this rule existed.
+ *
+ * The invariant is precise: every label must sit on an opaque shape it can be
+ * read against. It deliberately does not demand a full-bleed canvas on every
+ * asset, because most diagrams already place all text on inset panels.
+ *
+ * Not covered: non-text contrast (WCAG 1.4.11) for connector strokes drawn on
+ * bare canvas between panels. Recorded as a residual, not silently implied.
+ */
+export function validateSvgTextLegibility(svg, source = "<svg>", minimum = 4.5) {
+  const shapes = opaqueShapes(svg);
+  for (const match of svg.matchAll(/<text\b([^>]*)>([^<]*)<\/text>/gi)) {
+    const attributes = svgAttributes(match[1]);
+    const label = match[2].replace(/\s+/g, " ").trim();
+    if (!label) continue;
+    const x = finiteNumber(attributes.x);
+    const y = finiteNumber(attributes.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    const covering = shapes.filter(
+      (shape) =>
+        x >= shape.left && x <= shape.right && y >= shape.top && y <= shape.bottom,
+    );
+    if (covering.length === 0) {
+      throw new Error(
+        `${source}: text '${label}' sits on the bare canvas — it renders against the ` +
+          `near-white Help figure surface in the Light and Sand themes`,
+      );
+    }
+    const backdrop = covering.sort(
+      (a, b) =>
+        (a.right - a.left) * (a.bottom - a.top) -
+        (b.right - b.left) * (b.bottom - b.top),
+    )[0];
+    const fill = attributes.fill;
+    if (!fill || !HEX_RE.test(fill)) {
+      throw new Error(
+        `${source}: text '${label}' needs an explicit hex fill to be contrast-checked`,
+      );
+    }
+    const ratio = contrastRatio(fill, backdrop.fill);
+    if (ratio < minimum) {
+      throw new Error(
+        `${source}: text '${label}' is ${ratio.toFixed(2)}:1 against ${backdrop.fill} ` +
+          `(WCAG AA needs ${minimum}:1)`,
+      );
+    }
+  }
+}
+
 function validateSvg(assetPath, source) {
   const stat = fs.lstatSync(assetPath);
   if (stat.isSymbolicLink() || !stat.isFile()) {
@@ -460,6 +580,7 @@ function validateSvg(assetPath, source) {
     throw new Error(`${source}: SVG contains executable or remote content`);
   }
   validateSvgPresentation(svg, source);
+  validateSvgTextLegibility(svg, source);
   validateSvgGeometry(svg, source);
 }
 
@@ -565,6 +686,23 @@ function validateBody(body, meta, pagePath, root, assetsSeen) {
     validateSvg(assetPath, path.relative(root, assetPath));
     assetsSeen.add(assetPath);
     svgCount += 1;
+  }
+
+  /*
+   * HelpMarkdown only tokenizes inline links whose target is a `help://`
+   * locator, so any other inline link is emitted to the reader as literal
+   * Markdown source. Three shipped pages carried relative `.md` links that
+   * users saw as raw "[text](page.md)" text. Reject the shape outright rather
+   * than teaching the renderer a second link syntax (#540).
+   */
+  for (const match of body.matchAll(/(?<!!)\[([^\]]*)\]\(([^)\s]+)\)/g)) {
+    const target = match[2];
+    if (target.startsWith("help://")) continue;
+    if (/^(?:https?|mailto):/i.test(target)) continue;
+    throw new Error(
+      `${source}: inline link '${match[0]}' is not a help:// locator — HelpMarkdown ` +
+        `renders it as literal Markdown text`,
+    );
   }
 
   const hasTable = /^\s*\|.+\|\s*$\n^\s*\|(?:\s*:?-+:?\s*\|)+\s*$/m.test(body);

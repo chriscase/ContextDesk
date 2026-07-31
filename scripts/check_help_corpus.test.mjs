@@ -13,6 +13,7 @@ import {
   validateSourceHelpReferences,
   validateSvgGeometry,
   validateSvgPresentation,
+  validateSvgTextLegibility,
 } from "./check_help_corpus.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -399,4 +400,106 @@ test("SVG geometry validator rejects clipping and box-border overlap", () => {
       ),
     /box border/,
   );
+});
+
+test("a relative Markdown link in a Help page fails closed", () => {
+  withFixture((root) => {
+    // HelpMarkdown only tokenizes help:// targets; anything else reached the
+    // reader as literal "[text](page.md)" source (#540).
+    fs.writeFileSync(
+      path.join(root, "overview", "fixture.md"),
+      pageWithLocator("other-page.md"),
+    );
+    assert.throws(
+      () => validateHelpCorpus(root),
+      /is not a help:\/\/ locator/,
+    );
+  });
+});
+
+test("external and mail links stay allowed", () => {
+  withFixture((root) => {
+    fs.writeFileSync(
+      path.join(root, "overview", "fixture.md"),
+      pageWithLocator("https://example.invalid/docs"),
+    );
+    assert.doesNotThrow(() => validateHelpCorpus(root));
+  });
+});
+
+test("diagram text on the bare canvas fails closed", () => {
+  // The exact shipped defect: a light label above every filled shape renders
+  // against the near-white Help figure surface in the Light and Sand themes.
+  assert.throws(
+    () =>
+      validateSvgTextLegibility(
+        `<svg viewBox="0 0 200 100">
+           <text x="100" y="20" fill="#e5e7eb" font-size="14">Stranded title</text>
+           <rect x="10" y="40" width="180" height="50" fill="#111827"/>
+         </svg>`,
+        "stranded.svg",
+      ),
+    /sits on the bare canvas/,
+  );
+});
+
+test("diagram text below AA against its own backdrop fails closed", () => {
+  assert.throws(
+    () =>
+      validateSvgTextLegibility(
+        `<svg viewBox="0 0 200 100">
+           <rect x="10" y="10" width="180" height="80" fill="#064e3b"/>
+           <text x="100" y="50" fill="#9ca3af" font-size="13">Low contrast</text>
+         </svg>`,
+        "low.svg",
+      ),
+    /is 3\.83:1 against #064e3b/,
+  );
+});
+
+test("diagram text on an opaque backdrop above AA passes", () => {
+  assert.doesNotThrow(() =>
+    validateSvgTextLegibility(
+      `<svg viewBox="0 0 200 100">
+         <rect width="200" height="100" fill="#0f172a"/>
+         <rect x="10" y="10" width="180" height="80" fill="#111827"/>
+         <text x="100" y="50" fill="#e5e7eb" font-size="13">Readable</text>
+       </svg>`,
+      "ok.svg",
+    ),
+  );
+});
+
+test("the smallest covering shape is the one text is measured against", () => {
+  // A dark full-bleed canvas must not mask a label placed on a light panel.
+  assert.throws(
+    () =>
+      validateSvgTextLegibility(
+        `<svg viewBox="0 0 200 100">
+           <rect width="200" height="100" fill="#0f172a"/>
+           <rect x="10" y="10" width="180" height="80" fill="#f8fafc"/>
+           <text x="100" y="50" fill="#e5e7eb" font-size="13">Washed out</text>
+         </svg>`,
+        "masked.svg",
+      ),
+    /against #f8fafc/,
+  );
+});
+
+test("every checked-in Help diagram keeps its labels legible in every theme", () => {
+  const assetsRoot = path.join(repoRoot, "docs", "help", "assets");
+  const assets = fs
+    .readdirSync(assetsRoot)
+    .filter((name) => name.toLowerCase().endsWith(".svg"));
+  assert.ok(assets.length >= 18);
+  for (const name of assets) {
+    assert.doesNotThrow(
+      () =>
+        validateSvgTextLegibility(
+          fs.readFileSync(path.join(assetsRoot, name), "utf8"),
+          name,
+        ),
+      `${name} has unreadable labels`,
+    );
+  }
 });
