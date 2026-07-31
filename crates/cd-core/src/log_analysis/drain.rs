@@ -14,7 +14,6 @@ use crate::error::{CoreError, CoreResult};
 use crate::process_progress::CancelFlag;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Hard cap on distinct templates retained by one ingest DrainMiner (#824).
 ///
@@ -27,20 +26,6 @@ pub const MAX_DRAIN_TEMPLATES: usize = 25_000;
 /// Linear same-length scans are O(bucket); unbounded equal-token-count
 /// messages would otherwise stall ingest. Cap forces fail-closed rejection.
 pub const MAX_DRAIN_TEMPLATES_PER_LENGTH_BUCKET: usize = 2_048;
-
-/// Test/observability: number of candidate comparisons completed in the current
-/// (or last) same-length scan. Used by active-scan cancel proofs (#824).
-static SCAN_CANDIDATES_SEEN: AtomicUsize = AtomicUsize::new(0);
-
-/// Reset and read helpers for cancel / profile tests.
-pub fn reset_scan_candidates_seen() {
-    SCAN_CANDIDATES_SEEN.store(0, Ordering::SeqCst);
-}
-
-/// Candidates compared so far in the active same-length scan (relaxed load).
-pub fn scan_candidates_seen() -> usize {
-    SCAN_CANDIDATES_SEEN.load(Ordering::Acquire)
-}
 
 /// One template row (counts / window updated on match).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -87,9 +72,9 @@ pub struct DrainMiner {
     max_templates: usize,
     /// Per token-length bucket hard cap.
     max_per_bucket: usize,
-    /// Optional per-candidate progress hook (`candidates_seen`). Production
-    /// leaves this `None`. Active-scan cancel tests use it to synchronize so
-    /// cancel is requested only after the expensive scan is confirmed active.
+    /// Test-only per-candidate progress hook (`candidates_seen`). Compiled out
+    /// of non-test builds so the shipped match loop has zero hook overhead.
+    #[cfg(test)]
     scan_progress_hook: Option<std::sync::Arc<dyn Fn(usize) + Send + Sync>>,
 }
 
@@ -129,11 +114,13 @@ impl DrainMiner {
             pattern_tokens: HashMap::new(),
             max_templates: max_templates.max(1),
             max_per_bucket: max_per_bucket.max(1),
+            #[cfg(test)]
             scan_progress_hook: None,
         }
     }
 
-    /// Install a per-candidate scan progress hook (tests / diagnostics only).
+    /// Install a per-candidate scan progress hook (unit tests only).
+    #[cfg(test)]
     pub fn set_scan_progress_hook(
         &mut self,
         hook: Option<std::sync::Arc<dyn Fn(usize) + Send + Sync>>,
@@ -188,70 +175,37 @@ impl DrainMiner {
         let len = tokens.len();
         let sev = level_severity(level);
 
-        // Reset per-call scan progress so active-scan cancel tests can wait
-        // until this message's candidate loop is actually running.
-        SCAN_CANDIDATES_SEEN.store(0, Ordering::Release);
+        // Phase 1 — immutable same-length scan over the insertion-order bucket
+        // (no clone of the id Vec). Cached pattern_tokens only; never re-tokenize
+        // stored patterns. Winner id is a scalar so all borrows end before phase 2.
+        let best_id = self.scan_best_template_id(len, &tokens, cancel)?;
 
-        if let Some(ids) = self.by_len.get(&len) {
-            // Copy ids only (cheap) so we can mutate templates after the scan.
-            // Do **not** re-tokenize stored patterns — use pattern_tokens cache.
-            let ids: Vec<u64> = ids.clone();
-            // Score-only scan (no param Vec alloc per candidate); extract params
-            // once for the winning template.
-            let mut best: Option<(u64, f32)> = None;
-            for (scan_i, id) in ids.into_iter().enumerate() {
-                let seen = scan_i + 1;
-                SCAN_CANDIDATES_SEEN.store(seen, Ordering::Release);
-                if let Some(hook) = &self.scan_progress_hook {
-                    hook(seen);
-                }
-                // Poll cancel inside the linear same-length scan (#824).
-                // Check every 16 after the first so mid-scan cancel is observed
-                // without waiting for a full 64-step quantum.
-                if scan_i > 0
-                    && scan_i.is_multiple_of(16)
-                    && cancel.map(|c| c.is_cancelled()).unwrap_or(false)
-                {
-                    return Err(CoreError::Cancelled);
-                }
-                let Some(pat_toks) = self.pattern_tokens.get(&id) else {
-                    continue;
-                };
-                if pat_toks.len() != len {
-                    continue;
-                }
-                let sim = token_similarity_score(pat_toks, &tokens, self.sim_threshold);
-                if sim >= self.sim_threshold && best.as_ref().map(|b| sim > b.1).unwrap_or(true) {
-                    best = Some((id, sim));
+        // Phase 2 — mutate only the winner (immutable scan borrows ended).
+        if let Some(id) = best_id {
+            let pat_toks = self
+                .pattern_tokens
+                .get(&id)
+                .cloned()
+                .expect("matched id always has pattern_tokens");
+            let params = token_params(&pat_toks, &tokens);
+            let needs_merge = pat_toks
+                .iter()
+                .zip(tokens.iter())
+                .any(|(p, m)| p.as_str() != "<*>" && p.as_str() != *m);
+            let merged = needs_merge.then(|| merge_pattern(&pat_toks, &tokens));
+            if let Some(t) = self.templates.get_mut(&id) {
+                t.count += 1;
+                t.last_seen = ts;
+                t.severity = t.severity.max(sev);
+                if let Some(ref m) = merged {
+                    t.pattern = m.join(" ");
+                    t.token_count = m.len();
                 }
             }
-            if let Some((id, _)) = best {
-                let pat_toks = self
-                    .pattern_tokens
-                    .get(&id)
-                    .cloned()
-                    .expect("matched id always has pattern_tokens");
-                let params = token_params(&pat_toks, &tokens);
-                // Only rewrite pattern when a constant token must become <*>.
-                let needs_merge = pat_toks
-                    .iter()
-                    .zip(tokens.iter())
-                    .any(|(p, m)| p.as_str() != "<*>" && p.as_str() != *m);
-                let merged = needs_merge.then(|| merge_pattern(&pat_toks, &tokens));
-                if let Some(t) = self.templates.get_mut(&id) {
-                    t.count += 1;
-                    t.last_seen = ts;
-                    t.severity = t.severity.max(sev);
-                    if let Some(ref m) = merged {
-                        t.pattern = m.join(" ");
-                        t.token_count = m.len();
-                    }
-                }
-                if let Some(m) = merged {
-                    self.pattern_tokens.insert(id, m);
-                }
-                return Ok((id, params));
+            if let Some(m) = merged {
+                self.pattern_tokens.insert(id, m);
             }
+            return Ok((id, params));
         }
 
         // New template — enforce total + per-bucket caps fail-closed.
@@ -291,6 +245,44 @@ impl DrainMiner {
         // max_children / depth reserved for future tree pruning; keep API stable.
         let _ = (self.depth, self.max_children);
         Ok((id, Vec::new()))
+    }
+
+    /// Immutable same-length candidate scan. Borrows `by_len` / `pattern_tokens`
+    /// only; returns the best template id (or None). No bucket clone.
+    fn scan_best_template_id(
+        &self,
+        len: usize,
+        tokens: &[&str],
+        cancel: Option<&CancelFlag>,
+    ) -> CoreResult<Option<u64>> {
+        let Some(ids) = self.by_len.get(&len) else {
+            return Ok(None);
+        };
+        let mut best: Option<(u64, f32)> = None;
+        for (scan_i, &id) in ids.iter().enumerate() {
+            #[cfg(test)]
+            if let Some(hook) = &self.scan_progress_hook {
+                hook(scan_i + 1);
+            }
+            // Poll cancel inside the linear same-length scan (#824).
+            if scan_i > 0
+                && scan_i.is_multiple_of(16)
+                && cancel.map(|c| c.is_cancelled()).unwrap_or(false)
+            {
+                return Err(CoreError::Cancelled);
+            }
+            let Some(pat_toks) = self.pattern_tokens.get(&id) else {
+                continue;
+            };
+            if pat_toks.len() != len {
+                continue;
+            }
+            let sim = token_similarity_score(pat_toks, tokens, self.sim_threshold);
+            if sim >= self.sim_threshold && best.as_ref().map(|b| sim > b.1).unwrap_or(true) {
+                best = Some((id, sim));
+            }
+        }
+        Ok(best.map(|(id, _)| id))
     }
 
     /// Reduction ratio: lines / templates (higher = better collapse).
@@ -524,7 +516,7 @@ mod tests {
     /// template published from the cancelled call (#824).
     #[test]
     fn adversarial_active_scan_cancel_to_terminal_is_bounded() {
-        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::mpsc;
 
         fn letter_code(i: usize) -> String {
@@ -576,7 +568,6 @@ mod tests {
         let flag_scan = flag.clone();
         let d_scan = Arc::clone(&d);
 
-        reset_scan_candidates_seen();
         let scan_thread = thread::spawn(move || {
             d_scan.lock().unwrap().match_or_create_cancellable(
                 "qqqqqq wwwwww eeeeee rrrrrr",
@@ -592,10 +583,6 @@ mod tests {
         assert!(
             seen_before_cancel >= 128,
             "cancel must fire only after active scan, seen={seen_before_cancel}"
-        );
-        assert!(
-            scan_candidates_seen() >= 128,
-            "scan_candidates_seen must reflect active work"
         );
 
         let t0 = Instant::now();
@@ -633,6 +620,46 @@ mod tests {
         eprintln!(
             "PASS adversarial-active-scan-cancel templates_before={} candidates_before_cancel={} cancel_to_terminal_ms={} (one-machine observation)",
             templates_before, seen_before_cancel, cancel_to_terminal_ms
+        );
+    }
+
+    /// Source-level proof that the shipped match path does not re-tokenize
+    /// stored patterns and does not clone the same-length id bucket per event
+    /// (#824 skeptic).
+    #[test]
+    fn match_hot_path_source_has_no_bucket_clone_or_global_scan_atomic() {
+        let src = include_str!("drain.rs");
+        // Isolate production impl (before the tests module at file end).
+        let impl_src = src
+            .split("mod tests {")
+            .next()
+            .expect("tests module marker");
+        assert!(
+            !impl_src.contains("ids.clone()"),
+            "match path must not clone the same-length candidate id bucket"
+        );
+        assert!(
+            !impl_src.contains("SCAN_CANDIDATES_SEEN"),
+            "production match path must not use a global scan atomic"
+        );
+        assert!(
+            impl_src.contains("fn scan_best_template_id"),
+            "expected immutable two-phase scan helper"
+        );
+        assert!(
+            impl_src.contains("pattern_tokens"),
+            "expected cached pattern tokens"
+        );
+        // Re-tokenize of stored TemplateInfo.pattern must not appear in the scan.
+        assert!(
+            !impl_src.contains("tokenize(&t.pattern)")
+                && !impl_src.contains("Self::tokenize(&t.pattern)"),
+            "must not re-tokenize stored pattern strings in the match path"
+        );
+        // Global AtomicUsize for scan counters must not live in production path.
+        assert!(
+            !impl_src.contains("AtomicUsize"),
+            "production drain must not keep a global AtomicUsize scan counter"
         );
     }
 }

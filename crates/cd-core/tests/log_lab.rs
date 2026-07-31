@@ -1090,17 +1090,16 @@ async fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
         "deferred embed must not burn wall time as if it ran"
     );
     // Same-machine regression budgets (#824) — not a universal SLA.
-    // Defective observation class (debug): ~548–630 s total / ~579 s template_analysis
-    // from re-tokenizing every stored pattern per event.
-    // After pattern_tokens cache + borrowed message tokens (this branch, debug):
-    //   template_analysis ~137 s, total ~200 s class — materially faster, still
-    //   enforced so a re-tokenize regression fails CI.
-    // Product SoftWrite is release-optimized; same path observed ~5.6 s template /
-    // ~12 s total on this machine (see scale-250k-release evidence) — first usable
-    // corpus is not multi-minute in the shipped profile.
+    // Enforced only when this ignored test is run explicitly, e.g.:
+    //   cargo test -p cd-core --test log_lab \
+    //     log_lab_triage_stress_250k_product_path_is_bounded_and_truthful \
+    //     -- --ignored --nocapture --test-threads=1
+    // Ordinary `cargo test --workspace` / hosted CI do **not** execute this test
+    // (it is `#[ignore]`), so these budgets do not fail default CI.
+    // Defective debug class was ~548–630 s total / ~579 s template_analysis.
     // Headroom covers host load on unoptimized test builds only.
-    const BUDGET_250K_TEMPLATE_ANALYSIS_MS: u128 = 200_000; // debug budget
-    const BUDGET_250K_IMPORT_MS: u128 = 280_000; // debug budget
+    const BUDGET_250K_TEMPLATE_ANALYSIS_MS: u128 = 200_000; // debug budget when run
+    const BUDGET_250K_IMPORT_MS: u128 = 280_000; // debug budget when run
     assert!(
         (report.phase_timings.template_analysis_ms as u128)
             < BUDGET_250K_TEMPLATE_ANALYSIS_MS,
@@ -1608,8 +1607,8 @@ fn log_lab_product_scale_seven_day_25k_with_production_embed() {
         );
     }
     // Same-machine regression budgets (#824) — not a universal SLA.
-    // Defective class without Drain token cache was multi-minute at 250k; 25k
-    // product path must stay interactive with headroom for CI load.
+    // Enforced by this default-suite test (`cargo test -p cd-core --test log_lab
+    // log_lab_product_scale_seven_day` / full workspace gate).
     assert!(
         wall_ms < 45_000,
         "product seven-day 25k wall_ms={wall_ms} exceeded 45s same-machine budget"
@@ -1704,7 +1703,10 @@ fn log_lab_ui_medium_100k_product_path_is_bounded_and_bidirectional() {
         report.phase_timings.embedding_deferred
     );
     // Same-machine regression budgets (#824) — not a universal SLA.
-    // Prior product 100k under production embed was ~18–20s; keep generous headroom.
+    // Enforced only when this ignored test is run explicitly:
+    //   cargo test -p cd-core --test log_lab log_lab_ui_medium_100k \
+    //     -- --ignored --nocapture --test-threads=1
+    // Not part of ordinary workspace CI (#[ignore]).
     assert!(
         import_ms < 60_000,
         "product ui-medium 100k import_ms={import_ms} exceeded 60s same-machine budget"
