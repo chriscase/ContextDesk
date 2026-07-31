@@ -167,18 +167,17 @@ function MessageRowImpl({
             id: c.id,
             label: shortSourceLabel(c.label, c.id),
             title: c.title,
+            corpusId: c.corpusId,
           }))}
-          onOpenFile={(path) => {
+          onOpenFile={(citation) => {
+            const path = citation.id;
             const route = classifyCompletedCitation(path);
             if (route === "help") {
               onOpenHelpCitation?.(path);
               return;
             }
             if (route === "log") {
-              onOpenLogCitation?.(
-                path,
-                m.citations?.find((citation) => citation.id === path)?.corpusId,
-              );
+              onOpenLogCitation?.(path, citation.corpusId);
               return;
             }
             // Durable memory citations: `memory:{uuid}` → Compose (ADR 0007)
@@ -254,10 +253,13 @@ function MessageRowImpl({
                     return;
                   }
                   if (route === "log") {
+                    const matching =
+                      m.citations?.filter(
+                        (citation) => citation.id === cite,
+                      ) ?? [];
                     onOpenLogCitation?.(
                       cite,
-                      m.citations?.find((citation) => citation.id === cite)
-                        ?.corpusId,
+                      matching.length === 1 ? matching[0]?.corpusId : undefined,
                     );
                     return;
                   }

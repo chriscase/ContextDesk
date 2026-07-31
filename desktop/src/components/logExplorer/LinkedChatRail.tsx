@@ -357,12 +357,10 @@ function LinkedChatBubble({
             id: c.id,
             label: c.label,
             title: c.title,
+            corpusId: c.corpusId,
           }))}
-          onOpenFile={(path) => {
-            const corpusId = message.citations?.find(
-              (citation) => citation.id === path,
-            )?.corpusId;
-            onOpenCitation?.(path, corpusId);
+          onOpenFile={(citation) => {
+            onOpenCitation?.(citation.id, citation.corpusId);
           }}
         />
       ) : null}
@@ -952,7 +950,10 @@ export function LinkedChatRail({
       session.chatModel = option.id;
       session.providerProfileId = option.provider_id;
       session.updatedAt = nowIso();
-      const saved = await hostSaveChatSession(sessionToDto(session));
+      const saved = await hostSaveChatSession(
+        sessionToDto(session),
+        session.hostRevision ?? null,
+      );
       if (!saved) throw new Error("Linked chat model was not persisted");
       setSelectionByChat((current) => ({
         ...current,
@@ -1196,7 +1197,10 @@ export function LinkedChatRail({
           lastReadMessageId: assistantId,
           updatedAt: nowIso(),
         };
-        const rendererSaved = await hostSaveChatSession(sessionToDto(updated));
+        const rendererSaved = await hostSaveChatSession(
+          sessionToDto(updated),
+          session.hostRevision ?? null,
+        );
         if (!rendererSaved) {
           throw new Error("Linked chat turn was not persisted");
         }

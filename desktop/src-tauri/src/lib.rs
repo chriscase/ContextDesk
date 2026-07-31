@@ -4019,10 +4019,11 @@ fn persist_host_terminal_turn_at(
         else {
             continue;
         };
-        if citations
-            .iter()
-            .any(|citation| citation["id"].as_str() == Some(source_id.as_str()))
-        {
+        let event_corpus = linked_corpus_id.as_deref();
+        if citations.iter().any(|citation| {
+            citation["id"].as_str() == Some(source_id.as_str())
+                && citation.get("corpusId").and_then(|value| value.as_str()) == event_corpus
+        }) {
             continue;
         }
         let mut citation = serde_json::json!({
@@ -4910,13 +4911,12 @@ fn is_governed_log_citation_id(source_id: &str) -> bool {
 ///
 /// The renderer may carry transcript chips, but it cannot invent or broaden
 /// corpus identity. Rules:
-/// 1. If a citation id already exists on the durable message with a host corpus
-///    id, preserve that id (survives detach/relink and restart).
-/// 2. If a citation id already exists on the durable message **without** a
-///    corpus id (legacy unbound), leave it unbound forever — never stamp the
-///    current linked corpus onto historical unbound chips (no substitution).
-/// 3. Only **new** citation ids (not present on the durable message) may be
-///    stamped with the session's host-governed linked_corpus_id when set.
+/// 1. If an exact citation id + corpus pair already exists on the durable
+///    message, preserve it (survives detach/relink and restart).
+/// 2. A lone durable identity remains authoritative when an older renderer
+///    omits its corpus. Multiple same-id corpus identities stay distinct.
+/// 3. Durable unbound legacy identities stay unbound; genuinely new identities
+///    may be stamped only with the session's host-governed linked corpus.
 /// 4. Never accept a free-form renderer/model corpus id that differs from those
 ///    host sources.
 fn sanitize_log_citation_provenance(session: &mut Session, durable: Option<&Session>) {
@@ -4933,8 +4933,9 @@ fn sanitize_log_citation_provenance(session: &mut Session, durable: Option<&Sess
         let Some(items) = citations.as_array_mut() else {
             continue;
         };
-        // value = Some(corpus) when durable bound; None when durable present but unbound
-        let durable_log: HashMap<String, Option<String>> = durable_by_msg
+        // Preserve every trusted (id, corpus) identity. Bare-id maps collapse
+        // citations after relink and can route a chip into the wrong corpus.
+        let durable_log: Vec<(String, Option<String>)> = durable_by_msg
             .get(message.id.as_str())
             .and_then(|m| m.citations.as_ref())
             .and_then(|v| v.as_array())
@@ -4955,7 +4956,7 @@ fn sanitize_log_citation_provenance(session: &mut Session, durable: Option<&Sess
                             .map(str::to_string);
                         Some((id, corpus))
                     })
-                    .collect()
+                    .collect::<Vec<_>>()
             })
             .unwrap_or_default();
 
@@ -4972,14 +4973,30 @@ fn sanitize_log_citation_provenance(session: &mut Session, durable: Option<&Sess
                 obj.remove("corpus_id");
                 continue;
             }
-            let trusted = match durable_log.get(&id) {
-                // Historical bound provenance — never let renderer change it.
-                Some(Some(corpus_id)) => Some(corpus_id.clone()),
-                // Historical unbound — fail closed; do not stamp current link.
-                Some(None) => None,
-                // Truly new citation id on this message — stamp host link if any.
-                None => linked.clone(),
-            };
+            let claimed = obj
+                .get("corpusId")
+                .or_else(|| obj.get("corpus_id"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let same_id = durable_log
+                .iter()
+                .filter(|(durable_id, _)| durable_id == &id)
+                .collect::<Vec<_>>();
+            let trusted = same_id
+                .iter()
+                .find(|(_, corpus)| corpus.as_deref() == claimed)
+                .map(|(_, corpus)| corpus.clone())
+                .or_else(|| {
+                    // A lone historical identity is unambiguous even if an
+                    // older renderer omitted its corpus field.
+                    (same_id.len() == 1).then(|| same_id[0].1.clone())
+                })
+                .unwrap_or_else(|| {
+                    // A genuinely new identity can only receive the current
+                    // host-governed link; never accept renderer provenance.
+                    linked.clone()
+                });
             match trusted {
                 Some(corpus_id) => {
                     obj.insert("corpusId".into(), serde_json::Value::String(corpus_id));
@@ -4994,9 +5011,18 @@ fn sanitize_log_citation_provenance(session: &mut Session, durable: Option<&Sess
     }
 }
 
+#[cfg(test)]
 fn save_chat_session_at(
     store: &cd_core::sessions::SessionStore,
+    session: Session,
+) -> Result<Session, String> {
+    save_chat_session_cas_at(store, session, None)
+}
+
+fn save_chat_session_cas_at(
+    store: &cd_core::sessions::SessionStore,
     mut session: Session,
+    expected_updated_at: Option<&str>,
 ) -> Result<Session, String> {
     // The renderer owns transcript/view fields, but never the governed corpus
     // grant. Preserve the durable host value for an existing chat and strip an
@@ -5005,6 +5031,17 @@ fn save_chat_session_at(
         let durable = store
             .load(&session.id)
             .map_err(|e| format!("chat session is unavailable or corrupt: {e}"))?;
+        if let Some(expected) = expected_updated_at {
+            let durable_revision = serde_json::to_value(durable.updated_at)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .ok_or_else(|| "chat_session_conflict: invalid durable revision".to_string())?;
+            if durable_revision != expected {
+                return Err(
+                    "chat_session_conflict: the conversation changed; reload and retry".to_string(),
+                );
+            }
+        }
         session.linked_corpus_id = durable.linked_corpus_id.clone();
         Some(durable)
     } else {
@@ -5026,17 +5063,28 @@ fn chat_provider_binding_changed(previous: &Session, next: &Session) -> bool {
 }
 
 #[tauri::command]
-fn save_chat_session(state: State<'_, AppState>, session: Session) -> Result<Session, String> {
+fn save_chat_session(
+    state: State<'_, AppState>,
+    session: Session,
+    expected_updated_at: Option<String>,
+) -> Result<Session, String> {
     let _mutation = state
         .chat_session_mutation
         .lock()
         .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     let store = session_store(&state)?;
+    if expected_updated_at.is_none()
+        && store
+            .exists(&session.id)
+            .map_err(|error| error.to_string())?
+    {
+        return Err("chat_session_conflict: expected revision is required".to_string());
+    }
     let provider_binding_changed = store
         .load(&session.id)
         .ok()
         .is_some_and(|previous| chat_provider_binding_changed(&previous, &session));
-    let session = save_chat_session_at(&store, session)?;
+    let session = save_chat_session_cas_at(&store, session, expected_updated_at.as_deref())?;
     if provider_binding_changed {
         state
             .linked_synthesis_checkpoints
@@ -14198,12 +14246,13 @@ mod startup_host_tests {
         parse_log_explorer_nav_target, persist_host_terminal_turn_at,
         persist_linked_provider_loop_terminal_at, prepare_linked_turn_with,
         provider_profile_for_turn, request_agent_turn_cancel, restore_host_if_generation_matches,
-        save_chat_session_at, set_chat_linked_corpus_at, take_ready_linked_host,
-        validate_linked_log_corpus_at, wait_for_host_readiness, BackgroundIndexBuild,
-        HostInitFlight, HostReadinessFailure, LinkedCheckpointStore, LinkedTurnPreparation,
-        LogExplorerNavTarget, LogExplorerNavTargetStore, LogExplorerTurnContextReq, StdInstant,
-        LINKED_CHECKPOINT_ENTRY_CAP, LINKED_CHECKPOINT_TOTAL_BYTES, LINKED_CHECKPOINT_TTL,
-        LOG_INGEST_CANCEL_KEY, LOG_REANALYZE_CANCEL_KEY,
+        save_chat_session_at, save_chat_session_cas_at, set_chat_linked_corpus_at,
+        take_ready_linked_host, validate_linked_log_corpus_at, wait_for_host_readiness,
+        BackgroundIndexBuild, HostInitFlight, HostReadinessFailure, LinkedCheckpointStore,
+        LinkedTurnPreparation, LogExplorerNavTarget, LogExplorerNavTargetStore,
+        LogExplorerTurnContextReq, StdInstant, LINKED_CHECKPOINT_ENTRY_CAP,
+        LINKED_CHECKPOINT_TOTAL_BYTES, LINKED_CHECKPOINT_TTL, LOG_INGEST_CANCEL_KEY,
+        LOG_REANALYZE_CANCEL_KEY,
     };
     use cd_core::events::StreamEvent;
     use cd_core::index::{KeywordIndex, ReindexStats};
@@ -15367,6 +15416,46 @@ mod startup_host_tests {
     }
 
     #[test]
+    fn generic_save_rejects_a_stale_conversation_revision_without_erasing_history() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let mut original = cd_core::sessions::Session::new("Concurrent");
+        original.messages.push(cd_core::sessions::StoredMessage {
+            id: "user-1".into(),
+            role: "user".into(),
+            content: "first".into(),
+            tools: None,
+            citations: None,
+            trail: None,
+            meta: None,
+        });
+        store.save(&original).expect("save original");
+        let stale_revision = original.updated_at.to_rfc3339();
+        let stale = original.clone();
+
+        let mut newer = original.clone();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        newer.touch();
+        newer.messages.push(cd_core::sessions::StoredMessage {
+            id: "assistant-1".into(),
+            role: "assistant".into(),
+            content: "newer durable answer".into(),
+            tools: None,
+            citations: None,
+            trail: None,
+            meta: None,
+        });
+        store.save(&newer).expect("save concurrent winner");
+
+        let error = save_chat_session_cas_at(&store, stale, Some(&stale_revision))
+            .expect_err("stale renderer must lose");
+        assert!(error.starts_with("chat_session_conflict:"));
+        let reopened = store.load(&original.id).expect("reopen winner");
+        assert_eq!(reopened.messages.len(), 2);
+        assert_eq!(reopened.messages[1].content, "newer durable answer");
+    }
+
+    #[test]
     fn retry_binding_changes_on_provider_or_model_switch_only() {
         let original = cd_core::sessions::Session::new("Bound");
         let mut same = original.clone();
@@ -15745,6 +15834,37 @@ mod startup_host_tests {
             .cloned()
             .expect("new cite");
         assert_eq!(new_cite["corpusId"].as_str(), Some("trusted-corpus"));
+    }
+
+    #[test]
+    fn generic_save_preserves_equal_log_ids_bound_to_distinct_corpora() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let mut durable = cd_core::sessions::Session::new("Cross-corpus evidence");
+        durable.messages.push(cd_core::sessions::StoredMessage {
+            id: "assistant-cross-corpus".into(),
+            role: "assistant".into(),
+            content: "comparison".into(),
+            tools: None,
+            citations: Some(serde_json::json!([
+                {"id":"log_event:7","label":"A","corpusId":"corpus-a"},
+                {"id":"log_event:7","label":"B","corpusId":"corpus-b"}
+            ])),
+            trail: None,
+            meta: None,
+        });
+        store.save(&durable).expect("save durable");
+
+        let renderer = store.load(&durable.id).expect("load renderer");
+        let saved = save_chat_session_at(&store, renderer).expect("generic save");
+        let citations = saved.messages[0]
+            .citations
+            .as_ref()
+            .and_then(|value| value.as_array())
+            .expect("citations");
+        assert_eq!(citations.len(), 2);
+        assert_eq!(citations[0]["corpusId"], "corpus-a");
+        assert_eq!(citations[1]["corpusId"], "corpus-b");
     }
 
     /// #698 — durable legacy log citations without corpusId stay unbound even

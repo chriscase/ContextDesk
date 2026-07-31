@@ -56,13 +56,17 @@ export function ChatArchivePane({
   const [error, setError] = useState<string | null>(null);
   /** Monotonic id of the newest search; older responses are discarded. */
   const searchTicketRef = useRef(0);
+  /** Latest rendered inputs, used after a mutation promise settles. */
+  const latestSearchRef = useRef({ query: debounced, scope });
+  latestSearchRef.current = { query: debounced, scope };
+  const mutationTicketRef = useRef(0);
 
   useEffect(() => {
     const t = window.setTimeout(() => setDebounced(query.trim()), 200);
     return () => window.clearTimeout(t);
   }, [query]);
 
-  const runSearch = useCallback(async () => {
+  const runSearch = useCallback(async (searchQuery = debounced, searchScope = scope) => {
     // Typing fast, or switching scope mid-flight, leaves several searches in
     // the air. Without a sequence number the slowest one wins, so the list can
     // settle on results for an older query — or show Trash rows under the
@@ -73,18 +77,18 @@ export function ChatArchivePane({
     setLoading(true);
     setError(null);
     try {
-      const next = await hostSearchChatSessions(debounced, {
+      const next = await hostSearchChatSessions(searchQuery, {
         limit: 80,
         // Active: exclude archived+trashed. Archived: include archived (still exclude trash).
-        includeArchived: scope === "archived",
+        includeArchived: searchScope === "archived",
         includeTrashed: false,
-        onlyTrashed: scope === "trash",
+        onlyTrashed: searchScope === "trash",
       });
       if (!isCurrent()) return;
       const filtered =
-        scope === "trash"
+        searchScope === "trash"
           ? next
-          : scope === "archived"
+          : searchScope === "archived"
             ? next.filter((h) => h.meta.archived && !h.meta.trashed)
             : next.filter((h) => !h.meta.archived && !h.meta.trashed);
       setHits(filtered);
@@ -102,11 +106,15 @@ export function ChatArchivePane({
   }, [runSearch, refreshKey]);
 
   const mutate = async (fn: () => Promise<unknown>) => {
+    const mutationTicket = (mutationTicketRef.current += 1);
     try {
       await fn();
+      if (mutationTicketRef.current !== mutationTicket) return;
       onSessionsChanged?.();
-      await runSearch();
+      const latest = latestSearchRef.current;
+      await runSearch(latest.query, latest.scope);
     } catch (e) {
+      if (mutationTicketRef.current !== mutationTicket) return;
       setError(e instanceof Error ? e.message : String(e));
     }
   };

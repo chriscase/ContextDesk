@@ -12,6 +12,11 @@ export type ChatCitation = {
   corpusId?: string;
 };
 
+/** Citation identity includes governed corpus provenance, not just source id. */
+export function chatCitationKey(citation: Pick<ChatCitation, "id" | "corpusId">): string {
+  return `${citation.id}\u0000${citation.corpusId ?? ""}`;
+}
+
 /** In-UI chat message shape (subset persisted to sessions). */
 export type ChatMsg = {
   id: string;
@@ -118,14 +123,38 @@ export function applyEventsToMessage(
           titleRaw && titleRaw !== id && titleRaw !== label
             ? titleRaw
             : undefined;
-        if (id && !citations.some((c) => c.id === id)) {
+        if (id) {
           const corpusId =
             (id.startsWith("log_template:") || id.startsWith("log_event:")) &&
             typeof p.corpus_id === "string" &&
             p.corpus_id.trim()
               ? p.corpus_id.trim()
               : undefined;
-          citations.push({ id, label, title, corpusId });
+          const incoming = { id, label, title, corpusId };
+          const exact = citations.findIndex(
+            (citation) => chatCitationKey(citation) === chatCitationKey(incoming),
+          );
+          if (exact < 0) {
+            // A stream may first announce a governed citation before trusted
+            // corpus provenance arrives. Enrich that one incomplete identity;
+            // otherwise preserve same-id citations from different corpora.
+            const unbound = corpusId
+              ? citations.findIndex(
+                  (citation) => citation.id === id && !citation.corpusId,
+                )
+              : -1;
+            if (unbound >= 0) {
+              citations[unbound] = incoming;
+            } else if (
+              !corpusId &&
+              citations.some((citation) => citation.id === id)
+            ) {
+              // Never add a less-trusted duplicate after corpus provenance is
+              // already known for this governed identity.
+            } else {
+              citations.push(incoming);
+            }
+          }
         }
         break;
       }

@@ -164,6 +164,8 @@ export function useShellState() {
   const [hostPreflightReport, setHostPreflightReport] =
     useState<PreflightReport | null>(null);
   const chatScrollSaveRef = useRef(0);
+  /** Older model-list responses must never overwrite newer host capability truth. */
+  const chatModelRefreshTicketRef = useRef(0);
 
   const clientPreflight = useMemo(() => runClientPreflight(setup), [setup]);
   const preflight = hostPreflightReport ?? clientPreflight;
@@ -206,11 +208,13 @@ export function useShellState() {
    * rendering someone else's model (#678).
    */
   const refreshChatModels = useCallback(async (keepKeys?: readonly string[]) => {
+    const ticket = (chatModelRefreshTicketRef.current += 1);
     try {
       const [listed, def] = await Promise.all([
         hostListChatModels({ keepKeys }),
         hostGetDefaultChatModel(),
       ]);
+      if (chatModelRefreshTicketRef.current !== ticket) return;
       setModelOptions(listed);
       if (def?.trim()) setDefaultModelKey(def.trim());
     } catch {

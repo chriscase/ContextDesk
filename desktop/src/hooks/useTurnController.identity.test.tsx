@@ -60,6 +60,7 @@ function mountTwoChats() {
   };
 
   let activeId = a.id;
+  const refreshChatModels = vi.fn(async () => undefined);
   const rendered = renderHook(() =>
     useTurnController({
       sessionId: activeId,
@@ -76,6 +77,7 @@ function mountTwoChats() {
       upgradeTitleWithLlm: vi.fn(async () => undefined),
       pinScrollToEnd: vi.fn(),
       refreshMemory: vi.fn(async () => undefined),
+      refreshChatModels,
       setSourcePath: vi.fn(),
       setSourceContent: vi.fn(),
       setPaneChat: vi.fn(),
@@ -85,6 +87,7 @@ function mountTwoChats() {
   return {
     a,
     b,
+    refreshChatModels,
     rendered,
     get sessions() {
       return sessions;
@@ -365,6 +368,31 @@ describe("host-persisted terminal turns", () => {
     expect(transcriptIds.assistantMessageId).toBe(
       messages.find((m) => m.role === "assistant")!.id,
     );
+  });
+});
+
+describe("learned model capability truth", () => {
+  it("refreshes the exact provider/model after tools_unsupported", async () => {
+    const h = mountTwoChats();
+    h.a.providerProfileId = "provider-a";
+    h.a.chatModel = "model-a";
+    host.agentTurn.mockImplementation(async (...args: unknown[]) => {
+      const emit = args[5] as (event: EventDto) => void;
+      emit({
+        kind: "error",
+        payload: { code: "tools_unsupported", message: "no native tools" },
+      });
+      emit({ kind: "turn_completed", payload: { reason: "stop" } });
+      return [];
+    });
+
+    await act(async () => {
+      await h.rendered.result.current.startTurn("Use a tool");
+    });
+
+    expect(h.refreshChatModels).toHaveBeenCalledWith([
+      "provider-a::model-a",
+    ]);
   });
 });
 

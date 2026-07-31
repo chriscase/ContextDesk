@@ -1352,9 +1352,13 @@ export async function hostLoadChatSession(
 
 export async function hostSaveChatSession(
   session: ChatSessionDto,
+  expectedUpdatedAt: string | null = null,
 ): Promise<ChatSessionDto | null> {
   if (!isTauri()) return null;
-  return invoke<ChatSessionDto>("save_chat_session", { session });
+  return invoke<ChatSessionDto>("save_chat_session", {
+    session,
+    expectedUpdatedAt,
+  });
 }
 
 export async function hostRenameChatSession(

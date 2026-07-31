@@ -9,11 +9,13 @@ export type SourceCitation = {
   label: string;
   /** Article or page title for the expanded list. */
   title?: string;
+  /** Host-authored corpus provenance for governed log evidence. */
+  corpusId?: string;
 };
 
 type Props = {
   citations: SourceCitation[];
-  onOpenFile?: (path: string) => void;
+  onOpenFile?: (citation: SourceCitation) => void;
 };
 
 function isHttpUrl(s: string): boolean {
@@ -50,8 +52,9 @@ export function SourceCitations({ citations, onOpenFile }: Props) {
     const seen = new Set<string>();
     const out: SourceCitation[] = [];
     for (const c of citations) {
-      if (!c.id || seen.has(c.id)) continue;
-      seen.add(c.id);
+      const key = `${c.id}\u0000${c.corpusId ?? ""}`;
+      if (!c.id || seen.has(key)) continue;
+      seen.add(key);
       out.push(c);
     }
     return out.slice(0, 12);
@@ -66,7 +69,7 @@ export function SourceCitations({ citations, onOpenFile }: Props) {
       });
       return;
     }
-    onOpenFile?.(c.id);
+    onOpenFile?.(c);
   };
 
   return (
@@ -89,7 +92,7 @@ export function SourceCitations({ citations, onOpenFile }: Props) {
             const web = isHttpUrl(c.id);
             return (
               <span
-                key={c.id}
+                key={`${c.id}\u0000${c.corpusId ?? ""}`}
                 className="sources__icon"
                 data-kind={web ? "web" : "file"}
                 style={{ ["--src-hue" as string]: String(hue) } as CSSProperties}
@@ -130,7 +133,7 @@ export function SourceCitations({ citations, onOpenFile }: Props) {
               </>
             );
             return (
-              <li key={c.id} className="sources__item">
+              <li key={`${c.id}\u0000${c.corpusId ?? ""}`} className="sources__item">
                 <span
                   className="sources__icon sources__icon--row"
                   style={

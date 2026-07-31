@@ -92,6 +92,30 @@ describe("the composer is never inert", () => {
       expect(input().value).toBe("typed before hydration"),
     );
   });
+
+  it("hands pre-hydration text to the newly assigned conversation", async () => {
+    function HydratingHost() {
+      const [owner, setOwner] = useState(false);
+      const [draft, setDraft] = useState("");
+      return (
+        <>
+          <button type="button" onClick={() => setOwner(true)}>
+            finish hydration
+          </button>
+          <Composer
+            onSubmit={vi.fn()}
+            draft={owner ? draft : undefined}
+            onDraftChange={owner ? setDraft : undefined}
+          />
+        </>
+      );
+    }
+
+    render(<HydratingHost />);
+    fireEvent.change(input(), { target: { value: "typed before hydration" } });
+    fireEvent.click(screen.getByRole("button", { name: "finish hydration" }));
+    await waitFor(() => expect(input().value).toBe("typed before hydration"));
+  });
 });
 
 describe("a streaming turn keeps its own wording", () => {

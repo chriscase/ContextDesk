@@ -35,6 +35,29 @@ describe("SourceCitations labels (#697)", () => {
     expect(fileCitation.textContent).toBe("Checkout failureapp.log");
 
     fireEvent.click(logCitation);
-    expect(onOpenFile).toHaveBeenCalledWith("log_template:4");
+    expect(onOpenFile).toHaveBeenCalledWith({
+      id: "log_template:4",
+      label: "log_template:4",
+    });
+  });
+
+  it("keeps equal governed ids from different corpora and activates exact provenance", () => {
+    const onOpenFile = vi.fn();
+    render(
+      <SourceCitations
+        citations={[
+          { id: "log_event:7", label: "Corpus A", corpusId: "a" },
+          { id: "log_event:7", label: "Corpus B", corpusId: "b" },
+        ]}
+        onOpenFile={onOpenFile}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Sources" }));
+    fireEvent.click(screen.getByRole("button", { name: "Corpus B" }));
+    expect(onOpenFile).toHaveBeenCalledWith({
+      id: "log_event:7",
+      label: "Corpus B",
+      corpusId: "b",
+    });
   });
 });

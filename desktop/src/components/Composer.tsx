@@ -74,7 +74,25 @@ export function Composer({
   const submittingRef = useRef(false);
 
   const controlled = draft !== undefined;
-  const value = controlled ? draft : localValue;
+  const wasControlledRef = useRef(controlled);
+  const handingOffLocalDraft =
+    controlled && !wasControlledRef.current && !draft && Boolean(localValue);
+  const value = controlled
+    ? handingOffLocalDraft
+      ? localValue
+      : draft
+    : localValue;
+
+  useEffect(() => {
+    const wasControlled = wasControlledRef.current;
+    wasControlledRef.current = controlled;
+    if (controlled && !wasControlled && localValue && !draft) {
+      // Hydration assigned the composer a real conversation owner after the
+      // user had already typed. Transfer the local text instead of switching
+      // to the owner's initially empty value and swallowing it.
+      onDraftChange?.(localValue);
+    }
+  }, [controlled, draft, localValue, onDraftChange]);
   const setValue = useCallback(
     (next: string | ((prev: string) => string)) => {
       if (controlled) {

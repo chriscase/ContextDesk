@@ -8,27 +8,38 @@
  * is still running.
  */
 
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionSearchHitDto } from "../../lib/host";
 import { ChatArchivePane } from "./ChatArchivePane";
 
-const host = vi.hoisted(() => ({ hostSearchChatSessions: vi.fn() }));
+const host = vi.hoisted(() => ({
+  hostSearchChatSessions: vi.fn(),
+  hostRestoreChatSession: vi.fn(),
+}));
 
 vi.mock("../../lib/host", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../lib/host")>();
-  return { ...original, hostSearchChatSessions: host.hostSearchChatSessions };
+  return {
+    ...original,
+    hostSearchChatSessions: host.hostSearchChatSessions,
+    hostRestoreChatSession: host.hostRestoreChatSession,
+  };
 });
 
-function hit(id: string, title: string): SessionSearchHitDto {
+function hit(
+  id: string,
+  title: string,
+  flags: { archived?: boolean; trashed?: boolean } = {},
+): SessionSearchHitDto {
   return {
     meta: {
       id,
       title,
       created_at: "2026-07-01T00:00:00.000Z",
       updated_at: "2026-07-01T00:00:00.000Z",
-      archived: false,
-      trashed: false,
+      archived: flags.archived ?? false,
+      trashed: flags.trashed ?? false,
       pinned: false,
       message_count: 2,
     },
@@ -37,9 +48,9 @@ function hit(id: string, title: string): SessionSearchHitDto {
 }
 
 /** A search whose resolution this test controls. */
-function deferred() {
-  let resolve!: (hits: SessionSearchHitDto[]) => void;
-  const promise = new Promise<SessionSearchHitDto[]>((r) => {
+function deferred<T = SessionSearchHitDto[]>() {
+  let resolve!: (hits: T) => void;
+  const promise = new Promise<T>((r) => {
     resolve = r;
   });
   return { promise, resolve };
@@ -143,5 +154,42 @@ describe("archive search sequencing", () => {
     expect(screen.queryByText(/stale backend failure/)).toBeNull();
     const list = await screen.findByRole("list");
     expect(within(list).queryAllByText(/Newest result/).length).toBeGreaterThan(0);
+  });
+
+  it("refreshes the current scope after a delayed mutation from an old scope", async () => {
+    const trashSearch = deferred();
+    const chatsSearch = deferred();
+    const postMutationSearch = deferred();
+    const restore = deferred<unknown>();
+    host.hostSearchChatSessions
+      .mockResolvedValueOnce([])
+      .mockReturnValueOnce(trashSearch.promise)
+      .mockReturnValueOnce(chatsSearch.promise)
+      .mockReturnValueOnce(postMutationSearch.promise);
+    host.hostRestoreChatSession.mockReturnValueOnce(restore.promise);
+    render(<ChatArchivePane onOpenSession={vi.fn()} />);
+
+    await waitFor(() => expect(host.hostSearchChatSessions).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("tab", { name: "Trash" }));
+    await waitFor(() => expect(host.hostSearchChatSessions).toHaveBeenCalledTimes(2));
+    await act(async () =>
+      trashSearch.resolve([hit("trash", "Restore me", { trashed: true })]),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Chats" }));
+    await waitFor(() => expect(host.hostSearchChatSessions).toHaveBeenCalledTimes(3));
+    await act(async () => chatsSearch.resolve([hit("active", "Active result")]));
+    expect((await screen.findAllByText("Active result")).length).toBeGreaterThan(0);
+
+    await act(async () => restore.resolve(undefined));
+    await waitFor(() => expect(host.hostSearchChatSessions).toHaveBeenCalledTimes(4));
+    expect(host.hostSearchChatSessions.mock.calls[3]?.[1]).toMatchObject({
+      includeArchived: false,
+      onlyTrashed: false,
+    });
+    await act(async () =>
+      postMutationSearch.resolve([hit("active-2", "Still active")]),
+    );
+    expect((await screen.findAllByText("Still active")).length).toBeGreaterThan(0);
   });
 });

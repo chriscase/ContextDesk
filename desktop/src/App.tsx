@@ -235,6 +235,7 @@ export function App() {
     upgradeTitleWithLlm,
     pinScrollToEnd,
     refreshMemory: shell.refreshMemory,
+    refreshChatModels: shell.refreshChatModels,
     setSourcePath: shell.setSourcePath,
     setSourceContent: shell.setSourceContent,
     setPaneChat: () => shell.setPane("chat"),

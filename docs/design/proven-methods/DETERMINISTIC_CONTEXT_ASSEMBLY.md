@@ -288,6 +288,14 @@ string found in untrusted content into trusted evidence.
 12. **Cancellation stops deterministic work.** A cancelled or expired broad
     scan interrupts the database operation and joins its worker; it does not
     leave a detached corpus scan consuming resources.
+13. **Transcript publication is revisioned.** A renderer autosave names the
+    last host revision it observed. The host rejects an older whole-session
+    snapshot, and only the newest still-relevant client mutation may reconcile
+    exact message identities with the winning durable revision.
+14. **Governed citation identity includes provenance.** Equal event/template
+    ids from different corpora remain distinct. Activation carries the exact
+    citation object; an ambiguous bare inline id fails closed rather than using
+    the first matching corpus.
 
 ```mermaid
 flowchart TB
@@ -517,8 +525,8 @@ synthesis step.
 | Contract/unit    | Source ranking and caps; context fitting; capability matrix; binding serialization; untrusted wrapper cannot forge delimiters                                                                    |
 | Core integration | Linked turn requires successful log evidence; a broad prompt receives its deterministic brief before the first provider call; one corpus with event/template/suppression revisions is pinned; ordinary turn excludes log tools; requested workspace search is staged; tools-disabled linked turn fails before provider; structured identity required |
 | Adversarial      | Model prints call-shaped JSON; wrapper metadata appears in output; user asks to reveal evaluator truth; malicious tool text asks for permissions                                                 |
-| Host/session     | Empty-chat link persists; stale/corrupt corpus fails before capability/provider handling; attach failure leaves durable state unchanged; ordinary session has no log scope; cancellation targets exact session |
-| Component UI     | Add context attaches/detaches one corpus; availability/event count/Open Explorer remain visible; Return/Shift+Return/IME; errors remain visible; autoscroll/unread semantics |
+| Host/session     | Empty-chat link persists; stale/corrupt corpus fails before capability/provider handling; attach failure leaves durable state unchanged; ordinary session has no log scope; cancellation targets exact session; stale whole-session save cannot erase a newer durable turn |
+| Component UI     | Add context attaches/detaches one corpus; availability/event count/Open Explorer remain visible; Return/Shift+Return/IME; errors remain visible; autoscroll/unread semantics; hydration/save/archive races retain the current owner; equal citation ids route by exact corpus provenance |
 | Packaged/native  | On an exact 250,000+ event build, a tools-enabled provider receives the host brief before synthesis for a general zero-prep question from main chat and Explorer; visible status is truthful; cited identities reopen; tools-disabled profile is honest; ordinary chat has no corpus; linked chat keeps corpus after switch/reopen |
 | Slow provider    | Deterministic cold/slow provider defaults; retrieval success then synthesis timeout; cancellation in choosing/retrieving/synthesizing; synthesis-only recovery; explicit deadline precedence |
 
@@ -537,7 +545,13 @@ assert the sentinel is absent from model-facing messages.
 - [`SessionContextBar.tsx`](../../../desktop/src/components/SessionContextBar.tsx):
   explicit single-corpus selection, availability, detach, and Explorer entry.
 - [`desktop/src-tauri/src/lib.rs`](../../../desktop/src-tauri/src/lib.rs):
-  atomic validated attachment and provider-free corpus preflight.
+  atomic validated attachment, revision-checked session persistence,
+  host-owned citation provenance, and provider-free corpus preflight.
+- [`useChatSessions.ts`](../../../desktop/src/hooks/useChatSessions.ts): ordered
+  hydration/synchronization and newest-mutation session reconciliation.
+- [`turn.ts`](../../../desktop/src/lib/turn.ts) and
+  [`SourceCitations.tsx`](../../../desktop/src/components/SourceCitations.tsx):
+  provenance-aware citation folding, presentation, and exact activation.
 - [`router.rs`](../../../crates/cd-core/src/router.rs): turn budgets and source
   ranking.
 - [`injection.rs`](../../../crates/cd-core/src/injection.rs): untrusted result
@@ -566,6 +580,8 @@ assert the sentinel is absent from model-facing messages.
 | Small-model staging         | **Shipped** | Constrained first log search and tool-closed synthesis path                | No guarantee every small model follows native tools                       |
 | Slow provider lifecycle     | **Shipped (agent-testable)** | Adaptive or explicit whole-turn ceiling, bounded truthful phases, immediate Stop, evidence-preserving synthesis retry | Native cold/slow tools-enabled profile acceptance remains #649 |
 | Model-picker curation       | **Shipped** | Pin/hide/restore state is profile/endpoint/model scoped, persistent, reversible, searchable, and hard-bounded across rendered bands | Not deletion, authorization, redaction, health, or capability qualification |
+| Durable transcript concurrency | **Shipped** | Host compare-and-swap rejects stale whole-session publication; newest client mutation alone may reconcile exact message ids | Not a multi-device collaborative-edit protocol |
+| Cross-corpus citation identity | **Shipped** | Governed chips retain `(source id, corpus provenance)` and activate the exact citation | Ambiguous bare inline ids fail closed rather than guessing |
 | Model-role guidance         | **Partial** | Versioned name hints are shown with typed basis and confidence; specialty and unknown ids stay selectable | No cross-gateway capability claim |
 | Measured qualification      | **Partial** | Explicit synthetic probes record pass/degraded/fail/untested per profile/endpoint/model/schema (#724) | No quality or permanent reliability claim; real packaged profile proof residual |
 | Model proposals changing UI | **Partial** | Structured `log_nav` is opt-in                                             | Rich finding proposal/approval lifecycle remains #646                     |

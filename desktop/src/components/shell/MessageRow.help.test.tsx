@@ -123,4 +123,30 @@ describe("MessageRow Help citation routing (#439)", () => {
     expect(hostReadFile).not.toHaveBeenCalled();
     expect(setPane).not.toHaveBeenCalledWith("source");
   });
+
+  it("routes equal log ids through the exact citation chip's corpus", () => {
+    const openLog = vi.fn();
+    render(
+      <MessageRow
+        msg={{
+          id: "cross-corpus",
+          role: "assistant",
+          content: "Compared two corpora.",
+          citations: [
+            { id: "log_event:7", label: "Corpus A", corpusId: "a" },
+            { id: "log_event:7", label: "Corpus B", corpusId: "b" },
+          ],
+        }}
+        turnStartedAt={null}
+        effectiveChatModel="test"
+        setSourcePath={vi.fn()}
+        setSourceContent={vi.fn()}
+        setPane={vi.fn()}
+        onOpenLogCitation={openLog}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Sources" }));
+    fireEvent.click(screen.getByRole("button", { name: "Corpus B" }));
+    expect(openLog).toHaveBeenCalledWith("log_event:7", "b");
+  });
 });

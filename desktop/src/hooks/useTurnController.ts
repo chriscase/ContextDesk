@@ -11,6 +11,7 @@ import {
   completePermission,
   hostCancelTurn,
   hostReadFile,
+  modelSelectionKey,
   type MessageMetaDto,
   type ModelOptionDto,
 } from "../lib/host";
@@ -48,6 +49,7 @@ type Args = {
   upgradeTitleWithLlm: (sessionId: string, prompt: string) => Promise<void>;
   pinScrollToEnd: (behavior?: ScrollBehavior) => void;
   refreshMemory: () => Promise<void>;
+  refreshChatModels: (keepKeys?: readonly string[]) => Promise<void>;
   setSourcePath: (p: string | null) => void;
   setSourceContent: (c: string) => void;
   setPaneChat: () => void;
@@ -68,6 +70,7 @@ export function useTurnController(args: Args) {
     upgradeTitleWithLlm,
     pinScrollToEnd,
     refreshMemory,
+    refreshChatModels,
     setSourcePath,
     setSourceContent,
     setPaneChat,
@@ -196,6 +199,20 @@ export function useTurnController(args: Args) {
               return;
             }
 
+            if (
+              ev.kind === "error" &&
+              ev.payload?.code === "tools_unsupported"
+            ) {
+              // The host has just persisted learned capability truth for this
+              // exact provider/model pair. Re-list immediately so the main
+              // composer does not continue offering tools on stale data.
+              const keepKey =
+                sessionProvider && sessionModel
+                  ? modelSelectionKey(sessionProvider, sessionModel)
+                  : undefined;
+              void refreshChatModels(keepKey ? [keepKey] : undefined);
+            }
+
             if (ev.kind === "permission_required") {
               const { permission: perm } = applyEventsToMessage(
                 {
@@ -290,11 +307,7 @@ export function useTurnController(args: Args) {
                 updatedAt: nowIso(),
               };
               if (done) {
-                void persistSession(updated).then((saved) => {
-                  setSessions((prev) =>
-                    prev.map((s) => (s.id === saved.id ? saved : s)),
-                  );
-                });
+                void persistSession(updated);
               }
               return all.map((s) => (s.id === sid ? updated : s));
             });
@@ -336,11 +349,7 @@ export function useTurnController(args: Args) {
             ),
             updatedAt: nowIso(),
           };
-          void persistSession(updated).then((saved) => {
-            setSessions((prev) =>
-              prev.map((s) => (s.id === saved.id ? saved : s)),
-            );
-          });
+          void persistSession(updated);
           return all.map((s) => (s.id === sid ? updated : s));
         });
       } finally {
@@ -365,6 +374,7 @@ export function useTurnController(args: Args) {
       modelOptions,
       defaultModelKey,
       refreshMemory,
+      refreshChatModels,
       persistSession,
       upgradeTitleWithLlm,
       pinScrollToEnd,
@@ -419,11 +429,7 @@ export function useTurnController(args: Args) {
             messages: [...cur.messages, msg],
             updatedAt: nowIso(),
           };
-          void persistSession(updated).then((saved) => {
-            setSessions((prev) =>
-              prev.map((s) => (s.id === saved.id ? saved : s)),
-            );
-          });
+          void persistSession(updated);
           return all.map((s) => (s.id === owner ? updated : s));
         });
       } catch (e) {
@@ -457,11 +463,7 @@ export function useTurnController(args: Args) {
             messages: [...cur.messages, failure],
             updatedAt: nowIso(),
           };
-          void persistSession(updated).then((saved) => {
-            setSessions((prev) =>
-              prev.map((s) => (s.id === saved.id ? saved : s)),
-            );
-          });
+          void persistSession(updated);
           return all.map((s) => (s.id === owner ? updated : s));
         });
       } finally {
@@ -503,11 +505,7 @@ export function useTurnController(args: Args) {
           updatedAt: nowIso(),
         };
         // Persist partial (or emptied) session so reload matches UI (#249 AC).
-        void persistSession(updated).then((saved) => {
-          setSessions((prev) =>
-            prev.map((s) => (s.id === saved.id ? saved : s)),
-          );
-        });
+        void persistSession(updated);
         return all.map((s) => (s.id === target ? updated : s));
       });
     }

@@ -12,6 +12,7 @@ import {
   isPristineBlank,
   nextChatTitle,
   pickRestoredSession,
+  reconcileOpenSessions,
 } from "./useChatSessions";
 
 function session(
@@ -53,6 +54,45 @@ describe("restoring the last-read conversation", () => {
 
   it("has nothing to restore when no chats loaded", () => {
     expect(pickRestoredSession([], "s-oldest")).toBeNull();
+  });
+});
+
+describe("host hydration reconciliation", () => {
+  it("retains a first turn created while host hydration was pending", () => {
+    const local = session("local", "First prompt", {
+      messages: [{ id: "u1", role: "user", content: "investigate" }],
+    });
+    const host = session("host", "Saved chat");
+    expect(
+      reconcileOpenSessions([local], [host], new Set([host.id])),
+    ).toEqual([local, host]);
+  });
+
+  it("does not resurrect a host-known chat that became archived", () => {
+    const archivedLocally = session("archived", "Old incident", {
+      messages: [{ id: "u1", role: "user", content: "old" }],
+    });
+    const open = session("open", "Current");
+    expect(
+      reconcileOpenSessions(
+        [archivedLocally, open],
+        [open],
+        new Set([archivedLocally.id, open.id]),
+      ),
+    ).toEqual([open]);
+  });
+
+  it("retains an unsaved local draft but drops an untouched local blank", () => {
+    const draft = session("draft", "Chat 2");
+    const blank = session("blank", "Chat 3");
+    expect(
+      reconcileOpenSessions(
+        [draft, blank],
+        [],
+        new Set(),
+        (id) => id === draft.id,
+      ),
+    ).toEqual([draft]);
   });
 });
 
