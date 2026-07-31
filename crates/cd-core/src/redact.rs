@@ -374,6 +374,18 @@ fn redact_bearer(out: &mut String) -> bool {
     while let Some(rel) = out[search_from..].find("Bearer ") {
         let i = search_from + rel;
         let rest = &out[i + "Bearer ".len()..];
+        // Already redacted. A real bearer token is alphanumeric/-/_/. so it can
+        // never begin with the marker, and re-redacting the marker is not a
+        // no-op: the token scan below finds zero token characters, `.max(8)`
+        // then consumes eight characters of the following prose, and the output
+        // keeps changing on every pass. Callers that persist a redacted value
+        // and later re-validate its canonical form would reject their own
+        // output — which made any note mentioning an auth header unsaveable
+        // (#656).
+        if rest.starts_with("***") {
+            search_from = i + "Bearer ***".len();
+            continue;
+        }
         let tok_len = rest
             .chars()
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
@@ -455,6 +467,26 @@ mod tests {
         assert!(s.contains("sk-***"), "{s}");
         assert!(s.contains("Bearer ***"), "{s}");
         assert!(!s.contains("abcdefghijklmnop"));
+    }
+
+    #[test]
+    fn bearer_redaction_is_idempotent() {
+        // Persisted values are re-scrubbed when their canonical form is
+        // validated; a redactor that keeps changing its own output makes the
+        // stored value unreadable (#656).
+        let once = scrub_secrets(
+            "Gateway rejected it: Authorization: Bearer abc123def456 and we should rotate it.",
+        );
+        assert!(once.contains("Bearer ***"), "{once}");
+        assert!(!once.contains("abc123def456"), "{once}");
+        let twice = scrub_secrets(&once);
+        assert_eq!(twice, once, "second pass changed the redacted text");
+        assert_eq!(scrub_secrets(&twice), twice);
+
+        // A short token is still over-consumed on the first pass, unchanged.
+        let short = scrub_secrets("Bearer ab plus trailing words here");
+        assert!(short.contains("Bearer ***"), "{short}");
+        assert_eq!(scrub_secrets(&short), short);
     }
 
     #[test]
