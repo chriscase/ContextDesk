@@ -4,20 +4,23 @@ mod log_lab_generator;
 use async_trait::async_trait;
 use cd_core::agent::{run_agent_turn, AgentOptions, ChatBackend, LogExplorerTurnContext};
 use cd_core::chat::{ChatCompletion, ChatMessage, FunctionCall, ToolCallMsg};
+use cd_core::embed::ConceptEmbedBackend;
 use cd_core::error::CoreResult;
 use cd_core::events::{StreamEvent, ToolPhase};
 use cd_core::index::KeywordIndex;
 use cd_core::investigations::InvestigationStore;
 use cd_core::log_analysis::{
     activate_template_suppression, add_line_bookmark, cluster_problems, export_corpus_zip,
-    import_corpus_zip_path, ingest_path, ingest_path_with_observer, list_bookmarks,
-    load_suppression_document, mutate_template_suppression_rule, preview_template_suppression,
-    query_event_count, query_event_neighborhood, query_event_rows, query_events, query_facets,
-    query_shared_timeline_summary, query_source_catalog, query_timeline_summary, search_events,
-    search_events_advanced, timeline, ActivateSuppressionPreview, EventNeighborhoodQuery,
-    EventQuery, EventSearchQuery, LogCorpus, LogSourceCatalogQuery, NewSuppressionPreview,
+    import_corpus_zip_path, ingest_path, ingest_path_with_observer, ingest_path_with_policy,
+    list_bookmarks, load_suppression_document, mutate_template_suppression_rule,
+    preview_template_suppression, query_event_count, query_event_neighborhood, query_event_rows,
+    query_events, query_facets, query_shared_timeline_summary, query_source_catalog,
+    query_timeline_summary, search_events, search_events_advanced, timeline,
+    ActivateSuppressionPreview, EmbeddingState, EventNeighborhoodQuery, EventQuery,
+    EventSearchQuery, LogCorpus, LogEmbedPolicy, LogSourceCatalogQuery, NewSuppressionPreview,
     SearchMatchMode, SharedTimelineSummaryQuery, SuppressionRuleMutation, SuppressionRuleOrigin,
-    TimeQuality, TimelineSummaryQuery, MAX_EVENT_PAGE, MAX_REGEX_SCAN_EVENTS,
+    TimeQuality, TimelineSummaryQuery, LOCAL_EMBED_DEFER_SOURCE_BYTES, MAX_EVENT_PAGE,
+    MAX_REGEX_SCAN_EVENTS, TRIAGE_STRESS_250K_SOURCE_BYTES,
 };
 use cd_core::process_progress::{
     CancelFlag, ProcessProgress, ProcessProgressObserver, RecordingProcessProgress,
@@ -1046,13 +1049,90 @@ async fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
     let cache = workspace.path().join("cache");
     let import_root = generated.join("scenarios/triage-stress/import");
     let import_started = Instant::now();
-    let report = ingest_path(&cache, &import_root, "triage-stress-250k", None, "none").unwrap();
+    // Production embedding policy (#824): local SoftWrite with real backend
+    // available; optional embed must defer past first use for this corpus.
+    let policy = LogEmbedPolicy::local_default();
+    let backend = std::sync::Arc::new(ConceptEmbedBackend::new(32));
+    let report = ingest_path_with_policy(
+        &cache,
+        &import_root,
+        "triage-stress-250k",
+        &policy,
+        Some(backend),
+    )
+    .unwrap();
     let import_ms = import_started.elapsed().as_millis();
     assert_eq!(report.stats.lines, DEFAULT_TRIAGE_STRESS_EVENT_COUNT as u64);
     assert_eq!(report.stats.files as usize, TRIAGE_STRESS_SOURCE_COUNT);
     assert_eq!(
         report.stats.templates as usize,
         TRIAGE_STRESS_PARSER_TEMPLATE_COUNT
+    );
+    assert_eq!(
+        report.stats.source_bytes, TRIAGE_STRESS_250K_SOURCE_BYTES,
+        "authoritative streamed source-byte identity for generated 250k product path"
+    );
+    assert!(
+        report.stats.source_bytes > LOCAL_EMBED_DEFER_SOURCE_BYTES,
+        "250k must cross production defer threshold"
+    );
+    assert_eq!(
+        report.embedding.state,
+        EmbeddingState::Deferred,
+        "production policy must defer optional embed past first use for 250k"
+    );
+    assert!(
+        report.phase_timings.embedding_deferred,
+        "phase timings must record deferred optional embedding"
+    );
+    assert_eq!(
+        report.phase_timings.optional_embedding_ms, 0,
+        "deferred embed must not burn wall time as if it ran"
+    );
+    // Same-machine regression budgets (#824) — not a universal SLA.
+    // Enforced only when this ignored test is run explicitly, e.g.:
+    //   cargo test -p cd-core --test log_lab \
+    //     log_lab_triage_stress_250k_product_path_is_bounded_and_truthful \
+    //     -- --ignored --nocapture --test-threads=1
+    // Ordinary `cargo test --workspace` / hosted CI do **not** execute this test
+    // (it is `#[ignore]`), so these budgets do not fail default CI.
+    // Defective debug class was ~548–630 s total / ~579 s template_analysis.
+    // Headroom covers host load on unoptimized test builds only.
+    const BUDGET_250K_TEMPLATE_ANALYSIS_MS: u128 = 200_000; // debug budget when run
+    const BUDGET_250K_IMPORT_MS: u128 = 280_000; // debug budget when run
+    assert!(
+        (report.phase_timings.template_analysis_ms as u128)
+            < BUDGET_250K_TEMPLATE_ANALYSIS_MS,
+        "250k template_analysis_ms={} exceeded same-machine budget {}ms (defective class was ~579s)",
+        report.phase_timings.template_analysis_ms,
+        BUDGET_250K_TEMPLATE_ANALYSIS_MS
+    );
+    assert!(
+        import_ms < BUDGET_250K_IMPORT_MS,
+        "250k import_ms={import_ms} exceeded same-machine budget {BUDGET_250K_IMPORT_MS}ms (defective class was ~548–630s)"
+    );
+    assert!(
+        (report.phase_timings.total_ms as u128) < BUDGET_250K_IMPORT_MS,
+        "250k total_ms={} exceeded same-machine budget {}ms",
+        report.phase_timings.total_ms,
+        BUDGET_250K_IMPORT_MS
+    );
+    // Severity identity from product generator (prescribed counts).
+    assert_eq!(
+        report.stats.level_counts.get("error").copied().unwrap_or(0),
+        45_000
+    );
+    assert_eq!(
+        report.stats.level_counts.get("warn").copied().unwrap_or(0),
+        37_500
+    );
+    assert_eq!(
+        report.stats.level_counts.get("debug").copied().unwrap_or(0),
+        7_500
+    );
+    assert_eq!(
+        report.stats.level_counts.get("info").copied().unwrap_or(0),
+        160_000
     );
 
     let cold_open_started = Instant::now();
@@ -1422,11 +1502,21 @@ async fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
     );
 
     eprintln!(
-        "PASS triage-stress-250k events={} files={} templates={} source_bytes={} generation_ms={} import_ms={} cold_open_ms={} summary_ms={} first_rows_ms={} exact_count_ms={} facets_ms={} source_catalog_ms={} bookmarks_ms={} investigation_ms={} shared_timeline_ms={} agent_timeline_ms={} cluster_ms={} broad_triage_ms={} linked_agent_ms={} broad_triage_bytes={} broad_triage_identities={} suppression_template_id={} suppression_hidden={} suppression_preview_ms={} suppression_activate_ms={} suppression_rows_ms={} suppression_count_ms={} suppression_facets_ms={} suppression_timeline_ms={} suppression_disable_ms={} tree_sha256={} (one-machine observation; not a universal claim)",
+        "PASS triage-stress-250k events={} files={} templates={} source_bytes={} embedding_state={:?} embedding_deferred={} total_ms={} discover_read_ms={} parse_frame_ms={} template_analysis_ms={} persist_index_ms={} optional_embedding_ms={} validation_ms={} publication_ms={} generation_ms={} import_ms={} cold_open_ms={} summary_ms={} first_rows_ms={} exact_count_ms={} facets_ms={} source_catalog_ms={} bookmarks_ms={} investigation_ms={} shared_timeline_ms={} agent_timeline_ms={} cluster_ms={} broad_triage_ms={} linked_agent_ms={} broad_triage_bytes={} broad_triage_identities={} suppression_template_id={} suppression_hidden={} suppression_preview_ms={} suppression_activate_ms={} suppression_rows_ms={} suppression_count_ms={} suppression_facets_ms={} suppression_timeline_ms={} suppression_disable_ms={} tree_sha256={} (one-machine observation; not a universal claim)",
         report.stats.lines,
         report.stats.files,
         report.stats.templates,
         report.stats.source_bytes,
+        report.embedding.state,
+        report.phase_timings.embedding_deferred,
+        report.phase_timings.total_ms,
+        report.phase_timings.discover_read_ms,
+        report.phase_timings.parse_frame_ms,
+        report.phase_timings.template_analysis_ms,
+        report.phase_timings.persist_index_ms,
+        report.phase_timings.optional_embedding_ms,
+        report.phase_timings.validation_ms,
+        report.phase_timings.publication_ms,
         generation_ms,
         import_ms,
         cold_open_ms,
@@ -1457,9 +1547,114 @@ async fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
     );
 }
 
-/// Explicit local acceptance path for #542. Kept out of the default suite
-/// because it generates and imports the literal 100k UI profile, but it uses
-/// only production core entry points and no network or external service.
+/// #824 — product-path 25k scale: pinned seven-day fixture + production embed policy.
+#[test]
+fn log_lab_product_scale_seven_day_25k_with_production_embed() {
+    let import_root =
+        fixture_root().join("acceptance/seven-day-25k/scenarios/behavior-scale/import");
+    assert!(
+        import_root.is_dir(),
+        "pinned seven-day import tree missing at {}",
+        import_root.display()
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let policy = LogEmbedPolicy::local_default();
+    let backend = std::sync::Arc::new(ConceptEmbedBackend::new(32));
+    let recorder = RecordingProcessProgress::default();
+    let started = Instant::now();
+    let report = cd_core::log_analysis::ingest_path_with_policy_and_observer(
+        cache.path(),
+        &import_root,
+        "seven-day-25k",
+        &policy,
+        Some(backend),
+        &recorder,
+        None,
+    )
+    .unwrap();
+    let wall_ms = started.elapsed().as_millis() as u64;
+    assert_eq!(report.stats.lines, 25_000);
+    assert!(report.stats.files >= 1);
+    assert!(report.stats.source_bytes > 0);
+    // Pinned seven-day is well under 60 MiB → production policy embeds during SoftWrite.
+    assert!(
+        report.stats.source_bytes <= LOCAL_EMBED_DEFER_SOURCE_BYTES,
+        "seven-day source_bytes {} should not defer",
+        report.stats.source_bytes
+    );
+    assert!(
+        !report.phase_timings.embedding_deferred,
+        "seven-day must embed under production policy (not deferred)"
+    );
+    assert!(
+        matches!(
+            report.embedding.state,
+            EmbeddingState::Partial | EmbeddingState::Complete
+        ),
+        "expected embed attempt, got {:?}",
+        report.embedding.state
+    );
+    let phases = recorder.phases();
+    for required in [
+        cd_core::process_progress::ProcessProgressPhase::Scan,
+        cd_core::process_progress::ProcessProgressPhase::Stream,
+        cd_core::process_progress::ProcessProgressPhase::Publish,
+        cd_core::process_progress::ProcessProgressPhase::Completed,
+    ] {
+        assert!(
+            phases.contains(&required),
+            "missing {required:?} in {phases:?}"
+        );
+    }
+    // Same-machine regression budgets (#824) — not a universal SLA.
+    // Enforced by this default-suite test (`cargo test -p cd-core --test log_lab
+    // log_lab_product_scale_seven_day` / full workspace gate).
+    assert!(
+        wall_ms < 45_000,
+        "product seven-day 25k wall_ms={wall_ms} exceeded 45s same-machine budget"
+    );
+    assert!(
+        report.phase_timings.template_analysis_ms < 20_000,
+        "product seven-day 25k template_analysis_ms={} exceeded 20s budget",
+        report.phase_timings.template_analysis_ms
+    );
+    assert!(
+        report.phase_timings.total_ms < 45_000,
+        "product seven-day 25k total_ms={} exceeded 45s budget",
+        report.phase_timings.total_ms
+    );
+    let corpus = LogCorpus::open(cache.path(), &report.corpus_id).unwrap();
+    let page = query_events(
+        &corpus,
+        &EventQuery {
+            limit: 200,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(page.events.len(), 200);
+    eprintln!(
+        "PASS product-seven-day-25k events={} files={} source_bytes={} total_ms={} discover_read_ms={} parse_frame_ms={} template_analysis_ms={} persist_index_ms={} optional_embedding_ms={} validation_ms={} publication_ms={} wall_ms={} templates={} embedding_state={:?} embedding_deferred={} (one-machine observation; not a universal claim)",
+        report.stats.lines,
+        report.stats.files,
+        report.stats.source_bytes,
+        report.phase_timings.total_ms,
+        report.phase_timings.discover_read_ms,
+        report.phase_timings.parse_frame_ms,
+        report.phase_timings.template_analysis_ms,
+        report.phase_timings.persist_index_ms,
+        report.phase_timings.optional_embedding_ms,
+        report.phase_timings.validation_ms,
+        report.phase_timings.publication_ms,
+        wall_ms,
+        report.stats.templates,
+        report.embedding.state,
+        report.phase_timings.embedding_deferred
+    );
+}
+
+/// Explicit local acceptance path for #542 / #824. Generates the literal 100k
+/// UI profile and imports under production embed policy.
 #[test]
 #[ignore = "explicit 100k Log Lab product-path proof"]
 fn log_lab_ui_medium_100k_product_path_is_bounded_and_bidirectional() {
@@ -1486,16 +1681,46 @@ fn log_lab_ui_medium_100k_product_path_is_bounded_and_bidirectional() {
 
     let cache = workspace.path().join("cache");
     let import_started = Instant::now();
-    let report = ingest_path(
+    // Production embedding policy (#824) — not embed=None.
+    let policy = LogEmbedPolicy::local_default();
+    let backend = std::sync::Arc::new(ConceptEmbedBackend::new(32));
+    let report = ingest_path_with_policy(
         &cache,
         &generated.join("scenarios/behavior-scale/import"),
         "behavior-ui-100k",
-        None,
-        "none",
+        &policy,
+        Some(backend),
     )
     .unwrap();
     let import_ms = import_started.elapsed().as_millis();
     assert_eq!(report.stats.lines, 100_000);
+    // ui-medium is under the 60 MiB defer bar → embeds during SoftWrite.
+    assert!(
+        report.stats.source_bytes <= LOCAL_EMBED_DEFER_SOURCE_BYTES
+            || report.phase_timings.embedding_deferred,
+        "unexpected 100k size/defer combo: bytes={} deferred={}",
+        report.stats.source_bytes,
+        report.phase_timings.embedding_deferred
+    );
+    // Same-machine regression budgets (#824) — not a universal SLA.
+    // Enforced only when this ignored test is run explicitly:
+    //   cargo test -p cd-core --test log_lab log_lab_ui_medium_100k \
+    //     -- --ignored --nocapture --test-threads=1
+    // Not part of ordinary workspace CI (#[ignore]).
+    assert!(
+        import_ms < 60_000,
+        "product ui-medium 100k import_ms={import_ms} exceeded 60s same-machine budget"
+    );
+    assert!(
+        report.phase_timings.template_analysis_ms < 40_000,
+        "product ui-medium 100k template_analysis_ms={} exceeded 40s budget",
+        report.phase_timings.template_analysis_ms
+    );
+    assert!(
+        report.phase_timings.total_ms < 60_000,
+        "product ui-medium 100k total_ms={} exceeded 60s budget",
+        report.phase_timings.total_ms
+    );
 
     let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
     let first_page_started = Instant::now();
@@ -1674,10 +1899,12 @@ fn log_lab_ui_medium_100k_product_path_is_bounded_and_bidirectional() {
     assert!(neighborhood.events.len() <= 41);
 
     eprintln!(
-        "PASS ui-medium-100k events={} files={} source_bytes={} generation_ms={} import_ms={} first_page_ms={} timeline_ms={} forward_12_pages_ms={} reverse_page_ms={} deep_find_ms={} bounded_regex_50k_ms={} first_page_rows={} timeline_slots={} neighborhood_rows={} tree_sha256={} (one-machine observation; not a universal claim)",
+        "PASS ui-medium-100k events={} files={} source_bytes={} embedding_state={:?} embedding_deferred={} generation_ms={} import_ms={} first_page_ms={} timeline_ms={} forward_12_pages_ms={} reverse_page_ms={} deep_find_ms={} bounded_regex_50k_ms={} first_page_rows={} timeline_slots={} neighborhood_rows={} tree_sha256={} (one-machine observation; not a universal claim)",
         report.stats.lines,
         report.stats.files,
         report.stats.source_bytes,
+        report.embedding.state,
+        report.phase_timings.embedding_deferred,
         generation_ms,
         import_ms,
         first_page_ms,
@@ -1690,5 +1917,93 @@ fn log_lab_ui_medium_100k_product_path_is_bounded_and_bidirectional() {
         timeline.bucket_count,
         neighborhood.events.len(),
         generation.tree_sha256
+    );
+}
+
+/// #824 — explicit real-ONNX product embed path for the pinned seven-day 25k demo.
+///
+/// Ordinary CI stays hermetic (`ConceptEmbedBackend`). Desktop product builds use
+/// `default_log_embed_backend` (log-fastembed ONNX). Run when the model/cache is
+/// available:
+///   cargo test -p cd-core --features log-fastembed --test log_lab \
+///     log_lab_product_25k_real_onnx_embed -- --ignored --nocapture
+#[test]
+#[ignore = "explicit real-ONNX 25k product-path proof; requires log-fastembed + model cache"]
+fn log_lab_product_25k_real_onnx_embed() {
+    use cd_core::embed::{
+        default_log_embed_backend, log_fastembed_enabled, LOCAL_LOG_EMBED_MODEL_ID,
+    };
+    use cd_core::log_analysis::EmbeddingState;
+
+    assert!(
+        log_fastembed_enabled(),
+        "this ignored proof requires --features log-fastembed"
+    );
+    let import_root =
+        fixture_root().join("acceptance/seven-day-25k/scenarios/behavior-scale/import");
+    assert!(import_root.is_dir(), "missing {}", import_root.display());
+
+    let backend = match default_log_embed_backend() {
+        Ok(Some(be)) => be,
+        Ok(None) => panic!("log-fastembed enabled but factory returned None"),
+        Err(e) => panic!("default_log_embed_backend failed (model/cache unavailable?): {e}"),
+    };
+
+    let cache = tempfile::tempdir().unwrap();
+    let mut policy = LogEmbedPolicy::local_default();
+    policy.model_id = LOCAL_LOG_EMBED_MODEL_ID.into();
+    let recorder = RecordingProcessProgress::default();
+    let started = Instant::now();
+    let report = cd_core::log_analysis::ingest_path_with_policy_and_observer(
+        cache.path(),
+        &import_root,
+        "seven-day-25k-onnx",
+        &policy,
+        Some(backend),
+        &recorder,
+        None,
+    )
+    .expect("real ONNX SoftWrite ingest must succeed");
+    let wall_ms = started.elapsed().as_millis() as u64;
+
+    assert_eq!(report.stats.lines, 25_000);
+    assert!(
+        report.stats.source_bytes <= LOCAL_EMBED_DEFER_SOURCE_BYTES,
+        "25k must not defer under production policy"
+    );
+    assert!(
+        !report.phase_timings.embedding_deferred,
+        "25k must embed with product ONNX, not defer"
+    );
+    assert!(
+        matches!(
+            report.embedding.state,
+            EmbeddingState::Partial | EmbeddingState::Complete
+        ),
+        "expected real embed attempt, got {:?}",
+        report.embedding.state
+    );
+    assert!(
+        report.stats.embedded > 0 || report.embedding.embedded_templates > 0,
+        "ONNX path must record embedded templates"
+    );
+    // Cancel was not requested; corpus is published.
+    let ids = LogCorpus::list_ids(cache.path()).unwrap();
+    assert_eq!(ids, vec![report.corpus_id.clone()]);
+    let corpus = LogCorpus::open(cache.path(), &report.corpus_id).unwrap();
+    assert_eq!(corpus.event_count(), 25_000);
+
+    eprintln!(
+        "PASS product-25k-real-onnx events={} source_bytes={} total_ms={} template_analysis_ms={} optional_embedding_ms={} wall_ms={} templates={} embedded={} embedding_state={:?} model_id={} (one-machine; not a SLA)",
+        report.stats.lines,
+        report.stats.source_bytes,
+        report.phase_timings.total_ms,
+        report.phase_timings.template_analysis_ms,
+        report.phase_timings.optional_embedding_ms,
+        wall_ms,
+        report.stats.templates,
+        report.stats.embedded,
+        report.embedding.state,
+        policy.model_id
     );
 }

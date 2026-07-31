@@ -17,6 +17,13 @@ describe("canonical Help deep links (#439)", () => {
       pageId: "log-analysis-pipeline",
       anchor: "pipeline",
     });
+    // #824 — phase-timings HelpTip locator (must match a real corpus H2 anchor).
+    expect(
+      parseHelpLocator("help://log-analysis-pipeline#import-phases"),
+    ).toEqual({
+      pageId: "log-analysis-pipeline",
+      anchor: "import-phases",
+    });
     for (const unsafe of [
       "help://../secret",
       "help://page?query=x",

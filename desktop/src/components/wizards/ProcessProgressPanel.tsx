@@ -1,11 +1,12 @@
 /**
- * Pipeline-style progress for long import/ingest (#445).
+ * Pipeline-style progress for long import/ingest (#445 / #824).
  */
 
 import { useEffect, useState } from "react";
 import {
   LOG_INGEST_PIPELINE,
   SESSION_IMPORT_PIPELINE,
+  formatElapsedMs,
   phaseLabel,
   type ProcessProgressDto,
   type ProcessProgressPhase,
@@ -32,14 +33,28 @@ export function ProcessProgressPanel({
   cancelLabel = "Cancel ingest",
 }: Props) {
   const [cancelRequested, setCancelRequested] = useState(false);
+  /** Phases actually observed this operation — optional steps must not be faked. */
+  const [seenPhases, setSeenPhases] = useState<Set<ProcessProgressPhase>>(
+    () => new Set(),
+  );
   const k = kind ?? progress?.kind ?? "log_ingest";
   const pipeline: ProcessProgressPhase[] =
     k === "session_context_import"
       ? SESSION_IMPORT_PIPELINE
       : LOG_INGEST_PIPELINE;
 
-  const active = progress?.phase ?? "starting";
-  const activeIdx = pipeline.indexOf(active as ProcessProgressPhase);
+  // Legacy bookend phases (parse/template/redact/store) map to the monotonic
+  // streaming phase so chrome never rewinds after host upgrades to Stream (#824).
+  const rawActive = progress?.phase ?? "starting";
+  const active: ProcessProgressPhase =
+    k === "log_ingest" &&
+    (rawActive === "parse" ||
+      rawActive === "template" ||
+      rawActive === "redact" ||
+      rawActive === "store")
+      ? "stream"
+      : (rawActive as ProcessProgressPhase);
+  const activeIdx = pipeline.indexOf(active);
   const terminal =
     active === "completed" || active === "failed" || active === "cancelled";
   const running = !terminal && !error;
@@ -54,6 +69,25 @@ export function ProcessProgressPanel({
   useEffect(() => {
     setCancelRequested(false);
   }, [active, progress?.cancellable]);
+
+  // Track which pipeline phases the host actually emitted. Optional embedding
+  // is often deferred (#824); completed chrome must not checkmark it then.
+  useEffect(() => {
+    if (active === "starting") {
+      setSeenPhases(new Set());
+      return;
+    }
+    if (!pipeline.includes(active as ProcessProgressPhase)) {
+      return;
+    }
+    const phase = active as ProcessProgressPhase;
+    setSeenPhases((prev) => {
+      if (prev.has(phase)) return prev;
+      const next = new Set(prev);
+      next.add(phase);
+      return next;
+    });
+  }, [active, pipeline]);
 
   const requestCancel = async () => {
     if (cancelRequested || !progress?.cancellable) return;
@@ -81,18 +115,27 @@ export function ProcessProgressPanel({
 
       <ol className="process-progress__pipeline" aria-label="Process phases">
         {pipeline.map((phase, i) => {
+          const observed = seenPhases.has(phase);
+          // Optional embedding is often deferred (#824). Position-based "done"
+          // would checkmark it once we reach validate/publish; refuse unless
+          // the host actually emitted embed.
+          const optionalSkipped = phase === "embed" && !observed;
           const done =
-            terminal && active === "completed"
-              ? true
-              : activeIdx >= 0 && i < activeIdx;
+            !optionalSkipped &&
+            phase !== active &&
+            (active === "completed" ||
+              (activeIdx >= 0 && i < activeIdx) ||
+              (terminal && activeIdx < 0 && observed));
           const current =
             phase === active || (activeIdx < 0 && i === 0 && !terminal);
           return (
             <li
               key={phase}
               className="process-progress__phase"
+              data-phase={phase}
               data-done={done ? "true" : "false"}
               data-active={current ? "true" : "false"}
+              data-seen={observed ? "true" : "false"}
             >
               <span className="process-progress__dot" aria-hidden>
                 {done ? "✓" : i + 1}
@@ -132,6 +175,14 @@ export function ProcessProgressPanel({
 
       {progress ? (
         <dl className="process-progress__stats">
+          {formatElapsedMs(progress.elapsed_ms) != null ? (
+            <>
+              <dt>Elapsed</dt>
+              <dd data-testid="process-progress-elapsed">
+                {formatElapsedMs(progress.elapsed_ms)}
+              </dd>
+            </>
+          ) : null}
           {progress.lines_processed != null ? (
             <>
               <dt>Lines</dt>

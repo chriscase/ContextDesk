@@ -74,7 +74,8 @@ default and doing nothing leaves the Logs library empty. The option installs
 for a seven-day performance-triage investigation.
 
 Select the option, then choose **Install demo**. ContextDesk shows the same
-bounded scan, parse, template, redact, store, and embedding progress used by an
+bounded discover, streaming read/parse/template/persist, optional embed, validate,
+and publication progress used by an
 ordinary Logs import. While an installation you explicitly started is active,
 finish or cancel it before entering the app. A failure stays visible and can be
 retried. Repeating a successful install selects the existing managed demo

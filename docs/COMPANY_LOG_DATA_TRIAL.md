@@ -249,7 +249,7 @@ OS profile when policy requires a guaranteed clean environment.
   clock-skew correction remain incomplete.
 - Tools-disabled profiles cannot perform a linked log investigation. Their
   honest refusal is expected behavior.
-- #745 remains open for exact packaged 250,000+ event proof with a real
+- #745 remains open for exact generated 250,000+ event proof with a real
   tools-enabled provider. Host-built deterministic evidence is shipped and
   agent-testable, but provider/model synthesis quality is not universal.
 - Portable package v1 does not include corpus bookmarks, while durable

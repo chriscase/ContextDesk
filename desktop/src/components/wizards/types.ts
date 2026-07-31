@@ -43,11 +43,13 @@ export type ProcessProgressKind = "log_ingest" | "session_context_import";
 export type ProcessProgressPhase =
   | "starting"
   | "scan"
+  | "stream"
   | "parse"
   | "template"
   | "redact"
   | "store"
   | "embed"
+  | "publish"
   | "read"
   | "validate"
   | "extract"
@@ -67,6 +69,10 @@ export type ProcessProgressDto = {
   bytes_processed: number | null;
   templates: number | null;
   cancellable: boolean;
+  /** Wall-clock ms since operation start (#824); optional for older hosts. */
+  elapsed_ms?: number | null;
+  /** Wall-clock ms spent in the previous phase when transitioning (#824). */
+  phase_elapsed_ms?: number | null;
 };
 
 export type WizardOutcome = {
@@ -116,14 +122,19 @@ export function wizardNavCancel(state: WizardNavState): WizardNavState {
   return { ...state, cancelled: true };
 }
 
-/** Log ingest pipeline phase order for ProcessProgressPanel. */
+/**
+ * Log ingest pipeline phase order for ProcessProgressPanel (#824).
+ *
+ * Matches core emission order: optional embedding may be skipped (deferred /
+ * keyword-only) between store and validate; validate always runs before atomic
+ * publication.
+ */
 export const LOG_INGEST_PIPELINE: ProcessProgressPhase[] = [
   "scan",
-  "parse",
-  "template",
-  "redact",
-  "store",
+  "stream",
   "embed",
+  "validate",
+  "publish",
 ];
 
 export const SESSION_IMPORT_PIPELINE: ProcessProgressPhase[] = [
@@ -136,12 +147,14 @@ export const SESSION_IMPORT_PIPELINE: ProcessProgressPhase[] = [
 export function phaseLabel(phase: ProcessProgressPhase): string {
   const map: Record<ProcessProgressPhase, string> = {
     starting: "Starting",
-    scan: "Scan",
-    parse: "Parse",
-    template: "Template",
+    scan: "Discover / read",
+    stream: "Streaming read, parse, template, and persist",
+    parse: "Parse / frame",
+    template: "Template analysis",
     redact: "Redact",
-    store: "Store",
-    embed: "Embed",
+    store: "Persist / index",
+    embed: "Optional embedding",
+    publish: "Publication",
     read: "Read",
     validate: "Validate",
     extract: "Extract",
@@ -151,4 +164,16 @@ export function phaseLabel(phase: ProcessProgressPhase): string {
     cancelled: "Cancelled",
   };
   return map[phase] ?? phase;
+}
+
+/** Format wall-clock elapsed for progress chrome (one-machine observation). */
+export function formatElapsedMs(ms: number | null | undefined): string | null {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return null;
+  const whole = Math.floor(ms);
+  if (whole < 1000) return `${whole} ms`;
+  const secs = whole / 1000;
+  if (secs < 60) return `${secs.toFixed(secs < 10 ? 1 : 0)} s`;
+  const minutes = Math.floor(secs / 60);
+  const rem = Math.floor(secs % 60);
+  return `${minutes}m ${rem}s`;
 }

@@ -477,11 +477,13 @@ fn process_progress_sample() -> Vec<ProcessProgress> {
     let phases = [
         ProcessProgressPhase::Starting,
         ProcessProgressPhase::Scan,
+        ProcessProgressPhase::Stream,
         ProcessProgressPhase::Parse,
         ProcessProgressPhase::Template,
         ProcessProgressPhase::Redact,
         ProcessProgressPhase::Store,
         ProcessProgressPhase::Embed,
+        ProcessProgressPhase::Publish,
         ProcessProgressPhase::Read,
         ProcessProgressPhase::Validate,
         ProcessProgressPhase::Extract,
@@ -519,6 +521,16 @@ fn process_progress_sample() -> Vec<ProcessProgress> {
             },
             templates: if i % 4 == 0 { Some(i as u64) } else { None },
             cancellable: i < 11,
+            elapsed_ms: if i % 2 == 0 {
+                Some(i as u64 * 1_000)
+            } else {
+                None
+            },
+            phase_elapsed_ms: if i % 3 == 0 {
+                Some(i as u64 * 250)
+            } else {
+                None
+            },
         })
         .collect()
 }

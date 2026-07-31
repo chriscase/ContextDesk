@@ -628,7 +628,7 @@ parsing free-form progress or error strings.
 | Bookmark exact refs/item               |                                                 512 | Reject larger save                                     |
 | Bookmark total refs/sidecar            |                                               8,192 | Reject malformed/oversized sidecar                     |
 | Template embeddings at ordinary ingest |                                   Top 256 templates | Persist honest partial state                           |
-| Embedding defer threshold              |              More than 64 MiB streamed source bytes | Publish keyword/structured corpus                      |
+| Embedding defer threshold              |              More than **60 MiB** streamed source bytes (measured so the explicit generated triage-stress 250k acceptance corpus at 63,883,809 B defers; bundled seven-day 25k and smaller 100k product paths still embed) | Publish keyword/structured corpus                      |
 | Trusted reanalysis                     |                               Up to 2,048 templates | Atomic sidecar publication                             |
 
 Reference-machine measurements for the existing deterministic 100k-event proof
@@ -678,7 +678,7 @@ Persist or expose:
 - active event revision, wall-event count, and one-step undo availability;
 - redaction, encoding normalization, and Original truncation flags;
 - query mode, filter, result/page count, bucket count, and cancellation;
-- per-phase progress and duration; and
+- per-phase progress and duration (progress chrome stays one monotonic Stream for interleaved work; completion diagnostics expose separate discover/read, parse/frame, template-analysis, persist/index, optional-embedding, validation, and publication timings from core through host DTO/TypeScript); and
 - package version/hash verification.
 
 Future #670 observability should add full precision, yearless/abbreviation

@@ -93,6 +93,8 @@ const MUTATIONS: Record<string, Mutation[]> = {
     { label: "bogus kind", apply: (r) => { r[0].kind = "logIngest"; } },
     { label: "fraction out of range", apply: (r) => { r[1].fraction = 1.5; } },
     { label: "counter overflow", apply: (r) => { r[1].bytes_processed = UNSAFE; } },
+    { label: "elapsed overflow", apply: (r) => { r[0].elapsed_ms = UNSAFE; } },
+    { label: "negative phase elapsed", apply: (r) => { r[0].phase_elapsed_ms = -1; } },
     { label: "delete cancellable", apply: (r) => delete r[0].cancellable },
     { label: "camelCase drift", apply: (r) => { r[0].linesProcessed = r[0].lines_processed; delete r[0].lines_processed; } },
   ],

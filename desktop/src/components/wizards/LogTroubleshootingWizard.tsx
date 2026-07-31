@@ -20,7 +20,10 @@ import {
   levelEntries,
   statsBlurb,
 } from "../../lib/logStats";
-import { HELP_TEMPLATE_GROUPING } from "../../lib/helpContent";
+import {
+  HELP_PHASE_TIMINGS,
+  HELP_TEMPLATE_GROUPING,
+} from "../../lib/helpContent";
 import { HelpTip } from "../HelpTip";
 import { LogImportConfidence } from "../panes/LogImportConfidence";
 import { ProcessProgressPanel } from "./ProcessProgressPanel";
@@ -82,6 +85,8 @@ export function LogTroubleshootingWizard({
     bytes_processed: p.bytes_processed,
     templates: p.templates,
     cancellable: p.cancellable,
+    elapsed_ms: p.elapsed_ms ?? null,
+    phase_elapsed_ms: p.phase_elapsed_ms ?? null,
   });
   const [corpusId, setCorpusId] = useState<string | null>(null);
   const [ingestReport, setIngestReport] = useState<LogIngestReportDto | null>(
@@ -627,6 +632,65 @@ function IngestStatsHero({ report }: { report: LogIngestReportDto }) {
           </dd>
         </div>
       </dl>
+      {report.phaseTimings ? (
+        <div
+          className="wizard-stats__phases"
+          data-testid="wizard-ingest-phase-timings"
+          aria-label="Import phase timings"
+        >
+          <p className="wizard-stats__phases-title">
+            Operation timings
+            {report.phaseTimings.embeddingDeferred
+              ? " · embedding deferred"
+              : ""}{" "}
+            <HelpTip
+              label="Phase timings"
+              title="Import phase timings"
+              content={HELP_PHASE_TIMINGS}
+            />
+          </p>
+          <dl className="process-progress__stats wizard-stats__grid wizard-stats__phase-grid">
+            <div>
+              <dt>Discover / read</dt>
+              <dd>{report.phaseTimings.discoverReadMs.toLocaleString()} ms</dd>
+            </div>
+            <div>
+              <dt>Parse / frame</dt>
+              <dd>{report.phaseTimings.parseFrameMs.toLocaleString()} ms</dd>
+            </div>
+            <div>
+              <dt>Template analysis</dt>
+              <dd>
+                {report.phaseTimings.templateAnalysisMs.toLocaleString()} ms
+              </dd>
+            </div>
+            <div>
+              <dt>Persist / index</dt>
+              <dd>{report.phaseTimings.persistIndexMs.toLocaleString()} ms</dd>
+            </div>
+            <div>
+              <dt>Optional embedding</dt>
+              <dd>
+                {report.phaseTimings.embeddingDeferred
+                  ? "deferred"
+                  : `${report.phaseTimings.optionalEmbeddingMs.toLocaleString()} ms`}
+              </dd>
+            </div>
+            <div>
+              <dt>Validation</dt>
+              <dd>{report.phaseTimings.validationMs.toLocaleString()} ms</dd>
+            </div>
+            <div>
+              <dt>Publication</dt>
+              <dd>{report.phaseTimings.publicationMs.toLocaleString()} ms</dd>
+            </div>
+            <div>
+              <dt>Total</dt>
+              <dd>{report.phaseTimings.totalMs.toLocaleString()} ms</dd>
+            </div>
+          </dl>
+        </div>
+      ) : null}
       {report.partial ? (
         <div className="wizard-stats__partial" role="note" data-testid="ingest-partial">
           <strong>Partial corpus</strong>

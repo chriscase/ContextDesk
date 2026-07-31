@@ -125,11 +125,13 @@ export type ProcessProgressKind = (typeof PROCESS_PROGRESS_KIND)[number];
 export const PROCESS_PROGRESS_PHASE = [
   "starting",
   "scan",
+  "stream",
   "parse",
   "template",
   "redact",
   "store",
   "embed",
+  "publish",
   "read",
   "validate",
   "extract",
@@ -427,6 +429,8 @@ export type WireProcessProgress = {
   bytes_processed: number | null;
   templates: number | null;
   cancellable: boolean;
+  elapsed_ms?: number;
+  phase_elapsed_ms?: number;
 };
 
 // ---------------------------------------------------------------------------
@@ -778,6 +782,8 @@ const processProgressShape: ObjectShape = {
   bytes_processed: f.nul(f.u64),
   templates: f.nul(f.u64),
   cancellable: f.req(f.bool),
+  elapsed_ms: f.opt(f.u64),
+  phase_elapsed_ms: f.opt(f.u64),
 };
 
 const eventShape: ObjectShape = {

@@ -50,9 +50,12 @@ pub use diagnostics::{
     FailedIngestReason, FailedIngestScanCounts, FailedIngestSourceKind,
     FAILED_INGEST_DIAGNOSTIC_SCHEMA_VERSION, MAX_FAILED_INGEST_EVIDENCE_ENTRIES,
 };
-pub use drain::{DrainMiner, TemplateInfo};
+pub use drain::{
+    DrainMiner, TemplateInfo, MAX_DRAIN_TEMPLATES, MAX_DRAIN_TEMPLATES_PER_LENGTH_BUCKET,
+};
 pub use embed_policy::{
     LogEmbedMode, LogEmbedPolicy, CLOUD_LEAVE_MACHINE_CONFIRM, LOCAL_EMBED_DEFER_SOURCE_BYTES,
+    TRIAGE_STRESS_250K_SOURCE_BYTES,
 };
 pub use event_revision::{
     apply_event_timestamp_revision, undo_event_revision, EventRevisionMetadata,
@@ -71,7 +74,7 @@ pub use governed_citation::{
 pub use ingest::{
     ingest_path, ingest_path_with_observer, ingest_path_with_policy,
     ingest_path_with_policy_and_observer, ingest_path_with_policy_and_observer_managed,
-    IngestReport, IngestStats,
+    IngestPhaseTimings, IngestReport, IngestStats,
 };
 pub use ingest_confidence::{
     IngestConfidenceCounts, IngestConfidenceReport, IngestFormatOutcome, SourceIngestConfidence,

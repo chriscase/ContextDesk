@@ -86,6 +86,8 @@ function hostProgressToWizard(p: ProcessProgressDto): WizardProgressDto {
     bytes_processed: p.bytes_processed,
     templates: p.templates,
     cancellable: p.cancellable,
+    elapsed_ms: p.elapsed_ms ?? null,
+    phase_elapsed_ms: p.phase_elapsed_ms ?? null,
   };
 }
 

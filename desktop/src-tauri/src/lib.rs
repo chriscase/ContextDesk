@@ -6428,6 +6428,9 @@ struct LogIngestReportDto {
     confidence: cd_core::log_analysis::IngestConfidenceReport,
     top_templates: Vec<LogTopTemplateDto>,
     embedding: cd_core::log_analysis::CorpusEmbeddingStatus,
+    /// Separate operation phase timings (#824). Progress chrome stays one
+    /// monotonic Stream for interleaved work; completion/diagnostics list these.
+    phase_timings: cd_core::log_analysis::IngestPhaseTimings,
 }
 
 const DEMO_LOG_IDENTITY: &str = "contextdesk.demo.logs.seven-day-25k.behavior-scale.v1";
@@ -7650,6 +7653,7 @@ async fn run_log_ingest(
             })
             .collect(),
         embedding: report.embedding,
+        phase_timings: report.phase_timings,
     })
 }
 
@@ -11504,6 +11508,32 @@ mod log_noise_candidate_host_tests {
         assert!(!command.contains("ensure_host("));
         assert!(!command.contains("LogCorpus::open"));
     }
+
+    /// #824 — SoftWrite ingest must not run DuckDB/analysis on the UI event loop.
+    #[test]
+    fn run_log_ingest_keeps_core_ingest_off_the_event_loop() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("async fn run_log_ingest(")
+            .expect("run_log_ingest");
+        let end = source[start..]
+            .find("\n#[tauri::command]")
+            .map(|offset| start + offset)
+            .expect("run_log_ingest boundary");
+        let body = &source[start..end];
+        assert!(
+            body.contains("tokio::task::spawn_blocking"),
+            "run_log_ingest must use spawn_blocking for trusted-core ingest"
+        );
+        assert!(
+            body.contains("ingest_path_with_policy_and_observer"),
+            "run_log_ingest must call the shipped core ingest path"
+        );
+        assert!(
+            !body.contains("LogCorpus::open("),
+            "run_log_ingest must not open DuckDB on the async host path"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -15221,5 +15251,205 @@ mod log_embedding_host_tests {
             Some(cd_core::log_analysis::LOCAL_EMBED_DEFER_SOURCE_BYTES)
         );
         assert!(backend.is_some());
+    }
+
+    /// #824 — product desktop path: host registers `default_log_embed_backend`
+    /// (log-fastembed ONNX), not ConceptEmbed as the production claim.
+    ///
+    /// Requires a usable local ONNX model/cache. Fail hard (do not silently skip)
+    /// so green CI cannot hide a missing product backend on the desktop crate.
+    #[test]
+    fn product_host_init_registers_default_log_embed_backend_not_concept() {
+        assert!(
+            cd_core::embed::log_fastembed_enabled(),
+            "desktop host crate must build with log-fastembed"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = cd_core::workspace::Workspace::new("logs", vec![dir.path().to_path_buf()]);
+        let index = cd_core::index::KeywordIndex::build(&workspace).unwrap();
+        let mut host = ToolHost::new(workspace, index, None);
+        // Mirror production host setup in this file (default_log_embed_backend).
+        let be = cd_core::embed::default_log_embed_backend()
+            .expect("default_log_embed_backend must not error on desktop log-fastembed builds")
+            .expect(
+                "desktop log-fastembed build must supply a backend; check model cache \
+                 (e.g. .fastembed_cache / HF hub AllMiniLML6V2)",
+            );
+        host.set_log_embed_backend(Some(be), cd_core::embed::LOCAL_LOG_EMBED_MODEL_ID);
+        let (policy, backend) = desktop_local_log_embed_plan(&host);
+        assert_eq!(policy.mode, cd_core::log_analysis::LogEmbedMode::Local);
+        assert_eq!(
+            policy.model_id,
+            cd_core::embed::LOCAL_LOG_EMBED_MODEL_ID,
+            "product plan must advertise the local ONNX model id, not a fixture"
+        );
+        assert_eq!(
+            policy.defer_above_source_bytes,
+            Some(cd_core::log_analysis::LOCAL_EMBED_DEFER_SOURCE_BYTES)
+        );
+        assert!(
+            backend.is_some(),
+            "product host must surface the dedicated log embed backend"
+        );
+        // Not ConceptEmbed: real backend must embed a tiny batch (model present).
+        let be = backend.expect("backend");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let vectors = rt
+            .block_on(be.embed(&[
+                "connection refused to upstream".into(),
+                "GET /health 200".into(),
+            ]))
+            .expect("product ONNX backend must embed");
+        assert_eq!(vectors.len(), 2);
+        assert!(
+            vectors[0].len() >= 8,
+            "vector dims unexpected: {}",
+            vectors[0].len()
+        );
+    }
+
+    /// #824 — host SoftWrite orchestration path: spawn_blocking + production
+    /// policy + product ONNX backend + cancel leaves no published corpus;
+    /// retry succeeds (same entry points as `run_log_ingest`).
+    ///
+    /// Requires product `default_log_embed_backend`. No ConceptEmbed fallback —
+    /// that would green-theater a non-product path.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn host_softwrite_cancel_then_retry_uses_product_embed_plan() {
+        use cd_core::log_analysis::{ingest_path_with_policy_and_observer, LogCorpus};
+        use cd_core::process_progress::{
+            CancelFlag, ProcessProgress, ProcessProgressObserver, ProcessProgressPhase,
+            RecordingProcessProgress,
+        };
+        use std::io::Write;
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+        assert!(
+            cd_core::embed::log_fastembed_enabled(),
+            "desktop host crate must build with log-fastembed"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let mut f = std::fs::File::create(logs.join("bulk.log")).unwrap();
+        for i in 0..12_000 {
+            writeln!(f, "warn bulk line {i} padding-padding-padding").unwrap();
+        }
+        drop(f);
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+
+        // Product plan only — fail if ONNX backend cannot be constructed.
+        let mut policy = cd_core::log_analysis::LogEmbedPolicy::local_default();
+        policy.model_id = cd_core::embed::LOCAL_LOG_EMBED_MODEL_ID.into();
+        let embed_backend = cd_core::embed::default_log_embed_backend()
+            .expect("default_log_embed_backend must not error on desktop log-fastembed builds")
+            .expect(
+                "product SoftWrite cancel proof requires default_log_embed_backend; \
+                 model cache missing or ONNX init failed",
+            );
+
+        let flag = CancelFlag::new();
+        let cancelled_mid_stream = std::sync::Arc::new(AtomicBool::new(false));
+        let cancelled_flag = std::sync::Arc::clone(&cancelled_mid_stream);
+        let flag_for_obs = flag.clone();
+        struct CancelMid {
+            flag: CancelFlag,
+            hit: std::sync::Arc<AtomicBool>,
+            rec: RecordingProcessProgress,
+        }
+        impl ProcessProgressObserver for CancelMid {
+            fn progress(&self, update: ProcessProgress) {
+                if update.phase == ProcessProgressPhase::Stream
+                    && update.lines_processed.unwrap_or(0) >= 1_500
+                    && !self.hit.swap(true, AtomicOrdering::SeqCst)
+                {
+                    self.flag.cancel();
+                }
+                self.rec.progress(update);
+            }
+        }
+        let observer = std::sync::Arc::new(CancelMid {
+            flag: flag_for_obs,
+            hit: cancelled_flag,
+            rec: RecordingProcessProgress::default(),
+        });
+
+        let cache_job = cache.clone();
+        let logs_job = logs.clone();
+        let policy_job = policy.clone();
+        let backend_job = Some(std::sync::Arc::clone(&embed_backend));
+        let flag_job = flag.clone();
+        let observer_job = std::sync::Arc::clone(&observer);
+        let cancel_result = tokio::task::spawn_blocking(move || {
+            ingest_path_with_policy_and_observer(
+                &cache_job,
+                &logs_job,
+                "host-cancel",
+                &policy_job,
+                backend_job,
+                observer_job.as_ref(),
+                Some(&flag_job),
+            )
+        })
+        .await
+        .expect("join")
+        .expect_err("cancel must fail the SoftWrite attempt");
+        assert!(
+            format!("{cancel_result}").to_lowercase().contains("cancel"),
+            "{cancel_result}"
+        );
+        assert!(
+            cancelled_mid_stream.load(AtomicOrdering::SeqCst),
+            "cancel must fire after active stream work"
+        );
+        assert!(
+            LogCorpus::list_ids(&cache).unwrap().is_empty(),
+            "cancel must not publish a partial corpus"
+        );
+        assert!(
+            !observer
+                .rec
+                .phases()
+                .contains(&ProcessProgressPhase::Publish),
+            "must not reach publish after cancel"
+        );
+
+        // Retry succeeds and publishes exactly one completed corpus.
+        let report = tokio::task::spawn_blocking({
+            let cache = cache.clone();
+            let logs = logs.clone();
+            let policy = policy.clone();
+            let backend = Some(std::sync::Arc::clone(&embed_backend));
+            move || {
+                ingest_path_with_policy_and_observer(
+                    &cache,
+                    &logs,
+                    "host-retry",
+                    &policy,
+                    backend,
+                    &RecordingProcessProgress::default(),
+                    None,
+                )
+            }
+        })
+        .await
+        .expect("join")
+        .expect("retry after cancel must succeed");
+        let ids = LogCorpus::list_ids(&cache).unwrap();
+        assert_eq!(ids.len(), 1, "relaunch must see only the completed corpus");
+        assert_eq!(ids[0], report.corpus_id);
+        assert!(report.stats.lines >= 12_000);
+        // Relaunch/open: only the completed id is listable.
+        let opened = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        assert_eq!(opened.event_count() as u64, report.stats.lines);
+        assert_eq!(
+            policy.model_id,
+            cd_core::embed::LOCAL_LOG_EMBED_MODEL_ID,
+            "cancel/retry path must use product ONNX model id"
+        );
     }
 }
