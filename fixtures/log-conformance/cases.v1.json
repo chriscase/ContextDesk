@@ -534,6 +534,84 @@
       "desired": { "kind": "record_count", "value": 4 }
     },
     {
+      "id": "docker-envelope-record-count",
+      "family": "layered",
+      "dimension": "record_boundary",
+      "input": "layered/docker-json-file.log",
+      "title": "One Docker json-file envelope per line is one record",
+      "status": "holds",
+      "invariant": true,
+      "desired": { "kind": "record_count", "value": 2 }
+    },
+    {
+      "id": "docker-outer-timestamp-preserved",
+      "family": "layered",
+      "dimension": "timestamp_provenance",
+      "input": "layered/docker-json-file.log",
+      "title": "The container's own timestamp is used and stays authoritative",
+      "note": "The outer envelope carries `time`, and it resolves to a wall clock today. #791 requires that decoding the inner payload must never silently overwrite container time, stream, or host -- so this is an invariant the layered work must not break, not merely something that happens to work.",
+      "status": "holds",
+      "invariant": true,
+      "desired": { "kind": "record_field", "where_contains": "inner pino record", "field": "timestamp_provenance", "value": "explicit_wall_clock" }
+    },
+    {
+      "id": "docker-inner-payload-severity",
+      "family": "layered",
+      "dimension": "structured_fields",
+      "input": "layered/docker-json-file.log",
+      "title": "The payload inside `log` is never interpreted",
+      "note": "The inner record is a complete Pino object with numeric level 50 (error). The envelope's `log` field is treated as message text, so the inner severity, timestamp, and fields are all invisible. This is the layered case #791 exists for.",
+      "status": "gap",
+      "issue": "791",
+      "desired": { "kind": "record_field", "where_contains": "inner pino record", "field": "level", "value": "error" },
+      "observed": { "kind": "record_field", "where_contains": "inner pino record", "field": "level", "value": "unknown" }
+    },
+    {
+      "id": "cri-partial-fragment-joined",
+      "family": "layered",
+      "dimension": "record_boundary",
+      "input": "layered/cri.log",
+      "title": "A CRI `P` fragment joins the `F` line that completes it",
+      "note": "CRI marks a partial record with `P` and its terminator with `F`. Four physical lines are three logical records; today the split JSON payload is torn into two records, neither of which is valid JSON.",
+      "status": "gap",
+      "issue": "788",
+      "desired": { "kind": "record_count", "value": 3 },
+      "observed": { "kind": "record_count", "value": 4 }
+    },
+    {
+      "id": "syslog-payload-record-count",
+      "family": "layered",
+      "dimension": "record_boundary",
+      "input": "layered/syslog-payload.log",
+      "title": "Syslog envelopes are one record per line",
+      "status": "holds",
+      "invariant": true,
+      "desired": { "kind": "record_count", "value": 2 }
+    },
+    {
+      "id": "cef-payload-severity",
+      "family": "layered",
+      "dimension": "structured_fields",
+      "input": "layered/syslog-payload.log",
+      "title": "A CEF payload's severity is not read",
+      "note": "The RFC5424 record carries a CEF:0 payload whose severity field is 5 -- the medium band of the documented 0-10 scale. The syslog path instead infers severity by scanning the message for the substrings `error` and `warn`, finds neither, and reports info.",
+      "status": "gap",
+      "issue": "791",
+      "desired": { "kind": "record_field", "where_contains": "CEF:0", "field": "level", "value": "warn" },
+      "observed": { "kind": "record_field", "where_contains": "CEF:0", "field": "level", "value": "info" }
+    },
+    {
+      "id": "rfc3164-logfmt-payload-level",
+      "family": "layered",
+      "dimension": "level",
+      "input": "layered/syslog-payload.log",
+      "title": "An RFC3164 record wrapping logfmt reports the payload's level",
+      "note": "Right answer, incidental mechanism: the level is not read from the logfmt payload but guessed by finding the substring `warn` anywhere in the message. Listed as an invariant so the layered work must keep producing it -- and note the same substring scan is what would classify a message reading `no warnings` as a warning.",
+      "status": "holds",
+      "invariant": true,
+      "desired": { "kind": "record_field", "where_contains": "rfc3164 wrapping logfmt", "field": "level", "value": "warn" }
+    },
+    {
       "id": "mixed-file-independent-parse",
       "family": "mixed-hostile",
       "dimension": "fallback",

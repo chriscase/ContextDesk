@@ -545,6 +545,69 @@ def mixed_hostile() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Layered transport envelopes carrying their own payload grammar
+# ---------------------------------------------------------------------------
+
+
+def layered() -> None:
+    # Docker `json-file` envelope. The outer object owns time and stream; the
+    # `log` field carries a complete inner record with its own timestamp and
+    # severity. Inner parsing must not erase the outer transport metadata.
+    inner_pino = json.dumps(
+        {"level": 50, "time": (BASE_EPOCH + 14400) * 1000, "msg": "inner pino record"},
+        separators=(",", ":"),
+    )
+    inner_spring = "2025-06-15 16:00:01.500 ERROR 1 --- [main] c.e.s.Order : inner spring record"
+    write(
+        "layered/docker-json-file.log",
+        "\n".join(
+            [
+                json.dumps(
+                    {"log": inner_pino + "\n", "stream": "stdout",
+                     "time": "2025-06-15T16:00:00.000000000Z"},
+                    separators=(",", ":"),
+                ),
+                json.dumps(
+                    {"log": inner_spring + "\n", "stream": "stderr",
+                     "time": "2025-06-15T16:00:01.000000000Z"},
+                    separators=(",", ":"),
+                ),
+            ]
+        )
+        + "\n",
+    )
+
+    # CRI: `<time> <stream> <P|F> <payload>`. A `P` line is a partial fragment
+    # that must be joined to the following `F` line before the payload is read.
+    write(
+        "layered/cri.log",
+        "\n".join(
+            [
+                '2025-06-15T16:10:00.000000000Z stdout F {"level":"error","msg":"cri full record"}',
+                '2025-06-15T16:10:01.000000000Z stdout P {"level":"warn","msg":"cri split ',
+                '2025-06-15T16:10:01.000000000Z stdout F record"}',
+                "2025-06-15T16:10:02.000000000Z stderr F plain cri payload",
+            ]
+        )
+        + "\n",
+    )
+
+    # RFC5424 carrying a CEF payload, and RFC3164 carrying logfmt.
+    write(
+        "layered/syslog-payload.log",
+        "\n".join(
+            [
+                "<134>1 2025-06-15T16:20:00.000Z gw.example app 1234 ID1 - "
+                "CEF:0|Example|Gateway|1.0|100|connection blocked|5|src=192.0.2.9 dst=192.0.2.10 spt=443",
+                "<38>Jun 15 16:20:01 gw.example app[1234]: "
+                'level=warn msg="rfc3164 wrapping logfmt" service=gateway',
+            ]
+        )
+        + "\n",
+    )
+
+
 def main() -> None:
     import datetime
 
@@ -556,6 +619,7 @@ def main() -> None:
     postgres_jsonlog()
     structured()
     multiline()
+    layered()
     mixed_hostile()
 
     files = sorted(p for p in CORPUS.rglob("*") if p.is_file())

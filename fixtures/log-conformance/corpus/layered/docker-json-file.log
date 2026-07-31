@@ -1,0 +1,2 @@
+{"log":"{\"level\":50,\"time\":1750003200000,\"msg\":\"inner pino record\"}\n","stream":"stdout","time":"2025-06-15T16:00:00.000000000Z"}
+{"log":"2025-06-15 16:00:01.500 ERROR 1 --- [main] c.e.s.Order : inner spring record\n","stream":"stderr","time":"2025-06-15T16:00:01.000000000Z"}

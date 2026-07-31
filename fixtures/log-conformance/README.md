@@ -10,8 +10,8 @@ behavior.
 
 ```text
 fixtures/log-conformance/
-  cases.v1.json        the machine-readable oracle
-  corpus/              27 bounded synthetic sample files, 6 families
+  cases.v1.json        the machine-readable oracle — 69 expectations
+  corpus/              30 bounded synthetic sample files, 7 families
 ```
 
 The corpus is emitted by `scripts/generate_conformance_corpus.py`. Expectations
@@ -81,6 +81,7 @@ cargo test -p cd-core --test log_conformance -- --ignored --nocapture stress
 | `postgres-jsonlog` | The documented jsonlog key contract, including `error_severity` and the non-RFC3339 `timestamp` spelling |
 | `structured` | `ts`/`timestamp`/`time`/`@timestamp`/`@t`/`eventTime` aliases with RFC3339, Unix seconds/milliseconds/microseconds/nanoseconds, offsetless local, Linux calendar strings, a date-shaped integer, trace-versus-span identity, extended severity vocabularies, and logfmt |
 | `multiline` | JVM, Kotlin coroutine, .NET inner-exception, chained Python traceback, Rust panic, and Go goroutine renderings — plus a false-continuation adversary |
+| `layered` | Transport envelopes carrying their own payload grammar: Docker `json-file` wrapping Pino JSON and Spring text, CRI `P`/`F` partial records, RFC5424 wrapping CEF, and RFC3164 wrapping logfmt |
 | `mixed-hostile` | Mixed structured/plain files, malformed records, invalid UTF-8 boundaries, a 40 KB record, embedded and pretty-printed newlines, duplicate basenames, and rotation overlap |
 
 ## Safety and provenance
