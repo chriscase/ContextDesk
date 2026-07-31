@@ -3595,6 +3595,15 @@ export function LogExplorer({ corpusId }: Props) {
             "Selection cleared — event no longer visible under filters/lanes",
           );
         }
+      } else if (!suppressSelectionClearStatusRef.current) {
+        // A partial prune used to be silent, so Save evidence / Create finding
+        // could persist fewer events than the person selected: by then
+        // selectedEvidenceRefs() sees only residents and its all-or-nothing
+        // guard never fires. Report the exact loss (#656).
+        setStatus(
+          `Selection reduced to ${next.size} of ${prev.size} events — ` +
+            "the others are no longer visible under current filters/lanes",
+        );
       }
       return next;
     });

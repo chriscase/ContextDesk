@@ -4535,6 +4535,58 @@ describe("LogExplorer shell", () => {
     expect(host.hostLogApplyInvestigationFindingView).not.toHaveBeenCalled();
   });
 
+  it("reports a partial selection loss instead of silently shrinking evidence (#656)", async () => {
+    // #656 requires the exact noncontiguous selection to reach evidence. The
+    // resident-window prune dropped evicted seqs from `selected` and only spoke
+    // up when the selection emptied. A partial prune was silent, and because
+    // selectedEvidenceRefs() re-derives refs from the live window, its
+    // all-or-nothing guard could no longer fire — Save evidence would persist
+    // fewer events than the person picked.
+    const allEvents = defaultEventPage().events;
+    const errorEvent = allEvents.find((event) => event.level === "error")!;
+    const otherEvent = allEvents.find((event) => event.level !== "error")!;
+    expect(errorEvent.seq).not.toBe(otherEvent.seq);
+
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        const levels = query?.levels ?? [];
+        const events =
+          levels.length === 0
+            ? allEvents
+            : allEvents.filter((event) => levels.includes(event.level));
+        return { ...defaultEventPage(), events, totalMatched: events.length };
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+
+    const rowFor = (seq: number) =>
+      document.querySelector<HTMLElement>(`[data-seq="${seq}"]`)!;
+    fireEvent.click(rowFor(otherEvent.seq));
+    fireEvent.click(rowFor(errorEvent.seq), { metaKey: true });
+    await waitFor(() =>
+      expect(
+        document.querySelectorAll(".log-explorer__row--selected").length,
+      ).toBe(2),
+    );
+
+    // Filter to errors only: one of the two selected rows leaves the window.
+    fireEvent.click(
+      await screen.findByRole("checkbox", { name: /error/i }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain(
+        "Selection reduced to 1 of 2 events",
+      ),
+    );
+    // The surviving selection is still exact, and the loss was not silent.
+    expect(
+      document.querySelectorAll(".log-explorer__row--selected").length,
+    ).toBe(1);
+  });
+
   it("keeps Restore prior view reachable when restore positioning fails (#656)", async () => {
     // #656 requires Restore to return the exact prior logical view, and the
     // shipped Help contract calls it a "one-step return". restorePriorView
