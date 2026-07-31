@@ -11,7 +11,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Dispatch, SetStateAction } from "react";
-import type { EventDto } from "../lib/host";
+import { modelSelectionKey, type EventDto } from "../lib/host";
 import type { AppSetupState } from "../lib/preflight";
 import { newSession, type ChatSession } from "../lib/session";
 import { useTurnController } from "./useTurnController";
@@ -391,7 +391,7 @@ describe("learned model capability truth", () => {
     });
 
     expect(h.refreshChatModels).toHaveBeenCalledWith([
-      "provider-a::model-a",
+      modelSelectionKey("provider-a", "model-a"),
     ]);
   });
 });

@@ -294,7 +294,9 @@ describe("the default can never become silently invalid", () => {
     );
 
     const rows = screen.getAllByRole("listitem");
-    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Hide" }));
+    fireEvent.click(
+      within(rows[0]!).getByRole("button", { name: /^Hide .* from / }),
+    );
 
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toMatch(/no discovered replacement default/i);

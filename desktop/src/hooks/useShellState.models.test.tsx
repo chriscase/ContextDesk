@@ -28,6 +28,11 @@ function model(toolsEnabled: boolean): ModelOptionDto {
     is_default: true,
     tools_enabled: toolsEnabled,
     tools_disabled_reason: toolsEnabled ? null : "model",
+    availability: "discovered",
+    availability_detail: null,
+    hidden: false,
+    hidden_by: null,
+    pinned_rank: null,
   };
 }
 
