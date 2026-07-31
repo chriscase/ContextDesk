@@ -4,6 +4,7 @@
  */
 import { createRef } from "react";
 import {
+  cleanup,
   fireEvent,
   render,
   screen,
@@ -350,5 +351,23 @@ describe("ChatPane first-chat home", () => {
     expect(kinds.indexOf("fill-composer")).toBeLessThan(
       kinds.lastIndexOf("launch-workflow"),
     );
+  });
+
+  it("withholds workspace starters when a configured root does not resolve", () => {
+    // hasAuthorizedWorkspaceContent means reachable, not merely configured:
+    // App derives it from workspace.roots, which only the host can fail.
+    render(
+      <ChatPane {...baseProps({ hasAuthorizedWorkspaceContent: true })} />,
+    );
+    expect(screen.getByText("Summarize files")).toBeTruthy();
+    cleanup();
+
+    render(
+      <ChatPane {...baseProps({ hasAuthorizedWorkspaceContent: false })} />,
+    );
+    expect(screen.queryByText("Summarize files")).toBeNull();
+    expect(
+      screen.getByTestId("first-chat-home").getAttribute("data-content-scope"),
+    ).toBe("chat-only");
   });
 });

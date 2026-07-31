@@ -181,6 +181,19 @@ export function App() {
     shell.preflight.hasBlocking,
   );
 
+  /**
+   * Workspace-claiming starters require roots that actually resolve, not just
+   * roots that are configured (#539). A failing `workspace.roots` normally
+   * blocks the home outright, but only the host can check path existence — the
+   * browser mirror cannot — so until the first host report lands, configured
+   * but missing roots would otherwise offer "summarize my workspace files".
+   */
+  const hasAuthorizedWorkspaceContent =
+    shell.setup.workspaceRoots.length > 0 &&
+    !shell.preflight.items.some(
+      (item) => item.id === "workspace.roots" && item.level === "fail",
+    );
+
   const scroll = useChatScroll(messages, sessionId, setSessions);
   const {
     chatScrollRef,
@@ -827,8 +840,7 @@ export function App() {
                   onStartWizard: (wizardId: string) => {
                     startWizard(wizardId);
                   },
-                  hasAuthorizedWorkspaceContent:
-                    shell.setup.workspaceRoots.length > 0,
+                  hasAuthorizedWorkspaceContent,
                   externalSeedRequest: wizardSeedRequest,
                   setPane: (p) => shell.setPane(p),
                   chatScrollRef,

@@ -14,6 +14,8 @@ html[data-theme="forest"] {
   /* ≥4.5:1 on app/panel */
   --text-faint: #7d9188;
   --accent: #3ecf8e;
+  /* Accent used as small text on --bg-elevated; must clear WCAG AA there. */
+  --accent-text: #3ecf8e;
   --accent-strong: #2bb875;
   --accent-soft: rgb(62 207 142 / 0.14);
   --accent-on: #0a100e;
