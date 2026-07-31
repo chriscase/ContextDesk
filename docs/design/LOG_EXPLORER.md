@@ -217,7 +217,7 @@ blocks action until refresh.
 **Status: implemented.** Trusted rule resolution ships in
 [`suppression.rs`](../../crates/cd-core/src/log_analysis/suppression.rs)
 (`SuppressionRuleResolutionKind`), policy binding in
-[`investigations.rs`](../../crates/cd-core/src/investigations.rs)
+[`investigations.rs`](../../crates/cd-core/src/investigations/mod.rs)
 (`InvestigationPolicyBindingStatus`, schema version 4), and the display and
 Apply-gating contract in
 [`policyBinding.ts`](../../desktop/src/lib/logExplorer/policyBinding.ts).
