@@ -186,7 +186,7 @@ async function acceptSoftWriteAndWaitForRun(
   await waitFor(() => expect(expectedHostCall).toHaveBeenCalledTimes(1));
 }
 
-function expectRichStatsHero() {
+function expectRichStatsHero(options?: { requirePhaseTimings?: boolean }) {
   const hero = screen.getByTestId("wizard-ingest-stats");
   expect(within(hero).getByText("1,200")).toBeTruthy();
   expect(within(hero).getByText("12")).toBeTruthy();
@@ -201,17 +201,20 @@ function expectRichStatsHero() {
   expect(
     within(hero).getByText("connection refused to upstream <*>"),
   ).toBeTruthy();
-  // Separate phase timings surface on completion diagnostics (#824).
-  const phases = within(hero).getByTestId("wizard-ingest-phase-timings");
-  expect(within(phases).getByText("Template analysis")).toBeTruthy();
-  expect(within(phases).getByText("890 ms")).toBeTruthy();
-  expect(within(phases).getByText("1,720 ms")).toBeTruthy();
-  expect(within(phases).getByText("Discover / read")).toBeTruthy();
-  expect(within(phases).getByText("Parse / frame")).toBeTruthy();
-  expect(within(phases).getByText("Persist / index")).toBeTruthy();
-  expect(within(phases).getByText("Optional embedding")).toBeTruthy();
-  expect(within(phases).getByText("Validation")).toBeTruthy();
-  expect(within(phases).getByText("Publication")).toBeTruthy();
+  // SoftWrite raw ingest carries phaseTimings; package reload from corpus
+  // summary does not persist operation timings (#824).
+  if (options?.requirePhaseTimings) {
+    const phases = within(hero).getByTestId("wizard-ingest-phase-timings");
+    expect(within(phases).getByText("Template analysis")).toBeTruthy();
+    expect(within(phases).getByText("890 ms")).toBeTruthy();
+    expect(within(phases).getByText("1,720 ms")).toBeTruthy();
+    expect(within(phases).getByText("Discover / read")).toBeTruthy();
+    expect(within(phases).getByText("Parse / frame")).toBeTruthy();
+    expect(within(phases).getByText("Persist / index")).toBeTruthy();
+    expect(within(phases).getByText("Optional embedding")).toBeTruthy();
+    expect(within(phases).getByText("Validation")).toBeTruthy();
+    expect(within(phases).getByText("Publication")).toBeTruthy();
+  }
 }
 
 function expectExactImportConfidence() {
@@ -253,7 +256,7 @@ describe("LogTroubleshootingWizard product path", () => {
     );
     expect(hostMocks.importSessionContext).not.toHaveBeenCalled();
     expect(await screen.findByText(/Import finished/)).toBeTruthy();
-    expectRichStatsHero();
+    expectRichStatsHero({ requirePhaseTimings: true });
     expectExactImportConfidence();
     fireEvent.click(
       screen.getByRole("button", {
@@ -276,7 +279,7 @@ describe("LogTroubleshootingWizard product path", () => {
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     await screen.findByRole("heading", { name: "Ready" });
     expect(screen.getByText("local-corpus-raw-123")).toBeTruthy();
-    expectRichStatsHero();
+    expectRichStatsHero({ requirePhaseTimings: true });
     expectExactImportConfidence();
 
     fireEvent.click(screen.getByRole("button", { name: "Finish" }));

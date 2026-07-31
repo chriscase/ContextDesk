@@ -102,7 +102,9 @@ describe("rendered demo-dataset Help (#715)", () => {
     expect(normalized).toContain("Install demo log corpus");
     expect(normalized).toContain("unchecked by default");
     expect(normalized).toContain("25,000 entirely synthetic events");
-    expect(normalized).toContain("same bounded scan, parse, template, redact");
+    expect(normalized).toContain(
+      "same bounded discover, streaming read/parse/template/persist",
+    );
     expect(normalized).toContain("Repeating a successful install");
     expect(normalized).toContain("evaluator answer manifests");
     expect(normalized).toContain("Enter app · Open Logs");
