@@ -36,6 +36,13 @@ type Props = {
    * textarea is described by, so a disabled composer is never silent.
    */
   disabledReason?: string;
+  /**
+   * Ask the host to re-test native tool support for the selected provider/model
+   * pair. Offered only when tools were disabled by a *learned* rejection from
+   * that exact model (#650) — a profile-level decision is the user's own and is
+   * changed in Settings.
+   */
+  onRetryModelTools?: (model: ModelOptionDto) => Promise<void> | void;
 };
 
 export function Composer({
@@ -51,7 +58,9 @@ export function Composer({
   draft,
   onDraftChange,
   disabledReason,
+  onRetryModelTools,
 }: Props) {
+  const [retryingTools, setRetryingTools] = useState(false);
   const [localValue, setLocalValue] = useState("");
   const [expanded, setExpanded] = useState(false);
   const id = useId();
@@ -230,9 +239,20 @@ export function Composer({
                   groups.map(([group, opts]) => (
                     <optgroup key={group} label={group}>
                       {opts.map((m) => (
-                        <option key={m.selection_key} value={m.selection_key}>
+                        <option
+                          key={m.selection_key}
+                          value={m.selection_key}
+                          // A profile the user disabled tools on cannot be
+                          // overridden per model; a learned model rejection can
+                          // be retried, so that option stays selectable.
+                          disabled={
+                            !m.tools_enabled &&
+                            m.tools_disabled_reason === "profile"
+                          }
+                        >
                           {m.label}
                           {m.is_default ? " · default" : ""}
+                          {!m.tools_enabled ? " · tools unavailable" : ""}
                         </option>
                       ))}
                     </optgroup>
@@ -252,6 +272,33 @@ export function Composer({
             >
               Default
             </button>
+          ) : null}
+
+          {selected && !selected.tools_enabled ? (
+            <span className="composer__capability" role="status">
+              <span>
+                {selected.tools_disabled_reason === "profile"
+                  ? "Tools are off for this provider"
+                  : "This model rejected native tools"}
+              </span>
+              {selected.tools_disabled_reason === "model" &&
+              onRetryModelTools ? (
+                <button
+                  type="button"
+                  className="composer__chip"
+                  disabled={busy || retryingTools}
+                  title={`Re-test native tool support for ${selected.label}`}
+                  onClick={() => {
+                    setRetryingTools(true);
+                    void Promise.resolve(onRetryModelTools(selected)).finally(
+                      () => setRetryingTools(false),
+                    );
+                  }}
+                >
+                  {retryingTools ? "Retrying…" : "Retry tools"}
+                </button>
+              ) : null}
+            </span>
           ) : null}
 
           <button

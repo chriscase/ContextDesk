@@ -33,6 +33,7 @@ import {
   hostOpenExternalUrl,
   hostSaveCompositionDraft,
   hostSetDefaultChatModel,
+  hostSetModelToolsEnabled,
   hostWriteMemory,
   modelSelectionKey,
   parseModelSelectionKey,
@@ -857,6 +858,16 @@ export function App() {
                   draft: drafts.draftFor(resolvedSessionId),
                   onDraftChange: (text: string) =>
                     drafts.setDraft(resolvedSessionId, text),
+                  onRetryModelTools: async (model) => {
+                    // Clear the learned rejection for this exact pair, then
+                    // re-list so the picker reflects measured truth again.
+                    await hostSetModelToolsEnabled({
+                      providerId: model.provider_id,
+                      modelId: model.id,
+                      toolsEnabled: true,
+                    });
+                    await shell.refreshChatModels();
+                  },
                   setPane: (p) => shell.setPane(p),
                   chatScrollRef,
                   onChatScroll,

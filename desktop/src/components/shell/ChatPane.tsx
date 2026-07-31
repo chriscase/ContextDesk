@@ -149,6 +149,8 @@ export type ChatPaneProps = {
   /** Draft for the active conversation, owned above the pane switch. */
   draft?: string;
   onDraftChange?: (text: string) => void;
+  /** Re-test native tool support for one exact provider/model pair (#650). */
+  onRetryModelTools?: (model: ModelOptionDto) => Promise<void> | void;
 };
 
 /** Chat tabpanel: session tabs + transcript + composer (#146). */
@@ -201,6 +203,7 @@ export function ChatPane(props: ChatPaneProps) {
     externalSeedRequest = null,
     draft,
     onDraftChange,
+    onRetryModelTools,
   } = props;
 
   const windowed = useMessageWindow(visibleMessages, chatScrollRef);
@@ -671,6 +674,7 @@ export function ChatPane(props: ChatPaneProps) {
           seedRequest={effectiveSeed}
           draft={draft}
           onDraftChange={onDraftChange}
+          onRetryModelTools={onRetryModelTools}
         />
       </div>
     </div>
