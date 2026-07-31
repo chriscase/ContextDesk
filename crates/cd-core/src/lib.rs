@@ -82,7 +82,8 @@ pub use events::{StreamEvent, ToolPhase};
 pub use investigations::{
     AddFindingInput, AddNoteInput, EditFindingInput, EditNoteInput, FindingItem, FindingKind,
     FindingLifecycle, HumanProvenance, InvestigationDocument, InvestigationStore,
-    InvestigationSummary, NoteItem, ResolvedInvestigationDocument,
+    InvestigationSummary, NoteItem, ProposeFindingInput, ProposedFindingItem,
+    ProposedFindingStatus, ResolvedInvestigationDocument, PROPOSE_FINDING_TOOL,
 };
 pub use permissions::{PermissionDecision, PermissionRequest, PermissionState};
 pub use providers::{

@@ -1,6 +1,9 @@
 /** Host bridge: Tauri invoke when available; offline research via test hook. */
 
 import type { AppSetupState } from "./preflight";
+// Type-only (erased at build time): logDiagnosticReport imports types from here
+// as well, so this cannot create a runtime cycle.
+import type { LogDiagnosticSuppressionPolicyInput } from "./logDiagnosticReport";
 
 export type EventDto = {
   kind: string;
@@ -2485,6 +2488,22 @@ export type SuppressionPreviewDto = {
   createdAt: number;
 };
 
+/** Trusted-core resolution of one durable rule against the open corpus (#819). */
+export type SuppressionRuleResolutionKind =
+  | "matches_current"
+  | "stale_target_missing"
+  | "stale_fingerprint_changed"
+  | "invalid_predicate"
+  | "conflicting_predicate"
+  | "inactive";
+
+export type SuppressionRuleResolutionDto = {
+  kind: SuppressionRuleResolutionKind;
+  /** Fail-closed: only `matches_current` can exclude events. */
+  matchesNothing: boolean;
+  explanation: string;
+};
+
 export type SuppressionRuleDto = {
   id: string;
   name: string;
@@ -2494,6 +2513,8 @@ export type SuppressionRuleDto = {
   state: SuppressionRuleState;
   createdAt: number;
   updatedAt: number;
+  /** Ephemeral host resolution; omitted from durable sidecar. */
+  resolution?: SuppressionRuleResolutionDto | null;
 };
 
 export type SuppressionAuditEntryDto = {
@@ -2512,7 +2533,32 @@ export type SuppressionDocumentDto = {
   rules: SuppressionRuleDto[];
   previews: SuppressionPreviewDto[];
   audit: SuppressionAuditEntryDto[];
+  /** Template-analysis revision used when host resolved every rule. */
+  resolvedTemplateRevision?: number | null;
 };
+
+/** Whether the host could establish a trusted exclusion set (#819). */
+export type SuppressionLensState = "resolved" | "unavailable";
+
+/**
+ * The exclusion set the host enforces, as the host reports it.
+ *
+ * `templateIds` is empty whenever `state` is `unavailable`, because a policy
+ * that cannot be read must hide nothing rather than keep hiding stale ids.
+ */
+export type TrustedSuppressionLensDto = {
+  corpusId: string;
+  state: SuppressionLensState;
+  /** Payload-free explanation; present only when unavailable. */
+  reason?: string | null;
+  templateIds: number[];
+  policyRevision?: number | null;
+  eventRevision: number;
+  templateAnalysisRevision: number;
+};
+
+/** Active = enabled matches_current rules apply; Suspended = exclude nothing. */
+export type InvestigationNoiseLens = "active" | "suspended";
 
 export type SuppressionMutationResultDto = {
   revision: number;
@@ -2818,6 +2864,30 @@ export type InvestigationViewRecipeDto = {
   viewportAnchors: InvestigationViewAnchorDto[];
 };
 
+/** Durable host-authored suppression-policy binding on a finding (#819). */
+export type InvestigationPolicyBindingDto = {
+  suppressionPolicyRevision: number;
+  resolvedTemplateRevision: number;
+  effectivePolicySha256: string;
+  noiseLens: InvestigationNoiseLens;
+};
+
+export type InvestigationPolicyBindingStatus =
+  | "unbound_legacy"
+  | "current"
+  | "made_under_different_policy"
+  | "made_under_different_lens"
+  | "current_lens_unknown";
+
+export type InvestigationPolicyBindingResolutionDto = {
+  binding?: InvestigationPolicyBindingDto | null;
+  currentSuppressionPolicyRevision: number;
+  currentResolvedTemplateRevision: number;
+  currentEffectivePolicySha256: string;
+  currentNoiseLens?: InvestigationNoiseLens | null;
+  status: InvestigationPolicyBindingStatus;
+};
+
 export type InvestigationFindingItemDto = {
   id: string;
   kind: InvestigationFindingKind;
@@ -2826,9 +2896,16 @@ export type InvestigationFindingItemDto = {
   whyItMatters: string;
   evidenceIds: string[];
   viewRecipe?: InvestigationViewRecipeDto | null;
+  /** Durable binding; absent on readable pre-#819 legacy findings. */
+  policyBinding?: InvestigationPolicyBindingDto | null;
   provenance: "human";
   createdAt: number;
   updatedAt: number;
+};
+
+export type ResolvedInvestigationFindingDto = {
+  item: InvestigationFindingItemDto;
+  policyBinding: InvestigationPolicyBindingResolutionDto;
 };
 
 export type InvestigationNoteItemDto = {
@@ -2842,6 +2919,53 @@ export type InvestigationNoteItemDto = {
   updatedAt: number;
 };
 
+/** Proposed finding status (#646). */
+export type ProposedFindingStatusDto =
+  | "proposed"
+  | "accepted"
+  | "dismissed"
+  | "superseded";
+
+export type ProposedFindingItemDto = {
+  id: string;
+  status: ProposedFindingStatusDto;
+  kind: "observation" | "inference" | "hypothesis";
+  title: string;
+  whyItMatters: string;
+  caveats?: string | null;
+  evidence: Array<{
+    eventRef: LogBookmarkEventRefDto;
+    role: "supporting" | "contradicting";
+  }>;
+  viewRecipe?: InvestigationViewRecipeDto | null;
+  corpusId: string;
+  investigationId: string;
+  policyBinding?: InvestigationPolicyBindingDto | null;
+  templateRevision?: number | null;
+  suppressionPolicyRevision?: number | null;
+  rankInputs?: {
+    supportingCount: number;
+    contradictingCount: number;
+    timeSpanSecs?: number | null;
+    levelWeight?: number | null;
+  } | null;
+  provenance: {
+    source: "model" | "detector" | "internal";
+    provider?: string | null;
+    modelId?: string | null;
+    runId?: string | null;
+    toolName: string;
+    detectorId?: string | null;
+  };
+  idempotencyKey: string;
+  acceptance?: { acceptedAt: number; edited: boolean } | null;
+  dismissReason?: string | null;
+  acceptedFindingId?: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+
 export type InvestigationDocumentDto = {
   schemaVersion: number;
   id: string;
@@ -2852,6 +2976,8 @@ export type InvestigationDocumentDto = {
   evidence: InvestigationEvidenceItemDto[];
   findings?: InvestigationFindingItemDto[];
   notes?: InvestigationNoteItemDto[];
+  /** Agent/detector proposals awaiting review (#646). */
+  proposedFindings?: ProposedFindingItemDto[];
   createdAt: number;
   updatedAt: number;
 };
@@ -2870,6 +2996,8 @@ export type ResolvedInvestigationEvidenceDto = {
 export type ResolvedInvestigationDocumentDto = {
   document: InvestigationDocumentDto;
   evidence: ResolvedInvestigationEvidenceDto[];
+  /** Host-resolved findings with current-vs-durable policy comparison (#819). */
+  findings?: ResolvedInvestigationFindingDto[];
 };
 
 export type InvestigationEvidencePreviewDto = {
@@ -2883,6 +3011,7 @@ export type InvestigationFindingViewPreviewDto = {
   investigationId: string;
   revision: number;
   findingId: string;
+  policyBinding: InvestigationPolicyBindingResolutionDto;
   recipe: InvestigationViewRecipeDto;
   missingCount: number;
   staleCount: number;
@@ -3143,6 +3272,21 @@ export async function hostCancelLogSearch(requestId: string): Promise<boolean> {
   return invoke<boolean>("cancel_log_search", { requestId });
 }
 
+/**
+ * Authoritative, bounded, payload-free suppression evidence for a diagnostic
+ * export (#819). Every field is derived by the trusted host from the corpus
+ * that is actually open; the renderer must never author these values.
+ */
+export async function hostLogSuppressionDiagnosticSnapshot(
+  corpusId: string,
+): Promise<LogDiagnosticSuppressionPolicyInput | null> {
+  if (!isTauri()) return null;
+  return invoke<LogDiagnosticSuppressionPolicyInput>(
+    "log_suppression_diagnostic_snapshot",
+    { corpusId },
+  );
+}
+
 /** Durable, corpus-scoped exact-template suppression policy. */
 export async function hostLogLoadSuppression(
   corpusId: string,
@@ -3158,6 +3302,30 @@ export async function hostLogLoadSuppression(
     };
   }
   return invoke<SuppressionDocumentDto>("log_load_suppression", { corpusId });
+}
+
+/**
+ * The exact exclusion set the host will honour for this corpus (#819).
+ *
+ * The renderer is outside the trusted computing base, so this is disclosure,
+ * not a capability: every query re-derives the trusted set host-side and
+ * intersects whatever the renderer asked for. Sending these ids back can
+ * therefore never hide more than the durable policy authorizes, and sending
+ * fewer — Suspend all, temporary reveal — still hides less.
+ */
+export async function hostLogSuppressionLens(
+  corpusId: string,
+): Promise<TrustedSuppressionLensDto> {
+  if (!isTauri()) {
+    return {
+      corpusId,
+      state: "resolved",
+      templateIds: [],
+      eventRevision: 0,
+      templateAnalysisRevision: 0,
+    };
+  }
+  return invoke<TrustedSuppressionLensDto>("log_suppression_lens", { corpusId });
 }
 
 /** Read-only, bounded exact-template proposals for explicit human review. */
@@ -3301,11 +3469,12 @@ export async function hostLogDeleteBookmark(
 
 export async function hostLogLoadActiveInvestigation(
   corpusId: string,
+  noiseLens: InvestigationNoiseLens = "active",
 ): Promise<ResolvedInvestigationDocumentDto | null> {
   if (!isTauri()) return null;
   return invoke<ResolvedInvestigationDocumentDto | null>(
     "log_load_active_investigation",
-    { corpusId },
+    { corpusId, noiseLens },
   );
 }
 
@@ -3316,6 +3485,7 @@ export async function hostLogAddInvestigationEvidence(
     expectedRevision?: number | null;
     title: string;
     eventRefs: LogBookmarkEventRefDto[];
+    noiseLens?: InvestigationNoiseLens;
   },
 ): Promise<ResolvedInvestigationDocumentDto> {
   if (!isTauri()) throw new Error("Investigation evidence requires Tauri host");
@@ -3328,6 +3498,7 @@ export async function hostLogAddInvestigationEvidence(
         expectedRevision: args.expectedRevision ?? null,
         title: args.title,
         eventRefs: args.eventRefs,
+        noiseLens: args.noiseLens ?? "active",
       },
     },
   );
@@ -3343,6 +3514,7 @@ export async function hostLogAddInvestigationFinding(
     whyItMatters: string;
     eventRefs: LogBookmarkEventRefDto[];
     viewRecipe?: InvestigationViewRecipeDto | null;
+    noiseLens?: InvestigationNoiseLens;
   },
 ): Promise<ResolvedInvestigationDocumentDto> {
   if (!isTauri()) throw new Error("Investigation findings require Tauri host");
@@ -3358,6 +3530,7 @@ export async function hostLogAddInvestigationFinding(
         whyItMatters: args.whyItMatters,
         eventRefs: args.eventRefs,
         viewRecipe: args.viewRecipe ?? null,
+        noiseLens: args.noiseLens ?? "active",
       },
     },
   );
@@ -3372,6 +3545,7 @@ export async function hostLogAddInvestigationNote(
     body: string;
     eventRefs: LogBookmarkEventRefDto[];
     findingIds?: string[];
+    noiseLens?: InvestigationNoiseLens;
   },
 ): Promise<ResolvedInvestigationDocumentDto> {
   if (!isTauri()) throw new Error("Investigation notes require Tauri host");
@@ -3386,6 +3560,7 @@ export async function hostLogAddInvestigationNote(
         body: args.body,
         eventRefs: args.eventRefs,
         findingIds: args.findingIds ?? [],
+        noiseLens: args.noiseLens ?? "active",
       },
     },
   );
@@ -3401,12 +3576,19 @@ export async function hostLogEditInvestigationFinding(
     lifecycle: InvestigationFindingLifecycle;
     title: string;
     whyItMatters: string;
+    noiseLens?: InvestigationNoiseLens;
   },
 ): Promise<ResolvedInvestigationDocumentDto> {
   if (!isTauri()) throw new Error("Investigation findings require Tauri host");
   return invoke<ResolvedInvestigationDocumentDto>(
     "log_edit_investigation_finding",
-    { args: { corpusId, ...args } },
+    {
+      args: {
+        corpusId,
+        ...args,
+        noiseLens: args.noiseLens ?? "active",
+      },
+    },
   );
 }
 
@@ -3420,6 +3602,7 @@ export async function hostLogEditInvestigationNote(
     body: string;
     evidenceIds: string[];
     findingIds?: string[];
+    noiseLens?: InvestigationNoiseLens;
   },
 ): Promise<ResolvedInvestigationDocumentDto> {
   if (!isTauri()) throw new Error("Investigation notes require Tauri host");
@@ -3430,6 +3613,7 @@ export async function hostLogEditInvestigationNote(
         corpusId,
         ...args,
         findingIds: args.findingIds ?? [],
+        noiseLens: args.noiseLens ?? "active",
       },
     },
   );
@@ -3453,13 +3637,100 @@ export async function hostLogPreviewInvestigationFindingView(
   corpusId: string,
   investigationId: string,
   findingId: string,
+  noiseLens: InvestigationNoiseLens = "active",
 ): Promise<InvestigationFindingViewPreviewDto> {
   if (!isTauri()) {
     throw new Error("Investigation view preview requires Tauri host");
   }
   return invoke<InvestigationFindingViewPreviewDto>(
     "log_preview_investigation_finding_view",
-    { corpusId, investigationId, findingId },
+    { corpusId, investigationId, findingId, noiseLens },
+  );
+}
+
+/**
+ * Explicitly recompute one saved finding view under the exact current policy
+ * and lens (#819). Uses optimistic investigation revision.
+ */
+export async function hostLogRecomputeInvestigationFindingView(
+  corpusId: string,
+  args: {
+    investigationId: string;
+    expectedRevision: number;
+    findingId: string;
+    viewRecipe: InvestigationViewRecipeDto;
+    noiseLens?: InvestigationNoiseLens;
+  },
+): Promise<ResolvedInvestigationDocumentDto> {
+  if (!isTauri()) {
+    throw new Error("Investigation recompute requires Tauri host");
+  }
+  return invoke<ResolvedInvestigationDocumentDto>(
+    "log_recompute_investigation_finding_view",
+    {
+      args: {
+        corpusId,
+        investigationId: args.investigationId,
+        expectedRevision: args.expectedRevision,
+        findingId: args.findingId,
+        viewRecipe: args.viewRecipe,
+        noiseLens: args.noiseLens ?? "active",
+      },
+    },
+  );
+}
+
+/** Trusted-host Apply gate (#656). Fails closed when exact refs are missing/stale. */
+export async function hostLogApplyInvestigationFindingView(
+  corpusId: string,
+  investigationId: string,
+  findingId: string,
+  noiseLens: InvestigationNoiseLens = "active",
+): Promise<InvestigationFindingViewPreviewDto> {
+  if (!isTauri()) {
+    throw new Error("Investigation view apply requires Tauri host");
+  }
+  return invoke<InvestigationFindingViewPreviewDto>(
+    "log_apply_investigation_finding_view",
+    { corpusId, investigationId, findingId, noiseLens },
+  );
+}
+
+/** Human Accept / Edit-and-accept (#646). */
+export async function hostLogAcceptProposedFinding(
+  corpusId: string,
+  investigationId: string,
+  input: {
+    proposalId: string;
+    expectedRevision: number;
+    edited?: boolean;
+    kind?: "observation" | "inference" | "hypothesis";
+    title?: string;
+    whyItMatters?: string;
+  },
+): Promise<ResolvedInvestigationDocumentDto> {
+  if (!isTauri()) {
+    throw new Error("Accept proposed finding requires Tauri host");
+  }
+  return invoke<ResolvedInvestigationDocumentDto>("log_accept_proposed_finding", {
+    corpusId,
+    investigationId,
+    input,
+  });
+}
+
+/** Human Dismiss-with-reason (#646). */
+export async function hostLogDismissProposedFinding(
+  corpusId: string,
+  investigationId: string,
+  input: { proposalId: string; expectedRevision: number; reason: string },
+): Promise<ResolvedInvestigationDocumentDto> {
+  if (!isTauri()) {
+    throw new Error("Dismiss proposed finding requires Tauri host");
+  }
+  return invoke<ResolvedInvestigationDocumentDto>(
+    "log_dismiss_proposed_finding",
+    { corpusId, investigationId, input },
   );
 }
 

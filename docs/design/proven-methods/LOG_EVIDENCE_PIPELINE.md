@@ -64,7 +64,7 @@ The reusable method is a layered evidence plane:
 | Bounded event query, facets, Find, timeline summaries       | **Shipped**                               | [`query.rs`](../../../crates/cd-core/src/log_analysis/query.rs)                                                                                | Durable metric attachment and full #670 time policy         |
 | Search/correlation/anomaly/trace tool surface               | **Shipped**                               | [`search.rs`](../../../crates/cd-core/src/log_analysis/search.rs), [`why.rs`](../../../crates/cd-core/src/log_analysis/why.rs)                 | Provider quality requires tools-enabled acceptance          |
 | Privacy-reviewed diagnostic handoff                         | **Shipped**                               | `diagnostics.rs`, typed ingest evidence callbacks in `ingest.rs`, `logDiagnosticReport.ts`, `LogDiagnosticDialog.tsx`, `log_diagnostic_report.rs`, and `log_diagnostics.rs` | Reports are memory-only metadata; users still review before sharing |
-| Exact-template noise/squelch policy                         | **Partial — #671 remains open**            | [`suppression.rs`](../../../crates/cd-core/src/log_analysis/suppression.rs), shared query/analysis/tool lens, and Explorer Noise policy                                                                        | Adversarial hardening; rule editing/creator identity; additional predicates; global/tool include-suppressed controls; Investigation/saved-view/package lifecycle; scale proof; baseline proposals; larger rule-set optimization |
+| Exact-template noise/squelch policy                         | **Partial — #671 remains open**            | [`suppression.rs`](../../../crates/cd-core/src/log_analysis/suppression.rs), host-authoritative [`suppression_lens.rs`](../../../crates/cd-core/src/log_analysis/suppression_lens.rs) intersection on every Explorer read, shared query/analysis/tool lens, and Explorer Noise policy | Rule editing/creator identity; additional predicates; global/tool include-suppressed controls; Investigation/saved-view/package lifecycle; 100k and 1M suppression scale proof; baseline proposals; larger rule-set optimization |
 
 ## 3. Reusable method
 
@@ -283,6 +283,18 @@ Trust boundaries:
 5. Enabled template IDs become one bounded exclusion lens for rows, counts,
    facets, timeline, Find, analysis, and log tools. A linked turn pins one
    revision and discloses the revision and hidden-event count.
+   The **host derives that set**; a caller's exclusions are a request. Every
+   Explorer read intersects the request with the trusted set
+   ([`suppression_lens.rs`](../../../crates/cd-core/src/log_analysis/suppression_lens.rs)),
+   so a stale or compromised renderer can hide at most what the durable policy
+   authorizes and never more. Intersecting rather than replacing is what keeps
+   **Suspend all** and temporary reveal working: both request fewer IDs. A
+   policy that cannot be resolved — malformed, truncated, future-version,
+   cross-corpus, or superseded — yields an empty set with a typed reason, which
+   hides nothing rather than continuing to hide stale IDs. Resolution is cached
+   per corpus handle and revalidated against the sidecar's observed identity, so
+   enforcement adds no sidecar read to paging, faceting, counting, or timeline
+   work.
 6. The raw/source/original/direct-evidence paths remain outside the lens.
    Resolving a suppressed bookmark offers a temporary, explicit reveal and a
    return to the prior lens.
@@ -731,7 +743,7 @@ details, not only a hover tooltip.
 | Parser unit          | Registry identity/version uniqueness; JSON/logfmt/RFC5424/classic/special/plain fingerprints; equal-score ambiguity independent of order; banner/mixed records; incidental pairs; extension disagreement; pseudo-PRI; non-syslog `Jan…`; positive/negative offsets; malformed, offsetless, yearless, overflow; fractional precision contract; Unicode |
 | Redaction unit       | Complete-record redaction precedes truncation; secret absent from parser/store; invalid UTF-8 and CRLF accounting                            |
 | Store integration    | Stable corpus+seq+source identity; exact/noncontiguous references; legacy schema read; additive Original unavailable/available behavior      |
-| Query integration    | Filter intersection; keyset forward/backward; time bounds; regex cap; semantic template-to-event resolution; dense gap buckets; exact-template suppression parity across rows/counts/facets/timeline/Find |
+| Query integration    | Filter intersection; keyset forward/backward; time bounds; regex cap; semantic template-to-event resolution; dense gap buckets; exact-template suppression parity across rows/counts/facets/timeline/Find, with the excluded set derived by the host rather than accepted from the caller |
 | Suppression store    | Trusted preview facts; human confirmation; stale preview/revision/fingerprint rejection; enable/disable/re-enable/tombstone audit; raw evidence unchanged |
 | Tool integration     | Search/clustering/timeline/correlation/anomaly/trace share one pinned revision and disclose hidden count; suppressed identities do not leak into results |
 | Package              | Frozen version fixture; path traversal, duplicate, cap, hash, too-new reader, staging cleanup                                                |
@@ -788,7 +800,7 @@ instant while ambiguous controls remain order-only.
 | Arbitrary timestamp diversity  | **Planned/partial**           | Ambiguous inputs fail to order rather than guess              | #670 timezone/year/DST/skew contract    |
 | Query/facets/search            | **Shipped**                   | Bounded event and template-aware retrieval                    | Unbounded regex or raw dumps            |
 | Timeline                       | **Partial**                   | Shared-axis log summary, durable one-per-corpus metric attachment, restore/replace/remove, scrubber, severity signal, resident range, lane coverage, and viewport-follow cursor | Multiple/bundle metric attachments, governed metric chat context, and full #670 time policy |
-| Noise suppression              | **Partial — #671 remains open** | Human-confirmed exact-template rules and one shared evidence lens | Adversarial hardening; rule editing/creator identity; other predicates; global/tool include-suppressed controls; Investigation/saved-view/package lifecycle; suppression scale proof; baseline proposals; larger rule sets |
+| Noise suppression              | **Partial — #671 remains open** | Human-confirmed exact-template rules and one shared evidence lens the host derives and enforces on every read | Rule editing/creator identity; other predicates; global/tool include-suppressed controls; Investigation/saved-view/package lifecycle; 100k and 1M suppression scale proof; baseline proposals; larger rule sets |
 | Template “reduction”           | **Shipped**                   | Events/templates ratio                                        | Storage compression claim               |
 
 ## 15. Reimplementation notes

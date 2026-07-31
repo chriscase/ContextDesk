@@ -27,6 +27,7 @@ pub mod redact_log;
 pub mod search;
 pub mod store;
 pub mod suppression;
+pub mod suppression_lens;
 pub mod timezone_application;
 pub mod timezone_resolution;
 pub mod tools;
@@ -144,14 +145,23 @@ pub use store::{
     LogCorpus, LogEvent, TemplateRow, TopTemplateSnapshot, EVENT_ENGINE, META_VERSION,
 };
 pub use suppression::{
-    activate_template_suppression, load_suppression_document, mutate_template_suppression_rule,
-    preview_template_suppression, ActivateSuppressionPreview, NewSuppressionPreview,
-    SuppressionAuditAction, SuppressionAuditEntry, SuppressionDocument, SuppressionLevelCount,
-    SuppressionMutationResult, SuppressionPreview, SuppressionRepresentativeEvent, SuppressionRule,
-    SuppressionRuleMutation, SuppressionRuleOrigin, SuppressionRuleState,
-    SuppressionTemplatePredicate, SuppressionTimeSpan, MAX_SUPPRESSION_AUDIT_ENTRIES,
-    MAX_SUPPRESSION_LEVEL_BUCKETS, MAX_SUPPRESSION_PREVIEWS, MAX_SUPPRESSION_REPRESENTATIVES,
-    MAX_SUPPRESSION_RULES, SUPPRESSION_SCHEMA_VERSION,
+    activate_template_suppression, capture_suppression_policy_binding, load_suppression_document,
+    mutate_template_suppression_rule, preview_template_suppression,
+    suppression_diagnostic_snapshot, ActivateSuppressionPreview, NewSuppressionPreview,
+    SuppressionAuditAction, SuppressionAuditEntry, SuppressionDiagnosticAuditEntry,
+    SuppressionDiagnosticRule, SuppressionDiagnosticSnapshot, SuppressionDocument,
+    SuppressionLevelCount, SuppressionMutationResult, SuppressionPolicyBindingSnapshot,
+    SuppressionPreview, SuppressionRepresentativeEvent, SuppressionRule, SuppressionRuleMutation,
+    SuppressionRuleOrigin, SuppressionRuleResolution, SuppressionRuleResolutionKind,
+    SuppressionRuleState, SuppressionTemplatePredicate, SuppressionTimeSpan,
+    MAX_DIAGNOSTIC_SUPPRESSION_AUDIT, MAX_DIAGNOSTIC_SUPPRESSION_RULES,
+    MAX_SUPPRESSION_AUDIT_ENTRIES, MAX_SUPPRESSION_LEVEL_BUCKETS, MAX_SUPPRESSION_PREVIEWS,
+    MAX_SUPPRESSION_REPRESENTATIVES, MAX_SUPPRESSION_RULES, SUPPRESSION_SCHEMA_VERSION,
+};
+pub use suppression_lens::{
+    apply_lens_to_query, apply_trusted_suppression_lens, invalidate_trusted_suppression_lens,
+    trusted_suppression_lens, SuppressionLensApplication, SuppressionLensState,
+    TrustedSuppressionLens,
 };
 pub use timezone_application::{
     apply_source_timezone, clear_source_timezone, load_timezone_resolution_state,

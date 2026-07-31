@@ -9,6 +9,7 @@ import {
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import checkoutTruth from "../../../../fixtures/log-lab/scenarios/checkout-cascade/truth/manifest.json";
 import * as host from "../../lib/host";
+import { ruleContributesToExclusion } from "../../lib/logExplorer/policyBinding";
 import { LogExplorer } from "./LogExplorer";
 
 vi.mock("../../lib/host", () => ({
@@ -53,6 +54,14 @@ vi.mock("../../lib/host", () => ({
     rules: [],
     previews: [],
     audit: [],
+  })),
+  hostLogSuppressionLens: vi.fn(async (corpusId: string) => ({
+    corpusId,
+    state: "resolved" as const,
+    templateIds: [],
+    policyRevision: 0,
+    eventRevision: 0,
+    templateAnalysisRevision: 0,
   })),
   hostLogProposeNoiseCandidates: vi.fn(async () => ({
     corpusId: "c1",
@@ -209,6 +218,10 @@ vi.mock("../../lib/host", () => ({
   hostLogEditInvestigationNote: vi.fn(),
   hostLogPreviewInvestigationEvidence: vi.fn(),
   hostLogPreviewInvestigationFindingView: vi.fn(),
+  hostLogRecomputeInvestigationFindingView: vi.fn(),
+  hostLogApplyInvestigationFindingView: vi.fn(),
+  hostLogAcceptProposedFinding: vi.fn(),
+  hostLogDismissProposedFinding: vi.fn(),
   hostPrepareLogDiagnosticReport: vi.fn(async (manifest) => {
     const actual = await vi.importActual<
       typeof import("../../lib/logDiagnosticReport")
@@ -449,7 +462,7 @@ function suppressionDocument(
   revision = 3,
   extraRules: host.SuppressionDocumentDto["rules"] = [],
 ): host.SuppressionDocumentDto {
-  const primary = {
+  const primary: host.SuppressionRuleDto = {
     id: "019fb-noise-rule",
     name: "Routine heartbeat",
     rationale: "Known health-check traffic obscures incident evidence.",
@@ -457,16 +470,30 @@ function suppressionDocument(
       templateId: 2,
       templateFingerprint: "template-2-fingerprint",
     },
-    origin: "human" as const,
+    origin: "human",
     state,
     createdAt: 1,
     updatedAt: 2,
+    // Host always resolves rules on load; enabled + matches_current can exclude.
+    resolution:
+      state === "enabled"
+        ? {
+            kind: "matches_current",
+            matchesNothing: false,
+            explanation: "Exact template matches the current corpus.",
+          }
+        : {
+            kind: "inactive",
+            matchesNothing: true,
+            explanation: "Disabled rules do not participate.",
+          },
   };
   const rules = [primary, ...extraRules];
   return {
     schemaVersion: 1,
     corpusId: "c1",
     revision,
+    resolvedTemplateRevision: 7,
     rules,
     previews: [],
     audit: [
@@ -498,6 +525,11 @@ function multiRuleSuppressionDocument(
       state: "enabled",
       createdAt: 3,
       updatedAt: 4,
+      resolution: {
+        kind: "matches_current",
+        matchesNothing: false,
+        explanation: "Exact template matches the current corpus.",
+      },
     },
   ]);
 }
@@ -590,6 +622,41 @@ async function openInvestigationView(expectedItems: number) {
   fireEvent.click(option);
 }
 
+
+/**
+ * The Explorer reads two host facts about suppression (#819): the durable
+ * document (for the rule list) and the trusted lens (for the query set). The
+ * host derives the second from the first — enabled rules that resolve as
+ * matches_current — so tests configure both together rather than letting the
+ * disclosed set drift from the enforced one.
+ */
+function lensFor(
+  document: host.SuppressionDocumentDto,
+): host.TrustedSuppressionLensDto {
+  const templateIds = [
+    ...new Set(
+      document.rules
+        .filter((rule) =>
+          ruleContributesToExclusion(rule.state, rule.resolution ?? null),
+        )
+        .map((rule) => rule.predicate.templateId),
+    ),
+  ].sort((a, b) => a - b);
+  return {
+    corpusId: document.corpusId,
+    state: "resolved",
+    templateIds,
+    policyRevision: document.revision,
+    eventRevision: 0,
+    templateAnalysisRevision: document.resolvedTemplateRevision ?? 0,
+  };
+}
+
+function useSuppressionPolicy(document: host.SuppressionDocumentDto): void {
+  vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(document);
+  vi.mocked(host.hostLogSuppressionLens).mockResolvedValue(lensFor(document));
+}
+
 describe("LogExplorer shell", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -667,7 +734,7 @@ describe("LogExplorer shell", () => {
       reason: "Original representation unavailable for this corpus",
     });
     vi.mocked(host.hostLogListBookmarks).mockResolvedValue([]);
-    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue({
+    useSuppressionPolicy({
       schemaVersion: 1,
       corpusId: "c1",
       revision: 0,
@@ -838,8 +905,145 @@ describe("LogExplorer shell", () => {
     expect(await screen.findByText(/auth failure/)).toBeTruthy();
   });
 
-  it("applies one suppression lens to rows, counts, facets, timeline, and Find", async () => {
+  it("excludes only matches_current templates; stale enabled rules match nothing (#819)", async () => {
+    useSuppressionPolicy(
+      suppressionDocument("enabled", 4, [
+        {
+          id: "019fb-stale-rule",
+          name: "Gone template",
+          rationale: "Target missing after re-analysis.",
+          predicate: {
+            templateId: 99,
+            templateFingerprint: "template-99-old",
+          },
+          origin: "human",
+          state: "enabled",
+          createdAt: 1,
+          updatedAt: 2,
+          resolution: {
+            kind: "stale_target_missing",
+            matchesNothing: true,
+            explanation: "Target template no longer exists.",
+          },
+        },
+        {
+          id: "019fb-fingerprint-rule",
+          name: "Reused id",
+          rationale: "Numeric id reused for different content.",
+          predicate: {
+            templateId: 77,
+            templateFingerprint: "template-77-old",
+          },
+          origin: "human",
+          state: "enabled",
+          createdAt: 1,
+          updatedAt: 2,
+          resolution: {
+            kind: "stale_fingerprint_changed",
+            matchesNothing: true,
+            explanation: "Template content changed under the same id.",
+          },
+        },
+      ]),
+    );
+    vi.mocked(host.hostLogCountEvents).mockImplementation(
+      async (_corpusId, query) => {
+        // Hidden-count uses templateIds of applying rules only (template 2).
+        if (query?.templateIds?.includes(2)) return { totalMatched: 4 };
+        if (query?.templateIds?.includes(99) || query?.templateIds?.includes(77)) {
+          throw new Error("stale template ids must not enter the hidden-count query");
+        }
+        const excluded = query?.excludedTemplateIds ?? [];
+        if (excluded.includes(99) || excluded.includes(77)) {
+          throw new Error("stale rules must not appear in excludedTemplateIds");
+        }
+        return { totalMatched: excluded.includes(2) ? 6 : 10 };
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await waitFor(() => expect(host.hostLogQueryEventRows).toHaveBeenCalled());
+
+    const rowQuery = vi
+      .mocked(host.hostLogQueryEventRows)
+      .mock.calls.at(-1)?.[1];
+    expect(rowQuery?.excludedTemplateIds).toEqual([2]);
+    expect(rowQuery?.excludedTemplateIds).not.toContain(99);
+    expect(rowQuery?.excludedTemplateIds).not.toContain(77);
+
+    await waitFor(() => expect(host.hostLogCountEvents).toHaveBeenCalled());
+    // Policy-hidden count query must only count matches_current templates.
+    const hiddenCountCalls = vi
+      .mocked(host.hostLogCountEvents)
+      .mock.calls.filter(([, query]) => (query?.templateIds?.length ?? 0) > 0);
+    expect(hiddenCountCalls.length).toBeGreaterThan(0);
+    for (const [, query] of hiddenCountCalls) {
+      expect(query?.templateIds).toEqual([2]);
+    }
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /Noise · 3 rules · 4 hidden/ }),
+      ).toBeTruthy(),
+    );
+  });
+
+  it("defers to the host lens instead of deriving exclusions from the rules (#819)", async () => {
+    // The durable document still carries an enabled, applying rule for
+    // template 2 — the rule list must keep showing it — but the host reports
+    // an empty enforced set, as it would when that rule was disabled by
+    // another window between the two reads. The renderer is not the authority,
+    // so it must request nothing rather than re-deriving template 2 itself.
     vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+      suppressionDocument("enabled", 4),
+    );
+    vi.mocked(host.hostLogSuppressionLens).mockResolvedValue({
+      corpusId: "c1",
+      state: "resolved",
+      templateIds: [],
+      policyRevision: 9,
+      eventRevision: 0,
+      templateAnalysisRevision: 0,
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+    await waitFor(() => expect(host.hostLogQueryEventRows).toHaveBeenCalled());
+
+    for (const [, query] of vi.mocked(host.hostLogQueryEventRows).mock.calls) {
+      expect(query?.excludedTemplateIds ?? []).toEqual([]);
+    }
+    // The hidden-count probe must not invent the rule's template either.
+    for (const [, query] of vi.mocked(host.hostLogCountEvents).mock.calls) {
+      expect(query?.templateIds ?? []).toEqual([]);
+    }
+  });
+
+  it("withholds evidence and offers retry when the host lens is unavailable (#819)", async () => {
+    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+      suppressionDocument("enabled", 4),
+    );
+    vi.mocked(host.hostLogSuppressionLens).mockResolvedValue({
+      corpusId: "c1",
+      state: "unavailable",
+      reason: "suppression sidecar changed while it was being read",
+      templateIds: [],
+      eventRevision: 0,
+      templateAnalysisRevision: 0,
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /Noise · unavailable/ }),
+      ).toBeTruthy(),
+    );
+    // Same fail-closed display contract as an unreadable policy (#817): never
+    // paint a reduced view the UI cannot describe.
+    expect(host.hostLogQueryEventRows).not.toHaveBeenCalled();
+  });
+
+  it("applies one suppression lens to rows, counts, facets, timeline, and Find", async () => {
+    useSuppressionPolicy(
       suppressionDocument(),
     );
     vi.mocked(host.hostLogCountEvents).mockImplementation(
@@ -889,7 +1093,7 @@ describe("LogExplorer shell", () => {
 
   it("discloses active rule and excluded counts on every reduced surface (#817)", async () => {
     vi.stubGlobal("localStorage", memoryStorage());
-    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+    useSuppressionPolicy(
       suppressionDocument(),
     );
     vi.mocked(host.hostLogCountEvents).mockImplementation(
@@ -926,7 +1130,7 @@ describe("LogExplorer shell", () => {
     vi.stubGlobal("localStorage", memoryStorage());
     const mutate = vi.mocked(host.hostLogMutateTemplateSuppressionRule);
     mutate.mockClear();
-    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+    useSuppressionPolicy(
       suppressionDocument("enabled", 3),
     );
     // Policy-hidden count uses templateIds filter; view counts use exclusions.
@@ -1026,7 +1230,7 @@ describe("LogExplorer shell", () => {
 
   it("keeps multi-rule exclusions and discloses both rules (#817)", async () => {
     vi.stubGlobal("localStorage", memoryStorage());
-    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+    useSuppressionPolicy(
       multiRuleSuppressionDocument(8),
     );
     vi.mocked(host.hostLogCountEvents).mockImplementation(
@@ -1061,7 +1265,7 @@ describe("LogExplorer shell", () => {
 
   it("discloses zero-match enabled rules without inventing excluded events (#817)", async () => {
     vi.stubGlobal("localStorage", memoryStorage());
-    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+    useSuppressionPolicy(
       suppressionDocument("enabled", 2),
     );
     vi.mocked(host.hostLogCountEvents).mockImplementation(
@@ -1092,7 +1296,7 @@ describe("LogExplorer shell", () => {
   it("restores suspend flag after Explorer remount for the same corpus (#817)", async () => {
     const store = memoryStorage();
     vi.stubGlobal("localStorage", store);
-    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+    useSuppressionPolicy(
       suppressionDocument(),
     );
     vi.mocked(host.hostLogCountEvents).mockImplementation(
@@ -1147,6 +1351,10 @@ describe("LogExplorer shell", () => {
         ...suppressionDocument(),
         corpusId,
       }),
+    );
+    vi.mocked(host.hostLogSuppressionLens).mockImplementation(
+      async (corpusId) =>
+        lensFor({ ...suppressionDocument(), corpusId }),
     );
     vi.mocked(host.hostLogCountEvents).mockImplementation(
       async (_corpusId, query) => ({
@@ -1286,6 +1494,10 @@ describe("LogExplorer shell", () => {
     vi.mocked(host.hostLogLoadSuppression)
       .mockResolvedValueOnce(emptyPolicy)
       .mockResolvedValue(suppressionDocument());
+    // The enforced lens follows the same before/after activation sequence.
+    vi.mocked(host.hostLogSuppressionLens)
+      .mockResolvedValueOnce(lensFor(emptyPolicy))
+      .mockResolvedValue(lensFor(suppressionDocument()));
     vi.mocked(host.hostLogQueryEvents).mockImplementation(
       async (_corpusId, query) => {
         const excluded = query?.excludedTemplateIds ?? [];
@@ -1904,7 +2116,10 @@ describe("LogExplorer shell", () => {
     expect(await screen.findByText(c2Event.message)).toBeTruthy();
     await waitFor(() => {
       expect(host.hostLogListBookmarks).toHaveBeenCalledWith("c2");
-      expect(host.hostLogLoadActiveInvestigation).toHaveBeenCalledWith("c2");
+      expect(host.hostLogLoadActiveInvestigation).toHaveBeenCalledWith(
+        "c2",
+        "active",
+      );
     });
 
     await act(async () => {
@@ -3419,7 +3634,7 @@ describe("LogExplorer shell", () => {
   it("requires an explicit temporary reveal for a noise-suppressed bookmark and reapplies policy on restore", async () => {
     const allEvents = defaultEventPage().events;
     const target = allEvents.find((event) => event.templateId === 2)!;
-    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+    useSuppressionPolicy(
       suppressionDocument(),
     );
     vi.mocked(host.hostLogCountEvents).mockImplementation(
@@ -3508,7 +3723,7 @@ describe("LogExplorer shell", () => {
     vi.stubGlobal("localStorage", store);
     const allEvents = defaultEventPage().events;
     const target = allEvents.find((event) => event.templateId === 2)!;
-    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+    useSuppressionPolicy(
       suppressionDocument(),
     );
     vi.mocked(host.hostLogCountEvents).mockImplementation(
@@ -3962,6 +4177,9 @@ describe("LogExplorer shell", () => {
         .mock.calls[0]![1].eventRefs?.map((eventRef) => eventRef.seq),
     ).toEqual([10, 12]);
 
+    // The host call can resolve before React commits the saved bookmark into
+    // local state. Wait for that state before exercising duplicate detection.
+    await screen.findByTestId("bookmark-activate-bm-exact");
     fireEvent.click(screen.getByRole("button", { name: "Bookmark (B)" }));
     await screen.findByText("Already bookmarked: 2 selected events");
     expect(host.hostLogAddBookmark).toHaveBeenCalledTimes(1);
@@ -4070,6 +4288,7 @@ describe("LogExplorer shell", () => {
         expectedRevision: null,
         title: item.title,
         eventRefs: [eventRef],
+        noiseLens: "active",
       }),
     );
     const evidencePanel = await screen.findByTestId("log-explorer-evidence");
@@ -4213,6 +4432,7 @@ describe("LogExplorer shell", () => {
           selection: [eventRef],
           focusedEvent: eventRef,
         }),
+        noiseLens: "active",
       }),
     );
     const panel = await screen.findByTestId("log-explorer-evidence");
@@ -4245,6 +4465,7 @@ describe("LogExplorer shell", () => {
         title: note.title,
         body: note.body,
         eventRefs: [eventRef],
+        noiseLens: "active",
       }),
     );
     expect(await screen.findByText(note.title)).toBeTruthy();
@@ -4269,6 +4490,7 @@ describe("LogExplorer shell", () => {
         lifecycle: "resolved",
         title: finding.title,
         whyItMatters: finding.whyItMatters,
+        noiseLens: "active",
       }),
     );
     expect(
@@ -4350,12 +4572,23 @@ describe("LogExplorer shell", () => {
       investigationId: loaded.document.id,
       revision: loaded.document.revision,
       findingId: finding.id,
+      policyBinding: {
+        binding: null,
+        currentSuppressionPolicyRevision: 1,
+        currentResolvedTemplateRevision: 1,
+        currentEffectivePolicySha256: "sha",
+        currentNoiseLens: "active" as const,
+        status: "current" as const,
+      },
       recipe,
       missingCount: 0,
       staleCount: 0,
     };
     vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(loaded);
     vi.mocked(host.hostLogPreviewInvestigationFindingView).mockResolvedValue(
+      preview,
+    );
+    vi.mocked(host.hostLogApplyInvestigationFindingView).mockResolvedValue(
       preview,
     );
     vi.mocked(host.hostLogQueryEventNeighborhood).mockResolvedValue(
@@ -4411,9 +4644,11 @@ describe("LogExplorer shell", () => {
     expect(
       selectedRow?.classList.contains("log-explorer__row--highlight"),
     ).toBe(true);
+    // Preview once + trusted-host Apply once (not a second Preview-as-Apply).
     expect(host.hostLogPreviewInvestigationFindingView).toHaveBeenCalledTimes(
-      2,
+      1,
     );
+    expect(host.hostLogApplyInvestigationFindingView).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByTestId("bookmark-restore-view"));
     await waitFor(() =>
@@ -4495,6 +4730,14 @@ describe("LogExplorer shell", () => {
     };
     vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(loaded);
     vi.mocked(host.hostLogPreviewInvestigationFindingView).mockResolvedValue({
+      policyBinding: {
+        binding: null,
+        currentSuppressionPolicyRevision: 1,
+        currentResolvedTemplateRevision: 1,
+        currentEffectivePolicySha256: "sha",
+        currentNoiseLens: "active",
+        status: "current",
+      },
       investigationId: loaded.document.id,
       revision: loaded.document.revision,
       findingId: finding.id,
@@ -4502,6 +4745,11 @@ describe("LogExplorer shell", () => {
       missingCount: 0,
       staleCount: 1,
     });
+    vi.mocked(host.hostLogApplyInvestigationFindingView).mockRejectedValue(
+      new Error(
+        "Apply blocked: finding view recipe has 0 missing and 1 stale exact references",
+      ),
+    );
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByText("auth failure");
@@ -4521,6 +4769,998 @@ describe("LogExplorer shell", () => {
       ).disabled,
     ).toBe(true);
     expect(host.hostLogQueryEventNeighborhood).not.toHaveBeenCalled();
+    expect(host.hostLogApplyInvestigationFindingView).not.toHaveBeenCalled();
+  });
+
+  it("reports a partial selection loss instead of silently shrinking evidence (#656)", async () => {
+    // #656 requires the exact noncontiguous selection to reach evidence. The
+    // resident-window prune dropped evicted seqs from `selected` and only spoke
+    // up when the selection emptied. A partial prune was silent, and because
+    // selectedEvidenceRefs() re-derives refs from the live window, its
+    // all-or-nothing guard could no longer fire — Save evidence would persist
+    // fewer events than the person picked.
+    const allEvents = defaultEventPage().events;
+    const errorEvent = allEvents.find((event) => event.level === "error")!;
+    const otherEvent = allEvents.find((event) => event.level !== "error")!;
+    expect(errorEvent.seq).not.toBe(otherEvent.seq);
+
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        const levels = query?.levels ?? [];
+        const events =
+          levels.length === 0
+            ? allEvents
+            : allEvents.filter((event) => levels.includes(event.level));
+        return { ...defaultEventPage(), events, totalMatched: events.length };
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+
+    const rowFor = (seq: number) =>
+      document.querySelector<HTMLElement>(`[data-seq="${seq}"]`)!;
+    fireEvent.click(rowFor(otherEvent.seq));
+    fireEvent.click(rowFor(errorEvent.seq), { metaKey: true });
+    await waitFor(() =>
+      expect(
+        document.querySelectorAll(".log-explorer__row--selected").length,
+      ).toBe(2),
+    );
+
+    // Filter to errors only: one of the two selected rows leaves the window.
+    fireEvent.click(
+      await screen.findByRole("checkbox", { name: /error/i }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain(
+        "Selection reduced to 1 of 2 events",
+      ),
+    );
+    // Cause-neutral: the same effect fires when the resident window slides
+    // during ordinary paging, where the dropped events DO still match the
+    // filters. Blaming filters/lanes would be wrong in that case.
+    expect(screen.getByRole("status").textContent).toContain(
+      "no longer loaded in the current view",
+    );
+    // The surviving selection is still exact, and the loss was not silent.
+    expect(
+      document.querySelectorAll(".log-explorer__row--selected").length,
+    ).toBe(1);
+  });
+
+  it("keeps Restore prior view reachable when restore positioning fails (#656)", async () => {
+    // #656 requires Restore to return the exact prior logical view, and the
+    // shipped Help contract calls it a "one-step return". restorePriorView
+    // cleared revealRestore synchronously, before the async positioning phase
+    // could fail, so one host error during Restore left a half-applied Explorer
+    // (filters/lanes/link mode already swapped) with the affordance gone.
+    const event = defaultEventPage().events[0]!;
+    const eventRef: host.LogBookmarkEventRefDto = {
+      corpusId: "c1",
+      seq: event.seq,
+      source: event.source,
+      timestampHint: event.ts,
+      timeQualityHint: event.timeQuality,
+    };
+    const recipe: host.InvestigationViewRecipeDto = {
+      filters: {
+        levels: ["error"],
+        sources: [],
+        services: [],
+        hosts: [],
+        timeFrom: null,
+        timeTo: null,
+        seqFrom: null,
+        seqTo: null,
+        templateId: null,
+        traceId: null,
+        keyword: null,
+      },
+      lanes: [{ id: "lane-0", label: "All sources", sources: [] }],
+      visibleLaneCount: 1,
+      linkMode: "independent",
+      focusedLaneId: "lane-0",
+      focusedEvent: eventRef,
+      selection: [eventRef],
+      highlights: [eventRef],
+      find: null,
+      viewportAnchors: [{ laneId: "lane-0", eventRef }],
+    };
+    const finding: host.InvestigationFindingItemDto = {
+      id: "019fa8d0-0000-7000-8000-000000000041",
+      kind: "observation",
+      lifecycle: "accepted",
+      title: "Restore failure view",
+      whyItMatters: "Restore must stay reachable after a positioning failure.",
+      evidenceIds: [],
+      viewRecipe: recipe,
+      provenance: "human",
+      createdAt: 3,
+      updatedAt: 3,
+    };
+    const loaded: host.ResolvedInvestigationDocumentDto = {
+      document: {
+        schemaVersion: 3,
+        id: "019fa8d0-0000-7000-8000-000000000040",
+        revision: 3,
+        title: "Investigation · fixture",
+        status: "active",
+        corpusLinks: [{ corpusId: "c1" }],
+        evidence: [],
+        findings: [finding],
+        notes: [],
+        createdAt: 1,
+        updatedAt: 3,
+      },
+      evidence: [],
+    };
+    const cleanPreview = {
+      investigationId: loaded.document.id,
+      revision: loaded.document.revision,
+      findingId: finding.id,
+      policyBinding: {
+        binding: null,
+        currentSuppressionPolicyRevision: 1,
+        currentResolvedTemplateRevision: 1,
+        currentEffectivePolicySha256: "sha",
+        currentNoiseLens: "active" as const,
+        status: "current" as const,
+      },
+      recipe,
+      missingCount: 0,
+      staleCount: 0,
+    };
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(loaded);
+    vi.mocked(host.hostLogPreviewInvestigationFindingView).mockResolvedValue(
+      cleanPreview,
+    );
+    vi.mocked(host.hostLogApplyInvestigationFindingView).mockResolvedValue(
+      cleanPreview,
+    );
+
+    let failPositioning = false;
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockImplementation(
+      async () => {
+        if (failPositioning) throw new Error("corpus handle closed");
+        return eventNeighborhood(event, "found", [event]);
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+
+    // Give the prior view a focused event so Restore has real positioning work.
+    const row = document.querySelector<HTMLElement>(`[data-seq="${event.seq}"]`);
+    expect(row).toBeTruthy();
+    fireEvent.click(row!);
+
+    await openInvestigationView(1);
+    fireEvent.click(await screen.findByTestId(`finding-item-${finding.id}`));
+    fireEvent.click(screen.getByRole("button", { name: "Preview saved view" }));
+    const viewPreview = await screen.findByTestId(
+      `finding-view-preview-${finding.id}`,
+    );
+    fireEvent.click(
+      within(viewPreview).getByRole("button", { name: "Apply saved view" }),
+    );
+
+    const restore = await screen.findByTestId("bookmark-restore-view");
+    expect(restore).toBeTruthy();
+
+    // The host fails only while Restore is repositioning.
+    failPositioning = true;
+    fireEvent.click(restore);
+
+    const alert = await screen.findByRole("alert", {}, { timeout: 3000 });
+    expect(alert.textContent ?? "").toMatch(/Saved view could not be applied/i);
+
+    // The status must not keep claiming the restore happened.
+    expect(screen.getByRole("status").textContent).not.toContain(
+      "Restored prior Explorer view",
+    );
+    expect(screen.getByRole("status").textContent).toContain(
+      "could not be positioned",
+    );
+
+    // The prior view must remain reachable in one step.
+    expect(screen.queryByTestId("bookmark-restore-view")).toBeTruthy();
+
+    // …and once the host recovers, that one step must work.
+    failPositioning = false;
+    fireEvent.click(screen.getByTestId("bookmark-restore-view"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("bookmark-restore-view")).toBeNull(),
+    );
+  });
+
+  it("surfaces host Apply rejection without mutating Explorer when clean preview enables Apply", async () => {
+    // Real entry point: clean Preview enables Apply → click Apply → trusted host
+    // rejects → filters/selection stay put and the typed host explanation surfaces.
+    const event = defaultEventPage().events[0]!;
+    const eventRef: host.LogBookmarkEventRefDto = {
+      corpusId: "c1",
+      seq: event.seq,
+      source: event.source,
+      timestampHint: event.ts,
+      timeQualityHint: event.timeQuality,
+    };
+    const recipe: host.InvestigationViewRecipeDto = {
+      filters: {
+        levels: ["error"],
+        sources: [],
+        services: [],
+        hosts: [],
+        timeFrom: null,
+        timeTo: null,
+        seqFrom: null,
+        seqTo: null,
+        templateId: null,
+        traceId: null,
+        keyword: null,
+      },
+      lanes: [{ id: "lane-0", label: "All sources", sources: [] }],
+      visibleLaneCount: 1,
+      linkMode: "independent",
+      focusedLaneId: "lane-0",
+      focusedEvent: eventRef,
+      selection: [eventRef],
+      highlights: [eventRef],
+      find: null,
+      viewportAnchors: [{ laneId: "lane-0", eventRef }],
+    };
+    const finding: host.InvestigationFindingItemDto = {
+      id: "019fa8d0-0000-7000-8000-000000000031",
+      kind: "observation",
+      lifecycle: "accepted",
+      title: "Apply host rejection view",
+      whyItMatters: "Host fail-closed must not schedule a local view apply.",
+      evidenceIds: [],
+      viewRecipe: recipe,
+      provenance: "human",
+      createdAt: 3,
+      updatedAt: 3,
+    };
+    const loaded: host.ResolvedInvestigationDocumentDto = {
+      document: {
+        schemaVersion: 3,
+        id: "019fa8d0-0000-7000-8000-000000000030",
+        revision: 3,
+        title: "Investigation · fixture",
+        status: "active",
+        corpusLinks: [{ corpusId: "c1" }],
+        evidence: [],
+        findings: [finding],
+        notes: [],
+        createdAt: 1,
+        updatedAt: 3,
+      },
+      evidence: [],
+    };
+    const cleanPreview = {
+      investigationId: loaded.document.id,
+      revision: loaded.document.revision,
+      findingId: finding.id,
+      policyBinding: {
+        binding: null,
+        currentSuppressionPolicyRevision: 1,
+        currentResolvedTemplateRevision: 1,
+        currentEffectivePolicySha256: "sha",
+        currentNoiseLens: "active" as const,
+        status: "current" as const,
+      },
+      recipe,
+      missingCount: 0,
+      staleCount: 0,
+    };
+    const hostRejectMessage =
+      "Apply blocked: finding view recipe has 0 missing and 1 stale exact references; fix or refresh evidence before Apply";
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(loaded);
+    vi.mocked(host.hostLogPreviewInvestigationFindingView).mockResolvedValue(
+      cleanPreview,
+    );
+    vi.mocked(host.hostLogApplyInvestigationFindingView).mockRejectedValue(
+      new Error(hostRejectMessage),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    await openInvestigationView(1);
+    fireEvent.click(await screen.findByTestId(`finding-item-${finding.id}`));
+
+    const errorCheckboxBefore = screen.getByRole("checkbox", {
+      name: /error/i,
+    }) as HTMLInputElement;
+    expect(errorCheckboxBefore.checked).toBe(false);
+    const selectedBefore = document.querySelectorAll(
+      ".log-explorer__row--selected",
+    ).length;
+    const queryCountBefore = vi.mocked(host.hostLogQueryEvents).mock.calls
+      .length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview saved view" }));
+    const viewPreview = await screen.findByTestId(
+      `finding-view-preview-${finding.id}`,
+    );
+    expect(viewPreview.textContent).toContain(
+      "Preview only · current Explorer unchanged",
+    );
+    // Clean preview must enable Apply so the host gate is actually exercised.
+    const applyButton = within(viewPreview).getByRole("button", {
+      name: "Apply saved view",
+    }) as HTMLButtonElement;
+    expect(applyButton.disabled).toBe(false);
+
+    fireEvent.click(applyButton);
+
+    // Host typed explanation surfaces; Apply must not schedule local mutation.
+    // String(Error) prefixes "Error: " — match the host typed body either way.
+    const alert = await screen.findByRole("alert", {}, { timeout: 3000 });
+    expect(alert.textContent ?? "").toMatch(
+      /Apply blocked:.*stale exact references/i,
+    );
+    expect(host.hostLogApplyInvestigationFindingView).toHaveBeenCalledTimes(1);
+    expect(host.hostLogApplyInvestigationFindingView).toHaveBeenCalledWith(
+      "c1",
+      loaded.document.id,
+      finding.id,
+      "active",
+    );
+
+    // Filters, selection, and neighborhood navigation stay at pre-Apply state.
+    expect(
+      (screen.getByRole("checkbox", { name: /error/i }) as HTMLInputElement)
+        .checked,
+    ).toBe(false);
+    expect(
+      document.querySelectorAll(".log-explorer__row--selected").length,
+    ).toBe(selectedBefore);
+    expect(host.hostLogQueryEventNeighborhood).not.toHaveBeenCalled();
+    // No "Applied saved Explorer view" status and no Restore prior view affordance.
+    expect(screen.queryByTestId("bookmark-restore-view")).toBeNull();
+    expect(screen.getByRole("status").textContent ?? "").not.toContain(
+      "Applied saved Explorer view",
+    );
+    // Host reject path may re-preview for honest counts, but must not run query apply.
+    expect(vi.mocked(host.hostLogQueryEvents).mock.calls.length).toBe(
+      queryCountBefore,
+    );
+  });
+
+  it("renders Proposed-only investigation cards and Accept/Dismiss/Preview without view mutation (#646)", async () => {
+    const event = defaultEventPage().events[0]!;
+    const eventRef: host.LogBookmarkEventRefDto = {
+      corpusId: "c1",
+      seq: event.seq,
+      source: event.source,
+      timestampHint: event.ts,
+      timeQualityHint: event.timeQuality,
+    };
+    const recipe: host.InvestigationViewRecipeDto = {
+      filters: {
+        levels: ["error"],
+        sources: [],
+        services: [],
+        hosts: [],
+        timeFrom: null,
+        timeTo: null,
+        seqFrom: null,
+        seqTo: null,
+        templateId: null,
+        traceId: null,
+        keyword: null,
+      },
+      lanes: [{ id: "lane-0", label: "All sources", sources: [] }],
+      visibleLaneCount: 1,
+      linkMode: "independent",
+      focusedLaneId: "lane-0",
+      focusedEvent: eventRef,
+      selection: [eventRef],
+      highlights: [],
+      find: null,
+      viewportAnchors: [],
+    };
+    const proposalId = "019fa8d0-0000-7000-8000-000000000041";
+    const proposedOnly: host.ResolvedInvestigationDocumentDto = {
+      document: {
+        schemaVersion: 5,
+        id: "019fa8d0-0000-7000-8000-000000000040",
+        revision: 2,
+        title: "Investigation · proposals",
+        status: "active",
+        corpusLinks: [{ corpusId: "c1" }],
+        evidence: [],
+        findings: [],
+        notes: [],
+        proposedFindings: [
+          {
+            id: proposalId,
+            status: "proposed",
+            kind: "hypothesis",
+            title: "Agent proposed checkout failure",
+            whyItMatters: "First error anchors the retry sequence.",
+            caveats: "Single sample",
+            evidence: [
+              { eventRef, role: "supporting" },
+              {
+                eventRef: { ...eventRef, seq: event.seq + 1 },
+                role: "contradicting",
+              },
+            ],
+            viewRecipe: recipe,
+            corpusId: "c1",
+            investigationId: "019fa8d0-0000-7000-8000-000000000040",
+            provenance: {
+              source: "model",
+              provider: "openai_compatible",
+              modelId: "test-investigator",
+              runId: "test-run-1",
+              toolName: "propose_finding",
+            },
+            idempotencyKey: "tool-loop-1",
+            createdAt: 2,
+            updatedAt: 2,
+          },
+        ],
+        createdAt: 1,
+        updatedAt: 2,
+      },
+      evidence: [],
+    };
+    const accepted: host.ResolvedInvestigationDocumentDto = {
+      document: {
+        ...proposedOnly.document,
+        revision: 3,
+        findings: [
+          {
+            id: "019fa8d0-0000-7000-8000-000000000042",
+            kind: "hypothesis",
+            lifecycle: "accepted",
+            title: "Agent proposed checkout failure",
+            whyItMatters: "First error anchors the retry sequence.",
+            evidenceIds: [],
+            viewRecipe: recipe,
+            provenance: "human",
+            createdAt: 3,
+            updatedAt: 3,
+          },
+        ],
+        proposedFindings: [
+          {
+            ...proposedOnly.document.proposedFindings![0]!,
+            status: "accepted",
+            acceptance: { acceptedAt: 3, edited: false },
+            acceptedFindingId: "019fa8d0-0000-7000-8000-000000000042",
+            updatedAt: 3,
+          },
+        ],
+      },
+      evidence: [],
+    };
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(
+      proposedOnly,
+    );
+    vi.mocked(host.hostLogAcceptProposedFinding).mockResolvedValue(accepted);
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    // Only 1 open proposed item — material count must include it (not empty rail).
+    await openInvestigationView(1);
+
+    const card = await screen.findByTestId(`proposed-finding-${proposalId}`);
+    expect(card.textContent).toContain("Agent proposed checkout failure");
+    expect(card.textContent).toContain("proposed");
+
+    const errorBefore = (
+      screen.getByRole("checkbox", { name: /error/i }) as HTMLInputElement
+    ).checked;
+    expect(errorBefore).toBe(false);
+    const queryCountBefore = vi.mocked(host.hostLogQueryEvents).mock.calls
+      .length;
+
+    // Non-mutating Preview: does not Apply and does not flip filters.
+    fireEvent.click(screen.getByTestId(`preview-proposed-${proposalId}`));
+    const proposalPreviewEl = await screen.findByTestId(
+      `proposed-finding-preview-${proposalId}`,
+    );
+    expect(proposalPreviewEl.textContent ?? "").toMatch(
+      /Preview only · current Explorer unchanged/,
+    );
+    expect(
+      (screen.getByRole("checkbox", { name: /error/i }) as HTMLInputElement)
+        .checked,
+    ).toBe(false);
+    expect(host.hostLogApplyInvestigationFindingView).not.toHaveBeenCalled();
+    expect(vi.mocked(host.hostLogQueryEvents).mock.calls.length).toBe(
+      queryCountBefore,
+    );
+    expect(screen.queryByTestId("bookmark-restore-view")).toBeNull();
+
+    fireEvent.click(screen.getByTestId(`accept-proposed-${proposalId}`));
+    await waitFor(() =>
+      expect(host.hostLogAcceptProposedFinding).toHaveBeenCalledWith(
+        "c1",
+        proposedOnly.document.id,
+        expect.objectContaining({
+          proposalId,
+          expectedRevision: 2,
+          edited: false,
+        }),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain(
+        "Accepted proposed finding",
+      ),
+    );
+    // After accept, proposal card is gone (status accepted); finding appears.
+    expect(
+      screen.queryByTestId(`proposed-finding-${proposalId}`),
+    ).toBeNull();
+    expect(
+      await screen.findByTestId(
+        `finding-item-019fa8d0-0000-7000-8000-000000000042`,
+      ),
+    ).toBeTruthy();
+    // Accept still must not have applied the view recipe.
+    expect(
+      (screen.getByRole("checkbox", { name: /error/i }) as HTMLInputElement)
+        .checked,
+    ).toBe(false);
+  });
+
+  it("Edit-and-accept and Dismiss drive host APIs for Proposed findings (#646)", async () => {
+    const event = defaultEventPage().events[0]!;
+    const eventRef: host.LogBookmarkEventRefDto = {
+      corpusId: "c1",
+      seq: event.seq,
+      source: event.source,
+      timestampHint: event.ts,
+      timeQualityHint: event.timeQuality,
+    };
+    const proposalId = "019fa8d0-0000-7000-8000-000000000051";
+    const proposedOnly: host.ResolvedInvestigationDocumentDto = {
+      document: {
+        schemaVersion: 5,
+        id: "019fa8d0-0000-7000-8000-000000000050",
+        revision: 2,
+        title: "Investigation · proposals",
+        status: "active",
+        corpusLinks: [{ corpusId: "c1" }],
+        evidence: [],
+        findings: [],
+        notes: [],
+        proposedFindings: [
+          {
+            id: proposalId,
+            status: "proposed",
+            kind: "observation",
+            title: "Original proposal title",
+            whyItMatters: "Original why",
+            evidence: [{ eventRef, role: "supporting" }],
+            viewRecipe: null,
+            corpusId: "c1",
+            investigationId: "019fa8d0-0000-7000-8000-000000000050",
+            provenance: {
+              source: "model",
+              provider: "openai_compatible",
+              modelId: "test-investigator",
+              runId: "test-run-2",
+              toolName: "propose_finding",
+            },
+            idempotencyKey: "edit-1",
+            createdAt: 2,
+            updatedAt: 2,
+          },
+        ],
+        createdAt: 1,
+        updatedAt: 2,
+      },
+      evidence: [],
+    };
+    const afterEdit: host.ResolvedInvestigationDocumentDto = {
+      document: {
+        ...proposedOnly.document,
+        revision: 3,
+        findings: [
+          {
+            id: "019fa8d0-0000-7000-8000-000000000052",
+            kind: "observation",
+            lifecycle: "accepted",
+            title: "Human edited title",
+            whyItMatters: "Human edited why",
+            evidenceIds: [],
+            provenance: "human",
+            createdAt: 3,
+            updatedAt: 3,
+          },
+        ],
+        proposedFindings: [
+          {
+            ...proposedOnly.document.proposedFindings![0]!,
+            status: "accepted",
+            acceptance: { acceptedAt: 3, edited: true },
+            acceptedFindingId: "019fa8d0-0000-7000-8000-000000000052",
+          },
+        ],
+      },
+      evidence: [],
+    };
+    const proposalId2 = "019fa8d0-0000-7000-8000-000000000061";
+    const proposedDismiss: host.ResolvedInvestigationDocumentDto = {
+      document: {
+        schemaVersion: 5,
+        id: "019fa8d0-0000-7000-8000-000000000060",
+        revision: 2,
+        title: "Investigation · dismiss",
+        status: "active",
+        corpusLinks: [{ corpusId: "c1" }],
+        evidence: [],
+        findings: [],
+        notes: [],
+        proposedFindings: [
+          {
+            id: proposalId2,
+            status: "proposed",
+            kind: "hypothesis",
+            title: "Dismiss me",
+            whyItMatters: "Not actionable",
+            evidence: [{ eventRef, role: "supporting" }],
+            corpusId: "c1",
+            investigationId: "019fa8d0-0000-7000-8000-000000000060",
+            provenance: {
+              source: "detector",
+              toolName: "propose_finding",
+              detectorId: "test-detector",
+            },
+            idempotencyKey: "dismiss-1",
+            createdAt: 2,
+            updatedAt: 2,
+          },
+        ],
+        createdAt: 1,
+        updatedAt: 2,
+      },
+      evidence: [],
+    };
+    const afterDismiss: host.ResolvedInvestigationDocumentDto = {
+      document: {
+        ...proposedDismiss.document,
+        revision: 3,
+        proposedFindings: [
+          {
+            ...proposedDismiss.document.proposedFindings![0]!,
+            status: "dismissed",
+            dismissReason: "Out of scope for this incident",
+          },
+        ],
+      },
+      evidence: [],
+    };
+
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(
+      proposedOnly,
+    );
+    vi.mocked(host.hostLogAcceptProposedFinding).mockResolvedValue(afterEdit);
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    await openInvestigationView(1);
+    fireEvent.click(screen.getByTestId(`edit-accept-proposed-${proposalId}`));
+    fireEvent.change(screen.getByTestId(`proposed-edit-title-${proposalId}`), {
+      target: { value: "Human edited title" },
+    });
+    fireEvent.change(screen.getByTestId(`proposed-edit-why-${proposalId}`), {
+      target: { value: "Human edited why" },
+    });
+    fireEvent.click(screen.getByTestId(`confirm-edit-accept-${proposalId}`));
+    await waitFor(() =>
+      expect(host.hostLogAcceptProposedFinding).toHaveBeenCalledWith(
+        "c1",
+        proposedOnly.document.id,
+        expect.objectContaining({
+          proposalId,
+          expectedRevision: 2,
+          edited: true,
+          title: "Human edited title",
+          whyItMatters: "Human edited why",
+        }),
+      ),
+    );
+
+    // Dismiss path (fresh mount)
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(
+      proposedDismiss,
+    );
+    vi.mocked(host.hostLogDismissProposedFinding).mockResolvedValue(
+      afterDismiss,
+    );
+    vi.stubGlobal(
+      "prompt",
+      vi.fn(() => "Out of scope for this incident"),
+    );
+    const view2 = render(<LogExplorer corpusId="c2" />);
+    // defaultEventPage still uses c1 corpus in events — load with c1 via rerender path:
+    view2.unmount();
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(
+      proposedDismiss,
+    );
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    await openInvestigationView(1);
+    fireEvent.click(screen.getByTestId(`dismiss-proposed-${proposalId2}`));
+    await waitFor(() =>
+      expect(host.hostLogDismissProposedFinding).toHaveBeenCalledWith(
+        "c1",
+        proposedDismiss.document.id,
+        expect.objectContaining({
+          proposalId: proposalId2,
+          expectedRevision: 2,
+          reason: "Out of scope for this incident",
+        }),
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId(`proposed-finding-${proposalId2}`),
+      ).toBeNull(),
+    );
+  });
+
+  it("reloads investigation with suspended lens and blocks Apply under different noise policy (#819)", async () => {
+    const event = defaultEventPage().events[0]!;
+    const eventRef: host.LogBookmarkEventRefDto = {
+      corpusId: "c1",
+      seq: event.seq,
+      source: event.source,
+      timestampHint: event.ts,
+      timeQualityHint: event.timeQuality,
+    };
+    const recipe: host.InvestigationViewRecipeDto = {
+      filters: {
+        levels: ["error"],
+        sources: [],
+        services: [],
+        hosts: [],
+        timeFrom: null,
+        timeTo: null,
+        seqFrom: null,
+        seqTo: null,
+        templateId: null,
+        traceId: null,
+        keyword: null,
+      },
+      lanes: [{ id: "lane-0", label: "All sources", sources: [] }],
+      visibleLaneCount: 1,
+      linkMode: "independent",
+      focusedLaneId: "lane-0",
+      focusedEvent: eventRef,
+      selection: [eventRef],
+      highlights: [eventRef],
+      find: null,
+      viewportAnchors: [{ laneId: "lane-0", eventRef }],
+    };
+    const finding: host.InvestigationFindingItemDto = {
+      id: "019fa8d0-0000-7000-8000-000000000031",
+      kind: "observation",
+      lifecycle: "accepted",
+      title: "Policy-bound failure",
+      whyItMatters: "Must recompute after policy change.",
+      evidenceIds: [],
+      viewRecipe: recipe,
+      policyBinding: {
+        suppressionPolicyRevision: 1,
+        resolvedTemplateRevision: 1,
+        effectivePolicySha256: "old-sha",
+        noiseLens: "active",
+      },
+      provenance: "human",
+      createdAt: 3,
+      updatedAt: 3,
+    };
+    const currentBinding = {
+      binding: finding.policyBinding,
+      currentSuppressionPolicyRevision: 2,
+      currentResolvedTemplateRevision: 2,
+      currentEffectivePolicySha256: "new-sha",
+      currentNoiseLens: "active" as const,
+      status: "made_under_different_policy" as const,
+    };
+    const loaded: host.ResolvedInvestigationDocumentDto = {
+      document: {
+        schemaVersion: 4,
+        id: "019fa8d0-0000-7000-8000-000000000030",
+        revision: 4,
+        title: "Investigation · fixture",
+        status: "active",
+        corpusLinks: [{ corpusId: "c1" }],
+        evidence: [],
+        findings: [finding],
+        notes: [],
+        createdAt: 1,
+        updatedAt: 4,
+      },
+      evidence: [],
+      findings: [
+        {
+          item: finding,
+          policyBinding: currentBinding,
+        },
+      ],
+    };
+    const suspendedLoaded: host.ResolvedInvestigationDocumentDto = {
+      ...loaded,
+      findings: [
+        {
+          item: finding,
+          policyBinding: {
+            ...currentBinding,
+            currentNoiseLens: "suspended",
+            status: "made_under_different_lens",
+          },
+        },
+      ],
+    };
+    const recomputed: host.ResolvedInvestigationDocumentDto = {
+      ...loaded,
+      document: {
+        ...loaded.document,
+        revision: 5,
+        findings: [
+          {
+            ...finding,
+            policyBinding: {
+              suppressionPolicyRevision: 2,
+              resolvedTemplateRevision: 2,
+              effectivePolicySha256: "new-sha",
+              noiseLens: "active",
+            },
+          },
+        ],
+      },
+      findings: [
+        {
+          item: {
+            ...finding,
+            policyBinding: {
+              suppressionPolicyRevision: 2,
+              resolvedTemplateRevision: 2,
+              effectivePolicySha256: "new-sha",
+              noiseLens: "active",
+            },
+          },
+          policyBinding: {
+            binding: {
+              suppressionPolicyRevision: 2,
+              resolvedTemplateRevision: 2,
+              effectivePolicySha256: "new-sha",
+              noiseLens: "active",
+            },
+            currentSuppressionPolicyRevision: 2,
+            currentResolvedTemplateRevision: 2,
+            currentEffectivePolicySha256: "new-sha",
+            currentNoiseLens: "active",
+            status: "current",
+          },
+        },
+      ],
+    };
+
+    useSuppressionPolicy({
+      schemaVersion: 1,
+      corpusId: "c1",
+      revision: 2,
+      resolvedTemplateRevision: 2,
+      rules: [
+        {
+          id: "rule-1",
+          name: "Heartbeat",
+          rationale: "noise",
+          predicate: { templateId: 1, templateFingerprint: "fp" },
+          origin: "human",
+          state: "enabled",
+          createdAt: 1,
+          updatedAt: 1,
+          resolution: {
+            kind: "matches_current",
+            matchesNothing: false,
+            explanation: "ok",
+          },
+        },
+      ],
+      previews: [],
+      audit: [],
+    });
+    vi.mocked(host.hostLogLoadActiveInvestigation)
+      .mockResolvedValueOnce(loaded)
+      .mockResolvedValueOnce(suspendedLoaded)
+      .mockResolvedValue(loaded);
+    vi.mocked(host.hostLogPreviewInvestigationFindingView).mockResolvedValue({
+      investigationId: loaded.document.id,
+      revision: loaded.document.revision,
+      findingId: finding.id,
+      policyBinding: currentBinding,
+      recipe,
+      missingCount: 0,
+      staleCount: 0,
+    });
+    vi.mocked(host.hostLogRecomputeInvestigationFindingView).mockResolvedValue(
+      recomputed,
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    await openInvestigationView(1);
+    await waitFor(() =>
+      expect(host.hostLogLoadActiveInvestigation).toHaveBeenCalledWith(
+        "c1",
+        "active",
+      ),
+    );
+
+    // Suspend lens must re-fetch investigation under suspended policy.
+    fireEvent.click(screen.getByTestId("noise-policy-trigger"));
+    fireEvent.click(await screen.findByTestId("noise-lens-suspend-all"));
+    await waitFor(() =>
+      expect(host.hostLogLoadActiveInvestigation).toHaveBeenCalledWith(
+        "c1",
+        "suspended",
+      ),
+    );
+
+    // Resume while the policy panel is still open (do not toggle it closed).
+    fireEvent.click(await screen.findByTestId("noise-lens-resume"));
+    await waitFor(() => {
+      const calls = vi.mocked(host.hostLogLoadActiveInvestigation).mock.calls;
+      const activeAfterSuspend = calls.filter(
+        (call) => call[0] === "c1" && call[1] === "active",
+      );
+      // Initial load + resume reload (at least two active loads).
+      expect(activeAfterSuspend.length).toBeGreaterThanOrEqual(2);
+    });
+
+    fireEvent.click(await screen.findByTestId(`finding-item-${finding.id}`));
+    expect(
+      screen.getByTestId(`finding-policy-${finding.id}`).textContent,
+    ).toBe("Made under a different noise policy");
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview saved view" }));
+    const viewPreview = await screen.findByTestId(
+      `finding-view-preview-${finding.id}`,
+    );
+    expect(viewPreview.textContent).toContain(
+      "Made under a different noise policy",
+    );
+    expect(viewPreview.textContent).toMatch(/Apply blocked/);
+    const applyBtn = within(viewPreview).getByRole("button", {
+      name: "Apply saved view",
+    }) as HTMLButtonElement;
+    expect(applyBtn.disabled).toBe(true);
+    fireEvent.click(applyBtn);
+    // Host apply re-preview must not schedule neighborhood mutation while blocked.
+    expect(host.hostLogQueryEventNeighborhood).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId(`finding-recompute-${finding.id}`));
+    await waitFor(() =>
+      expect(host.hostLogRecomputeInvestigationFindingView).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({
+          investigationId: loaded.document.id,
+          expectedRevision: loaded.document.revision,
+          findingId: finding.id,
+          noiseLens: "active",
+          viewRecipe: expect.objectContaining({
+            visibleLaneCount: expect.any(Number),
+          }),
+        }),
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Recomputed saved Explorer view under the current noise policy/i),
+      ).toBeTruthy(),
+    );
   });
 
   it("revalidates every evidence identity at Reveal time and blocks a changed corpus", async () => {
@@ -7503,7 +8743,7 @@ describe("LogExplorer shell", () => {
       },
       documentText: metricDocument,
     });
-    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+    useSuppressionPolicy(
       suppressionDocument(),
     );
     vi.mocked(host.hostLogCountEvents).mockImplementation(

@@ -608,7 +608,7 @@ pub fn propose_noise_candidates_with_cancel(
         .clamp(1, MAX_NOISE_REPRESENTATIVES);
 
     let policy = load_suppression_document(corpus)?;
-    let suppressed_ids = policy.enabled_template_ids()?;
+    let suppressed_ids = policy.enabled_template_ids_for_corpus(corpus)?;
     let suppressed_set: HashSet<u64> = suppressed_ids.iter().copied().collect();
     let deadline = Instant::now() + MAX_NOISE_QUERY_DURATION;
     let pinned_template_revision = corpus.template_analysis_revision();
@@ -815,7 +815,7 @@ pub fn propose_noise_candidates_with_cancel(
     }
     let current_policy = load_suppression_document(corpus)?;
     if current_policy.revision != policy.revision
-        || current_policy.enabled_template_ids()? != suppressed_ids
+        || current_policy.enabled_template_ids_for_corpus(corpus)? != suppressed_ids
     {
         return Err(CoreError::Message(
             "stale noise candidate snapshot: suppression policy changed".into(),

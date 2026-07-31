@@ -44,6 +44,38 @@ const finding: FindingItemView = {
   provenanceLabel: "Authored manually",
 };
 
+const recipeFinding: FindingItemView = {
+  ...finding,
+  id: "finding-view-1",
+  title: "Saved failure view",
+  viewRecipe: {
+    filters: {
+      levels: ["error"],
+      sources: [],
+      services: [],
+      hosts: [],
+      timeFrom: null,
+      timeTo: null,
+      seqFrom: null,
+      seqTo: null,
+      templateId: null,
+      traceId: null,
+      keyword: null,
+    },
+    lanes: [{ id: "lane-0", label: "All sources", sources: [] }],
+    visibleLaneCount: 1,
+    linkMode: "independent",
+    focusedLaneId: "lane-0",
+    focusedEvent: null,
+    selection: [],
+    highlights: [],
+    find: null,
+    viewportAnchors: [],
+  },
+  policyStatus: "made_under_different_policy",
+  policyStatusLabel: "Made under a different noise policy",
+};
+
 const note: NoteItemView = {
   id: "note-1",
   title: "Compare with deployment",
@@ -364,5 +396,61 @@ describe("EvidencePanel", () => {
         }),
       ),
     );
+  });
+
+  it("shows Made under a different noise policy, blocks Apply, and offers recompute (#819)", () => {
+    const apply = vi.fn();
+    const recompute = vi.fn();
+    const clearPreview = vi.fn();
+    render(
+      <EvidencePanel
+        modeControl={modeControl()}
+        items={[evidence]}
+        findings={[recipeFinding]}
+        preview={null}
+        viewPreview={{
+          findingId: recipeFinding.id,
+          recipe: recipeFinding.viewRecipe!,
+          changes: ["Filters: All logs → levels error"],
+          missingCount: 0,
+          staleCount: 0,
+          policyStatus: "made_under_different_policy",
+          policyStatusLabel: "Made under a different noise policy",
+          policyBlocksApply: true,
+        }}
+        busy={false}
+        error={null}
+        onPreview={() => undefined}
+        onReveal={() => undefined}
+        onPreviewFindingView={() => undefined}
+        onApplyFindingView={apply}
+        onRecomputeFindingView={recompute}
+        onClearPreview={() => undefined}
+        onClearViewPreview={clearPreview}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId(`finding-item-${recipeFinding.id}`));
+    expect(
+      screen.getByTestId(`finding-policy-${recipeFinding.id}`).textContent,
+    ).toBe("Made under a different noise policy");
+    const viewPreview = screen.getByTestId(
+      `finding-view-preview-${recipeFinding.id}`,
+    );
+    expect(viewPreview.textContent).toContain(
+      "Made under a different noise policy",
+    );
+    expect(viewPreview.textContent).toMatch(/Apply blocked/);
+    const applyBtn = within(viewPreview).getByRole("button", {
+      name: "Apply saved view",
+    }) as HTMLButtonElement;
+    expect(applyBtn.disabled).toBe(true);
+    fireEvent.click(applyBtn);
+    expect(apply).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      screen.getByTestId(`finding-recompute-${recipeFinding.id}`),
+    );
+    expect(recompute).toHaveBeenCalledWith(recipeFinding);
   });
 });

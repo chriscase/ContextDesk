@@ -155,6 +155,64 @@ deliberately treated as risky.
 Candidate review never deletes evidence and never lets the detector activate a
 rule.
 
+### Stale rules and policy-bound findings
+
+Re-analysis, a timezone declaration, and package import can all change which
+templates a corpus contains. A durable noise rule and a durable finding must
+survive that without quietly changing meaning.
+
+These states usually arrive with imported evidence rather than appearing during
+ordinary work: local re-analysis does not reparse events, so template identity
+does not move, and ContextDesk refuses to create a second rule for a template
+that already has one. You are most likely to see a stale or conflicting rule
+after importing a package built on another machine, or a legacy finding recorded
+before noise policy was captured.
+
+**A rule whose target is gone stays visible.** It remains in the rule list and
+in the audit, labeled **stale — matches nothing**, and it hides zero events.
+ContextDesk does not delete it for you, because the rule and its recorded
+reason are part of the investigation record. Only **enabled** rules resolved as
+matching the current corpus exclude events; stale, fingerprint-changed,
+invalid, conflicting, disabled, and removed rules exclude nothing while
+remaining visible for audit.
+
+**A reused template number never inherits an old rule.** Template numbers can be
+reassigned when a corpus is re-analyzed. A rule applies only when both the saved
+target and its content fingerprint still agree; when the number matches but the
+content does not, the rule is labeled **stale — template changed** and hides
+nothing. Silently re-pointing a rule at different content would hide evidence
+nobody reviewed.
+
+**Unusable rules fail closed.** A rule whose saved predicate is no longer valid,
+or which claims the same target as another enabled rule, hides nothing and
+explains why. Failing closed here means showing more evidence, never less.
+
+**Lifecycle stays available.** Disable, re-enable, remove, and the audit history
+continue to work on a stale rule. Re-enable is always re-validated by the trusted
+host. Remove still creates an inactive tombstone rather than erasing the rule's
+history.
+
+**Findings record the policy they were made under.** A finding or saved view
+records the exact suppression policy revision, the resolved template revision,
+and whether the noise lens was active or suspended at the time. Reopening it
+under a different policy shows **Made under a different noise policy**, and its
+saved view is not applied automatically. Preview is allowed for review; **Apply
+saved view** stays blocked until the finding is current. Different lens modes and
+legacy unbound findings are labeled explicitly rather than treated as current.
+
+**Older findings stay explicitly unbound.** Findings created before policy
+recording existed are labeled as legacy findings with no noise-policy binding.
+ContextDesk cannot reconstruct what was hidden when they were made, so it says so
+instead of treating them as current.
+
+**Recomputing is always your decision.** Use **Recompute from current view** to
+bind a finding to the current Explorer recipe under the current noise policy and
+lens. Cancel, Escape, and concurrent stale investigation revisions cause no
+mutation. Nothing recomputes in the background.
+
+If a corpus or policy revision changes while Explorer is open, the affected
+surface refreshes instead of mixing results from two revisions.
+
 ## Counts
 
 **Corpus events** is the persisted corpus size. **Matched** belongs to the

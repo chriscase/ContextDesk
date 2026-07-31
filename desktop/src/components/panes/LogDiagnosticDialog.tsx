@@ -5,6 +5,7 @@ import {
   LOG_DIAGNOSTIC_NOTE_MAX_CHARS,
   type LogDiagnosticActiveViewInput,
   type LogDiagnosticEnvironment,
+  type LogDiagnosticSuppressionPolicyInput,
   type LogDiagnosticStatus,
 } from "../../lib/logDiagnosticReport";
 import {
@@ -30,6 +31,7 @@ async function releasePreparedReport(reportId: string) {
 export function LogDiagnosticDialog({
   corpus,
   failedIngest = null,
+  suppressionPolicy = null,
   activeView = null,
   environment,
   currentStatus,
@@ -37,18 +39,19 @@ export function LogDiagnosticDialog({
 }: {
   corpus: LogCorpusSummaryDto | null;
   failedIngest?: FailedLogIngestDiagnosticDto | null;
+  suppressionPolicy?: LogDiagnosticSuppressionPolicyInput | null;
   activeView?: LogDiagnosticActiveViewInput | null;
   environment: LogDiagnosticEnvironment;
   currentStatus: LogDiagnosticStatus | null;
   onDismiss: () => void;
 }) {
   const [userNote, setUserNote] = useState("");
-  const [previewFormat, setPreviewFormat] =
-    useState<PreviewFormat>("markdown");
+  const [previewFormat, setPreviewFormat] = useState<PreviewFormat>("markdown");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
-  const [prepared, setPrepared] =
-    useState<PreparedLogDiagnosticDto | null>(null);
+  const [prepared, setPrepared] = useState<PreparedLogDiagnosticDto | null>(
+    null,
+  );
   const [prepareError, setPrepareError] = useState<string | null>(null);
   const generatedAtRef = useRef(new Date());
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -61,26 +64,43 @@ export function LogDiagnosticDialog({
   const descriptionId = useId();
   const noteId = useId();
 
-  const report = useMemo(
-    () =>
-      buildLogDiagnosticReport({
-        corpus,
-        failedIngest,
-        activeView,
-        environment,
-        currentStatus,
-        userNote,
-        generatedAt: generatedAtRef.current,
-      }),
-    [
+  // The builder is fail-closed and throws when a manifest cannot be produced
+  // within its bounded export size. That can happen on input the host accepts
+  // (per-field caps are counted in characters, the export bound in bytes, so a
+  // large policy written in a non-Latin script can exceed it). This memo runs
+  // during render and the app mounts no error boundary, so an escaping throw
+  // would unmount the whole Explorer. Degrade to the same disabled-with-message
+  // state the dialog already shows when the host refuses to prepare a report.
+  const report = useMemo(() => {
+    try {
+      return {
+        manifest: buildLogDiagnosticReport({
+          corpus,
+          failedIngest,
+          suppressionPolicy,
+          activeView,
+          environment,
+          currentStatus,
+          userNote,
+          generatedAt: generatedAtRef.current,
+        }).manifest,
+        error: null as string | null,
+      };
+    } catch (error) {
+      return {
+        manifest: null,
+        error: `Could not prepare diagnostics: ${String(error)}`,
+      };
+    }
+  }, [
       activeView,
       corpus,
       currentStatus,
       environment,
       failedIngest,
+      suppressionPolicy,
       userNote,
-    ],
-  );
+  ]);
   const failed = failedIngest != null;
   const subjectLabel = corpus?.name ?? "the latest failed import";
 
@@ -104,6 +124,11 @@ export function LogDiagnosticDialog({
     setPrepared(null);
     setPrepareError(null);
     setResult(null);
+    const manifest = report.manifest;
+    if (!manifest) {
+      setPrepareError(report.error);
+      return;
+    }
     const timer = window.setTimeout(() => {
       prepareQueueRef.current = prepareQueueRef.current
         .catch(() => undefined)
@@ -112,7 +137,7 @@ export function LogDiagnosticDialog({
             return;
           }
           try {
-            const next = await hostPrepareLogDiagnosticReport(report.manifest);
+            const next = await hostPrepareLogDiagnosticReport(manifest);
             if (!mountedRef.current || version !== prepareVersionRef.current) {
               await releasePreparedReport(next.reportId);
               return;
@@ -130,16 +155,14 @@ export function LogDiagnosticDialog({
             const previous = preparedRef.current;
             preparedRef.current = null;
             if (previous) await releasePreparedReport(previous.reportId);
-            setPrepareError(
-              `Could not prepare diagnostics: ${String(error)}`,
-            );
+            setPrepareError(`Could not prepare diagnostics: ${String(error)}`);
           }
         });
     }, PREPARE_DEBOUNCE_MS);
     return () => {
       window.clearTimeout(timer);
     };
-  }, [report.manifest]);
+  }, [report]);
 
   const dismiss = () => {
     if (!busy) onDismiss();
@@ -149,7 +172,9 @@ export function LogDiagnosticDialog({
     setResult(null);
     const json = previewFormat === "json";
     if (!prepared) {
-      setResult(prepareError ?? "The trusted host is still preparing the preview.");
+      setResult(
+        prepareError ?? "The trusted host is still preparing the preview.",
+      );
       return;
     }
     try {
@@ -169,7 +194,9 @@ export function LogDiagnosticDialog({
   async function save(format: PreviewFormat) {
     const markdown = format === "markdown";
     if (!prepared) {
-      setResult(prepareError ?? "The trusted host is still preparing the preview.");
+      setResult(
+        prepareError ?? "The trusted host is still preparing the preview.",
+      );
       return;
     }
     setBusy(true);
@@ -329,7 +356,8 @@ export function LogDiagnosticDialog({
               ? previewFormat === "markdown"
                 ? prepared.markdown
                 : prepared.json
-              : prepareError ?? "Preparing exact preview in the trusted host…"}
+              : (prepareError ??
+                "Preparing exact preview in the trusted host…")}
           </pre>
 
           {result ? (

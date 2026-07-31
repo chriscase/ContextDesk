@@ -174,6 +174,19 @@ A linked turn pins one policy revision and discloses that revision and the
 number of hidden events. Adapter-level tests prove every tool excludes the same
 identities and restores them after the rule is disabled.
 
+**The host owns the lens.** The webview is outside the trusted computing base
+(`docs/THREAT_MODEL.md`), so exclusions arriving over IPC are a *request*. Each
+Explorer read re-derives the trusted set and intersects the request with it, so
+a stale or compromised renderer can hide at most what the durable policy
+authorizes — never a template it was never granted. Intersection is also what
+preserves **Suspend all** and temporary reveal: both request fewer identities,
+and reducing a set can only reveal more. When the policy cannot be resolved the
+effective set is empty with a typed reason, so nothing is hidden on the strength
+of an unverifiable policy; the Explorer then withholds evidence and offers a
+retry rather than painting a view it cannot describe. The renderer asks the host
+which identities it will honour instead of deriving them, so the disclosed count
+and the enforced set cannot drift apart.
+
 The raw corpus, source catalog, bounded **Original (redacted)** record, and
 direct exact-evidence resolution remain authoritative. If a bookmark or other
 exact identity points to suppressed evidence, Explorer offers a clearly marked
@@ -211,6 +224,101 @@ reason for only the pinned corpus/template/policy revisions. **Suppress…**
 reuses the separate trusted Preview → Confirm workflow; the proposal detector
 cannot call preview or activation. Revision drift marks the review stale and
 blocks action until refresh.
+
+### Stale rules and policy-bound findings — #819
+
+**Status: implemented.** Trusted rule resolution ships in
+[`suppression.rs`](../../crates/cd-core/src/log_analysis/suppression.rs)
+(`SuppressionRuleResolutionKind`), policy binding in
+[`investigations.rs`](../../crates/cd-core/src/investigations/mod.rs)
+(`InvestigationPolicyBindingStatus`, schema version 4), and the display and
+Apply-gating contract in
+[`policyBinding.ts`](../../desktop/src/lib/logExplorer/policyBinding.ts).
+**Ordinary use cannot create these historical states.** Re-analysis does not
+reparse events, so template identity never moves; and activation rejects a
+duplicate predicate outright. A stale, conflicting, or unbound record is
+therefore something a corpus *arrives* carrying, not something the product can
+be driven into. Four such states — target missing, fingerprint changed,
+conflicting predicates, and a legacy unbound finding — are exercised through
+deterministic, bounded, `TEST-FIXTURE`-identified acceptance artifacts built
+from typed production structures and consumed by the ordinary release importer
+and loader, which re-derive resolution rather than trusting fixture metadata.
+No production UI, command, capability, or release backdoor exists for creating
+them. Invalid predicates remain automated-only because production validation
+rejects importing them.
+
+The first three are single importable packages. The legacy unbound finding is a
+**pair**: a corpus package plus an investigation directory. The investigation
+cites events inside that corpus, so it proves nothing on its own — and because
+`import_corpus_zip` always mints a new corpus id and records the packaged one as
+`origin_corpus_id`, the investigation must be rebound to the id the local import
+assigned before its evidence resolves. The generated fixture set therefore ships
+both artifacts, records the relationship and setup order in its manifest, and
+carries a README describing a reversible install that runs only while the app is
+closed and removes exactly one `TEST-FIXTURE` directory afterwards.
+
+A corpus revision can change template identity — re-analysis, a timezone
+declaration, package import. Two durable records must survive that without
+changing meaning: a suppression rule and a finding.
+
+**Rule resolution.** Every enabled rule resolves against the currently open
+corpus into exactly one state. Only a state where the saved target *and* its
+content fingerprint both still agree may exclude events; every other state
+excludes nothing and carries a payload-free explanation:
+
+| Condition | Excludes | User-visible label |
+| --------- | -------- | ------------------ |
+| Target and fingerprint agree | yes | *(no label)* |
+| Target no longer exists | no | stale — matches nothing |
+| Target exists, fingerprint differs | no | stale — template changed |
+| Saved predicate not structurally valid | no | invalid — cannot be applied |
+| Two enabled rules claim one target | no | conflicts with another rule |
+| Disabled or removed | no | disabled / removed |
+
+A numeric target is never re-bound by coincidence, a stale rule is never removed
+automatically, and lifecycle actions plus audit history remain available on
+every state. Resolution is computed against the open corpus and is not part of
+the durable sidecar, so a stale judgment can never be persisted and later
+believed.
+
+**Policy binding.** A finding or saved view records the effective suppression
+policy revision, the resolved template revision, and whether the noise lens was
+active or suspended. Reopening compares that binding to the present state:
+identical is current; a differing policy revision or lens is **Made under a
+different noise policy**; a record predating binding is **legacy — policy not
+recorded** and is never assumed current. Any non-current state previews rather
+than applies, and blocks silent mutation.
+
+`current_lens_unknown` is not a durable property of the finding: it means the
+host could not read the current lens, so the comparison itself did not
+complete. Apply stays blocked, but the remedy is to retry the read — never to
+recompute or rewrite the record.
+
+**Recompute.** **Recompute from current view** is an explicit durable mutation.
+It replaces exactly two things on the stored finding — the saved view recipe and
+its policy binding — and preserves prose, citations, lifecycle state, and
+provenance unchanged. It runs only on direct user action; nothing recomputes in
+the background, on open, or on policy change. A recompute that cannot reproduce
+the current view exactly fails closed and changes nothing.
+
+**Revision drift.** A resolved snapshot belongs to one template revision. A
+response that no longer matches the current revision is discarded and re-derived
+rather than rendered, so two revisions never mix on one surface.
+
+**Restart, re-analysis, timezone apply/undo, and package round-trip** all
+re-derive resolution from scratch; none of them may silently repair, re-bind, or
+drop a rule, and undoing a timezone declaration must restore the prior
+resolution rather than leave rules stale. An imported package keeps an unbound
+finding unbound instead of adopting the importing profile's current policy.
+
+**Diagnostics.** A diagnostic export must carry enough to review a suppression
+decision on another machine and nothing more. It **may** include rule name,
+recorded rationale, lifecycle state, resolution state and its explanation,
+bounded matching counts, policy and template revisions, finding binding state,
+and payload-free audit metadata. It **must not** include representative rows,
+raw or redacted event payloads, hidden event content, template text, preview
+tokens, absolute paths, or any other private data. The reviewer learns what was
+hidden and why it was hidden — never what the hidden events said.
 
 ### Startup and paging critical path
 

@@ -33,11 +33,17 @@ import {
   hostLogEditInvestigationNote,
   hostLogFacets,
   hostLogLoadActiveInvestigation,
+  hostLogSuppressionDiagnosticSnapshot,
   hostLogListBookmarks,
   hostLogLoadSuppression,
+  hostLogSuppressionLens,
   hostLogMutateTemplateSuppressionRule,
+  hostLogApplyInvestigationFindingView,
+  hostLogAcceptProposedFinding,
+  hostLogDismissProposedFinding,
   hostLogPreviewInvestigationEvidence,
   hostLogPreviewInvestigationFindingView,
+  hostLogRecomputeInvestigationFindingView,
   hostLogQueryEventOriginal,
   hostLogQueryEventNeighborhood,
   hostLogQueryEventRows,
@@ -58,6 +64,7 @@ import {
   type InvestigationViewRecipeDto,
   type ResolvedInvestigationDocumentDto,
   type SuppressionDocumentDto,
+  type TrustedSuppressionLensDto,
   type SuppressionMutationResultDto,
   type SuppressionRuleMutation,
   type TimeQuality,
@@ -67,10 +74,16 @@ import {
   portableDiagnosticOsHint,
   type LogDiagnosticActiveViewInput,
   type LogDiagnosticEnvironment,
+  type LogDiagnosticSuppressionPolicyInput,
 } from "../../lib/logDiagnosticReport";
 import { applyLogNav, type LogNavAction } from "../../lib/logExplorer/logNav";
 import { governedIdToSafeInteger } from "../../lib/citations";
 import { subscribeLogExplorerNavTargets } from "../../lib/engine/platform";
+import { refreshAfterTimeRevision } from "../../lib/logExplorer/timeRevisionRefresh";
+import {
+  formatPolicyBindingStatus,
+  policyBindingBlocksApply,
+} from "../../lib/logExplorer/policyBinding";
 import {
   clampLaneCount,
   computeGaps,
@@ -697,6 +710,26 @@ function investigationEvidenceViews(
 function investigationFindingViews(
   resolved: ResolvedInvestigationDocumentDto | null,
 ): FindingItemView[] {
+  // Prefer host-resolved findings (policy binding comparison). Fall back to
+  // durable document findings without status when the host omitted them.
+  const resolvedFindings = resolved?.findings;
+  if (resolvedFindings && resolvedFindings.length > 0) {
+    return resolvedFindings.map(({ item, policyBinding }) => {
+      const status = policyBinding.status;
+      return {
+        id: item.id,
+        kind: item.kind,
+        lifecycle: item.lifecycle,
+        title: item.title,
+        whyItMatters: item.whyItMatters,
+        evidenceIds: item.evidenceIds,
+        viewRecipe: item.viewRecipe ?? null,
+        provenanceLabel: "Authored manually",
+        policyStatus: status,
+        policyStatusLabel: formatPolicyBindingStatus(status),
+      };
+    });
+  }
   return (resolved?.document.findings ?? []).map((item) => ({
     id: item.id,
     kind: item.kind,
@@ -706,6 +739,10 @@ function investigationFindingViews(
     evidenceIds: item.evidenceIds,
     viewRecipe: item.viewRecipe ?? null,
     provenanceLabel: "Authored manually",
+    policyStatus: item.policyBinding ? null : "unbound_legacy",
+    policyStatusLabel: item.policyBinding
+      ? null
+      : formatPolicyBindingStatus("unbound_legacy"),
   }));
 }
 
@@ -720,6 +757,10 @@ function investigationNoteViews(
     findingIds: item.findingIds ?? [],
     provenanceLabel: "Authored manually",
   }));
+}
+
+function currentNoiseLens(lensSuspended: boolean): "active" | "suspended" {
+  return lensSuspended ? "suspended" : "active";
 }
 
 function investigationBookmarkViews(
@@ -755,6 +796,15 @@ export function LogExplorer({ corpusId }: Props) {
   const [suppressedEventCount, setSuppressedEventCount] = useState<
     number | null
   >(null);
+  /**
+   * The exclusion set the host says it will honour (#819).
+   *
+   * The renderer no longer derives this from the policy document: the host
+   * re-derives and intersects on every query regardless, so deriving it here
+   * too would only risk disclosing a different number than is enforced.
+   */
+  const [suppressionLens, setSuppressionLens] =
+    useState<TrustedSuppressionLensDto | null>(null);
   /** Suspend lens only — durable #671 rules stay enabled (#817). */
   const [lensSuspended, setLensSuspended] = useState(() =>
     readNoiseLensSuspended(corpusId),
@@ -918,6 +968,11 @@ export function LogExplorer({ corpusId }: Props) {
     useState<EvidencePreviewView | null>(null);
   const [findingViewPreview, setFindingViewPreview] =
     useState<FindingViewPreviewView | null>(null);
+  /** Non-mutating Preview of an agent/detector proposal (#646). */
+  const [proposalPreview, setProposalPreview] = useState<{
+    proposalId: string;
+    changes: string[];
+  } | null>(null);
   const [saveEvidenceOpen, setSaveEvidenceOpen] = useState(false);
   const [investigationAddMenuOpen, setInvestigationAddMenuOpen] =
     useState(false);
@@ -979,6 +1034,11 @@ export function LogExplorer({ corpusId }: Props) {
   const [pendingViewApply, setPendingViewApply] = useState<{
     recipe: InvestigationViewRecipeDto;
     status: string;
+    /**
+     * True when this apply *is* the Restore. The restore point is consumed only
+     * after positioning succeeds, so a failure keeps the one-step return (#656).
+     */
+    consumesRestorePoint?: boolean;
   } | null>(null);
   const [bookmarkRevealState, setBookmarkRevealState] = useState<
     "idle" | "visible" | "revealed" | "missing"
@@ -1060,6 +1120,8 @@ export function LogExplorer({ corpusId }: Props) {
   const [diagnostic, setDiagnostic] = useState<{
     environment: LogDiagnosticEnvironment;
     activeView: LogDiagnosticActiveViewInput;
+    /** Host-derived (#819); null when the trusted read failed. */
+    suppressionPolicy: LogDiagnosticSuppressionPolicyInput | null;
   } | null>(null);
   // Resizable columns (px)
   const [filterW, setFilterW] = useState(220);
@@ -1115,16 +1177,16 @@ export function LogExplorer({ corpusId }: Props) {
     (summary?.embedding?.embeddedTemplates ?? summary?.stats?.embedded ?? 0) >
     0;
   const findBusy = findSearching || findLocating;
+  // Fail-closed product lens (#819): only enabled rules the host resolved as
+  // matches_current may exclude events. Stale/fingerprint/invalid/conflicting
+  // rules remain visible but contribute zero exclusions.
+  //
+  // The host is the authority here. It re-derives this set and intersects the
+  // request on every query, so what the renderer sends can only ever hide less
+  // — never more — than the durable policy allows.
   const enabledSuppressionTemplateIds = useMemo(
-    () =>
-      [
-        ...new Set(
-          (suppressionDocument?.rules ?? [])
-            .filter((rule) => rule.state === "enabled")
-            .map((rule) => rule.predicate.templateId),
-        ),
-      ].sort((a, b) => a - b),
-    [suppressionDocument],
+    () => suppressionLens?.templateIds ?? [],
+    [suppressionLens],
   );
   const activeSuppressionTemplateIds = useMemo(
     () =>
@@ -1599,14 +1661,13 @@ export function LogExplorer({ corpusId }: Props) {
         setSuppressedEventCount(null);
       }
       try {
-        const document = await hostLogLoadSuppression(corpusId);
-        const enabledTemplateIds = [
-          ...new Set(
-            document.rules
-              .filter((rule) => rule.state === "enabled")
-              .map((rule) => rule.predicate.templateId),
-          ),
-        ].sort((a, b) => a - b);
+        const [document, lens] = await Promise.all([
+          hostLogLoadSuppression(corpusId),
+          hostLogSuppressionLens(corpusId),
+        ]);
+        // The disclosed count must describe the set the host actually
+        // enforces, so it is taken from the host lens rather than re-derived.
+        const enabledTemplateIds = lens.templateIds;
         const hidden =
           enabledTemplateIds.length === 0
             ? 0
@@ -1620,14 +1681,25 @@ export function LogExplorer({ corpusId }: Props) {
               ).totalMatched;
         if (requestId !== suppressionRequestRef.current) return document;
         setSuppressionDocument(document);
+        setSuppressionLens(lens);
         setSuppressedEventCount(hidden);
-        setSuppressionLoadState("ready");
+        if (lens.state === "unavailable") {
+          // The rules are readable but the lens is not, so counts are unknown.
+          // Nothing is being hidden; say so rather than imply a live policy.
+          setSuppressionLoadState("error");
+          setSuppressionLoadError(
+            lens.reason ?? "suppression lens unavailable; no events are hidden",
+          );
+        } else {
+          setSuppressionLoadState("ready");
+        }
         return document;
       } catch (policyError) {
         if (requestId === suppressionRequestRef.current) {
           setSuppressionLoadState("error");
           setSuppressionLoadError(String(policyError));
           setSuppressionDocument(null);
+          setSuppressionLens(null);
           setSuppressedEventCount(null);
         }
         throw policyError;
@@ -1674,6 +1746,36 @@ export function LogExplorer({ corpusId }: Props) {
     ],
   );
 
+  /**
+   * Host-resolved findings include policyBinding against the caller's lens.
+   * Always re-fetch after Suspend all / Resume so statuses stay honest (#819).
+   */
+  const reloadActiveInvestigation = useCallback(
+    (noiseLens: "active" | "suspended" = currentNoiseLens(lensSuspended)) => {
+      const investigationRequest = ++investigationLoadRequestRef.current;
+      setInvestigationLoadState("loading");
+      setInvestigationError(null);
+      return hostLogLoadActiveInvestigation(corpusId, noiseLens)
+        .then((activeInvestigation) => {
+          if (investigationRequest !== investigationLoadRequestRef.current) {
+            return;
+          }
+          setInvestigation(activeInvestigation);
+          setInvestigationLoadState("ready");
+          // A lens/policy change invalidates any open saved-view preview.
+          setFindingViewPreview(null);
+        })
+        .catch((investigationLoadError) => {
+          if (investigationRequest !== investigationLoadRequestRef.current) {
+            return;
+          }
+          setInvestigationLoadState("error");
+          setInvestigationError(String(investigationLoadError));
+        });
+    },
+    [corpusId, lensSuspended],
+  );
+
   const loadOptionalMetadata = useCallback(() => {
     if (!bookmarkMetadataStartedRef.current) {
       bookmarkMetadataStartedRef.current = true;
@@ -1704,26 +1806,9 @@ export function LogExplorer({ corpusId }: Props) {
 
     if (!investigationMetadataStartedRef.current) {
       investigationMetadataStartedRef.current = true;
-      const investigationRequest = ++investigationLoadRequestRef.current;
-      setInvestigationLoadState("loading");
-      setInvestigationError(null);
-      void hostLogLoadActiveInvestigation(corpusId)
-        .then((activeInvestigation) => {
-          if (investigationRequest !== investigationLoadRequestRef.current) {
-            return;
-          }
-          setInvestigation(activeInvestigation);
-          setInvestigationLoadState("ready");
-        })
-        .catch((investigationLoadError) => {
-          if (investigationRequest !== investigationLoadRequestRef.current) {
-            return;
-          }
-          setInvestigationLoadState("error");
-          setInvestigationError(String(investigationLoadError));
-        });
+      void reloadActiveInvestigation(currentNoiseLens(lensSuspended));
     }
-  }, [corpusId]);
+  }, [corpusId, lensSuspended, reloadActiveInvestigation]);
 
   const loadFacets = useCallback(async () => {
     if (suppressionLoadState !== "ready") return;
@@ -2142,6 +2227,7 @@ export function LogExplorer({ corpusId }: Props) {
     setInvestigationError(null);
     setEvidencePreview(null);
     setFindingViewPreview(null);
+    setProposalPreview(null);
     return () => {
       bookmarkLifecycleRef.current += 1;
       summaryRequestRef.current += 1;
@@ -3130,8 +3216,18 @@ export function LogExplorer({ corpusId }: Props) {
     } catch {
       /* Keep an honest unknown identity if host branding is unavailable. */
     }
+    // #819 — the suppression section of a diagnostic must be authored by the
+    // trusted host against the corpus that is actually open. A failed read
+    // omits the section entirely rather than substituting renderer state.
+    let suppressionPolicy: LogDiagnosticSuppressionPolicyInput | null = null;
+    try {
+      suppressionPolicy = await hostLogSuppressionDiagnosticSnapshot(corpusId);
+    } catch {
+      /* Omit the section rather than export unverified policy evidence. */
+    }
     setDiagnostic({
       environment,
+      suppressionPolicy,
       activeView: {
         breakpoint,
         density,
@@ -3297,6 +3393,7 @@ export function LogExplorer({ corpusId }: Props) {
         expectedRevision: investigation?.document.revision ?? null,
         title,
         eventRefs: selection.eventRefs,
+        noiseLens: currentNoiseLens(lensSuspended),
       });
       setInvestigation(updated);
       setInvestigationLoadState("ready");
@@ -3321,7 +3418,7 @@ export function LogExplorer({ corpusId }: Props) {
       setInvestigationError(message);
       if (message.toLowerCase().includes("stale investigation revision")) {
         try {
-          setInvestigation(await hostLogLoadActiveInvestigation(corpusId));
+          setInvestigation(await hostLogLoadActiveInvestigation(corpusId, currentNoiseLens(lensSuspended)));
         } catch {
           // Keep the original optimistic-concurrency error visible.
         }
@@ -3386,10 +3483,12 @@ export function LogExplorer({ corpusId }: Props) {
               kind: draft.kind,
               whyItMatters: draft.body,
               viewRecipe,
+              noiseLens: currentNoiseLens(lensSuspended),
             })
           : await hostLogAddInvestigationNote(corpusId, {
               ...common,
               body: draft.body,
+              noiseLens: currentNoiseLens(lensSuspended),
             });
       setInvestigation(updated);
       setInvestigationLoadState("ready");
@@ -3417,7 +3516,7 @@ export function LogExplorer({ corpusId }: Props) {
       setInvestigationError(message);
       if (message.toLowerCase().includes("stale investigation revision")) {
         try {
-          setInvestigation(await hostLogLoadActiveInvestigation(corpusId));
+          setInvestigation(await hostLogLoadActiveInvestigation(corpusId, currentNoiseLens(lensSuspended)));
         } catch {
           // Keep the original optimistic-concurrency error visible.
         }
@@ -3459,6 +3558,7 @@ export function LogExplorer({ corpusId }: Props) {
               lifecycle: draft.lifecycle,
               title: draft.title,
               whyItMatters: draft.body,
+              noiseLens: currentNoiseLens(lensSuspended),
             })
           : draft.type === "note" && editInvestigationItem.type === "note"
             ? await hostLogEditInvestigationNote(corpusId, {
@@ -3469,6 +3569,7 @@ export function LogExplorer({ corpusId }: Props) {
                 body: draft.body,
                 evidenceIds: editInvestigationItem.item.evidenceIds,
                 findingIds: editInvestigationItem.item.findingIds,
+                noiseLens: currentNoiseLens(lensSuspended),
               })
             : null;
       if (!updated) {
@@ -3483,7 +3584,7 @@ export function LogExplorer({ corpusId }: Props) {
       setInvestigationError(message);
       if (message.toLowerCase().includes("stale investigation revision")) {
         try {
-          setInvestigation(await hostLogLoadActiveInvestigation(corpusId));
+          setInvestigation(await hostLogLoadActiveInvestigation(corpusId, currentNoiseLens(lensSuspended)));
         } catch {
           // Keep the original optimistic-concurrency error visible.
         }
@@ -3589,6 +3690,20 @@ export function LogExplorer({ corpusId }: Props) {
             "Selection cleared — event no longer visible under filters/lanes",
           );
         }
+      } else if (!suppressSelectionClearStatusRef.current) {
+        // A partial prune used to be silent, so Save evidence / Create finding
+        // could persist fewer events than the person selected: by then
+        // selectedEvidenceRefs() sees only residents and its all-or-nothing
+        // guard never fires. Report the exact loss (#656).
+        // Cause-neutral on purpose: this effect only observes that a seq left
+        // `laneEvents`. It cannot distinguish a filter/lane change from the
+        // resident window sliding during ordinary paging, and in the paging
+        // case the events still match the filters — so naming a cause would be
+        // wrong exactly where the loss is most surprising.
+        setStatus(
+          `Selection reduced to ${next.size} of ${prev.size} events — ` +
+            "the others are no longer loaded in the current view",
+        );
       }
       return next;
     });
@@ -3846,6 +3961,7 @@ export function LogExplorer({ corpusId }: Props) {
   const scheduleInvestigationViewApply = (
     recipe: InvestigationViewRecipeDto,
     status: string,
+    options?: { consumesRestorePoint?: boolean },
   ) => {
     const nextFilters = recipeFilters(recipe);
     findRequestRef.current += 1;
@@ -3901,7 +4017,11 @@ export function LogExplorer({ corpusId }: Props) {
     setFindMatchMode(recipe.find?.matchMode ?? "literal");
     setFindCaseSensitive(recipe.find?.caseSensitive ?? false);
     setFindUseSemantic(recipe.find?.semantic ?? false);
-    setPendingViewApply({ recipe, status });
+    setPendingViewApply({
+      recipe,
+      status,
+      consumesRestorePoint: options?.consumesRestorePoint ?? false,
+    });
     setStatus(`${status} · positioning…`);
   };
 
@@ -3982,6 +4102,10 @@ export function LogExplorer({ corpusId }: Props) {
       setSelected(new Set(recipe.selection.map((eventRef) => eventRef.seq)));
       setHighlight(new Set(recipe.highlights.map((eventRef) => eventRef.seq)));
       setFocusLaneId(recipe.focusedLaneId);
+      if (pendingViewApply.consumesRestorePoint) {
+        setRevealRestore(null);
+        setBookmarkRevealState("idle");
+      }
       setPendingViewApply(null);
       setStatus(status);
     };
@@ -3990,6 +4114,12 @@ export function LogExplorer({ corpusId }: Props) {
       setPendingViewApply(null);
       setInvestigationError(
         `Saved view could not be applied: ${String(applyError)}`,
+      );
+      // The status still read "<status> · positioning…", whose prefix claims the
+      // view was applied or restored. Say plainly that it was not, and that the
+      // prior view is still one step away (#656).
+      setStatus(
+        "Saved view could not be positioned · Restore prior view is still available",
       );
     });
     return () => {
@@ -4006,12 +4136,13 @@ export function LogExplorer({ corpusId }: Props) {
       suppressSelectionClearStatusRef.current = true;
       setRevealSuppressedEvidence(false);
       setSuppressedBookmarkOffer(null);
+      // The restore point is released by the positioning effect on success, so
+      // a host failure mid-restore leaves the one-step return available (#656).
       scheduleInvestigationViewApply(
         revealRestore,
         "Restored prior Explorer view",
+        { consumesRestorePoint: true },
       );
-      setRevealRestore(null);
-      setBookmarkRevealState("idle");
     }
   };
 
@@ -4031,19 +4162,73 @@ export function LogExplorer({ corpusId }: Props) {
         corpusId,
         investigation.document.id,
         item.id,
+        currentNoiseLens(lensSuspended),
       );
+      const policyStatus = preview.policyBinding.status;
       setFindingViewPreview({
         findingId: item.id,
         recipe: preview.recipe,
         changes: describeInvestigationViewDiff(current, preview.recipe),
         missingCount: preview.missingCount,
         staleCount: preview.staleCount,
+        policyStatus,
+        policyStatusLabel: formatPolicyBindingStatus(policyStatus),
+        policyBlocksApply: policyBindingBlocksApply(policyStatus),
       });
       setStatus("Previewed saved Explorer view · current view unchanged");
     } catch (previewError) {
       setInvestigationError(String(previewError));
     } finally {
       setInvestigationBusy(false);
+    }
+  };
+
+  const recomputeInvestigationFindingView = async (item: FindingItemView) => {
+    if (!investigation) return;
+    const current = captureCurrentInvestigationView();
+    if (!current) {
+      setInvestigationError(
+        "The current Explorer view cannot be recomputed exactly. Rerun Find or clear the stale highlight first.",
+      );
+      return;
+    }
+    const request = ++investigationLoadRequestRef.current;
+    investigationMetadataStartedRef.current = true;
+    setInvestigationBusy(true);
+    setInvestigationError(null);
+    try {
+      const updated = await hostLogRecomputeInvestigationFindingView(corpusId, {
+        investigationId: investigation.document.id,
+        expectedRevision: investigation.document.revision,
+        findingId: item.id,
+        viewRecipe: current,
+        noiseLens: currentNoiseLens(lensSuspended),
+      });
+      if (request !== investigationLoadRequestRef.current) return;
+      setInvestigation(updated);
+      setInvestigationLoadState("ready");
+      setFindingViewPreview(null);
+      setStatus("Recomputed saved Explorer view under the current noise policy");
+    } catch (recomputeError) {
+      if (request !== investigationLoadRequestRef.current) return;
+      const message = String(recomputeError);
+      setInvestigationError(message);
+      if (message.toLowerCase().includes("stale investigation revision")) {
+        try {
+          setInvestigation(
+            await hostLogLoadActiveInvestigation(
+              corpusId,
+              currentNoiseLens(lensSuspended),
+            ),
+          );
+        } catch {
+          // Keep the original concurrency error visible.
+        }
+      }
+    } finally {
+      if (request === investigationLoadRequestRef.current) {
+        setInvestigationBusy(false);
+      }
     }
   };
 
@@ -4061,21 +4246,33 @@ export function LogExplorer({ corpusId }: Props) {
     setInvestigationBusy(true);
     setInvestigationError(null);
     try {
-      const fresh = await hostLogPreviewInvestigationFindingView(
+      // Trusted-host Apply gate — fails closed on missing/stale exact refs.
+      const fresh = await hostLogApplyInvestigationFindingView(
         corpusId,
         investigation.document.id,
         preview.findingId,
+        currentNoiseLens(lensSuspended),
       );
-      if (fresh.missingCount > 0 || fresh.staleCount > 0) {
+      const policyStatus = fresh.policyBinding.status;
+      if (
+        fresh.missingCount > 0 ||
+        fresh.staleCount > 0 ||
+        policyBindingBlocksApply(policyStatus)
+      ) {
         setFindingViewPreview({
           findingId: preview.findingId,
           recipe: fresh.recipe,
           changes: preview.changes,
           missingCount: fresh.missingCount,
           staleCount: fresh.staleCount,
+          policyStatus,
+          policyStatusLabel: formatPolicyBindingStatus(policyStatus),
+          policyBlocksApply: policyBindingBlocksApply(policyStatus),
         });
         setInvestigationError(
-          "Apply blocked because the saved view no longer resolves to exact authoritative event identities.",
+          policyBindingBlocksApply(policyStatus)
+            ? `${formatPolicyBindingStatus(policyStatus)}. Review or recompute under the current noise policy before applying.`
+            : "Apply blocked because the saved view no longer resolves to exact authoritative event identities.",
         );
         return;
       }
@@ -4086,7 +4283,25 @@ export function LogExplorer({ corpusId }: Props) {
         "Applied saved Explorer view · Restore prior view is available",
       );
     } catch (applyError) {
-      setInvestigationError(String(applyError));
+      const message = String(applyError);
+      setInvestigationError(message);
+      // Refresh non-mutating preview counts so the blocked Apply UI stays honest.
+      try {
+        const status = await hostLogPreviewInvestigationFindingView(
+          corpusId,
+          investigation.document.id,
+          preview.findingId,
+        );
+        setFindingViewPreview({
+          findingId: preview.findingId,
+          recipe: status.recipe,
+          changes: preview.changes,
+          missingCount: status.missingCount,
+          staleCount: status.staleCount,
+        });
+      } catch {
+        /* keep prior preview */
+      }
     } finally {
       setInvestigationBusy(false);
     }
@@ -4166,7 +4381,7 @@ export function LogExplorer({ corpusId }: Props) {
         setInvestigationError(
           "Reveal was blocked because the authoritative evidence changed after the rail loaded",
         );
-        setInvestigation(await hostLogLoadActiveInvestigation(corpusId));
+        setInvestigation(await hostLogLoadActiveInvestigation(corpusId, currentNoiseLens(lensSuspended)));
         return;
       }
       const eventRefs = current.item.eventRefs;
@@ -4276,8 +4491,12 @@ export function LogExplorer({ corpusId }: Props) {
       writeNoiseLensSuspended(corpusId, suspended);
       setLensSuspended(suspended);
       // loadEvents / facets re-run when activeSuppressionTemplateIds changes.
+      // Findings must re-resolve against the new active|suspended lens (#819).
+      if (investigationMetadataStartedRef.current) {
+        void reloadActiveInvestigation(currentNoiseLens(suspended));
+      }
     },
-    [corpusId],
+    [corpusId, reloadActiveInvestigation],
   );
 
   const laneSourceFilter = (laneId: string) => {
@@ -4804,13 +5023,121 @@ export function LogExplorer({ corpusId }: Props) {
   const columnGridTemplate = `${colWidths[0]}rem ${colWidths[1]}rem minmax(${colWidths[2]}rem, ${colWidths[2] + 2}rem) minmax(${colWidths[3]}rem, 1fr)`;
   const evidenceItems = investigationEvidenceViews(investigation);
   const findingItems = investigationFindingViews(investigation);
+  const proposedFindingItems = (investigation?.document.proposedFindings ?? [])
+    .filter((p) => p.status === "proposed")
+    .map((p) => {
+      const supporting = (p.evidence ?? []).filter(
+        (e) => e.role === "supporting",
+      ).length;
+      const contradicting = (p.evidence ?? []).filter(
+        (e) => e.role === "contradicting",
+      ).length;
+      return {
+        id: p.id,
+        kind: p.kind,
+        title: p.title,
+        whyItMatters: p.whyItMatters,
+        status: p.status as "proposed",
+        dismissReason: p.dismissReason ?? null,
+        caveats: p.caveats ?? null,
+        evidenceCount: (p.evidence ?? []).length,
+        supportingCount: supporting,
+        contradictingCount: contradicting,
+        viewRecipe: p.viewRecipe ?? null,
+      };
+    });
   const noteItems = investigationNoteViews(investigation);
   const bookmarkItems = investigationBookmarkViews(bookmarks);
   const investigationMaterialCount =
     evidenceItems.length +
     findingItems.length +
+    proposedFindingItems.length +
     noteItems.length +
     bookmarkItems.length;
+
+  const acceptProposedFinding = async (input: {
+    proposalId: string;
+    edited: boolean;
+    title?: string;
+    whyItMatters?: string;
+    kind?: "observation" | "inference" | "hypothesis";
+  }) => {
+    if (!investigation) return;
+    setInvestigationBusy(true);
+    setInvestigationError(null);
+    try {
+      const updated = await hostLogAcceptProposedFinding(
+        corpusId,
+        investigation.document.id,
+        {
+          proposalId: input.proposalId,
+          expectedRevision: investigation.document.revision,
+          edited: input.edited,
+          title: input.title,
+          whyItMatters: input.whyItMatters,
+          kind: input.kind,
+        },
+      );
+      setInvestigation(updated);
+      setProposalPreview(null);
+      setStatus(
+        input.edited
+          ? "Accepted proposed finding with edits · now a human finding"
+          : "Accepted proposed finding · now a human finding",
+      );
+    } catch (err) {
+      setInvestigationError(String(err));
+    } finally {
+      setInvestigationBusy(false);
+    }
+  };
+
+  /** Non-mutating Preview for a Proposed finding — never schedules view Apply. */
+  const previewProposedFinding = (item: {
+    id: string;
+    viewRecipe?: InvestigationViewRecipeDto | null;
+  }) => {
+    const current = captureCurrentInvestigationView();
+    const changes =
+      item.viewRecipe && current
+        ? describeInvestigationViewDiff(current, item.viewRecipe)
+        : item.viewRecipe
+          ? ["Saved Explorer view recipe is attached (current view not comparable)"]
+          : ["No Explorer view recipe on this proposal"];
+    setProposalPreview({ proposalId: item.id, changes });
+    setFindingViewPreview(null);
+    setStatus("Previewed proposed finding · current Explorer unchanged");
+  };
+
+  const dismissProposedFinding = async (proposalId: string) => {
+    if (!investigation) return;
+    const reason =
+      window.prompt("Dismiss reason (required)")?.trim() ?? "";
+    if (!reason) {
+      setInvestigationError("Dismiss requires a reason");
+      return;
+    }
+    setInvestigationBusy(true);
+    setInvestigationError(null);
+    try {
+      const updated = await hostLogDismissProposedFinding(
+        corpusId,
+        investigation.document.id,
+        {
+          proposalId,
+          expectedRevision: investigation.document.revision,
+          reason,
+        },
+      );
+      setInvestigation(updated);
+      setProposalPreview(null);
+      setStatus("Dismissed proposed finding");
+    } catch (err) {
+      setInvestigationError(String(err));
+    } finally {
+      setInvestigationBusy(false);
+    }
+  };
   const editEvidenceRefs = editInvestigationItem
     ? editInvestigationItem.item.evidenceIds.flatMap(
         (evidenceId) =>
@@ -7077,10 +7404,12 @@ export function LogExplorer({ corpusId }: Props) {
           modeControl={investigationModeControl}
           items={evidenceItems}
           findings={findingItems}
+          proposedFindings={proposedFindingItems}
           notes={noteItems}
           bookmarks={bookmarkItems}
           preview={evidencePreview}
           viewPreview={findingViewPreview}
+          proposalPreview={proposalPreview}
           busy={investigationBusy || investigationLoadState === "loading"}
           error={investigationError}
           compactLayout={breakpoint === "narrow"}
@@ -7094,6 +7423,9 @@ export function LogExplorer({ corpusId }: Props) {
           onApplyFindingView={(preview) =>
             void applyInvestigationFindingView(preview)
           }
+          onRecomputeFindingView={(item) =>
+            void recomputeInvestigationFindingView(item)
+          }
           onEditFinding={openEditFinding}
           onEditNote={openEditNote}
           onActivateBookmark={(item) => {
@@ -7102,8 +7434,16 @@ export function LogExplorer({ corpusId }: Props) {
             );
             if (bookmark) void activateBookmark(bookmark);
           }}
+          onAcceptProposedFinding={(input) =>
+            void acceptProposedFinding(input)
+          }
+          onDismissProposedFinding={(id) => void dismissProposedFinding(id)}
+          onPreviewProposedFinding={(item) => previewProposedFinding(item)}
           onClearPreview={() => setEvidencePreview(null)}
-          onClearViewPreview={() => setFindingViewPreview(null)}
+          onClearViewPreview={() => {
+            setFindingViewPreview(null);
+            setProposalPreview(null);
+          }}
           onToggleCollapsed={() => setChatCollapsed((collapsed) => !collapsed)}
           onRequestClose={() => {
             setNarrowChatOpen(false);
@@ -7209,6 +7549,7 @@ export function LogExplorer({ corpusId }: Props) {
         <LogDiagnosticDialog
           corpus={summary}
           activeView={diagnostic.activeView}
+          suppressionPolicy={diagnostic.suppressionPolicy}
           environment={diagnostic.environment}
           currentStatus={null}
           onDismiss={closeDiagnostics}
@@ -7221,8 +7562,20 @@ export function LogExplorer({ corpusId }: Props) {
           triggerRef={timeResolutionTriggerRef}
           onDismiss={() => setTimeResolutionOpen(false)}
           onChanged={async () => {
-            await refreshSummary();
-            await loadEvents();
+            // #819 — a timezone apply/undo publishes a new corpus revision, so
+            // every downstream snapshot must be re-derived before any query
+            // reads exclusions. The order is the contract and is asserted by
+            // lib/logExplorer/timeRevisionRefresh.test.ts.
+            await refreshAfterTimeRevision({
+              invalidateInFlight: () => {
+                eventsRequestRef.current += 1;
+              },
+              refreshSummary,
+              refreshSuppressionPolicy,
+              reloadActiveInvestigation,
+              loadFacets,
+              loadEvents,
+            });
           }}
         />
       ) : null}

@@ -10,7 +10,8 @@ use crate::error::{CoreError, CoreResult};
 use crate::redact::redact_candidate;
 use duckdb::params;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -43,6 +44,7 @@ const MAX_TEMPLATE_FINGERPRINT_BYTES: usize = 256;
 const MAX_SOURCE_IDENTITY_BYTES: usize = 1_024;
 const MAX_LEVEL_BYTES: usize = 64;
 const MAX_REDACTED_EXCERPT_BYTES: usize = 1_024;
+const MAX_RESOLUTION_ATTEMPTS: usize = 3;
 
 static SUPPRESSION_MUTATION_LOCK: Mutex<()> = Mutex::new(());
 
@@ -83,6 +85,56 @@ pub struct SuppressionTemplatePredicate {
     pub template_id: u64,
     /// Trusted-core fingerprint of the exact template definition.
     pub template_fingerprint: String,
+}
+
+/// Trusted-core resolution of one durable rule against current template state.
+///
+/// This status is computed when the policy is loaded and is never persisted in
+/// `suppression.json`. The durable rule remains the historical source of truth.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SuppressionRuleResolutionKind {
+    /// The enabled rule's id and fingerprint match the current corpus.
+    MatchesCurrent,
+    /// The durable target id no longer exists.
+    StaleTargetMissing,
+    /// The target id exists but now identifies a different template.
+    StaleFingerprintChanged,
+    /// The persisted predicate is not structurally valid.
+    InvalidPredicate,
+    /// More than one enabled rule claims the same numeric template id.
+    ConflictingPredicate,
+    /// The durable rule is disabled or removed and does not participate.
+    Inactive,
+}
+
+/// Payload-free explanation of whether one rule can affect the current lens.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SuppressionRuleResolution {
+    /// Machine-readable status for UI and diagnostics.
+    pub kind: SuppressionRuleResolutionKind,
+    /// Explicit fail-closed result. `false` only for `matches_current`.
+    pub matches_nothing: bool,
+    /// Actionable, payload-free explanation.
+    pub explanation: String,
+}
+
+/// Payload-free identity of the exact effective suppression policy.
+///
+/// The durable sidecar revision alone is insufficient after re-analysis:
+/// template resolution can change while `suppression.json` remains byte-for-byte
+/// unchanged. Findings bind to all three fields so a same-revision policy can
+/// never silently reinterpret evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SuppressionPolicyBindingSnapshot {
+    /// Durable sidecar mutation revision.
+    pub suppression_policy_revision: u64,
+    /// Template-analysis revision against which every rule was resolved.
+    pub resolved_template_revision: u64,
+    /// SHA-256 of the canonical payload-free effective rule/resolution set.
+    pub effective_policy_sha256: String,
 }
 
 /// One bounded level-distribution bucket in a preview.
@@ -205,6 +257,12 @@ pub struct SuppressionRule {
     pub created_at: i64,
     /// Last mutation time in Unix seconds.
     pub updated_at: i64,
+    /// Ephemeral trusted-core resolution against the currently open corpus.
+    ///
+    /// Omitted from the durable sidecar; populated by
+    /// [`load_suppression_document`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<SuppressionRuleResolution>,
 }
 
 /// Audited suppression operation.
@@ -262,6 +320,12 @@ pub struct SuppressionDocument {
     /// Bounded append-only audit history.
     #[serde(default)]
     pub audit: Vec<SuppressionAuditEntry>,
+    /// Ephemeral template revision against which rule resolutions were made.
+    ///
+    /// Omitted from the durable sidecar; callers can use it to reject a stale
+    /// concurrently returned snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_template_revision: Option<u64>,
 }
 
 impl SuppressionDocument {
@@ -271,12 +335,34 @@ impl SuppressionDocument {
     /// bound is enforced here; durable rule storage may be larger, but active
     /// rules are never silently truncated.
     pub fn enabled_template_ids(&self) -> CoreResult<Vec<u64>> {
-        let mut template_ids = self
+        let mut template_ids = Vec::new();
+        for rule in self
             .rules
             .iter()
             .filter(|rule| rule.state == SuppressionRuleState::Enabled)
-            .map(|rule| rule.predicate.template_id)
-            .collect::<Vec<_>>();
+        {
+            let resolution = rule.resolution.as_ref().ok_or_else(|| {
+                CoreError::Message(format!(
+                    "suppression_rule_unresolved: enabled rule {} has not been resolved against the current corpus; reload the suppression policy before applying it",
+                    rule.id
+                ))
+            })?;
+            match resolution.kind {
+                SuppressionRuleResolutionKind::MatchesCurrent => {
+                    template_ids.push(rule.predicate.template_id);
+                }
+                SuppressionRuleResolutionKind::StaleTargetMissing
+                | SuppressionRuleResolutionKind::StaleFingerprintChanged
+                | SuppressionRuleResolutionKind::InvalidPredicate
+                | SuppressionRuleResolutionKind::ConflictingPredicate => {}
+                SuppressionRuleResolutionKind::Inactive => {
+                    return Err(CoreError::Message(format!(
+                        "suppression_rule_resolution_invalid: enabled rule {} was resolved as inactive; reload the suppression policy",
+                        rule.id
+                    )));
+                }
+            }
+        }
         template_ids.sort_unstable();
         template_ids.dedup();
         if template_ids.len() > super::query::MAX_EXCLUDED_TEMPLATE_IDS {
@@ -288,6 +374,124 @@ impl SuppressionDocument {
         }
         Ok(template_ids)
     }
+
+    /// Return exclusions only if this resolved snapshot still belongs to the
+    /// corpus's current template revision.
+    pub fn enabled_template_ids_for_corpus(&self, corpus: &LogCorpus) -> CoreResult<Vec<u64>> {
+        let resolved_revision = self.resolved_template_revision.ok_or_else(|| {
+            CoreError::Message(
+                "suppression_policy_unresolved: reload the suppression policy before applying it"
+                    .into(),
+            )
+        })?;
+        let before = corpus.template_analysis_revision();
+        if before != resolved_revision {
+            return Err(CoreError::Message(format!(
+                "suppression_policy_snapshot_stale: resolved template revision {resolved_revision}, current revision {before}; reload before applying the lens"
+            )));
+        }
+        let template_ids = self.enabled_template_ids()?;
+        let after = corpus.template_analysis_revision();
+        if after != resolved_revision {
+            return Err(CoreError::Message(format!(
+                "suppression_policy_snapshot_stale: template revision changed from {resolved_revision} to {after} while applying the lens; retry"
+            )));
+        }
+        Ok(template_ids)
+    }
+
+    /// Return an exact, payload-free binding for findings and saved views.
+    ///
+    /// This rejects a concurrently superseded resolution snapshot before
+    /// hashing it. The digest contains durable rule identity/lifecycle and the
+    /// trusted-core resolution kind, but no representatives, event payloads,
+    /// rule rationale text, or source paths.
+    pub fn policy_binding_snapshot(
+        &self,
+        corpus: &LogCorpus,
+    ) -> CoreResult<SuppressionPolicyBindingSnapshot> {
+        let resolved_template_revision = self.resolved_template_revision.ok_or_else(|| {
+            CoreError::Message(
+                "suppression_policy_unresolved: reload the suppression policy before binding a finding"
+                    .into(),
+            )
+        })?;
+        let _ = self.enabled_template_ids_for_corpus(corpus)?;
+
+        let mut rules = self.rules.iter().collect::<Vec<_>>();
+        rules.sort_by(|left, right| left.id.cmp(&right.id));
+        let mut hasher = Sha256::new();
+        update_policy_digest(&mut hasher, b"contextdesk.suppression-policy-binding.v1");
+        update_policy_digest(&mut hasher, self.corpus_id.as_bytes());
+        update_policy_digest(&mut hasher, &self.schema_version.to_le_bytes());
+        update_policy_digest(&mut hasher, &self.revision.to_le_bytes());
+        update_policy_digest(&mut hasher, &resolved_template_revision.to_le_bytes());
+        for rule in rules {
+            let resolution = rule.resolution.as_ref().ok_or_else(|| {
+                CoreError::Message(format!(
+                    "suppression_rule_unresolved: rule {} has no trusted-core resolution",
+                    rule.id
+                ))
+            })?;
+            update_policy_digest(&mut hasher, rule.id.as_bytes());
+            update_policy_digest(&mut hasher, &[suppression_origin_code(rule.origin)]);
+            update_policy_digest(&mut hasher, &[suppression_state_code(rule.state)]);
+            update_policy_digest(&mut hasher, &rule.predicate.template_id.to_le_bytes());
+            update_policy_digest(&mut hasher, rule.predicate.template_fingerprint.as_bytes());
+            update_policy_digest(&mut hasher, &[suppression_resolution_code(resolution.kind)]);
+            update_policy_digest(&mut hasher, &[u8::from(resolution.matches_nothing)]);
+        }
+        if corpus.template_analysis_revision() != resolved_template_revision {
+            return Err(CoreError::Message(
+                "suppression_policy_snapshot_stale: template revision changed while binding the policy; retry"
+                    .into(),
+            ));
+        }
+        Ok(SuppressionPolicyBindingSnapshot {
+            suppression_policy_revision: self.revision,
+            resolved_template_revision,
+            effective_policy_sha256: format!("{:x}", hasher.finalize()),
+        })
+    }
+}
+
+fn update_policy_digest(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn suppression_origin_code(origin: SuppressionRuleOrigin) -> u8 {
+    match origin {
+        SuppressionRuleOrigin::Human => 1,
+        SuppressionRuleOrigin::DetectorProposal => 2,
+        SuppressionRuleOrigin::ModelProposal => 3,
+    }
+}
+
+fn suppression_state_code(state: SuppressionRuleState) -> u8 {
+    match state {
+        SuppressionRuleState::Enabled => 1,
+        SuppressionRuleState::Disabled => 2,
+        SuppressionRuleState::Removed => 3,
+    }
+}
+
+fn suppression_resolution_code(kind: SuppressionRuleResolutionKind) -> u8 {
+    match kind {
+        SuppressionRuleResolutionKind::MatchesCurrent => 1,
+        SuppressionRuleResolutionKind::StaleTargetMissing => 2,
+        SuppressionRuleResolutionKind::StaleFingerprintChanged => 3,
+        SuppressionRuleResolutionKind::InvalidPredicate => 4,
+        SuppressionRuleResolutionKind::ConflictingPredicate => 5,
+        SuppressionRuleResolutionKind::Inactive => 6,
+    }
+}
+
+/// Capture an exact suppression-policy binding from one authoritative corpus.
+pub fn capture_suppression_policy_binding(
+    corpus: &LogCorpus,
+) -> CoreResult<SuppressionPolicyBindingSnapshot> {
+    load_suppression_document(corpus)?.policy_binding_snapshot(corpus)
 }
 
 /// Human activation request for one durable preview token.
@@ -333,9 +537,169 @@ struct ComputedPreviewFacts {
 
 /// Load the suppression sidecar, returning an empty revision-zero document when absent.
 pub fn load_suppression_document(corpus: &LogCorpus) -> CoreResult<SuppressionDocument> {
-    let document = load_document_from_root(corpus.root(), corpus.id())?;
-    validate_enabled_predicates(corpus, &document)?;
+    let mut document = load_document_from_root(corpus.root(), corpus.id())?;
+    resolve_rule_statuses(corpus, &mut document)?;
     Ok(document)
+}
+
+/// Hard bound on rules reported in one diagnostic snapshot.
+pub const MAX_DIAGNOSTIC_SUPPRESSION_RULES: usize = 64;
+/// Hard bound on audit entries reported in one diagnostic snapshot.
+pub const MAX_DIAGNOSTIC_SUPPRESSION_AUDIT: usize = 128;
+
+/// One rule as it appears in a payload-free diagnostic snapshot.
+///
+/// Deliberately excludes the template fingerprint, template text, preview
+/// tokens, and every event payload: a reviewer learns which rule was active and
+/// why it did or did not apply, never what the hidden events said.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SuppressionDiagnosticRule {
+    /// Stable durable rule identity.
+    pub rule_id: String,
+    /// Human-authored rule name.
+    pub name: String,
+    /// Human-authored reason the rule exists.
+    pub rationale: String,
+    /// Durable lifecycle state.
+    pub state: SuppressionRuleState,
+    /// Trusted-core resolution against the corpus that is actually open.
+    pub resolution_kind: SuppressionRuleResolutionKind,
+    /// Trusted-core explanation; empty when the rule resolves cleanly.
+    pub explanation: String,
+    /// Exact matching events for an applying rule; always zero otherwise.
+    pub matching_event_count: u64,
+}
+
+/// One audit entry as it appears in a diagnostic snapshot (never a token).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SuppressionDiagnosticAuditEntry {
+    /// Audited operation kind.
+    pub action: SuppressionAuditAction,
+    /// Document revision created by the operation.
+    pub revision: u64,
+    /// Rule identity when the operation targeted one.
+    pub rule_id: Option<String>,
+    /// Operation time in Unix seconds.
+    pub created_at: u64,
+}
+
+/// Trusted, bounded, payload-free suppression evidence for a diagnostic export.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SuppressionDiagnosticSnapshot {
+    /// Durable sidecar mutation revision.
+    pub policy_revision: u64,
+    /// Template-analysis revision every rule was resolved against.
+    pub resolved_template_revision: u64,
+    /// Durable rules in the `enabled` lifecycle state.
+    pub enabled_rule_count: u64,
+    /// Rules that actually contribute exclusions (`enabled` + `matches_current`).
+    pub applied_rule_count: u64,
+    /// Enabled rules that resolve to something other than `matches_current`.
+    pub stale_rule_count: u64,
+    /// Bounded per-rule evidence, capped by [`MAX_DIAGNOSTIC_SUPPRESSION_RULES`].
+    pub rules: Vec<SuppressionDiagnosticRule>,
+    /// Bounded recent audit, capped by [`MAX_DIAGNOSTIC_SUPPRESSION_AUDIT`].
+    pub audit: Vec<SuppressionDiagnosticAuditEntry>,
+    /// Rules present durably but omitted from `rules` by the cap.
+    pub omitted_rule_entries: u64,
+    /// Audit entries present durably but omitted from `audit` by the cap.
+    pub omitted_audit_entries: u64,
+}
+
+/// Derive the authoritative suppression snapshot for a diagnostic export.
+///
+/// The renderer must never author these values. Every field comes from the
+/// durable sidecar plus trusted-core resolution against the corpus that is
+/// actually open, so a stale or forged renderer snapshot cannot be exported as
+/// evidence. A non-applying rule always reports zero matches.
+pub fn suppression_diagnostic_snapshot(
+    corpus: &LogCorpus,
+) -> CoreResult<SuppressionDiagnosticSnapshot> {
+    let document = load_suppression_document(corpus)?;
+    let resolved_template_revision = document
+        .resolved_template_revision
+        .unwrap_or_else(|| corpus.template_analysis_revision());
+
+    // Exact per-template event counts, used only for applying rules.
+    let template_counts: HashMap<u64, u64> = corpus
+        .list_template_infos()
+        .into_iter()
+        .map(|info| (info.template_id, info.count))
+        .collect();
+
+    let mut enabled_rule_count = 0u64;
+    let mut applied_rule_count = 0u64;
+    let mut stale_rule_count = 0u64;
+    let mut rules = Vec::new();
+    for rule in &document.rules {
+        let enabled = rule.state == SuppressionRuleState::Enabled;
+        if enabled {
+            enabled_rule_count += 1;
+        }
+        let (kind, explanation) = match &rule.resolution {
+            Some(resolution) => (resolution.kind, resolution.explanation.clone()),
+            None => (
+                SuppressionRuleResolutionKind::Inactive,
+                "unresolved against the current corpus".to_string(),
+            ),
+        };
+        let applies = enabled && kind == SuppressionRuleResolutionKind::MatchesCurrent;
+        if applies {
+            applied_rule_count += 1;
+        } else if enabled {
+            stale_rule_count += 1;
+        }
+        // Fail closed: only an applying rule may report a nonzero count.
+        let matching_event_count = if applies {
+            template_counts
+                .get(&rule.predicate.template_id)
+                .copied()
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        if rules.len() < MAX_DIAGNOSTIC_SUPPRESSION_RULES {
+            rules.push(SuppressionDiagnosticRule {
+                rule_id: rule.id.clone(),
+                name: rule.name.clone(),
+                rationale: rule.rationale.clone(),
+                state: rule.state,
+                resolution_kind: kind,
+                explanation,
+                matching_event_count,
+            });
+        }
+    }
+    let omitted_rule_entries = document.rules.len().saturating_sub(rules.len()) as u64;
+
+    // Keep the most recent audit entries; never emit a preview token.
+    let audit_total = document.audit.len();
+    let audit_start = audit_total.saturating_sub(MAX_DIAGNOSTIC_SUPPRESSION_AUDIT);
+    let audit = document.audit[audit_start..]
+        .iter()
+        .map(|entry| SuppressionDiagnosticAuditEntry {
+            action: entry.action,
+            revision: entry.revision,
+            rule_id: entry.rule_id.clone(),
+            created_at: entry.created_at.max(0) as u64,
+        })
+        .collect::<Vec<_>>();
+    let omitted_audit_entries = audit_total.saturating_sub(audit.len()) as u64;
+
+    Ok(SuppressionDiagnosticSnapshot {
+        policy_revision: document.revision,
+        resolved_template_revision,
+        enabled_rule_count,
+        applied_rule_count,
+        stale_rule_count,
+        rules,
+        audit,
+        omitted_rule_entries,
+        omitted_audit_entries,
+    })
 }
 
 /// Persist a bounded preview against the current corpus event revision.
@@ -384,11 +748,75 @@ fn empty_document(corpus_id: &str) -> SuppressionDocument {
         rules: Vec::new(),
         previews: Vec::new(),
         audit: Vec::new(),
+        resolved_template_revision: None,
     }
 }
 
 fn sidecar_path(corpus_root: &Path) -> PathBuf {
     corpus_root.join(SIDECAR_FILENAME)
+}
+
+/// Cheap observable identity of the suppression sidecar.
+///
+/// Mutations publish by atomic rename under [`mutation_guard`], including from
+/// another process, so a rewrite lands as a new inode rather than an in-place
+/// edit. Comparing this before trusting a cached resolution therefore catches a
+/// policy change this process was never told about, at the cost of one `stat`
+/// instead of a read, parse, and resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidecarIdentity {
+    /// No sidecar: the corpus has no durable policy and hides nothing.
+    Absent,
+    /// A sidecar was present with this identity.
+    Present {
+        len: u64,
+        modified_ns: Option<i128>,
+        #[cfg(unix)]
+        device: u64,
+        #[cfg(unix)]
+        inode: u64,
+    },
+    /// The sidecar could not be measured. Callers must neither trust nor
+    /// populate a cache entry from this reading.
+    Unmeasurable,
+}
+
+impl SidecarIdentity {
+    pub(crate) fn observe(corpus_root: &Path) -> Self {
+        let metadata = match std::fs::symlink_metadata(sidecar_path(corpus_root)) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Self::Absent,
+            Err(_) => return Self::Unmeasurable,
+        };
+        if !metadata.file_type().is_file() {
+            // A symlink or directory here is refused by the loader; treat it as
+            // unmeasurable so the refusal is re-derived every time.
+            return Self::Unmeasurable;
+        }
+        let modified_ns = metadata.modified().ok().map(|modified| {
+            match modified.duration_since(std::time::UNIX_EPOCH) {
+                Ok(delta) => delta.as_nanos() as i128,
+                Err(error) => -(error.duration().as_nanos() as i128),
+            }
+        });
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Self::Present {
+                len: metadata.len(),
+                modified_ns,
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self::Present {
+                len: metadata.len(),
+                modified_ns,
+            }
+        }
+    }
 }
 
 fn lock_path(corpus_root: &Path) -> PathBuf {
@@ -518,6 +946,7 @@ fn activate_from_root(
         state: SuppressionRuleState::Enabled,
         created_at: now,
         updated_at: now,
+        resolution: None,
     };
     document.rules.push(rule.clone());
     document.previews.clear();
@@ -657,42 +1086,120 @@ fn authoritative_template_predicate(
     Ok(predicate)
 }
 
-fn validate_enabled_predicates(
-    corpus: &LogCorpus,
-    document: &SuppressionDocument,
-) -> CoreResult<()> {
-    let enabled = document
-        .rules
-        .iter()
-        .filter(|rule| rule.state == SuppressionRuleState::Enabled)
-        .collect::<Vec<_>>();
-    let template_ids = enabled
-        .iter()
-        .map(|rule| rule.predicate.template_id)
-        .collect::<Vec<_>>();
-    let current_fingerprints =
-        corpus.template_fingerprints(&template_ids, MAX_TEMPLATE_FINGERPRINT_BYTES);
-    for rule in enabled {
-        let current_fingerprint = current_fingerprints
-            .get(&rule.predicate.template_id)
-            .ok_or_else(|| {
-                CoreError::Message(format!(
-                    "suppression template {} is missing from the corpus",
-                    rule.predicate.template_id
-                ))
-            })?;
-        let current = SuppressionTemplatePredicate {
-            template_id: rule.predicate.template_id,
-            template_fingerprint: current_fingerprint.clone(),
-        };
-        validate_predicate(&current)?;
-        if current != rule.predicate {
-            return Err(CoreError::Message(format!(
-                "enabled suppression rule {} is stale; exact template {} changed",
-                rule.id, rule.predicate.template_id
-            )));
+fn resolve_rule_statuses(corpus: &LogCorpus, document: &mut SuppressionDocument) -> CoreResult<()> {
+    let mut enabled_by_template_id = HashMap::<u64, Vec<usize>>::new();
+    for (index, rule) in document.rules.iter().enumerate() {
+        if rule.state == SuppressionRuleState::Enabled {
+            enabled_by_template_id
+                .entry(rule.predicate.template_id)
+                .or_default()
+                .push(index);
         }
     }
+    let conflicting_template_ids = enabled_by_template_id
+        .iter()
+        .filter_map(|(template_id, indexes)| (indexes.len() > 1).then_some(*template_id))
+        .collect::<HashSet<_>>();
+
+    let structurally_valid_enabled = document
+        .rules
+        .iter()
+        .enumerate()
+        .filter(|(_, rule)| rule.state == SuppressionRuleState::Enabled)
+        .filter_map(|(index, rule)| {
+            validate_predicate(&rule.predicate)
+                .is_ok()
+                .then_some((index, rule.predicate.template_id))
+        })
+        .collect::<Vec<_>>();
+    let template_ids = structurally_valid_enabled
+        .iter()
+        .map(|(_, template_id)| *template_id)
+        .collect::<Vec<_>>();
+
+    let mut resolved = None;
+    for _ in 0..MAX_RESOLUTION_ATTEMPTS {
+        let before = corpus.template_analysis_revision();
+        let fingerprints =
+            corpus.template_fingerprints(&template_ids, MAX_TEMPLATE_FINGERPRINT_BYTES);
+        let after = corpus.template_analysis_revision();
+        if before == after {
+            resolved = Some((after, fingerprints));
+            break;
+        }
+    }
+    let (template_revision, current_fingerprints) = resolved.ok_or_else(|| {
+        CoreError::Message(format!(
+            "suppression_policy_resolution_busy: template metadata changed during {MAX_RESOLUTION_ATTEMPTS} resolution attempts; retry"
+        ))
+    })?;
+
+    for rule in &mut document.rules {
+        let resolution = if rule.state != SuppressionRuleState::Enabled {
+            SuppressionRuleResolution {
+                kind: SuppressionRuleResolutionKind::Inactive,
+                matches_nothing: true,
+                explanation: match rule.state {
+                    SuppressionRuleState::Disabled => {
+                        "Rule is disabled and matches nothing until a person re-enables it.".into()
+                    }
+                    SuppressionRuleState::Removed => {
+                        "Rule is an immutable tombstone retained for audit history.".into()
+                    }
+                    SuppressionRuleState::Enabled => unreachable!(),
+                },
+            }
+        } else if let Err(error) = validate_predicate(&rule.predicate) {
+            SuppressionRuleResolution {
+                kind: SuppressionRuleResolutionKind::InvalidPredicate,
+                matches_nothing: true,
+                explanation: format!(
+                    "Invalid predicate — matches nothing: {error}. Disable or remove the rule after review."
+                ),
+            }
+        } else if conflicting_template_ids.contains(&rule.predicate.template_id) {
+            SuppressionRuleResolution {
+                kind: SuppressionRuleResolutionKind::ConflictingPredicate,
+                matches_nothing: true,
+                explanation: format!(
+                    "Conflicting predicate — matches nothing: multiple enabled rules target template {}. Disable or remove conflicting rules before applying suppression.",
+                    rule.predicate.template_id
+                ),
+            }
+        } else {
+            match current_fingerprints.get(&rule.predicate.template_id) {
+                None => SuppressionRuleResolution {
+                    kind: SuppressionRuleResolutionKind::StaleTargetMissing,
+                    matches_nothing: true,
+                    explanation: format!(
+                        "Stale — matches nothing: template {} no longer exists. The rule and audit history were preserved; disable or remove it after review.",
+                        rule.predicate.template_id
+                    ),
+                },
+                Some(current_fingerprint)
+                    if current_fingerprint != &rule.predicate.template_fingerprint =>
+                {
+                    SuppressionRuleResolution {
+                        kind: SuppressionRuleResolutionKind::StaleFingerprintChanged,
+                        matches_nothing: true,
+                        explanation: format!(
+                            "Stale — matches nothing: template {} now has a different fingerprint. The rule was not remapped by numeric id; review the corpus revision.",
+                            rule.predicate.template_id
+                        ),
+                    }
+                }
+                Some(_) => SuppressionRuleResolution {
+                    kind: SuppressionRuleResolutionKind::MatchesCurrent,
+                    matches_nothing: false,
+                    explanation:
+                        "Exact template id and fingerprint match the current corpus revision."
+                            .into(),
+                },
+            }
+        };
+        rule.resolution = Some(resolution);
+    }
+    document.resolved_template_revision = Some(template_revision);
     Ok(())
 }
 
@@ -703,10 +1210,9 @@ fn compute_preview_facts(
 ) -> CoreResult<ComputedPreviewFacts> {
     let template_id = i64::try_from(predicate.template_id)
         .map_err(|_| CoreError::Message("suppression template id exceeds i64".into()))?;
-    let already_hidden = rules.iter().any(|rule| {
-        rule.state == SuppressionRuleState::Enabled
-            && rule.predicate.template_id == predicate.template_id
-    });
+    let already_hidden = rules
+        .iter()
+        .any(|rule| rule.state == SuppressionRuleState::Enabled && rule.predicate == *predicate);
 
     let facts = corpus.with_connection(|connection| {
         // Event appends publish their revision while holding this same
@@ -921,8 +1427,9 @@ fn load_document_from_root(corpus_root: &Path, corpus_id: &str) -> CoreResult<Su
             "suppression sidecar changed while it was being read".into(),
         ));
     }
-    let document: SuppressionDocument = serde_json::from_slice(&bytes)
+    let mut document: SuppressionDocument = serde_json::from_slice(&bytes)
         .map_err(|error| CoreError::Message(format!("parse suppression sidecar: {error}")))?;
+    clear_ephemeral_resolution(&mut document);
     validate_document(&document, corpus_id)?;
     Ok(document)
 }
@@ -953,15 +1460,17 @@ fn open_regular_nofollow(path: &Path, read_write: bool, create: bool) -> std::io
 
 fn write_document(corpus_root: &Path, document: &SuppressionDocument) -> CoreResult<()> {
     validate_corpus_root(corpus_root)?;
-    validate_document(document, &document.corpus_id)?;
-    let bytes = serde_json::to_vec_pretty(document)?;
+    let mut persisted = document.clone();
+    clear_ephemeral_resolution(&mut persisted);
+    validate_document(&persisted, &persisted.corpus_id)?;
+    let bytes = serde_json::to_vec_pretty(&persisted)?;
     if bytes.len() as u64 > MAX_SIDECAR_BYTES {
         return Err(CoreError::Message(format!(
             "suppression sidecar exceeds {MAX_SIDECAR_BYTES} bytes"
         )));
     }
     let reparsed: SuppressionDocument = serde_json::from_slice(&bytes)?;
-    if reparsed != *document {
+    if reparsed != persisted {
         return Err(CoreError::Message(
             "suppression sidecar failed serialization validation".into(),
         ));
@@ -992,13 +1501,20 @@ fn write_document(corpus_root: &Path, document: &SuppressionDocument) -> CoreRes
         .map_err(|error| CoreError::Message(format!("sync suppression sidecar: {error}")))?;
     sync_directory(corpus_root)?;
 
-    let loaded = load_document_from_root(corpus_root, &document.corpus_id)?;
-    if loaded != *document {
+    let loaded = load_document_from_root(corpus_root, &persisted.corpus_id)?;
+    if loaded != persisted {
         return Err(CoreError::Message(
             "published suppression sidecar failed validation".into(),
         ));
     }
     Ok(())
+}
+
+fn clear_ephemeral_resolution(document: &mut SuppressionDocument) {
+    document.resolved_template_revision = None;
+    for rule in &mut document.rules {
+        rule.resolution = None;
+    }
 }
 
 fn validate_document(document: &SuppressionDocument, expected_corpus_id: &str) -> CoreResult<()> {
@@ -1045,7 +1561,7 @@ fn validate_document(document: &SuppressionDocument, expected_corpus_id: &str) -
                 rule.id
             )));
         }
-        validate_rule_fields(&rule.name, &rule.rationale, &rule.predicate)?;
+        validate_rule_metadata(&rule.name, &rule.rationale)?;
         if rule.created_at > rule.updated_at {
             return Err(CoreError::Message(format!(
                 "suppression rule {} updated_at precedes created_at",
@@ -1249,13 +1765,17 @@ fn validate_rule_fields(
     rationale: &str,
     predicate: &SuppressionTemplatePredicate,
 ) -> CoreResult<()> {
+    validate_rule_metadata(name, rationale)?;
+    validate_predicate(predicate)
+}
+
+fn validate_rule_metadata(name: &str, rationale: &str) -> CoreResult<()> {
     validate_bounded_text("suppression rule name", name, MAX_RULE_NAME_BYTES)?;
     validate_bounded_text(
         "suppression rule rationale",
         rationale,
         MAX_RULE_RATIONALE_BYTES,
-    )?;
-    validate_predicate(predicate)
+    )
 }
 
 fn validate_predicate(predicate: &SuppressionTemplatePredicate) -> CoreResult<()> {
@@ -1640,7 +2160,17 @@ mod tests {
         let reopened = LogCorpus::open(cache.path(), &corpus_id).unwrap();
         let document = load_suppression_document(&reopened).unwrap();
         assert_eq!(document.revision, 2);
-        assert_eq!(document.rules, vec![activated.rule]);
+        let mut durable_rule = document.rules[0].clone();
+        assert_eq!(
+            durable_rule.resolution.as_ref().unwrap().kind,
+            SuppressionRuleResolutionKind::MatchesCurrent
+        );
+        durable_rule.resolution = None;
+        assert_eq!(durable_rule, activated.rule);
+        assert_eq!(
+            document.enabled_template_ids_for_corpus(&reopened).unwrap(),
+            vec![7]
+        );
         assert_eq!(document.audit.len(), 2);
     }
 
@@ -1813,7 +2343,7 @@ mod tests {
     }
 
     #[test]
-    fn enabled_and_reenabled_rules_fail_closed_when_the_template_changes() {
+    fn enabled_rule_with_reused_numeric_id_is_stale_and_matches_nothing() {
         let cache = tempfile::tempdir().unwrap();
         let corpus = corpus(&cache);
         let activated = activated_rule(&corpus);
@@ -1832,9 +2362,18 @@ mod tests {
             vector: None,
         };
         corpus.upsert_templates([changed_template.clone()]).unwrap();
-        let error = load_suppression_document(&corpus).unwrap_err().to_string();
-        assert!(error.contains("enabled suppression rule"));
-        assert!(error.contains("is stale"));
+        let resolved = load_suppression_document(&corpus).unwrap();
+        assert_eq!(resolved.rules.len(), 1);
+        assert_eq!(resolved.rules[0].state, SuppressionRuleState::Enabled);
+        let resolution = resolved.rules[0].resolution.as_ref().unwrap();
+        assert_eq!(
+            resolution.kind,
+            SuppressionRuleResolutionKind::StaleFingerprintChanged
+        );
+        assert!(resolution.matches_nothing);
+        assert!(resolution.explanation.contains("not remapped"));
+        assert!(resolved.enabled_template_ids().unwrap().is_empty());
+        assert!(fetch_events_by_seqs(&corpus, &[1]).unwrap().len() == 1);
 
         corpus
             .upsert_templates([TemplateRow {
@@ -1875,7 +2414,173 @@ mod tests {
     }
 
     #[test]
-    fn corrupted_sidecar_rejects_template_ids_above_signed_storage_range() {
+    fn deleted_target_survives_restart_as_stale_with_audit_and_zero_exclusions() {
+        let cache = tempfile::tempdir().unwrap();
+        let corpus = corpus(&cache);
+        let corpus_id = corpus.id().to_string();
+        let activated = activated_rule(&corpus);
+        corpus.flush().unwrap();
+        let sidecar_before = std::fs::read_to_string(sidecar_path(corpus.root())).unwrap();
+        assert!(!sidecar_before.contains("resolution"));
+        assert!(!sidecar_before.contains("resolvedTemplateRevision"));
+        let template_path = corpus.root().join("templates.json");
+        drop(corpus);
+
+        std::fs::write(&template_path, b"[]").unwrap();
+        let reopened = LogCorpus::open(cache.path(), &corpus_id).unwrap();
+        let document = load_suppression_document(&reopened).unwrap();
+        assert_eq!(document.revision, activated.revision);
+        assert_eq!(document.rules.len(), 1);
+        assert_eq!(document.rules[0].id, activated.rule.id);
+        assert_eq!(document.rules[0].state, SuppressionRuleState::Enabled);
+        assert_eq!(document.audit.len(), 2);
+        assert_eq!(
+            document.rules[0].resolution.as_ref().unwrap().kind,
+            SuppressionRuleResolutionKind::StaleTargetMissing
+        );
+        assert!(document.rules[0]
+            .resolution
+            .as_ref()
+            .unwrap()
+            .explanation
+            .contains("Stale — matches nothing"));
+        assert!(document.enabled_template_ids().unwrap().is_empty());
+        assert!(document
+            .enabled_template_ids_for_corpus(&reopened)
+            .unwrap()
+            .is_empty());
+
+        let sidecar_after = std::fs::read_to_string(sidecar_path(reopened.root())).unwrap();
+        assert_eq!(sidecar_after, sidecar_before);
+    }
+
+    #[test]
+    fn unrelated_reanalysis_revision_requires_refresh_without_staling_exact_target() {
+        let cache = tempfile::tempdir().unwrap();
+        let corpus = corpus(&cache);
+        activated_rule(&corpus);
+        let before = load_suppression_document(&corpus).unwrap();
+        let before_revision = before.resolved_template_revision.unwrap();
+
+        corpus
+            .upsert_templates([TemplateRow {
+                info: TemplateInfo {
+                    template_id: 8,
+                    pattern: "new unrelated <*>".into(),
+                    token_count: 3,
+                    count: 1,
+                    first_seen: 1_700_000_010,
+                    last_seen: 1_700_000_010,
+                    severity: 2,
+                    example: "new unrelated event".into(),
+                },
+                content_hash: "sha256:template-eight".into(),
+                vector: None,
+            }])
+            .unwrap();
+
+        let stale_error = before
+            .enabled_template_ids_for_corpus(&corpus)
+            .unwrap_err()
+            .to_string();
+        assert!(stale_error.contains("suppression_policy_snapshot_stale"));
+        let refreshed = load_suppression_document(&corpus).unwrap();
+        assert!(refreshed.resolved_template_revision.unwrap() > before_revision);
+        assert_eq!(
+            refreshed.enabled_template_ids_for_corpus(&corpus).unwrap(),
+            vec![7]
+        );
+        assert_eq!(
+            refreshed.rules[0].resolution.as_ref().unwrap().kind,
+            SuppressionRuleResolutionKind::MatchesCurrent
+        );
+    }
+
+    #[test]
+    fn concurrent_stale_snapshot_cannot_contribute_exclusions() {
+        let cache = tempfile::tempdir().unwrap();
+        let corpus = Arc::new(corpus(&cache));
+        activated_rule(&corpus);
+        let snapshot = load_suppression_document(&corpus).unwrap();
+        assert_eq!(snapshot.enabled_template_ids().unwrap(), vec![7]);
+
+        let barrier = Arc::new(Barrier::new(2));
+        let worker_corpus = Arc::clone(&corpus);
+        let worker_barrier = Arc::clone(&barrier);
+        let handle = std::thread::spawn(move || {
+            worker_barrier.wait();
+            snapshot.enabled_template_ids_for_corpus(&worker_corpus)
+        });
+
+        corpus
+            .upsert_templates([TemplateRow {
+                info: TemplateInfo {
+                    template_id: 7,
+                    pattern: "concurrent replacement <*>".into(),
+                    token_count: 3,
+                    count: 1,
+                    first_seen: 1_700_000_000,
+                    last_seen: 1_700_000_000,
+                    severity: 4,
+                    example: "concurrent replacement".into(),
+                },
+                content_hash: "sha256:concurrent-replacement".into(),
+                vector: None,
+            }])
+            .unwrap();
+        barrier.wait();
+
+        let error = handle.join().unwrap().unwrap_err().to_string();
+        assert!(error.contains("suppression_policy_snapshot_stale"));
+        let refreshed = load_suppression_document(&corpus).unwrap();
+        assert!(refreshed.enabled_template_ids().unwrap().is_empty());
+        assert_eq!(
+            refreshed.rules[0].resolution.as_ref().unwrap().kind,
+            SuppressionRuleResolutionKind::StaleFingerprintChanged
+        );
+    }
+
+    #[test]
+    fn conflicting_enabled_predicates_are_typed_and_all_match_nothing() {
+        let cache = tempfile::tempdir().unwrap();
+        let corpus = corpus(&cache);
+        let activated = activated_rule(&corpus);
+        let mut document = load_document_from_root(corpus.root(), corpus.id()).unwrap();
+        let mut conflicting = activated.rule.clone();
+        conflicting.id = Uuid::now_v7().to_string();
+        conflicting.name = "Conflicting reused id".into();
+        conflicting.predicate.template_fingerprint = "sha256:other-seven".into();
+        conflicting.resolution = None;
+        document.rules.push(conflicting.clone());
+        document.revision = 3;
+        document.audit.push(SuppressionAuditEntry {
+            id: Uuid::now_v7().to_string(),
+            revision: 3,
+            action: SuppressionAuditAction::Activated,
+            rule_id: Some(conflicting.id),
+            preview_token: None,
+            created_at: 3,
+        });
+        write_document(corpus.root(), &document).unwrap();
+
+        let resolved = load_suppression_document(&corpus).unwrap();
+        assert_eq!(resolved.rules.len(), 2);
+        assert!(resolved.enabled_template_ids().unwrap().is_empty());
+        for rule in &resolved.rules {
+            let resolution = rule.resolution.as_ref().unwrap();
+            assert_eq!(
+                resolution.kind,
+                SuppressionRuleResolutionKind::ConflictingPredicate
+            );
+            assert!(resolution.matches_nothing);
+            assert!(resolution.explanation.contains("multiple enabled rules"));
+            assert!(resolution.explanation.contains("Disable or remove"));
+        }
+        assert_eq!(resolved.audit.len(), 3);
+    }
+
+    #[test]
+    fn invalid_predicate_is_typed_actionable_and_matches_nothing() {
         let cache = tempfile::tempdir().unwrap();
         let corpus = corpus(&cache);
         let body = serde_json::json!({
@@ -1909,8 +2614,16 @@ mod tests {
             serde_json::to_vec_pretty(&body).unwrap(),
         )
         .unwrap();
-        let error = load_suppression_document(&corpus).unwrap_err().to_string();
-        assert!(error.contains("1..=i64::MAX"));
+        let document = load_suppression_document(&corpus).unwrap();
+        let resolution = document.rules[0].resolution.as_ref().unwrap();
+        assert_eq!(
+            resolution.kind,
+            SuppressionRuleResolutionKind::InvalidPredicate
+        );
+        assert!(resolution.matches_nothing);
+        assert!(resolution.explanation.contains("1..=i64::MAX"));
+        assert!(resolution.explanation.contains("Disable or remove"));
+        assert!(document.enabled_template_ids().unwrap().is_empty());
     }
 
     #[test]
@@ -1984,6 +2697,11 @@ mod tests {
             state: SuppressionRuleState::Enabled,
             created_at: 1,
             updated_at: 1,
+            resolution: Some(SuppressionRuleResolution {
+                kind: SuppressionRuleResolutionKind::MatchesCurrent,
+                matches_nothing: false,
+                explanation: "test fixture matches current corpus".into(),
+            }),
         };
         let mut document = empty_document("corpus");
         document.rules = vec![make_rule(9), make_rule(2), make_rule(9), make_rule(5)];
@@ -2012,6 +2730,7 @@ mod tests {
             state: SuppressionRuleState::Enabled,
             created_at: 1,
             updated_at: 1,
+            resolution: None,
         };
         let starting_revision = MAX_SUPPRESSION_AUDIT_ENTRIES - 2;
         let audit = (1..=starting_revision)
@@ -2031,6 +2750,7 @@ mod tests {
             rules: vec![rule.clone()],
             previews: Vec::new(),
             audit,
+            resolved_template_revision: None,
         };
         write_document(corpus.root(), &document).unwrap();
         let error = preview_template_suppression(
@@ -2120,5 +2840,93 @@ mod tests {
                 .to_string();
         assert!(error.contains("open") || error.contains("link"));
         assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
+    }
+
+    /// #819 — an applying rule reports the exact authoritative match count and
+    /// the snapshot is derived from the open corpus, never from a caller.
+    #[test]
+    fn diagnostic_snapshot_reports_applying_rule_with_exact_count() {
+        let cache = tempfile::tempdir().unwrap();
+        let corpus = corpus(&cache);
+        let activated = activated_rule(&corpus);
+        let snapshot = suppression_diagnostic_snapshot(&corpus).unwrap();
+        assert_eq!(snapshot.policy_revision, activated.revision);
+        assert_eq!(snapshot.enabled_rule_count, 1);
+        assert_eq!(snapshot.applied_rule_count, 1);
+        assert_eq!(snapshot.stale_rule_count, 0);
+        assert_eq!(snapshot.rules.len(), 1);
+        assert_eq!(
+            snapshot.rules[0].resolution_kind,
+            SuppressionRuleResolutionKind::MatchesCurrent
+        );
+        // Template 7 has exactly one event in the fixture corpus.
+        assert_eq!(snapshot.rules[0].matching_event_count, 1);
+        assert_eq!(snapshot.omitted_rule_entries, 0);
+    }
+
+    /// #819 — every non-applying resolution reports zero matches, so a stale or
+    /// disabled rule can never look like it is still hiding evidence.
+    #[test]
+    fn diagnostic_snapshot_forces_zero_matches_for_non_applying_rules() {
+        let cache = tempfile::tempdir().unwrap();
+        let corpus = corpus(&cache);
+        activated_rule(&corpus);
+        // Reuse template id 7 with different content: fingerprint changes.
+        corpus
+            .upsert_templates([TemplateRow {
+                info: TemplateInfo {
+                    template_id: 7,
+                    pattern: "different evidence <*>".into(),
+                    token_count: 3,
+                    count: 1,
+                    first_seen: 1_700_000_000,
+                    last_seen: 1_700_000_000,
+                    severity: 4,
+                    example: "different evidence".into(),
+                },
+                content_hash: "sha256:different-template".into(),
+                vector: None,
+            }])
+            .unwrap();
+        let snapshot = suppression_diagnostic_snapshot(&corpus).unwrap();
+        assert_eq!(snapshot.enabled_rule_count, 1);
+        assert_eq!(snapshot.applied_rule_count, 0);
+        assert_eq!(snapshot.stale_rule_count, 1);
+        assert_eq!(
+            snapshot.rules[0].resolution_kind,
+            SuppressionRuleResolutionKind::StaleFingerprintChanged
+        );
+        assert_eq!(snapshot.rules[0].matching_event_count, 0);
+        for rule in &snapshot.rules {
+            if rule.resolution_kind != SuppressionRuleResolutionKind::MatchesCurrent {
+                assert_eq!(rule.matching_event_count, 0);
+            }
+        }
+    }
+
+    /// #819 — the diagnostic snapshot is payload-free: no event content,
+    /// template text, fingerprint, or preview token may be serialized.
+    #[test]
+    fn diagnostic_snapshot_is_payload_free() {
+        let cache = tempfile::tempdir().unwrap();
+        let corpus = corpus(&cache);
+        activated_rule(&corpus);
+        let preview_token = load_suppression_document(&corpus)
+            .unwrap()
+            .previews
+            .first()
+            .map(|preview| preview.token.clone());
+        let snapshot = suppression_diagnostic_snapshot(&corpus).unwrap();
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(!json.contains(RAW_SENTINEL), "event payload leaked");
+        assert!(!json.contains("routine health"), "template text leaked");
+        assert!(!json.contains("sha256:"), "template fingerprint leaked");
+        assert!(!json.contains("worker/app.log"), "source path leaked");
+        if let Some(token) = preview_token {
+            assert!(!json.contains(&token), "preview token leaked");
+        }
+        // Rule name and rationale are required evidence and must remain.
+        assert!(json.contains(&snapshot.rules[0].name));
+        assert!(json.contains(&snapshot.rules[0].rationale));
     }
 }

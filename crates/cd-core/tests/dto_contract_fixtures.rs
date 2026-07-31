@@ -25,8 +25,11 @@ use std::path::PathBuf;
 use cd_core::investigations::{
     EvidenceItem, EvidenceProvenance, FindingItem, FindingKind, FindingLifecycle,
     FindingViewFilters, FindingViewFind, FindingViewFindMatchMode, FindingViewLane,
-    FindingViewRecipe, FindingViewTimeLinkMode, FindingViewViewportAnchor, HumanProvenance,
-    InvestigationCorpusLink, InvestigationDocument, InvestigationStatus, NoteItem,
+    FindingViewRecipe, FindingViewTimeLinkMode, FindingViewViewportAnchor, HumanProposalAcceptance,
+    HumanProvenance, InvestigationCorpusLink, InvestigationDocument, InvestigationNoiseLens,
+    InvestigationPolicyBinding, InvestigationStatus, NoteItem, ProposalEvidenceCitation,
+    ProposalEvidenceRole, ProposalProvenance, ProposalRankInputs, ProposalSourceKind,
+    ProposedFindingItem, ProposedFindingStatus,
 };
 use cd_core::log_analysis::{ActiveTimestampBasis, TimestampProvenance};
 use cd_core::log_analysis::{
@@ -36,8 +39,8 @@ use cd_core::log_analysis::{
     SharedTimelineLaneSummary, SharedTimelineSeverity, SharedTimelineSeveritySeries,
     SharedTimelineSummary, SuppressionAuditAction, SuppressionAuditEntry, SuppressionDocument,
     SuppressionLevelCount, SuppressionPreview, SuppressionRepresentativeEvent, SuppressionRule,
-    SuppressionRuleOrigin, SuppressionRuleState, SuppressionTemplatePredicate, SuppressionTimeSpan,
-    TimeQuality,
+    SuppressionRuleOrigin, SuppressionRuleResolution, SuppressionRuleResolutionKind,
+    SuppressionRuleState, SuppressionTemplatePredicate, SuppressionTimeSpan, TimeQuality,
 };
 use cd_core::process_progress::{ProcessProgress, ProcessProgressKind, ProcessProgressPhase};
 use cd_core::research::EventDto;
@@ -93,6 +96,16 @@ fn event_ref(seq: u64) -> BookmarkEventRef {
     }
 }
 
+fn investigation_policy_binding() -> InvestigationPolicyBinding {
+    InvestigationPolicyBinding {
+        suppression_policy_revision: 7,
+        resolved_template_revision: 11,
+        effective_policy_sha256: "9f9af2c8459f74dc6f21ce3e0a9c7fd5a677d9cc7f60c5ee7f86a8c285e1732f"
+            .into(),
+        noise_lens: InvestigationNoiseLens::Active,
+    }
+}
+
 fn suppression_document_sample() -> SuppressionDocument {
     let predicate = SuppressionTemplatePredicate {
         template_id: 41,
@@ -112,6 +125,11 @@ fn suppression_document_sample() -> SuppressionDocument {
                 state: SuppressionRuleState::Enabled,
                 created_at: 1_735_990_000,
                 updated_at: 1_735_990_100,
+                resolution: Some(SuppressionRuleResolution {
+                    kind: SuppressionRuleResolutionKind::MatchesCurrent,
+                    matches_nothing: false,
+                    explanation: "Enabled rule matches the current exact template.".into(),
+                }),
             },
             SuppressionRule {
                 id: "0199aaaa-0000-7000-8000-000000000002".into(),
@@ -125,6 +143,11 @@ fn suppression_document_sample() -> SuppressionDocument {
                 state: SuppressionRuleState::Disabled,
                 created_at: 1_735_990_200,
                 updated_at: 1_735_990_300,
+                resolution: Some(SuppressionRuleResolution {
+                    kind: SuppressionRuleResolutionKind::Inactive,
+                    matches_nothing: true,
+                    explanation: "Disabled rules exclude nothing.".into(),
+                }),
             },
             SuppressionRule {
                 id: "0199aaaa-0000-7000-8000-000000000003".into(),
@@ -138,6 +161,11 @@ fn suppression_document_sample() -> SuppressionDocument {
                 state: SuppressionRuleState::Removed,
                 created_at: 1_735_990_400,
                 updated_at: 1_735_990_500,
+                resolution: Some(SuppressionRuleResolution {
+                    kind: SuppressionRuleResolutionKind::StaleTargetMissing,
+                    matches_nothing: true,
+                    explanation: "The historical target no longer exists.".into(),
+                }),
             },
         ],
         previews: vec![SuppressionPreview {
@@ -219,6 +247,7 @@ fn suppression_document_sample() -> SuppressionDocument {
                 created_at: 1_735_990_500,
             },
         ],
+        resolved_template_revision: Some(11),
     }
 }
 
@@ -330,9 +359,11 @@ fn noise_candidate_report_sample() -> NoiseCandidateReport {
 
 fn investigation_document_sample() -> InvestigationDocument {
     let corpus_id = "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001".to_string();
+    let investigation_id = "0199bbbb-0000-7000-8000-000000000001".to_string();
+    let policy_binding = investigation_policy_binding();
     InvestigationDocument {
-        schema_version: 3,
-        id: "0199bbbb-0000-7000-8000-000000000001".into(),
+        schema_version: 5,
+        id: investigation_id.clone(),
         revision: 5,
         title: "checkout-cascade".into(),
         status: InvestigationStatus::Active,
@@ -343,7 +374,7 @@ fn investigation_document_sample() -> InvestigationDocument {
             id: "0199bbbb-1111-7000-8000-000000000001".into(),
             title: "burst of connection refusals".into(),
             provenance: EvidenceProvenance::Human,
-            corpus_id,
+            corpus_id: corpus_id.clone(),
             event_refs: vec![event_ref(42), event_ref(44)],
             created_at: 1_735_991_500,
             updated_at: 1_735_991_500,
@@ -392,6 +423,7 @@ fn investigation_document_sample() -> InvestigationDocument {
                         event_ref: event_ref(42),
                     }],
                 }),
+                policy_binding: Some(policy_binding.clone()),
                 provenance: HumanProvenance::Human,
                 created_at: 1_735_991_600,
                 updated_at: 1_735_991_600,
@@ -404,6 +436,7 @@ fn investigation_document_sample() -> InvestigationDocument {
                 why_it_matters: "Connects the warning trail to the failures.".into(),
                 evidence_ids: vec!["0199bbbb-1111-7000-8000-000000000001".into()],
                 view_recipe: None,
+                policy_binding: Some(policy_binding.clone()),
                 provenance: HumanProvenance::Human,
                 created_at: 1_735_991_700,
                 updated_at: 1_735_991_700,
@@ -416,6 +449,7 @@ fn investigation_document_sample() -> InvestigationDocument {
                 why_it_matters: "Testable root-cause explanation.".into(),
                 evidence_ids: vec!["0199bbbb-1111-7000-8000-000000000001".into()],
                 view_recipe: None,
+                policy_binding: None,
                 provenance: HumanProvenance::Human,
                 created_at: 1_735_991_800,
                 updated_at: 1_735_992_000,
@@ -430,6 +464,53 @@ fn investigation_document_sample() -> InvestigationDocument {
             provenance: HumanProvenance::Human,
             created_at: 1_735_992_100,
             updated_at: 1_735_992_100,
+        }],
+        proposed_findings: vec![ProposedFindingItem {
+            id: "0199bbbb-4444-7000-8000-000000000001".into(),
+            status: ProposedFindingStatus::Accepted,
+            kind: FindingKind::Hypothesis,
+            title: "connection pool exhaustion amplified the restart".into(),
+            why_it_matters: "Human review can promote this bounded model proposal.".into(),
+            caveats: Some("The cited events support correlation, not causation.".into()),
+            evidence: vec![
+                ProposalEvidenceCitation {
+                    event_ref: event_ref(42),
+                    role: ProposalEvidenceRole::Supporting,
+                },
+                ProposalEvidenceCitation {
+                    event_ref: event_ref(44),
+                    role: ProposalEvidenceRole::Contradicting,
+                },
+            ],
+            view_recipe: None,
+            corpus_id: corpus_id.clone(),
+            investigation_id,
+            policy_binding: Some(policy_binding),
+            template_revision: Some(11),
+            suppression_policy_revision: Some(7),
+            rank_inputs: Some(ProposalRankInputs {
+                supporting_count: 1,
+                contradicting_count: 1,
+                time_span_secs: Some(60),
+                level_weight: Some(85),
+            }),
+            provenance: ProposalProvenance {
+                source: ProposalSourceKind::Model,
+                provider: Some("openai_compatible".into()),
+                model_id: Some("local-investigator".into()),
+                run_id: Some("run-contract-1".into()),
+                tool_name: "propose_finding".into(),
+                detector_id: None,
+            },
+            idempotency_key: "contract-proposal-1".into(),
+            acceptance: Some(HumanProposalAcceptance {
+                accepted_at: 1_735_992_200,
+                edited: true,
+            }),
+            dismiss_reason: None,
+            accepted_finding_id: Some("0199bbbb-2222-7000-8000-000000000003".into()),
+            created_at: 1_735_992_150,
+            updated_at: 1_735_992_200,
         }],
         created_at: 1_735_991_000,
         updated_at: 1_735_992_100,

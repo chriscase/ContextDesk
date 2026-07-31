@@ -12,11 +12,13 @@ vi.mock("../../lib/host", () => ({
 
 function policy(
   state: host.SuppressionRuleState = "enabled",
+  resolution?: host.SuppressionRuleResolutionDto | null,
 ): host.SuppressionDocumentDto {
   return {
     schemaVersion: 1,
     corpusId: "c1",
     revision: 7,
+    resolvedTemplateRevision: 11,
     rules: [
       {
         id: "rule-1",
@@ -30,6 +32,14 @@ function policy(
         state,
         createdAt: 1,
         updatedAt: 2,
+        resolution:
+          resolution === undefined
+            ? {
+                kind: "matches_current",
+                matchesNothing: false,
+                explanation: "Exact template matches the current corpus.",
+              }
+            : resolution,
       },
     ],
     previews: [],
@@ -527,5 +537,36 @@ describe("SuppressTemplateDialog", () => {
     expect(
       await screen.findByRole("button", { name: "Confirm suppression" }),
     ).toBeTruthy();
+  });
+
+  it("shows durable resolution lifecycle for stale rules that exclude nothing (#819)", async () => {
+    const triggerRef = createRef<HTMLButtonElement>();
+    render(
+      <NoisePolicyControl
+        corpusId="c1"
+        document={policy("enabled", {
+          kind: "stale_target_missing",
+          matchesNothing: true,
+          explanation: "Target template no longer exists.",
+        })}
+        hiddenCount={0}
+        state="ready"
+        error={null}
+        narrow={false}
+        triggerRef={triggerRef}
+        onRetry={vi.fn()}
+        onMutate={vi.fn()}
+        onReloadPolicy={async () => 7}
+        onCandidateActivated={async () => {}}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("noise-policy-trigger"));
+    const rule = await screen.findByTestId("noise-rule-rule-1");
+    expect(rule.getAttribute("data-resolution")).toBe("stale_target_missing");
+    expect(rule.getAttribute("data-excludes")).toBe("false");
+    expect(screen.getByTestId("noise-rule-resolution-rule-1").textContent).toMatch(
+      /Stale — matches nothing/,
+    );
+    expect(screen.getByText(/templates r11/)).toBeTruthy();
   });
 });

@@ -54,6 +54,17 @@ export type SuppressionRuleOrigin = (typeof SUPPRESSION_RULE_ORIGIN)[number];
 export const SUPPRESSION_RULE_STATE = ["enabled", "disabled", "removed"] as const;
 export type SuppressionRuleState = (typeof SUPPRESSION_RULE_STATE)[number];
 
+export const SUPPRESSION_RULE_RESOLUTION_KIND = [
+  "matches_current",
+  "stale_target_missing",
+  "stale_fingerprint_changed",
+  "invalid_predicate",
+  "conflicting_predicate",
+  "inactive",
+] as const;
+export type SuppressionRuleResolutionKind =
+  (typeof SUPPRESSION_RULE_RESOLUTION_KIND)[number];
+
 export const SUPPRESSION_AUDIT_ACTION = [
   "previewed",
   "activated",
@@ -95,6 +106,36 @@ export type FindingKind = (typeof FINDING_KIND)[number];
 
 export const FINDING_LIFECYCLE = ["accepted", "resolved"] as const;
 export type FindingLifecycle = (typeof FINDING_LIFECYCLE)[number];
+
+export const INVESTIGATION_NOISE_LENS = ["active", "suspended"] as const;
+export type InvestigationNoiseLens = (typeof INVESTIGATION_NOISE_LENS)[number];
+
+export const INVESTIGATION_POLICY_BINDING_STATUS = [
+  "unbound_legacy",
+  "current",
+  "made_under_different_policy",
+  "made_under_different_lens",
+  "current_lens_unknown",
+] as const;
+export type InvestigationPolicyBindingStatus =
+  (typeof INVESTIGATION_POLICY_BINDING_STATUS)[number];
+
+export const PROPOSED_FINDING_STATUS = [
+  "proposed",
+  "accepted",
+  "dismissed",
+  "superseded",
+] as const;
+export type ProposedFindingStatus = (typeof PROPOSED_FINDING_STATUS)[number];
+
+export const PROPOSAL_EVIDENCE_ROLE = [
+  "supporting",
+  "contradicting",
+] as const;
+export type ProposalEvidenceRole = (typeof PROPOSAL_EVIDENCE_ROLE)[number];
+
+export const PROPOSAL_SOURCE_KIND = ["model", "detector", "internal"] as const;
+export type ProposalSourceKind = (typeof PROPOSAL_SOURCE_KIND)[number];
 
 export const FINDING_VIEW_TIME_LINK_MODE = [
   "independent",
@@ -214,6 +255,7 @@ export type WireSuppressionDocument = {
   rules: WireSuppressionRule[];
   previews: WireSuppressionPreview[];
   audit: WireSuppressionAuditEntry[];
+  resolvedTemplateRevision?: number;
 };
 
 export type WireSuppressionRule = {
@@ -225,6 +267,13 @@ export type WireSuppressionRule = {
   state: SuppressionRuleState;
   createdAt: number;
   updatedAt: number;
+  resolution?: WireSuppressionRuleResolution;
+};
+
+export type WireSuppressionRuleResolution = {
+  kind: SuppressionRuleResolutionKind;
+  matchesNothing: boolean;
+  explanation: string;
 };
 
 export type WireSuppressionPreview = {
@@ -351,6 +400,7 @@ export type WireInvestigationDocument = {
   evidence: WireEvidenceItem[];
   findings: WireFindingItem[];
   notes: WireNoteItem[];
+  proposedFindings: WireProposedFindingItem[];
   createdAt: number;
   updatedAt: number;
 };
@@ -373,7 +423,54 @@ export type WireFindingItem = {
   whyItMatters: string;
   evidenceIds: string[];
   viewRecipe?: WireFindingViewRecipe;
+  policyBinding?: WireInvestigationPolicyBinding;
   provenance: HumanProvenance;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type WireInvestigationPolicyBinding = {
+  suppressionPolicyRevision: number;
+  resolvedTemplateRevision: number;
+  effectivePolicySha256: string;
+  noiseLens: InvestigationNoiseLens;
+};
+
+export type WireProposedFindingItem = {
+  id: string;
+  status: ProposedFindingStatus;
+  kind: FindingKind;
+  title: string;
+  whyItMatters: string;
+  caveats?: string;
+  evidence: {
+    eventRef: WireBookmarkEventRef;
+    role: ProposalEvidenceRole;
+  }[];
+  viewRecipe?: WireFindingViewRecipe;
+  corpusId: string;
+  investigationId: string;
+  policyBinding?: WireInvestigationPolicyBinding;
+  templateRevision?: number;
+  suppressionPolicyRevision?: number;
+  rankInputs?: {
+    supportingCount: number;
+    contradictingCount: number;
+    timeSpanSecs?: number;
+    levelWeight?: number;
+  };
+  provenance: {
+    source: ProposalSourceKind;
+    provider?: string;
+    modelId?: string;
+    runId?: string;
+    toolName: string;
+    detectorId?: string;
+  };
+  idempotencyKey: string;
+  acceptance?: { acceptedAt: number; edited: boolean };
+  dismissReason?: string;
+  acceptedFindingId?: string;
   createdAt: number;
   updatedAt: number;
 };
@@ -556,6 +653,13 @@ const suppressionDocumentShape: ObjectShape = {
         state: f.req(f.en(...SUPPRESSION_RULE_STATE)),
         createdAt: f.req(f.i64),
         updatedAt: f.req(f.i64),
+        resolution: f.opt(
+          f.obj({
+            kind: f.req(f.en(...SUPPRESSION_RULE_RESOLUTION_KIND)),
+            matchesNothing: f.req(f.bool),
+            explanation: f.req(f.str),
+          }),
+        ),
       }),
     ),
   ),
@@ -593,6 +697,7 @@ const suppressionDocumentShape: ObjectShape = {
       }),
     ),
   ),
+  resolvedTemplateRevision: f.opt(f.u64),
 };
 
 const noiseCandidateReportShape: ObjectShape = {
@@ -718,6 +823,65 @@ const findingViewRecipeShape: ObjectShape = {
   ),
 };
 
+const investigationPolicyBindingShape: ObjectShape = {
+  suppressionPolicyRevision: f.req(f.u64),
+  resolvedTemplateRevision: f.req(f.u64),
+  effectivePolicySha256: f.req(f.str),
+  noiseLens: f.req(f.en(...INVESTIGATION_NOISE_LENS)),
+};
+
+const proposedFindingShape: ObjectShape = {
+  id: f.req(f.str),
+  status: f.req(f.en(...PROPOSED_FINDING_STATUS)),
+  kind: f.req(f.en(...FINDING_KIND)),
+  title: f.req(f.str),
+  whyItMatters: f.req(f.str),
+  caveats: f.opt(f.str),
+  evidence: f.req(
+    f.arr(
+      f.obj({
+        eventRef: f.req(f.obj(bookmarkEventRefShape)),
+        role: f.req(f.en(...PROPOSAL_EVIDENCE_ROLE)),
+      }),
+    ),
+  ),
+  viewRecipe: f.opt(f.obj(findingViewRecipeShape)),
+  corpusId: f.req(f.str),
+  investigationId: f.req(f.str),
+  policyBinding: f.opt(f.obj(investigationPolicyBindingShape)),
+  templateRevision: f.opt(f.u64),
+  suppressionPolicyRevision: f.opt(f.u64),
+  rankInputs: f.opt(
+    f.obj({
+      supportingCount: f.req(f.u64),
+      contradictingCount: f.req(f.u64),
+      timeSpanSecs: f.opt(f.u64),
+      levelWeight: f.opt(f.u64),
+    }),
+  ),
+  provenance: f.req(
+    f.obj({
+      source: f.req(f.en(...PROPOSAL_SOURCE_KIND)),
+      provider: f.opt(f.str),
+      modelId: f.opt(f.str),
+      runId: f.opt(f.str),
+      toolName: f.req(f.str),
+      detectorId: f.opt(f.str),
+    }),
+  ),
+  idempotencyKey: f.req(f.str),
+  acceptance: f.opt(
+    f.obj({
+      acceptedAt: f.req(f.i64),
+      edited: f.req(f.bool),
+    }),
+  ),
+  dismissReason: f.opt(f.str),
+  acceptedFindingId: f.opt(f.str),
+  createdAt: f.req(f.i64),
+  updatedAt: f.req(f.i64),
+};
+
 const investigationDocumentShape: ObjectShape = {
   schemaVersion: f.req(f.u64),
   id: f.req(f.str),
@@ -748,6 +912,7 @@ const investigationDocumentShape: ObjectShape = {
         whyItMatters: f.req(f.str),
         evidenceIds: f.req(f.arr(f.str)),
         viewRecipe: f.opt(f.obj(findingViewRecipeShape)),
+        policyBinding: f.opt(f.obj(investigationPolicyBindingShape)),
         provenance: f.req(f.en(...HUMAN_PROVENANCE)),
         createdAt: f.req(f.i64),
         updatedAt: f.req(f.i64),
@@ -768,6 +933,7 @@ const investigationDocumentShape: ObjectShape = {
       }),
     ),
   ),
+  proposedFindings: f.req(f.arr(f.obj(proposedFindingShape))),
   createdAt: f.req(f.i64),
   updatedAt: f.req(f.i64),
 };

@@ -41,6 +41,15 @@ export type FindingItemView = {
   evidenceIds: string[];
   viewRecipe: InvestigationViewRecipeDto | null;
   provenanceLabel: string;
+  /** Host-authored current-vs-durable policy comparison (#819). */
+  policyStatus?:
+    | "unbound_legacy"
+    | "current"
+    | "made_under_different_policy"
+    | "made_under_different_lens"
+    | "current_lens_unknown"
+    | null;
+  policyStatusLabel?: string | null;
 };
 
 export type FindingViewPreviewView = {
@@ -49,6 +58,16 @@ export type FindingViewPreviewView = {
   changes: string[];
   missingCount: number;
   staleCount: number;
+  policyStatus?:
+    | "unbound_legacy"
+    | "current"
+    | "made_under_different_policy"
+    | "made_under_different_lens"
+    | "current_lens_unknown"
+    | null;
+  policyStatusLabel?: string | null;
+  /** True when Apply is blocked for policy mismatch. */
+  policyBlocksApply?: boolean;
 };
 
 export type NoteItemView = {
@@ -240,14 +259,40 @@ function findingKindLabel(kind: FindingItemView["kind"]): string {
   return kind.charAt(0).toUpperCase() + kind.slice(1);
 }
 
+export type ProposedFindingItemView = {
+  id: string;
+  kind: FindingItemView["kind"];
+  title: string;
+  whyItMatters: string;
+  status: "proposed" | "accepted" | "dismissed" | "superseded";
+  dismissReason?: string | null;
+  caveats?: string | null;
+  /** Supporting + contradicting exact evidence count. */
+  evidenceCount: number;
+  supportingCount: number;
+  contradictingCount: number;
+  /** Optional payload-free view recipe for non-mutating Preview. */
+  viewRecipe?: InvestigationViewRecipeDto | null;
+};
+
+export type ProposedFindingAcceptInput = {
+  proposalId: string;
+  edited: boolean;
+  title?: string;
+  whyItMatters?: string;
+  kind?: FindingItemView["kind"];
+};
+
 export function EvidencePanel({
   modeControl,
   items,
   findings = [],
+  proposedFindings = [],
   notes = [],
   bookmarks = [],
   preview,
   viewPreview,
+  proposalPreview = null,
   busy,
   error,
   visible = true,
@@ -258,21 +303,31 @@ export function EvidencePanel({
   onReveal,
   onPreviewFindingView,
   onApplyFindingView,
+  onRecomputeFindingView,
   onEditFinding,
   onEditNote,
   onActivateBookmark,
+  onAcceptProposedFinding,
+  onDismissProposedFinding,
+  onPreviewProposedFinding,
   onClearPreview,
   onClearViewPreview,
   onToggleCollapsed,
   onRequestClose,
 }: {
   modeControl: ReactNode;
+  proposedFindings?: ProposedFindingItemView[];
   items: EvidenceItemView[];
   findings?: FindingItemView[];
   notes?: NoteItemView[];
   bookmarks?: BookmarkItemView[];
   preview: EvidencePreviewView | null;
   viewPreview?: FindingViewPreviewView | null;
+  /** Non-mutating proposal preview (never mutates Explorer filters/selection). */
+  proposalPreview?: {
+    proposalId: string;
+    changes: string[];
+  } | null;
   busy: boolean;
   error: string | null;
   visible?: boolean;
@@ -283,9 +338,14 @@ export function EvidencePanel({
   onReveal: (item: EvidenceItemView) => void;
   onPreviewFindingView?: (item: FindingItemView) => void;
   onApplyFindingView?: (preview: FindingViewPreviewView) => void;
+  /** Explicit recompute under current Explorer recipe + policy/lens (#819). */
+  onRecomputeFindingView?: (item: FindingItemView) => void;
   onEditFinding?: (item: FindingItemView, trigger: HTMLButtonElement) => void;
   onEditNote?: (item: NoteItemView, trigger: HTMLButtonElement) => void;
   onActivateBookmark?: (item: BookmarkItemView) => void;
+  onAcceptProposedFinding?: (input: ProposedFindingAcceptInput) => void;
+  onDismissProposedFinding?: (id: string) => void;
+  onPreviewProposedFinding?: (item: ProposedFindingItemView) => void;
   onClearPreview: () => void;
   onClearViewPreview?: () => void;
   onToggleCollapsed?: () => void;
@@ -293,6 +353,9 @@ export function EvidencePanel({
 }) {
   const [filter, setFilter] = useState<MaterialFilter>("all");
   const [detail, setDetail] = useState<MaterialDetail | null>(null);
+  const [proposalEditId, setProposalEditId] = useState<string | null>(null);
+  const [proposalEditTitle, setProposalEditTitle] = useState("");
+  const [proposalEditWhy, setProposalEditWhy] = useState("");
   const collapseToggleRef = useRef<HTMLButtonElement>(null);
   const reopenRef = useRef<HTMLButtonElement>(null);
   const detailBackRef = useRef<HTMLButtonElement>(null);
@@ -314,13 +377,23 @@ export function EvidencePanel({
     detail?.type === "bookmark"
       ? (bookmarks.find((item) => item.id === detail.id) ?? null)
       : null;
+  const openProposedCount = proposedFindings.filter(
+    (item) => item.status === "proposed",
+  ).length;
+  // Include open Proposed items so agent-propose-only investigations are not
+  // treated as an empty rail (Accept/Dismiss must remain reachable).
   const materialCount =
-    items.length + findings.length + notes.length + bookmarks.length;
+    items.length +
+    findings.length +
+    openProposedCount +
+    notes.length +
+    bookmarks.length;
+  const findingsFilterCount = findings.length + openProposedCount;
   const visibleMaterialCount =
     filter === "all"
       ? materialCount
       : filter === "findings"
-        ? findings.length
+        ? findingsFilterCount
         : filter === "evidence"
           ? items.length
           : filter === "notes"
@@ -480,7 +553,7 @@ export function EvidencePanel({
             }
           >
             <option value="all">All material · {materialCount}</option>
-            <option value="findings">Findings · {findings.length}</option>
+            <option value="findings">Findings · {findingsFilterCount}</option>
             <option value="evidence">Evidence · {items.length}</option>
             <option value="notes">Notes · {notes.length}</option>
             <option value="bookmarks">Bookmarks · {bookmarks.length}</option>
@@ -639,6 +712,15 @@ export function EvidencePanel({
           <div className="log-explorer__evidence-provenance">
             {activeFinding.provenanceLabel}
           </div>
+          {activeFinding.policyStatusLabel ? (
+            <div
+              className="log-explorer__finding-policy"
+              data-testid={`finding-policy-${activeFinding.id}`}
+              data-policy-status={activeFinding.policyStatus ?? "unknown"}
+            >
+              {activeFinding.policyStatusLabel}
+            </div>
+          ) : null}
           {activeFinding.viewRecipe && onPreviewFindingView ? (
             <div className="log-explorer__finding-view">
               <div className="log-explorer__material-section-label">
@@ -652,29 +734,40 @@ export function EvidencePanel({
                   <div className="log-explorer__chat-header-meta">
                     Preview only · current Explorer unchanged
                   </div>
+                  {viewPreview.policyStatusLabel ? (
+                    <div
+                      className="log-explorer__finding-policy"
+                      data-testid={`finding-view-policy-${activeFinding.id}`}
+                      data-policy-status={
+                        viewPreview.policyStatus ?? "unknown"
+                      }
+                    >
+                      {viewPreview.policyStatusLabel}
+                    </div>
+                  ) : null}
                   <ul>
                     {viewPreview.changes.map((change) => (
                       <li key={change}>{change}</li>
                     ))}
                   </ul>
                   {viewPreview.missingCount > 0 ||
-                  viewPreview.staleCount > 0 ? (
+                  viewPreview.staleCount > 0 ||
+                  viewPreview.policyBlocksApply ? (
                     <div
                       className="log-explorer__evidence-warning"
                       role="status"
                     >
-                      Apply blocked ·{" "}
+                      Apply blocked
+                      {viewPreview.policyBlocksApply
+                        ? " · review under current noise policy first"
+                        : null}
                       {viewPreview.missingCount > 0
-                        ? `${viewPreview.missingCount} missing reference${
+                        ? ` · ${viewPreview.missingCount} missing reference${
                             viewPreview.missingCount === 1 ? "" : "s"
                           }`
                         : null}
-                      {viewPreview.missingCount > 0 &&
-                      viewPreview.staleCount > 0
-                        ? " · "
-                        : null}
                       {viewPreview.staleCount > 0
-                        ? `${viewPreview.staleCount} changed reference${
+                        ? ` · ${viewPreview.staleCount} changed reference${
                             viewPreview.staleCount === 1 ? "" : "s"
                           }`
                         : null}
@@ -687,12 +780,24 @@ export function EvidencePanel({
                       disabled={
                         busy ||
                         viewPreview.missingCount > 0 ||
-                        viewPreview.staleCount > 0
+                        viewPreview.staleCount > 0 ||
+                        Boolean(viewPreview.policyBlocksApply)
                       }
                       onClick={() => onApplyFindingView?.(viewPreview)}
                     >
                       Apply saved view
                     </button>
+                    {onRecomputeFindingView ? (
+                      <button
+                        type="button"
+                        className="log-explorer__btn"
+                        data-testid={`finding-recompute-${activeFinding.id}`}
+                        disabled={busy}
+                        onClick={() => onRecomputeFindingView(activeFinding)}
+                      >
+                        Recompute from current view
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       className="log-explorer__btn"
@@ -703,14 +808,27 @@ export function EvidencePanel({
                   </div>
                 </div>
               ) : (
-                <button
-                  type="button"
-                  className="log-explorer__btn"
-                  disabled={busy}
-                  onClick={() => onPreviewFindingView(activeFinding)}
-                >
-                  Preview saved view
-                </button>
+                <div className="log-explorer__evidence-card-actions">
+                  <button
+                    type="button"
+                    className="log-explorer__btn"
+                    disabled={busy}
+                    onClick={() => onPreviewFindingView(activeFinding)}
+                  >
+                    Preview saved view
+                  </button>
+                  {onRecomputeFindingView ? (
+                    <button
+                      type="button"
+                      className="log-explorer__btn"
+                      data-testid={`finding-recompute-${activeFinding.id}`}
+                      disabled={busy}
+                      onClick={() => onRecomputeFindingView(activeFinding)}
+                    >
+                      Recompute from current view
+                    </button>
+                  ) : null}
+                </div>
               )}
             </div>
           ) : null}
@@ -886,6 +1004,188 @@ export function EvidencePanel({
             </div>
           ) : (
             <>
+              {(filter === "all" || filter === "findings") &&
+                proposedFindings
+                  .filter((p) => p.status === "proposed")
+                  .map((item) => {
+                    const isEditing = proposalEditId === item.id;
+                    const isPreviewing =
+                      proposalPreview?.proposalId === item.id;
+                    return (
+                      <div
+                        key={item.id}
+                        className="log-explorer__evidence-card log-explorer__material-card"
+                        data-testid={`proposed-finding-${item.id}`}
+                      >
+                        <div className="log-explorer__evidence-card-heading">
+                          <div>
+                            <div className="log-explorer__material-kicker">
+                              Proposed · {findingKindLabel(item.kind)}
+                            </div>
+                            <div className="log-explorer__evidence-card-title">
+                              {item.title}
+                            </div>
+                          </div>
+                          <span className="log-explorer__evidence-status">
+                            proposed
+                          </span>
+                        </div>
+                        <p className="log-explorer__chat-header-meta">
+                          {item.whyItMatters}
+                        </p>
+                        <p className="log-explorer__chat-header-meta">
+                          {item.supportingCount} supporting ·{" "}
+                          {item.contradictingCount} contradicting ·{" "}
+                          {item.evidenceCount} exact ref
+                          {item.evidenceCount === 1 ? "" : "s"}
+                        </p>
+                        {isPreviewing ? (
+                          <div
+                            className="log-explorer__finding-view-preview"
+                            data-testid={`proposed-finding-preview-${item.id}`}
+                            role="status"
+                          >
+                            <div className="log-explorer__chat-header-meta">
+                              Preview only · current Explorer unchanged · not
+                              accepted
+                            </div>
+                            {item.caveats ? (
+                              <p className="log-explorer__chat-header-meta">
+                                Caveats: {item.caveats}
+                              </p>
+                            ) : null}
+                            {proposalPreview.changes.length > 0 ? (
+                              <ul>
+                                {proposalPreview.changes.map((change) => (
+                                  <li key={change}>{change}</li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <p className="log-explorer__chat-header-meta">
+                                No Explorer view change listed for this proposal
+                                (or recipe matches current view).
+                              </p>
+                            )}
+                            <button
+                              type="button"
+                              className="log-explorer__btn"
+                              onClick={() => onClearViewPreview?.()}
+                            >
+                              Dismiss preview
+                            </button>
+                          </div>
+                        ) : null}
+                        {isEditing ? (
+                          <div
+                            className="log-explorer__finding-view-preview"
+                            data-testid={`proposed-finding-edit-${item.id}`}
+                          >
+                            <label className="log-explorer__field">
+                              <span className="sr-only">Edited title</span>
+                              <input
+                                type="text"
+                                value={proposalEditTitle}
+                                onChange={(event) =>
+                                  setProposalEditTitle(event.target.value)
+                                }
+                                aria-label="Edited proposal title"
+                                data-testid={`proposed-edit-title-${item.id}`}
+                              />
+                            </label>
+                            <label className="log-explorer__field">
+                              <span className="sr-only">Edited why it matters</span>
+                              <textarea
+                                value={proposalEditWhy}
+                                onChange={(event) =>
+                                  setProposalEditWhy(event.target.value)
+                                }
+                                aria-label="Edited proposal why it matters"
+                                data-testid={`proposed-edit-why-${item.id}`}
+                                rows={3}
+                              />
+                            </label>
+                            <div className="log-explorer__evidence-card-actions">
+                              <button
+                                type="button"
+                                className="log-explorer__btn log-explorer__btn--active"
+                                disabled={busy || !proposalEditTitle.trim()}
+                                data-testid={`confirm-edit-accept-${item.id}`}
+                                onClick={() => {
+                                  onAcceptProposedFinding?.({
+                                    proposalId: item.id,
+                                    edited: true,
+                                    title: proposalEditTitle.trim(),
+                                    whyItMatters: proposalEditWhy.trim(),
+                                  });
+                                  setProposalEditId(null);
+                                }}
+                              >
+                                Save edits and accept
+                              </button>
+                              <button
+                                type="button"
+                                className="log-explorer__btn"
+                                disabled={busy}
+                                onClick={() => setProposalEditId(null)}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="log-explorer__evidence-card-actions">
+                            <button
+                              type="button"
+                              className="log-explorer__btn"
+                              disabled={busy}
+                              data-testid={`preview-proposed-${item.id}`}
+                              onClick={() => onPreviewProposedFinding?.(item)}
+                            >
+                              Preview
+                            </button>
+                            <button
+                              type="button"
+                              className="log-explorer__btn log-explorer__btn--active"
+                              disabled={busy}
+                              data-testid={`accept-proposed-${item.id}`}
+                              onClick={() =>
+                                onAcceptProposedFinding?.({
+                                  proposalId: item.id,
+                                  edited: false,
+                                })
+                              }
+                            >
+                              Accept
+                            </button>
+                            <button
+                              type="button"
+                              className="log-explorer__btn"
+                              disabled={busy}
+                              data-testid={`edit-accept-proposed-${item.id}`}
+                              onClick={() => {
+                                setProposalEditId(item.id);
+                                setProposalEditTitle(item.title);
+                                setProposalEditWhy(item.whyItMatters);
+                              }}
+                            >
+                              Edit and accept
+                            </button>
+                            <button
+                              type="button"
+                              className="log-explorer__btn"
+                              disabled={busy}
+                              data-testid={`dismiss-proposed-${item.id}`}
+                              onClick={() =>
+                                onDismissProposedFinding?.(item.id)
+                              }
+                            >
+                              Dismiss
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
               {(filter === "all" || filter === "findings") &&
                 findings.map((item) => (
                   <button

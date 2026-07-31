@@ -33,6 +33,7 @@ pub const LOG_TOOL_NAMES: &[&str] = &[
     CORRELATE,
     ANOMALIES,
     TRACE,
+    crate::investigations::PROPOSE_FINDING_TOOL,
 ];
 
 /// True when `name` is a log analysis tool.
@@ -210,7 +211,7 @@ pub fn trace_tool_spec() -> ToolSpec {
 
 /// All Phase-1 + Phase-2 log tool specs.
 pub fn log_tool_specs() -> Vec<ToolSpec> {
-    vec![
+    let mut specs = vec![
         ingest_logs_tool_spec(),
         search_logs_tool_spec(),
         cluster_problems_tool_spec(),
@@ -218,7 +219,10 @@ pub fn log_tool_specs() -> Vec<ToolSpec> {
         correlate_tool_spec(),
         anomalies_tool_spec(),
         trace_tool_spec(),
-    ]
+    ];
+    // #646: agent/detector proposed findings (SoftWrite → Proposed only).
+    specs.push(crate::investigations::propose_finding_tool_spec());
+    specs
 }
 
 #[cfg(test)]

@@ -40,6 +40,12 @@
       "id": "0199bbbb-2222-7000-8000-000000000001",
       "kind": "observation",
       "lifecycle": "accepted",
+      "policyBinding": {
+        "effectivePolicySha256": "9f9af2c8459f74dc6f21ce3e0a9c7fd5a677d9cc7f60c5ee7f86a8c285e1732f",
+        "noiseLens": "active",
+        "resolvedTemplateRevision": 11,
+        "suppressionPolicyRevision": 7
+      },
       "provenance": "human",
       "title": "error burst at 14:02",
       "updatedAt": 1735991600,
@@ -119,6 +125,12 @@
       "id": "0199bbbb-2222-7000-8000-000000000002",
       "kind": "inference",
       "lifecycle": "accepted",
+      "policyBinding": {
+        "effectivePolicySha256": "9f9af2c8459f74dc6f21ce3e0a9c7fd5a677d9cc7f60c5ee7f86a8c285e1732f",
+        "noiseLens": "active",
+        "resolvedTemplateRevision": 11,
+        "suppressionPolicyRevision": 7
+      },
       "provenance": "human",
       "title": "pool exhaustion preceded the burst",
       "updatedAt": 1735991700,
@@ -155,8 +167,71 @@
       "updatedAt": 1735992100
     }
   ],
+  "proposedFindings": [
+    {
+      "acceptance": {
+        "acceptedAt": 1735992200,
+        "edited": true
+      },
+      "acceptedFindingId": "0199bbbb-2222-7000-8000-000000000003",
+      "caveats": "The cited events support correlation, not causation.",
+      "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+      "createdAt": 1735992150,
+      "evidence": [
+        {
+          "eventRef": {
+            "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+            "seq": 42,
+            "source": "api.log",
+            "timeQualityHint": "wall",
+            "timestampHint": 1735991449
+          },
+          "role": "supporting"
+        },
+        {
+          "eventRef": {
+            "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+            "seq": 44,
+            "source": "api.log",
+            "timeQualityHint": "wall",
+            "timestampHint": 1735991449
+          },
+          "role": "contradicting"
+        }
+      ],
+      "id": "0199bbbb-4444-7000-8000-000000000001",
+      "idempotencyKey": "contract-proposal-1",
+      "investigationId": "0199bbbb-0000-7000-8000-000000000001",
+      "kind": "hypothesis",
+      "policyBinding": {
+        "effectivePolicySha256": "9f9af2c8459f74dc6f21ce3e0a9c7fd5a677d9cc7f60c5ee7f86a8c285e1732f",
+        "noiseLens": "active",
+        "resolvedTemplateRevision": 11,
+        "suppressionPolicyRevision": 7
+      },
+      "provenance": {
+        "modelId": "local-investigator",
+        "provider": "openai_compatible",
+        "runId": "run-contract-1",
+        "source": "model",
+        "toolName": "propose_finding"
+      },
+      "rankInputs": {
+        "contradictingCount": 1,
+        "levelWeight": 85,
+        "supportingCount": 1,
+        "timeSpanSecs": 60
+      },
+      "status": "accepted",
+      "suppressionPolicyRevision": 7,
+      "templateRevision": 11,
+      "title": "connection pool exhaustion amplified the restart",
+      "updatedAt": 1735992200,
+      "whyItMatters": "Human review can promote this bounded model proposal."
+    }
+  ],
   "revision": 5,
-  "schemaVersion": 3,
+  "schemaVersion": 5,
   "status": "active",
   "title": "checkout-cascade",
   "updatedAt": 1735992100
