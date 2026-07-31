@@ -41,6 +41,8 @@ const ARRAY_FIELDS = new Set(["tags", "related"]);
 const ID_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const MAX_PAGE_BYTES = 2 * 1024 * 1024;
 const MAX_ASSET_BYTES = 256 * 1024;
+/** Canonical in-app Help locator, e.g. `help://log-explorer#counts`. */
+const HELP_LOCATOR_RE = /\bhelp:\/\/([a-z0-9-]+)(?:#([a-z0-9-]+))?/g;
 
 function unquote(value) {
   const trimmed = value.trim();
@@ -180,6 +182,43 @@ function validateHeadingStructure(body, meta, source) {
     }
     previous = level;
   }
+}
+
+/**
+ * Mirror of `heading_anchor` in crates/cd-core/src/help.rs so a locator that
+ * resolves here also resolves in the shipped HelpPane table of contents.
+ */
+export function helpHeadingAnchor(title) {
+  let out = "";
+  let separator = false;
+  for (const ch of title.toLowerCase()) {
+    if (/[\p{L}\p{N}]/u.test(ch)) {
+      if (separator && out) out += "-";
+      out += ch;
+      separator = false;
+    } else {
+      separator = true;
+    }
+  }
+  return out;
+}
+
+/**
+ * H2/H3 anchors for one page body, including the `-2` duplicate suffix used by
+ * `parse_toc` in cd-core. HelpPane scrolls by `document.getElementById`, so an
+ * anchor missing from this set is a silently dead deep link.
+ */
+export function helpPageAnchors(body) {
+  const counts = new Map();
+  const anchors = [];
+  for (const match of body.matchAll(/^(#{2,3})\s+(.+?)\s*$/gm)) {
+    const base = helpHeadingAnchor(match[2]);
+    if (!base) continue;
+    const next = (counts.get(base) ?? 0) + 1;
+    counts.set(base, next);
+    anchors.push(next === 1 ? base : `${base}-${next}`);
+  }
+  return anchors;
 }
 
 function normalizedInside(root, candidate, source) {
@@ -349,6 +388,52 @@ export function validateSvgGeometry(svg, source = "<svg>") {
   }
 }
 
+/**
+ * Presentation rules the safety/geometry passes cannot express (#540).
+ *
+ * Help renders diagrams through `<img>`, so a diagram cannot inherit theme
+ * colors: `currentColor` collapses to the UA default and the artwork becomes
+ * unreadable in one theme. The same contract is already enforced for the
+ * incident-evidence diagrams by scripts/check_incident_evidence_drift.mjs;
+ * this generalizes it to every bundled Help asset, and adds the non-visual
+ * access requirement (`role="img"` plus a resolvable `aria-labelledby`).
+ */
+export function validateSvgPresentation(svg, source = "<svg>") {
+  const withoutComments = svg.replace(/<!--[\s\S]*?-->/g, "");
+  const root = withoutComments.match(/<svg\b([^>]*)>/i);
+  if (!root) {
+    throw new Error(`${source}: SVG requires a root <svg> element`);
+  }
+  const attributes = svgAttributes(root[1]);
+  if (attributes.role !== "img") {
+    throw new Error(`${source}: SVG requires role="img" for non-visual access`);
+  }
+  const labelledBy = attributes["aria-labelledby"];
+  if (!labelledBy || !labelledBy.trim()) {
+    throw new Error(`${source}: SVG requires aria-labelledby`);
+  }
+  for (const reference of labelledBy.trim().split(/\s+/)) {
+    const idPattern = new RegExp(
+      `\\bid\\s*=\\s*["']${reference.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']`,
+    );
+    if (!idPattern.test(withoutComments)) {
+      throw new Error(
+        `${source}: aria-labelledby references missing id '${reference}'`,
+      );
+    }
+  }
+  if (/\bcurrentColor\b/i.test(withoutComments)) {
+    throw new Error(
+      `${source}: SVG uses currentColor, which cannot inherit the Help theme through <img>`,
+    );
+  }
+  if (!/#[0-9a-fA-F]{3,8}\b/.test(withoutComments)) {
+    throw new Error(
+      `${source}: SVG requires explicit hex colors readable in every theme`,
+    );
+  }
+}
+
 function validateSvg(assetPath, source) {
   const stat = fs.lstatSync(assetPath);
   if (stat.isSymbolicLink() || !stat.isFile()) {
@@ -374,7 +459,73 @@ function validateSvg(assetPath, source) {
   ) {
     throw new Error(`${source}: SVG contains executable or remote content`);
   }
+  validateSvgPresentation(svg, source);
   validateSvgGeometry(svg, source);
+}
+
+/**
+ * Validate every checked-in asset, not only the ones a page happens to link
+ * (#540). `docs/help` ships whole into the packaged app
+ * (desktop/src-tauri/tauri.conf.json → resources), so an unreferenced or
+ * unvalidated file is still shipped bytes.
+ */
+function validateAssetLibrary(root, assetsSeen, externalReferences) {
+  const assetsRoot = path.join(root, "assets");
+  if (!fs.existsSync(assetsRoot)) {
+    return { validated: 0 };
+  }
+  let validated = 0;
+  for (const entry of fs.readdirSync(assetsRoot, { withFileTypes: true })) {
+    const source = path.join("assets", entry.name);
+    if (entry.isSymbolicLink()) {
+      throw new Error(`${source}: symlinked help assets are forbidden`);
+    }
+    if (!entry.isFile()) {
+      throw new Error(`${source}: help assets must be regular files`);
+    }
+    if (entry.name === "README.md") continue;
+    if (path.extname(entry.name).toLowerCase() !== ".svg") {
+      throw new Error(`${source}: only SVG help assets are supported`);
+    }
+    const assetPath = path.join(assetsRoot, entry.name);
+    validateSvg(assetPath, source);
+    validated += 1;
+    if (!assetsSeen.has(assetPath) && !externalReferences.has(entry.name)) {
+      throw new Error(
+        `${source}: unreferenced help asset — link it from a Help page or a docs chapter, or delete it`,
+      );
+    }
+  }
+  return { validated };
+}
+
+/**
+ * Diagram references from documentation outside `docs/help` (the proven-methods
+ * handbook embeds the incident-evidence diagrams from the same asset folder).
+ */
+export function collectExternalAssetReferences(repositoryRoot) {
+  const references = new Set();
+  const docsRoot = path.resolve(repositoryRoot, "docs");
+  const helpRoot = path.resolve(docsRoot, "help");
+  if (!fs.existsSync(docsRoot)) return references;
+  const stack = [docsRoot];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        if (full !== helpRoot) stack.push(full);
+        continue;
+      }
+      if (path.extname(entry.name).toLowerCase() !== ".md") continue;
+      const text = fs.readFileSync(full, "utf8");
+      for (const match of text.matchAll(/help\/assets\/([A-Za-z0-9._-]+\.svg)/g)) {
+        references.add(match[1]);
+      }
+    }
+  }
+  return references;
 }
 
 function validateBody(body, meta, pagePath, root, assetsSeen) {
@@ -459,6 +610,7 @@ export function validateHelpCorpus(
   {
     requiredIds = [],
     maxPages = 1000,
+    externalAssetReferences = new Set(),
   } = {},
 ) {
   const absoluteRoot = path.resolve(root);
@@ -501,16 +653,22 @@ export function validateHelpCorpus(
     throw new Error(`help corpus exceeds ${maxPages} pages`);
   }
 
+  const anchors = new Map(
+    pages.map((page) => [page.meta.id, new Set(helpPageAnchors(page.body))]),
+  );
+
   for (const page of pages) {
     for (const related of page.meta.related) {
       if (!ids.has(related)) {
         throw new Error(`${page.path}: unknown related page '${related}'`);
       }
     }
-    for (const match of page.body.matchAll(/\bhelp:\/\/([a-z0-9-]+)(?:#[a-z0-9-]+)?/g)) {
-      if (!ids.has(match[1])) {
-        throw new Error(`${page.path}: unknown help link '${match[0]}'`);
-      }
+    for (const match of page.body.matchAll(HELP_LOCATOR_RE)) {
+      assertLocatorResolves(
+        { pageId: match[1], anchor: match[2], text: match[0] },
+        { ids, anchors },
+        page.path,
+      );
     }
   }
   for (const id of requiredIds) {
@@ -518,16 +676,156 @@ export function validateHelpCorpus(
       throw new Error(`required help page missing: ${id}`);
     }
   }
+  const assetLibrary = validateAssetLibrary(
+    absoluteRoot,
+    assetsSeen,
+    externalAssetReferences,
+  );
   return {
     pages: pages.length,
     assets: assetsSeen.size,
+    assetsValidated: assetLibrary.validated,
     ids: [...ids.keys()].sort(),
+    anchors,
   };
+}
+
+function assertLocatorResolves({ pageId, anchor, text }, { ids, anchors }, source) {
+  if (!ids.has(pageId)) {
+    throw new Error(`${source}: unknown help link '${text}'`);
+  }
+  if (anchor && !anchors.get(pageId)?.has(anchor)) {
+    throw new Error(
+      `${source}: help link '${text}' points at a heading that does not exist ` +
+        `(HelpPane scrolls by element id, so this deep link silently does nothing)`,
+    );
+  }
+}
+
+function sourceFiles(root, extensions) {
+  const files = [];
+  if (!fs.existsSync(root)) return files;
+  const stack = [root];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) continue;
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name !== "node_modules" && !entry.name.startsWith(".")) {
+          stack.push(full);
+        }
+        continue;
+      }
+      if (!extensions.has(path.extname(entry.name).toLowerCase())) continue;
+      if (/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(entry.name)) continue;
+      files.push(full);
+    }
+  }
+  return files.sort();
+}
+
+/**
+ * The UI → corpus direction (#540/#541).
+ *
+ * `validateHelpCorpus` only proves the corpus is internally consistent. Rich
+ * contextual Help (desktop/src/lib/helpContent.ts) and the Settings help router
+ * (desktop/src/lib/help.ts) name pages and anchors from React, and nothing
+ * previously checked that those targets exist — a renamed heading turned
+ * "Open full Help" into a no-op without failing any gate.
+ */
+export function validateSourceHelpReferences(
+  repositoryRoot,
+  { ids: rawIds, anchors },
+  { sourceRoot = path.join("desktop", "src") } = {},
+) {
+  const ids = rawIds instanceof Set ? rawIds : new Set(rawIds);
+  const absoluteSourceRoot = path.resolve(repositoryRoot, sourceRoot);
+  const files = sourceFiles(
+    absoluteSourceRoot,
+    new Set([".ts", ".tsx", ".js", ".jsx"]),
+  );
+  let locators = 0;
+  for (const file of files) {
+    const source = path.relative(repositoryRoot, file);
+    const text = fs.readFileSync(file, "utf8");
+    for (const match of text.matchAll(HELP_LOCATOR_RE)) {
+      assertLocatorResolves(
+        { pageId: match[1], anchor: match[2], text: match[0] },
+        { ids, anchors },
+        source,
+      );
+      locators += 1;
+    }
+  }
+
+  // The Settings help router returns bare page ids rather than locators.
+  const routerPath = path.resolve(repositoryRoot, sourceRoot, "lib", "help.ts");
+  let routes = 0;
+  if (fs.existsSync(routerPath)) {
+    const routerText = fs.readFileSync(routerPath, "utf8");
+    const router = routerText.match(
+      /export function helpPageForSettingsSection[\s\S]*?\n}/,
+    );
+    if (!router) {
+      throw new Error(
+        "desktop/src/lib/help.ts: helpPageForSettingsSection is no longer statically checkable",
+      );
+    }
+    for (const match of router[0].matchAll(/return\s+"([a-z0-9-]+)"/g)) {
+      if (!ids.has(match[1])) {
+        throw new Error(
+          `desktop/src/lib/help.ts: helpPageForSettingsSection routes to unknown help page '${match[1]}'`,
+        );
+      }
+      routes += 1;
+    }
+    if (routes === 0) {
+      throw new Error(
+        "desktop/src/lib/help.ts: helpPageForSettingsSection returned no checkable page ids",
+      );
+    }
+  }
+  return { files: files.length, locators, routes };
+}
+
+/**
+ * Packaging guard (#540): the bundled corpus is only offline-available because
+ * the Tauri bundle copies `docs/help` into the app resources. Dropping that
+ * mapping would ship an application whose Help pane is empty, with every other
+ * check still green.
+ */
+export function validateHelpPackaging(repositoryRoot) {
+  const configPath = path.resolve(
+    repositoryRoot,
+    "desktop",
+    "src-tauri",
+    "tauri.conf.json",
+  );
+  if (!fs.existsSync(configPath)) {
+    throw new Error("desktop/src-tauri/tauri.conf.json is missing");
+  }
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  const resources = config?.bundle?.resources;
+  if (!resources || typeof resources !== "object") {
+    throw new Error(
+      "desktop/src-tauri/tauri.conf.json: bundle.resources must map the Help corpus",
+    );
+  }
+  const target = resources["../../docs/help"];
+  if (target !== "help") {
+    throw new Error(
+      "desktop/src-tauri/tauri.conf.json: bundle.resources must map '../../docs/help' to 'help' " +
+        "so bundled Help stays available offline",
+    );
+  }
+  return { resource: target };
 }
 
 function main() {
   const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-  const defaultRoot = path.resolve(scriptDir, "..", "docs", "help");
+  const repositoryRoot = path.resolve(scriptDir, "..");
+  const defaultRoot = path.resolve(repositoryRoot, "docs", "help");
   const root = process.argv[2] ? path.resolve(process.argv[2]) : defaultRoot;
   const result = validateHelpCorpus(root, {
     requiredIds: [
@@ -539,9 +837,14 @@ function main() {
       "memory-overview",
       "skills-context-packs",
     ],
+    externalAssetReferences: collectExternalAssetReferences(repositoryRoot),
   });
+  const references = validateSourceHelpReferences(repositoryRoot, result);
+  validateHelpPackaging(repositoryRoot);
   process.stdout.write(
-    `check_help_corpus: OK (${result.pages} pages, ${result.assets} referenced SVGs)\n`,
+    `check_help_corpus: OK (${result.pages} pages, ${result.assets} referenced SVGs, ` +
+      `${result.assetsValidated} validated assets, ${references.locators} UI locators, ` +
+      `${references.routes} settings routes, packaged resource ok)\n`,
   );
 }
 

@@ -65,8 +65,45 @@ test("valid manifest passes with concise output", () => {
   withRepository(({ root }) => {
     const result = run(root);
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, "public media manifest valid: 1 assets\n");
+    assert.equal(
+      result.stdout,
+      "public media manifest valid: 1 assets, 0 published references\n",
+    );
     assert.equal(result.stderr, "");
+  });
+});
+
+test("the checked-in public media ledger validates against the real repository", () => {
+  const result = run(path.resolve(scriptDir, ".."));
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^public media manifest valid: \d+ assets/);
+});
+
+test("a README raster outside the ledger fails closed", () => {
+  withRepository(({ root, pathname }) => {
+    fs.writeFileSync(
+      path.join(root, "README.md"),
+      `# Fixture\n\n![CI](https://example.invalid/badge.svg)\n\n![Listed](${pathname})\n`,
+    );
+    const listed = run(root);
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.match(listed.stdout, /1 published references/);
+
+    fs.mkdirSync(path.join(root, "docs", "images"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, "docs", "images", "unreviewed.png"),
+      "unreviewed",
+    );
+    fs.appendFileSync(
+      path.join(root, "README.md"),
+      "\n![Unreviewed](docs/images/unreviewed.png)\n",
+    );
+    const smuggled = run(root);
+    assert.notEqual(smuggled.status, 0);
+    assert.match(
+      smuggled.stderr,
+      /published raster 'docs\/images\/unreviewed\.png' is not in the public media ledger/,
+    );
   });
 });
 

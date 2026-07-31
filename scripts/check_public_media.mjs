@@ -206,7 +206,44 @@ export function validatePublicMedia(
     );
   }
 
-  return { assets: inventory.length };
+  const published = validatePublishedReferences(root, seen);
+
+  return { assets: inventory.length, published };
+}
+
+/**
+ * README is the published product-communication surface (#677/#734). The
+ * manifest is only a privacy gate if every raster the README actually shows is
+ * a ledger entry: a raster committed outside `docs/media/` would otherwise be
+ * published with no blob identity, source SHA, or privacy review.
+ */
+export function validatePublishedReferences(
+  root,
+  listed,
+  documents = ["README.md"],
+) {
+  let references = 0;
+  for (const document of documents) {
+    const documentPath = path.join(root, document);
+    if (!fs.existsSync(documentPath)) continue;
+    const text = fs.readFileSync(documentPath, "utf8");
+    for (const match of text.matchAll(/!\[[^\]]*\]\(([^)\s]+)\)/g)) {
+      const target = match[1];
+      // Remote badges are not repository media and carry no local bytes.
+      if (/^(?:https?:)?\/\//i.test(target) || target.startsWith("data:")) {
+        continue;
+      }
+      if (!RASTER_EXTENSION_RE.test(target)) continue;
+      const normalized = target.replace(/^\.\//, "");
+      if (!listed.has(normalized)) {
+        throw new Error(
+          `${document}: published raster '${target}' is not in the public media ledger`,
+        );
+      }
+      references += 1;
+    }
+  }
+  return references;
 }
 
 function main() {
@@ -225,7 +262,9 @@ function main() {
     ? path.resolve(repositoryRoot, args[1])
     : path.join(repositoryRoot, "docs/media/public-assets.json");
   const result = validatePublicMedia(repositoryRoot, manifestPath);
-  process.stdout.write(`public media manifest valid: ${result.assets} assets\n`);
+  process.stdout.write(
+    `public media manifest valid: ${result.assets} assets, ${result.published} published references\n`,
+  );
 }
 
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";
