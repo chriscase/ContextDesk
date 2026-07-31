@@ -2,7 +2,9 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
+  useState,
   type KeyboardEvent,
 } from "react";
 import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
@@ -21,6 +23,28 @@ type Props = {
   onTrash: () => void;
 };
 
+const VIEWPORT_GUTTER = 8;
+
+export function clampChatContextMenuPosition(
+  x: number,
+  y: number,
+  menuWidth: number,
+  menuHeight: number,
+  viewportWidth: number,
+  viewportHeight: number,
+) {
+  return {
+    left: Math.max(
+      VIEWPORT_GUTTER,
+      Math.min(x, viewportWidth - menuWidth - VIEWPORT_GUTTER),
+    ),
+    top: Math.max(
+      VIEWPORT_GUTTER,
+      Math.min(y, viewportHeight - menuHeight - VIEWPORT_GUTTER),
+    ),
+  };
+}
+
 export function ChatContextMenu({
   x,
   y,
@@ -35,6 +59,30 @@ export function ChatContextMenu({
 }: Props) {
   const layerId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ left: x, top: y });
+
+  const updatePosition = useCallback(() => {
+    const menu = rootRef.current;
+    if (!menu) return;
+    const rect = menu.getBoundingClientRect();
+    const next = clampChatContextMenuPosition(
+      x,
+      y,
+      rect.width,
+      rect.height,
+      window.innerWidth,
+      window.innerHeight,
+    );
+    setPosition((current) =>
+      current.left === next.left && current.top === next.top ? current : next,
+    );
+  }, [x, y]);
+
+  useLayoutEffect(() => {
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    return () => window.removeEventListener("resize", updatePosition);
+  }, [updatePosition]);
 
   const dismiss = useCallback(
     (restoreFocus: boolean) => {
@@ -98,7 +146,7 @@ export function ChatContextMenu({
       ref={rootRef}
       className="chat-ctx-menu"
       role="menu"
-      style={{ left: x, top: y }}
+      style={{ left: position.left, top: position.top }}
       onClick={(e) => e.stopPropagation()}
       onContextMenu={(e) => e.preventDefault()}
       onKeyDown={moveFocus}
