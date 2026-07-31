@@ -578,8 +578,17 @@ describe("settings — AI / models", () => {
     // shooting it (it sits at the bottom of the AI section).
     dialog.scrollIntoView({ block: "center" });
     await nextPaintedFrame();
+    // The dialog's content-driven height is bistable at ±1px across fresh
+    // runs (a dimension mismatch fails the comparator outright), so pin the
+    // capture height with Playwright's screenshot-time style injection; the
+    // model list scrolls internally, so no content is lost.
     await expect(page.elementLocator(dialog)).toMatchScreenshot(
       "settings-manage-models-dark",
+      {
+        screenshotOptions: {
+          style: ".model-visibility__panel { height: 480px !important; }",
+        },
+      },
     );
   });
 });
