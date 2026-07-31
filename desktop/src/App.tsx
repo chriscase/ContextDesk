@@ -23,6 +23,7 @@ import { Titlebar } from "./components/shell/Titlebar";
 import { Workspace } from "./components/shell/Workspace";
 import { useChatScroll } from "./hooks/useChatScroll";
 import { useChatSessions } from "./hooks/useChatSessions";
+import { useComposerDrafts } from "./hooks/useComposerDrafts";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useLinkedCorpusAttachment } from "./hooks/useLinkedCorpusAttachment";
 import { useShellState } from "./hooks/useShellState";
@@ -110,6 +111,14 @@ export function App() {
       setSessions,
     });
   const linkedCorpusPending = pendingSessionIds.has(resolvedSessionId);
+  // Owned above the pane switch that unmounts ChatPane, so a draft belongs to
+  // its conversation and survives a trip to Help, Memory, or Archive.
+  const drafts = useComposerDrafts();
+  const { retainSessions } = drafts;
+  useEffect(() => {
+    // Trashing a chat must not leave its draft behind for a recycled id.
+    retainSessions(sessions.map((s) => s.id));
+  }, [sessions, retainSessions]);
 
   const [archiveRefreshKey, setArchiveRefreshKey] = useState(0);
   const [renameTarget, setRenameTarget] = useState<{
@@ -845,6 +854,9 @@ export function App() {
                   },
                   hasAuthorizedWorkspaceContent,
                   externalSeedRequest: wizardSeedRequest,
+                  draft: drafts.draftFor(resolvedSessionId),
+                  onDraftChange: (text: string) =>
+                    drafts.setDraft(resolvedSessionId, text),
                   setPane: (p) => shell.setPane(p),
                   chatScrollRef,
                   onChatScroll,

@@ -146,6 +146,9 @@ export type ChatPaneProps = {
   hasAuthorizedWorkspaceContent?: boolean;
   /** External composer seed from wizard completion. */
   externalSeedRequest?: { id: number; text: string } | null;
+  /** Draft for the active conversation, owned above the pane switch. */
+  draft?: string;
+  onDraftChange?: (text: string) => void;
 };
 
 /** Chat tabpanel: session tabs + transcript + composer (#146). */
@@ -196,6 +199,8 @@ export function ChatPane(props: ChatPaneProps) {
     onStartWizard,
     hasAuthorizedWorkspaceContent = false,
     externalSeedRequest = null,
+    draft,
+    onDraftChange,
   } = props;
 
   const windowed = useMessageWindow(visibleMessages, chatScrollRef);
@@ -642,12 +647,21 @@ export function ChatPane(props: ChatPaneProps) {
           onSubmit={onSubmit}
           disabled={busy || contextMutationPending}
           busy={busy}
+          disabledReason={
+            contextMutationPending
+              ? "Updating this chat's context — sending resumes when it finishes"
+              : preflightBlocking
+                ? "Setup checks are unresolved — sending opens Settings instead"
+                : undefined
+          }
           models={modelOptions}
           selectedModelKey={effectiveModelKey}
           onModelChange={setSessionModel}
           onSetDefaultModel={(key) => void setAppDefaultModel(key)}
           onStop={onStop}
           seedRequest={effectiveSeed}
+          draft={draft}
+          onDraftChange={onDraftChange}
         />
       </div>
     </div>
