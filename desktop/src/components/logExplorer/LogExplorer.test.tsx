@@ -209,6 +209,7 @@ vi.mock("../../lib/host", () => ({
   hostLogEditInvestigationNote: vi.fn(),
   hostLogPreviewInvestigationEvidence: vi.fn(),
   hostLogPreviewInvestigationFindingView: vi.fn(),
+  hostLogApplyInvestigationFindingView: vi.fn(),
   hostPrepareLogDiagnosticReport: vi.fn(async (manifest) => {
     const actual = await vi.importActual<
       typeof import("../../lib/logDiagnosticReport")
@@ -4358,6 +4359,9 @@ describe("LogExplorer shell", () => {
     vi.mocked(host.hostLogPreviewInvestigationFindingView).mockResolvedValue(
       preview,
     );
+    vi.mocked(host.hostLogApplyInvestigationFindingView).mockResolvedValue(
+      preview,
+    );
     vi.mocked(host.hostLogQueryEventNeighborhood).mockResolvedValue(
       eventNeighborhood(event),
     );
@@ -4411,9 +4415,11 @@ describe("LogExplorer shell", () => {
     expect(
       selectedRow?.classList.contains("log-explorer__row--highlight"),
     ).toBe(true);
+    // Preview once + trusted-host Apply once (not a second Preview-as-Apply).
     expect(host.hostLogPreviewInvestigationFindingView).toHaveBeenCalledTimes(
-      2,
+      1,
     );
+    expect(host.hostLogApplyInvestigationFindingView).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByTestId("bookmark-restore-view"));
     await waitFor(() =>
@@ -4502,6 +4508,11 @@ describe("LogExplorer shell", () => {
       missingCount: 0,
       staleCount: 1,
     });
+    vi.mocked(host.hostLogApplyInvestigationFindingView).mockRejectedValue(
+      new Error(
+        "Apply blocked: finding view recipe has 0 missing and 1 stale exact references",
+      ),
+    );
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByText("auth failure");
@@ -4521,6 +4532,7 @@ describe("LogExplorer shell", () => {
       ).disabled,
     ).toBe(true);
     expect(host.hostLogQueryEventNeighborhood).not.toHaveBeenCalled();
+    expect(host.hostLogApplyInvestigationFindingView).not.toHaveBeenCalled();
   });
 
   it("revalidates every evidence identity at Reveal time and blocks a changed corpus", async () => {

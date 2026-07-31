@@ -3463,6 +3463,21 @@ export async function hostLogPreviewInvestigationFindingView(
   );
 }
 
+/** Trusted-host Apply gate (#656). Fails closed when exact refs are missing/stale. */
+export async function hostLogApplyInvestigationFindingView(
+  corpusId: string,
+  investigationId: string,
+  findingId: string,
+): Promise<InvestigationFindingViewPreviewDto> {
+  if (!isTauri()) {
+    throw new Error("Investigation view apply requires Tauri host");
+  }
+  return invoke<InvestigationFindingViewPreviewDto>(
+    "log_apply_investigation_finding_view",
+    { corpusId, investigationId, findingId },
+  );
+}
+
 export async function hostListChatSessionsForCorpus(
   corpusId: string,
 ): Promise<SessionMetaDto[]> {

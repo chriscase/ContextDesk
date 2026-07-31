@@ -9667,6 +9667,26 @@ fn log_preview_investigation_finding_view(
         .map_err(|e| e.to_string())
 }
 
+/// Trusted-host Apply gate for a finding view recipe (#656).
+///
+/// Revalidates every exact reference. Returns the recipe only when every
+/// reference is verified; missing/stale refs fail closed. Does not mutate
+/// the Investigation document — the UI applies the returned recipe locally.
+#[tauri::command]
+fn log_apply_investigation_finding_view(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    investigation_id: String,
+    finding_id: String,
+) -> Result<cd_core::investigations::FindingViewRecipeResolution, String> {
+    let cache = log_cache_dir(&state)?;
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    investigation_store(&state)?
+        .apply_finding_view_recipe(&investigation_id, &finding_id, &corpus)
+        .map_err(|e| e.to_string())
+}
+
 /// List chat sessions linked to a corpus (any chat may link).
 #[tauri::command]
 fn list_chat_sessions_for_corpus(
@@ -10993,6 +11013,7 @@ pub fn run() {
             log_edit_investigation_note,
             log_preview_investigation_evidence,
             log_preview_investigation_finding_view,
+            log_apply_investigation_finding_view,
             list_chat_sessions_for_corpus,
             set_chat_linked_corpus,
             open_log_explorer,

@@ -36,6 +36,7 @@ import {
   hostLogListBookmarks,
   hostLogLoadSuppression,
   hostLogMutateTemplateSuppressionRule,
+  hostLogApplyInvestigationFindingView,
   hostLogPreviewInvestigationEvidence,
   hostLogPreviewInvestigationFindingView,
   hostLogQueryEventOriginal,
@@ -4061,24 +4062,12 @@ export function LogExplorer({ corpusId }: Props) {
     setInvestigationBusy(true);
     setInvestigationError(null);
     try {
-      const fresh = await hostLogPreviewInvestigationFindingView(
+      // Trusted-host Apply gate — fails closed on missing/stale exact refs.
+      const fresh = await hostLogApplyInvestigationFindingView(
         corpusId,
         investigation.document.id,
         preview.findingId,
       );
-      if (fresh.missingCount > 0 || fresh.staleCount > 0) {
-        setFindingViewPreview({
-          findingId: preview.findingId,
-          recipe: fresh.recipe,
-          changes: preview.changes,
-          missingCount: fresh.missingCount,
-          staleCount: fresh.staleCount,
-        });
-        setInvestigationError(
-          "Apply blocked because the saved view no longer resolves to exact authoritative event identities.",
-        );
-        return;
-      }
       setRevealRestore(priorView);
       setFindingViewPreview(null);
       scheduleInvestigationViewApply(
@@ -4086,7 +4075,25 @@ export function LogExplorer({ corpusId }: Props) {
         "Applied saved Explorer view · Restore prior view is available",
       );
     } catch (applyError) {
-      setInvestigationError(String(applyError));
+      const message = String(applyError);
+      setInvestigationError(message);
+      // Refresh non-mutating preview counts so the blocked Apply UI stays honest.
+      try {
+        const status = await hostLogPreviewInvestigationFindingView(
+          corpusId,
+          investigation.document.id,
+          preview.findingId,
+        );
+        setFindingViewPreview({
+          findingId: preview.findingId,
+          recipe: status.recipe,
+          changes: preview.changes,
+          missingCount: status.missingCount,
+          staleCount: status.staleCount,
+        });
+      } catch {
+        /* keep prior preview */
+      }
     } finally {
       setInvestigationBusy(false);
     }
