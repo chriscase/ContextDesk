@@ -15255,6 +15255,9 @@ mod log_embedding_host_tests {
 
     /// #824 — product desktop path: host registers `default_log_embed_backend`
     /// (log-fastembed ONNX), not ConceptEmbed as the production claim.
+    ///
+    /// Requires a usable local ONNX model/cache. Fail hard (do not silently skip)
+    /// so green CI cannot hide a missing product backend on the desktop crate.
     #[test]
     fn product_host_init_registers_default_log_embed_backend_not_concept() {
         assert!(
@@ -15266,19 +15269,13 @@ mod log_embedding_host_tests {
         let index = cd_core::index::KeywordIndex::build(&workspace).unwrap();
         let mut host = ToolHost::new(workspace, index, None);
         // Mirror production host setup in this file (default_log_embed_backend).
-        match cd_core::embed::default_log_embed_backend() {
-            Ok(Some(be)) => {
-                host.set_log_embed_backend(Some(be), cd_core::embed::LOCAL_LOG_EMBED_MODEL_ID);
-            }
-            Ok(None) => panic!("desktop log-fastembed build must supply a backend"),
-            Err(e) => {
-                // Model cache missing is an environment limitation, not a product lie.
-                eprintln!(
-                    "SKIP product ONNX host registration: default_log_embed_backend failed: {e}"
-                );
-                return;
-            }
-        }
+        let be = cd_core::embed::default_log_embed_backend()
+            .expect("default_log_embed_backend must not error on desktop log-fastembed builds")
+            .expect(
+                "desktop log-fastembed build must supply a backend; check model cache \
+                 (e.g. .fastembed_cache / HF hub AllMiniLML6V2)",
+            );
+        host.set_log_embed_backend(Some(be), cd_core::embed::LOCAL_LOG_EMBED_MODEL_ID);
         let (policy, backend) = desktop_local_log_embed_plan(&host);
         assert_eq!(policy.mode, cd_core::log_analysis::LogEmbedMode::Local);
         assert_eq!(
@@ -15307,12 +15304,19 @@ mod log_embedding_host_tests {
             ]))
             .expect("product ONNX backend must embed");
         assert_eq!(vectors.len(), 2);
-        assert!(vectors[0].len() >= 8, "vector dims unexpected: {}", vectors[0].len());
+        assert!(
+            vectors[0].len() >= 8,
+            "vector dims unexpected: {}",
+            vectors[0].len()
+        );
     }
 
     /// #824 — host SoftWrite orchestration path: spawn_blocking + production
-    /// policy + cancel leaves no published corpus; retry succeeds (same
-    /// entry points as `run_log_ingest`, without requiring a Tauri AppHandle).
+    /// policy + product ONNX backend + cancel leaves no published corpus;
+    /// retry succeeds (same entry points as `run_log_ingest`).
+    ///
+    /// Requires product `default_log_embed_backend`. No ConceptEmbed fallback —
+    /// that would green-theater a non-product path.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn host_softwrite_cancel_then_retry_uses_product_embed_plan() {
         use cd_core::log_analysis::{ingest_path_with_policy_and_observer, LogCorpus};
@@ -15323,6 +15327,10 @@ mod log_embedding_host_tests {
         use std::io::Write;
         use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
+        assert!(
+            cd_core::embed::log_fastembed_enabled(),
+            "desktop host crate must build with log-fastembed"
+        );
         let dir = tempfile::tempdir().unwrap();
         let logs = dir.path().join("logs");
         std::fs::create_dir_all(&logs).unwrap();
@@ -15334,22 +15342,15 @@ mod log_embedding_host_tests {
         let cache = dir.path().join("cache");
         std::fs::create_dir_all(&cache).unwrap();
 
-        // Product plan: local_default policy + default_log_embed_backend when available.
+        // Product plan only — fail if ONNX backend cannot be constructed.
         let mut policy = cd_core::log_analysis::LogEmbedPolicy::local_default();
-        let embed_backend = match cd_core::embed::default_log_embed_backend() {
-            Ok(Some(be)) => {
-                policy.model_id = cd_core::embed::LOCAL_LOG_EMBED_MODEL_ID.into();
-                Some(be)
-            }
-            Ok(None) | Err(_) => {
-                // Hermetic fallback still exercises host cancel path; product
-                // ONNX registration is covered by the registration test.
-                policy.model_id = "fixture-local".into();
-                Some(std::sync::Arc::new(
-                    cd_core::embed::ConceptEmbedBackend::new(32),
-                ) as std::sync::Arc<dyn cd_core::embed::EmbedBackend>)
-            }
-        };
+        policy.model_id = cd_core::embed::LOCAL_LOG_EMBED_MODEL_ID.into();
+        let embed_backend = cd_core::embed::default_log_embed_backend()
+            .expect("default_log_embed_backend must not error on desktop log-fastembed builds")
+            .expect(
+                "product SoftWrite cancel proof requires default_log_embed_backend; \
+                 model cache missing or ONNX init failed",
+            );
 
         let flag = CancelFlag::new();
         let cancelled_mid_stream = std::sync::Arc::new(AtomicBool::new(false));
@@ -15380,7 +15381,7 @@ mod log_embedding_host_tests {
         let cache_job = cache.clone();
         let logs_job = logs.clone();
         let policy_job = policy.clone();
-        let backend_job = embed_backend.clone();
+        let backend_job = Some(std::sync::Arc::clone(&embed_backend));
         let flag_job = flag.clone();
         let observer_job = std::sync::Arc::clone(&observer);
         let cancel_result = tokio::task::spawn_blocking(move || {
@@ -15422,7 +15423,7 @@ mod log_embedding_host_tests {
             let cache = cache.clone();
             let logs = logs.clone();
             let policy = policy.clone();
-            let backend = embed_backend.clone();
+            let backend = Some(std::sync::Arc::clone(&embed_backend));
             move || {
                 ingest_path_with_policy_and_observer(
                     &cache,
@@ -15445,5 +15446,10 @@ mod log_embedding_host_tests {
         // Relaunch/open: only the completed id is listable.
         let opened = LogCorpus::open(&cache, &report.corpus_id).unwrap();
         assert_eq!(opened.event_count() as u64, report.stats.lines);
+        assert_eq!(
+            policy.model_id,
+            cd_core::embed::LOCAL_LOG_EMBED_MODEL_ID,
+            "cancel/retry path must use product ONNX model id"
+        );
     }
 }
