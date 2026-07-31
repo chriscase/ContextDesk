@@ -1,0 +1,35 @@
+[
+  {
+    "kind": "turn_started",
+    "payload": {
+      "session_id": "s-1"
+    }
+  },
+  {
+    "kind": "text_delta",
+    "payload": {
+      "text": "Looking at the burst around 14:02…"
+    }
+  },
+  {
+    "kind": "tool",
+    "payload": {
+      "detail": "41 hits",
+      "name": "search_logs",
+      "phase": "completed"
+    }
+  },
+  {
+    "kind": "citation",
+    "payload": {
+      "id": "log_template:41",
+      "title": "connection refused to db-<*>"
+    }
+  },
+  {
+    "kind": "turn_completed",
+    "payload": {
+      "ok": true
+    }
+  }
+]

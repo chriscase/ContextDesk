@@ -1,0 +1,18 @@
+{
+  "hosts": {
+    "api-7": 300
+  },
+  "levels": {
+    "ERROR": 471,
+    "INFO": 24529
+  },
+  "services": {
+    "": 171,
+    "checkout": 300
+  },
+  "sources": {
+    "api.log": 300,
+    "worker.log": 171
+  },
+  "timeQuality": "mixed"
+}

@@ -1,0 +1,128 @@
+{
+  "audit": [
+    {
+      "action": "previewed",
+      "createdAt": 1735990050,
+      "id": "0199aaaa-2222-7000-8000-000000000001",
+      "previewToken": "0199aaaa-1111-7000-8000-000000000001",
+      "revision": 3
+    },
+    {
+      "action": "activated",
+      "createdAt": 1735990100,
+      "id": "0199aaaa-2222-7000-8000-000000000002",
+      "previewToken": "0199aaaa-1111-7000-8000-000000000001",
+      "revision": 4,
+      "ruleId": "0199aaaa-0000-7000-8000-000000000001"
+    },
+    {
+      "action": "disabled",
+      "createdAt": 1735990300,
+      "id": "0199aaaa-2222-7000-8000-000000000003",
+      "revision": 5,
+      "ruleId": "0199aaaa-0000-7000-8000-000000000002"
+    },
+    {
+      "action": "reenabled",
+      "createdAt": 1735990350,
+      "id": "0199aaaa-2222-7000-8000-000000000004",
+      "revision": 6,
+      "ruleId": "0199aaaa-0000-7000-8000-000000000002"
+    },
+    {
+      "action": "removed",
+      "createdAt": 1735990500,
+      "id": "0199aaaa-2222-7000-8000-000000000005",
+      "revision": 7,
+      "ruleId": "0199aaaa-0000-7000-8000-000000000003"
+    }
+  ],
+  "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+  "previews": [
+    {
+      "corpusEventCount": 25000,
+      "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+      "createdAt": 1735990050,
+      "eventRevision": 3,
+      "incrementalEventCount": 10300,
+      "levelCounts": [
+        {
+          "count": 10299,
+          "level": "INFO"
+        },
+        {
+          "count": 1,
+          "level": "WARN"
+        }
+      ],
+      "matchingEventCount": 10300,
+      "name": "health-check noise",
+      "origin": "human",
+      "predicate": {
+        "templateFingerprint": "fp-41-abcdef",
+        "templateId": 41
+      },
+      "rationale": "Confirmed repetitive infrastructure traffic",
+      "representatives": [
+        {
+          "level": "INFO",
+          "redactedExcerpt": "GET /health 200 [REDACTED_TOKEN]",
+          "seq": 42,
+          "source": "api.log",
+          "timeQuality": "wall",
+          "timestamp": 1735991449
+        }
+      ],
+      "ruleRevision": 7,
+      "sourceCount": 3,
+      "timeSpan": {
+        "from": 1735400000,
+        "to": 1735991449
+      },
+      "token": "0199aaaa-1111-7000-8000-000000000001"
+    }
+  ],
+  "revision": 7,
+  "rules": [
+    {
+      "createdAt": 1735990000,
+      "id": "0199aaaa-0000-7000-8000-000000000001",
+      "name": "health-check noise",
+      "origin": "human",
+      "predicate": {
+        "templateFingerprint": "fp-41-abcdef",
+        "templateId": 41
+      },
+      "rationale": "Reviewed repetitive success traffic",
+      "state": "enabled",
+      "updatedAt": 1735990100
+    },
+    {
+      "createdAt": 1735990200,
+      "id": "0199aaaa-0000-7000-8000-000000000002",
+      "name": "retry chatter",
+      "origin": "detector_proposal",
+      "predicate": {
+        "templateFingerprint": "fp-77-123456",
+        "templateId": 77
+      },
+      "rationale": "Detector proposal retained for review",
+      "state": "disabled",
+      "updatedAt": 1735990300
+    },
+    {
+      "createdAt": 1735990400,
+      "id": "0199aaaa-0000-7000-8000-000000000003",
+      "name": "obsolete rule",
+      "origin": "model_proposal",
+      "predicate": {
+        "templateFingerprint": "fp-99-fedcba",
+        "templateId": 99
+      },
+      "rationale": "Model proposal later removed",
+      "state": "removed",
+      "updatedAt": 1735990500
+    }
+  ],
+  "schemaVersion": 1
+}

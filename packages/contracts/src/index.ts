@@ -14,3 +14,6 @@ export const CONTRACTS_PACKAGE = "@contextdesk/contracts" as const;
 
 /** The wire/event-stream contract generation this package mirrors. */
 export const CD_WIRE_VERSION = "cd.v1" as const;
+
+export { ContractViolation } from "./parse";
+export * from "./wireV1";
