@@ -35,6 +35,10 @@ dist/
 playwright-report/
 test-results/
 vitest.config.ts.timestamp-*
+# Visual-suite failure artifacts (actual/diff PNGs); reviewed baselines are
+# committed under desktop/visual/**/__screenshots__/ instead.
+.vitest-attachments/
+**/.vitest-attachments/
 
 # Rust
 target/

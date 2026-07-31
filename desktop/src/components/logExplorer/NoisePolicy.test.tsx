@@ -460,6 +460,61 @@ describe("SuppressTemplateDialog", () => {
     });
   });
 
+  it("carries the narrow sheet class on the portaled form itself (#834 repair)", () => {
+    // The dialog portals to document.body, so no .log-explorer--narrow
+    // ancestor can scope its sheet styling; the directly applied --sheet
+    // class is the narrow signal the stylesheet keys on. Rendered geometry
+    // is proven renderer-level in desktop/visual/noise-suppress.test.tsx.
+    const triggerRef = createRef<HTMLButtonElement>();
+    const { unmount } = render(
+      <>
+        <Trigger triggerRef={triggerRef} />
+        <SuppressTemplateDialog
+          corpusId="c1"
+          templateId={22}
+          policyRevision={7}
+          narrow
+          triggerRef={triggerRef}
+          onReloadPolicy={async () => 7}
+          onActivated={async () => {}}
+          onDismiss={vi.fn()}
+        />
+      </>,
+    );
+    const form = screen.getByRole("dialog", {
+      name: "Suppress exact template",
+    });
+    expect(form.classList.contains("log-explorer__suppress-dialog--sheet")).toBe(
+      true,
+    );
+    expect(
+      screen.getByTestId("suppress-template-backdrop").parentElement,
+    ).toBe(document.body);
+    unmount();
+
+    const wideRef = createRef<HTMLButtonElement>();
+    render(
+      <>
+        <Trigger triggerRef={wideRef} />
+        <SuppressTemplateDialog
+          corpusId="c1"
+          templateId={22}
+          policyRevision={7}
+          narrow={false}
+          triggerRef={wideRef}
+          onReloadPolicy={async () => 7}
+          onActivated={async () => {}}
+          onDismiss={vi.fn()}
+        />
+      </>,
+    );
+    expect(
+      screen
+        .getByRole("dialog", { name: "Suppress exact template" })
+        .classList.contains("log-explorer__suppress-dialog--sheet"),
+    ).toBe(false);
+  });
+
   it("previews trusted impact and requires explicit confirmation", async () => {
     const triggerRef = createRef<HTMLButtonElement>();
     const onActivated = vi.fn(async () => {});
