@@ -181,6 +181,13 @@ pub struct AppConfig {
     /// proven sibling models.
     #[serde(default)]
     pub model_tools_enabled: std::collections::HashMap<String, bool>,
+    /// Which providers/models ordinary pickers offer, and in what order (#678).
+    ///
+    /// Display curation only: it never deletes a profile, a credential
+    /// reference, a locally installed model, or a remote resource, and it is
+    /// never a security or redaction boundary.
+    #[serde(default)]
+    pub model_curation: crate::model_curation::ModelCuration,
 }
 
 fn default_index_max_files() -> usize {
@@ -292,7 +299,10 @@ pub fn load_config(path: &Path) -> CoreResult<AppConfig> {
         return Ok(AppConfig::default());
     }
     let raw = fs::read_to_string(path)?;
-    let cfg: AppConfig = serde_json::from_str(&raw)?;
+    let mut cfg: AppConfig = serde_json::from_str(&raw)?;
+    // Stamp the curation schema version and drop blank/duplicate keys. Entries
+    // written by a newer build are preserved verbatim (#678).
+    cfg.model_curation.migrate();
     refuse_raw_secret_refs(&cfg)?;
     Ok(cfg)
 }

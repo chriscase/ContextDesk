@@ -1,0 +1,497 @@
+//! Curated provider/model visibility (#678).
+//!
+//! Discovery can return a long or personally named inventory. This module lets
+//! a user narrow what ordinary pickers offer — hide a whole provider profile,
+//! hide individual models, pin the ones they actually use — **without deleting
+//! anything**. Nothing here removes a provider profile, a credential
+//! reference, a locally installed model, or any remote resource; it only
+//! records display preferences.
+//!
+//! It is explicitly *not* a security or redaction boundary. A hidden model is
+//! still configured, still reachable by an explicit selection that already
+//! names it, and still listed by the management surface. Callers must never
+//! present hiding as protection (see #653 for public-capture guidance).
+//!
+//! ## Scope identity
+//!
+//! Curation is keyed by **provider kind + endpoint identity + model id**, not
+//! by the profile's display label:
+//!
+//! - Renaming a profile keeps its curation (the upstream is the same).
+//! - Repointing a profile at a different `base_url` does *not* carry curation
+//!   across, because that is a different inventory. The old entries stay in
+//!   config, inert, so pointing back restores the user's choices.
+//! - Two profiles of the same kind aimed at the same endpoint are the same
+//!   upstream and therefore share one curation scope.
+//! - Session-based kinds with no URL fall back to the profile id, so distinct
+//!   profiles stay distinct.
+//!
+//! That is what keeps two providers that both expose `llama3` curated
+//! independently.
+
+use std::collections::BTreeSet;
+
+use serde::{Deserialize, Serialize};
+
+use crate::providers::{ProviderKind, ProviderProfile};
+
+/// Schema version written by this build.
+pub const CURATION_VERSION: u32 = 1;
+
+/// Identity of one curation scope: an exact upstream inventory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurationScope {
+    kind: ProviderKind,
+    endpoint: String,
+}
+
+impl CurationScope {
+    /// Derive the scope for a profile.
+    pub fn for_profile(profile: &ProviderProfile) -> Self {
+        Self {
+            kind: profile.kind,
+            endpoint: normalize_endpoint(&profile.base_url, &profile.id),
+        }
+    }
+
+    /// Stable key for the provider profile as a whole.
+    pub fn provider_key(&self) -> String {
+        format!("p:v1:{}:{}", kind_slug(self.kind), self.endpoint)
+    }
+
+    /// Stable key for one model inside this scope.
+    pub fn model_key(&self, model_id: &str) -> String {
+        format!(
+            "m:v1:{}:{}:{}",
+            kind_slug(self.kind),
+            self.endpoint,
+            model_id.trim()
+        )
+    }
+}
+
+fn kind_slug(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::Ollama => "ollama",
+        ProviderKind::OpenAiCompatible => "openai_compatible",
+        ProviderKind::Anthropic => "anthropic",
+        ProviderKind::XaiGrokBuild => "xai_grok_build",
+    }
+}
+
+/// Endpoint identity: the base URL when there is one, else the profile id.
+///
+/// Trailing slashes and case in the scheme/host are not meaningful, so they are
+/// normalized — otherwise `http://Host:11434/` and `http://host:11434` would
+/// curate separately and the user's choices would appear to vanish.
+fn normalize_endpoint(base_url: &str, profile_id: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return profile_id.trim().to_string();
+    }
+    match trimmed.split_once("://") {
+        Some((scheme, rest)) => {
+            let (authority, path) = match rest.split_once('/') {
+                Some((a, p)) => (a, Some(p)),
+                None => (rest, None),
+            };
+            let mut out = format!(
+                "{}://{}",
+                scheme.to_ascii_lowercase(),
+                authority.to_ascii_lowercase()
+            );
+            if let Some(p) = path {
+                if !p.is_empty() {
+                    out.push('/');
+                    out.push_str(p);
+                }
+            }
+            out
+        }
+        None => trimmed.to_ascii_lowercase(),
+    }
+}
+
+/// Why a model is not offered by ordinary pickers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HiddenBy {
+    /// The whole provider profile is hidden.
+    Provider,
+    /// This exact model is hidden.
+    Model,
+}
+
+/// User-curated visibility and ordering. Purely presentational.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelCuration {
+    /// Schema version of the persisted shape.
+    #[serde(default)]
+    pub version: u32,
+    /// Provider scope keys the user has hidden.
+    #[serde(default)]
+    pub hidden_providers: BTreeSet<String>,
+    /// Model scope keys the user has hidden.
+    #[serde(default)]
+    pub hidden_models: BTreeSet<String>,
+    /// Model scope keys in explicit user order; index 0 sorts first.
+    #[serde(default)]
+    pub pinned_models: Vec<String>,
+}
+
+impl ModelCuration {
+    /// Normalize a freshly loaded value.
+    ///
+    /// A config written by a *newer* build keeps its version and its entries:
+    /// every field is an opaque key set, so round-tripping preserves data this
+    /// build does not understand rather than silently dropping the user's
+    /// choices. Only duplicates and blanks are cleaned.
+    pub fn migrate(&mut self) {
+        if self.version == 0 {
+            // Absent or pre-versioning: the shape is already current.
+            self.version = CURATION_VERSION;
+        }
+        self.hidden_providers.retain(|k| !k.trim().is_empty());
+        self.hidden_models.retain(|k| !k.trim().is_empty());
+        let mut seen = BTreeSet::new();
+        self.pinned_models
+            .retain(|k| !k.trim().is_empty() && seen.insert(k.clone()));
+    }
+
+    /// True when the profile itself is hidden.
+    pub fn provider_hidden(&self, profile: &ProviderProfile) -> bool {
+        self.hidden_providers
+            .contains(&CurationScope::for_profile(profile).provider_key())
+    }
+
+    /// Why this exact provider/model pair is hidden, if it is.
+    ///
+    /// Provider hiding wins: a model inside a hidden provider reports
+    /// `Provider` even if it also carries its own entry, so restoring the
+    /// provider does not silently un-hide models the user hid individually.
+    pub fn hidden_by(&self, profile: &ProviderProfile, model_id: &str) -> Option<HiddenBy> {
+        if self.provider_hidden(profile) {
+            return Some(HiddenBy::Provider);
+        }
+        let scope = CurationScope::for_profile(profile);
+        if self.hidden_models.contains(&scope.model_key(model_id)) {
+            return Some(HiddenBy::Model);
+        }
+        None
+    }
+
+    /// Explicit pin position, lowest first.
+    pub fn pinned_rank(&self, profile: &ProviderProfile, model_id: &str) -> Option<u32> {
+        let key = CurationScope::for_profile(profile).model_key(model_id);
+        self.pinned_models
+            .iter()
+            .position(|k| *k == key)
+            .map(|i| i as u32)
+    }
+
+    /// Hide or restore a whole profile. Returns true when state changed.
+    pub fn set_provider_hidden(&mut self, profile: &ProviderProfile, hidden: bool) -> bool {
+        let key = CurationScope::for_profile(profile).provider_key();
+        if hidden {
+            self.hidden_providers.insert(key)
+        } else {
+            self.hidden_providers.remove(&key)
+        }
+    }
+
+    /// Hide or restore one model. Returns true when state changed.
+    pub fn set_model_hidden(
+        &mut self,
+        profile: &ProviderProfile,
+        model_id: &str,
+        hidden: bool,
+    ) -> bool {
+        let key = CurationScope::for_profile(profile).model_key(model_id);
+        if hidden {
+            // Hiding something pinned is contradictory; drop the pin so the
+            // picker cannot show a hidden model in its pinned band.
+            self.pinned_models.retain(|k| k != &key);
+            self.hidden_models.insert(key)
+        } else {
+            self.hidden_models.remove(&key)
+        }
+    }
+
+    /// Pin or unpin one model. Pinning appends at the end of the explicit order.
+    pub fn set_model_pinned(
+        &mut self,
+        profile: &ProviderProfile,
+        model_id: &str,
+        pinned: bool,
+    ) -> bool {
+        let key = CurationScope::for_profile(profile).model_key(model_id);
+        let already = self.pinned_models.contains(&key);
+        if pinned == already {
+            return false;
+        }
+        if pinned {
+            // A pinned model must be offered, so pinning restores it.
+            self.hidden_models.remove(&key);
+            self.pinned_models.push(key);
+        } else {
+            self.pinned_models.retain(|k| k != &key);
+        }
+        true
+    }
+
+    /// Drop curation for scopes no longer present in the configuration.
+    ///
+    /// Deliberately *not* called on profile deletion: a user who removes and
+    /// re-adds the same endpoint should get their choices back. This exists for
+    /// an explicit "forget hidden choices" action only.
+    pub fn retain_scopes(&mut self, profiles: &[ProviderProfile]) {
+        let provider_keys: BTreeSet<String> = profiles
+            .iter()
+            .map(|p| CurationScope::for_profile(p).provider_key())
+            .collect();
+        let model_prefixes: Vec<String> = profiles
+            .iter()
+            .map(|p| {
+                let s = CurationScope::for_profile(p);
+                let full = s.model_key("");
+                full.trim_end_matches(':').to_string()
+            })
+            .collect();
+        self.hidden_providers.retain(|k| provider_keys.contains(k));
+        let in_scope = |k: &String| model_prefixes.iter().any(|p| k.starts_with(p.as_str()));
+        self.hidden_models.retain(&in_scope);
+        self.pinned_models.retain(|k| in_scope(k));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::{ProviderCapabilities, ProviderDeadlinePreference};
+
+    fn profile(id: &str, kind: ProviderKind, base_url: &str) -> ProviderProfile {
+        ProviderProfile {
+            id: id.into(),
+            label: format!("label for {id}"),
+            kind,
+            base_url: base_url.into(),
+            api_key_ref: None,
+            chat_model: "m".into(),
+            embedding_model: None,
+            embedding_base_url: None,
+            capabilities: ProviderCapabilities::default(),
+            local_only: false,
+            deadline_preference: ProviderDeadlinePreference::default(),
+        }
+    }
+
+    #[test]
+    fn same_model_name_behind_two_providers_curates_independently() {
+        let a = profile("a", ProviderKind::Ollama, "http://127.0.0.1:11434");
+        let b = profile("b", ProviderKind::Ollama, "http://10.0.0.9:11434");
+        let mut c = ModelCuration::default();
+
+        c.set_model_hidden(&a, "llama3", true);
+
+        assert_eq!(c.hidden_by(&a, "llama3"), Some(HiddenBy::Model));
+        assert_eq!(c.hidden_by(&b, "llama3"), None, "sibling must stay visible");
+    }
+
+    #[test]
+    fn same_endpoint_under_a_different_kind_is_a_different_scope() {
+        let ollama = profile("a", ProviderKind::Ollama, "http://host:1234");
+        let compat = profile("b", ProviderKind::OpenAiCompatible, "http://host:1234");
+        let mut c = ModelCuration::default();
+
+        c.set_model_hidden(&ollama, "shared", true);
+
+        assert_eq!(c.hidden_by(&ollama, "shared"), Some(HiddenBy::Model));
+        assert_eq!(c.hidden_by(&compat, "shared"), None);
+    }
+
+    #[test]
+    fn renaming_a_profile_label_keeps_curation() {
+        let mut p = profile("a", ProviderKind::Ollama, "http://127.0.0.1:11434");
+        let mut c = ModelCuration::default();
+        c.set_model_hidden(&p, "llama3", true);
+
+        p.label = "Completely different name".into();
+
+        assert_eq!(c.hidden_by(&p, "llama3"), Some(HiddenBy::Model));
+    }
+
+    #[test]
+    fn repointing_at_a_new_endpoint_does_not_carry_curation_across() {
+        let mut p = profile("a", ProviderKind::Ollama, "http://127.0.0.1:11434");
+        let mut c = ModelCuration::default();
+        c.set_model_hidden(&p, "llama3", true);
+
+        p.base_url = "http://192.168.1.50:11434".into();
+        assert_eq!(
+            c.hidden_by(&p, "llama3"),
+            None,
+            "a different server is a different inventory"
+        );
+
+        // Pointing back restores the user's choice — nothing was deleted.
+        p.base_url = "http://127.0.0.1:11434".into();
+        assert_eq!(c.hidden_by(&p, "llama3"), Some(HiddenBy::Model));
+    }
+
+    #[test]
+    fn endpoint_identity_ignores_trailing_slash_and_host_case() {
+        let a = profile("a", ProviderKind::Ollama, "http://Localhost:11434/");
+        let b = profile("b", ProviderKind::Ollama, "http://localhost:11434");
+        let mut c = ModelCuration::default();
+        c.set_model_hidden(&a, "llama3", true);
+        assert_eq!(c.hidden_by(&b, "llama3"), Some(HiddenBy::Model));
+    }
+
+    #[test]
+    fn session_kinds_without_a_url_stay_distinct_per_profile() {
+        let a = profile("grok-one", ProviderKind::XaiGrokBuild, "");
+        let b = profile("grok-two", ProviderKind::XaiGrokBuild, "");
+        let mut c = ModelCuration::default();
+        c.set_model_hidden(&a, "grok-3", true);
+        assert_eq!(c.hidden_by(&a, "grok-3"), Some(HiddenBy::Model));
+        assert_eq!(c.hidden_by(&b, "grok-3"), None);
+    }
+
+    #[test]
+    fn provider_hiding_wins_and_restoring_it_keeps_individual_model_choices() {
+        let p = profile("a", ProviderKind::Ollama, "http://127.0.0.1:11434");
+        let mut c = ModelCuration::default();
+        c.set_model_hidden(&p, "noisy", true);
+        c.set_provider_hidden(&p, true);
+
+        assert_eq!(c.hidden_by(&p, "noisy"), Some(HiddenBy::Provider));
+        assert_eq!(c.hidden_by(&p, "wanted"), Some(HiddenBy::Provider));
+
+        c.set_provider_hidden(&p, false);
+        assert_eq!(
+            c.hidden_by(&p, "noisy"),
+            Some(HiddenBy::Model),
+            "the individually hidden model must not be un-hidden"
+        );
+        assert_eq!(c.hidden_by(&p, "wanted"), None);
+    }
+
+    #[test]
+    fn hiding_a_pinned_model_drops_the_pin() {
+        let p = profile("a", ProviderKind::Ollama, "http://x:1");
+        let mut c = ModelCuration::default();
+        c.set_model_pinned(&p, "m1", true);
+        assert_eq!(c.pinned_rank(&p, "m1"), Some(0));
+
+        c.set_model_hidden(&p, "m1", true);
+        assert_eq!(c.pinned_rank(&p, "m1"), None);
+        assert_eq!(c.hidden_by(&p, "m1"), Some(HiddenBy::Model));
+    }
+
+    #[test]
+    fn pinning_a_hidden_model_restores_it() {
+        let p = profile("a", ProviderKind::Ollama, "http://x:1");
+        let mut c = ModelCuration::default();
+        c.set_model_hidden(&p, "m1", true);
+
+        c.set_model_pinned(&p, "m1", true);
+        assert_eq!(c.hidden_by(&p, "m1"), None);
+    }
+
+    #[test]
+    fn pin_order_is_explicit_and_reversible() {
+        let p = profile("a", ProviderKind::Ollama, "http://x:1");
+        let mut c = ModelCuration::default();
+        c.set_model_pinned(&p, "second", true);
+        c.set_model_pinned(&p, "first", true);
+
+        assert_eq!(c.pinned_rank(&p, "second"), Some(0));
+        assert_eq!(c.pinned_rank(&p, "first"), Some(1));
+
+        assert!(c.set_model_pinned(&p, "second", false));
+        assert_eq!(c.pinned_rank(&p, "second"), None);
+        assert_eq!(c.pinned_rank(&p, "first"), Some(0), "ranks close up");
+
+        // Re-pinning is idempotent and does not duplicate.
+        assert!(c.set_model_pinned(&p, "second", true));
+        assert!(!c.set_model_pinned(&p, "second", true));
+        assert_eq!(c.pinned_models.len(), 2);
+    }
+
+    #[test]
+    fn migrate_stamps_version_and_removes_duplicates_without_losing_choices() {
+        let mut c = ModelCuration {
+            version: 0,
+            hidden_models: BTreeSet::from(["m:v1:ollama:e:a".to_string(), String::new()]),
+            pinned_models: vec!["k".into(), "k".into(), "  ".into(), "j".into()],
+            ..Default::default()
+        };
+        c.migrate();
+
+        assert_eq!(c.version, CURATION_VERSION);
+        assert_eq!(c.hidden_models.len(), 1);
+        assert_eq!(c.pinned_models, vec!["k".to_string(), "j".to_string()]);
+    }
+
+    #[test]
+    fn a_newer_config_keeps_its_version_and_entries() {
+        let mut c = ModelCuration {
+            version: CURATION_VERSION + 7,
+            hidden_models: BTreeSet::from(["m:v9:future:endpoint:model".to_string()]),
+            ..Default::default()
+        };
+        let before = c.clone();
+        c.migrate();
+
+        assert_eq!(c.version, before.version, "must not downgrade");
+        assert_eq!(
+            c.hidden_models, before.hidden_models,
+            "entries this build does not understand must survive"
+        );
+    }
+
+    #[test]
+    fn curation_round_trips_through_json_without_secrets() {
+        let p = profile("a", ProviderKind::Ollama, "http://127.0.0.1:11434");
+        let mut c = ModelCuration::default();
+        c.set_model_hidden(&p, "llama3", true);
+        c.set_model_pinned(&p, "mistral", true);
+        c.set_provider_hidden(&p, true);
+
+        let json = serde_json::to_string(&c).expect("serialize");
+        assert!(
+            !json.contains("api_key"),
+            "curation must never carry secrets"
+        );
+        assert!(!json.contains("label for a"), "no display labels either");
+
+        let back: ModelCuration = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, c);
+        assert_eq!(back.hidden_by(&p, "llama3"), Some(HiddenBy::Provider));
+    }
+
+    #[test]
+    fn absent_field_deserializes_to_an_empty_curation() {
+        let mut c: ModelCuration = serde_json::from_str("{}").expect("deserialize");
+        c.migrate();
+        assert_eq!(c.version, CURATION_VERSION);
+        assert!(c.hidden_models.is_empty());
+        assert!(c.pinned_models.is_empty());
+    }
+
+    #[test]
+    fn retain_scopes_only_drops_entries_with_no_matching_profile() {
+        let keep = profile("a", ProviderKind::Ollama, "http://keep:1");
+        let gone = profile("b", ProviderKind::Ollama, "http://gone:2");
+        let mut c = ModelCuration::default();
+        c.set_model_hidden(&keep, "m1", true);
+        c.set_model_hidden(&gone, "m2", true);
+        c.set_provider_hidden(&gone, true);
+
+        c.retain_scopes(std::slice::from_ref(&keep));
+
+        assert_eq!(c.hidden_by(&keep, "m1"), Some(HiddenBy::Model));
+        assert!(c.hidden_models.len() == 1);
+        assert!(c.hidden_providers.is_empty());
+    }
+}
