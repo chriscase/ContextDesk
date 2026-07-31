@@ -145,12 +145,15 @@ pub use store::{
 };
 pub use suppression::{
     activate_template_suppression, capture_suppression_policy_binding, load_suppression_document,
-    mutate_template_suppression_rule, preview_template_suppression, ActivateSuppressionPreview,
-    NewSuppressionPreview, SuppressionAuditAction, SuppressionAuditEntry, SuppressionDocument,
+    mutate_template_suppression_rule, preview_template_suppression,
+    suppression_diagnostic_snapshot, ActivateSuppressionPreview, NewSuppressionPreview,
+    SuppressionAuditAction, SuppressionAuditEntry, SuppressionDiagnosticAuditEntry,
+    SuppressionDiagnosticRule, SuppressionDiagnosticSnapshot, SuppressionDocument,
     SuppressionLevelCount, SuppressionMutationResult, SuppressionPolicyBindingSnapshot,
     SuppressionPreview, SuppressionRepresentativeEvent, SuppressionRule, SuppressionRuleMutation,
     SuppressionRuleOrigin, SuppressionRuleResolution, SuppressionRuleResolutionKind,
     SuppressionRuleState, SuppressionTemplatePredicate, SuppressionTimeSpan,
+    MAX_DIAGNOSTIC_SUPPRESSION_AUDIT, MAX_DIAGNOSTIC_SUPPRESSION_RULES,
     MAX_SUPPRESSION_AUDIT_ENTRIES, MAX_SUPPRESSION_LEVEL_BUCKETS, MAX_SUPPRESSION_PREVIEWS,
     MAX_SUPPRESSION_REPRESENTATIVES, MAX_SUPPRESSION_RULES, SUPPRESSION_SCHEMA_VERSION,
 };

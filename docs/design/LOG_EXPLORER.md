@@ -214,9 +214,18 @@ blocks action until refresh.
 
 ### Stale rules and policy-bound findings — #819
 
-**Status: specified, not on `main`.** Neither half has landed: `main` carries no
-rule-resolution state and `INVESTIGATION_SCHEMA_VERSION` is still `3`. This
-section is the contract, not a description of shipped behavior.
+**Status: implemented.** Trusted rule resolution ships in
+[`suppression.rs`](../../crates/cd-core/src/log_analysis/suppression.rs)
+(`SuppressionRuleResolutionKind`), policy binding in
+[`investigations.rs`](../../crates/cd-core/src/investigations.rs)
+(`InvestigationPolicyBindingStatus`, schema version 4), and the display and
+Apply-gating contract in
+[`policyBinding.ts`](../../desktop/src/lib/logExplorer/policyBinding.ts).
+Residual: four states — target missing, fingerprint changed, conflicting
+predicates, and a legacy unbound finding — cannot be produced through the
+shipped UI and are exercised through deterministic test-support fixture
+packages. Invalid predicates remain automated-only because production
+validation rejects importing them.
 
 A corpus revision can change template identity — re-analysis, a timezone
 declaration, package import. Two durable records must survive that without
@@ -248,9 +257,19 @@ active or suspended. Reopening compares that binding to the present state:
 identical is current; a differing policy revision or lens is **Made under a
 different noise policy**; a record predating binding is **legacy — policy not
 recorded** and is never assumed current. Any non-current state previews rather
-than applies, and blocks silent mutation. Recomputation is an explicit user
-action that produces a reviewable current view without rewriting the original
-record.
+than applies, and blocks silent mutation.
+
+`current_lens_unknown` is not a durable property of the finding: it means the
+host could not read the current lens, so the comparison itself did not
+complete. Apply stays blocked, but the remedy is to retry the read — never to
+recompute or rewrite the record.
+
+**Recompute.** **Recompute from current view** is an explicit durable mutation.
+It replaces exactly two things on the stored finding — the saved view recipe and
+its policy binding — and preserves prose, citations, lifecycle state, and
+provenance unchanged. It runs only on direct user action; nothing recomputes in
+the background, on open, or on policy change. A recompute that cannot reproduce
+the current view exactly fails closed and changes nothing.
 
 **Revision drift.** A resolved snapshot belongs to one template revision. A
 response that no longer matches the current revision is discarded and re-derived

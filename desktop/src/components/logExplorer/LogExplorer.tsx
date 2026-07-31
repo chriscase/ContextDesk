@@ -33,6 +33,7 @@ import {
   hostLogEditInvestigationNote,
   hostLogFacets,
   hostLogLoadActiveInvestigation,
+  hostLogSuppressionDiagnosticSnapshot,
   hostLogListBookmarks,
   hostLogLoadSuppression,
   hostLogMutateTemplateSuppressionRule,
@@ -68,6 +69,7 @@ import {
   portableDiagnosticOsHint,
   type LogDiagnosticActiveViewInput,
   type LogDiagnosticEnvironment,
+  type LogDiagnosticSuppressionPolicyInput,
 } from "../../lib/logDiagnosticReport";
 import { applyLogNav, type LogNavAction } from "../../lib/logExplorer/logNav";
 import { governedIdToSafeInteger } from "../../lib/citations";
@@ -1094,6 +1096,8 @@ export function LogExplorer({ corpusId }: Props) {
   const [diagnostic, setDiagnostic] = useState<{
     environment: LogDiagnosticEnvironment;
     activeView: LogDiagnosticActiveViewInput;
+    /** Host-derived (#819); null when the trusted read failed. */
+    suppressionPolicy: LogDiagnosticSuppressionPolicyInput | null;
   } | null>(null);
   // Resizable columns (px)
   const [filterW, setFilterW] = useState(220);
@@ -3185,8 +3189,18 @@ export function LogExplorer({ corpusId }: Props) {
     } catch {
       /* Keep an honest unknown identity if host branding is unavailable. */
     }
+    // #819 — the suppression section of a diagnostic must be authored by the
+    // trusted host against the corpus that is actually open. A failed read
+    // omits the section entirely rather than substituting renderer state.
+    let suppressionPolicy: LogDiagnosticSuppressionPolicyInput | null = null;
+    try {
+      suppressionPolicy = await hostLogSuppressionDiagnosticSnapshot(corpusId);
+    } catch {
+      /* Omit the section rather than export unverified policy evidence. */
+    }
     setDiagnostic({
       environment,
+      suppressionPolicy,
       activeView: {
         breakpoint,
         density,
@@ -7341,6 +7355,7 @@ export function LogExplorer({ corpusId }: Props) {
         <LogDiagnosticDialog
           corpus={summary}
           activeView={diagnostic.activeView}
+          suppressionPolicy={diagnostic.suppressionPolicy}
           environment={diagnostic.environment}
           currentStatus={null}
           onDismiss={closeDiagnostics}
@@ -7353,7 +7368,17 @@ export function LogExplorer({ corpusId }: Props) {
           triggerRef={timeResolutionTriggerRef}
           onDismiss={() => setTimeResolutionOpen(false)}
           onChanged={async () => {
+            // #819 — a timezone apply/undo publishes a new corpus revision, so
+            // every downstream snapshot must be re-derived before any query
+            // runs. Order matters: invalidate in-flight requests first, then
+            // reload trusted suppression resolution, then reload the active
+            // investigation under the current lens, and only then repaint
+            // facets and rows. No query may reuse pre-change exclusions.
+            eventsRequestRef.current += 1;
             await refreshSummary();
+            await refreshSuppressionPolicy();
+            await reloadActiveInvestigation();
+            await loadFacets();
             await loadEvents();
           }}
         />

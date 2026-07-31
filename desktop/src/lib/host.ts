@@ -1,6 +1,9 @@
 /** Host bridge: Tauri invoke when available; offline research via test hook. */
 
 import type { AppSetupState } from "./preflight";
+// Type-only (erased at build time): logDiagnosticReport imports types from here
+// as well, so this cannot create a runtime cycle.
+import type { LogDiagnosticSuppressionPolicyInput } from "./logDiagnosticReport";
 
 export type EventDto = {
   kind: string;
@@ -3198,6 +3201,21 @@ export async function hostLogSearchEventsAdvanced(
 export async function hostCancelLogSearch(requestId: string): Promise<boolean> {
   if (!isTauri()) return false;
   return invoke<boolean>("cancel_log_search", { requestId });
+}
+
+/**
+ * Authoritative, bounded, payload-free suppression evidence for a diagnostic
+ * export (#819). Every field is derived by the trusted host from the corpus
+ * that is actually open; the renderer must never author these values.
+ */
+export async function hostLogSuppressionDiagnosticSnapshot(
+  corpusId: string,
+): Promise<LogDiagnosticSuppressionPolicyInput | null> {
+  if (!isTauri()) return null;
+  return invoke<LogDiagnosticSuppressionPolicyInput>(
+    "log_suppression_diagnostic_snapshot",
+    { corpusId },
+  );
 }
 
 /** Durable, corpus-scoped exact-template suppression policy. */

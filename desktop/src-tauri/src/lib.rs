@@ -9130,6 +9130,35 @@ async fn log_load_suppression(
         .map_err(|error| format!("log suppression load task join: {error}"))?
 }
 
+fn log_suppression_diagnostic_snapshot_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+) -> Result<cd_core::log_analysis::SuppressionDiagnosticSnapshot, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    cd_core::log_analysis::suppression_diagnostic_snapshot(&corpus).map_err(|e| e.to_string())
+}
+
+/// Authoritative, bounded, payload-free suppression evidence for a diagnostic
+/// export (#819).
+///
+/// The renderer must never author policy revisions, resolutions, or counts.
+/// This opens the real corpus and derives every field from trusted core, so a
+/// stale or forged renderer snapshot cannot be exported as evidence.
+#[tauri::command]
+async fn log_suppression_diagnostic_snapshot(
+    state: State<'_, AppState>,
+    corpus_id: String,
+) -> Result<cd_core::log_analysis::SuppressionDiagnosticSnapshot, String> {
+    let cache = log_cache_dir(&state)?;
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || {
+        log_suppression_diagnostic_snapshot_at(&handles, &cache, &corpus_id)
+    })
+    .await
+    .map_err(|error| format!("log suppression diagnostic task join: {error}"))?
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LogPreviewTemplateSuppressionArgs {
@@ -11049,6 +11078,7 @@ pub fn run() {
             cancel_log_search,
             log_propose_noise_candidates,
             log_load_suppression,
+            log_suppression_diagnostic_snapshot,
             log_preview_template_suppression,
             log_activate_template_suppression,
             log_mutate_template_suppression_rule,

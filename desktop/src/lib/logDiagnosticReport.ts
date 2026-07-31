@@ -92,6 +92,8 @@ export type LogDiagnosticSuppressionPolicyInput = {
       | "invalid_predicate"
       | "conflicting_predicate"
       | "inactive";
+    /** Trusted-core explanation; never renderer-authored. */
+    explanation?: string;
     matchingEventCount: number;
   }[];
   audit: {
@@ -320,7 +322,13 @@ function buildSuppressionPolicy(
         "No rationale recorded",
       state: rule.state,
       resolutionKind: rule.resolutionKind,
-      matchingEventCount: safeCount(rule.matchingEventCount),
+      explanation: sanitizeText(rule.explanation ?? "", MAX_RATIONALE_CHARS),
+      // Fail closed: only an applying rule may report a nonzero count, even if
+      // a caller supplied one. The host rejects the inconsistency too.
+      matchingEventCount:
+        rule.resolutionKind === "matches_current" && rule.state === "enabled"
+          ? safeCount(rule.matchingEventCount)
+          : 0,
     })),
     audit: policy.audit.slice(-MAX_SUPPRESSION_AUDIT_ENTRIES).map((entry) => ({
       action: entry.action,

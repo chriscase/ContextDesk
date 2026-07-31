@@ -24,7 +24,9 @@ export function formatPolicyBindingStatus(
     case "made_under_different_lens":
       return "Made under a different noise lens";
     case "current_lens_unknown":
-      return "Noise lens not supplied for comparison";
+      // Not a durable property of the finding: the host could not read the
+      // current lens, so the comparison itself failed and can be retried.
+      return "Noise policy not verified — retry";
     case "unbound_legacy":
       return "Legacy finding · no noise-policy binding";
     default:
@@ -39,6 +41,18 @@ export function policyBindingBlocksApply(
   return status !== "current";
 }
 
+/**
+ * `current_lens_unknown` means verification did not complete, not that the
+ * finding was made under a different policy. Apply stays blocked (see
+ * [`policyBindingBlocksApply`]) but the correct remedy is to retry the read,
+ * never to recompute or rewrite the durable record.
+ */
+export function policyBindingIsRetryableVerification(
+  status: InvestigationPolicyBindingStatus | null | undefined,
+): boolean {
+  return status === "current_lens_unknown";
+}
+
 export function formatSuppressionResolution(
   resolution: SuppressionRuleResolutionDto | null | undefined,
   state: SuppressionRuleState,
@@ -50,13 +64,13 @@ export function formatSuppressionResolution(
     case "matches_current":
       return "Matches current · can exclude events";
     case "stale_target_missing":
-      return "Stale — matches nothing (target missing)";
+      return "Stale — matches nothing";
     case "stale_fingerprint_changed":
-      return "Stale — matches nothing (fingerprint changed)";
+      return "Stale — template changed";
     case "invalid_predicate":
-      return "Invalid predicate · excludes nothing";
+      return "Invalid — cannot be applied";
     case "conflicting_predicate":
-      return "Conflicting predicate · excludes nothing";
+      return "Conflicts with another rule";
     case "inactive":
       return "Inactive · excludes nothing";
     default:

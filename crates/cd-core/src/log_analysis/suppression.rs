@@ -542,6 +542,166 @@ pub fn load_suppression_document(corpus: &LogCorpus) -> CoreResult<SuppressionDo
     Ok(document)
 }
 
+/// Hard bound on rules reported in one diagnostic snapshot.
+pub const MAX_DIAGNOSTIC_SUPPRESSION_RULES: usize = 64;
+/// Hard bound on audit entries reported in one diagnostic snapshot.
+pub const MAX_DIAGNOSTIC_SUPPRESSION_AUDIT: usize = 128;
+
+/// One rule as it appears in a payload-free diagnostic snapshot.
+///
+/// Deliberately excludes the template fingerprint, template text, preview
+/// tokens, and every event payload: a reviewer learns which rule was active and
+/// why it did or did not apply, never what the hidden events said.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SuppressionDiagnosticRule {
+    /// Stable durable rule identity.
+    pub rule_id: String,
+    /// Human-authored rule name.
+    pub name: String,
+    /// Human-authored reason the rule exists.
+    pub rationale: String,
+    /// Durable lifecycle state.
+    pub state: SuppressionRuleState,
+    /// Trusted-core resolution against the corpus that is actually open.
+    pub resolution_kind: SuppressionRuleResolutionKind,
+    /// Trusted-core explanation; empty when the rule resolves cleanly.
+    pub explanation: String,
+    /// Exact matching events for an applying rule; always zero otherwise.
+    pub matching_event_count: u64,
+}
+
+/// One audit entry as it appears in a diagnostic snapshot (never a token).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SuppressionDiagnosticAuditEntry {
+    /// Audited operation kind.
+    pub action: SuppressionAuditAction,
+    /// Document revision created by the operation.
+    pub revision: u64,
+    /// Rule identity when the operation targeted one.
+    pub rule_id: Option<String>,
+    /// Operation time in Unix seconds.
+    pub created_at: u64,
+}
+
+/// Trusted, bounded, payload-free suppression evidence for a diagnostic export.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SuppressionDiagnosticSnapshot {
+    /// Durable sidecar mutation revision.
+    pub policy_revision: u64,
+    /// Template-analysis revision every rule was resolved against.
+    pub resolved_template_revision: u64,
+    /// Durable rules in the `enabled` lifecycle state.
+    pub enabled_rule_count: u64,
+    /// Rules that actually contribute exclusions (`enabled` + `matches_current`).
+    pub applied_rule_count: u64,
+    /// Enabled rules that resolve to something other than `matches_current`.
+    pub stale_rule_count: u64,
+    /// Bounded per-rule evidence, capped by [`MAX_DIAGNOSTIC_SUPPRESSION_RULES`].
+    pub rules: Vec<SuppressionDiagnosticRule>,
+    /// Bounded recent audit, capped by [`MAX_DIAGNOSTIC_SUPPRESSION_AUDIT`].
+    pub audit: Vec<SuppressionDiagnosticAuditEntry>,
+    /// Rules present durably but omitted from `rules` by the cap.
+    pub omitted_rule_entries: u64,
+    /// Audit entries present durably but omitted from `audit` by the cap.
+    pub omitted_audit_entries: u64,
+}
+
+/// Derive the authoritative suppression snapshot for a diagnostic export.
+///
+/// The renderer must never author these values. Every field comes from the
+/// durable sidecar plus trusted-core resolution against the corpus that is
+/// actually open, so a stale or forged renderer snapshot cannot be exported as
+/// evidence. A non-applying rule always reports zero matches.
+pub fn suppression_diagnostic_snapshot(
+    corpus: &LogCorpus,
+) -> CoreResult<SuppressionDiagnosticSnapshot> {
+    let document = load_suppression_document(corpus)?;
+    let resolved_template_revision = document
+        .resolved_template_revision
+        .unwrap_or_else(|| corpus.template_analysis_revision());
+
+    // Exact per-template event counts, used only for applying rules.
+    let template_counts: HashMap<u64, u64> = corpus
+        .list_template_infos()
+        .into_iter()
+        .map(|info| (info.template_id, info.count))
+        .collect();
+
+    let mut enabled_rule_count = 0u64;
+    let mut applied_rule_count = 0u64;
+    let mut stale_rule_count = 0u64;
+    let mut rules = Vec::new();
+    for rule in &document.rules {
+        let enabled = rule.state == SuppressionRuleState::Enabled;
+        if enabled {
+            enabled_rule_count += 1;
+        }
+        let (kind, explanation) = match &rule.resolution {
+            Some(resolution) => (resolution.kind, resolution.explanation.clone()),
+            None => (
+                SuppressionRuleResolutionKind::Inactive,
+                "unresolved against the current corpus".to_string(),
+            ),
+        };
+        let applies = enabled && kind == SuppressionRuleResolutionKind::MatchesCurrent;
+        if applies {
+            applied_rule_count += 1;
+        } else if enabled {
+            stale_rule_count += 1;
+        }
+        // Fail closed: only an applying rule may report a nonzero count.
+        let matching_event_count = if applies {
+            template_counts
+                .get(&rule.predicate.template_id)
+                .copied()
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        if rules.len() < MAX_DIAGNOSTIC_SUPPRESSION_RULES {
+            rules.push(SuppressionDiagnosticRule {
+                rule_id: rule.id.clone(),
+                name: rule.name.clone(),
+                rationale: rule.rationale.clone(),
+                state: rule.state,
+                resolution_kind: kind,
+                explanation,
+                matching_event_count,
+            });
+        }
+    }
+    let omitted_rule_entries = document.rules.len().saturating_sub(rules.len()) as u64;
+
+    // Keep the most recent audit entries; never emit a preview token.
+    let audit_total = document.audit.len();
+    let audit_start = audit_total.saturating_sub(MAX_DIAGNOSTIC_SUPPRESSION_AUDIT);
+    let audit = document.audit[audit_start..]
+        .iter()
+        .map(|entry| SuppressionDiagnosticAuditEntry {
+            action: entry.action,
+            revision: entry.revision,
+            rule_id: entry.rule_id.clone(),
+            created_at: entry.created_at.max(0) as u64,
+        })
+        .collect::<Vec<_>>();
+    let omitted_audit_entries = audit_total.saturating_sub(audit.len()) as u64;
+
+    Ok(SuppressionDiagnosticSnapshot {
+        policy_revision: document.revision,
+        resolved_template_revision,
+        enabled_rule_count,
+        applied_rule_count,
+        stale_rule_count,
+        rules,
+        audit,
+        omitted_rule_entries,
+        omitted_audit_entries,
+    })
+}
+
 /// Persist a bounded preview against the current corpus event revision.
 pub fn preview_template_suppression(
     corpus: &LogCorpus,
@@ -2617,5 +2777,93 @@ mod tests {
                 .to_string();
         assert!(error.contains("open") || error.contains("link"));
         assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
+    }
+
+    /// #819 — an applying rule reports the exact authoritative match count and
+    /// the snapshot is derived from the open corpus, never from a caller.
+    #[test]
+    fn diagnostic_snapshot_reports_applying_rule_with_exact_count() {
+        let cache = tempfile::tempdir().unwrap();
+        let corpus = corpus(&cache);
+        let activated = activated_rule(&corpus);
+        let snapshot = suppression_diagnostic_snapshot(&corpus).unwrap();
+        assert_eq!(snapshot.policy_revision, activated.revision);
+        assert_eq!(snapshot.enabled_rule_count, 1);
+        assert_eq!(snapshot.applied_rule_count, 1);
+        assert_eq!(snapshot.stale_rule_count, 0);
+        assert_eq!(snapshot.rules.len(), 1);
+        assert_eq!(
+            snapshot.rules[0].resolution_kind,
+            SuppressionRuleResolutionKind::MatchesCurrent
+        );
+        // Template 7 has exactly one event in the fixture corpus.
+        assert_eq!(snapshot.rules[0].matching_event_count, 1);
+        assert_eq!(snapshot.omitted_rule_entries, 0);
+    }
+
+    /// #819 — every non-applying resolution reports zero matches, so a stale or
+    /// disabled rule can never look like it is still hiding evidence.
+    #[test]
+    fn diagnostic_snapshot_forces_zero_matches_for_non_applying_rules() {
+        let cache = tempfile::tempdir().unwrap();
+        let corpus = corpus(&cache);
+        activated_rule(&corpus);
+        // Reuse template id 7 with different content: fingerprint changes.
+        corpus
+            .upsert_templates([TemplateRow {
+                info: TemplateInfo {
+                    template_id: 7,
+                    pattern: "different evidence <*>".into(),
+                    token_count: 3,
+                    count: 1,
+                    first_seen: 1_700_000_000,
+                    last_seen: 1_700_000_000,
+                    severity: 4,
+                    example: "different evidence".into(),
+                },
+                content_hash: "sha256:different-template".into(),
+                vector: None,
+            }])
+            .unwrap();
+        let snapshot = suppression_diagnostic_snapshot(&corpus).unwrap();
+        assert_eq!(snapshot.enabled_rule_count, 1);
+        assert_eq!(snapshot.applied_rule_count, 0);
+        assert_eq!(snapshot.stale_rule_count, 1);
+        assert_eq!(
+            snapshot.rules[0].resolution_kind,
+            SuppressionRuleResolutionKind::StaleFingerprintChanged
+        );
+        assert_eq!(snapshot.rules[0].matching_event_count, 0);
+        for rule in &snapshot.rules {
+            if rule.resolution_kind != SuppressionRuleResolutionKind::MatchesCurrent {
+                assert_eq!(rule.matching_event_count, 0);
+            }
+        }
+    }
+
+    /// #819 — the diagnostic snapshot is payload-free: no event content,
+    /// template text, fingerprint, or preview token may be serialized.
+    #[test]
+    fn diagnostic_snapshot_is_payload_free() {
+        let cache = tempfile::tempdir().unwrap();
+        let corpus = corpus(&cache);
+        activated_rule(&corpus);
+        let preview_token = load_suppression_document(&corpus)
+            .unwrap()
+            .previews
+            .first()
+            .map(|preview| preview.token.clone());
+        let snapshot = suppression_diagnostic_snapshot(&corpus).unwrap();
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(!json.contains(RAW_SENTINEL), "event payload leaked");
+        assert!(!json.contains("routine health"), "template text leaked");
+        assert!(!json.contains("sha256:"), "template fingerprint leaked");
+        assert!(!json.contains("worker/app.log"), "source path leaked");
+        if let Some(token) = preview_token {
+            assert!(!json.contains(&token), "preview token leaked");
+        }
+        // Rule name and rationale are required evidence and must remain.
+        assert!(json.contains(&snapshot.rules[0].name));
+        assert!(json.contains(&snapshot.rules[0].rationale));
     }
 }

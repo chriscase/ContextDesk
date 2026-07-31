@@ -483,6 +483,75 @@ describe("buildLogDiagnosticReport", () => {
     }
   });
 
+  it("forces zero matches for every non-applying rule even when a caller claims otherwise (#819)", () => {
+    const report = buildLogDiagnosticReport({
+      corpus: privateCorpus(),
+      environment: {
+        appVersion: "0.1.0",
+        channel: "dev",
+        gitSha: null,
+        os: "macOS",
+      },
+      suppressionPolicy: {
+        policyRevision: 4,
+        resolvedTemplateRevision: 2,
+        enabledRuleCount: 4,
+        appliedRuleCount: 1,
+        staleRuleCount: 3,
+        rules: [
+          {
+            ruleId: "019fab76-18ff-7361-8dd8-00000000000a",
+            name: "applying",
+            rationale: "reviewed noise",
+            state: "enabled",
+            resolutionKind: "matches_current",
+            matchingEventCount: 12_452,
+          },
+          // A renderer claiming a stale rule still hides evidence.
+          {
+            ruleId: "019fab76-18ff-7361-8dd8-00000000000b",
+            name: "stale target",
+            rationale: "target gone",
+            state: "enabled",
+            resolutionKind: "stale_target_missing",
+            matchingEventCount: 9_999,
+          },
+          {
+            ruleId: "019fab76-18ff-7361-8dd8-00000000000c",
+            name: "fingerprint changed",
+            rationale: "template changed",
+            state: "enabled",
+            resolutionKind: "stale_fingerprint_changed",
+            matchingEventCount: 7,
+          },
+          // A disabled rule with a matching kind must still report zero.
+          {
+            ruleId: "019fab76-18ff-7361-8dd8-00000000000d",
+            name: "disabled",
+            rationale: "turned off",
+            state: "disabled",
+            resolutionKind: "inactive",
+            matchingEventCount: 5,
+          },
+        ],
+        audit: [],
+      },
+    });
+
+    const rules = report.manifest.suppressionPolicy?.rules ?? [];
+    expect(rules).toHaveLength(4);
+    for (const rule of rules) {
+      if (
+        rule.resolutionKind === "matches_current" &&
+        rule.state === "enabled"
+      ) {
+        expect(rule.matchingEventCount).toBe(12_452);
+      } else {
+        expect(rule.matchingEventCount).toBe(0);
+      }
+    }
+  });
+
   it("keeps suppression diagnostics absent for legacy and failed-ingest reports", () => {
     const legacy = buildLogDiagnosticReport({
       corpus: privateCorpus(),

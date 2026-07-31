@@ -173,6 +173,9 @@ struct DiagnosticSuppressionRule {
     rationale: String,
     state: String,
     resolution_kind: String,
+    /// Trusted-core explanation of the resolution; payload-free.
+    #[serde(default)]
+    explanation: String,
     matching_event_count: u64,
 }
 
@@ -534,6 +537,12 @@ fn validate_suppression_policy(policy: &mut DiagnosticSuppressionPolicy) -> Resu
         if rule.resolution_kind != "matches_current" && rule.matching_event_count != 0 {
             return Err("non-applying suppression rules must report zero matches".into());
         }
+        // An enabled+matches_current rule is the only applying case; a disabled
+        // or removed rule may never report matches even with a matching kind.
+        if rule.state != "enabled" && rule.matching_event_count != 0 {
+            return Err("non-enabled suppression rules must report zero matches".into());
+        }
+        rule.explanation = sanitize_text(&rule.explanation, MAX_RATIONALE_CHARS);
     }
 
     let mut previous_revision = None;
