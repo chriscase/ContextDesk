@@ -35,22 +35,30 @@ export async function setViewport(name: ViewportName): Promise<void> {
 }
 
 /**
+ * Wait for one painted frame. The tester page returns stale computed styles
+ * when a selector-relevant attribute or class flips on an EXISTING element
+ * and the style is read synchronously afterward (verified empirically: the
+ * custom property updates, its dependents do not until the next recalc;
+ * freshly inserted elements are unaffected). Await this after any such flip
+ * before reading computed styles or taking a screenshot.
+ */
+export async function nextPaintedFrame(): Promise<void> {
+  await new Promise<void>((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+  );
+}
+
+/**
  * Apply a registered skin exactly the way the app does: the production
  * validator sets html[data-theme] (fails closed on unknown ids), and the
- * storage key matches what useShellState persists.
- *
- * Waits for a painted frame before returning: the tester page returns stale
- * computed styles for var()-dependent declarations when read synchronously
- * after the attribute flip (verified empirically — the custom property
- * updates, its dependents do not until the next recalc). A rendered frame
- * guarantees fresh substitution for computed reads and screenshots alike.
+ * storage key matches what useShellState persists. Waits for a painted frame
+ * before returning (see nextPaintedFrame) so computed reads and screenshots
+ * see the new skin.
  */
 export async function applyTheme(skin: SkinId): Promise<void> {
   window.localStorage.setItem("cd-theme", skin);
   applyThemeToDocument(skin);
-  await new Promise((resolve) =>
-    requestAnimationFrame(() => requestAnimationFrame(resolve)),
-  );
+  await nextPaintedFrame();
 }
 
 /**
