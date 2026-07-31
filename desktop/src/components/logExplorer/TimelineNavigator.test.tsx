@@ -369,8 +369,8 @@ describe("TimelineNavigator", () => {
         }),
       ),
     );
-    expect(onSeekSeq).toHaveBeenCalledWith(77, target);
-    expect(screen.getByText(/Moved to seq 77/)).toBeTruthy();
+    await waitFor(() => expect(onSeekSeq).toHaveBeenCalledWith(77, target));
+    expect(await screen.findByText(/Moved to seq 77/)).toBeTruthy();
     expect(screen.getByTestId("timeline-bucket-3").className).toContain(
       "resident",
     );
