@@ -56,19 +56,29 @@ impl CurationScope {
 
     /// Stable key for the provider profile as a whole.
     pub fn provider_key(&self) -> String {
-        format!("p:v1:{}:{}", kind_slug(self.kind), self.endpoint)
+        format!("p:v1:{}{SEP}{}", kind_slug(self.kind), self.endpoint)
     }
 
     /// Stable key for one model inside this scope.
     pub fn model_key(&self, model_id: &str) -> String {
         format!(
-            "m:v1:{}:{}:{}",
+            "m:v1:{}{SEP}{}{SEP}{}",
             kind_slug(self.kind),
             self.endpoint,
             model_id.trim()
         )
     }
 }
+
+/// Field separator for scope keys.
+///
+/// Deliberately a control character, not `:`. Endpoints carry ports and model
+/// ids carry tags (`mistral:latest`), so a colon-joined key is ambiguous:
+/// endpoint `http://h` + model `11434:mistral` and endpoint `http://h:11434` +
+/// model `mistral` produce the *same* colon-joined string, which would let one
+/// model's curation silently apply to a different provider's model. U+001F
+/// cannot occur in a URL, a kind slug, or a model id.
+const SEP: char = '\u{1f}';
 
 fn kind_slug(kind: ProviderKind) -> &'static str {
     match kind {
@@ -249,13 +259,12 @@ impl ModelCuration {
             .iter()
             .map(|p| CurationScope::for_profile(p).provider_key())
             .collect();
+        // `model_key("")` ends with the separator, so the prefix is terminated:
+        // an endpoint of `http://h:1` cannot match keys belonging to
+        // `http://h:11`, which a bare colon-joined prefix would have done.
         let model_prefixes: Vec<String> = profiles
             .iter()
-            .map(|p| {
-                let s = CurationScope::for_profile(p);
-                let full = s.model_key("");
-                full.trim_end_matches(':').to_string()
-            })
+            .map(|p| CurationScope::for_profile(p).model_key(""))
             .collect();
         self.hidden_providers.retain(|k| provider_keys.contains(k));
         let in_scope = |k: &String| model_prefixes.iter().any(|p| k.starts_with(p.as_str()));
@@ -295,6 +304,41 @@ mod tests {
 
         assert_eq!(c.hidden_by(&a, "llama3"), Some(HiddenBy::Model));
         assert_eq!(c.hidden_by(&b, "llama3"), None, "sibling must stay visible");
+    }
+
+    #[test]
+    fn a_port_in_the_endpoint_cannot_be_confused_with_a_tag_in_the_model_id() {
+        // Ollama ids carry tags (`mistral:latest`) and endpoints carry ports,
+        // so a colon-joined key would make these two distinct pairs collide:
+        //   endpoint http://host        + model "11434:mistral"
+        //   endpoint http://host:11434  + model "mistral"
+        let bare = profile("a", ProviderKind::Ollama, "http://host");
+        let ported = profile("b", ProviderKind::Ollama, "http://host:11434");
+
+        assert_ne!(
+            CurationScope::for_profile(&bare).model_key("11434:mistral"),
+            CurationScope::for_profile(&ported).model_key("mistral"),
+            "scope keys must not be ambiguous across the separator"
+        );
+
+        let mut c = ModelCuration::default();
+        c.set_model_hidden(&bare, "11434:mistral", true);
+        assert_eq!(
+            c.hidden_by(&ported, "mistral"),
+            None,
+            "hiding one model must not hide an unrelated model on another endpoint"
+        );
+    }
+
+    #[test]
+    fn ordinary_tagged_model_ids_still_curate_normally() {
+        let p = profile("a", ProviderKind::Ollama, "http://127.0.0.1:11434");
+        let mut c = ModelCuration::default();
+        c.set_model_hidden(&p, "mistral:latest", true);
+
+        assert_eq!(c.hidden_by(&p, "mistral:latest"), Some(HiddenBy::Model));
+        assert_eq!(c.hidden_by(&p, "mistral"), None);
+        assert_eq!(c.hidden_by(&p, "mistral:7b"), None);
     }
 
     #[test]
@@ -477,6 +521,22 @@ mod tests {
         assert_eq!(c.version, CURATION_VERSION);
         assert!(c.hidden_models.is_empty());
         assert!(c.pinned_models.is_empty());
+    }
+
+    #[test]
+    fn retain_scopes_does_not_confuse_one_endpoint_for_a_longer_one() {
+        // `http://h:1` must not be treated as a prefix of `http://h:11`.
+        let short = profile("a", ProviderKind::Ollama, "http://h:1");
+        let long = profile("b", ProviderKind::Ollama, "http://h:11");
+        let mut c = ModelCuration::default();
+        c.set_model_hidden(&long, "m", true);
+
+        c.retain_scopes(std::slice::from_ref(&short));
+
+        assert!(
+            c.hidden_models.is_empty(),
+            "the longer endpoint's entry must not survive as a prefix match"
+        );
     }
 
     #[test]
