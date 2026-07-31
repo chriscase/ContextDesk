@@ -172,6 +172,9 @@ function Trigger({
 describe("NoisePolicyControl", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(host.hostLogPreviewTemplateSuppression).mockResolvedValue(
+      preview(),
+    );
     vi.mocked(host.hostLogProposeNoiseCandidates).mockResolvedValue(
       candidateReport(),
     );
@@ -375,7 +378,9 @@ describe("NoisePolicyControl", () => {
     expect(host.hostLogActivateTemplateSuppression).not.toHaveBeenCalled();
     expect(host.hostLogPreviewTemplateSuppression).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Suppress…" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Suppress…" }),
+    );
     expect(
       await screen.findByRole("dialog", { name: "Suppress exact template" }),
     ).toBeTruthy();
@@ -394,6 +399,52 @@ describe("NoisePolicyControl", () => {
     );
     expect(screen.getByTestId("noise-candidate-review")).toBeTruthy();
     expect(host.hostLogPreviewTemplateSuppression).not.toHaveBeenCalled();
+  });
+
+  it("keeps a portaled suppression dialog open through pointerdown and preview click", async () => {
+    const triggerRef = createRef<HTMLButtonElement>();
+    render(
+      <NoisePolicyControl
+        corpusId="c1"
+        document={policy()}
+        hiddenCount={250}
+        state="ready"
+        error={null}
+        narrow={false}
+        triggerRef={triggerRef}
+        onRetry={vi.fn()}
+        onMutate={vi.fn()}
+        onReloadPolicy={async () => 8}
+        onCandidateActivated={async () => {}}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Noise · 1 rule · 250 hidden" }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Review suggestions" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Suppress…" }),
+    );
+    fireEvent.change(screen.getByLabelText("Rationale (required)"), {
+      target: { value: "Known repetitive health traffic." },
+    });
+
+    const previewImpact = screen.getByRole("button", {
+      name: "Preview impact",
+    });
+    fireEvent.pointerDown(previewImpact);
+    fireEvent.click(previewImpact);
+
+    expect(
+      await screen.findByRole("button", { name: "Confirm suppression" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("dialog", { name: "Suppress exact template" }),
+    ).toBeTruthy();
+    expect(host.hostLogActivateTemplateSuppression).not.toHaveBeenCalled();
   });
 });
 
@@ -428,6 +479,10 @@ describe("SuppressTemplateDialog", () => {
         />
       </>,
     );
+
+    expect(
+      screen.getByTestId("suppress-template-backdrop").parentElement,
+    ).toBe(document.body);
 
     fireEvent.change(screen.getByLabelText("Rule name"), {
       target: { value: "Routine heartbeat" },
@@ -493,6 +548,43 @@ describe("SuppressTemplateDialog", () => {
       expect(document.activeElement).toBe(triggerRef.current),
     );
     expect(host.hostLogPreviewTemplateSuppression).not.toHaveBeenCalled();
+  });
+
+  it("resynchronizes the durable policy after dismissing a preview", async () => {
+    const triggerRef = createRef<HTMLButtonElement>();
+    const onDismiss = vi.fn();
+    const onReloadPolicy = vi.fn(async () => 8);
+    render(
+      <>
+        <Trigger triggerRef={triggerRef} />
+        <SuppressTemplateDialog
+          corpusId="c1"
+          templateId={22}
+          policyRevision={7}
+          narrow={false}
+          triggerRef={triggerRef}
+          onReloadPolicy={onReloadPolicy}
+          onActivated={async () => {}}
+          onDismiss={onDismiss}
+        />
+      </>,
+    );
+
+    fireEvent.change(screen.getByLabelText("Rationale (required)"), {
+      target: { value: "Known repetitive health traffic." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Preview impact" }));
+    expect(
+      await screen.findByRole("button", { name: "Confirm suppression" }),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(onReloadPolicy).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(document.activeElement).toBe(triggerRef.current),
+    );
+    expect(host.hostLogActivateTemplateSuppression).not.toHaveBeenCalled();
   });
 
   it("keeps stale errors visible and reloads before re-previewing", async () => {
