@@ -33,10 +33,10 @@ view state.
 | Capability                                           | Status      | ContextDesk evidence                                                                                                                                                                 | Residual                                                 |
 | ---------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- |
 | Exact single/range/noncontiguous bookmarks           | **Shipped** | [`bookmarks.rs`](../../../crates/cd-core/src/log_analysis/bookmarks.rs)                                                                                                              | Bookmarks are not exported in package v1                 |
-| Duplicate-resistant exact evidence save              | **Partial** | Core/UI path exists in [`investigations.rs`](../../../crates/cd-core/src/investigations.rs) and [`LogExplorer.tsx`](../../../desktop/src/components/logExplorer/LogExplorer.tsx)     | Full packaged matrix keeps #656 open                     |
+| Duplicate-resistant exact evidence save              | **Partial** | Core/UI path exists in [`investigations.rs`](../../../crates/cd-core/src/investigations/mod.rs) and [`LogExplorer.tsx`](../../../desktop/src/components/logExplorer/LogExplorer.tsx)     | Full packaged matrix keeps #656 open                     |
 | Human Observation/Inference/Hypothesis               | **Partial** | Core/UI path exists in [`CreateInvestigationItemDialog.tsx`](../../../desktop/src/components/logExplorer/CreateInvestigationItemDialog.tsx)                                          | Model proposals are not shipped; packaged matrix remains |
-| Human cited notes                                    | **Partial** | Core/UI path exists in [`investigations.rs`](../../../crates/cd-core/src/investigations.rs) and [`EvidencePanel.tsx`](../../../desktop/src/components/logExplorer/EvidencePanel.tsx) | Report composition and packaged matrix remain            |
-| Append-only optimistic revisions                     | **Shipped** | [`investigations.rs`](../../../crates/cd-core/src/investigations.rs) `InvestigationStore`                                                                                            | Multi-device sync is not claimed                         |
+| Human cited notes                                    | **Partial** | Core/UI path exists in [`investigations.rs`](../../../crates/cd-core/src/investigations/mod.rs) and [`EvidencePanel.tsx`](../../../desktop/src/components/logExplorer/EvidencePanel.tsx) | Report composition and packaged matrix remain            |
+| Append-only optimistic revisions                     | **Shipped** | [`investigations.rs`](../../../crates/cd-core/src/investigations/mod.rs) `InvestigationStore`                                                                                            | Multi-device sync is not claimed                         |
 | Preview authoritative evidence without view mutation | **Partial** | `preview_evidence` and the Investigation rail exist on `main`                                                                                                                        | Native stale-reference proof remains in #656             |
 | Payload-free saved view recipe                       | **Shipped** | `FindingViewRecipe` and [`investigationView.ts`](../../../desktop/src/lib/logExplorer/investigationView.ts) are on `main` through PR #666                                            | Broader proposal history remains                         |
 | Explicit Apply and Restore prior view                | **Partial** | [`LogExplorer.tsx`](../../../desktop/src/components/logExplorer/LogExplorer.tsx) contains the core/UI path                                                                           | Native responsive/restart matrix remains                 |
@@ -413,7 +413,7 @@ responsive rails are not fully represented by DOM tests.
 
 ## 13. ContextDesk anchors
 
-- [`investigations.rs`](../../../crates/cd-core/src/investigations.rs):
+- [`investigations.rs`](../../../crates/cd-core/src/investigations/mod.rs):
   versioned documents, bounds, exact evidence, findings, notes, view recipes,
   revision publication, preview and revalidation.
 - [`bookmarks.rs`](../../../crates/cd-core/src/log_analysis/bookmarks.rs):
