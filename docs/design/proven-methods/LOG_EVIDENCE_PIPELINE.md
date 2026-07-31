@@ -628,7 +628,7 @@ parsing free-form progress or error strings.
 | Bookmark exact refs/item               |                                                 512 | Reject larger save                                     |
 | Bookmark total refs/sidecar            |                                               8,192 | Reject malformed/oversized sidecar                     |
 | Template embeddings at ordinary ingest |                                   Top 256 templates | Persist honest partial state                           |
-| Embedding defer threshold              |              More than **60 MiB** streamed source bytes (measured so packaged triage-stress 250k at 63,883,809 B defers; smaller 25k/100k product paths still embed) | Publish keyword/structured corpus                      |
+| Embedding defer threshold              |              More than **60 MiB** streamed source bytes (measured so the explicit generated triage-stress 250k acceptance corpus at 63,883,809 B defers; bundled seven-day 25k and smaller 100k product paths still embed) | Publish keyword/structured corpus                      |
 | Trusted reanalysis                     |                               Up to 2,048 templates | Atomic sidecar publication                             |
 
 Reference-machine measurements for the existing deterministic 100k-event proof

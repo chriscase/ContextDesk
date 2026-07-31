@@ -10,21 +10,25 @@ use serde::{Deserialize, Serialize};
 
 /// Local ingest defers optional template embedding after this many streamed source bytes.
 ///
-/// **Measured justification (#824):** the authoritative packaged triage-stress
-/// 250k product corpus streams **63,883,809** source bytes (12 files, 250,000
-/// events, 648 templates). That is **above 60 MiB** (`60 × 1024² = 62,914,560`)
-/// and **below the former 64 MiB** bar, so a 64 MiB threshold never deferred the
-/// real product path. The 60 MiB threshold is chosen so:
-/// - the real 250k packaged path **defers** optional embedding past first use
-///   (keyword/structured ready immediately);
-/// - smaller product paths (pinned seven-day 25k and ui-medium 100k, both well
-///   under 60 MiB of streamed source) **still embed** during SoftWrite.
+/// **Measured justification (#824):** the authoritative **generated** (not
+/// app-bundled) triage-stress 250k product-path corpus streams **63,883,809**
+/// source bytes (12 files, 250,000 events, 648 templates). That is **above 60
+/// MiB** (`60 × 1024² = 62,914,560`) and **below the former 64 MiB** bar, so a
+/// 64 MiB threshold never deferred that path. The 60 MiB threshold is chosen so:
+/// - the generated 250k acceptance path **defers** optional embedding past first
+///   use (keyword/structured ready immediately);
+/// - smaller product paths (bundled/pinned seven-day 25k demo and ui-medium
+///   100k, both well under 60 MiB of streamed source) **still embed** during
+///   SoftWrite.
 ///
-/// Do not lower this merely to pass a synthetic fixture — re-measure packaged
-/// product paths if the threshold must move.
+/// Do not lower this merely to pass a synthetic fixture — re-measure product
+/// paths if the threshold must move. The 250k tree is generated into a temp
+/// directory for explicit release-scale proof; only the seven-day 25k demo is
+/// packaged with the app.
 pub const LOCAL_EMBED_DEFER_SOURCE_BYTES: u64 = 60 * 1024 * 1024;
 
 /// Authoritative triage-stress 250k streamed source-byte identity (#824).
+/// Generated product-path corpus — not bundled in the desktop package.
 pub const TRIAGE_STRESS_250K_SOURCE_BYTES: u64 = 63_883_809;
 
 /// How a corpus embeds templates.
@@ -173,7 +177,7 @@ mod tests {
     #[test]
     fn authoritative_250k_corpus_crosses_deferral_and_boundary_neighbors_do_not() {
         let p = LogEmbedPolicy::local_default();
-        // Real packaged triage-stress identity must defer optional embed.
+        // Generated triage-stress 250k product-path identity must defer optional embed.
         const {
             assert!(
                 TRIAGE_STRESS_250K_SOURCE_BYTES > LOCAL_EMBED_DEFER_SOURCE_BYTES,

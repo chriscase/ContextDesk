@@ -42,7 +42,7 @@ synthesis only after required deterministic steps succeed.
 | Structured evidence identity, not rendered-text reconstruction | **Shipped** | [`tool_host.rs`](../../../crates/cd-core/src/tool_host.rs) `ToolResult.log_evidence`                             | Other source types have source-specific citation contracts                                         |
 | Viewport snapshot is bounded and treated as data               | **Shipped** | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs)                                    | Snapshot is a hint, not authoritative event content                                                |
 | Session file packs are scoped and bounded                      | **Shipped** | [`session_context.rs`](../../../crates/cd-core/src/session_context.rs)                                           | Not the path for multi-million-line log corpora                                                    |
-| Broad linked-log triage brief                                  | **Shipped (agent-testable)** | [`tool_host.rs`](../../../crates/cd-core/src/tool_host.rs) `build_broad_log_triage_brief` and [`agent.rs`](../../../crates/cd-core/src/agent.rs) broad-turn admission | Exact packaged 250,000+ event proof with a tools-enabled provider remains #745 |
+| Broad linked-log triage brief                                  | **Shipped (agent-testable)** | [`tool_host.rs`](../../../crates/cd-core/src/tool_host.rs) `build_broad_log_triage_brief` and [`agent.rs`](../../../crates/cd-core/src/agent.rs) broad-turn admission | Exact generated 250,000+ event acceptance with a tools-enabled provider remains #745 |
 | Slow-provider phase lifecycle and synthesis-only retry         | **Shipped (agent-testable)** | One monotonic turn ceiling, bounded phases, immediate cancellation, host-only evidence checkpoint, and tool-closed retry | Native cold/slow tools-enabled provider acceptance remains on #649                                 |
 | Name-based model-role guidance                                 | **Partial** | Versioned hints inform setup, Settings, and preflight without claiming measured capability                       | Provider-scoped hidden-model integration remains #678                                                  |
 | Explicit synthetic capability qualification                    | **Partial** | User-triggered probes, cache key isolation, inert tools, Settings control, and mock-transport tests ship (#724) | Packaged proof against real tools-enabled/disabled profiles remains owner/environment residual        |
@@ -555,7 +555,7 @@ assert the sentinel is absent from model-facing messages.
 | Ordinary chat isolation     | **Shipped** | No ambient log-tool inheritance                                            | No claim that every future source is automatically isolated without tests |
 | Main-chat log attachment    | **Shipped** | One host-validated durable corpus, bounded linked-log tools, and reversible detach | Multi-corpus context remains #693; no hidden all-corpus fallback |
 | Linked log grounding        | **Shipped** | Required bounded log result and evidence identity                          | No success under tools-disabled profile                                   |
-| Broad linked-log triage     | **Shipped (agent-testable)** | Conservative broad prompts receive a deterministic 32 KiB/128-identity host brief before model participation | Exact packaged 250,000+ tools-enabled provider proof remains #745; no universal model-quality claim |
+| Broad linked-log triage     | **Shipped (agent-testable)** | Conservative broad prompts receive a deterministic 32 KiB/128-identity host brief before model participation | Exact generated 250,000+ tools-enabled provider proof remains #745; no universal model-quality claim |
 | Cross-source read           | **Partial** | Requested governed reads can be offered after log grounding                | No unrestricted autonomous source crawl                                   |
 | Small-model staging         | **Shipped** | Constrained first log search and tool-closed synthesis path                | No guarantee every small model follows native tools                       |
 | Slow provider lifecycle     | **Shipped (agent-testable)** | Adaptive or explicit whole-turn ceiling, bounded truthful phases, immediate Stop, evidence-preserving synthesis retry | Native cold/slow tools-enabled profile acceptance remains #649 |
@@ -593,7 +593,7 @@ Avoid these shortcuts:
 
 ## 16. Open residuals
 
-- #745: exact packaged 250,000+ event acceptance with a real tools-enabled
+- #745: exact generated 250,000+ event acceptance with a real tools-enabled
   provider, including visible host-brief status, grounded identity resolution,
   bounded completion, and honest failure. The deterministic builder and agent
   sequencing are agent-testable; model quality remains provider/model

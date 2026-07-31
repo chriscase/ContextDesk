@@ -107,8 +107,9 @@ Template embedding is deferred/capped so large dumps finish SoftWrite without a
 mandatory full embed pass; when deferred, completion text states that
 keyword/structured first use is ready. Ordinary imports use the local ONNX model
 when it is installed. Inputs over **60 MiB** of actual streamed log bytes are
-marked **deferred** (chosen so the packaged triage-stress 250k corpus at
-~63.9 MiB defers past first use while smaller 25k/100k product paths still embed);
+marked **deferred** (measured so the explicit generated triage-stress 250k
+acceptance corpus at **63,883,809** streamed source bytes defers past first use,
+while the bundled seven-day 25k demo and smaller product paths still embed);
 smaller imports embed at most the 256 most frequent templates.
 The corpus Overview always shows its actual semantic state and model.
 
@@ -116,6 +117,27 @@ For a keyword-only or deferred corpus, choose **Re-analyze locally…** in Logs.
 After confirmation, ContextDesk embeds up to 2,048 templates without reparsing
 or duplicating events. Cancellation or failure keeps the previous keyword
 corpus and index. Semantic search is labeled available only after vectors exist.
+
+## Import phases
+
+SoftWrite **progress chrome** stays one monotonic stream while read, parse,
+template analysis, and persist interleave. After a successful import, the
+completion/diagnostic report lists separate operation timings when the host
+provides them:
+
+- discover / read
+- parse / frame
+- template analysis
+- persist / index
+- optional embedding (or **deferred**)
+- validation
+- publication
+
+These numbers are one-machine observations for triage engineers—not a product
+SLA. Optional embedding is deferred when streamed source bytes cross the local
+threshold (more than **60 MiB**). Cancel or failure before atomic publication
+leaves nothing in the Logs library; retry can succeed without a stuck partial
+corpus.
 
 ## Review source-local timestamps
 

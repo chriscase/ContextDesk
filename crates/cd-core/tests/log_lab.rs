@@ -1070,7 +1070,7 @@ async fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
     );
     assert_eq!(
         report.stats.source_bytes, TRIAGE_STRESS_250K_SOURCE_BYTES,
-        "authoritative streamed source-byte identity for packaged 250k path"
+        "authoritative streamed source-byte identity for generated 250k product path"
     );
     assert!(
         report.stats.source_bytes > LOCAL_EMBED_DEFER_SOURCE_BYTES,
@@ -1917,5 +1917,93 @@ fn log_lab_ui_medium_100k_product_path_is_bounded_and_bidirectional() {
         timeline.bucket_count,
         neighborhood.events.len(),
         generation.tree_sha256
+    );
+}
+
+/// #824 — explicit real-ONNX product embed path for the pinned seven-day 25k demo.
+///
+/// Ordinary CI stays hermetic (`ConceptEmbedBackend`). Desktop product builds use
+/// `default_log_embed_backend` (log-fastembed ONNX). Run when the model/cache is
+/// available:
+///   cargo test -p cd-core --features log-fastembed --test log_lab \
+///     log_lab_product_25k_real_onnx_embed -- --ignored --nocapture
+#[test]
+#[ignore = "explicit real-ONNX 25k product-path proof; requires log-fastembed + model cache"]
+fn log_lab_product_25k_real_onnx_embed() {
+    use cd_core::embed::{
+        default_log_embed_backend, log_fastembed_enabled, LOCAL_LOG_EMBED_MODEL_ID,
+    };
+    use cd_core::log_analysis::EmbeddingState;
+
+    assert!(
+        log_fastembed_enabled(),
+        "this ignored proof requires --features log-fastembed"
+    );
+    let import_root =
+        fixture_root().join("acceptance/seven-day-25k/scenarios/behavior-scale/import");
+    assert!(import_root.is_dir(), "missing {}", import_root.display());
+
+    let backend = match default_log_embed_backend() {
+        Ok(Some(be)) => be,
+        Ok(None) => panic!("log-fastembed enabled but factory returned None"),
+        Err(e) => panic!("default_log_embed_backend failed (model/cache unavailable?): {e}"),
+    };
+
+    let cache = tempfile::tempdir().unwrap();
+    let mut policy = LogEmbedPolicy::local_default();
+    policy.model_id = LOCAL_LOG_EMBED_MODEL_ID.into();
+    let recorder = RecordingProcessProgress::default();
+    let started = Instant::now();
+    let report = cd_core::log_analysis::ingest_path_with_policy_and_observer(
+        cache.path(),
+        &import_root,
+        "seven-day-25k-onnx",
+        &policy,
+        Some(backend),
+        &recorder,
+        None,
+    )
+    .expect("real ONNX SoftWrite ingest must succeed");
+    let wall_ms = started.elapsed().as_millis() as u64;
+
+    assert_eq!(report.stats.lines, 25_000);
+    assert!(
+        report.stats.source_bytes <= LOCAL_EMBED_DEFER_SOURCE_BYTES,
+        "25k must not defer under production policy"
+    );
+    assert!(
+        !report.phase_timings.embedding_deferred,
+        "25k must embed with product ONNX, not defer"
+    );
+    assert!(
+        matches!(
+            report.embedding.state,
+            EmbeddingState::Partial | EmbeddingState::Complete
+        ),
+        "expected real embed attempt, got {:?}",
+        report.embedding.state
+    );
+    assert!(
+        report.stats.embedded > 0 || report.embedding.embedded_templates > 0,
+        "ONNX path must record embedded templates"
+    );
+    // Cancel was not requested; corpus is published.
+    let ids = LogCorpus::list_ids(cache.path()).unwrap();
+    assert_eq!(ids, vec![report.corpus_id.clone()]);
+    let corpus = LogCorpus::open(cache.path(), &report.corpus_id).unwrap();
+    assert_eq!(corpus.event_count(), 25_000);
+
+    eprintln!(
+        "PASS product-25k-real-onnx events={} source_bytes={} total_ms={} template_analysis_ms={} optional_embedding_ms={} wall_ms={} templates={} embedded={} embedding_state={:?} model_id={} (one-machine; not a SLA)",
+        report.stats.lines,
+        report.stats.source_bytes,
+        report.phase_timings.total_ms,
+        report.phase_timings.template_analysis_ms,
+        report.phase_timings.optional_embedding_ms,
+        wall_ms,
+        report.stats.templates,
+        report.stats.embedded,
+        report.embedding.state,
+        policy.model_id
     );
 }

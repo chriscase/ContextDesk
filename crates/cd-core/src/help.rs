@@ -1471,6 +1471,24 @@ related: []
         assert_eq!(page.assets.len(), 1);
         assert_eq!(page.assets[0].path, "assets/log-analysis-pipeline.svg");
         assert!(page.toc.iter().any(|entry| entry.anchor == "tool-guide"));
+        // #824 — Help tip HELP_PHASE_TIMINGS targets #import-phases; must exist
+        // as a governed H2 so open+scroll is not a silent no-op.
+        assert!(
+            page.toc
+                .iter()
+                .any(|entry| entry.anchor == "import-phases" && entry.title == "Import phases"),
+            "log-analysis-pipeline must expose import-phases TOC anchor; toc={:?}",
+            page.toc.iter().map(|e| &e.anchor).collect::<Vec<_>>()
+        );
+        assert!(
+            page.body.contains("## Import phases"),
+            "import-phases heading must be present in page body"
+        );
+        // User Help must not claim the generated 250k corpus is app-packaged.
+        assert!(
+            !page.body.to_lowercase().contains("packaged triage-stress"),
+            "Help must not describe the generated 250k corpus as packaged"
+        );
     }
 
     #[test]
