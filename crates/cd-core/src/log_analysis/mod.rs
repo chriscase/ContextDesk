@@ -13,6 +13,7 @@ pub mod drain;
 pub mod embed_policy;
 pub mod event_revision;
 pub mod format_profile;
+pub mod frame;
 pub mod governed_citation;
 pub mod import_preview;
 pub mod import_profile;

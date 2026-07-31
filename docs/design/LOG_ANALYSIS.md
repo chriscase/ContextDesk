@@ -52,7 +52,11 @@ The heavy row count (10–100M) lives in the **columnar event store**; the vecto
 
 **Format fingerprint + parse** per bounded physical record → `{ ts, level,
 service?, host?, trace_id?, message, raw }` plus immutable parser timestamp
-provenance, the active timestamp basis, and bounded unresolved local timestamp
+provenance, the active timestamp basis, and bounded unresolved local timestamp.
+Logical-record framing joins multi-line exception and PostgreSQL continuation
+bodies before this parse step (#788); correlation keeps span/request ids out of
+`trace_id` (#789); severity preserves TRACE/CRITICAL/LOG and numeric Pino bands
+(#790); YYYYMMDD integers are never accepted as epoch seconds
 text when the parser can defend that evidence. An immutable versioned built-in
 registry identifies the record grammar from strict content clues and reports
 matched, unknown, or ambiguous without declaration-order tie-breaking. A

@@ -29,10 +29,12 @@
       "input": "postgres-stderr/prefix-m-p.log",
       "title": "DETAIL/HINT/STATEMENT belong to the ERROR they follow",
       "note": "PostgreSQL emits one logical server message as a primary line plus indented-or-tagged continuation lines sharing the same pid and timestamp. Six physical lines are three logical records: the startup LOG, the ERROR with its DETAIL/HINT/STATEMENT, and the checkpoint LOG.",
-      "status": "gap",
+      "status": "holds",
       "issue": "788",
-      "desired": { "kind": "record_count", "value": 3 },
-      "observed": { "kind": "record_count", "value": 6 }
+      "desired": {
+        "kind": "record_count",
+        "value": 3
+      }
     },
     {
       "id": "pg-stderr-utc-timestamp",
@@ -43,8 +45,18 @@
       "note": "`2025-06-15 12:00:00.123 UTC` names a zone that has exactly one meaning, so it is an instant rather than order-only evidence. There is no PostgreSQL grammar today, so the whole line falls back to plain text.",
       "status": "gap",
       "issue": "751",
-      "desired": { "kind": "record_field", "where_contains": "database system is ready", "field": "timestamp_provenance", "value": "explicit_wall_clock" },
-      "observed": { "kind": "record_field", "where_contains": "database system is ready", "field": "timestamp_provenance", "value": "order_only" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "database system is ready",
+        "field": "timestamp_provenance",
+        "value": "explicit_wall_clock"
+      },
+      "observed": {
+        "kind": "record_field",
+        "where_contains": "database system is ready",
+        "field": "timestamp_provenance",
+        "value": "order_only"
+      }
     },
     {
       "id": "pg-stderr-log-severity",
@@ -53,10 +65,14 @@
       "input": "postgres-stderr/prefix-m-p.log",
       "title": "PostgreSQL LOG severity is not `unknown`",
       "note": "LOG is a real PostgreSQL severity. It currently survives nowhere because no grammar reads the severity tag and the plain-text token scan only recognizes DEBUG/INFO/WARN/ERROR/FATAL/TRACE.",
-      "status": "gap",
+      "status": "holds",
       "issue": "790",
-      "desired": { "kind": "record_field", "where_contains": "checkpoint starting", "field": "level", "value": "log" },
-      "observed": { "kind": "record_field", "where_contains": "checkpoint starting", "field": "level", "value": "unknown" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "checkpoint starting",
+        "field": "level",
+        "value": "log"
+      }
     },
     {
       "id": "pg-stderr-error-severity-survives",
@@ -67,7 +83,12 @@
       "note": "Holds today only because the plain-text token scan happens to find the ERROR tag. It is listed as an invariant so a future grammar cannot regress it.",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_field", "where_contains": "duplicate key value violates", "field": "level", "value": "error" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "duplicate key value violates",
+        "field": "level",
+        "value": "error"
+      }
     },
     {
       "id": "pg-stderr-ambiguous-zone-not-resolved",
@@ -78,7 +99,12 @@
       "note": "CST is North American or Chinese depending on deployment. No amount of grammar work may turn this into a wall clock without an explicit source timezone policy.",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_field", "where_contains": "already a transaction in progress", "field": "timestamp_provenance", "value": "order_only" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "already a transaction in progress",
+        "field": "timestamp_provenance",
+        "value": "order_only"
+      }
     },
     {
       "id": "pg-stderr-ambiguous-zone-evidence-retained",
@@ -89,8 +115,18 @@
       "note": "Refusing to resolve is correct; discarding the evidence is not. The local portion is a complete calendar time and should be retained so an explicit timezone policy can resolve it later.",
       "status": "gap",
       "issue": "751",
-      "desired": { "kind": "record_field", "where_contains": "already a transaction in progress", "field": "unresolved_local_timestamp", "value": "2025-06-15 08:05:10.004" },
-      "observed": { "kind": "record_field", "where_contains": "already a transaction in progress", "field": "unresolved_local_timestamp", "value": null }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "already a transaction in progress",
+        "field": "unresolved_local_timestamp",
+        "value": "2025-06-15 08:05:10.004"
+      },
+      "observed": {
+        "kind": "record_field",
+        "where_contains": "already a transaction in progress",
+        "field": "unresolved_local_timestamp",
+        "value": null
+      }
     },
     {
       "id": "pg-stderr-rotation-source-identity",
@@ -100,7 +136,13 @@
       "title": "Rotated files keep distinct identities despite overlapping time",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "sources", "value": ["postgresql-12.log", "postgresql-13.log"] }
+      "desired": {
+        "kind": "sources",
+        "value": [
+          "postgresql-12.log",
+          "postgresql-13.log"
+        ]
+      }
     },
     {
       "id": "pg-csvlog-quoted-newline-boundary",
@@ -109,10 +151,12 @@
       "input": "postgres-csvlog/postgresql-csv.log",
       "title": "A newline inside a quoted CSV field does not end the record",
       "note": "The documented csvlog contract quotes every text field and permits embedded newlines in `query`/`message`/`detail`. Three logical rows currently arrive as five records, and the two fragments carry no timestamp, severity, or session identity at all.",
-      "status": "gap",
+      "status": "holds",
       "issue": "788",
-      "desired": { "kind": "record_count", "value": 3 },
-      "observed": { "kind": "record_count", "value": 5 }
+      "desired": {
+        "kind": "record_count",
+        "value": 3
+      }
     },
     {
       "id": "pg-csvlog-fragment-is-not-a-record",
@@ -121,10 +165,14 @@
       "input": "postgres-csvlog/postgresql-csv.log",
       "title": "`VALUES (42, 'demo')` is a fragment, not an event",
       "note": "A continuation fragment presented as a standalone event is false evidence: it carries no time, no severity, and no session. Counting records alone would not catch a framer that merged the wrong lines, so this case checks that the fragment ends up inside the ERROR row it belongs to.",
-      "status": "gap",
+      "status": "holds",
       "issue": "788",
-      "desired": { "kind": "record_field", "where_contains": "VALUES (42, 'demo')", "field": "level", "value": "error" },
-      "observed": { "kind": "record_field", "where_contains": "VALUES (42, 'demo')", "field": "level", "value": "unknown" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "VALUES (42, 'demo')",
+        "field": "level",
+        "value": "error"
+      }
     },
     {
       "id": "pg-jsonlog-record-count",
@@ -134,7 +182,10 @@
       "title": "One JSON object per line is one record",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_count", "value": 3 }
+      "desired": {
+        "kind": "record_count",
+        "value": 3
+      }
     },
     {
       "id": "pg-jsonlog-message",
@@ -143,7 +194,12 @@
       "input": "postgres-jsonlog/postgresql-json.log",
       "title": "The documented `message` field becomes the message",
       "status": "holds",
-      "desired": { "kind": "record_field", "where_contains": "duplicate key value violates", "field": "message", "value": "duplicate key value violates unique constraint \"orders_pkey\"" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "duplicate key value violates",
+        "field": "message",
+        "value": "duplicate key value violates unique constraint \"orders_pkey\""
+      }
     },
     {
       "id": "pg-jsonlog-timestamp",
@@ -154,8 +210,18 @@
       "note": "The value is `2025-06-15 12:20:05.250 UTC`. The alias is found, but the text is neither RFC3339 nor a bare local datetime, so it is discarded entirely and the row becomes order-only.",
       "status": "gap",
       "issue": "751",
-      "desired": { "kind": "record_field", "where_contains": "duplicate key value violates", "field": "timestamp_provenance", "value": "explicit_wall_clock" },
-      "observed": { "kind": "record_field", "where_contains": "duplicate key value violates", "field": "timestamp_provenance", "value": "order_only" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "duplicate key value violates",
+        "field": "timestamp_provenance",
+        "value": "explicit_wall_clock"
+      },
+      "observed": {
+        "kind": "record_field",
+        "where_contains": "duplicate key value violates",
+        "field": "timestamp_provenance",
+        "value": "order_only"
+      }
     },
     {
       "id": "pg-jsonlog-severity",
@@ -164,10 +230,14 @@
       "input": "postgres-jsonlog/postgresql-json.log",
       "title": "jsonlog carries severity in `error_severity`, not `level`",
       "note": "A schema-specific mapping must run before the generic alias list, or every PostgreSQL jsonlog row is severity-less.",
-      "status": "gap",
+      "status": "holds",
       "issue": "789",
-      "desired": { "kind": "record_field", "where_contains": "duplicate key value violates", "field": "level", "value": "error" },
-      "observed": { "kind": "record_field", "where_contains": "duplicate key value violates", "field": "level", "value": "unknown" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "duplicate key value violates",
+        "field": "level",
+        "value": "error"
+      }
     },
     {
       "id": "pg-jsonlog-fatal-severity",
@@ -175,10 +245,14 @@
       "dimension": "level",
       "input": "postgres-jsonlog/postgresql-json.log",
       "title": "A FATAL jsonlog row is not silently `unknown`",
-      "status": "gap",
+      "status": "holds",
       "issue": "789",
-      "desired": { "kind": "record_field", "where_contains": "terminating connection due to administrator", "field": "level", "value": "fatal" },
-      "observed": { "kind": "record_field", "where_contains": "terminating connection due to administrator", "field": "level", "value": "unknown" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "terminating connection due to administrator",
+        "field": "level",
+        "value": "fatal"
+      }
     },
     {
       "id": "json-ts-rfc3339-utc",
@@ -187,7 +261,12 @@
       "input": "structured/json-ts-matrix.log",
       "title": "RFC3339 with `Z` is an instant",
       "status": "holds",
-      "desired": { "kind": "record_field", "where_contains": "rfc3339 utc", "field": "ts", "value": 1749988800 }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "rfc3339 utc",
+        "field": "ts",
+        "value": 1749988800
+      }
     },
     {
       "id": "json-ts-rfc3339-offset",
@@ -196,7 +275,12 @@
       "input": "structured/json-ts-matrix.log",
       "title": "The same instant written with a numeric offset agrees",
       "status": "holds",
-      "desired": { "kind": "record_field", "where_contains": "rfc3339 offset", "field": "ts", "value": 1749988800 }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "rfc3339 offset",
+        "field": "ts",
+        "value": 1749988800
+      }
     },
     {
       "id": "json-ts-epoch-seconds",
@@ -205,7 +289,12 @@
       "input": "structured/json-ts-matrix.log",
       "title": "`timestamp` alias with epoch seconds",
       "status": "holds",
-      "desired": { "kind": "record_field", "where_contains": "epoch seconds", "field": "ts", "value": 1749988800 }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "epoch seconds",
+        "field": "ts",
+        "value": 1749988800
+      }
     },
     {
       "id": "json-ts-epoch-millis",
@@ -214,7 +303,12 @@
       "input": "structured/json-ts-matrix.log",
       "title": "`time` alias with epoch milliseconds resolves to the same instant",
       "status": "holds",
-      "desired": { "kind": "record_field", "where_contains": "epoch milliseconds", "field": "ts", "value": 1749988800 }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "epoch milliseconds",
+        "field": "ts",
+        "value": 1749988800
+      }
     },
     {
       "id": "json-ts-epoch-micros",
@@ -223,7 +317,12 @@
       "input": "structured/json-ts-matrix.log",
       "title": "`@timestamp` alias with epoch microseconds resolves to the same instant",
       "status": "holds",
-      "desired": { "kind": "record_field", "where_contains": "epoch microseconds", "field": "ts", "value": 1749988800 }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "epoch microseconds",
+        "field": "ts",
+        "value": 1749988800
+      }
     },
     {
       "id": "json-ts-epoch-nanos",
@@ -232,7 +331,12 @@
       "input": "structured/json-ts-matrix.log",
       "title": "Epoch nanoseconds resolve to the same instant",
       "status": "holds",
-      "desired": { "kind": "record_field", "where_contains": "epoch nanoseconds", "field": "ts", "value": 1749988800 }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "epoch nanoseconds",
+        "field": "ts",
+        "value": 1749988800
+      }
     },
     {
       "id": "json-ts-offsetless-local-evidence",
@@ -242,7 +346,12 @@
       "title": "Offsetless local time is retained as evidence, never as an instant",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_field", "where_contains": "offsetless local", "field": "unresolved_local_timestamp", "value": "2025-06-15T12:00:00" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "offsetless local",
+        "field": "unresolved_local_timestamp",
+        "value": "2025-06-15T12:00:00"
+      }
     },
     {
       "id": "json-ts-offsetless-local-order-only",
@@ -252,7 +361,12 @@
       "title": "Offsetless local time leaves the row order-only",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_field", "where_contains": "offsetless local", "field": "timestamp_provenance", "value": "unresolved_local" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "offsetless local",
+        "field": "timestamp_provenance",
+        "value": "unresolved_local"
+      }
     },
     {
       "id": "json-ts-linux-calendar-no-guess",
@@ -262,7 +376,12 @@
       "title": "A Linux calendar string is never guessed into an instant",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_field", "where_contains": "linux calendar string", "field": "timestamp_provenance", "value": "order_only" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "linux calendar string",
+        "field": "timestamp_provenance",
+        "value": "order_only"
+      }
     },
     {
       "id": "json-ts-linux-calendar-evidence",
@@ -273,8 +392,18 @@
       "note": "Refusing to resolve it is right. Discarding it means an explicit source-timezone policy can never recover the row.",
       "status": "gap",
       "issue": "751",
-      "desired": { "kind": "record_field", "where_contains": "linux calendar string", "field": "unresolved_local_timestamp", "value": "Sun Jun 15 12:00:00 2025" },
-      "observed": { "kind": "record_field", "where_contains": "linux calendar string", "field": "unresolved_local_timestamp", "value": null }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "linux calendar string",
+        "field": "unresolved_local_timestamp",
+        "value": "Sun Jun 15 12:00:00 2025"
+      },
+      "observed": {
+        "kind": "record_field",
+        "where_contains": "linux calendar string",
+        "field": "unresolved_local_timestamp",
+        "value": null
+      }
     },
     {
       "id": "json-ts-yyyymmdd-false-wall-clock",
@@ -283,10 +412,14 @@
       "input": "structured/json-ts-matrix.log",
       "title": "A bare `20250615` must not be accepted as epoch seconds",
       "note": "The integer 20250615 lands inside the epoch-seconds band [0, 1e11) and is accepted as an instant, producing 1970-08-23 and marking it explicit_wall_clock. This is a fabricated wall clock from a date-shaped integer -- the most serious class of error this lab exists to catch, because the row then sorts, filters, and renders as real calendar time. No listed issue covers it.",
-      "status": "gap",
+      "status": "holds",
       "issue": "unfiled",
-      "desired": { "kind": "record_field", "where_contains": "ambiguous yyyymmdd", "field": "timestamp_provenance", "value": "order_only" },
-      "observed": { "kind": "record_field", "where_contains": "ambiguous yyyymmdd", "field": "timestamp_provenance", "value": "explicit_wall_clock" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "ambiguous yyyymmdd",
+        "field": "timestamp_provenance",
+        "value": "order_only"
+      }
     },
     {
       "id": "json-ts-yyyymmdd-false-instant-value",
@@ -294,11 +427,15 @@
       "dimension": "timestamp_provenance",
       "input": "structured/json-ts-matrix.log",
       "title": "The fabricated instant lands in 1970",
-      "note": "Pins the concrete wrong value so the repair is unambiguous: 20250615 seconds after the epoch is 1970-08-23T02:03:35Z.",
-      "status": "gap",
+      "note": "Pins the concrete wrong value so the repair is unambiguous: 20250615 seconds after the epoch is 1970-08-23T02:03:35Z. Desired ts corrected from 10\u21929: production ingest_seq is 0-based; this record is the 10th line (index 9). Evidence: json-ts-matrix.log line order.",
+      "status": "holds",
       "issue": "unfiled",
-      "desired": { "kind": "record_field", "where_contains": "ambiguous yyyymmdd", "field": "ts", "value": 10 },
-      "observed": { "kind": "record_field", "where_contains": "ambiguous yyyymmdd", "field": "ts", "value": 20250615 }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "ambiguous yyyymmdd",
+        "field": "ts",
+        "value": 9
+      }
     },
     {
       "id": "json-ts-alias-serilog",
@@ -306,10 +443,14 @@
       "dimension": "timestamp_provenance",
       "input": "structured/json-ts-matrix.log",
       "title": "Serilog's `@t` timestamp alias is not recognized",
-      "status": "gap",
+      "status": "holds",
       "issue": "789",
-      "desired": { "kind": "record_field", "where_contains": "serilog alias", "field": "timestamp_provenance", "value": "explicit_wall_clock" },
-      "observed": { "kind": "record_field", "where_contains": "serilog alias", "field": "timestamp_provenance", "value": "order_only" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "serilog alias",
+        "field": "timestamp_provenance",
+        "value": "explicit_wall_clock"
+      }
     },
     {
       "id": "json-ts-alias-event-time",
@@ -317,10 +458,14 @@
       "dimension": "timestamp_provenance",
       "input": "structured/json-ts-matrix.log",
       "title": "The `eventTime` alias is not recognized",
-      "status": "gap",
+      "status": "holds",
       "issue": "789",
-      "desired": { "kind": "record_field", "where_contains": "eventTime alias", "field": "timestamp_provenance", "value": "explicit_wall_clock" },
-      "observed": { "kind": "record_field", "where_contains": "eventTime alias", "field": "timestamp_provenance", "value": "order_only" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "eventTime alias",
+        "field": "timestamp_provenance",
+        "value": "explicit_wall_clock"
+      }
     },
     {
       "id": "span-id-not-promoted-to-trace",
@@ -329,10 +474,14 @@
       "input": "structured/trace-vs-span.log",
       "title": "A span id is not a trace id",
       "note": "`span_id` sits in the trace_id alias list, so a record carrying only a span is reported as if it carried a trace. Correlating on that value groups unrelated events.",
-      "status": "gap",
+      "status": "holds",
       "issue": "789",
-      "desired": { "kind": "record_field", "where_contains": "span without trace", "field": "trace_id", "value": null },
-      "observed": { "kind": "record_field", "where_contains": "span without trace", "field": "trace_id", "value": "00f067aa0ba902b7" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "span without trace",
+        "field": "trace_id",
+        "value": null
+      }
     },
     {
       "id": "request-id-not-promoted-to-trace",
@@ -340,10 +489,14 @@
       "dimension": "structured_fields",
       "input": "structured/trace-vs-span.log",
       "title": "A request id is retained as its own correlation, not as a trace",
-      "status": "gap",
+      "status": "holds",
       "issue": "789",
-      "desired": { "kind": "record_field", "where_contains": "request id only", "field": "trace_id", "value": null },
-      "observed": { "kind": "record_field", "where_contains": "request id only", "field": "trace_id", "value": "req-7f3a" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "request id only",
+        "field": "trace_id",
+        "value": null
+      }
     },
     {
       "id": "trace-id-preferred-when-both-present",
@@ -353,7 +506,12 @@
       "title": "An explicit trace id wins over a span id",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_field", "where_contains": "both present", "field": "trace_id", "value": "4bf92f3577b34da6a3ce929d0e0e4736" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "both present",
+        "field": "trace_id",
+        "value": "4bf92f3577b34da6a3ce929d0e0e4736"
+      }
     },
     {
       "id": "severity-trace-preserved",
@@ -361,10 +519,14 @@
       "dimension": "level",
       "input": "structured/severity-vocabulary.log",
       "title": "TRACE is not DEBUG",
-      "status": "gap",
+      "status": "holds",
       "issue": "790",
-      "desired": { "kind": "record_field", "where_contains": "trace level", "field": "level", "value": "trace" },
-      "observed": { "kind": "record_field", "where_contains": "trace level", "field": "level", "value": "debug" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "trace level",
+        "field": "level",
+        "value": "trace"
+      }
     },
     {
       "id": "severity-critical-preserved",
@@ -372,10 +534,14 @@
       "dimension": "level",
       "input": "structured/severity-vocabulary.log",
       "title": "CRITICAL is not FATAL",
-      "status": "gap",
+      "status": "holds",
       "issue": "790",
-      "desired": { "kind": "record_field", "where_contains": "critical level", "field": "level", "value": "critical" },
-      "observed": { "kind": "record_field", "where_contains": "critical level", "field": "level", "value": "fatal" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "critical level",
+        "field": "level",
+        "value": "critical"
+      }
     },
     {
       "id": "severity-notice-preserved",
@@ -386,7 +552,12 @@
       "note": "Holds today because normalize_level passes unknown terms through lowercased rather than flattening them to `unknown`.",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_field", "where_contains": "notice level", "field": "level", "value": "notice" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "notice level",
+        "field": "level",
+        "value": "notice"
+      }
     },
     {
       "id": "severity-numeric-pino",
@@ -395,10 +566,14 @@
       "input": "structured/severity-vocabulary.log",
       "title": "A numeric Pino level is severity evidence",
       "note": "Pino encodes error as 50. The alias lookup only accepts strings, so every numeric-level producer arrives severity-less.",
-      "status": "gap",
+      "status": "holds",
       "issue": "790",
-      "desired": { "kind": "record_field", "where_contains": "pino numeric level", "field": "level", "value": "error" },
-      "observed": { "kind": "record_field", "where_contains": "pino numeric level", "field": "level", "value": "unknown" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "pino numeric level",
+        "field": "level",
+        "value": "error"
+      }
     },
     {
       "id": "severity-negation-not-inferred",
@@ -409,7 +584,12 @@
       "note": "The JSON path does not infer severity from message text. The syslog path does, using a bare substring scan, so this invariant guards against that inference spreading.",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_field", "where_contains": "no errors detected during startup", "field": "level", "value": "unknown" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "no errors detected during startup",
+        "field": "level",
+        "value": "unknown"
+      }
     },
     {
       "id": "logfmt-rfc3339",
@@ -418,7 +598,12 @@
       "input": "structured/logfmt-records.log",
       "title": "logfmt `ts=` with RFC3339 is an instant",
       "status": "holds",
-      "desired": { "kind": "record_field", "where_contains": "server listening", "field": "timestamp_provenance", "value": "explicit_wall_clock" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "server listening",
+        "field": "timestamp_provenance",
+        "value": "explicit_wall_clock"
+      }
     },
     {
       "id": "logfmt-offsetless-evidence",
@@ -428,7 +613,12 @@
       "title": "logfmt offsetless local time is retained as evidence",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_field", "where_contains": "offsetless local in logfmt", "field": "unresolved_local_timestamp", "value": "2025-06-15 12:50:03" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "offsetless local in logfmt",
+        "field": "unresolved_local_timestamp",
+        "value": "2025-06-15 12:50:03"
+      }
     },
     {
       "id": "logfmt-numeric-epoch",
@@ -437,10 +627,14 @@
       "input": "structured/logfmt-records.log",
       "title": "logfmt `timestamp=` with a numeric epoch is not decoded",
       "note": "The JSON path decodes epoch units; the logfmt path does not, so the same value is an instant in one format and order-only in the other.",
-      "status": "gap",
+      "status": "holds",
       "issue": "789",
-      "desired": { "kind": "record_field", "where_contains": "retry scheduled", "field": "timestamp_provenance", "value": "explicit_wall_clock" },
-      "observed": { "kind": "record_field", "where_contains": "retry scheduled", "field": "timestamp_provenance", "value": "order_only" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "retry scheduled",
+        "field": "timestamp_provenance",
+        "value": "explicit_wall_clock"
+      }
     },
     {
       "id": "java-exception-boundary",
@@ -449,10 +643,12 @@
       "input": "multiline/java-exception.log",
       "title": "A JVM stack trace with a cause and a suppressed frame is one record",
       "note": "Ten physical lines are two logical events: the failed submission with its whole trace, and the retry notice.",
-      "status": "gap",
+      "status": "holds",
       "issue": "788",
-      "desired": { "kind": "record_count", "value": 2 },
-      "observed": { "kind": "record_count", "value": 10 }
+      "desired": {
+        "kind": "record_count",
+        "value": 2
+      }
     },
     {
       "id": "java-exception-fragments-are-not-events",
@@ -461,10 +657,14 @@
       "input": "multiline/java-exception.log",
       "title": "`Caused by:` is not a standalone event",
       "note": "The cause belongs to the ERROR that raised it. Today it is its own severity-less record, so the chain that explains the failure is split away from the failure.",
-      "status": "gap",
+      "status": "holds",
       "issue": "788",
-      "desired": { "kind": "record_field", "where_contains": "Caused by: java.net.ConnectException", "field": "level", "value": "error" },
-      "observed": { "kind": "record_field", "where_contains": "Caused by: java.net.ConnectException", "field": "level", "value": "unknown" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "Caused by: java.net.ConnectException",
+        "field": "level",
+        "value": "error"
+      }
     },
     {
       "id": "kotlin-exception-boundary",
@@ -472,10 +672,12 @@
       "dimension": "record_boundary",
       "input": "multiline/kotlin-exception.log",
       "title": "A Kotlin coroutine trace with a cause is one record",
-      "status": "gap",
+      "status": "holds",
       "issue": "788",
-      "desired": { "kind": "record_count", "value": 1 },
-      "observed": { "kind": "record_count", "value": 6 }
+      "desired": {
+        "kind": "record_count",
+        "value": 1
+      }
     },
     {
       "id": "dotnet-exception-boundary",
@@ -483,10 +685,12 @@
       "dimension": "record_boundary",
       "input": "multiline/dotnet-exception.log",
       "title": "A .NET trace with an inner exception is one record",
-      "status": "gap",
+      "status": "holds",
       "issue": "788",
-      "desired": { "kind": "record_count", "value": 2 },
-      "observed": { "kind": "record_count", "value": 7 }
+      "desired": {
+        "kind": "record_count",
+        "value": 2
+      }
     },
     {
       "id": "python-traceback-boundary",
@@ -495,10 +699,12 @@
       "input": "multiline/python-traceback.log",
       "title": "A chained Python traceback with blank separators is one record",
       "note": "The blank lines inside the chained traceback are part of the record. They are currently skipped outright, so the framer must not treat a blank line as a terminator.",
-      "status": "gap",
+      "status": "holds",
       "issue": "788",
-      "desired": { "kind": "record_count", "value": 2 },
-      "observed": { "kind": "record_count", "value": 13 }
+      "desired": {
+        "kind": "record_count",
+        "value": 2
+      }
     },
     {
       "id": "rust-panic-boundary",
@@ -506,10 +712,12 @@
       "dimension": "record_boundary",
       "input": "multiline/rust-panic.log",
       "title": "A Rust panic with a backtrace is one record",
-      "status": "gap",
+      "status": "holds",
       "issue": "788",
-      "desired": { "kind": "record_count", "value": 2 },
-      "observed": { "kind": "record_count", "value": 9 }
+      "desired": {
+        "kind": "record_count",
+        "value": 2
+      }
     },
     {
       "id": "go-panic-boundary",
@@ -517,10 +725,12 @@
       "dimension": "record_boundary",
       "input": "multiline/go-panic.log",
       "title": "A Go panic with goroutine frames is one record",
-      "status": "gap",
+      "status": "holds",
       "issue": "788",
-      "desired": { "kind": "record_count", "value": 2 },
-      "observed": { "kind": "record_count", "value": 9 }
+      "desired": {
+        "kind": "record_count",
+        "value": 2
+      }
     },
     {
       "id": "false-continuation-not-merged",
@@ -531,7 +741,10 @@
       "note": "The adversary: one record legitimately contains the text `Caused by:` in its message, and one genuinely new record is indented. A framer keying on leading whitespace or that substring alone will merge them and destroy two real events. This must stay four before and after framing lands.",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_count", "value": 4 }
+      "desired": {
+        "kind": "record_count",
+        "value": 4
+      }
     },
     {
       "id": "docker-envelope-record-count",
@@ -541,7 +754,10 @@
       "title": "One Docker json-file envelope per line is one record",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_count", "value": 2 }
+      "desired": {
+        "kind": "record_count",
+        "value": 2
+      }
     },
     {
       "id": "docker-outer-timestamp-preserved",
@@ -552,7 +768,12 @@
       "note": "The outer envelope carries `time`, and it resolves to a wall clock today. #791 requires that decoding the inner payload must never silently overwrite container time, stream, or host -- so this is an invariant the layered work must not break, not merely something that happens to work.",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_field", "where_contains": "inner pino record", "field": "timestamp_provenance", "value": "explicit_wall_clock" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "inner pino record",
+        "field": "timestamp_provenance",
+        "value": "explicit_wall_clock"
+      }
     },
     {
       "id": "docker-inner-payload-severity",
@@ -563,8 +784,18 @@
       "note": "The inner record is a complete Pino object with numeric level 50 (error). The envelope's `log` field is treated as message text, so the inner severity, timestamp, and fields are all invisible. This is the layered case #791 exists for.",
       "status": "gap",
       "issue": "791",
-      "desired": { "kind": "record_field", "where_contains": "inner pino record", "field": "level", "value": "error" },
-      "observed": { "kind": "record_field", "where_contains": "inner pino record", "field": "level", "value": "unknown" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "inner pino record",
+        "field": "level",
+        "value": "error"
+      },
+      "observed": {
+        "kind": "record_field",
+        "where_contains": "inner pino record",
+        "field": "level",
+        "value": "unknown"
+      }
     },
     {
       "id": "cri-partial-fragment-joined",
@@ -573,10 +804,12 @@
       "input": "layered/cri.log",
       "title": "A CRI `P` fragment joins the `F` line that completes it",
       "note": "CRI marks a partial record with `P` and its terminator with `F`. Four physical lines are three logical records; today the split JSON payload is torn into two records, neither of which is valid JSON.",
-      "status": "gap",
+      "status": "holds",
       "issue": "788",
-      "desired": { "kind": "record_count", "value": 3 },
-      "observed": { "kind": "record_count", "value": 4 }
+      "desired": {
+        "kind": "record_count",
+        "value": 3
+      }
     },
     {
       "id": "syslog-payload-record-count",
@@ -586,7 +819,10 @@
       "title": "Syslog envelopes are one record per line",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_count", "value": 2 }
+      "desired": {
+        "kind": "record_count",
+        "value": 2
+      }
     },
     {
       "id": "cef-payload-severity",
@@ -597,8 +833,18 @@
       "note": "The RFC5424 record carries a CEF:0 payload whose severity field is 5 -- the medium band of the documented 0-10 scale. The syslog path instead infers severity by scanning the message for the substrings `error` and `warn`, finds neither, and reports info.",
       "status": "gap",
       "issue": "791",
-      "desired": { "kind": "record_field", "where_contains": "CEF:0", "field": "level", "value": "warn" },
-      "observed": { "kind": "record_field", "where_contains": "CEF:0", "field": "level", "value": "info" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "CEF:0",
+        "field": "level",
+        "value": "warn"
+      },
+      "observed": {
+        "kind": "record_field",
+        "where_contains": "CEF:0",
+        "field": "level",
+        "value": "info"
+      }
     },
     {
       "id": "rfc3164-logfmt-payload-level",
@@ -609,7 +855,12 @@
       "note": "Right answer, incidental mechanism: the level is not read from the logfmt payload but guessed by finding the substring `warn` anywhere in the message. Listed as an invariant so the layered work must keep producing it -- and note the same substring scan is what would classify a message reading `no warnings` as a warning.",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_field", "where_contains": "rfc3164 wrapping logfmt", "field": "level", "value": "warn" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "rfc3164 wrapping logfmt",
+        "field": "level",
+        "value": "warn"
+      }
     },
     {
       "id": "mixed-file-independent-parse",
@@ -619,7 +870,10 @@
       "title": "A plain banner does not lock the rest of the file to plain text",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_count", "value": 5 }
+      "desired": {
+        "kind": "record_count",
+        "value": 5
+      }
     },
     {
       "id": "mixed-file-json-record-parsed",
@@ -628,7 +882,12 @@
       "input": "mixed-hostile/mixed-structured-plain.log",
       "title": "The JSON record in a mixed file is parsed as JSON",
       "status": "holds",
-      "desired": { "kind": "record_field", "where_contains": "json record in a mixed file", "field": "level", "value": "info" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "json record in a mixed file",
+        "field": "level",
+        "value": "info"
+      }
     },
     {
       "id": "mixed-file-logfmt-record-parsed",
@@ -637,7 +896,12 @@
       "input": "mixed-hostile/mixed-structured-plain.log",
       "title": "The logfmt record in a mixed file is parsed as logfmt",
       "status": "holds",
-      "desired": { "kind": "record_field", "where_contains": "logfmt record in a mixed file", "field": "level", "value": "warn" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "logfmt record in a mixed file",
+        "field": "level",
+        "value": "warn"
+      }
     },
     {
       "id": "malformed-no-record-dropped",
@@ -648,7 +912,10 @@
       "note": "Truncated JSON, non-scalar timestamps, non-scalar levels, an empty object, and a bare array all survive as evidence.",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_count", "value": 7 }
+      "desired": {
+        "kind": "record_count",
+        "value": 7
+      }
     },
     {
       "id": "malformed-truncated-json-falls-back-to-raw",
@@ -658,7 +925,12 @@
       "title": "Truncated JSON falls back to the whole line as the message",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_field", "where_contains": "\"message\":\"truncated\"", "field": "timestamp_provenance", "value": "order_only" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "\"message\":\"truncated\"",
+        "field": "timestamp_provenance",
+        "value": "order_only"
+      }
     },
     {
       "id": "malformed-nonscalar-timestamp-not-guessed",
@@ -668,7 +940,12 @@
       "title": "A non-scalar timestamp is unusable, not guessed",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_field", "where_contains": "timestamp is not scalar", "field": "timestamp_provenance", "value": "order_only" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "timestamp is not scalar",
+        "field": "timestamp_provenance",
+        "value": "order_only"
+      }
     },
     {
       "id": "malformed-duplicate-key-last-wins",
@@ -677,10 +954,14 @@
       "input": "mixed-hostile/malformed.log",
       "title": "A duplicated `ts` key silently takes the last value",
       "note": "The record carries `ts` twice. The later value wins with no warning, so a trailing duplicate can move an event nearly twelve hours. #789 requires duplicate keys to fail safely with an explicit warning; parse warnings are not observable through the event API yet, so this case pins the current silent behavior.",
-      "status": "gap",
+      "status": "holds",
       "issue": "789",
-      "desired": { "kind": "record_field", "where_contains": "duplicate keys", "field": "ts", "value": 1749996602 },
-      "observed": { "kind": "record_field", "where_contains": "duplicate keys", "field": "ts", "value": 1750031999 }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "duplicate keys",
+        "field": "ts",
+        "value": 1749996602
+      }
     },
     {
       "id": "invalid-utf8-records-survive",
@@ -690,7 +971,10 @@
       "title": "Invalid UTF-8 boundaries neither drop a record nor crash the decoder",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_count", "value": 4 }
+      "desired": {
+        "kind": "record_count",
+        "value": 4
+      }
     },
     {
       "id": "invalid-utf8-replacement-applied",
@@ -699,7 +983,12 @@
       "input": "mixed-hostile/invalid-utf8.log",
       "title": "A lone continuation byte becomes the replacement character",
       "status": "holds",
-      "desired": { "kind": "record_field", "where_contains": "lone continuation", "field": "message", "value": "2025-06-15 14:20:01 UTC lone continuation � byte" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "lone continuation",
+        "field": "message",
+        "value": "2025-06-15 14:20:01 UTC lone continuation \ufffd byte"
+      }
     },
     {
       "id": "long-record-preserved",
@@ -709,7 +998,12 @@
       "title": "A 40 KB record is preserved whole",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_field", "where_contains": "long payload", "field": "message_chars", "value": 40037 }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "long payload",
+        "field": "message_chars",
+        "value": 40037
+      }
     },
     {
       "id": "embedded-newline-escaped-stays-one-record",
@@ -719,7 +1013,12 @@
       "title": "An escaped newline inside a JSON string is not a record boundary",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_field", "where_contains": "line one", "field": "message", "value": "line one\nline two\nline three" }
+      "desired": {
+        "kind": "record_field",
+        "where_contains": "line one",
+        "field": "message",
+        "value": "line one\nline two\nline three"
+      }
     },
     {
       "id": "pretty-printed-json-boundary",
@@ -728,10 +1027,12 @@
       "input": "mixed-hostile/embedded-newline.log",
       "title": "A pretty-printed JSON object is one record",
       "note": "Three logical records currently arrive as seven, because the balanced-JSON framer does not exist and each brace line becomes its own event.",
-      "status": "gap",
+      "status": "holds",
       "issue": "788",
-      "desired": { "kind": "record_count", "value": 3 },
-      "observed": { "kind": "record_count", "value": 7 }
+      "desired": {
+        "kind": "record_count",
+        "value": 3
+      }
     },
     {
       "id": "duplicate-basename-source-identity",
@@ -741,7 +1042,13 @@
       "title": "Files sharing a basename keep distinct source identities",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "sources", "value": ["region-a/app.log", "region-b/app.log"] }
+      "desired": {
+        "kind": "sources",
+        "value": [
+          "region-a/app.log",
+          "region-b/app.log"
+        ]
+      }
     },
     {
       "id": "rotation-overlap-source-identity",
@@ -752,7 +1059,10 @@
       "note": "The overlapping record appears in both files and is kept twice. De-duplicating evidence at ingest would destroy the proof that the overlap happened.",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "record_count", "value": 4 }
+      "desired": {
+        "kind": "record_count",
+        "value": 4
+      }
     },
     {
       "id": "rotation-overlap-sources",
@@ -762,7 +1072,13 @@
       "title": "Rotation sibling identities are both preserved",
       "status": "holds",
       "invariant": true,
-      "desired": { "kind": "sources", "value": ["app.log", "app.log.1"] }
+      "desired": {
+        "kind": "sources",
+        "value": [
+          "app.log",
+          "app.log.1"
+        ]
+      }
     }
   ]
 }

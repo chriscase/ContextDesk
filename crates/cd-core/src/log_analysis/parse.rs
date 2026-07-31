@@ -437,11 +437,39 @@ fn parse_json(raw: &str, ingest_seq: u64) -> ParsedLine {
         return parse_plain(raw, ingest_seq);
     };
     let obj = v.as_object();
+    // First-wins for duplicate JSON keys: serde_json keeps the last write, so
+    // scan the raw text for the first occurrence of known timestamp keys (#789).
+    let first_ts_hint =
+        first_json_ts_field(raw, &["ts", "timestamp", "time", "@timestamp", "@t", "eventTime"]);
     let get_str = |keys: &[&str]| -> Option<String> {
         let o = obj?;
         for k in keys {
             if let Some(s) = o.get(*k).and_then(|x| x.as_str()) {
                 return Some(s.to_string());
+            }
+        }
+        None
+    };
+    let get_level = || -> Option<String> {
+        let o = obj?;
+        // PostgreSQL jsonlog documents `error_severity` (#789 / #790).
+        if let Some(s) = o
+            .get("error_severity")
+            .and_then(|x| x.as_str())
+            .map(normalize_level)
+        {
+            return Some(s);
+        }
+        for k in ["level", "severity", "lvl"] {
+            if let Some(s) = o.get(k).and_then(|x| x.as_str()) {
+                return Some(normalize_level(s));
+            }
+            // Pino and friends encode severity as a number (#790).
+            if let Some(n) = o.get(k).and_then(|x| x.as_i64()) {
+                return Some(normalize_numeric_level(n));
+            }
+            if let Some(n) = o.get(k).and_then(|x| x.as_u64()) {
+                return Some(normalize_numeric_level(n as i64));
             }
         }
         None
@@ -452,15 +480,22 @@ fn parse_json(raw: &str, ingest_seq: u64) -> ParsedLine {
                 .or_else(|| o.get("timestamp"))
                 .or_else(|| o.get("time"))
                 .or_else(|| o.get("@timestamp"))
+                .or_else(|| o.get("@t"))
+                .or_else(|| o.get("eventTime"))
         })
         .map(parse_ts_value)
         .unwrap_or(ParsedTimestamp::Unusable);
+    // Prefer the first timestamp key when the raw text contains duplicates.
+    let timestamp = match first_ts_hint {
+        Some(first) => first,
+        None => timestamp,
+    };
     let (ts, timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp) =
         timestamp.into_stored_fields(ingest_seq);
-    let level = get_str(&["level", "severity", "lvl"])
-        .map(|s| normalize_level(&s))
-        .unwrap_or_else(|| "unknown".into());
+    let level = get_level().unwrap_or_else(|| "unknown".into());
     let message = get_str(&["message", "msg", "log", "text"]).unwrap_or_else(|| raw.to_string());
+    // #789: only true trace identifiers — never span_id or request_id.
+    let trace_id = get_str(&["trace_id", "traceId", "trace"]);
     ParsedLine {
         ts: Some(ts),
         timestamp_provenance,
@@ -469,10 +504,64 @@ fn parse_json(raw: &str, ingest_seq: u64) -> ParsedLine {
         level,
         service: get_str(&["service", "app", "component"]),
         host: get_str(&["host", "hostname", "node"]),
-        trace_id: get_str(&["trace_id", "traceId", "request_id", "req_id", "span_id"]),
+        trace_id,
         message,
         raw: raw.to_string(),
         format: LogFormat::Json,
+    }
+}
+
+/// Best-effort first scalar timestamp value for a JSON key (duplicate first-wins).
+/// Returns either a numeric epoch or a parseable RFC3339/offset string as epoch.
+fn first_json_ts_field(raw: &str, keys: &[&str]) -> Option<ParsedTimestamp> {
+    for key in keys {
+        let pattern = format!("\"{key}\"");
+        let mut search = raw;
+        while let Some(idx) = search.find(&pattern) {
+            let after = &search[idx + pattern.len()..];
+            let after = after.trim_start();
+            let Some(after) = after.strip_prefix(':') else {
+                search = &search[idx + pattern.len()..];
+                continue;
+            };
+            let after = after.trim_start();
+            if let Some(rest) = after.strip_prefix('"') {
+                // String timestamp.
+                if let Some(end) = rest.find('"') {
+                    let s = &rest[..end];
+                    let ts = parse_timestamp_text(s);
+                    if !matches!(ts, ParsedTimestamp::Unusable) {
+                        return Some(ts);
+                    }
+                }
+            } else {
+                // Number (not string).
+                let end = after
+                    .find(|c: char| !c.is_ascii_digit() && c != '-' && c != '+' && c != '.')
+                    .unwrap_or(after.len());
+                if let Some(num) = after.get(..end).map(str::trim) {
+                    if let Ok(n) = num.parse::<i64>() {
+                        if let Some(secs) = decode_unix_epoch_to_secs_i64(n) {
+                            return Some(ParsedTimestamp::ExplicitWallClock(secs));
+                        }
+                    }
+                }
+            }
+            search = &search[idx + pattern.len()..];
+        }
+    }
+    None
+}
+
+fn normalize_numeric_level(n: i64) -> String {
+    // Pino / bunyan-style bands (common open convention).
+    match n {
+        ..=10 => "trace".into(),
+        11..=20 => "debug".into(),
+        21..=30 => "info".into(),
+        31..=40 => "warn".into(),
+        41..=50 => "error".into(),
+        51.. => "fatal".into(),
     }
 }
 
@@ -650,6 +739,12 @@ fn decode_unix_epoch_to_secs_i64(raw: i64) -> Option<i64> {
     if raw < 0 {
         return None;
     }
+    // Date-shaped integers such as `20250615` fall inside the seconds band but
+    // are YYYYMMDD calendar tokens, not Unix epochs. Accepting them fabricates
+    // 1970 wall-clock evidence (unfiled conformance cases).
+    if looks_like_yyyymmdd_integer(raw) {
+        return None;
+    }
     let secs = if raw < EPOCH_BAND_MS_MIN {
         // seconds
         raw
@@ -668,6 +763,21 @@ fn decode_unix_epoch_to_secs_i64(raw: i64) -> Option<i64> {
     } else {
         None
     }
+}
+
+/// True when `raw` is an 8-digit calendar date YYYYMMDD (year 1900–2100).
+fn looks_like_yyyymmdd_integer(raw: i64) -> bool {
+    if !(1_900_0101..=2_100_1231).contains(&raw) {
+        return false;
+    }
+    // Must be exactly 8 decimal digits (no leading zeros beyond year).
+    if !(10_000_000..100_000_000).contains(&raw) {
+        return false;
+    }
+    let year = raw / 10_000;
+    let month = (raw / 100) % 100;
+    let day = raw % 100;
+    (1900..=2100).contains(&year) && (1..=12).contains(&month) && (1..=31).contains(&day)
 }
 
 /// Decode a JSON floating numeric epoch. Nonfinite values are rejected.
@@ -707,6 +817,7 @@ fn parse_numeric_epoch_str(s: &str) -> Option<i64> {
 }
 
 fn parse_logfmt(raw: &str, ingest_seq: u64) -> ParsedLine {
+    // First-wins map: a trailing duplicate key must not silently move time (#789).
     let mut map = std::collections::HashMap::new();
     for tok in split_logfmt_tokens(raw) {
         if let Some((k, v)) = tok.split_once('=') {
@@ -716,7 +827,7 @@ fn parse_logfmt(raw: &str, ingest_seq: u64) -> ParsedLine {
                 .unwrap_or(v)
                 .replace("\\\"", "\"")
                 .replace("\\\\", "\\");
-            map.insert(k.to_string(), v);
+            map.entry(k.to_string()).or_insert(v);
         }
     }
     let level = map
@@ -731,9 +842,11 @@ fn parse_logfmt(raw: &str, ingest_seq: u64) -> ParsedLine {
         .unwrap_or_else(|| raw.to_string());
     // Explicit-offset RFC3339 and epoch integers become wall seconds; offsetless /
     // malformed values fall back to ingest order (never drop the record).
+    // `timestamp=` is a documented logfmt alias alongside `ts`/`time` (#789).
     let timestamp = map
         .get("ts")
         .or_else(|| map.get("time"))
+        .or_else(|| map.get("timestamp"))
         .map(|value| parse_timestamp_text(value))
         .unwrap_or(ParsedTimestamp::Unusable);
     let (ts, timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp) =
@@ -746,9 +859,11 @@ fn parse_logfmt(raw: &str, ingest_seq: u64) -> ParsedLine {
         level,
         service: map.get("service").or_else(|| map.get("app")).cloned(),
         host: map.get("host").cloned(),
+        // #789: never promote request_id / span_id to trace.
         trace_id: map
             .get("trace_id")
-            .or_else(|| map.get("request_id"))
+            .or_else(|| map.get("traceId"))
+            .or_else(|| map.get("trace"))
             .cloned(),
         message,
         raw: raw.to_string(),
@@ -1351,6 +1466,15 @@ fn level_from_message_text(message: &str) -> String {
 }
 
 fn parse_plain(raw: &str, ingest_seq: u64) -> ParsedLine {
+    // Prefer PostgreSQL stderr grammar when the line (or multi-line record)
+    // matches the documented prefix form (#788 / #790).
+    if let Some(parsed) = parse_postgres_stderr(raw, ingest_seq) {
+        return parsed;
+    }
+    // csvlog rows are quoted CSV; attempt a bounded field extract.
+    if let Some(parsed) = parse_postgres_csvlog(raw, ingest_seq) {
+        return parsed;
+    }
     let level = if let Some(l) = extract_level_token(raw) {
         normalize_level(l)
     } else {
@@ -1371,12 +1495,156 @@ fn parse_plain(raw: &str, ingest_seq: u64) -> ParsedLine {
     }
 }
 
+/// PostgreSQL stderr: `YYYY-MM-DD HH:MM:SS.mmm TZ [pid] SEVERITY: message`.
+fn parse_postgres_stderr(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
+    let primary = raw.lines().next()?.trim();
+    let bracket = primary.find('[')?;
+    let after_bracket = primary.get(bracket..)?;
+    let close = after_bracket.find(']')?;
+    let rest = after_bracket.get(close + 1..)?.trim_start();
+    let (sev_tok, message) = rest.split_once(':')?;
+    let sev = sev_tok.trim();
+    if !is_pg_severity_token(sev) {
+        return None;
+    }
+    // Prefix before `[pid]` should look like a PG timestamp.
+    let prefix = primary.get(..bracket)?.trim();
+    if prefix.len() < 19 || !prefix.as_bytes().get(4).is_some_and(|b| *b == b'-') {
+        return None;
+    }
+    // Preserve multi-line DETAIL/HINT/STATEMENT in the message body.
+    let full_message = if raw.contains('\n') {
+        raw.to_string()
+    } else {
+        message.trim_start().to_string()
+    };
+    Some(ParsedLine {
+        ts: Some(ingest_seq as i64),
+        timestamp_provenance: TimestampProvenance::OrderOnly,
+        active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
+        unresolved_local_timestamp: None,
+        level: normalize_level(sev),
+        service: None,
+        host: None,
+        trace_id: None,
+        message: full_message,
+        raw: raw.to_string(),
+        format: LogFormat::Plain,
+    })
+}
+
+fn is_pg_severity_token(sev: &str) -> bool {
+    matches!(
+        sev.to_ascii_uppercase().as_str(),
+        "DEBUG"
+            | "DEBUG1"
+            | "DEBUG2"
+            | "DEBUG3"
+            | "DEBUG4"
+            | "DEBUG5"
+            | "INFO"
+            | "NOTICE"
+            | "WARNING"
+            | "ERROR"
+            | "LOG"
+            | "FATAL"
+            | "PANIC"
+            | "DETAIL"
+            | "HINT"
+            | "STATEMENT"
+            | "CONTEXT"
+            | "QUERY"
+    )
+}
+
+/// PostgreSQL csvlog: documented CSV with severity in a fixed column band.
+fn parse_postgres_csvlog(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
+    let first = raw.lines().next()?.trim_start();
+    if !first.starts_with('"') {
+        return None;
+    }
+    let fields = parse_csv_fields(raw.lines().next()?)?;
+    // Documented csvlog has many columns; error_severity is typically near the
+    // middle. Accept a field that is an exact PG severity token.
+    let level = fields
+        .iter()
+        .find(|f| is_pg_severity_token(f) && f.len() <= 12)
+        .map(|s| normalize_level(s))
+        .unwrap_or_else(|| "unknown".into());
+    // Message is usually the first long free-text field after severity.
+    let message = if raw.contains('\n') {
+        raw.to_string()
+    } else {
+        fields
+            .iter()
+            .find(|f| f.len() > 12 && !is_pg_severity_token(f))
+            .cloned()
+            .unwrap_or_else(|| raw.to_string())
+    };
+    Some(ParsedLine {
+        ts: Some(ingest_seq as i64),
+        timestamp_provenance: TimestampProvenance::OrderOnly,
+        active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
+        unresolved_local_timestamp: None,
+        level,
+        service: None,
+        host: None,
+        trace_id: None,
+        message,
+        raw: raw.to_string(),
+        format: LogFormat::Plain,
+    })
+}
+
+fn parse_csv_fields(line: &str) -> Option<Vec<String>> {
+    let mut fields = Vec::new();
+    let mut cur = String::new();
+    let mut in_quote = false;
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if in_quote {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    cur.push('"');
+                } else {
+                    in_quote = false;
+                }
+            } else {
+                cur.push(ch);
+            }
+        } else if ch == '"' {
+            in_quote = true;
+        } else if ch == ',' {
+            fields.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(ch);
+        }
+    }
+    fields.push(cur);
+    if fields.len() < 4 {
+        return None;
+    }
+    Some(fields)
+}
+
 fn extract_level_token(s: &str) -> Option<&str> {
     for tok in s.split(|c: char| !c.is_alphanumeric()) {
         let u = tok.to_ascii_uppercase();
         if matches!(
             u.as_str(),
-            "DEBUG" | "INFO" | "WARN" | "WARNING" | "ERROR" | "FATAL" | "TRACE"
+            "DEBUG"
+                | "INFO"
+                | "WARN"
+                | "WARNING"
+                | "ERROR"
+                | "FATAL"
+                | "TRACE"
+                | "LOG"
+                | "NOTICE"
+                | "CRITICAL"
+                | "EMERGENCY"
+                | "PANIC"
         ) {
             return Some(tok);
         }
@@ -1385,13 +1653,22 @@ fn extract_level_token(s: &str) -> Option<&str> {
 }
 
 /// Normalize free-form level strings.
+///
+/// Distinct vocabulary is preserved when the oracle and product need it:
+/// `trace` ≠ `debug`, `critical` ≠ `fatal`, PostgreSQL `log` stays `log` (#790).
 pub fn normalize_level(s: &str) -> String {
     match s.trim().to_ascii_lowercase().as_str() {
-        "debug" | "dbg" | "trace" => "debug".into(),
+        "trace" | "trc" => "trace".into(),
+        "debug" | "dbg" | "debug1" | "debug2" | "debug3" | "debug4" | "debug5" => "debug".into(),
         "info" | "information" | "informational" => "info".into(),
+        "notice" => "notice".into(),
+        "log" => "log".into(),
         "warn" | "warning" => "warn".into(),
         "error" | "err" | "severe" => "error".into(),
-        "fatal" | "crit" | "critical" | "panic" => "fatal".into(),
+        "critical" => "critical".into(),
+        "fatal" | "panic" => "fatal".into(),
+        "emergency" | "emerg" => "emergency".into(),
+        "crit" => "critical".into(),
         "" => "unknown".into(),
         other => other.to_string(),
     }
@@ -1400,11 +1677,11 @@ pub fn normalize_level(s: &str) -> String {
 /// Severity rank for clustering (higher = worse).
 pub fn level_severity(level: &str) -> u8 {
     match normalize_level(level).as_str() {
-        "fatal" => 5,
+        "emergency" | "fatal" | "critical" | "panic" => 5,
         "error" => 4,
         "warn" => 3,
-        "info" => 2,
-        "debug" => 1,
+        "info" | "notice" | "log" => 2,
+        "debug" | "trace" => 1,
         _ => 0,
     }
 }
@@ -2269,4 +2546,55 @@ mod tests {
         assert_eq!(p.ts, Some(55), "u64 overflow must fall back to order-only");
         assert!(p.message.contains("u64-max"));
     }
+    #[test]
+    fn yyyymmdd_integer_is_not_a_unix_epoch() {
+        assert_eq!(decode_unix_epoch_to_secs_i64(20_250_615), None);
+        let line = r#"{"ts":20250615,"level":"info","message":"ambiguous yyyymmdd"}"#;
+        let p = parse_line(line, Some(LogFormat::Json), 9);
+        assert_eq!(p.timestamp_provenance, TimestampProvenance::OrderOnly);
+        assert_eq!(p.ts, Some(9));
+    }
+
+    #[test]
+    fn span_id_and_request_id_are_not_trace_ids() {
+        let span_only = r#"{"ts":"2025-06-15T12:30:00Z","level":"info","span_id":"00f067aa0ba902b7","message":"span without trace"}"#;
+        let p = parse_line(span_only, Some(LogFormat::Json), 0);
+        assert_eq!(p.trace_id, None);
+        let req = r#"{"ts":"2025-06-15T12:30:02Z","level":"info","request_id":"req-7f3a","message":"request id only"}"#;
+        let p = parse_line(req, Some(LogFormat::Json), 0);
+        assert_eq!(p.trace_id, None);
+        let both = r#"{"ts":"2025-06-15T12:30:01Z","level":"info","trace_id":"abc","span_id":"def","message":"both"}"#;
+        let p = parse_line(both, Some(LogFormat::Json), 0);
+        assert_eq!(p.trace_id.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn postgres_jsonlog_error_severity_and_conflicting_level_field() {
+        let line = r#"{"timestamp":"2025-06-15 12:20:05.250 UTC","error_severity":"ERROR","level":"info","message":"duplicate key value violates"}"#;
+        let p = parse_line(line, Some(LogFormat::Json), 0);
+        assert_eq!(p.level, "error", "error_severity must win over generic level");
+    }
+
+    #[test]
+    fn postgres_stderr_log_severity_token() {
+        let line = "2025-06-15 12:00:02.001 UTC [1042] LOG:  checkpoint starting: time";
+        let p = parse_line(line, None, 0);
+        assert_eq!(p.level, "log");
+    }
+
+    #[test]
+    fn duplicate_json_ts_key_first_wins() {
+        let line = r#"{"ts":"2025-06-15T14:10:02Z","ts":"2025-06-15T23:59:59Z","level":"info","message":"duplicate keys"}"#;
+        let p = parse_line(line, Some(LogFormat::Json), 0);
+        assert_eq!(p.ts, Some(1_749_996_602));
+    }
+
+    #[test]
+    fn trace_and_critical_levels_are_preserved() {
+        assert_eq!(normalize_level("TRACE"), "trace");
+        assert_eq!(normalize_level("CRITICAL"), "critical");
+        assert_ne!(normalize_level("TRACE"), normalize_level("DEBUG"));
+        assert_ne!(normalize_level("CRITICAL"), normalize_level("FATAL"));
+    }
+
 }

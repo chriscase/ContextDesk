@@ -34,7 +34,7 @@ clustering, and “why” tools.
 | Stage | What happens | Evidence or boundary |
 | --- | --- | --- |
 | Ingest | A file, directory, or bounded ZIP bundle is read into a named disposable corpus | `ingest_logs` is SoftWrite because it materializes local analysis data |
-| Parse | Supported structured formats are parsed defensibly; malformed or unsupported structure falls back to retained redacted plain/order-only evidence rather than being dropped | No claim of perfect parsing or exhaustive per-line parse-error reporting |
+| Parse | Physical newlines are framed into **logical records** before parse (PostgreSQL DETAIL/HINT/STATEMENT and csvlog quoted newlines, JVM/Python/.NET/Go/Rust stacks, CRI `P`/`F` partials, pretty-printed JSON). Structured formats (JSON, logfmt, syslog, PostgreSQL stderr/csvlog/jsonlog) are parsed defensibly; `trace_id` is never filled from `span_id` or request ids; severity vocabulary keeps `trace`/`critical`/`log` distinct; date-shaped integers like `20250615` are rejected as Unix epochs. Malformed structure falls back to retained redacted plain/order-only evidence rather than being dropped | No claim of perfect parsing or exhaustive per-line parse-error reporting; layered transport (#791) and ambiguous-zone wall clocks (#751) remain separate work |
 | Redact | Secret-like values and sensitive parameters are scrubbed | Redaction happens before persistence and embedding |
 | Template | Drain groups variable messages into stable templates | Parameters remain separate from the template pattern |
 | Store | Events and templates are persisted under the app cache | DuckDB serves time/filter/aggregate scans; logs are not durable memory |

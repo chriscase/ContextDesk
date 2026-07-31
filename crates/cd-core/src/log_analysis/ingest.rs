@@ -4,6 +4,7 @@ use super::drain::DrainMiner;
 use super::embed_policy::{LogEmbedMode, LogEmbedPolicy};
 use super::import_preview::{ImportPreviewItem, ImportPreviewReport};
 use super::ingest_confidence::{IngestConfidenceAggregator, IngestConfidenceReport};
+use super::frame::LogicalRecordFramer;
 use super::parse::{parse_line_with_fingerprint, LogFormat};
 use super::redact_log::{prepare_original_record, redact_message, redact_params};
 use super::store::{
@@ -1668,6 +1669,7 @@ fn ingest_lines_from_reader(
 ) -> CoreResult<bool> {
     let mut raw_line = Vec::new();
     let mut source_bytes_read = 0u64;
+    let mut framer = LogicalRecordFramer::new();
     loop {
         if cancelled(cancel) {
             emit(
@@ -1706,112 +1708,191 @@ fn ingest_lines_from_reader(
             )));
         }
         stats.source_bytes = stats.source_bytes.saturating_add(bytes as u64);
-        let prepared_original = time_op_ms(ops, IngestOp::ParseFrame, || {
-            prepare_original_record(&raw_line)
-        });
-        let line = prepared_original.parser_text.as_str();
-        if line.trim().is_empty() {
-            continue;
-        }
-        // Every bounded physical record is fingerprinted independently. A
-        // plain banner cannot lock the rest of a file to Plain, and mixed
-        // structured records remain independently explainable.
-        let fingerprinted = time_op_ms(ops, IngestOp::ParseFrame, || {
-            parse_line_with_fingerprint(line, file_hint, *seq)
-        });
-        confidence.observe(source_label, &fingerprinted);
-        let parsed = fingerprinted.parsed;
-        *stats
-            .timestamp_provenance_counts
-            .entry(parsed.timestamp_provenance.as_storage_str().into())
-            .or_insert(0) += 1;
-        *stats
-            .active_timestamp_basis_counts
-            .entry(parsed.active_timestamp_basis.as_storage_str().into())
-            .or_insert(0) += 1;
-        let fmt_key = match parsed.format {
-            LogFormat::Json => "json",
-            LogFormat::Logfmt => "logfmt",
-            LogFormat::Syslog => "syslog",
-            LogFormat::Plain => "plain",
+        // Physical line → logical record framing (#788). Bound is already
+        // enforced per physical read; joined logical text is still capped by
+        // MAX_RAW_LOG_LINE_BYTES across the whole record.
+        // Lossy UTF-8 so invalid sequences remain as replacement chars (holds
+        // require invalid-utf8 records to survive framing, not vanish).
+        let physical = {
+            let without_lf = raw_line.strip_suffix(b"\n").unwrap_or(raw_line.as_slice());
+            let without_cr = without_lf.strip_suffix(b"\r").unwrap_or(without_lf);
+            String::from_utf8_lossy(without_cr).into_owned()
         };
-        *stats.format_counts.entry(fmt_key.into()).or_insert(0) += 1;
-        let msg = time_op_ms(ops, IngestOp::ParseFrame, || {
-            redact_message(&parsed.message)
-        });
-        let ts = parsed.ts.unwrap_or(*seq as i64);
-        stats.ts_min = Some(stats.ts_min.map_or(ts, |m| m.min(ts)));
-        stats.ts_max = Some(stats.ts_max.map_or(ts, |m| m.max(ts)));
-        let level_key = parsed.level.to_ascii_lowercase();
-        *stats.level_counts.entry(level_key).or_insert(0) += 1;
-        let (tid, params) = time_op_result_ms(ops, IngestOp::Template, || {
-            miner.match_or_create_cancellable(&msg, ts, &parsed.level, cancel)
-        })?;
-        let params = time_op_ms(ops, IngestOp::ParseFrame, || redact_params(&params));
-        batch.push(IngestedLogEvent {
-            event: LogEvent {
-                seq: *seq,
-                ts,
-                timestamp_provenance: parsed.timestamp_provenance,
-                active_timestamp_basis: parsed.active_timestamp_basis,
-                unresolved_local_timestamp: parsed.unresolved_local_timestamp,
-                level: parsed.level,
-                service: parsed.service,
-                host: parsed.host,
-                template_id: tid,
-                params,
-                trace_id: parsed.trace_id,
-                message: msg,
-                source: source_label.to_string(),
-            },
-            original: prepared_original.stored,
-        });
-        *seq += 1;
-        stats.lines += 1;
-        if batch.len() >= 256 {
-            if files_done == 0 && stats.lines <= 256 {
-                emit(
-                    progress,
-                    ProcessProgress::phase(
-                        kind,
-                        ProcessProgressPhase::Stream,
-                        "streaming read, parse, template, and persist",
-                        true,
-                    )
-                    .with_lines(stats.lines)
-                    .with_files(files_done)
-                    .with_bytes(stats.source_bytes),
-                );
-            }
-            time_op_result_ms(ops, IngestOp::Persist, || {
-                corpus.push_ingested_events(batch)
-            })?;
-            batch.clear();
-        }
-        if stats.lines.is_multiple_of(PROGRESS_EVERY_LINES) {
-            emit(
+        let completed = time_op_ms(ops, IngestOp::ParseFrame, || framer.push_line(&physical));
+        if let Some(logical) = completed {
+            ingest_framed_record(
+                &logical,
+                source_label,
+                file_hint,
+                corpus,
+                miner,
+                stats,
+                confidence,
+                seq,
+                batch,
+                files_done,
+                file_count,
                 progress,
-                with_stream_file_fraction(
-                    ProcessProgress::phase(
-                        kind,
-                        ProcessProgressPhase::Stream,
-                        format!(
-                            "streaming import of {source_label} ({} lines so far)",
-                            stats.lines
-                        ),
-                        true,
-                    )
-                    .with_lines(stats.lines)
-                    .with_files(files_done)
-                    .with_bytes(stats.source_bytes)
-                    .with_templates(miner.templates().len() as u64),
-                    files_done,
-                    file_count,
-                ),
-            );
+                cancel,
+                kind,
+                limits,
+                ops,
+            )?;
         }
     }
+    if let Some(logical) = time_op_ms(ops, IngestOp::ParseFrame, || framer.finish()) {
+        ingest_framed_record(
+            &logical,
+            source_label,
+            file_hint,
+            corpus,
+            miner,
+            stats,
+            confidence,
+            seq,
+            batch,
+            files_done,
+            file_count,
+            progress,
+            cancel,
+            kind,
+            limits,
+            ops,
+        )?;
+    }
     Ok(true)
+}
+
+/// Parse + persist path for one framed logical record.
+#[allow(clippy::too_many_arguments)]
+fn ingest_framed_record(
+    logical: &str,
+    source_label: &str,
+    file_hint: Option<&Path>,
+    corpus: &LogCorpus,
+    miner: &mut DrainMiner,
+    stats: &mut IngestStats,
+    confidence: &mut IngestConfidenceAggregator,
+    seq: &mut u64,
+    batch: &mut Vec<IngestedLogEvent>,
+    files_done: u64,
+    file_count: u64,
+    progress: &dyn ProcessProgressObserver,
+    cancel: Option<&CancelFlag>,
+    kind: ProcessProgressKind,
+    limits: RawIngestLimits,
+    ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
+) -> CoreResult<()> {
+    if logical.len() > limits.max_line_bytes {
+        emit_ingest_evidence(
+            progress,
+            LogIngestEvidenceReason::ParseFailed,
+            Path::new(source_label),
+        );
+        return Err(CoreError::Policy(format!(
+            "raw log line-length limit exceeded (>{} bytes)",
+            limits.max_line_bytes
+        )));
+    }
+    let prepared_original = time_op_ms(ops, IngestOp::ParseFrame, || {
+        prepare_original_record(logical.as_bytes())
+    });
+    let line = prepared_original.parser_text.as_str();
+    if line.trim().is_empty() {
+        return Ok(());
+    }
+    // Every bounded logical record is fingerprinted independently.
+    let fingerprinted = time_op_ms(ops, IngestOp::ParseFrame, || {
+        parse_line_with_fingerprint(line, file_hint, *seq)
+    });
+    confidence.observe(source_label, &fingerprinted);
+    let parsed = fingerprinted.parsed;
+    *stats
+        .timestamp_provenance_counts
+        .entry(parsed.timestamp_provenance.as_storage_str().into())
+        .or_insert(0) += 1;
+    *stats
+        .active_timestamp_basis_counts
+        .entry(parsed.active_timestamp_basis.as_storage_str().into())
+        .or_insert(0) += 1;
+    let fmt_key = match parsed.format {
+        LogFormat::Json => "json",
+        LogFormat::Logfmt => "logfmt",
+        LogFormat::Syslog => "syslog",
+        LogFormat::Plain => "plain",
+    };
+    *stats.format_counts.entry(fmt_key.into()).or_insert(0) += 1;
+    let msg = time_op_ms(ops, IngestOp::ParseFrame, || redact_message(&parsed.message));
+    let ts = parsed.ts.unwrap_or(*seq as i64);
+    stats.ts_min = Some(stats.ts_min.map_or(ts, |m| m.min(ts)));
+    stats.ts_max = Some(stats.ts_max.map_or(ts, |m| m.max(ts)));
+    let level_key = parsed.level.to_ascii_lowercase();
+    *stats.level_counts.entry(level_key).or_insert(0) += 1;
+    let (tid, params) = time_op_result_ms(ops, IngestOp::Template, || {
+        miner.match_or_create_cancellable(&msg, ts, &parsed.level, cancel)
+    })?;
+    let params = time_op_ms(ops, IngestOp::ParseFrame, || redact_params(&params));
+    batch.push(IngestedLogEvent {
+        event: LogEvent {
+            seq: *seq,
+            ts,
+            timestamp_provenance: parsed.timestamp_provenance,
+            active_timestamp_basis: parsed.active_timestamp_basis,
+            unresolved_local_timestamp: parsed.unresolved_local_timestamp,
+            level: parsed.level,
+            service: parsed.service,
+            host: parsed.host,
+            template_id: tid,
+            params,
+            trace_id: parsed.trace_id,
+            message: msg,
+            source: source_label.to_string(),
+        },
+        original: prepared_original.stored,
+    });
+    *seq += 1;
+    stats.lines += 1;
+    if batch.len() >= 256 {
+        if files_done == 0 && stats.lines <= 256 {
+            emit(
+                progress,
+                ProcessProgress::phase(
+                    kind,
+                    ProcessProgressPhase::Stream,
+                    "streaming read, parse, template, and persist",
+                    true,
+                )
+                .with_lines(stats.lines)
+                .with_files(files_done)
+                .with_bytes(stats.source_bytes),
+            );
+        }
+        time_op_result_ms(ops, IngestOp::Persist, || corpus.push_ingested_events(batch))?;
+        batch.clear();
+    }
+    if stats.lines.is_multiple_of(PROGRESS_EVERY_LINES) {
+        emit(
+            progress,
+            with_stream_file_fraction(
+                ProcessProgress::phase(
+                    kind,
+                    ProcessProgressPhase::Stream,
+                    format!(
+                        "streaming import of {source_label} ({} lines so far)",
+                        stats.lines
+                    ),
+                    true,
+                )
+                .with_lines(stats.lines)
+                .with_files(files_done)
+                .with_bytes(stats.source_bytes)
+                .with_templates(miner.templates().len() as u64),
+                files_done,
+                file_count,
+            ),
+        );
+    }
+    Ok(())
 }
 
 /// One nested archive copied into the hidden per-ingest tree.
