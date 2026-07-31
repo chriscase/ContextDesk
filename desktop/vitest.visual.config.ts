@@ -32,6 +32,10 @@ export default defineConfig({
     browser: {
       enabled: true,
       headless: true,
+      // Failure screenshots default into __screenshots__/ next to reviewed
+      // baselines and end up in commits; toMatchScreenshot already writes
+      // actual+diff artifacts to .vitest-attachments/ (gitignored).
+      screenshotFailures: false,
       provider: playwright({
         launchOptions: {
           args: [
