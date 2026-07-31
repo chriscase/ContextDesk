@@ -46,9 +46,12 @@
 //!   activation refuses a duplicate predicate outright. They are therefore
 //!   modelled as historical durable state — exactly what an older corpus on
 //!   disk would hold — and proven end-to-end through the ordinary importer.
-//! - `legacy unbound finding` is still uncovered here; investigations are not
-//!   carried in a corpus package and need a separate schema-3
-//!   `InvestigationStore` fixture.
+//! - `legacy unbound finding` is covered by `legacy_investigation_fixture`, not
+//!   here: investigations are not carried in a corpus package. That fixture is
+//!   a **pair** — a corpus package plus an investigation directory citing
+//!   events inside it — because the investigation cannot resolve evidence
+//!   alone, and `import_corpus_zip` re-mints the corpus id, so the
+//!   investigation must be rebound to the locally imported id.
 
 use cd_core::error::CoreResult;
 use cd_core::log_analysis::{

@@ -30,11 +30,12 @@ use cd_core::investigations::{
     EvidenceReferenceStatus, InvestigationNoiseLens, InvestigationPolicyBindingStatus,
     InvestigationStore, ResolvedInvestigationDocument,
 };
-use cd_core::log_analysis::LogCorpus;
+use cd_core::log_analysis::{import_corpus_zip_path, load_suppression_document, LogCorpus};
 use legacy_investigation_fixture::{
-    activate_fixture_suppression_rule, install_legacy_unbound_investigation, legacy_fixture_corpus,
-    revision_filename, LegacyInvestigationFixture, FIXTURE_LABEL, LEGACY_REVISION,
-    LEGACY_SCHEMA_VERSION,
+    activate_fixture_suppression_rule, export_legacy_fixture_corpus,
+    install_legacy_unbound_investigation, install_legacy_unbound_investigation_for_corpus_id,
+    legacy_fixture_corpus, revision_filename, LegacyInvestigationFixture, FIXTURE_LABEL,
+    LEGACY_REVISION, LEGACY_SCHEMA_VERSION,
 };
 use std::path::Path;
 
@@ -314,4 +315,106 @@ fn fixture_writes_only_under_the_supplied_profile_root() {
         "unexpected error: {error}"
     );
     assert!(!Path::new("relative/root").exists());
+}
+
+/// #819 — the paired-artifact end-to-end proof.
+///
+/// The investigation cites events in a corpus, so shipping the investigation
+/// alone is not an executable native protocol: a fresh machine cannot resolve
+/// the evidence. This exercises the real sequence a tester follows — export the
+/// corpus, import it through the ordinary production importer into a fresh
+/// app-equivalent cache, then install the investigation bound to the id the
+/// importer actually assigned — and proves every #819 property survives it.
+///
+/// Note the identity step: `import_corpus_zip` always mints a new corpus id, so
+/// binding must happen after import. Nothing rewrites an id after the fact.
+#[test]
+fn paired_corpus_and_investigation_survive_production_import_and_reopen() {
+    let build_cache = tempfile::tempdir().expect("build cache");
+    let package_dir = tempfile::tempdir().expect("package dir");
+    let corpus = legacy_fixture_corpus(build_cache.path()).expect("fixture corpus");
+    let origin_id = corpus.id().to_string();
+    let package = export_legacy_fixture_corpus(
+        corpus,
+        build_cache.path(),
+        package_dir.path().join("fixture-legacy-corpus.zip"),
+    )
+    .expect("export paired corpus");
+
+    // Fresh app-equivalent roots: nothing from the build step is reachable.
+    let app_cache = tempfile::tempdir().expect("app cache");
+    let app_profile = tempfile::tempdir().expect("app investigations root");
+
+    let report = import_corpus_zip_path(app_cache.path(), &package).expect("production import");
+    assert_eq!(report.origin_corpus_id, origin_id, "origin recorded");
+    assert_ne!(
+        report.corpus_id, origin_id,
+        "production import always mints a new corpus id"
+    );
+
+    let fixture =
+        install_legacy_unbound_investigation_for_corpus_id(app_profile.path(), &report.corpus_id)
+            .expect("install bound to the imported corpus");
+
+    let imported = LogCorpus::open(app_cache.path(), &report.corpus_id).expect("open imported");
+    let store = InvestigationStore::new(app_profile.path());
+
+    // Cited evidence resolves against the imported corpus.
+    let loaded: ResolvedInvestigationDocument = store
+        .load_with_policy_lens(
+            &fixture.investigation_id,
+            &imported,
+            InvestigationNoiseLens::Active,
+        )
+        .expect("load under active lens");
+    let evidence = loaded.evidence.first().expect("one evidence item");
+    assert_eq!(evidence.references.len(), 2);
+    for reference in &evidence.references {
+        assert_eq!(
+            reference.status,
+            EvidenceReferenceStatus::Verified,
+            "cited evidence must resolve against the imported corpus"
+        );
+    }
+
+    // Unbound legacy, Apply blocked, and no unintended exclusions.
+    let finding = loaded.findings.first().expect("one finding");
+    assert_eq!(
+        finding.policy_binding.status,
+        InvestigationPolicyBindingStatus::UnboundLegacy
+    );
+    assert!(finding.item.policy_binding.is_none(), "stays unbound");
+    assert_ne!(
+        finding.policy_binding.status,
+        InvestigationPolicyBindingStatus::Current,
+        "Apply must stay blocked"
+    );
+    let suppression = load_suppression_document(&imported).expect("suppression");
+    assert!(
+        suppression.enabled_template_ids().expect("ids").is_empty(),
+        "importing a fixture must not introduce exclusions"
+    );
+
+    // Byte-stable schema 3 across reopen.
+    let before = std::fs::read(&fixture.revision_path).expect("read revision");
+    let reopened = LogCorpus::open(app_cache.path(), &report.corpus_id).expect("reopen imported");
+    let again = InvestigationStore::new(app_profile.path())
+        .load_with_policy_lens(
+            &fixture.investigation_id,
+            &reopened,
+            InvestigationNoiseLens::Active,
+        )
+        .expect("reopen load");
+    assert_eq!(
+        again.findings[0].policy_binding.status,
+        InvestigationPolicyBindingStatus::UnboundLegacy,
+        "unbound survives reopen"
+    );
+    assert_eq!(again.document.schema_version, LEGACY_SCHEMA_VERSION);
+    let after = std::fs::read(&fixture.revision_path).expect("re-read revision");
+    assert_eq!(before, after, "loading must not rewrite the legacy record");
+    assert_eq!(
+        again.evidence[0].references[0].status,
+        EvidenceReferenceStatus::Verified
+    );
 }

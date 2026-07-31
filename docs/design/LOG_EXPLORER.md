@@ -234,6 +234,16 @@ No production UI, command, capability, or release backdoor exists for creating
 them. Invalid predicates remain automated-only because production validation
 rejects importing them.
 
+The first three are single importable packages. The legacy unbound finding is a
+**pair**: a corpus package plus an investigation directory. The investigation
+cites events inside that corpus, so it proves nothing on its own — and because
+`import_corpus_zip` always mints a new corpus id and records the packaged one as
+`origin_corpus_id`, the investigation must be rebound to the id the local import
+assigned before its evidence resolves. The generated fixture set therefore ships
+both artifacts, records the relationship and setup order in its manifest, and
+carries a README describing a reversible install that runs only while the app is
+closed and removes exactly one `TEST-FIXTURE` directory afterwards.
+
 A corpus revision can change template identity — re-analysis, a timezone
 declaration, package import. Two durable records must survive that without
 changing meaning: a suppression rule and a finding.

@@ -240,6 +240,27 @@ pub fn install_legacy_unbound_investigation(
     profile_root: &Path,
     corpus: &LogCorpus,
 ) -> CoreResult<LegacyInvestigationFixture> {
+    install_legacy_unbound_investigation_for_corpus_id(profile_root, corpus.id())
+}
+
+/// Install the same fixture bound to an explicit corpus id.
+///
+/// Production `import_corpus_zip` **always mints a new corpus id** and records
+/// the packaged one as `origin_corpus_id` (see `package.rs`), so an
+/// investigation generated ahead of time can never match the id a user's import
+/// will produce. Binding is therefore a separate, explicit step: import the
+/// paired corpus first, then install the investigation against the id the
+/// importer actually assigned. This keeps import and loader rules untouched —
+/// nothing rewrites a corpus id after the fact.
+pub fn install_legacy_unbound_investigation_for_corpus_id(
+    profile_root: &Path,
+    corpus_id: &str,
+) -> CoreResult<LegacyInvestigationFixture> {
+    if corpus_id.trim().is_empty() {
+        return Err(CoreError::Message(
+            "legacy investigation fixture requires a non-empty corpus id".into(),
+        ));
+    }
     if !profile_root.is_absolute() {
         return Err(CoreError::Message(
             "legacy investigation fixture requires an absolute caller-supplied profile root".into(),
@@ -250,7 +271,7 @@ pub fn install_legacy_unbound_investigation(
     let evidence_id = Uuid::now_v7().to_string();
     let finding_id = Uuid::now_v7().to_string();
 
-    let view_recipe = legacy_view_recipe(corpus.id());
+    let view_recipe = legacy_view_recipe(corpus_id);
     let document = InvestigationDocument {
         schema_version: LEGACY_SCHEMA_VERSION,
         id: investigation_id.clone(),
@@ -258,16 +279,16 @@ pub fn install_legacy_unbound_investigation(
         title: LEGACY_INVESTIGATION_TITLE.to_string(),
         status: InvestigationStatus::Active,
         corpus_links: vec![InvestigationCorpusLink {
-            corpus_id: corpus.id().to_string(),
+            corpus_id: corpus_id.to_string(),
         }],
         evidence: vec![EvidenceItem {
             id: evidence_id.clone(),
             title: LEGACY_EVIDENCE_TITLE.to_string(),
             provenance: EvidenceProvenance::Human,
-            corpus_id: corpus.id().to_string(),
+            corpus_id: corpus_id.to_string(),
             event_refs: vec![
-                fixture_event_ref(corpus.id(), API_SEQ, API_SOURCE, API_TS),
-                fixture_event_ref(corpus.id(), WORKER_SEQ, WORKER_SOURCE, WORKER_TS),
+                fixture_event_ref(corpus_id, API_SEQ, API_SOURCE, API_TS),
+                fixture_event_ref(corpus_id, WORKER_SEQ, WORKER_SOURCE, WORKER_TS),
             ],
             created_at: FIXED_CREATED_AT,
             updated_at: FIXED_CREATED_AT,
@@ -357,6 +378,27 @@ pub fn install_legacy_unbound_investigation(
 /// Production revision file naming: `revision-{revision:020}.json`.
 pub fn revision_filename(revision: u64) -> String {
     format!("revision-{revision:020}.json")
+}
+
+/// Export the fixture corpus through the production packager.
+///
+/// The legacy investigation cites events *in a corpus*, so the investigation
+/// artifact is useless on its own: a machine that has never seen this corpus
+/// cannot resolve the evidence. Emitting the paired package is what makes the
+/// fixture executable natively.
+///
+/// Flush before export (the writer reads `templates.json` and `events.duckdb`
+/// from disk) and drop the handle first (Windows exclusive-locks DuckDB).
+pub fn export_legacy_fixture_corpus(
+    corpus: LogCorpus,
+    cache_root: &Path,
+    out_path: PathBuf,
+) -> CoreResult<PathBuf> {
+    corpus.flush()?;
+    let corpus_id = corpus.id().to_string();
+    drop(corpus);
+    cd_core::log_analysis::export_corpus_zip(cache_root, &corpus_id, &out_path)?;
+    Ok(out_path)
 }
 
 /// Exact, payload-free reference in the canonical stored form.
