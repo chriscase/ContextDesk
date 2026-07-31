@@ -8,7 +8,10 @@ import {
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { LogCorpusSummaryDto } from "../../lib/host";
-import type { LogDiagnosticManifest } from "../../lib/logDiagnosticReport";
+import type {
+  LogDiagnosticManifest,
+  LogDiagnosticSuppressionPolicyInput,
+} from "../../lib/logDiagnosticReport";
 import {
   LogDiagnosticDialog,
   PREPARE_DEBOUNCE_MS,
@@ -243,5 +246,73 @@ describe("LogDiagnosticDialog short-height layout", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // Regression: every field below is inside the caps cd-core and the renderer
+  // both accept (32 rules, name <= 160 chars, rationale <= 400 chars), but the
+  // caps are counted in characters while the bounded export size is counted in
+  // bytes. A policy written in a non-Latin script therefore makes the report
+  // builder throw. That builder runs in a render-phase useMemo and the app
+  // mounts no error boundary, so the throw used to unmount the whole Explorer.
+  it("keeps the dialog usable when the report exceeds its bounded export size", async () => {
+    const oversizedPolicy: LogDiagnosticSuppressionPolicyInput = {
+      policyRevision: 7,
+      resolvedTemplateRevision: 0,
+      enabledRuleCount: 32,
+      appliedRuleCount: 0,
+      staleRuleCount: 32,
+      rules: Array.from({ length: 32 }, (_, index) => ({
+        ruleId: `019fab76-18ff-7361-8dd8-e4ddc0f1bb${String(index).padStart(2, "0")}`,
+        name: "定期ヘルスチェックの雑音抑制".repeat(12).slice(0, 160),
+        rationale: "この抑制ルールは定期的なヘルスチェックログを除外するために作成されました。"
+          .repeat(20)
+          .slice(0, 400),
+        state: "enabled" as const,
+        resolutionKind: "stale_target_missing" as const,
+        explanation:
+          "Stale — matches nothing: template 4211 no longer exists. The rule and audit history were preserved; disable or remove it after review.",
+        matchingEventCount: 0,
+      })),
+      audit: Array.from({ length: 64 }, (_, index) => ({
+        action: "activated" as const,
+        revision: index + 1,
+        ruleId: `019fab76-18ff-7361-8dd8-e4ddc0f1bb${String(index % 32).padStart(2, "0")}`,
+        createdAt: 1_700_000_000 + index,
+      })),
+    };
+
+    render(
+      <LogDiagnosticDialog
+        corpus={corpus}
+        suppressionPolicy={oversizedPolicy}
+        environment={{
+          appVersion: "0.1.0",
+          channel: "dev",
+          gitSha: "de43caeba66df05068a50db9356efad3b64a4a45",
+          os: "macOS",
+        }}
+        currentStatus={null}
+        onDismiss={vi.fn()}
+      />,
+    );
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Export corpus diagnostics",
+    });
+    const preview = within(dialog).getByLabelText("Markdown diagnostic preview");
+    await waitFor(() =>
+      expect(preview.textContent).toContain(
+        "Diagnostic report exceeded its bounded export size",
+      ),
+    );
+
+    // No partial or unbounded artefact is offered for export, and the host is
+    // never asked to prepare a manifest that could not be built.
+    for (const name of ["Save Markdown…", "Save JSON…", "Copy Markdown"]) {
+      expect(
+        within(dialog).getByRole("button", { name }).hasAttribute("disabled"),
+      ).toBe(true);
+    }
+    expect(hostMocks.prepare).not.toHaveBeenCalled();
   });
 });

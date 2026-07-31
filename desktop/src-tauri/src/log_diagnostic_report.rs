@@ -904,6 +904,13 @@ fn sanitize_text(value: &str, max_chars: usize) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .chars()
+        // Splitting on whitespace already folds away newlines and tabs, but the
+        // remaining C0/C1 controls (ESC, BEL, NUL, DEL) are neither whitespace
+        // nor ASCII punctuation, so they survive `markdown_literal` too. Some of
+        // this text crosses a trust boundary — an imported package supplies the
+        // corpus name with no character validation — and a diagnostic report is
+        // meant to be pasted into a terminal or a support thread.
+        .filter(|character| !character.is_control())
         .take(max_chars)
         .collect()
 }
@@ -1128,7 +1135,7 @@ fn render_markdown(manifest: &LogDiagnosticManifest) -> String {
             lines.push("- none recorded".into());
         } else {
             lines.extend(policy.rules.iter().map(|rule| {
-                format!(
+                let mut line = format!(
                     "- {} ({}): {} / {} / {} matching event(s) — {}",
                     markdown_literal(&rule.name),
                     markdown_literal(&rule.rule_id),
@@ -1136,7 +1143,14 @@ fn render_markdown(manifest: &LogDiagnosticManifest) -> String {
                     markdown_literal(&rule.resolution_kind),
                     rule.matching_event_count,
                     markdown_literal(&rule.rationale)
-                )
+                );
+                // The trusted-core explanation is why the rule resolves the way
+                // it does. Markdown is the default preview and share format, so
+                // omitting it here leaves a reader with a bare resolution kind.
+                if !rule.explanation.is_empty() {
+                    line.push_str(&format!(" — {}", markdown_literal(&rule.explanation)));
+                }
+                line
             }));
         }
         if policy.omitted_rule_entries > 0 {
@@ -1736,5 +1750,55 @@ mod tests {
                 .expect("second remains"),
             second.markdown
         );
+    }
+
+    #[test]
+    fn markdown_carries_the_trusted_core_explanation_for_each_rule() {
+        let mut value = safe_manifest_value();
+        value["suppressionPolicy"] = safe_suppression_policy_value();
+        value["suppressionPolicy"]["rules"][1]["explanation"] = serde_json::json!(
+            "Stale - matches nothing: template 4211 no longer exists. \
+             The rule and audit history were preserved."
+        );
+
+        let manifest = serde_json::from_value(value).expect("manifest");
+        let prepared = LogDiagnosticReportStore::default()
+            .prepare(manifest)
+            .expect("prepare");
+
+        // Markdown is the default preview and share format, so a reader must be
+        // able to see why a rule resolves as stale, not just its resolution kind.
+        assert!(
+            prepared.markdown.contains("template 4211 no longer exists"),
+            "markdown omitted the trusted-core explanation: {}",
+            prepared.markdown
+        );
+        assert!(prepared.markdown.contains("stale&#95;target&#95;missing"));
+    }
+
+    #[test]
+    fn sanitize_text_strips_control_characters_from_untrusted_text() {
+        // An imported package supplies the corpus name with no character
+        // validation, and a diagnostic report is meant to be pasted into a
+        // terminal or a support thread.
+        let mut value = safe_manifest_value();
+        value["corpus"]["name"] = serde_json::json!("Prod \u{1b}c logs\u{7}\u{0}\u{7f}\u{9c} tail");
+
+        let manifest = serde_json::from_value(value).expect("manifest");
+        let prepared = LogDiagnosticReportStore::default()
+            .prepare(manifest)
+            .expect("prepare");
+
+        for artefact in [&prepared.markdown, &prepared.json] {
+            assert!(
+                !artefact.chars().any(|character| character.is_control()
+                    && character != '\n'
+                    && character != '\t'),
+                "control character survived into a shared artefact: {artefact:?}"
+            );
+            assert!(!artefact.contains('\u{1b}'));
+            assert!(!artefact.contains("\\u001b"));
+        }
+        assert!(prepared.markdown.contains("Prod c logs tail"));
     }
 }
