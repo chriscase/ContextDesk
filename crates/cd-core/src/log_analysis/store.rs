@@ -483,9 +483,16 @@ pub struct LogCorpus {
     event_revision: Arc<AtomicU64>,
     /// Changes when deterministic template metadata is replaced in-process.
     template_analysis_revision: Arc<AtomicU64>,
+    /// Trusted exclusion lens for Explorer-shaped queries (#819). Scoped to this
+    /// handle, so it can never serve one corpus's policy to another and is
+    /// bounded by however many handles the host keeps open.
+    suppression_lens: Mutex<Option<super::suppression_lens::CachedSuppressionLens>>,
     /// Test instrumentation: physical `COUNT(*)` scans, not cache reads.
     #[cfg(test)]
     event_count_scans: AtomicUsize,
+    /// Test instrumentation: sidecar reads plus rule resolutions, not cache hits.
+    #[cfg(test)]
+    suppression_lens_loads: AtomicUsize,
 }
 
 impl LogCorpus {
@@ -529,8 +536,11 @@ impl LogCorpus {
             event_count_cache: Mutex::new(EventCountCache::default()),
             event_revision,
             template_analysis_revision,
+            suppression_lens: Mutex::new(None),
             #[cfg(test)]
             event_count_scans: AtomicUsize::new(0),
+            #[cfg(test)]
+            suppression_lens_loads: AtomicUsize::new(0),
         })
     }
 
@@ -621,8 +631,11 @@ impl LogCorpus {
             event_count_cache: Mutex::new(EventCountCache::default()),
             event_revision,
             template_analysis_revision,
+            suppression_lens: Mutex::new(None),
             #[cfg(test)]
             event_count_scans: AtomicUsize::new(0),
+            #[cfg(test)]
+            suppression_lens_loads: AtomicUsize::new(0),
         })
     }
 
@@ -925,6 +938,52 @@ impl LogCorpus {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(key, CachedEventCount { revision, count });
         self.event_revision.load(Ordering::SeqCst) == revision
+    }
+
+    /// Cached trusted suppression lens, if one was resolved for this handle.
+    pub(crate) fn cached_suppression_lens(
+        &self,
+    ) -> Option<super::suppression_lens::CachedSuppressionLens> {
+        self.suppression_lens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Replace the cached trusted suppression lens for this handle.
+    pub(crate) fn store_suppression_lens(
+        &self,
+        entry: super::suppression_lens::CachedSuppressionLens,
+    ) {
+        *self
+            .suppression_lens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(entry);
+    }
+
+    /// Drop the cached lens so the next query re-resolves the durable policy.
+    ///
+    /// The host calls this after a policy mutation or import so enforcement
+    /// does not wait for the sidecar identity to be observed as changed.
+    pub fn invalidate_suppression_lens(&self) {
+        *self
+            .suppression_lens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    /// Count one sidecar read plus rule resolution (not a cache hit).
+    #[cfg(test)]
+    pub(crate) fn record_suppression_lens_load(&self) {
+        self.suppression_lens_loads.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[cfg(not(test))]
+    pub(crate) fn record_suppression_lens_load(&self) {}
+
+    #[cfg(test)]
+    pub(crate) fn suppression_lens_load_count(&self) -> usize {
+        self.suppression_lens_loads.load(Ordering::SeqCst)
     }
 
     #[cfg(test)]
