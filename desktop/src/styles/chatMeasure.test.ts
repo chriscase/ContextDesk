@@ -82,7 +82,6 @@ describe("chat input-stack alignment (#699, #767)", () => {
     const shelfWidth = getComputedStyle(shelf).maxWidth;
     const composerWidth = getComputedStyle(composer).maxWidth;
 
-    // eslint-disable-next-line no-console -- paste-friendly close proof
     console.log(
       `measure: transcript=${transcriptWidth} shelf=${shelfWidth} composer=${composerWidth}`,
     );
@@ -100,7 +99,6 @@ describe("chat input-stack alignment (#699, #767)", () => {
     const scrollStyle = getComputedStyle(scroll);
     const dockStyle = getComputedStyle(dock);
 
-    // eslint-disable-next-line no-console -- paste-friendly close proof
     console.log(
       `gutters: scroll=${scrollStyle.paddingLeft}/${scrollStyle.paddingRight} dock=${dockStyle.paddingLeft}/${dockStyle.paddingRight}`,
     );

@@ -80,7 +80,23 @@ export function useTurnController(args: Args) {
     Record<string, unknown>
   >({});
   const [agentError, setAgentError] = useState<string | null>(null);
-  const stopRef = useRef(false);
+  /**
+   * Monotonic id of the turn allowed to write to the transcript. Stopping, or
+   * starting a replacement turn, bumps it — so a cancelled turn whose host
+   * promise is still draining can never resume streaming into a later turn.
+   */
+  const turnTokenRef = useRef(0);
+  /**
+   * Session that owns the turn currently in flight. Stop, permission replies,
+   * and failure reporting must target *this* chat, not whatever the user has
+   * since switched to — otherwise a mid-turn chat switch cancels the wrong
+   * session and leaves the real one streaming forever.
+   */
+  const activeTurnSessionRef = useRef<string | null>(null);
+  /** Session that raised the pending permission prompt. */
+  const permissionSessionRef = useRef<string | null>(null);
+  /** Synchronous in-flight latch: two sends in one frame must not both start. */
+  const turnInFlightRef = useRef(false);
 
   const startTurn = useCallback(
     async (text: string): Promise<boolean> => {
@@ -88,10 +104,21 @@ export function useTurnController(args: Args) {
         onNeedPreflight();
         return false;
       }
+      // `busy` only reaches the composer on the next render, so a second send
+      // dispatched in the same frame would otherwise start a parallel turn.
+      // Reject it here and let the caller keep the draft.
+      if (turnInFlightRef.current) {
+        return false;
+      }
+      turnInFlightRef.current = true;
+      turnTokenRef.current += 1;
+      const myToken = turnTokenRef.current;
+      /** This turn has been stopped, or superseded by a newer one. */
+      const isRetired = () => turnTokenRef.current !== myToken;
       // First send / empty list / post-trash: always have a real session id.
       const target = ensureActiveSession();
       const sid = target.id;
-      stopRef.current = false;
+      activeTurnSessionRef.current = sid;
       setAgentError(null);
       setBusy(true);
       setTurnStartedAt(Date.now());
@@ -163,7 +190,7 @@ export function useTurnController(args: Args) {
           (ev) => {
             // #249: do not drop turn_completed/error after Stop — that left
             // streaming:true forever (original #105 AC#3). Host cancel: #90/#109.
-            if (!shouldProcessEventWhileStopped(stopRef.current, ev.kind)) {
+            if (!shouldProcessEventWhileStopped(isRetired(), ev.kind)) {
               return;
             }
 
@@ -177,6 +204,7 @@ export function useTurnController(args: Args) {
                 [ev],
               );
               if (perm) {
+                permissionSessionRef.current = sid;
                 setPermission(perm);
                 const a = ev.payload?.arguments;
                 if (a && typeof a === "object" && !Array.isArray(a)) {
@@ -270,9 +298,21 @@ export function useTurnController(args: Args) {
             });
           },
           pinnedSkillId,
+          null,
+          false,
+          // Hand the host the ids this transcript already uses. When the host
+          // persists a terminal turn itself (e.g. a chat pinned to a provider
+          // profile that no longer exists) it de-duplicates against these
+          // instead of writing a second copy of the same exchange.
+          { userMessageId: user.id, assistantMessageId: assistantId },
         );
       } catch (e) {
         const err = e instanceof Error ? e.message : String(e);
+        // A turn the user already stopped (or replaced) must not reach back and
+        // overwrite the partial answer it left behind with a host error.
+        if (isRetired()) {
+          return false;
+        }
         setSessions((all) => {
           const cur = all.find((s) => s.id === sid);
           if (!cur) return all;
@@ -298,8 +338,14 @@ export function useTurnController(args: Args) {
           return all.map((s) => (s.id === sid ? updated : s));
         });
       } finally {
-        setBusy(false);
-        setTurnStartedAt(null);
+        // A retired turn must not clear the latch or the busy flag belonging to
+        // the turn that replaced it.
+        if (!isRetired()) {
+          turnInFlightRef.current = false;
+          activeTurnSessionRef.current = null;
+          setBusy(false);
+          setTurnStartedAt(null);
+        }
       }
       return true;
     },
@@ -328,6 +374,9 @@ export function useTurnController(args: Args) {
       typed?: string,
     ) => {
       if (!permission) return;
+      // The prompt belongs to the chat that raised it. Answering after a chat
+      // switch must not file the tool result under the chat now on screen.
+      const owner = permissionSessionRef.current ?? sessionId;
       try {
         const events = await completePermission(
           permission.requestId,
@@ -335,13 +384,14 @@ export function useTurnController(args: Args) {
           permission.toolName,
           pendingToolArgs,
           typed,
-          sessionId,
+          owner,
         );
         setPermission(null);
         setPendingToolArgs({});
+        permissionSessionRef.current = null;
         // Append tool results as assistant follow-up
         setSessions((all) => {
-          const cur = all.find((s) => s.id === sessionId);
+          const cur = all.find((s) => s.id === owner);
           if (!cur) return all;
           const { msg } = applyEventsToMessage(
             {
@@ -361,11 +411,40 @@ export function useTurnController(args: Args) {
               prev.map((s) => (s.id === saved.id ? saved : s)),
             );
           });
-          return all.map((s) => (s.id === sessionId ? updated : s));
+          return all.map((s) => (s.id === owner ? updated : s));
         });
       } catch (e) {
-        setAgentError(e instanceof Error ? e.message : String(e));
+        // A refused or malformed write is a turn-level outcome, not an app
+        // failure. Record it in the conversation that asked for it so the
+        // thread stays readable and nothing implies the write succeeded (#691).
+        const detail = e instanceof Error ? e.message : String(e);
+        const toolName = permission.toolName.trim() || "The requested write";
         setPermission(null);
+        setPendingToolArgs({});
+        permissionSessionRef.current = null;
+        setSessions((all) => {
+          const cur = all.find((s) => s.id === owner);
+          if (!cur) {
+            setAgentError(detail);
+            return all;
+          }
+          const failure: Msg = {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: `**${toolName} was not completed.** ${detail}\n\nNothing was written. You can ask again with the missing details, or continue without it.`,
+          };
+          const updated: ChatSession = {
+            ...cur,
+            messages: [...cur.messages, failure],
+            updatedAt: nowIso(),
+          };
+          void persistSession(updated).then((saved) => {
+            setSessions((prev) =>
+              prev.map((s) => (s.id === saved.id ? saved : s)),
+            );
+          });
+          return all.map((s) => (s.id === owner ? updated : s));
+        });
       }
     },
     [permission, pendingToolArgs, sessionId, setSessions, persistSession],
@@ -373,12 +452,18 @@ export function useTurnController(args: Args) {
 
   const stopTurn = useCallback(() => {
     // True cancellation is host-owned (#90/#109). UI must still finalize so no
-    // assistant bubble stays streaming:true (#249 / #105 AC#3).
-    stopRef.current = true;
-    if (sessionId) {
-      void hostCancelTurn(sessionId);
+    // assistant bubble stays streaming:true (#249 / #105 AC#3). Retiring the
+    // token also keeps late deltas from the cancelled turn out of the
+    // transcript once a replacement turn has started.
+    turnTokenRef.current += 1;
+    // Cancel the chat that is actually streaming. Falling back to the on-screen
+    // session would cancel the wrong turn after a mid-stream chat switch and
+    // leave the real one pinned as streaming forever.
+    const target = activeTurnSessionRef.current ?? sessionId;
+    if (target) {
+      void hostCancelTurn(target);
       setSessions((all) => {
-        const cur = all.find((s) => s.id === sessionId);
+        const cur = all.find((s) => s.id === target);
         if (!cur) return all;
         const messages = finalizeMessagesAfterStop(cur.messages);
         if (messages === cur.messages) return all;
@@ -402,9 +487,10 @@ export function useTurnController(args: Args) {
             prev.map((s) => (s.id === saved.id ? saved : s)),
           );
         });
-        return all.map((s) => (s.id === sessionId ? updated : s));
+        return all.map((s) => (s.id === target ? updated : s));
       });
     }
+    turnInFlightRef.current = false;
     setBusy(false);
     setTurnStartedAt(null);
     // Cancellation is an expected chat action, not an application-wide error.
