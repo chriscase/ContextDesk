@@ -38,6 +38,8 @@ import {
   hostLogLoadSuppression,
   hostLogMutateTemplateSuppressionRule,
   hostLogApplyInvestigationFindingView,
+  hostLogAcceptProposedFinding,
+  hostLogDismissProposedFinding,
   hostLogPreviewInvestigationEvidence,
   hostLogPreviewInvestigationFindingView,
   hostLogRecomputeInvestigationFindingView,
@@ -4968,13 +4970,76 @@ export function LogExplorer({ corpusId }: Props) {
   const columnGridTemplate = `${colWidths[0]}rem ${colWidths[1]}rem minmax(${colWidths[2]}rem, ${colWidths[2] + 2}rem) minmax(${colWidths[3]}rem, 1fr)`;
   const evidenceItems = investigationEvidenceViews(investigation);
   const findingItems = investigationFindingViews(investigation);
+  const proposedFindingItems = (investigation?.document.proposedFindings ?? [])
+    .filter((p) => p.status === "proposed")
+    .map((p) => ({
+      id: p.id,
+      kind: p.kind,
+      title: p.title,
+      whyItMatters: p.whyItMatters,
+      status: p.status as "proposed",
+      dismissReason: p.dismissReason ?? null,
+    }));
   const noteItems = investigationNoteViews(investigation);
   const bookmarkItems = investigationBookmarkViews(bookmarks);
   const investigationMaterialCount =
     evidenceItems.length +
     findingItems.length +
+    proposedFindingItems.length +
     noteItems.length +
     bookmarkItems.length;
+
+  const acceptProposedFinding = async (proposalId: string) => {
+    if (!investigation) return;
+    setInvestigationBusy(true);
+    setInvestigationError(null);
+    try {
+      const updated = await hostLogAcceptProposedFinding(
+        corpusId,
+        investigation.document.id,
+        {
+          proposalId,
+          expectedRevision: investigation.document.revision,
+          edited: false,
+        },
+      );
+      setInvestigation(updated);
+      setStatus("Accepted proposed finding · now a human finding");
+    } catch (err) {
+      setInvestigationError(String(err));
+    } finally {
+      setInvestigationBusy(false);
+    }
+  };
+
+  const dismissProposedFinding = async (proposalId: string) => {
+    if (!investigation) return;
+    const reason =
+      window.prompt("Dismiss reason (required)")?.trim() ?? "";
+    if (!reason) {
+      setInvestigationError("Dismiss requires a reason");
+      return;
+    }
+    setInvestigationBusy(true);
+    setInvestigationError(null);
+    try {
+      const updated = await hostLogDismissProposedFinding(
+        corpusId,
+        investigation.document.id,
+        {
+          proposalId,
+          expectedRevision: investigation.document.revision,
+          reason,
+        },
+      );
+      setInvestigation(updated);
+      setStatus("Dismissed proposed finding");
+    } catch (err) {
+      setInvestigationError(String(err));
+    } finally {
+      setInvestigationBusy(false);
+    }
+  };
   const editEvidenceRefs = editInvestigationItem
     ? editInvestigationItem.item.evidenceIds.flatMap(
         (evidenceId) =>
@@ -7241,6 +7306,7 @@ export function LogExplorer({ corpusId }: Props) {
           modeControl={investigationModeControl}
           items={evidenceItems}
           findings={findingItems}
+          proposedFindings={proposedFindingItems}
           notes={noteItems}
           bookmarks={bookmarkItems}
           preview={evidencePreview}
@@ -7269,6 +7335,8 @@ export function LogExplorer({ corpusId }: Props) {
             );
             if (bookmark) void activateBookmark(bookmark);
           }}
+          onAcceptProposedFinding={(id) => void acceptProposedFinding(id)}
+          onDismissProposedFinding={(id) => void dismissProposedFinding(id)}
           onClearPreview={() => setEvidencePreview(null)}
           onClearViewPreview={() => setFindingViewPreview(null)}
           onToggleCollapsed={() => setChatCollapsed((collapsed) => !collapsed)}

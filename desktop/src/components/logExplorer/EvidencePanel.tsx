@@ -259,10 +259,20 @@ function findingKindLabel(kind: FindingItemView["kind"]): string {
   return kind.charAt(0).toUpperCase() + kind.slice(1);
 }
 
+export type ProposedFindingItemView = {
+  id: string;
+  kind: FindingItemView["kind"];
+  title: string;
+  whyItMatters: string;
+  status: "proposed" | "accepted" | "dismissed" | "superseded";
+  dismissReason?: string | null;
+};
+
 export function EvidencePanel({
   modeControl,
   items,
   findings = [],
+  proposedFindings = [],
   notes = [],
   bookmarks = [],
   preview,
@@ -281,12 +291,17 @@ export function EvidencePanel({
   onEditFinding,
   onEditNote,
   onActivateBookmark,
+  onAcceptProposedFinding,
+  onDismissProposedFinding,
   onClearPreview,
   onClearViewPreview,
   onToggleCollapsed,
   onRequestClose,
 }: {
   modeControl: ReactNode;
+  proposedFindings?: ProposedFindingItemView[];
+  onAcceptProposedFinding?: (id: string) => void;
+  onDismissProposedFinding?: (id: string) => void;
   items: EvidenceItemView[];
   findings?: FindingItemView[];
   notes?: NoteItemView[];
@@ -308,6 +323,8 @@ export function EvidencePanel({
   onEditFinding?: (item: FindingItemView, trigger: HTMLButtonElement) => void;
   onEditNote?: (item: NoteItemView, trigger: HTMLButtonElement) => void;
   onActivateBookmark?: (item: BookmarkItemView) => void;
+  onAcceptProposedFinding?: (id: string) => void;
+  onDismissProposedFinding?: (id: string) => void;
   onClearPreview: () => void;
   onClearViewPreview?: () => void;
   onToggleCollapsed?: () => void;
@@ -953,6 +970,53 @@ export function EvidencePanel({
             </div>
           ) : (
             <>
+              {(filter === "all" || filter === "findings") &&
+                proposedFindings
+                  .filter((p) => p.status === "proposed")
+                  .map((item) => (
+                    <div
+                      key={item.id}
+                      className="log-explorer__evidence-card log-explorer__material-card"
+                      data-testid={`proposed-finding-${item.id}`}
+                    >
+                      <div className="log-explorer__evidence-card-heading">
+                        <div>
+                          <div className="log-explorer__material-kicker">
+                            Proposed · {findingKindLabel(item.kind)}
+                          </div>
+                          <div className="log-explorer__evidence-card-title">
+                            {item.title}
+                          </div>
+                        </div>
+                        <span className="log-explorer__evidence-status">
+                          proposed
+                        </span>
+                      </div>
+                      <p className="log-explorer__chat-header-meta">
+                        {item.whyItMatters}
+                      </p>
+                      <div className="log-explorer__evidence-card-actions">
+                        <button
+                          type="button"
+                          className="log-explorer__btn log-explorer__btn--active"
+                          disabled={busy}
+                          data-testid={`accept-proposed-${item.id}`}
+                          onClick={() => onAcceptProposedFinding?.(item.id)}
+                        >
+                          Accept
+                        </button>
+                        <button
+                          type="button"
+                          className="log-explorer__btn"
+                          disabled={busy}
+                          data-testid={`dismiss-proposed-${item.id}`}
+                          onClick={() => onDismissProposedFinding?.(item.id)}
+                        >
+                          Dismiss
+                        </button>
+                      </div>
+                    </div>
+                  ))}
               {(filter === "all" || filter === "findings") &&
                 findings.map((item) => (
                   <button

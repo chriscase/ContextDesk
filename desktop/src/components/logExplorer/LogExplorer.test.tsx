@@ -211,6 +211,8 @@ vi.mock("../../lib/host", () => ({
   hostLogPreviewInvestigationFindingView: vi.fn(),
   hostLogRecomputeInvestigationFindingView: vi.fn(),
   hostLogApplyInvestigationFindingView: vi.fn(),
+  hostLogAcceptProposedFinding: vi.fn(),
+  hostLogDismissProposedFinding: vi.fn(),
   hostPrepareLogDiagnosticReport: vi.fn(async (manifest) => {
     const actual = await vi.importActual<
       typeof import("../../lib/logDiagnosticReport")

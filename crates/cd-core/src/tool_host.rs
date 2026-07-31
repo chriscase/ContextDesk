@@ -17,7 +17,7 @@ use crate::workspace::Workspace;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -928,6 +928,8 @@ pub struct ToolHost {
     log_analysis_enabled: bool,
     /// Cache root for disposable log corpora (app cache dir).
     log_cache_dir: Option<PathBuf>,
+    /// Durable Investigation store root for `propose_finding` (#646).
+    investigation_store_dir: Option<PathBuf>,
     /// One turn-scoped initialized corpus handle for sequential log tools.
     ///
     /// Linked triage commonly runs search → clusters → timeline against the
@@ -1081,6 +1083,7 @@ impl ToolHost {
             ambient_recall_enabled: true,
             log_analysis_enabled: false,
             log_cache_dir: None,
+            investigation_store_dir: None,
             log_corpus_handle: std::sync::Mutex::new(None),
             active_log_corpus: None,
             scoped_log_corpus: None,
@@ -1692,6 +1695,16 @@ impl ToolHost {
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         self.pinned_log_suppression = None;
+    }
+
+    /// Set durable Investigation store root for `propose_finding` (#646).
+    pub fn set_investigation_store_dir(&mut self, dir: Option<PathBuf>) {
+        self.investigation_store_dir = dir;
+    }
+
+    /// Durable Investigation store root, when configured.
+    pub fn investigation_store_dir(&self) -> Option<&Path> {
+        self.investigation_store_dir.as_deref()
     }
 
     /// Whether log analysis tools are registered.
@@ -3288,6 +3301,7 @@ impl ToolHost {
             crate::log_analysis::CORRELATE => self.tool_correlate_logs(arguments)?,
             crate::log_analysis::ANOMALIES => self.tool_anomalies_logs(arguments)?,
             crate::log_analysis::TRACE => self.tool_trace_logs(arguments)?,
+            crate::investigations::PROPOSE_FINDING_TOOL => self.tool_propose_finding(arguments)?,
             crate::help::SEARCH_HELP => {
                 let (ok, summary, raw, cites) = self.tool_search_help(arguments).await?;
                 web_cites = cites;
@@ -3994,6 +4008,91 @@ impl ToolHost {
             ),
             raw,
             Some(format!("log_corpus:{}", report.corpus_id)),
+        ))
+    }
+
+    /// SoftWrite propose_finding → durable Proposed only (#646).
+    fn tool_propose_finding(
+        &self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        if !self.log_analysis_enabled {
+            return Err(crate::investigations::propose_repair_error(
+                crate::investigations::ProposeFindingErrorCode::ToolsDisabled,
+                "log analysis / propose_finding unavailable",
+            ));
+        }
+        let store_dir = self.investigation_store_dir.as_ref().ok_or_else(|| {
+            crate::investigations::propose_repair_error(
+                crate::investigations::ProposeFindingErrorCode::ToolsDisabled,
+                "investigation store is not configured on this host",
+            )
+        })?;
+        let investigation_id = args
+            .get("investigation_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                crate::investigations::propose_repair_error(
+                    crate::investigations::ProposeFindingErrorCode::InvalidInput,
+                    "investigation_id is required",
+                )
+            })?
+            .to_string();
+        let expected_revision = args
+            .get("expected_revision")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| {
+                crate::investigations::propose_repair_error(
+                    crate::investigations::ProposeFindingErrorCode::InvalidInput,
+                    "expected_revision is required",
+                )
+            })?;
+        let _cid = self.resolve_log_corpus(args, crate::investigations::PROPOSE_FINDING_TOOL)?;
+        let corpus = self.open_log_corpus(&_cid)?;
+        let input = crate::investigations::propose_finding_input_from_tool_args(
+            args,
+            investigation_id.clone(),
+            expected_revision,
+        )?;
+        let store = crate::investigations::InvestigationStore::new(store_dir);
+        let resolved = store.propose_finding(corpus.as_ref(), input)?;
+        let proposal = resolved
+            .document
+            .proposed_findings
+            .iter()
+            .filter(|p| p.status == crate::investigations::ProposedFindingStatus::Proposed)
+            .last()
+            .or_else(|| resolved.document.proposed_findings.last())
+            .ok_or_else(|| {
+                CoreError::Message("propose_finding succeeded without a proposal row".into())
+            })?;
+        // Proposed-only: tool path must never mark this proposal as accepted.
+        if proposal.status != crate::investigations::ProposedFindingStatus::Proposed
+            || proposal.accepted_finding_id.is_some()
+        {
+            return Err(CoreError::Message(
+                "propose_finding integrity: result was not Proposed-only".into(),
+            ));
+        }
+        let summary = format!(
+            "proposed finding {} status=proposed (not accepted); investigation revision={}",
+            proposal.id, resolved.document.revision
+        );
+        let raw = serde_json::to_string(&serde_json::json!({
+            "proposalId": proposal.id,
+            "status": "proposed",
+            "investigationId": investigation_id,
+            "revision": resolved.document.revision,
+            "kind": format!("{:?}", proposal.kind).to_ascii_lowercase(),
+            "title": proposal.title,
+            "acceptedFindingId": null,
+        }))
+        .unwrap_or_else(|_| summary.clone());
+        Ok((
+            true,
+            summary,
+            raw,
+            Some(format!("investigation_proposal:{}", proposal.id)),
         ))
     }
 
@@ -5962,6 +6061,13 @@ fn resolve_write_target(name: &str, args: &Value, memory_dir: &std::path::Path) 
             format!("mem://edge/{from}→{to}")
         }
         crate::memory::tool_names::PROPOSE_MEMORY_CANDIDATES => "mem://candidates/propose".into(),
+        crate::investigations::PROPOSE_FINDING_TOOL => {
+            let inv = args
+                .get("investigation_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            format!("investigation://propose/{inv}")
+        }
         names::RECALL_MEMORY => args
             .get("query")
             .and_then(|v| v.as_str())
@@ -10627,5 +10733,124 @@ mod tests {
             timeline.summary,
             timeline.detail_raw
         );
+    }
+
+    #[tokio::test]
+    async fn propose_finding_tools_enabled_loop_creates_proposed_only() {
+        use crate::events::StreamEvent;
+        use crate::investigations::{
+            InvestigationStore, ProposedFindingStatus, PROPOSE_FINDING_TOOL,
+        };
+        use crate::log_analysis::{ActiveTimestampBasis, LogCorpus, LogEvent, TimestampProvenance};
+        use crate::permissions::PermissionDecision;
+
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let inv_dir = root.path().join("investigations");
+        let corpus = LogCorpus::create(&cache, "tool loop").unwrap();
+        corpus
+            .push_events(&[LogEvent {
+                seq: 10,
+                ts: 1_700_000_010,
+                timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                unresolved_local_timestamp: None,
+                level: "error".into(),
+                service: Some("api".into()),
+                host: None,
+                template_id: 1,
+                params: vec![],
+                trace_id: None,
+                message: "checkout failed".into(),
+                source: "api/app.log".into(),
+            }])
+            .unwrap();
+        corpus.flush().unwrap();
+        let corpus_id = corpus.id().to_string();
+        let store = InvestigationStore::new(&inv_dir);
+        let doc = store.create("Tool loop", &corpus).unwrap();
+
+        let workspace = Workspace::new("ws", vec![root.path().to_path_buf()]);
+        let mut host = ToolHost::new(workspace, KeywordIndex::new(), None);
+        host.set_log_analysis(true, Some(cache.clone()));
+        host.set_investigation_store_dir(Some(inv_dir.clone()));
+        host.set_active_log_corpus(Some(corpus_id.clone()));
+        // Drop local handle so DuckDB exclusive open can re-open via host.
+        drop(corpus);
+        let reopened = LogCorpus::open(&cache, &corpus_id).unwrap();
+        host.seed_log_corpus_handle(&corpus_id, std::sync::Arc::new(reopened))
+            .expect("seed corpus handle");
+
+        let args = json!({
+            "investigation_id": doc.id,
+            "expected_revision": 1,
+            "idempotency_key": "tool-loop-1",
+            "kind": "hypothesis",
+            "title": "Tool proposed failure",
+            "why_it_matters": "Real tool call must create Proposed only.",
+            "evidence": [{
+                "event_ref": {
+                    "corpusId": corpus_id,
+                    "seq": 10,
+                    "source": "api/app.log",
+                    "timestampHint": 1_700_000_010,
+                    "timeQualityHint": "wall"
+                },
+                "role": "supporting"
+            }],
+            "provenance": {
+                "source": "model",
+                "tool_name": PROPOSE_FINDING_TOOL,
+                "model_id": "fake-model",
+                "run_id": "turn-1"
+            }
+        });
+
+        let first = host
+            .execute(PROPOSE_FINDING_TOOL, &args, None)
+            .await
+            .unwrap();
+        let rid = first
+            .events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::PermissionRequired { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+            .expect("PermissionRequired for SoftWrite propose_finding");
+        host.complete_permission(&rid, PermissionDecision::AllowOnce, None)
+            .unwrap();
+        let second = host
+            .execute(PROPOSE_FINDING_TOOL, &args, Some(&rid))
+            .await
+            .unwrap();
+        assert!(
+            second.ok,
+            "tool should succeed after grant: {}",
+            second.summary
+        );
+        assert!(
+            second.summary.contains("proposed") || second.detail_raw.contains("proposed"),
+            "{} / {}",
+            second.summary,
+            second.detail_raw
+        );
+
+        let loaded = store
+            .load(&doc.id, &LogCorpus::open(&cache, &corpus_id).unwrap())
+            .unwrap();
+        assert_eq!(loaded.document.proposed_findings.len(), 1);
+        assert_eq!(
+            loaded.document.proposed_findings[0].status,
+            ProposedFindingStatus::Proposed
+        );
+        assert!(
+            loaded.document.findings.is_empty(),
+            "tool must not create accepted findings"
+        );
+        assert!(loaded.document.proposed_findings[0]
+            .accepted_finding_id
+            .is_none());
     }
 }

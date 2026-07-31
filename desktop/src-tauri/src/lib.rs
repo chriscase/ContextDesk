@@ -770,6 +770,9 @@ fn build_linked_log_fallback_host(
     host.set_router_budget(cfg.router);
     host.set_model_context_budgets(cfg.model_context_budgets);
     host.set_log_analysis(true, Some(cache));
+    if let Ok(store) = investigation_store(state) {
+        host.set_investigation_store_dir(Some(store.root().to_path_buf()));
+    }
     host.set_log_only_tool_surface(true);
     host.set_log_corpus_scope(Some(context.corpus_id.clone()));
     host.set_active_log_corpus(Some(context.corpus_id.clone()));
@@ -1313,6 +1316,9 @@ fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState)
         let log_cache = config_dir.join("cache");
         let _ = std::fs::create_dir_all(&log_cache);
         host.set_log_analysis(true, Some(log_cache));
+        let inv = config_dir.join("investigations");
+        let _ = std::fs::create_dir_all(&inv);
+        host.set_investigation_store_dir(Some(inv));
     }
     // #359: product default for log templates = local ONNX (fastembed), not Ollama HTTP.
     // May download the small model once; on failure fall back to shared host embed later.
@@ -9811,6 +9817,65 @@ fn log_apply_investigation_finding_view(
     )
 }
 
+/// Deterministic internal propose path (#646) — same validation as the tool.
+#[tauri::command]
+fn log_propose_investigation_finding(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    input: cd_core::investigations::ProposeFindingInput,
+) -> Result<cd_core::investigations::ResolvedInvestigationDocument, String> {
+    let _mutation = state
+        .investigation_mutation
+        .lock()
+        .map_err(|_| "Investigation storage is temporarily unavailable".to_string())?;
+    let cache = log_cache_dir(&state)?;
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    investigation_store(&state)?
+        .propose_finding(&corpus, input)
+        .map_err(|e| e.to_string())
+}
+
+/// Human Accept or Edit-and-accept of a Proposed finding (#646).
+#[tauri::command]
+fn log_accept_proposed_finding(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    investigation_id: String,
+    input: cd_core::investigations::AcceptProposedFindingInput,
+) -> Result<cd_core::investigations::ResolvedInvestigationDocument, String> {
+    let _mutation = state
+        .investigation_mutation
+        .lock()
+        .map_err(|_| "Investigation storage is temporarily unavailable".to_string())?;
+    let cache = log_cache_dir(&state)?;
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    investigation_store(&state)?
+        .accept_proposed_finding(&corpus, &investigation_id, input)
+        .map_err(|e| e.to_string())
+}
+
+/// Human Dismiss-with-reason of a Proposed finding (#646).
+#[tauri::command]
+fn log_dismiss_proposed_finding(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    investigation_id: String,
+    input: cd_core::investigations::DismissProposedFindingInput,
+) -> Result<cd_core::investigations::ResolvedInvestigationDocument, String> {
+    let _mutation = state
+        .investigation_mutation
+        .lock()
+        .map_err(|_| "Investigation storage is temporarily unavailable".to_string())?;
+    let cache = log_cache_dir(&state)?;
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    investigation_store(&state)?
+        .dismiss_proposed_finding(&corpus, &investigation_id, input)
+        .map_err(|e| e.to_string())
+}
+
 /// List chat sessions linked to a corpus (any chat may link).
 #[tauri::command]
 fn list_chat_sessions_for_corpus(
@@ -11140,6 +11205,9 @@ pub fn run() {
             log_preview_investigation_finding_view,
             log_recompute_investigation_finding_view,
             log_apply_investigation_finding_view,
+            log_propose_investigation_finding,
+            log_accept_proposed_finding,
+            log_dismiss_proposed_finding,
             list_chat_sessions_for_corpus,
             set_chat_linked_corpus,
             open_log_explorer,
@@ -15716,8 +15784,10 @@ mod log_investigation_apply_host_tests {
         let command_start = src
             .find("fn log_apply_investigation_finding_view(")
             .expect("Apply command");
+        // Bound Apply command body to the next investigation IPC (not later SoftWrite helpers).
         let command_end = src[command_start..]
-            .find("/// List chat sessions linked to a corpus")
+            .find("/// Deterministic internal propose path")
+            .or_else(|| src[command_start..].find("/// List chat sessions linked to a corpus"))
             .map(|offset| command_start + offset)
             .expect("command boundary");
         let command_body = &src[command_start..command_end];

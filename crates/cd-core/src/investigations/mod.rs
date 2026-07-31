@@ -11,6 +11,9 @@
 //! never overwritten, so an interrupted or rejected publication cannot damage
 //! the last readable revision.
 
+mod proposed;
+pub use proposed::*;
+
 use crate::error::{CoreError, CoreResult};
 use crate::log_analysis::bookmarks::canonicalize_exact_event_refs;
 use crate::log_analysis::event_revision::{
@@ -29,7 +32,9 @@ use std::path::{Component, Path, PathBuf};
 use uuid::{Uuid, Version};
 
 /// Investigation document schema understood by this build.
-pub const INVESTIGATION_SCHEMA_VERSION: u32 = 4;
+///
+/// Version 5 adds durable agent/detector [`ProposedFindingItem`] review queue (#646).
+pub const INVESTIGATION_SCHEMA_VERSION: u32 = 5;
 const MIN_INVESTIGATION_SCHEMA_VERSION: u32 = 1;
 /// Maximum durable investigation documents under one store root.
 pub const MAX_INVESTIGATION_DOCUMENTS: usize = 256;
@@ -511,6 +516,12 @@ pub struct InvestigationDocument {
     /// revisions remain readable.
     #[serde(default)]
     pub notes: Vec<NoteItem>,
+    /// Durable agent/detector proposed findings awaiting human review (#646).
+    ///
+    /// Additive; defaults empty so schema versions 1–4 remain readable.
+    /// Proposed items never equal accepted findings.
+    #[serde(default)]
+    pub proposed_findings: Vec<ProposedFindingItem>,
     /// Creation time as Unix seconds.
     pub created_at: i64,
     /// Last update time as Unix seconds.
@@ -687,6 +698,7 @@ impl InvestigationStore {
                         }],
                         evidence: Vec::new(),
                         findings: Vec::new(),
+                        proposed_findings: Vec::new(),
                         notes: Vec::new(),
                         created_at: now,
                         updated_at: now,
@@ -1512,7 +1524,7 @@ impl InvestigationStore {
         Ok(directories)
     }
 
-    fn investigation_directory(&self, investigation_id: &str) -> CoreResult<PathBuf> {
+    pub(crate) fn investigation_directory(&self, investigation_id: &str) -> CoreResult<PathBuf> {
         validate_uuid_v7("investigation id", investigation_id)?;
         let directory = self.root.join(investigation_id);
         let metadata = std::fs::symlink_metadata(&directory).map_err(|error| {
@@ -1528,7 +1540,10 @@ impl InvestigationStore {
         Ok(directory)
     }
 
-    fn load_document(&self, investigation_id: &str) -> CoreResult<InvestigationDocument> {
+    pub(crate) fn load_document(
+        &self,
+        investigation_id: &str,
+    ) -> CoreResult<InvestigationDocument> {
         let directory = self.investigation_directory(investigation_id)?;
         let (revision, path) = latest_revision_path(&directory)?;
         read_revision(&path, investigation_id, revision)
@@ -2347,6 +2362,25 @@ fn validate_document(
                 .into(),
         ));
     }
+    if document.schema_version < 5 && !document.proposed_findings.is_empty() {
+        return Err(CoreError::Message(
+            "investigation schema versions 1 through 4 cannot contain proposed findings".into(),
+        ));
+    }
+    if document.proposed_findings.len() > MAX_PROPOSED_FINDINGS {
+        return Err(CoreError::Message(format!(
+            "investigation exceeds {MAX_PROPOSED_FINDINGS} proposed findings"
+        )));
+    }
+    for proposal in &document.proposed_findings {
+        validate_uuid_v7("proposal id", &proposal.id)?;
+        validate_uuid_v7("proposal investigation id", &proposal.investigation_id)?;
+        if proposal.investigation_id != document.id {
+            return Err(CoreError::Message(
+                "proposed finding investigation_id must match document id".into(),
+            ));
+        }
+    }
     validate_uuid_v7("investigation id", &document.id)?;
     if expected_id.is_some_and(|expected| expected != document.id) {
         return Err(CoreError::Message(
@@ -3136,7 +3170,7 @@ mod tests {
     }
 
     #[test]
-    fn investigation_v1_loads_without_rewrite_and_first_mutation_upgrades_to_v4() {
+    fn investigation_v1_loads_without_rewrite_and_first_mutation_upgrades_to_current() {
         let cache = tempfile::tempdir().unwrap();
         let durable = tempfile::tempdir().unwrap();
         let corpus = evidence_corpus(&cache);
@@ -3164,13 +3198,16 @@ mod tests {
         let upgraded = store
             .add_human_finding(&document.id, 1, &corpus, finding_input(&corpus))
             .unwrap();
-        assert_eq!(upgraded.document.schema_version, 4);
+        assert_eq!(
+            upgraded.document.schema_version,
+            INVESTIGATION_SCHEMA_VERSION
+        );
         assert_eq!(upgraded.document.revision, 2);
         assert!(revision_path.exists());
     }
 
     #[test]
-    fn investigation_v2_loads_without_rewrite_and_first_recipe_mutation_upgrades_to_v4() {
+    fn investigation_v2_loads_without_rewrite_and_first_recipe_mutation_upgrades_to_current() {
         let cache = tempfile::tempdir().unwrap();
         let durable = tempfile::tempdir().unwrap();
         let corpus = evidence_corpus(&cache);
@@ -3205,7 +3242,10 @@ mod tests {
         let upgraded = store
             .add_human_finding(&document.id, 2, &corpus, input)
             .unwrap();
-        assert_eq!(upgraded.document.schema_version, 4);
+        assert_eq!(
+            upgraded.document.schema_version,
+            INVESTIGATION_SCHEMA_VERSION
+        );
         assert_eq!(upgraded.document.revision, 3);
         assert_eq!(upgraded.document.findings.len(), 2);
         assert!(upgraded.document.findings[1].view_recipe.is_some());
@@ -3228,7 +3268,7 @@ mod tests {
         let saved = store
             .add_human_finding_bound(&document.id, 1, &corpus, binding.clone(), input)
             .unwrap();
-        assert_eq!(saved.document.schema_version, 4);
+        assert_eq!(saved.document.schema_version, INVESTIGATION_SCHEMA_VERSION);
         assert_eq!(
             saved.document.findings[0].policy_binding,
             Some(binding.clone())
@@ -3639,7 +3679,10 @@ mod tests {
         let upgraded = store
             .add_human_finding_bound(&document.id, 2, &corpus, binding.clone(), distinct)
             .unwrap();
-        assert_eq!(upgraded.document.schema_version, 4);
+        assert_eq!(
+            upgraded.document.schema_version,
+            INVESTIGATION_SCHEMA_VERSION
+        );
         assert_eq!(upgraded.document.findings.len(), 2);
         assert_eq!(upgraded.document.findings[0].policy_binding, None);
         assert_eq!(upgraded.document.findings[1].policy_binding, Some(binding));

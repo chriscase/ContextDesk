@@ -2899,6 +2899,36 @@ export type InvestigationNoteItemDto = {
   updatedAt: number;
 };
 
+/** Proposed finding status (#646). */
+export type ProposedFindingStatusDto =
+  | "proposed"
+  | "accepted"
+  | "dismissed"
+  | "superseded";
+
+export type ProposedFindingItemDto = {
+  id: string;
+  status: ProposedFindingStatusDto;
+  kind: "observation" | "inference" | "hypothesis";
+  title: string;
+  whyItMatters: string;
+  caveats?: string | null;
+  evidence: Array<{
+    eventRef: LogBookmarkEventRefDto;
+    role: "supporting" | "contradicting";
+  }>;
+  viewRecipe?: InvestigationViewRecipeDto | null;
+  corpusId: string;
+  investigationId: string;
+  idempotencyKey: string;
+  acceptance?: { acceptedAt: number; edited: boolean } | null;
+  dismissReason?: string | null;
+  acceptedFindingId?: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+
 export type InvestigationDocumentDto = {
   schemaVersion: number;
   id: string;
@@ -2909,6 +2939,8 @@ export type InvestigationDocumentDto = {
   evidence: InvestigationEvidenceItemDto[];
   findings?: InvestigationFindingItemDto[];
   notes?: InvestigationNoteItemDto[];
+  /** Agent/detector proposals awaiting review (#646). */
+  proposedFindings?: ProposedFindingItemDto[];
   createdAt: number;
   updatedAt: number;
 };
@@ -3599,6 +3631,44 @@ export async function hostLogApplyInvestigationFindingView(
   return invoke<InvestigationFindingViewPreviewDto>(
     "log_apply_investigation_finding_view",
     { corpusId, investigationId, findingId },
+  );
+}
+
+/** Human Accept / Edit-and-accept (#646). */
+export async function hostLogAcceptProposedFinding(
+  corpusId: string,
+  investigationId: string,
+  input: {
+    proposalId: string;
+    expectedRevision: number;
+    edited?: boolean;
+    kind?: "observation" | "inference" | "hypothesis";
+    title?: string;
+    whyItMatters?: string;
+  },
+): Promise<ResolvedInvestigationDocumentDto> {
+  if (!isTauri()) {
+    throw new Error("Accept proposed finding requires Tauri host");
+  }
+  return invoke<ResolvedInvestigationDocumentDto>("log_accept_proposed_finding", {
+    corpusId,
+    investigationId,
+    input,
+  });
+}
+
+/** Human Dismiss-with-reason (#646). */
+export async function hostLogDismissProposedFinding(
+  corpusId: string,
+  investigationId: string,
+  input: { proposalId: string; expectedRevision: number; reason: string },
+): Promise<ResolvedInvestigationDocumentDto> {
+  if (!isTauri()) {
+    throw new Error("Dismiss proposed finding requires Tauri host");
+  }
+  return invoke<ResolvedInvestigationDocumentDto>(
+    "log_dismiss_proposed_finding",
+    { corpusId, investigationId, input },
   );
 }
 
