@@ -93,6 +93,10 @@ vi.mock("../../lib/host", () => ({
   ]),
   hostListChatSessionsForCorpus: vi.fn(async () => []),
   hostLoadChatSession: vi.fn(async () => null),
+  hostTakeLogExplorerNavTarget: vi.fn(async () => null),
+  hostOpenLogExplorerTarget: vi.fn(async () => {
+    throw new Error("not used in LogExplorer unit tests");
+  }),
   hostLogFacets: vi.fn(async () => ({
     sources: { "api.log": 5, "worker.log": 5 },
     levels: { error: 3, info: 7 },

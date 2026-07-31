@@ -55,6 +55,15 @@ import {
   LOG_NAV_UNREADABLE_MESSAGE,
   type LogNavAction,
 } from "../../lib/logExplorer/logNav";
+import {
+  classifyCompletedCitation,
+  openPersistedLogCitation,
+  parseGovernedLogCitationId,
+} from "../../lib/citations";
+import {
+  hostOpenLogExplorer,
+  hostOpenLogExplorerTarget,
+} from "../../lib/host";
 import { useMessageWindow } from "../../hooks/useMessageWindow";
 import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
 import { HELP_LINKED_CHAT_CONTEXT } from "../../lib/helpContent";
@@ -284,12 +293,14 @@ function LinkedChatBubble({
   onHeightChange,
   virtualized,
   top,
+  onOpenCitation,
 }: {
   message: ChatMsg;
   developerMode: boolean;
   onHeightChange?: (id: string, height: number) => void;
   virtualized: boolean;
   top: number;
+  onOpenCitation?: (sourceId: string, corpusId?: string) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -340,7 +351,19 @@ function LinkedChatBubble({
         <ToolCallList tools={message.tools} collapseAfter={4} />
       ) : null}
       {message.citations && message.citations.length > 0 ? (
-        <SourceCitations citations={message.citations} />
+        <SourceCitations
+          citations={message.citations.map((c) => ({
+            id: c.id,
+            label: c.label,
+            title: c.title,
+          }))}
+          onOpenFile={(path) => {
+            const corpusId = message.citations?.find(
+              (citation) => citation.id === path,
+            )?.corpusId;
+            onOpenCitation?.(path, corpusId);
+          }}
+        />
       ) : null}
       <LinkedAssistantBody
         content={message.content}
@@ -460,6 +483,10 @@ export function LinkedChatRail({
   const focusComposerAfterTurnRef = useRef<string | null>(null);
   const appliedExternalDraftRequestRef = useRef<number | null>(null);
   const creatingTurnChatRef = useRef(false);
+  /** Coalesce concurrent New/Send/Return create paths to one durable session (#709). */
+  const createLinkedChatInflightRef = useRef<Promise<string | null> | null>(
+    null,
+  );
   const sendingChatsRef = useRef<Set<string>>(new Set());
   const cancellationRequestsRef = useRef<Set<string>>(new Set());
   const terminalChatsRef = useRef<Set<string>>(new Set());
@@ -756,55 +783,128 @@ export function LinkedChatRail({
     }
   };
 
-  const createLinkedChat = async (): Promise<string | null> => {
-    setRailError(null);
-    try {
-      const options =
-        modelOptions.length > 0 ? modelOptions : await loadModels();
-      const preferredKey =
-        newChatSelection ||
-        options.find((option) => option.is_default)?.selection_key ||
-        options[0]?.selection_key ||
-        "";
-      const preferred =
-        options.find((option) => option.selection_key === preferredKey) ?? null;
-      const s = newSession(`Logs · ${corpusName || corpusId.slice(0, 8)}`);
-      s.linkedCorpusId = corpusId;
-      if (preferred) {
-        s.chatModel = preferred.id;
-        s.providerProfileId = preferred.provider_id;
+  /**
+   * Open a host-authored log citation without workspace file I/O (#701/#698).
+   * Same- and cross-corpus paths both use host exact-nav (validate, open/focus
+   * the citation's corpus Explorer, one-shot deliver). Never substitutes the
+   * rail's current corpus when provenance is missing.
+   */
+  const openLinkedCitation = useCallback(
+    (sourceId: string, citationCorpusId?: string) => {
+      const route = classifyCompletedCitation(sourceId);
+      if (route === "invalid") {
+        setRailError(
+          "This citation is unsupported or malformed and was not opened.",
+        );
+        return;
       }
-      // A linked corpus is a host-governed grant, so the generic renderer save
-      // path intentionally cannot create it. Persist the empty first-turn
-      // draft and its validated corpus link atomically through the governed
-      // mutation instead.
-      const saved = await hostSetChatLinkedCorpus(
-        s.id,
-        corpusId,
-        sessionToDto(s),
-        s.updatedAt,
-      );
-      if (saved) {
-        if (preferred) {
-          setSelectionByChat((current) => ({
-            ...current,
-            [saved.id]: preferred.selection_key,
+      if (route !== "log") {
+        // Linked rail is log-evidence first; Help/file are not auto-opened here.
+        setRailError(
+          "This citation is not a governed log evidence identity for this rail.",
+        );
+        return;
+      }
+      const original = citationCorpusId?.trim() || undefined;
+      if (!original) {
+        setRailError(
+          "This older log citation does not record its original corpus. ContextDesk will not substitute the chat’s current corpus.",
+        );
+        return;
+      }
+      if (!parseGovernedLogCitationId(sourceId)) {
+        setRailError(`Could not interpret log citation ${sourceId}.`);
+        return;
+      }
+      // Host path for same- and cross-corpus: never open a different corpus
+      // than the citation's host-authored provenance.
+      void openPersistedLogCitation(
+        sourceId,
+        original,
+        (_id, message) => {
+          setRailError(message);
+        },
+        hostOpenLogExplorer,
+        (id, target) => hostOpenLogExplorerTarget(id, target),
+      ).then((opened) => {
+        // Only claim success when the host exact-nav path actually succeeded;
+        // showUnavailable already records failures on the rail error surface.
+        if (opened && activeChatId) {
+          setStatusByChat((m) => ({
+            ...m,
+            [activeChatId]: `Opened ${sourceId}`,
           }));
         }
-        await refreshChats();
-        await openChat(saved.id);
-        setStatusByChat((m) => ({
-          ...m,
-          [saved.id]: `Linked chat created: ${saved.title}`,
-        }));
-        setFollowByChat((m) => ({ ...m, [saved.id]: true }));
-        setDetachedByChat((m) => ({ ...m, [saved.id]: false }));
-        return saved.id;
-      }
-    } catch (e) {
-      setRailError(String(e));
+      });
+    },
+    [activeChatId],
+  );
+
+  const createLinkedChat = async (): Promise<string | null> => {
+    // Same-session Return/Send/New races must share one in-flight create so the
+    // host never receives two draft identities for one user intent (#709).
+    if (createLinkedChatInflightRef.current) {
+      return createLinkedChatInflightRef.current;
     }
-    return null;
+    const inflight = (async (): Promise<string | null> => {
+      setRailError(null);
+      try {
+        const options =
+          modelOptions.length > 0 ? modelOptions : await loadModels();
+        const preferredKey =
+          newChatSelection ||
+          options.find((option) => option.is_default)?.selection_key ||
+          options[0]?.selection_key ||
+          "";
+        const preferred =
+          options.find((option) => option.selection_key === preferredKey) ??
+          null;
+        const s = newSession(`Logs · ${corpusName || corpusId.slice(0, 8)}`);
+        s.linkedCorpusId = corpusId;
+        if (preferred) {
+          s.chatModel = preferred.id;
+          s.providerProfileId = preferred.provider_id;
+        }
+        // A linked corpus is a host-governed grant, so the generic renderer save
+        // path intentionally cannot create it. Persist the empty first-turn
+        // draft and its validated corpus link atomically through the governed
+        // mutation instead.
+        const saved = await hostSetChatLinkedCorpus(
+          s.id,
+          corpusId,
+          sessionToDto(s),
+          s.updatedAt,
+        );
+        if (saved) {
+          if (preferred) {
+            setSelectionByChat((current) => ({
+              ...current,
+              [saved.id]: preferred.selection_key,
+            }));
+          }
+          await refreshChats();
+          await openChat(saved.id);
+          setStatusByChat((m) => ({
+            ...m,
+            [saved.id]: `Linked chat created: ${saved.title}`,
+          }));
+          setFollowByChat((m) => ({ ...m, [saved.id]: true }));
+          setDetachedByChat((m) => ({ ...m, [saved.id]: false }));
+          return saved.id;
+        }
+      } catch (e) {
+        setRailError(String(e));
+      }
+      return null;
+    })();
+    createLinkedChatInflightRef.current = inflight;
+    try {
+      return await inflight;
+    } finally {
+      if (createLinkedChatInflightRef.current === inflight) {
+        createLinkedChatInflightRef.current = null;
+      }
+    }
   };
 
   const changeModel = async (selectionKey: string) => {
@@ -1831,6 +1931,7 @@ export function LinkedChatRail({
                   onHeightChange={
                     windowed.virtualized ? windowed.onHeightChange : undefined
                   }
+                  onOpenCitation={openLinkedCitation}
                 />
               ))}
             </div>

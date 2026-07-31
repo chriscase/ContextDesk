@@ -13,6 +13,7 @@ pub mod drain;
 pub mod embed_policy;
 pub mod event_revision;
 pub mod format_profile;
+pub mod governed_citation;
 pub mod ingest;
 mod ingest_confidence;
 pub mod lanes;
@@ -62,6 +63,10 @@ pub use format_profile::{
     fingerprint_format, BuiltInFormatProfile, BuiltInGrammar, FormatFingerprint,
     FormatFingerprintOutcome, FormatProfileIdentity, BUILT_IN_FORMAT_PROFILES,
     MIN_STRUCTURED_FORMAT_SCORE,
+};
+pub use governed_citation::{
+    format_governed_log_citation_id, is_governed_log_citation_id, parse_governed_log_citation_id,
+    GovernedLogCitationId, GovernedLogCitationKind,
 };
 pub use ingest::{
     ingest_path, ingest_path_with_observer, ingest_path_with_policy,

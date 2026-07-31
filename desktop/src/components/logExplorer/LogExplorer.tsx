@@ -43,7 +43,9 @@ import {
   hostLogQueryEventRows,
   hostLogSearchEventsAdvanced,
   hostLogSourceCatalog,
+  hostTakeLogExplorerNavTarget,
   type EventPageDto,
+  type LogExplorerNavTargetDto,
   type EventRowsPageDto,
   type EventOriginalRepresentationDto,
   type SearchMatchMode,
@@ -67,6 +69,8 @@ import {
   type LogDiagnosticEnvironment,
 } from "../../lib/logDiagnosticReport";
 import { applyLogNav, type LogNavAction } from "../../lib/logExplorer/logNav";
+import { governedIdToSafeInteger } from "../../lib/citations";
+import { subscribeLogExplorerNavTargets } from "../../lib/engine/platform";
 import {
   clampLaneCount,
   computeGaps,
@@ -2444,6 +2448,114 @@ export function LogExplorer({ corpusId }: Props) {
     }
     return nb.status;
   };
+
+  // Keep latest seek without re-binding the exact-nav effect (which must not
+  // re-take on every filter change).
+  const seekToSeqRef = useRef(seekToSeq);
+  seekToSeqRef.current = seekToSeq;
+
+  const applyExactNavTarget = useCallback(
+    async (target: LogExplorerNavTargetDto) => {
+      const kind = target.kind;
+      const id = target.id;
+      const safe = governedIdToSafeInteger(id);
+      if (safe == null) {
+        setStatus(
+          `Cannot reveal ${kind} ${id} in this window: identity is outside the safe integer range and was not widened.`,
+        );
+        setError(
+          `Log citation ${kind} id ${id} cannot be focused here without silent integer loss. Open via a host path that keeps string ids, or use an id ≤ ${Number.MAX_SAFE_INTEGER}.`,
+        );
+        return;
+      }
+      if (kind === "event") {
+        setHighlight(new Set([safe]));
+        const status = await seekToSeqRef.current(safe, {
+          focusRow: true,
+          selectTarget: true,
+          // Preserve unrelated filters for citation reveal.
+          clearFilters: false,
+        });
+        if (status === "missing") {
+          setStatus(`Event ${id} was not found in this corpus.`);
+          setError(`Event ${id} was not found in this corpus.`);
+        } else if (status === "hidden_by_filter") {
+          setStatus(
+            `Event ${id} exists but is hidden by the current filters.`,
+          );
+        } else {
+          setStatus(`Revealed log_event:${id}`);
+          setError(null);
+        }
+        return;
+      }
+      if (kind === "template") {
+        setFilters((f) => ({ ...f, templateId: safe }));
+        setTemplateDraft(String(safe));
+        setHighlight(new Set());
+        setStatus(`Opened log_template:${id}`);
+        setError(null);
+        return;
+      }
+      setError(`Unsupported log navigation kind: ${String(kind)}`);
+    },
+    [],
+  );
+
+  // Deliver-once exact-nav: take pending when this corpus window mounts, and
+  // listen for live stages while focused. Corpus change re-takes for the new id.
+  useEffect(() => {
+    let cancelled = false;
+    let stopListen: (() => void) | undefined;
+
+    const deliver = async () => {
+      try {
+        const pending = await hostTakeLogExplorerNavTarget(corpusId);
+        if (cancelled || !pending) return;
+        await applyExactNavTarget(pending);
+      } catch (err) {
+        if (!cancelled) {
+          setError(
+            `Exact navigation failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+      }
+    };
+
+    void deliver();
+
+    void (async () => {
+      try {
+        stopListen = await subscribeLogExplorerNavTargets(() => {
+          // Deliver only via take() so a cleared/replayed target never applies.
+          void (async () => {
+            try {
+              const pending = await hostTakeLogExplorerNavTarget(corpusId);
+              if (cancelled || !pending) return;
+              await applyExactNavTarget(pending);
+            } catch (err) {
+              if (!cancelled) {
+                setError(
+                  `Exact navigation failed: ${
+                    err instanceof Error ? err.message : String(err)
+                  }`,
+                );
+              }
+            }
+          })();
+        });
+      } catch {
+        // Browser preview / unit tests have no Tauri event bus.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      stopListen?.();
+    };
+  }, [applyExactNavTarget, corpusId]);
 
   const visibleLaneForSource = (source: string | null | undefined) => {
     const visibleLanes = lanes.slice(0, laneCount);

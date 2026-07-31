@@ -349,6 +349,127 @@ struct AppState {
     /// In-process capability qualification cache (#724). Memory-only; absent after restart.
     /// Keyed by profile + endpoint fingerprint + exact model + schema version (#650 isolation).
     qualification_store: Mutex<cd_core::capability_qualification::QualificationStore>,
+    /// One-shot exact Log Explorer navigation targets (#698 exact-nav).
+    /// Keyed by corpus id. `take` delivers once; cleared on take, discard, or window destroy.
+    log_explorer_nav_targets: Mutex<LogExplorerNavTargetStore>,
+}
+
+/// One-shot pending target for a Log Explorer window (process-local only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LogExplorerNavTarget {
+    /// `event` or `template`.
+    kind: String,
+    /// Canonical decimal u64 string — never a silent JS Number widen.
+    id: String,
+}
+
+/// Process-local store of one-shot Explorer navigation targets.
+#[derive(Debug, Default)]
+struct LogExplorerNavTargetStore {
+    by_corpus: HashMap<String, LogExplorerNavTarget>,
+}
+
+impl LogExplorerNavTargetStore {
+    fn set(&mut self, corpus_id: String, target: LogExplorerNavTarget) {
+        self.by_corpus.insert(corpus_id, target);
+    }
+
+    fn take(&mut self, corpus_id: &str) -> Option<LogExplorerNavTarget> {
+        self.by_corpus.remove(corpus_id)
+    }
+
+    fn clear(&mut self, corpus_id: &str) {
+        self.by_corpus.remove(corpus_id);
+    }
+
+    fn clear_for_window_label(&mut self, label: &str) {
+        if !label.starts_with("log-explorer-") {
+            return;
+        }
+        self.by_corpus
+            .retain(|corpus_id, _| log_explorer_window_label(corpus_id) != label);
+    }
+
+    #[cfg(test)]
+    fn peek(&self, corpus_id: &str) -> Option<&LogExplorerNavTarget> {
+        self.by_corpus.get(corpus_id)
+    }
+}
+
+/// Stable Tauri window label for a Log Explorer corpus window.
+fn log_explorer_window_label(corpus_id: &str) -> String {
+    format!(
+        "log-explorer-{}",
+        corpus_id
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+            .take(48)
+            .collect::<String>()
+    )
+}
+
+/// Tauri event name delivered to an Explorer window when a new exact target is staged.
+const LOG_EXPLORER_NAV_TARGET_EVENT: &str = "log-explorer-nav-target";
+
+/// Parse a navigation target DTO into a trusted governed identity.
+fn parse_log_explorer_nav_target(
+    kind: &str,
+    id: &str,
+) -> Result<cd_core::log_analysis::GovernedLogCitationId, String> {
+    let kind = kind.trim();
+    let id = id.trim();
+    let prefix = match kind {
+        "event" => "log_event:",
+        "template" => "log_template:",
+        _ => {
+            return Err(format!(
+                "unsupported log navigation kind `{kind}` (expected event or template)"
+            ))
+        }
+    };
+    let raw = format!("{prefix}{id}");
+    cd_core::log_analysis::parse_governed_log_citation_id(&raw)
+        .ok_or_else(|| format!("invalid governed log identity `{raw}`"))
+}
+
+/// Fail closed when the cited evidence is missing from the opened corpus.
+fn ensure_log_nav_evidence_exists(
+    corpus: &cd_core::log_analysis::LogCorpus,
+    parsed: &cd_core::log_analysis::GovernedLogCitationId,
+) -> Result<(), String> {
+    use cd_core::log_analysis::{
+        query_event_neighborhood, EventNeighborhoodQuery, EventQuery, GovernedLogCitationKind,
+        TargetResolveStatus,
+    };
+    match parsed.kind {
+        GovernedLogCitationKind::Event => {
+            let nb = query_event_neighborhood(
+                corpus,
+                &EventNeighborhoodQuery {
+                    target_seq: parsed.value,
+                    before: 0,
+                    after: 0,
+                    filter: EventQuery::default(),
+                    sort_by_time: true,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            if nb.status == TargetResolveStatus::Missing {
+                return Err(format!("event {} was not found in this corpus", parsed.id));
+            }
+            Ok(())
+        }
+        GovernedLogCitationKind::Template => {
+            if corpus.template_pattern(parsed.value).is_none() {
+                return Err(format!(
+                    "template {} was not found in this corpus",
+                    parsed.id
+                ));
+            }
+            Ok(())
+        }
+    }
 }
 
 fn workspace_from_cfg(cfg: &AppConfig) -> Option<Workspace> {
@@ -4747,6 +4868,102 @@ fn should_persist_chat_session(session: &Session) -> bool {
     !session.messages.is_empty() || session.linked_corpus_id.is_some()
 }
 
+/// Whether a citation id is a governed log evidence identity (#701 / #698).
+///
+/// Delegates to the shared core grammar: lowercase `log_event:<u64>` /
+/// `log_template:<u64>` only (digits, canonical form, overflow rejected).
+fn is_governed_log_citation_id(source_id: &str) -> bool {
+    cd_core::log_analysis::is_governed_log_citation_id(source_id)
+}
+
+/// Host-owned log citation provenance (#698).
+///
+/// The renderer may carry transcript chips, but it cannot invent or broaden
+/// corpus identity. Rules:
+/// 1. If a citation id already exists on the durable message with a host corpus
+///    id, preserve that id (survives detach/relink and restart).
+/// 2. If a citation id already exists on the durable message **without** a
+///    corpus id (legacy unbound), leave it unbound forever — never stamp the
+///    current linked corpus onto historical unbound chips (no substitution).
+/// 3. Only **new** citation ids (not present on the durable message) may be
+///    stamped with the session's host-governed linked_corpus_id when set.
+/// 4. Never accept a free-form renderer/model corpus id that differs from those
+///    host sources.
+fn sanitize_log_citation_provenance(session: &mut Session, durable: Option<&Session>) {
+    use std::collections::HashMap;
+    let durable_by_msg: HashMap<&str, &cd_core::sessions::StoredMessage> = durable
+        .map(|s| s.messages.iter().map(|m| (m.id.as_str(), m)).collect())
+        .unwrap_or_default();
+    let linked = session.linked_corpus_id.clone();
+
+    for message in &mut session.messages {
+        let Some(citations) = message.citations.as_mut() else {
+            continue;
+        };
+        let Some(items) = citations.as_array_mut() else {
+            continue;
+        };
+        // value = Some(corpus) when durable bound; None when durable present but unbound
+        let durable_log: HashMap<String, Option<String>> = durable_by_msg
+            .get(message.id.as_str())
+            .and_then(|m| m.citations.as_ref())
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| {
+                        let obj = item.as_object()?;
+                        let id = obj.get("id")?.as_str()?.to_string();
+                        if !is_governed_log_citation_id(&id) {
+                            return None;
+                        }
+                        let corpus = obj
+                            .get("corpusId")
+                            .or_else(|| obj.get("corpus_id"))
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string);
+                        Some((id, corpus))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for item in items.iter_mut() {
+            let Some(obj) = item.as_object_mut() else {
+                continue;
+            };
+            let Some(id) = obj.get("id").and_then(|v| v.as_str()).map(str::to_string) else {
+                continue;
+            };
+            if !is_governed_log_citation_id(&id) {
+                // Non-log chips never carry corpus provenance.
+                obj.remove("corpusId");
+                obj.remove("corpus_id");
+                continue;
+            }
+            let trusted = match durable_log.get(&id) {
+                // Historical bound provenance — never let renderer change it.
+                Some(Some(corpus_id)) => Some(corpus_id.clone()),
+                // Historical unbound — fail closed; do not stamp current link.
+                Some(None) => None,
+                // Truly new citation id on this message — stamp host link if any.
+                None => linked.clone(),
+            };
+            match trusted {
+                Some(corpus_id) => {
+                    obj.insert("corpusId".into(), serde_json::Value::String(corpus_id));
+                    obj.remove("corpus_id");
+                }
+                None => {
+                    obj.remove("corpusId");
+                    obj.remove("corpus_id");
+                }
+            }
+        }
+    }
+}
+
 fn save_chat_session_at(
     store: &cd_core::sessions::SessionStore,
     mut session: Session,
@@ -4754,14 +4971,17 @@ fn save_chat_session_at(
     // The renderer owns transcript/view fields, but never the governed corpus
     // grant. Preserve the durable host value for an existing chat and strip an
     // attempted grant from a new chat; only set_chat_linked_corpus may change it.
-    if store.exists(&session.id).map_err(|e| e.to_string())? {
+    let durable = if store.exists(&session.id).map_err(|e| e.to_string())? {
         let durable = store
             .load(&session.id)
             .map_err(|e| format!("chat session is unavailable or corrupt: {e}"))?;
-        session.linked_corpus_id = durable.linked_corpus_id;
+        session.linked_corpus_id = durable.linked_corpus_id.clone();
+        Some(durable)
     } else {
         session.linked_corpus_id = None;
-    }
+        None
+    };
+    sanitize_log_citation_provenance(&mut session, durable.as_ref());
     session.maybe_auto_title_from_first_user();
     session.touch();
     if should_persist_chat_session(&session) {
@@ -7998,6 +8218,10 @@ fn discard_log_corpus(state: State<'_, AppState>, corpus_id: String) -> Result<(
     if active_log_corpus_snapshot(&state).as_deref() == Some(corpus_id.as_str()) {
         set_active_log_corpus_state_nonblocking(&state, None);
     }
+    // Discarded corpus must not keep a staged exact-nav target for replay.
+    if let Ok(mut store) = state.log_explorer_nav_targets.lock() {
+        store.clear(&corpus_id);
+    }
     Ok(())
 }
 
@@ -9606,15 +9830,7 @@ async fn open_log_explorer(
     let title = format!("Log Explorer · {corpus_name}");
     // Set active corpus so agent tools resolve without id.
     set_active_log_corpus_state_nonblocking(&state, Some(corpus_id.clone()));
-    // Window labels: alphanumeric + `-` only (Tauri constraint). Keep short.
-    let label = format!(
-        "log-explorer-{}",
-        corpus_id
-            .chars()
-            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-            .take(48)
-            .collect::<String>()
-    );
+    let label = log_explorer_window_label(&corpus_id);
     use tauri::Manager;
     if let Some(w) = app.get_webview_window(&label) {
         let _ = w.set_focus();
@@ -9637,6 +9853,138 @@ async fn open_log_explorer(
         .build()
         .map_err(|e| format!("open log explorer window: {e}"))?;
     Ok(label)
+}
+
+/// Host-governed exact navigation into a corpus Explorer (#698).
+///
+/// Validates the corpus and target, stages a one-shot pending target, opens or
+/// focuses exactly that corpus's Explorer, and never substitutes another corpus.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenLogExplorerTargetResult {
+    window_label: String,
+    corpus_id: String,
+    target: LogExplorerNavTarget,
+}
+
+#[tauri::command]
+async fn open_log_explorer_target(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    corpus_id: String,
+    target: LogExplorerNavTarget,
+) -> Result<OpenLogExplorerTargetResult, String> {
+    let corpus_id = corpus_id.trim().to_string();
+    if corpus_id.is_empty() {
+        return Err("corpus id is required for exact log navigation".into());
+    }
+    let parsed = parse_log_explorer_nav_target(&target.kind, &target.id)?;
+    let staged = LogExplorerNavTarget {
+        kind: parsed.kind.as_str().to_string(),
+        id: parsed.id.clone(),
+    };
+
+    // Validate corpus + evidence before staging or opening a window.
+    let cache = log_cache_dir(&state)?;
+    let handles = Arc::clone(&state.log_corpus_handles);
+    let open_corpus_id = corpus_id.clone();
+    let evidence_id = parsed.clone();
+    let corpus_name = tokio::task::spawn_blocking(move || {
+        let corpus = handles.open(&cache, &open_corpus_id)?;
+        ensure_log_nav_evidence_exists(&corpus, &evidence_id)?;
+        Ok::<_, String>(corpus.name().to_string())
+    })
+    .await
+    .map_err(|error| format!("open log explorer target task join: {error}"))??;
+
+    let title = format!("Log Explorer · {corpus_name}");
+    set_active_log_corpus_state_nonblocking(&state, Some(corpus_id.clone()));
+    let label = log_explorer_window_label(&corpus_id);
+    use tauri::Emitter;
+    use tauri::Manager;
+
+    // Existing window: stage only after we know the window is reachable, then
+    // emit so take() delivers once.
+    if let Some(w) = app.get_webview_window(&label) {
+        stage_log_explorer_nav_target(&state, &corpus_id, staged.clone())?;
+        let _ = w.set_focus();
+        let _ = w.unminimize();
+        let _ = w.emit(LOG_EXPLORER_NAV_TARGET_EVENT, staged.clone());
+        return Ok(OpenLogExplorerTargetResult {
+            window_label: label,
+            corpus_id,
+            target: staged,
+        });
+    }
+
+    // New window: resolve URL *before* staging so a URL failure never leaves a
+    // pending target for a later generic open to take (stale replay).
+    let url = log_explorer_webview_url(&app, &corpus_id)?;
+    stage_log_explorer_nav_target(&state, &corpus_id, staged.clone())?;
+    if let Err(error) = tauri::WebviewWindowBuilder::new(&app, &label, url)
+        .title(title)
+        .inner_size(1400.0, 900.0)
+        .min_inner_size(800.0, 600.0)
+        .resizable(true)
+        .maximizable(true)
+        .minimizable(true)
+        .closable(true)
+        .decorations(true)
+        .background_color(tauri::window::Color(0x0b, 0x0c, 0x0e, 0xff))
+        .build()
+    {
+        // Window never opened — clear the staged target so a later Explorer
+        // open for this corpus cannot take a failed citation.
+        clear_log_explorer_nav_target(&state, &corpus_id);
+        return Err(format!("open log explorer window: {error}"));
+    }
+    // Fresh window will take the pending target on mount (no emit required).
+    Ok(OpenLogExplorerTargetResult {
+        window_label: label,
+        corpus_id,
+        target: staged,
+    })
+}
+
+/// Stage a one-shot exact-nav target (last writer wins for the corpus).
+fn stage_log_explorer_nav_target(
+    state: &AppState,
+    corpus_id: &str,
+    target: LogExplorerNavTarget,
+) -> Result<(), String> {
+    let mut store = state
+        .log_explorer_nav_targets
+        .lock()
+        .map_err(|_| "log explorer nav target store poisoned".to_string())?;
+    store.set(corpus_id.to_string(), target);
+    Ok(())
+}
+
+/// Clear any undelivered exact-nav target for a corpus (failed open path).
+fn clear_log_explorer_nav_target(state: &AppState, corpus_id: &str) {
+    if let Ok(mut store) = state.log_explorer_nav_targets.lock() {
+        store.clear(corpus_id);
+    }
+}
+
+/// Deliver and clear the one-shot exact-nav target for this corpus's Explorer.
+///
+/// Returns `None` when nothing is pending (already delivered, cleared on close,
+/// or never staged). Safe to call repeatedly — never replays a prior target.
+#[tauri::command]
+fn take_log_explorer_nav_target(
+    state: State<'_, AppState>,
+    corpus_id: String,
+) -> Result<Option<LogExplorerNavTarget>, String> {
+    let corpus_id = corpus_id.trim().to_string();
+    if corpus_id.is_empty() {
+        return Err("corpus id is required".into());
+    }
+    let mut store = state
+        .log_explorer_nav_targets
+        .lock()
+        .map_err(|_| "log explorer nav target store poisoned".to_string())?;
+    Ok(store.take(&corpus_id))
 }
 
 fn handbook_webview_url(app: &tauri::AppHandle) -> Result<tauri::WebviewUrl, String> {
@@ -10450,12 +10798,25 @@ pub fn run() {
         qualification_store: Mutex::new(
             cd_core::capability_qualification::QualificationStore::default(),
         ),
+        log_explorer_nav_targets: Mutex::new(LogExplorerNavTargetStore::default()),
     };
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         // Opt-in signed updates (#173). Check/install only via Settings — never silent.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
+        .on_window_event(|window, event| {
+            // Close/destroy clears undelivered exact-nav targets so reopen never
+            // replays a stale citation reveal.
+            if let tauri::WindowEvent::Destroyed = event {
+                let label = window.label().to_string();
+                if let Some(state) = window.try_state::<AppState>() {
+                    if let Ok(mut store) = state.log_explorer_nav_targets.lock() {
+                        store.clear_for_window_label(&label);
+                    }
+                }
+            }
+        })
         .setup(|app| {
             // Dark window/webview fill before React mounts (avoids white flash).
             use tauri::Manager;
@@ -10631,6 +10992,8 @@ pub fn run() {
             list_chat_sessions_for_corpus,
             set_chat_linked_corpus,
             open_log_explorer,
+            open_log_explorer_target,
+            take_log_explorer_nav_target,
             export_log_corpus_package,
             prepare_log_diagnostic_report,
             release_log_diagnostic_report,
@@ -12689,17 +13052,20 @@ mod startup_host_tests {
     use super::{
         admit_agent_turn, build_and_install_background_index, chat_provider_binding_changed,
         chat_turn_cancel_key, desktop_log_ingest_embed_plan_nonblocking,
-        event_to_dto_with_linked_corpus, finish_agent_turn, host_readiness_terminal_events,
-        install_prepared_durable_memory, linked_log_fallback_notice,
-        linked_log_host_terminal_events, linked_log_preflight_at, log_search_cancel_key,
-        normalize_log_corpus_id, persist_host_terminal_turn_at,
+        ensure_log_nav_evidence_exists, event_to_dto_with_linked_corpus, finish_agent_turn,
+        host_readiness_terminal_events, install_prepared_durable_memory,
+        is_governed_log_citation_id, linked_log_fallback_notice, linked_log_host_terminal_events,
+        linked_log_preflight_at, linked_log_turn_context, load_session_for_turn,
+        log_explorer_window_label, log_search_cancel_key, normalize_log_corpus_id,
+        parse_log_explorer_nav_target, persist_host_terminal_turn_at,
         persist_linked_provider_loop_terminal_at, prepare_linked_turn_with,
         provider_profile_for_turn, request_agent_turn_cancel, restore_host_if_generation_matches,
         save_chat_session_at, set_chat_linked_corpus_at, take_ready_linked_host,
         validate_linked_log_corpus_at, wait_for_host_readiness, BackgroundIndexBuild,
         HostInitFlight, HostReadinessFailure, LinkedCheckpointStore, LinkedTurnPreparation,
-        StdInstant, LINKED_CHECKPOINT_ENTRY_CAP, LINKED_CHECKPOINT_TOTAL_BYTES,
-        LINKED_CHECKPOINT_TTL, LOG_INGEST_CANCEL_KEY, LOG_REANALYZE_CANCEL_KEY,
+        LogExplorerNavTarget, LogExplorerNavTargetStore, LogExplorerTurnContextReq, StdInstant,
+        LINKED_CHECKPOINT_ENTRY_CAP, LINKED_CHECKPOINT_TOTAL_BYTES, LINKED_CHECKPOINT_TTL,
+        LOG_INGEST_CANCEL_KEY, LOG_REANALYZE_CANCEL_KEY,
     };
     use cd_core::events::StreamEvent;
     use cd_core::index::{KeywordIndex, ReindexStats};
@@ -13944,6 +14310,378 @@ mod startup_host_tests {
         .expect_err("nonempty draft must fail");
         assert!(error.contains("draft chat identity is invalid"));
         assert!(!store.exists(&draft_id).expect("draft existence"));
+    }
+
+    #[test]
+    fn concurrent_empty_linked_create_does_not_duplicate_or_orphan() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let cache = tempfile::tempdir().expect("cache");
+        let logs = tempfile::tempdir().expect("logs");
+        std::fs::write(
+            logs.path().join("app.log"),
+            b"2026-07-28T12:00:00Z ERROR checkout failed\n",
+        )
+        .expect("fixture");
+        let report =
+            cd_core::log_analysis::ingest_path(cache.path(), logs.path(), "incident", None, "none")
+                .expect("ingest");
+
+        let draft_a = cd_core::sessions::Session::new("A");
+        let draft_b = cd_core::sessions::Session::new("B");
+        let a = set_chat_linked_corpus_at(
+            &store,
+            cache.path(),
+            &draft_a.id,
+            Some(report.corpus_id.clone()),
+            Some(draft_a.clone()),
+            Some(wire_session_revision(&draft_a)),
+        )
+        .expect("first create");
+        let b = set_chat_linked_corpus_at(
+            &store,
+            cache.path(),
+            &draft_b.id,
+            Some(report.corpus_id.clone()),
+            Some(draft_b.clone()),
+            Some(wire_session_revision(&draft_b)),
+        )
+        .expect("second create");
+        assert_ne!(a.id, b.id);
+        assert_eq!(
+            a.linked_corpus_id.as_deref(),
+            Some(report.corpus_id.as_str())
+        );
+        assert_eq!(
+            b.linked_corpus_id.as_deref(),
+            Some(report.corpus_id.as_str())
+        );
+
+        // Invalid corpus creates no orphan.
+        let orphan = cd_core::sessions::Session::new("Orphan");
+        let err = set_chat_linked_corpus_at(
+            &store,
+            cache.path(),
+            &orphan.id,
+            Some("missing-corpus".into()),
+            Some(orphan.clone()),
+            Some(wire_session_revision(&orphan)),
+        )
+        .expect_err("missing corpus");
+        assert!(!err.is_empty());
+        assert!(!store.exists(&orphan.id).expect("orphan existence"));
+
+        // First-turn load path sees the durable linked session (no "not available").
+        let loaded = load_session_for_turn(&store, &a.id)
+            .expect("load")
+            .expect("session present");
+        assert_eq!(
+            loaded.linked_corpus_id.as_deref(),
+            Some(report.corpus_id.as_str())
+        );
+        let ctx = linked_log_turn_context(
+            Some(&loaded),
+            "win-1",
+            Some(LogExplorerTurnContextReq {
+                corpus_id: report.corpus_id.clone(),
+                brief: "privacy-safe brief".into(),
+                noise_lens_suspended: false,
+            }),
+        )
+        .expect("turn context");
+        assert!(ctx.is_some());
+    }
+
+    #[test]
+    fn governed_log_citation_id_uses_strict_u64_grammar() {
+        assert!(is_governed_log_citation_id("log_event:42"));
+        assert!(is_governed_log_citation_id("log_template:7"));
+        assert!(is_governed_log_citation_id(
+            "log_event:18446744073709551615"
+        ));
+        assert!(!is_governed_log_citation_id("log_event:"));
+        assert!(!is_governed_log_citation_id("log_event:42/../x"));
+        assert!(!is_governed_log_citation_id("LOG_EVENT:42"));
+        assert!(!is_governed_log_citation_id("log_event:event_42"));
+        assert!(!is_governed_log_citation_id(
+            "log_event:18446744073709551616"
+        ));
+        assert!(!is_governed_log_citation_id("log_event:01"));
+    }
+
+    #[test]
+    fn exact_nav_target_parse_and_deliver_once_store() {
+        let parsed = parse_log_explorer_nav_target("event", "9007199254740993")
+            .expect("unsafe-for-JS u64 still parses on host");
+        assert_eq!(parsed.id, "9007199254740993");
+        assert_eq!(parsed.value, 9007199254740993);
+        assert!(parse_log_explorer_nav_target("event", "01").is_err());
+        assert!(parse_log_explorer_nav_target("EVENT", "1").is_err());
+        assert!(parse_log_explorer_nav_target("event", "18446744073709551616").is_err());
+
+        let mut store = LogExplorerNavTargetStore::default();
+        let corpus_a = "corpus-a".to_string();
+        let corpus_b = "corpus-b".to_string();
+        let target_a = LogExplorerNavTarget {
+            kind: "event".into(),
+            id: "42".into(),
+        };
+        let target_b = LogExplorerNavTarget {
+            kind: "template".into(),
+            id: "7".into(),
+        };
+        store.set(corpus_a.clone(), target_a.clone());
+        store.set(corpus_b.clone(), target_b.clone());
+        // Colliding bare ids across corpora stay independent.
+        store.set(
+            corpus_b.clone(),
+            LogExplorerNavTarget {
+                kind: "event".into(),
+                id: "42".into(),
+            },
+        );
+        assert_eq!(store.peek(&corpus_a).map(|t| t.id.as_str()), Some("42"));
+        let first = store.take(&corpus_a).expect("first take");
+        assert_eq!(first, target_a);
+        assert!(store.take(&corpus_a).is_none(), "deliver-once: no replay");
+        // Rapid replace: last writer wins, prior undelivered target dropped.
+        store.set(
+            corpus_b.clone(),
+            LogExplorerNavTarget {
+                kind: "event".into(),
+                id: "99".into(),
+            },
+        );
+        let last = store.take(&corpus_b).expect("last target");
+        assert_eq!(last.id, "99");
+        assert!(store.take(&corpus_b).is_none());
+
+        // Window destroy clears undelivered targets for that label only.
+        store.set(corpus_a.clone(), target_a.clone());
+        store.set(
+            "other".into(),
+            LogExplorerNavTarget {
+                kind: "event".into(),
+                id: "1".into(),
+            },
+        );
+        let label = log_explorer_window_label(&corpus_a);
+        store.clear_for_window_label(&label);
+        assert!(store.peek(&corpus_a).is_none());
+        assert!(store.peek("other").is_some());
+
+        // Failed window open after stage must clear so a later generic open
+        // cannot take a failed citation (stale replay).
+        store.set(corpus_a.clone(), target_a.clone());
+        assert!(store.peek(&corpus_a).is_some());
+        store.clear(&corpus_a);
+        assert!(
+            store.take(&corpus_a).is_none(),
+            "cleared staged target must not replay on a later take"
+        );
+    }
+
+    #[test]
+    fn exact_nav_missing_evidence_and_corpus_fail_closed() {
+        let cache = tempfile::tempdir().expect("cache");
+        let logs = tempfile::tempdir().expect("logs");
+        std::fs::write(
+            logs.path().join("app.log"),
+            b"2026-07-28T12:00:00Z ERROR checkout failed\n",
+        )
+        .expect("fixture");
+        let report =
+            cd_core::log_analysis::ingest_path(cache.path(), logs.path(), "nav", None, "none")
+                .expect("ingest");
+        let corpus =
+            cd_core::log_analysis::LogCorpus::open(cache.path(), &report.corpus_id).expect("open");
+
+        let event0 = parse_log_explorer_nav_target("event", "0").expect("event 0");
+        ensure_log_nav_evidence_exists(&corpus, &event0).expect("seq 0 exists after ingest");
+
+        let missing = parse_log_explorer_nav_target("event", "999999").expect("grammar ok");
+        let err = ensure_log_nav_evidence_exists(&corpus, &missing).expect_err("missing event");
+        assert!(
+            err.to_lowercase().contains("not found"),
+            "missing evidence must fail visibly: {err}"
+        );
+
+        let missing_template =
+            parse_log_explorer_nav_target("template", "999999").expect("grammar ok");
+        let err = ensure_log_nav_evidence_exists(&corpus, &missing_template)
+            .expect_err("missing template");
+        assert!(
+            err.to_lowercase().contains("not found"),
+            "missing template must fail visibly: {err}"
+        );
+
+        // Discarded corpus cannot be opened for substitution.
+        cd_core::log_analysis::LogCorpus::discard(cache.path(), &report.corpus_id)
+            .expect("discard");
+        assert!(
+            cd_core::log_analysis::LogCorpus::open(cache.path(), &report.corpus_id).is_err(),
+            "discarded corpus must not open"
+        );
+    }
+
+    #[test]
+    fn generic_save_cannot_forge_or_broaden_log_citation_corpus_id() {
+        assert!(is_governed_log_citation_id("log_event:42"));
+        assert!(!is_governed_log_citation_id("log_event:"));
+        assert!(!is_governed_log_citation_id("log_event:42/../x"));
+
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let mut durable = cd_core::sessions::Session::new("Grounded");
+        durable.set_linked_corpus_id(Some("trusted-corpus".into()));
+        durable.messages.push(cd_core::sessions::StoredMessage {
+            id: "assistant-1".into(),
+            role: "assistant".into(),
+            content: "finding".into(),
+            tools: None,
+            citations: Some(serde_json::json!([{
+                "id": "log_event:42",
+                "label": "event 42",
+                "corpusId": "trusted-corpus"
+            }])),
+            trail: None,
+            meta: None,
+        });
+        store.save(&durable).expect("save durable");
+
+        // Detach: clear linked_corpus_id but keep historical citation provenance.
+        let mut detached = store.load(&durable.id).expect("load");
+        detached.set_linked_corpus_id(None);
+        store.save(&detached).expect("detach save");
+
+        let mut renderer = store.load(&durable.id).expect("load");
+        renderer.messages[0].citations = Some(serde_json::json!([{
+            "id": "log_event:42",
+            "label": "event 42",
+            "corpusId": "attacker-corpus"
+        },{
+            "id": "runbook.md",
+            "label": "runbook",
+            "corpusId": "must-not-apply"
+        }]));
+        let saved = save_chat_session_at(&store, renderer).expect("save");
+        let citations = saved.messages[0]
+            .citations
+            .as_ref()
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            citations[0]["corpusId"].as_str(),
+            Some("trusted-corpus"),
+            "historical host provenance must win over renderer forgery"
+        );
+        assert!(citations[1].get("corpusId").is_none());
+
+        // New log citation while linked stamps host corpus; model corpus ignored.
+        let mut linked = store.load(&durable.id).expect("load");
+        linked.set_linked_corpus_id(Some("trusted-corpus".into()));
+        store.save(&linked).expect("relink");
+        let mut renderer2 = store.load(&durable.id).expect("load");
+        renderer2.messages.push(cd_core::sessions::StoredMessage {
+            id: "assistant-2".into(),
+            role: "assistant".into(),
+            content: "new finding".into(),
+            tools: None,
+            citations: Some(serde_json::json!([{
+                "id": "log_template:7",
+                "label": "template 7",
+                "corpusId": "smuggled"
+            }])),
+            trail: None,
+            meta: None,
+        });
+        let saved2 = save_chat_session_at(&store, renderer2).expect("save2");
+        let new_cite = saved2
+            .messages
+            .iter()
+            .find(|m| m.id == "assistant-2")
+            .and_then(|m| m.citations.as_ref())
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .cloned()
+            .expect("new cite");
+        assert_eq!(new_cite["corpusId"].as_str(), Some("trusted-corpus"));
+    }
+
+    /// #698 — durable legacy log citations without corpusId stay unbound even
+    /// when the session remains linked; save must not rewrite history onto the
+    /// current corpus (substitution).
+    #[test]
+    fn generic_save_leaves_durable_unbound_log_citations_unbound() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let mut durable = cd_core::sessions::Session::new("Legacy unbound");
+        durable.set_linked_corpus_id(Some("trusted-corpus".into()));
+        durable.messages.push(cd_core::sessions::StoredMessage {
+            id: "assistant-legacy".into(),
+            role: "assistant".into(),
+            content: "old finding".into(),
+            tools: None,
+            // Present on disk without corpusId — historical fail-closed.
+            citations: Some(serde_json::json!([
+                {
+                    "id": "log_event:99",
+                    "label": "log_event:99"
+                },
+                {
+                    "id": "log_template:3",
+                    "label": "log_template:3"
+                }
+            ])),
+            trail: None,
+            meta: None,
+        });
+        store.save(&durable).expect("save durable unbound");
+
+        // Renderer still linked and tries to invent provenance for history.
+        let mut renderer = store.load(&durable.id).expect("load");
+        assert_eq!(renderer.linked_corpus_id.as_deref(), Some("trusted-corpus"));
+        renderer.messages[0].citations = Some(serde_json::json!([
+            {
+                "id": "log_event:99",
+                "label": "log_event:99",
+                "corpusId": "attacker-or-current-link"
+            },
+            {
+                "id": "log_template:3",
+                "label": "log_template:3",
+                "corpusId": "trusted-corpus"
+            }
+        ]));
+        let saved = save_chat_session_at(&store, renderer).expect("save");
+        let citations = saved.messages[0]
+            .citations
+            .as_ref()
+            .and_then(|v| v.as_array())
+            .cloned()
+            .expect("citations");
+        assert_eq!(citations.len(), 2);
+        for item in &citations {
+            assert!(
+                item.get("corpusId").is_none() && item.get("corpus_id").is_none(),
+                "durable unbound log citation must stay unbound: {item}"
+            );
+        }
+        // Reopen proves persistence.
+        let reopened = store.load(&durable.id).expect("reopen");
+        let reopened_cites = reopened.messages[0]
+            .citations
+            .as_ref()
+            .and_then(|v| v.as_array())
+            .cloned()
+            .expect("reopened citations");
+        for item in &reopened_cites {
+            assert!(
+                item.get("corpusId").is_none() && item.get("corpus_id").is_none(),
+                "reopened unbound citation must remain unbound: {item}"
+            );
+        }
     }
 
     #[test]

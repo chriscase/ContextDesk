@@ -1,0 +1,174 @@
+{
+  "catalog_version": "contextdesk.governed_log_citation_ids.v1",
+  "notes": [
+    "Shared accept/reject vectors for log_event:<u64> and log_template:<u64>.",
+    "Only lowercase scheme prefixes; digits-only id; canonical form (no leading zeros except 0).",
+    "id is always the decimal string of the accepted u64 — never a JS Number.",
+    "Rust and TypeScript production parsers must accept/reject exactly these cases."
+  ],
+  "accept": [
+    {
+      "input": "log_event:0",
+      "kind": "event",
+      "id": "0"
+    },
+    {
+      "input": "log_event:42",
+      "kind": "event",
+      "id": "42"
+    },
+    {
+      "input": "log_template:7",
+      "kind": "template",
+      "id": "7"
+    },
+    {
+      "input": "log_event:9007199254740991",
+      "kind": "event",
+      "id": "9007199254740991",
+      "js_safe_integer": true
+    },
+    {
+      "input": "log_event:9007199254740992",
+      "kind": "event",
+      "id": "9007199254740992",
+      "js_safe_integer": false,
+      "notes": "Number.MAX_SAFE_INTEGER + 1; must remain string-identical, never Number-coerced"
+    },
+    {
+      "input": "log_event:9007199254740993",
+      "kind": "event",
+      "id": "9007199254740993",
+      "js_safe_integer": false,
+      "notes": "Must not become 9007199254740992 via silent JS Number widening"
+    },
+    {
+      "input": "log_template:9007199254740993",
+      "kind": "template",
+      "id": "9007199254740993",
+      "js_safe_integer": false
+    },
+    {
+      "input": "log_event:18446744073709551615",
+      "kind": "event",
+      "id": "18446744073709551615",
+      "js_safe_integer": false,
+      "notes": "u64::MAX"
+    },
+    {
+      "input": "log_template:18446744073709551615",
+      "kind": "template",
+      "id": "18446744073709551615",
+      "js_safe_integer": false
+    },
+    {
+      "input": "  log_event:99  ",
+      "kind": "event",
+      "id": "99",
+      "notes": "Leading/trailing whitespace is trimmed before grammar match"
+    }
+  ],
+  "reject": [
+    {
+      "input": "",
+      "reason": "empty"
+    },
+    {
+      "input": "log_event:",
+      "reason": "empty_id"
+    },
+    {
+      "input": "log_template:",
+      "reason": "empty_id"
+    },
+    {
+      "input": "log_event:abc",
+      "reason": "non_digit"
+    },
+    {
+      "input": "log_event:event_42",
+      "reason": "non_digit"
+    },
+    {
+      "input": "log_template:template-17",
+      "reason": "non_digit"
+    },
+    {
+      "input": "log_event:4.2",
+      "reason": "non_digit"
+    },
+    {
+      "input": "log_event:+42",
+      "reason": "sign"
+    },
+    {
+      "input": "log_event:-1",
+      "reason": "sign"
+    },
+    {
+      "input": "log_event:01",
+      "reason": "leading_zero"
+    },
+    {
+      "input": "log_event:00",
+      "reason": "leading_zero"
+    },
+    {
+      "input": "log_template:007",
+      "reason": "leading_zero"
+    },
+    {
+      "input": "LOG_EVENT:42",
+      "reason": "uppercase"
+    },
+    {
+      "input": "Log_Event:42",
+      "reason": "uppercase"
+    },
+    {
+      "input": "log_Event:42",
+      "reason": "uppercase"
+    },
+    {
+      "input": "LOG_TEMPLATE:7",
+      "reason": "uppercase"
+    },
+    {
+      "input": "log_event:42/../../secret",
+      "reason": "malformed"
+    },
+    {
+      "input": "log_event:42:extra",
+      "reason": "malformed"
+    },
+    {
+      "input": "prefix_log_event:42",
+      "reason": "leading_junk"
+    },
+    {
+      "input": "log_event:42suffix",
+      "reason": "trailing_junk"
+    },
+    {
+      "input": "log_event:18446744073709551616",
+      "reason": "overflow",
+      "notes": "u64::MAX + 1"
+    },
+    {
+      "input": "log_template:18446744073709551616",
+      "reason": "overflow"
+    },
+    {
+      "input": "log_event:99999999999999999999",
+      "reason": "overflow"
+    },
+    {
+      "input": "file:log_event:1",
+      "reason": "wrong_scheme"
+    },
+    {
+      "input": "memory:note-1",
+      "reason": "wrong_scheme"
+    }
+  ]
+}

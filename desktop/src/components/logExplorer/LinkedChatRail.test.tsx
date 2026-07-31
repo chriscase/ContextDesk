@@ -120,6 +120,12 @@ vi.mock("../../lib/host", () => ({
   hostRenameChatSession: vi.fn(),
   hostPinChatSession: vi.fn(),
   hostArchiveChatSession: vi.fn(),
+  hostOpenLogExplorer: vi.fn(async () => "opened"),
+  hostOpenLogExplorerTarget: vi.fn(async (corpusId: string, target) => ({
+    windowLabel: `log-explorer-${corpusId}`,
+    corpusId,
+    target,
+  })),
   agentTurn: vi.fn(async () => []),
 }));
 
@@ -818,6 +824,281 @@ describe("LinkedChatRail", () => {
     expect(host.agentTurn).not.toHaveBeenCalled();
     expect(host.hostSaveChatSession).not.toHaveBeenCalled();
     expect(screen.getByText("No chat selected")).toBeTruthy();
+  });
+
+  it("coalesces concurrent New and Send into one durable linked session (#709)", async () => {
+    // Dual-enter createLinkedChat itself (New button + Send with no active
+    // chat). This is not satisfied by creatingTurnChatRef alone — both paths
+    // call createLinkedChat, so only createLinkedChatInflightRef coalesce
+    // keeps a single host create.
+    let resolveCreate:
+      | ((session: host.ChatSessionDto) => void)
+      | null = null;
+    const createGate = new Promise<host.ChatSessionDto>((resolve) => {
+      resolveCreate = resolve;
+    });
+    const createdIds: string[] = [];
+    let createEntries = 0;
+    vi.mocked(host.hostSetChatLinkedCorpus).mockImplementation(
+      async (sessionId, corpusId, draftSession) => {
+        if (!draftSession) return null;
+        createEntries += 1;
+        createdIds.push(sessionId);
+        const saved: host.ChatSessionDto = {
+          ...draftSession,
+          id: sessionId,
+          linked_corpus_id: corpusId,
+        };
+        // Hold the first create open so New+Send both enter createLinkedChat.
+        await createGate;
+        return host.hostSaveChatSession(saved);
+      },
+    );
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
+      async () =>
+        createdIds.map((id) => ({
+          id,
+          title: "Logs · c1",
+          archived: false,
+          pinned: false,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          message_count: 0,
+          preview: "",
+          linked_corpus_id: "c1",
+        })),
+    );
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async (id) => {
+      const base = sessionDto(id, "Logs · c1");
+      return {
+        ...base,
+        chat_model: "triage-1",
+        provider_profile_id: "tools-provider",
+        linked_corpus_id: "c1",
+      };
+    });
+    vi.mocked(host.agentTurn).mockResolvedValue([
+      { kind: "text_delta", payload: { text: "one" } },
+      { kind: "turn_completed", payload: {} },
+    ]);
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    const composer = (await screen.findByLabelText(
+      "Chat message",
+    )) as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: "race me" } });
+
+    // New starts createLinkedChat; Send (no activeChatId yet) also enters it.
+    fireEvent.click(screen.getByTestId("new-linked-chat"));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() =>
+      expect(host.hostSetChatLinkedCorpus).toHaveBeenCalledTimes(1),
+    );
+    expect(createEntries).toBe(1);
+    expect(createdIds).toHaveLength(1);
+
+    await act(async () => {
+      const base = sessionDto(createdIds[0]!, "Logs · c1");
+      resolveCreate?.({
+        ...base,
+        chat_model: "triage-1",
+        provider_profile_id: "tools-provider",
+        linked_corpus_id: "c1",
+      });
+    });
+
+    // Send's turn proceeds on the single created session.
+    await waitFor(() => expect(host.agentTurn).toHaveBeenCalledTimes(1));
+    expect(host.agentTurn).toHaveBeenCalledWith(
+      createdIds[0],
+      "race me",
+      false,
+      "triage-1",
+      "tools-provider",
+      expect.any(Function),
+      null,
+      expect.objectContaining({ corpus_id: "c1" }),
+      false,
+      expect.any(Object),
+    );
+    expect(new Set(createdIds).size).toBe(1);
+  });
+
+  it("reveals same-corpus log_event citations and fails closed for legacy/malformed (#701/#698)", async () => {
+    const onApplyNav = vi.fn();
+    let stored = sessionDto("chat-cite", "Citation chat");
+    stored.messages = [
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "Grounded finding",
+        tools: null,
+        citations: [
+          {
+            id: "log_event:42",
+            label: "log_event:42",
+            corpusId: "c1",
+          },
+          {
+            id: "log_template:7",
+            label: "log_template:7",
+            // legacy unbound — no corpusId
+          },
+          {
+            id: "unknown://x",
+            label: "unknown://x",
+          },
+        ],
+        trail: null,
+        meta: null,
+      },
+    ] as host.ChatSessionDto["messages"];
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
+      async () => [
+        {
+          id: stored.id,
+          title: stored.title,
+          archived: false,
+          pinned: false,
+          created_at: stored.created_at,
+          updated_at: stored.updated_at,
+          message_count: stored.messages.length,
+          preview: "Grounded finding",
+          linked_corpus_id: "c1",
+        },
+      ],
+    );
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async () => stored);
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      stored = session;
+      return session;
+    });
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={onApplyNav}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("linked-chat-switcher-toggle"));
+    fireEvent.click(
+      within(screen.getByTestId("linked-chat-switcher")).getByText(
+        "Citation chat",
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("linked-chat-msg-assistant")).toBeTruthy(),
+    );
+
+    // Open Sources and activate log_event via host exact-nav (same path as main chat).
+    fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+    fireEvent.click(screen.getByRole("button", { name: "log_event:42" }));
+    await waitFor(() =>
+      expect(host.hostOpenLogExplorerTarget).toHaveBeenCalledWith("c1", {
+        kind: "event",
+        id: "42",
+      }),
+    );
+    // Local log_nav shortcut is no longer used — host owns exact reveal.
+    expect(onApplyNav).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(screen.getByText(/Opened log_event:42/i)).toBeTruthy(),
+    );
+
+    // Legacy unbound fails closed — no substitute.
+    fireEvent.click(screen.getByRole("button", { name: "log_template:7" }));
+    expect(
+      await screen.findByText(/does not record its original corpus/i),
+    ).toBeTruthy();
+
+    // Malformed scheme never becomes file I/O.
+    fireEvent.click(screen.getByRole("button", { name: "unknown://x" }));
+    expect(
+      await screen.findByText(/unsupported or malformed/i),
+    ).toBeTruthy();
+  });
+
+  it("does not claim Opened status when host exact-nav fails", async () => {
+    let stored = sessionDto("chat-cite-fail", "Citation fail");
+    stored.messages = [
+      {
+        id: "a1",
+        role: "assistant",
+        content: "see source",
+        tools: undefined,
+        citations: [
+          {
+            id: "log_event:42",
+            label: "log_event:42",
+            title: undefined,
+            corpusId: "c1",
+          },
+        ],
+        trail: undefined,
+        meta: undefined,
+      },
+    ];
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
+      async () => [
+        {
+          id: stored.id,
+          title: stored.title,
+          archived: false,
+          pinned: false,
+          created_at: stored.created_at,
+          updated_at: stored.updated_at,
+          message_count: stored.messages.length,
+          preview: "",
+          linked_corpus_id: "c1",
+        },
+      ],
+    );
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async () => stored);
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      stored = session;
+      return session;
+    });
+    vi.mocked(host.hostOpenLogExplorerTarget).mockRejectedValue(
+      new Error("event 42 was not found in this corpus"),
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("linked-chat-switcher-toggle"));
+    fireEvent.click(
+      within(screen.getByTestId("linked-chat-switcher")).getByText(
+        "Citation fail",
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("linked-chat-msg-assistant")).toBeTruthy(),
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+    fireEvent.click(screen.getByRole("button", { name: "log_event:42" }));
+
+    expect(
+      await screen.findByText(/original log corpus.*unavailable[\s\S]*not found/i),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Opened log_event:42/i)).toBeNull();
   });
 
   it("stops the exact active session once and waits for the host terminal event", async () => {
