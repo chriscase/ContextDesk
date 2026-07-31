@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   hostArchiveChatSession,
   hostDeleteChatSession,
@@ -54,6 +54,8 @@ export function ChatArchivePane({
   const [loading, setLoading] = useState(false);
   const [scope, setScope] = useState<Scope>("active");
   const [error, setError] = useState<string | null>(null);
+  /** Monotonic id of the newest search; older responses are discarded. */
+  const searchTicketRef = useRef(0);
 
   useEffect(() => {
     const t = window.setTimeout(() => setDebounced(query.trim()), 200);
@@ -61,6 +63,13 @@ export function ChatArchivePane({
   }, [query]);
 
   const runSearch = useCallback(async () => {
+    // Typing fast, or switching scope mid-flight, leaves several searches in
+    // the air. Without a sequence number the slowest one wins, so the list can
+    // settle on results for an older query — or show Trash rows under the
+    // Chats tab — and a stale `finally` clears the spinner while the newest
+    // search is still running.
+    const ticket = (searchTicketRef.current += 1);
+    const isCurrent = () => searchTicketRef.current === ticket;
     setLoading(true);
     setError(null);
     try {
@@ -71,6 +80,7 @@ export function ChatArchivePane({
         includeTrashed: false,
         onlyTrashed: scope === "trash",
       });
+      if (!isCurrent()) return;
       const filtered =
         scope === "trash"
           ? next
@@ -79,10 +89,11 @@ export function ChatArchivePane({
             : next.filter((h) => !h.meta.archived && !h.meta.trashed);
       setHits(filtered);
     } catch (e) {
+      if (!isCurrent()) return;
       setError(e instanceof Error ? e.message : String(e));
       setHits([]);
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }, [debounced, scope]);
 

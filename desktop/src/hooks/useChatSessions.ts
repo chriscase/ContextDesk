@@ -33,6 +33,48 @@ export function shouldPersistUiSession(session: ChatSession): boolean {
   );
 }
 
+/** Where the last-read conversation is remembered between launches. */
+export const ACTIVE_SESSION_KEY = "cd-active-session";
+
+/**
+ * Next default title. Counting sessions produced repeats — create "Chat 2",
+ * trash "Chat 1", create again and you had two "Chat 2"s — so number past the
+ * highest one already used instead.
+ */
+export function nextChatTitle(existing: readonly ChatSession[]): string {
+  let highest = 0;
+  for (const s of existing) {
+    const m = /^Chat (\d+)$/.exec(s.title.trim());
+    if (m) highest = Math.max(highest, Number(m[1]));
+  }
+  return `Chat ${Math.max(highest + 1, existing.length + 1)}`;
+}
+
+function readStoredActiveSessionId(): string | null {
+  try {
+    return localStorage.getItem(ACTIVE_SESSION_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Choose the conversation to open on launch: the one the user was last
+ * reading, but only while it is still present and open. A stored id for a
+ * chat that has since been archived, trashed, or deleted must not win —
+ * falling through to the newest chat is the honest outcome.
+ */
+export function pickRestoredSession(
+  loaded: readonly ChatSession[],
+  storedId: string | null,
+): string | null {
+  if (loaded.length === 0) return null;
+  const stored =
+    storedId &&
+    loaded.find((s) => s.id === storedId && !s.archived && !s.trashed);
+  return stored ? stored.id : loaded[0]!.id;
+}
+
 export function useChatSessions() {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [sessionsReady, setSessionsReady] = useState(false);
@@ -137,7 +179,9 @@ export function useChatSessions() {
           setActiveSessionId(s.id);
         } else {
           setSessions(loaded);
-          setActiveSessionId(loaded[0].id);
+          setActiveSessionId(
+            pickRestoredSession(loaded, readStoredActiveSessionId()),
+          );
         }
       } catch {
         if (!cancelled) {
@@ -154,6 +198,16 @@ export function useChatSessions() {
     };
   }, []);
 
+  // Remember what the user was reading so the next launch reopens it.
+  useEffect(() => {
+    if (!sessionsReady || !resolvedSessionId) return;
+    try {
+      localStorage.setItem(ACTIVE_SESSION_KEY, resolvedSessionId);
+    } catch {
+      /* storage unavailable — restoration is a convenience, not a guarantee */
+    }
+  }, [sessionsReady, resolvedSessionId]);
+
   const openChatSessions = useMemo(
     () =>
       sessions
@@ -165,12 +219,24 @@ export function useChatSessions() {
     [sessions],
   );
 
-  const createSession = useCallback(() => {
-    const s = newSession(`Chat ${sessions.length + 1}`, null);
+  const createSession = useCallback((): ChatSession => {
+    const open = sessions.filter((s) => !s.archived && !s.trashed);
+    // "New chat" while an untouched blank chat is already open should take the
+    // user there rather than stacking another indistinguishable "Chat N".
+    // Blank chats are never persisted, so the extras only ever existed in the
+    // sidebar until the next reload.
+    const blank = open.find(
+      (s) => s.messages.length === 0 && !s.linkedCorpusId,
+    );
+    if (blank) {
+      setActiveSessionId(blank.id);
+      return blank;
+    }
+    const s = newSession(nextChatTitle(sessions), null);
     setSessions((all) => [s, ...all]);
     setActiveSessionId(s.id);
     return s;
-  }, [sessions.length]);
+  }, [sessions]);
 
   /**
    * Guarantee a non-trashed active chat exists (first send / model pick before
