@@ -1,0 +1,4 @@
+2025-06-15 14:20:00 UTC valid ascii record
+2025-06-15 14:20:01 UTC lone continuation € byte
+2025-06-15 14:20:02 UTC truncated sequence â‚ end
+2025-06-15 14:20:03 UTC valid ascii again

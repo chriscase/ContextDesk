@@ -1,0 +1,2 @@
+2025-06-15 08:05:10.004 CST [3001] WARNING:  there is already a transaction in progress
+2025-06-15 08:05:11.007 CST [3001] LOG:  duration: 1523.004 ms  statement: SELECT count(*) FROM orders

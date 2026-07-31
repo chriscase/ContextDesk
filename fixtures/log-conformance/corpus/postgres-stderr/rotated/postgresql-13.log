@@ -1,0 +1,2 @@
+2025-06-15 12:59:59.750 UTC [4002] LOG:  automatic vacuum of table "appdb.public.orders"
+2025-06-15 13:00:01.250 UTC [4002] LOG:  parameter "log_min_duration_statement" changed to "250ms"

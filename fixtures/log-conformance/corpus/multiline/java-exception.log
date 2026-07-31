@@ -1,0 +1,10 @@
+2025-06-15 13:00:00,100 ERROR [com.example.svc.OrderService] (worker-1) Order submission failed
+java.sql.SQLException: connection refused
+	at com.example.svc.OrderService.handle(OrderService.java:42)
+	at com.example.svc.OrderController.post(OrderController.java:19)
+Caused by: java.net.ConnectException: Connection refused
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	... 14 more
+	Suppressed: java.lang.IllegalStateException: pool already closed
+		at com.example.svc.Pool.close(Pool.java:88)
+2025-06-15 13:00:01,200 INFO  [com.example.svc.OrderService] (worker-1) Retry scheduled

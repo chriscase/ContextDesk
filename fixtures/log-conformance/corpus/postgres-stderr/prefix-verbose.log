@@ -1,0 +1,4 @@
+2025-06-15 12:05:10 UTC [2001]: [1-1] user=app_user,db=appdb,app=worker,client=192.0.2.15 LOG:  statement: SELECT 1
+2025-06-15 12:05:11 UTC [2001]: [2-1] user=app_user,db=appdb,app=worker,client=192.0.2.15 ERROR:  canceling statement due to statement timeout
+2025-06-15 12:05:11 UTC [2001]: [3-1] user=app_user,db=appdb,app=worker,client=192.0.2.15 CONTEXT:  while updating tuple in relation "orders"
+2025-06-15 12:05:12 UTC [2002]: [1-1] user=[unknown],db=[unknown],app=[unknown],client=192.0.2.31 LOG:  connection received

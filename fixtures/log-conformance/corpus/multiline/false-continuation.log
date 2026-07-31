@@ -1,0 +1,4 @@
+2025-06-15 13:30:00,000 INFO  [com.example.svc.Audit] (main) audit begin
+2025-06-15 13:30:01,000 INFO  [com.example.svc.Audit] (main) user note: Caused by: operator request
+        2025-06-15 13:30:02,000 WARN  [com.example.svc.Audit] (main) indented but timestamped record
+2025-06-15 13:30:03,000 INFO  [com.example.svc.Audit] (main) audit end

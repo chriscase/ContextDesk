@@ -1,0 +1,2 @@
+2025-06-15 12:59:58.000 UTC [4001] LOG:  checkpoint complete
+2025-06-15 13:00:00.500 UTC [4001] LOG:  received SIGHUP, reloading configuration files

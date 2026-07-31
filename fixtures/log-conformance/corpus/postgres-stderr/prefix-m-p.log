@@ -1,0 +1,6 @@
+2025-06-15 12:00:00.123 UTC [1042] LOG:  database system is ready to accept connections
+2025-06-15 12:00:01.500 UTC [1103] ERROR:  duplicate key value violates unique constraint "orders_pkey"
+2025-06-15 12:00:01.500 UTC [1103] DETAIL:  Key (id)=(42) already exists.
+2025-06-15 12:00:01.500 UTC [1103] HINT:  Retry with a fresh identifier.
+2025-06-15 12:00:01.500 UTC [1103] STATEMENT:  INSERT INTO orders (id, label) VALUES (42, 'demo');
+2025-06-15 12:00:02.001 UTC [1042] LOG:  checkpoint starting: time

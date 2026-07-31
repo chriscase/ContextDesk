@@ -1,0 +1,12 @@
+{"id":"ts-rfc3339-z","ts":"2025-06-15T12:00:00Z","level":"info","message":"rfc3339 utc"}
+{"id":"ts-rfc3339-offset","ts":"2025-06-15T17:30:00+05:30","level":"info","message":"rfc3339 offset"}
+{"id":"timestamp-epoch-seconds","timestamp":1749988800,"level":"warn","message":"epoch seconds"}
+{"id":"time-epoch-millis","time":1749988800000,"level":"error","message":"epoch milliseconds"}
+{"id":"at-timestamp-epoch-micros","@timestamp":1749988800000000,"level":"debug","message":"epoch microseconds"}
+{"id":"ts-epoch-nanos","ts":1749988800000000000,"level":"info","message":"epoch nanoseconds"}
+{"id":"ts-offsetless-local","ts":"2025-06-15T12:00:00","level":"info","message":"offsetless local"}
+{"id":"ts-offsetless-local-space","ts":"2025-06-15 12:00:00.250","level":"info","message":"offsetless local with space"}
+{"id":"ts-linux-calendar","ts":"Sun Jun 15 12:00:00 2025","level":"info","message":"linux calendar string"}
+{"id":"ts-ambiguous-yyyymmdd","ts":20250615,"level":"info","message":"ambiguous yyyymmdd"}
+{"id":"ts-alias-serilog","@t":"2025-06-15T12:00:00Z","level":"info","message":"serilog alias"}
+{"id":"ts-alias-event-time","eventTime":"2025-06-15T12:00:00Z","level":"info","message":"eventTime alias"}

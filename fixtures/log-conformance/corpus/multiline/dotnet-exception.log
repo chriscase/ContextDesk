@@ -1,0 +1,7 @@
+2025-06-15 13:10:00.000 +00:00 [ERR] Order submission failed
+System.Data.SqlClient.SqlException (0x80131904): Timeout expired.
+   at Example.Svc.OrderService.Handle() in /src/svc/OrderService.cs:line 42
+   at Example.Svc.OrderController.Post() in /src/svc/OrderController.cs:line 19
+ ---> System.TimeoutException: The operation timed out.
+   --- End of inner exception stack trace ---
+2025-06-15 13:10:01.000 +00:00 [INF] Retry scheduled
