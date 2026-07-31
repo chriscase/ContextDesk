@@ -111,6 +111,60 @@ Index caps (all in `index.rs`; surfaced via `AppConfig`):
   before any `read_to_string`, so huge dumps never allocate in full).
 - **`MAX_DEPTH`** — directory-walk depth cap, **12** (runaway nesting is skipped).
 
+## Renderer visual acceptance (desktop)
+
+Real-Chromium visual, responsive, and accessibility regression for the desktop
+UI: Vitest 4 browser mode via `@vitest/browser-playwright`, configured in
+`desktop/vitest.visual.config.ts`, suites in `desktop/visual/`. It is a
+**separate config on purpose** — `npm run test` and the documented CI gate are
+unchanged, and nothing here runs in the ubuntu CI desktop job.
+
+**Honesty scope:** everything this suite proves is renderer-level (headless
+Chromium rendering the production CSS with mocked hosts) — real layout, real
+computed styles, real focus and ARIA semantics, axe-core on rendered pixels.
+It is never native packaged acceptance (`docs/CLOSE_PROOF.md` § Native
+packaged proof): no packaged shell, no OS window manager, no OS-level input.
+
+```sh
+cd desktop
+npx playwright install chromium   # once per machine (~130 MB cache)
+npm run test:visual               # run the suite (must be green)
+npm run test:visual:update        # regenerate baselines after a REVIEWED change
+npm run typecheck:visual          # tsc over desktop/visual/
+```
+
+Baselines live in `desktop/visual/**/__screenshots__/` with the browser and
+platform in the filename (`…-chromium-darwin.png`) — they are **per-OS by
+construction**; a Linux run needs its own `-linux` baselines. A test with no
+baseline fails and writes one for review — the first run of a new screenshot
+is red by design; review the PNG, then re-run. On mismatch, expected/actual/
+diff PNGs land in the gitignored `desktop/.vitest-attachments/`.
+
+Determinism: pinned sRGB color profile, no LCD text, hidden scrollbars, DPR 1,
+reduced motion, UTC, en-US; fonts are force-loaded before capture; theme flips
+go through `applyTheme()`, which waits a painted frame (the tester returns
+stale computed styles on synchronous reads after attribute/class flips — see
+`visual/support/harness.ts`).
+
+**Known sensitivity boundary (proven by mutation):** removing the #834
+fixed-position rule, a visible-magnitude panel recolor, and a deleted
+aria-label each fail loudly, but a *uniform tint shift below pixelmatch's
+per-pixel threshold* (≈10% YIQ distance, e.g. `#12141a → #1a1c24`) passes the
+screenshot comparison on every pixel. Token-level truth is owned by the
+existing `src/styles/themes/*Contrast.test.ts` / `tokenResolution.test.ts`
+unit suites; the visual suite adds geometry, composition, and rendered-pixel
+regressions, not token drift detection.
+
+**CI proposal (measured on an M-series Mac, 2026-07-31):** one clean full run
+is ~9 s wall (6 files, 41 tests; ~1.4–2.4 s per file after browser start), so
+the whole suite is cheap enough to be the **PR smoke** wherever a macOS
+runner with the Playwright Chromium cache exists; until such a runner is
+wired, it stays a documented local gate for UI-touching branches. A
+**scheduled fuller matrix** (all five skins on the richest surfaces, extra
+viewport ladder steps, a DPR-2 instance) would multiply baselines ~3–4× and
+is deliberately not implemented — decide runner strategy first, since
+baselines are per-OS.
+
 ## Dev ports (multi-Tauri machines)
 
 Almost every `create-tauri-app` template uses **Vite on 1420**. If you run several Tauri apps, that port is almost always busy (`strictPort: true` then fails).
