@@ -6,6 +6,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type RefObject,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   hostLogActivateTemplateSuppression,
   hostLogPreviewTemplateSuppression,
@@ -488,8 +489,17 @@ export function SuppressTemplateDialog({
 
   const dismiss = () => {
     if (busy) return;
+    const mustResyncPolicy = preview !== null || error !== null;
     onDismiss();
-    queueMicrotask(() => triggerRef.current?.focus());
+    if (mustResyncPolicy) {
+      void onReloadPolicy()
+        .catch(() => undefined)
+        .finally(() => {
+          queueMicrotask(() => triggerRef.current?.focus());
+        });
+    } else {
+      queueMicrotask(() => triggerRef.current?.focus());
+    }
   };
 
   useEffect(() => {
@@ -567,10 +577,11 @@ export function SuppressTemplateDialog({
       ? (preview.matchingEventCount / preview.corpusEventCount) * 100
       : 0;
 
-  return (
+  const dialog = (
     <div
-      className="log-explorer__dialog-backdrop"
+      className="log-explorer__dialog-backdrop log-explorer__dialog-backdrop--viewport"
       data-testid="suppress-template-backdrop"
+      data-noise-policy-branch="true"
       onKeyDown={(event) => {
         if (event.key === "Escape" && !busy) {
           event.preventDefault();
@@ -741,4 +752,9 @@ export function SuppressTemplateDialog({
       </form>
     </div>
   );
+
+  // This dialog can be launched from inside the absolutely positioned Noise
+  // review popover. Portal it to the document so the viewport, rather than the
+  // popover's narrow containing block, owns its backdrop and responsive width.
+  return createPortal(dialog, document.body);
 }
