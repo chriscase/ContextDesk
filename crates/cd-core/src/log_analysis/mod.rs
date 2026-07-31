@@ -78,6 +78,7 @@ pub use governed_citation::{
 pub use ingest::{
     ingest_path, ingest_path_with_observer, ingest_path_with_policy,
     ingest_path_with_policy_and_observer, ingest_path_with_policy_and_observer_managed,
+    ingest_path_with_policy_selection_and_observer,
     ingest_path_with_policy_selection_and_observer_managed, IngestPhaseTimings, IngestReport,
     IngestSelection, IngestStats,
 };

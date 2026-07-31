@@ -389,6 +389,54 @@ pub fn ingest_path_with_policy_and_observer_managed(
     )
 }
 
+/// Policy ingest honoring an explicit reviewed selection (#751), unmanaged.
+///
+/// See [`ingest_path_with_policy_selection_and_observer_managed`] for the
+/// selection semantics; this variant is for ordinary user-invoked imports
+/// that do not reserve a host-managed identity.
+#[allow(clippy::too_many_arguments)]
+pub fn ingest_path_with_policy_selection_and_observer(
+    cache_root: &Path,
+    path: &Path,
+    name: &str,
+    policy: &LogEmbedPolicy,
+    embed: Option<Arc<dyn EmbedBackend>>,
+    progress: &dyn ProcessProgressObserver,
+    cancel: Option<&CancelFlag>,
+    selection: &IngestSelection,
+) -> CoreResult<IngestReport> {
+    policy.assert_embed_allowed()?;
+    if selection.deselected.len() > super::import_preview::MAX_IMPORT_PREVIEW_ITEMS {
+        return Err(CoreError::Policy(format!(
+            "import selection lists {} deselected identities (limit {})",
+            selection.deselected.len(),
+            super::import_preview::MAX_IMPORT_PREVIEW_ITEMS
+        )));
+    }
+    let backend = match policy.mode {
+        LogEmbedMode::None => None,
+        LogEmbedMode::Local | LogEmbedMode::Cloud => embed,
+    };
+    if policy.mode == LogEmbedMode::Cloud && backend.is_none() {
+        return Err(CoreError::Config(
+            "cloud embed mode requires an EmbedBackend (key from keychain)".into(),
+        ));
+    }
+    ingest_path_inner(
+        cache_root,
+        path,
+        name,
+        backend.as_deref(),
+        policy.model_id.as_str(),
+        policy.mode,
+        policy.defer_above_source_bytes,
+        progress,
+        cancel,
+        None,
+        Some(selection),
+    )
+}
+
 /// Managed policy ingest honoring an explicit reviewed selection (#751).
 ///
 /// Identical to [`ingest_path_with_policy_and_observer_managed`] except that
