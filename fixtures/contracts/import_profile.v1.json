@@ -1,0 +1,34 @@
+{
+  "minReaderVersion": 1,
+  "name": "Example web tier",
+  "profileId": "example.web-tier",
+  "schemaId": "contextdesk.import_profile.v1",
+  "scope": {
+    "label": "example/web"
+  },
+  "sourceGroups": [
+    {
+      "exclude": [
+        "logs/**/debug-*"
+      ],
+      "formatProfile": {
+        "id": "json-object-line",
+        "version": 1
+      },
+      "groupId": "app-logs",
+      "include": [
+        "logs/**"
+      ],
+      "role": "log",
+      "timestampPolicy": "reviewed.utc-explicit"
+    },
+    {
+      "groupId": "metrics",
+      "include": [
+        "metrics/*.json"
+      ],
+      "role": "operational_metrics"
+    }
+  ],
+  "version": 1
+}

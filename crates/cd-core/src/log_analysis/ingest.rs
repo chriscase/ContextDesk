@@ -2,6 +2,7 @@
 
 use super::drain::DrainMiner;
 use super::embed_policy::{LogEmbedMode, LogEmbedPolicy};
+use super::import_preview::{ImportPreviewItem, ImportPreviewReport};
 use super::ingest_confidence::{IngestConfidenceAggregator, IngestConfidenceReport};
 use super::parse::{parse_line_with_fingerprint, LogFormat};
 use super::redact_log::{prepare_original_record, redact_message, redact_params};
@@ -1266,17 +1267,19 @@ fn resolve_zip64_entry_values(
     ))
 }
 
-fn locate_raw_log_zip_directory(file: &mut std::fs::File) -> CoreResult<(u64, u64, u64)> {
+fn locate_raw_log_zip_directory<R: Read + Seek>(file: &mut R) -> CoreResult<(u64, u64, u64)> {
     const EOCD_MIN_BYTES: usize = 22;
     const MAX_ZIP_COMMENT_BYTES: usize = u16::MAX as usize;
     const EOCD_SIGNATURE: &[u8; 4] = b"PK\x05\x06";
     const ZIP64_LOCATOR_SIGNATURE: &[u8; 4] = b"PK\x06\x07";
     const ZIP64_EOCD_SIGNATURE: &[u8; 4] = b"PK\x06\x06";
 
-    let file_len = file
-        .metadata()
-        .map_err(|e| CoreError::Message(format!("read zip metadata: {e}")))?
-        .len();
+    // Length via seek rather than `File::metadata`, so this works for any
+    // `Read + Seek` — the preview inventories a nested archive from an
+    // in-memory cursor, because staging it to disk would be a write.
+    let file_len: u64 = file
+        .seek(SeekFrom::End(0))
+        .map_err(|e| CoreError::Message(format!("read zip length: {e}")))?;
     if file_len < EOCD_MIN_BYTES as u64 {
         return Err(CoreError::Message("zip open: missing end record".into()));
     }
@@ -1397,8 +1400,8 @@ fn locate_raw_log_zip_directory(file: &mut std::fs::File) -> CoreResult<(u64, u6
 /// metadata, inconsistent central directories, and multi-disk archives. We
 /// independently walk every raw central entry so no name-index collapsing can
 /// hide duplicate or traversal ambiguity.
-fn preflight_raw_log_zip(
-    file: &mut std::fs::File,
+fn preflight_raw_log_zip<R: Read + Seek>(
+    file: &mut R,
     budget: &mut RawIngestBudget,
     limits: RawIngestLimits,
     cancel: Option<&CancelFlag>,
@@ -3250,6 +3253,485 @@ fn open_inventory_file(inventory: &FileInventory, path: &Path) -> CoreResult<std
         }
     }
     Ok(file)
+}
+
+/// Largest nested archive the preview will buffer in memory to inventory.
+///
+/// Preview never stages to disk (that is a write), so a nested archive must be
+/// held in memory to be read. Beyond this bound the archive is reported with
+/// [`super::import_preview::ImportPreviewReason::NestedArchiveNotInventoried`]
+/// and the report is marked truncated, rather than silently under-reporting
+/// what the real import would descend into.
+const MAX_PREVIEW_NESTED_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Read-only preview traversal backing [`super::import_preview::preview_import_path`].
+///
+/// Lives here, not in `import_preview`, so it can reuse this module's private
+/// traversal (`collect_log_files`), archive preflight (`preflight_raw_log_zip`),
+/// identity rules (`portable_source_identity`, `archive_member_identity`), and
+/// budget/limit types **without widening any of them into the public API**. A
+/// parallel walker in another module would be free to disagree with the real
+/// import path about what is safe, which is precisely the class of bug these
+/// limits exist to prevent.
+///
+/// Writes nothing: no staging directory, no corpus, no cache entry. Nested
+/// archives are inventoried from their central directory only.
+pub(super) fn preview_import_path_impl(
+    path: &Path,
+    cancel: Option<&CancelFlag>,
+) -> CoreResult<ImportPreviewReport> {
+    use super::import_preview::{
+        excluded_item, finish_report, item_from_sample, map_exclusion, sample_bounded,
+        ImportItemStatus, ImportPreviewReason, ImportSourceKind, MAX_IMPORT_PREVIEW_ITEMS,
+    };
+
+    let limits = RawIngestLimits::default();
+    let mut budget = RawIngestBudget::default();
+    let mut items: Vec<ImportPreviewItem> = Vec::new();
+    let mut truncated = false;
+
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| CoreError::Message("log source does not exist".into()))?;
+    if metadata.file_type().is_symlink() {
+        // Matches `collect_log_files`: a directly selected symlink is fatal,
+        // not an excluded row.
+        return Err(CoreError::Policy(
+            "symlink log source rejected by policy".into(),
+        ));
+    }
+
+    // A directly selected ZIP previews as an archive with bare member
+    // identities, exactly as `ingest_from_zip_file(prefix_members = false)`
+    // would publish them.
+    if metadata.is_file() {
+        // Archive detection must match `ingest_path_inner` exactly, or the
+        // preview promises an import that will not happen. For a *directly
+        // selected* path ingest uses `is_zip_file`, which is extension-only
+        // and deliberately ignores content — so preview does too. Using the
+        // ZIP signature here instead (as an earlier version did) reported a
+        // `.bundle` ZIP as an archive full of importable members while the
+        // real import treated it as one binary file and published nothing.
+        let mut file = open_selected_regular_file(path)?;
+        let is_archive = is_zip_file(path);
+
+        if is_archive {
+            preview_zip_members(
+                &mut file,
+                "",
+                1,
+                &mut budget,
+                limits,
+                cancel,
+                &mut items,
+                &mut truncated,
+            )?;
+            return Ok(finish_report(
+                ImportSourceKind::Archive,
+                items,
+                truncated,
+                None,
+            ));
+        }
+
+        budget.add_entries(1, limits)?;
+        let identity = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "item".to_string());
+        let bytes = metadata.len();
+        if bytes > limits.max_file_bytes {
+            items.push(excluded_item(
+                &identity,
+                bytes,
+                ImportItemStatus::Blocked,
+                ImportPreviewReason::Oversized,
+            ));
+        } else {
+            let sample = sample_bounded(&mut file, bytes);
+            items.push(item_from_sample(&identity, bytes, &sample, None, false));
+        }
+        return Ok(finish_report(
+            ImportSourceKind::File,
+            items,
+            truncated,
+            None,
+        ));
+    }
+
+    let inventory = collect_log_files(path, &mut budget, limits, cancel)?;
+
+    // Excluded AND ignored entries become rows — "nothing disappears silently"
+    // is only true if every refusal is visible. `collect_log_files` returns
+    // these in two separate vectors; an earlier version consumed only
+    // `excluded`, so hidden files and whole hidden subtrees vanished from the
+    // report with no item, no reason, and no count.
+    for ignored_path in &inventory.ignored {
+        if items.len() >= MAX_IMPORT_PREVIEW_ITEMS {
+            truncated = true;
+            break;
+        }
+        let identity = preview_relative_identity(ignored_path, &inventory.canonical_root);
+        let bytes = std::fs::symlink_metadata(ignored_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        items.push(excluded_item(
+            &identity,
+            bytes,
+            ImportItemStatus::Ignored,
+            ImportPreviewReason::Hidden,
+        ));
+    }
+
+    for (excluded_path, reason) in &inventory.excluded {
+        if items.len() >= MAX_IMPORT_PREVIEW_ITEMS {
+            truncated = true;
+            break;
+        }
+        let identity = preview_relative_identity(excluded_path, &inventory.canonical_root);
+        let (status, code) = map_exclusion(reason);
+        let bytes = std::fs::symlink_metadata(excluded_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        items.push(excluded_item(&identity, bytes, status, code));
+    }
+
+    for file_path in &inventory.files {
+        if cancelled(cancel) {
+            return Err(CoreError::Cancelled);
+        }
+        if items.len() >= MAX_IMPORT_PREVIEW_ITEMS {
+            truncated = true;
+            break;
+        }
+        let identity = preview_relative_identity(file_path, &inventory.canonical_root);
+        let Ok(meta) = std::fs::symlink_metadata(file_path) else {
+            items.push(excluded_item(
+                &identity,
+                0,
+                ImportItemStatus::Unsupported,
+                ImportPreviewReason::ReadFailed,
+            ));
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            // TOCTOU guard: the walk saw a regular file, so anything else now
+            // is a change under us and is refused rather than followed.
+            items.push(excluded_item(
+                &identity,
+                meta.len(),
+                ImportItemStatus::Blocked,
+                ImportPreviewReason::SymlinkRejected,
+            ));
+            continue;
+        }
+        let bytes = meta.len();
+        if bytes > limits.max_file_bytes {
+            items.push(excluded_item(
+                &identity,
+                bytes,
+                ImportItemStatus::Blocked,
+                ImportPreviewReason::Oversized,
+            ));
+            continue;
+        }
+        // `open_inventory_file` is the same hardened open the real import
+        // uses: it re-canonicalizes and asserts containment under the selected
+        // root, compares dev/ino of the pre-open metadata against the *opened
+        // handle*, and on Windows refuses reparse points. Plain `File::open`
+        // (an earlier version) left a check-then-use window in which a
+        // concurrent rename could swap the file for a symlink to anything on
+        // disk, whose content would then be sampled and reported under the
+        // in-root identity.
+        let Ok(mut file) = open_inventory_file(&inventory, file_path) else {
+            items.push(excluded_item(
+                &identity,
+                bytes,
+                ImportItemStatus::Blocked,
+                ImportPreviewReason::SymlinkRejected,
+            ));
+            continue;
+        };
+
+        let mut head = [0u8; 4];
+        let read = file.read(&mut head).unwrap_or(0);
+        // Directory members: extension OR signature, matching ingest.
+        let is_archive = has_zip_extension(file_path) || has_zip_signature(&head[..read]);
+        if file.seek(SeekFrom::Start(0)).is_err() {
+            items.push(excluded_item(
+                &identity,
+                bytes,
+                ImportItemStatus::Unsupported,
+                ImportPreviewReason::ReadFailed,
+            ));
+            continue;
+        }
+
+        if is_archive {
+            preview_zip_members(
+                &mut file,
+                &identity,
+                1,
+                &mut budget,
+                limits,
+                cancel,
+                &mut items,
+                &mut truncated,
+            )?;
+            continue;
+        }
+
+        let sample = sample_bounded(&mut file, bytes);
+        items.push(item_from_sample(&identity, bytes, &sample, None, false));
+    }
+
+    Ok(finish_report(
+        ImportSourceKind::Directory,
+        items,
+        truncated,
+        None,
+    ))
+}
+
+/// Portable identity of a walked path relative to the selected root.
+fn preview_relative_identity(path: &Path, canonical_root: &Path) -> String {
+    let relative = std::fs::canonicalize(path)
+        .ok()
+        .and_then(|canonical| {
+            canonical
+                .strip_prefix(canonical_root)
+                .ok()
+                .map(Path::to_path_buf)
+        })
+        .or_else(|| {
+            path.strip_prefix(canonical_root)
+                .ok()
+                .map(Path::to_path_buf)
+        })
+        .unwrap_or_else(|| {
+            PathBuf::from(
+                path.file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("item")),
+            )
+        });
+    portable_source_identity(&relative).unwrap_or_else(|_| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "item".to_string())
+    })
+}
+
+/// Inventory one archive's members from its central directory.
+///
+/// Two-pass like ingest: the plan is built from the central directory before
+/// any payload read, so a hostile entry is refused before it can be decompressed.
+/// Nested archives recurse under the same [`MAX_RAW_LOG_ARCHIVE_DEPTH`] bound.
+#[allow(clippy::too_many_arguments)]
+fn preview_zip_members<R: Read + Seek>(
+    file: &mut R,
+    archive_identity: &str,
+    archive_depth: u8,
+    budget: &mut RawIngestBudget,
+    limits: RawIngestLimits,
+    cancel: Option<&CancelFlag>,
+    items: &mut Vec<ImportPreviewItem>,
+    truncated: &mut bool,
+) -> CoreResult<()> {
+    use super::import_preview::{
+        excluded_item, item_from_sample, sample_streaming, ImportItemStatus, ImportPreviewReason,
+        SampleOutcome, MAX_IMPORT_PREVIEW_ITEMS,
+    };
+
+    let member_identity = |member: &str| -> String {
+        if archive_identity.is_empty() {
+            member.to_string()
+        } else {
+            archive_member_identity(archive_identity, member)
+        }
+    };
+
+    if archive_depth > limits.max_archive_depth {
+        items.push(excluded_item(
+            archive_identity,
+            0,
+            ImportItemStatus::Blocked,
+            ImportPreviewReason::ArchiveDepthExceeded,
+        ));
+        return Ok(());
+    }
+
+    // Refuses traversal, duplicate identities, encryption, and multi-disk
+    // archives before any member is opened.
+    let plans = preflight_raw_log_zip(file, budget, limits, cancel)?;
+
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| CoreError::Message(format!("rewind zip: {e}")))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| CoreError::Policy(format!("read zip archive: {e}")))?;
+
+    for plan in plans {
+        if cancelled(cancel) {
+            return Err(CoreError::Cancelled);
+        }
+        if items.len() >= MAX_IMPORT_PREVIEW_ITEMS {
+            *truncated = true;
+            break;
+        }
+        let identity = member_identity(&plan.identity);
+
+        match plan.disposition {
+            ZipEntryDisposition::Directory => continue,
+            ZipEntryDisposition::Symlink => {
+                items.push(excluded_item(
+                    &identity,
+                    plan.expanded_size,
+                    ImportItemStatus::Blocked,
+                    ImportPreviewReason::SymlinkRejected,
+                ));
+                continue;
+            }
+            ZipEntryDisposition::NonRegular => {
+                items.push(excluded_item(
+                    &identity,
+                    plan.expanded_size,
+                    ImportItemStatus::Blocked,
+                    ImportPreviewReason::NonRegularRejected,
+                ));
+                continue;
+            }
+            ZipEntryDisposition::TooLarge => {
+                items.push(excluded_item(
+                    &identity,
+                    plan.expanded_size,
+                    ImportItemStatus::Blocked,
+                    ImportPreviewReason::Oversized,
+                ));
+                continue;
+            }
+            ZipEntryDisposition::Hidden => {
+                // Same condition as a hidden file on disk, so same ledger
+                // state. Filing it as `Supporting` mixed ignored noise in with
+                // real attachments and left `counts.ignored` unreachable for
+                // archives.
+                items.push(excluded_item(
+                    &identity,
+                    plan.expanded_size,
+                    ImportItemStatus::Ignored,
+                    ImportPreviewReason::Hidden,
+                ));
+                continue;
+            }
+            ZipEntryDisposition::Import | ZipEntryDisposition::NestedArchive => {}
+        }
+
+        if compression_ratio_exceeded(
+            plan.expanded_size,
+            plan.compressed_size,
+            limits.max_compression_ratio,
+        ) {
+            items.push(excluded_item(
+                &identity,
+                plan.expanded_size,
+                ImportItemStatus::Blocked,
+                ImportPreviewReason::CompressionRatioExceeded,
+            ));
+            continue;
+        }
+
+        let Ok(mut entry) = archive.by_name(&plan.identity) else {
+            items.push(excluded_item(
+                &identity,
+                plan.expanded_size,
+                ImportItemStatus::Unsupported,
+                ImportPreviewReason::ReadFailed,
+            ));
+            continue;
+        };
+
+        // A nested archive is buffered and inventoried recursively.
+        // `ZipArchive` needs `Read + Seek`, which `Cursor<Vec<u8>>` provides,
+        // so preview never stages anything to disk the way ingest must.
+        if plan.disposition == ZipEntryDisposition::NestedArchive {
+            if archive_depth + 1 > limits.max_archive_depth {
+                items.push(excluded_item(
+                    &identity,
+                    plan.expanded_size,
+                    ImportItemStatus::Blocked,
+                    ImportPreviewReason::ArchiveDepthExceeded,
+                ));
+                continue;
+            }
+            if plan.expanded_size > MAX_PREVIEW_NESTED_ARCHIVE_BYTES {
+                // Disclosed, not silently skipped: the real import would
+                // descend here, so the preview says it could not.
+                items.push(excluded_item(
+                    &identity,
+                    plan.expanded_size,
+                    ImportItemStatus::Supporting,
+                    ImportPreviewReason::NestedArchiveNotInventoried,
+                ));
+                *truncated = true;
+                continue;
+            }
+            let mut buf = Vec::new();
+            if std::io::Read::take(&mut entry, plan.expanded_size)
+                .read_to_end(&mut buf)
+                .is_err()
+            {
+                items.push(excluded_item(
+                    &identity,
+                    plan.expanded_size,
+                    ImportItemStatus::Unsupported,
+                    ImportPreviewReason::ReadFailed,
+                ));
+                continue;
+            }
+            drop(entry);
+            let mut nested = std::io::Cursor::new(buf);
+            preview_zip_members(
+                &mut nested,
+                &identity,
+                archive_depth + 1,
+                budget,
+                limits,
+                cancel,
+                items,
+                truncated,
+            )?;
+            continue;
+        }
+
+        // True head/interior/tail sampling without `Seek`.
+        //
+        // A ZIP entry is a streaming reader, so an earlier version buffered
+        // only the first 64 KiB and then "sampled" three windows out of that
+        // head region — re-introducing exactly the first-window lock-in the
+        // design forbids, but only inside archives. Streaming keeps the head,
+        // a middle window, and a rolling tail, at bounded memory.
+        // Cancellation propagates as `Err(Cancelled)`; a read/decompression
+        // failure becomes an explicit ledger row rather than a classification
+        // of whatever bytes happened to arrive.
+        let sample = match sample_streaming(&mut entry, plan.expanded_size, cancel)? {
+            SampleOutcome::Sampled(sample) => sample,
+            SampleOutcome::ReadFailed => {
+                items.push(excluded_item(
+                    &identity,
+                    plan.expanded_size,
+                    ImportItemStatus::Unsupported,
+                    ImportPreviewReason::ReadFailed,
+                ));
+                continue;
+            }
+        };
+        items.push(item_from_sample(
+            &identity,
+            plan.expanded_size,
+            &sample,
+            None,
+            false,
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

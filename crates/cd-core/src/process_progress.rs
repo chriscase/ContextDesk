@@ -44,31 +44,38 @@ impl LogIngestEvidence {
     /// Parent paths and archive ancestry are discarded before redaction. Names
     /// that resemble private hosts are replaced completely rather than exposed.
     pub(crate) fn from_source(reason: LogIngestEvidenceReason, source: &std::path::Path) -> Self {
-        let raw = source.to_string_lossy();
-        let leaf = raw
-            .rsplit(['/', '\\'])
-            .find(|component| !component.is_empty())
-            .unwrap_or("item");
-        let redaction = crate::redact::redact_candidate(leaf);
-        let mut safe = if redaction.blocked {
-            "[REDACTED_BASENAME]".to_string()
-        } else {
-            redaction.text
-        };
-        safe.retain(|character| !character.is_control() && !matches!(character, '/' | '\\' | '!'));
-        safe = safe.trim().to_string();
-        if safe.is_empty() || resembles_private_host(&safe) {
-            safe = "[REDACTED_BASENAME]".into();
-        }
-        safe = safe
-            .chars()
-            .take(MAX_LOG_INGEST_EVIDENCE_BASENAME_CHARS)
-            .collect();
         Self {
             reason,
-            basename: safe,
+            basename: redact_basename(&source.to_string_lossy()),
         }
     }
+}
+
+/// Discard ancestry from a filesystem or virtual archive identity, then redact
+/// the remaining leaf.
+///
+/// Shared by [`LogIngestEvidence`] and the import preview so both surfaces
+/// apply byte-identical rules. A second near-copy would be free to drift into
+/// leaking a private hostname or an archive ancestor.
+pub(crate) fn redact_basename(source: &str) -> String {
+    let leaf = source
+        .rsplit(['/', '\\'])
+        .find(|component| !component.is_empty())
+        .unwrap_or("item");
+    let redaction = crate::redact::redact_candidate(leaf);
+    let mut safe = if redaction.blocked {
+        "[REDACTED_BASENAME]".to_string()
+    } else {
+        redaction.text
+    };
+    safe.retain(|character| !character.is_control() && !matches!(character, '/' | '\\' | '!'));
+    safe = safe.trim().to_string();
+    if safe.is_empty() || resembles_private_host(&safe) {
+        safe = "[REDACTED_BASENAME]".into();
+    }
+    safe.chars()
+        .take(MAX_LOG_INGEST_EVIDENCE_BASENAME_CHARS)
+        .collect()
 }
 
 fn resembles_private_host(value: &str) -> bool {

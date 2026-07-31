@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextdesk.local/schemas/import_profile/import-profile.v1.json",
+  "title": "ContextDesk ImportProfile v1",
+  "description": "A portable, declarative, versioned import plan. Contains no executable code and no user-supplied regular expressions. A format profile reference expresses an expectation; it never activates a parser on its own.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "minReaderVersion",
+    "profileId",
+    "version",
+    "scope",
+    "name",
+    "sourceGroups"
+  ],
+  "properties": {
+    "schemaId": {
+      "type": "string",
+      "const": "contextdesk.import_profile.v1"
+    },
+    "minReaderVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Lowest reader version able to interpret this document. A reader that is older must refuse the document rather than partially understand it."
+    },
+    "profileId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Stable identity across versions."
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Monotonically increasing. Editing an import profile produces a new version whose digest differs; documents are never edited in place."
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label"
+      ],
+      "description": "Mandatory. A import profile never applies globally, so a correction cannot silently change behaviour for unrelated corpora.",
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "sourceGroups": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/sourceGroup"
+      }
+    }
+  },
+  "$defs": {
+    "safePattern": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Bounded glob. '?' matches one non-separator character, '*' matches within one path segment, '**' matches whole segments. There is no alternation, no character class, and no quantifier, so matching is linear and cannot be made to backtrack catastrophically. Must be relative: no leading '/', no backslash, and no '.' or '..' segment.",
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*(^|/)\\.\\.?(/|$)).+$"
+    },
+    "profileRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version"
+      ],
+      "description": "Reference to a profile the build already registers. A reference cannot define new parsing behaviour.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      }
+    },
+    "sourceGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "groupId",
+        "include",
+        "role"
+      ],
+      "properties": {
+        "groupId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "include": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/safePattern"
+          },
+          "maxItems": 256
+        },
+        "exclude": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/safePattern"
+          },
+          "description": "Applied after include.",
+          "maxItems": 256
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "log",
+            "operational_metrics",
+            "attachment",
+            "readme",
+            "unknown"
+          ],
+          "description": "Matches the Incident Evidence Bundle manifest role vocabulary, plus 'unknown'."
+        },
+        "formatProfile": {
+          "$ref": "#/$defs/profileRef",
+          "description": "Expected format. Reported as applied only where the source's own content fingerprint already agrees; otherwise the result is drift."
+        },
+        "framingProfile": {
+          "$ref": "#/$defs/profileRef"
+        },
+        "timestampPolicy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Reference to a timestamp/timezone policy the user already reviewed. Never encodes a timezone guess; an absent declaration stays unresolved."
+        }
+      }
+    }
+  }
+}

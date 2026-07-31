@@ -1025,6 +1025,363 @@ export const parseBookmarkEventRef = parserFor<WireBookmarkEventRef>(
   bookmarkEventRefShape,
 );
 
+/* ------------------------------------------------------------------ *
+ * Import preview + ImportProfile v1 (#751 / #763)
+ *
+ * Mirrors `cd_core::log_analysis::import_preview` and `::import_profile`.
+ * Casing follows the house wire style: camelCase struct fields with
+ * snake_case enum values.
+ * ------------------------------------------------------------------ */
+
+/** Disposition of one previewed file or archive member. */
+export const IMPORT_ITEM_STATUS = [
+  "ready",
+  "review",
+  "raw_fallback",
+  "supporting",
+  "ignored",
+  "unsupported",
+  "blocked",
+] as const;
+export type ImportItemStatus = (typeof IMPORT_ITEM_STATUS)[number];
+
+/**
+ * Proposed handling role. Values match the Incident Evidence Bundle
+ * manifest `role` vocabulary so a bundle declaration needs no translation.
+ */
+export const IMPORT_ITEM_ROLE = [
+  "log",
+  "operational_metrics",
+  "attachment",
+  "readme",
+  "unknown",
+] as const;
+export type ImportItemRole = (typeof IMPORT_ITEM_ROLE)[number];
+
+/** What the user selected for preview. */
+export const IMPORT_SOURCE_KIND = ["file", "directory", "archive"] as const;
+export type ImportSourceKind = (typeof IMPORT_SOURCE_KIND)[number];
+
+/** Machine-readable explanation for an item's status. */
+export const IMPORT_PREVIEW_REASON = [
+  "manifest_declared",
+  "strong_format_match",
+  "ambiguous_format_match",
+  "mixed_format_records",
+  "no_structured_match",
+  "binary_content",
+  "empty_content",
+  "oversized",
+  "hidden",
+  "symlink_rejected",
+  "non_regular_rejected",
+  "archive_depth_exceeded",
+  "compression_ratio_exceeded",
+  "traversal_rejected",
+  "duplicate_identity",
+  "encrypted_entry",
+  "read_failed",
+  "metrics_document",
+  "readme_document",
+  "weak_name_hint_only",
+  "nested_archive_not_inventoried",
+] as const;
+export type ImportPreviewReason = (typeof IMPORT_PREVIEW_REASON)[number];
+
+/** Three-valued deterministic fingerprint outcome. */
+export const IMPORT_FORMAT_OUTCOME = [
+  "matched",
+  "ambiguous",
+  "unknown",
+] as const;
+export type ImportFormatOutcome = (typeof IMPORT_FORMAT_OUTCOME)[number];
+
+const importPreviewItemShape: ObjectShape = {
+  identity: f.req(f.str),
+  basename: f.req(f.str),
+  bytes: f.req(f.u64),
+  status: f.req(f.en(...IMPORT_ITEM_STATUS)),
+  role: f.req(f.en(...IMPORT_ITEM_ROLE)),
+  selected: f.req(f.bool),
+  formatId: f.opt(f.str),
+  formatVersion: f.opt(f.u64),
+  outcome: f.opt(f.en(...IMPORT_FORMAT_OUTCOME)),
+  score: f.opt(f.u64),
+  runnerUpMargin: f.opt(f.u64),
+  producerHint: f.opt(f.str),
+  decisiveClueCodes: f.opt(f.arr(f.str)),
+  reasons: f.req(f.arr(f.en(...IMPORT_PREVIEW_REASON))),
+  representative: f.opt(f.str),
+  groupId: f.opt(f.str),
+};
+
+const importPreviewReportShape: ObjectShape = {
+  schemaVersion: f.req(f.u64),
+  sourceKind: f.req(f.en(...IMPORT_SOURCE_KIND)),
+  items: f.req(f.arr(f.obj(importPreviewItemShape))),
+  groups: f.opt(
+    f.arr(
+      f.obj({
+        groupId: f.req(f.str),
+        stem: f.req(f.str),
+        formatId: f.req(f.str),
+        formatVersion: f.req(f.u64),
+        memberIdentities: f.req(f.arr(f.str)),
+        possibleOverlap: f.req(f.bool),
+      }),
+    ),
+  ),
+  counts: f.req(
+    f.obj({
+      total: f.req(f.u64),
+      selected: f.req(f.u64),
+      ready: f.req(f.u64),
+      review: f.req(f.u64),
+      rawFallback: f.req(f.u64),
+      supporting: f.req(f.u64),
+      ignored: f.req(f.u64),
+      unsupported: f.req(f.u64),
+      blocked: f.req(f.u64),
+    }),
+  ),
+  truncated: f.req(f.bool),
+  manifest: f.opt(
+    f.obj({
+      schemaId: f.req(f.str),
+      valid: f.req(f.bool),
+      declaredComponents: f.req(f.u64),
+      diagnosticCodes: f.opt(f.arr(f.str)),
+    }),
+  ),
+};
+
+/** One previewed file or archive member. */
+export type WireImportPreviewItem = {
+  identity: string;
+  basename: string;
+  bytes: number;
+  status: ImportItemStatus;
+  role: ImportItemRole;
+  selected: boolean;
+  formatId?: string;
+  formatVersion?: number;
+  outcome?: ImportFormatOutcome;
+  score?: number;
+  runnerUpMargin?: number;
+  producerHint?: string;
+  decisiveClueCodes?: string[];
+  reasons: ImportPreviewReason[];
+  representative?: string;
+  groupId?: string;
+};
+
+/** Bounded preview of one import source. */
+export type WireImportPreviewReport = {
+  schemaVersion: number;
+  sourceKind: ImportSourceKind;
+  items: WireImportPreviewItem[];
+  groups?: {
+    groupId: string;
+    stem: string;
+    formatId: string;
+    formatVersion: number;
+    memberIdentities: string[];
+    possibleOverlap: boolean;
+  }[];
+  counts: {
+    total: number;
+    selected: number;
+    ready: number;
+    review: number;
+    rawFallback: number;
+    supporting: number;
+    ignored: number;
+    unsupported: number;
+    blocked: number;
+  };
+  truncated: boolean;
+  manifest?: {
+    schemaId: string;
+    valid: boolean;
+    declaredComponents: number;
+    diagnosticCodes?: string[];
+  };
+};
+
+const profileRefShape: ObjectShape = {
+  id: f.req(f.str),
+  version: f.req(f.u64),
+};
+
+const importProfileShape: ObjectShape = {
+  schemaId: f.req(f.str),
+  minReaderVersion: f.req(f.u64),
+  profileId: f.req(f.str),
+  version: f.req(f.u64),
+  scope: f.req(f.obj({ label: f.req(f.str) })),
+  name: f.req(f.str),
+  sourceGroups: f.req(
+    f.arr(
+      f.obj({
+        groupId: f.req(f.str),
+        include: f.req(f.arr(f.str)),
+        exclude: f.opt(f.arr(f.str)),
+        role: f.req(f.en(...IMPORT_ITEM_ROLE)),
+        formatProfile: f.opt(f.obj(profileRefShape)),
+        framingProfile: f.opt(f.obj(profileRefShape)),
+        timestampPolicy: f.opt(f.str),
+      }),
+    ),
+  ),
+};
+
+/** Whether a recipe expectation held, drifted, or conflicted. */
+export const PROFILE_FINDING_KIND = ["match", "drift", "conflict"] as const;
+export type ProfileFindingKind = (typeof PROFILE_FINDING_KIND)[number];
+
+/** Why a recipe finding was raised. */
+export const PROFILE_DIAGNOSTIC_CODE = [
+  "schema_id_invalid",
+  "reader_too_old",
+  "min_reader_version_invalid",
+  "identifier_invalid",
+  "version_invalid",
+  "no_source_groups",
+  "too_many_groups",
+  "duplicate_group_id",
+  "too_many_patterns",
+  "group_has_no_includes",
+  "pattern_empty",
+  "pattern_too_long",
+  "pattern_too_many_wildcards",
+  "pattern_too_many_segments",
+  "pattern_not_relative",
+  "pattern_traversal",
+  "pattern_control_character",
+  "pattern_empty_segment",
+  "pattern_empty_segment",
+  "profile_ref_invalid",
+  "document_too_large",
+] as const;
+export type ProfileDiagnosticCode = (typeof PROFILE_DIAGNOSTIC_CODE)[number];
+
+export const PROFILE_APPLICABILITY = [
+  "applicable",
+  "not_applicable",
+  "incomplete",
+] as const;
+export type ProfileApplicability = (typeof PROFILE_APPLICABILITY)[number];
+
+export const PROFILE_FINDING_REASON = [
+  "format_agrees",
+  "format_disagrees",
+  "format_unconfirmed",
+  "no_format_expectation",
+  "pattern_matched_nothing",
+  "role_conflict",
+  "format_conflict",
+  "item_blocked",
+  "role_incompatible_with_status",
+  "preview_truncated",
+] as const;
+export type ProfileFindingReason = (typeof PROFILE_FINDING_REASON)[number];
+
+const profileValidationShape: ObjectShape = {
+  valid: f.req(f.bool),
+  diagnostics: f.opt(
+    f.arr(
+      f.obj({
+        code: f.req(f.en(...PROFILE_DIAGNOSTIC_CODE)),
+        location: f.req(f.str),
+      }),
+    ),
+  ),
+};
+
+const profileMatchReportShape: ObjectShape = {
+  profile: f.req(
+    f.obj({
+      profileId: f.req(f.str),
+      version: f.req(f.u64),
+      digest: f.req(f.str),
+    }),
+  ),
+  clean: f.req(f.bool),
+  applicability: f.req(f.en(...PROFILE_APPLICABILITY)),
+  validation: f.req(f.obj(profileValidationShape)),
+  findings: f.req(
+    f.arr(
+      f.obj({
+        kind: f.req(f.en(...PROFILE_FINDING_KIND)),
+        reason: f.req(f.en(...PROFILE_FINDING_REASON)),
+        groupId: f.req(f.str),
+        identity: f.opt(f.str),
+        expectedFormatId: f.opt(f.str),
+        observedFormatId: f.opt(f.str),
+      }),
+    ),
+  ),
+  proposedRoles: f.req(f.map(f.en(...IMPORT_ITEM_ROLE))),
+};
+
+/** A portable, declarative, versioned import plan. */
+export type WireImportProfile = {
+  schemaId: string;
+  minReaderVersion: number;
+  profileId: string;
+  version: number;
+  scope: { label: string };
+  name: string;
+  sourceGroups: {
+    groupId: string;
+    include: string[];
+    exclude?: string[];
+    role: ImportItemRole;
+    formatProfile?: { id: string; version: number };
+    framingProfile?: { id: string; version: number };
+    timestampPolicy?: string;
+  }[];
+};
+
+/**
+ * Result of matching a recipe against a preview.
+ *
+ * `proposedRoles` is a proposal only — nothing has been applied, and a
+ * `formatProfile` reference is reported as a match only where observed
+ * content already agrees.
+ */
+export type WireProfileMatchReport = {
+  profile: { profileId: string; version: number; digest: string };
+  clean: boolean;
+  applicability: ProfileApplicability;
+  validation: {
+    valid: boolean;
+    diagnostics?: { code: ProfileDiagnosticCode; location: string }[];
+  };
+  findings: {
+    kind: ProfileFindingKind;
+    reason: ProfileFindingReason;
+    groupId: string;
+    identity?: string;
+    expectedFormatId?: string;
+    observedFormatId?: string;
+  }[];
+  proposedRoles: Record<string, ImportItemRole>;
+};
+
+export const parseImportPreviewReport = parserFor<WireImportPreviewReport>(
+  "importPreviewReport",
+  importPreviewReportShape,
+);
+export const parseImportProfile = parserFor<WireImportProfile>(
+  "importProfile",
+  importProfileShape,
+);
+export const parseProfileMatchReport = parserFor<WireProfileMatchReport>(
+  "profileMatchReport",
+  profileMatchReportShape,
+);
+
 /**
  * Committed fixture manifest: exact file set under `fixtures/contracts/` and
  * the strict parser proving each. Tests fail when the directory and this
@@ -1046,4 +1403,7 @@ export const FIXTURE_PARSERS: Readonly<
   "investigation_document.v1.json": parseInvestigationDocument,
   "resolved_bookmark.v1.json": parseResolvedBookmarks,
   "process_progress.v1.json": parseProcessProgressStream,
+  "import_preview_report.v1.json": parseImportPreviewReport,
+  "import_profile.v1.json": parseImportProfile,
+  "profile_match_report.v1.json": parseProfileMatchReport,
 };
