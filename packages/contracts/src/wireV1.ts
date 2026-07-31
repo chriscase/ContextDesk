@@ -110,6 +110,16 @@ export type FindingLifecycle = (typeof FINDING_LIFECYCLE)[number];
 export const INVESTIGATION_NOISE_LENS = ["active", "suspended"] as const;
 export type InvestigationNoiseLens = (typeof INVESTIGATION_NOISE_LENS)[number];
 
+export const INVESTIGATION_POLICY_BINDING_STATUS = [
+  "unbound_legacy",
+  "current",
+  "made_under_different_policy",
+  "made_under_different_lens",
+  "current_lens_unknown",
+] as const;
+export type InvestigationPolicyBindingStatus =
+  (typeof INVESTIGATION_POLICY_BINDING_STATUS)[number];
+
 export const PROPOSED_FINDING_STATUS = [
   "proposed",
   "accepted",
@@ -257,11 +267,13 @@ export type WireSuppressionRule = {
   state: SuppressionRuleState;
   createdAt: number;
   updatedAt: number;
-  resolution?: {
-    kind: SuppressionRuleResolutionKind;
-    matchesNothing: boolean;
-    explanation: string;
-  };
+  resolution?: WireSuppressionRuleResolution;
+};
+
+export type WireSuppressionRuleResolution = {
+  kind: SuppressionRuleResolutionKind;
+  matchesNothing: boolean;
+  explanation: string;
 };
 
 export type WireSuppressionPreview = {

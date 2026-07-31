@@ -5,9 +5,9 @@
 
 import type {
   InvestigationPolicyBindingStatus,
-  SuppressionRuleResolutionDto,
   SuppressionRuleState,
-} from "../host";
+  WireSuppressionRuleResolution,
+} from "@contextdesk/contracts";
 
 /** Exact product label required by #819 for policy mismatch. */
 export const MADE_UNDER_DIFFERENT_NOISE_POLICY =
@@ -54,7 +54,7 @@ export function policyBindingIsRetryableVerification(
 }
 
 export function formatSuppressionResolution(
-  resolution: SuppressionRuleResolutionDto | null | undefined,
+  resolution: WireSuppressionRuleResolution | null | undefined,
   state: SuppressionRuleState,
 ): string {
   if (state === "disabled") return "Disabled · excludes nothing";
@@ -81,7 +81,7 @@ export function formatSuppressionResolution(
 /** Only enabled + matches_current can hide events (mirrors trusted-core lens). */
 export function ruleContributesToExclusion(
   state: SuppressionRuleState,
-  resolution: SuppressionRuleResolutionDto | null | undefined,
+  resolution: WireSuppressionRuleResolution | null | undefined,
 ): boolean {
   return (
     state === "enabled" &&
