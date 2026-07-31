@@ -958,6 +958,11 @@ export function LogExplorer({ corpusId }: Props) {
     useState<EvidencePreviewView | null>(null);
   const [findingViewPreview, setFindingViewPreview] =
     useState<FindingViewPreviewView | null>(null);
+  /** Non-mutating Preview of an agent/detector proposal (#646). */
+  const [proposalPreview, setProposalPreview] = useState<{
+    proposalId: string;
+    changes: string[];
+  } | null>(null);
   const [saveEvidenceOpen, setSaveEvidenceOpen] = useState(false);
   const [investigationAddMenuOpen, setInvestigationAddMenuOpen] =
     useState(false);
@@ -2205,6 +2210,7 @@ export function LogExplorer({ corpusId }: Props) {
     setInvestigationError(null);
     setEvidencePreview(null);
     setFindingViewPreview(null);
+    setProposalPreview(null);
     return () => {
       bookmarkLifecycleRef.current += 1;
       summaryRequestRef.current += 1;
@@ -4972,14 +4978,27 @@ export function LogExplorer({ corpusId }: Props) {
   const findingItems = investigationFindingViews(investigation);
   const proposedFindingItems = (investigation?.document.proposedFindings ?? [])
     .filter((p) => p.status === "proposed")
-    .map((p) => ({
-      id: p.id,
-      kind: p.kind,
-      title: p.title,
-      whyItMatters: p.whyItMatters,
-      status: p.status as "proposed",
-      dismissReason: p.dismissReason ?? null,
-    }));
+    .map((p) => {
+      const supporting = (p.evidence ?? []).filter(
+        (e) => e.role === "supporting",
+      ).length;
+      const contradicting = (p.evidence ?? []).filter(
+        (e) => e.role === "contradicting",
+      ).length;
+      return {
+        id: p.id,
+        kind: p.kind,
+        title: p.title,
+        whyItMatters: p.whyItMatters,
+        status: p.status as "proposed",
+        dismissReason: p.dismissReason ?? null,
+        caveats: p.caveats ?? null,
+        evidenceCount: (p.evidence ?? []).length,
+        supportingCount: supporting,
+        contradictingCount: contradicting,
+        viewRecipe: p.viewRecipe ?? null,
+      };
+    });
   const noteItems = investigationNoteViews(investigation);
   const bookmarkItems = investigationBookmarkViews(bookmarks);
   const investigationMaterialCount =
@@ -4989,7 +5008,13 @@ export function LogExplorer({ corpusId }: Props) {
     noteItems.length +
     bookmarkItems.length;
 
-  const acceptProposedFinding = async (proposalId: string) => {
+  const acceptProposedFinding = async (input: {
+    proposalId: string;
+    edited: boolean;
+    title?: string;
+    whyItMatters?: string;
+    kind?: "observation" | "inference" | "hypothesis";
+  }) => {
     if (!investigation) return;
     setInvestigationBusy(true);
     setInvestigationError(null);
@@ -4998,18 +5023,43 @@ export function LogExplorer({ corpusId }: Props) {
         corpusId,
         investigation.document.id,
         {
-          proposalId,
+          proposalId: input.proposalId,
           expectedRevision: investigation.document.revision,
-          edited: false,
+          edited: input.edited,
+          title: input.title,
+          whyItMatters: input.whyItMatters,
+          kind: input.kind,
         },
       );
       setInvestigation(updated);
-      setStatus("Accepted proposed finding · now a human finding");
+      setProposalPreview(null);
+      setStatus(
+        input.edited
+          ? "Accepted proposed finding with edits · now a human finding"
+          : "Accepted proposed finding · now a human finding",
+      );
     } catch (err) {
       setInvestigationError(String(err));
     } finally {
       setInvestigationBusy(false);
     }
+  };
+
+  /** Non-mutating Preview for a Proposed finding — never schedules view Apply. */
+  const previewProposedFinding = (item: {
+    id: string;
+    viewRecipe?: InvestigationViewRecipeDto | null;
+  }) => {
+    const current = captureCurrentInvestigationView();
+    const changes =
+      item.viewRecipe && current
+        ? describeInvestigationViewDiff(current, item.viewRecipe)
+        : item.viewRecipe
+          ? ["Saved Explorer view recipe is attached (current view not comparable)"]
+          : ["No Explorer view recipe on this proposal"];
+    setProposalPreview({ proposalId: item.id, changes });
+    setFindingViewPreview(null);
+    setStatus("Previewed proposed finding · current Explorer unchanged");
   };
 
   const dismissProposedFinding = async (proposalId: string) => {
@@ -5033,6 +5083,7 @@ export function LogExplorer({ corpusId }: Props) {
         },
       );
       setInvestigation(updated);
+      setProposalPreview(null);
       setStatus("Dismissed proposed finding");
     } catch (err) {
       setInvestigationError(String(err));
@@ -7311,6 +7362,7 @@ export function LogExplorer({ corpusId }: Props) {
           bookmarks={bookmarkItems}
           preview={evidencePreview}
           viewPreview={findingViewPreview}
+          proposalPreview={proposalPreview}
           busy={investigationBusy || investigationLoadState === "loading"}
           error={investigationError}
           compactLayout={breakpoint === "narrow"}
@@ -7335,10 +7387,16 @@ export function LogExplorer({ corpusId }: Props) {
             );
             if (bookmark) void activateBookmark(bookmark);
           }}
-          onAcceptProposedFinding={(id) => void acceptProposedFinding(id)}
+          onAcceptProposedFinding={(input) =>
+            void acceptProposedFinding(input)
+          }
           onDismissProposedFinding={(id) => void dismissProposedFinding(id)}
+          onPreviewProposedFinding={(item) => previewProposedFinding(item)}
           onClearPreview={() => setEvidencePreview(null)}
-          onClearViewPreview={() => setFindingViewPreview(null)}
+          onClearViewPreview={() => {
+            setFindingViewPreview(null);
+            setProposalPreview(null);
+          }}
           onToggleCollapsed={() => setChatCollapsed((collapsed) => !collapsed)}
           onRequestClose={() => {
             setNarrowChatOpen(false);

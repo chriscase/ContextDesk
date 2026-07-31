@@ -4807,6 +4807,367 @@ describe("LogExplorer shell", () => {
     );
   });
 
+  it("renders Proposed-only investigation cards and Accept/Dismiss/Preview without view mutation (#646)", async () => {
+    const event = defaultEventPage().events[0]!;
+    const eventRef: host.LogBookmarkEventRefDto = {
+      corpusId: "c1",
+      seq: event.seq,
+      source: event.source,
+      timestampHint: event.ts,
+      timeQualityHint: event.timeQuality,
+    };
+    const recipe: host.InvestigationViewRecipeDto = {
+      filters: {
+        levels: ["error"],
+        sources: [],
+        services: [],
+        hosts: [],
+        timeFrom: null,
+        timeTo: null,
+        seqFrom: null,
+        seqTo: null,
+        templateId: null,
+        traceId: null,
+        keyword: null,
+      },
+      lanes: [{ id: "lane-0", label: "All sources", sources: [] }],
+      visibleLaneCount: 1,
+      linkMode: "independent",
+      focusedLaneId: "lane-0",
+      focusedEvent: eventRef,
+      selection: [eventRef],
+      highlights: [],
+      find: null,
+      viewportAnchors: [],
+    };
+    const proposalId = "019fa8d0-0000-7000-8000-000000000041";
+    const proposedOnly: host.ResolvedInvestigationDocumentDto = {
+      document: {
+        schemaVersion: 5,
+        id: "019fa8d0-0000-7000-8000-000000000040",
+        revision: 2,
+        title: "Investigation · proposals",
+        status: "active",
+        corpusLinks: [{ corpusId: "c1" }],
+        evidence: [],
+        findings: [],
+        notes: [],
+        proposedFindings: [
+          {
+            id: proposalId,
+            status: "proposed",
+            kind: "hypothesis",
+            title: "Agent proposed checkout failure",
+            whyItMatters: "First error anchors the retry sequence.",
+            caveats: "Single sample",
+            evidence: [
+              { eventRef, role: "supporting" },
+              {
+                eventRef: { ...eventRef, seq: event.seq + 1 },
+                role: "contradicting",
+              },
+            ],
+            viewRecipe: recipe,
+            corpusId: "c1",
+            investigationId: "019fa8d0-0000-7000-8000-000000000040",
+            idempotencyKey: "tool-loop-1",
+            createdAt: 2,
+            updatedAt: 2,
+          },
+        ],
+        createdAt: 1,
+        updatedAt: 2,
+      },
+      evidence: [],
+    };
+    const accepted: host.ResolvedInvestigationDocumentDto = {
+      document: {
+        ...proposedOnly.document,
+        revision: 3,
+        findings: [
+          {
+            id: "019fa8d0-0000-7000-8000-000000000042",
+            kind: "hypothesis",
+            lifecycle: "accepted",
+            title: "Agent proposed checkout failure",
+            whyItMatters: "First error anchors the retry sequence.",
+            evidenceIds: [],
+            viewRecipe: recipe,
+            provenance: "human",
+            createdAt: 3,
+            updatedAt: 3,
+          },
+        ],
+        proposedFindings: [
+          {
+            ...proposedOnly.document.proposedFindings![0]!,
+            status: "accepted",
+            acceptance: { acceptedAt: 3, edited: false },
+            acceptedFindingId: "019fa8d0-0000-7000-8000-000000000042",
+            updatedAt: 3,
+          },
+        ],
+      },
+      evidence: [],
+    };
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(
+      proposedOnly,
+    );
+    vi.mocked(host.hostLogAcceptProposedFinding).mockResolvedValue(accepted);
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    // Only 1 open proposed item — material count must include it (not empty rail).
+    await openInvestigationView(1);
+
+    const card = await screen.findByTestId(`proposed-finding-${proposalId}`);
+    expect(card.textContent).toContain("Agent proposed checkout failure");
+    expect(card.textContent).toContain("proposed");
+
+    const errorBefore = (
+      screen.getByRole("checkbox", { name: /error/i }) as HTMLInputElement
+    ).checked;
+    expect(errorBefore).toBe(false);
+    const queryCountBefore = vi.mocked(host.hostLogQueryEvents).mock.calls
+      .length;
+
+    // Non-mutating Preview: does not Apply and does not flip filters.
+    fireEvent.click(screen.getByTestId(`preview-proposed-${proposalId}`));
+    const proposalPreviewEl = await screen.findByTestId(
+      `proposed-finding-preview-${proposalId}`,
+    );
+    expect(proposalPreviewEl.textContent ?? "").toMatch(
+      /Preview only · current Explorer unchanged/,
+    );
+    expect(
+      (screen.getByRole("checkbox", { name: /error/i }) as HTMLInputElement)
+        .checked,
+    ).toBe(false);
+    expect(host.hostLogApplyInvestigationFindingView).not.toHaveBeenCalled();
+    expect(vi.mocked(host.hostLogQueryEvents).mock.calls.length).toBe(
+      queryCountBefore,
+    );
+    expect(screen.queryByTestId("bookmark-restore-view")).toBeNull();
+
+    fireEvent.click(screen.getByTestId(`accept-proposed-${proposalId}`));
+    await waitFor(() =>
+      expect(host.hostLogAcceptProposedFinding).toHaveBeenCalledWith(
+        "c1",
+        proposedOnly.document.id,
+        expect.objectContaining({
+          proposalId,
+          expectedRevision: 2,
+          edited: false,
+        }),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain(
+        "Accepted proposed finding",
+      ),
+    );
+    // After accept, proposal card is gone (status accepted); finding appears.
+    expect(
+      screen.queryByTestId(`proposed-finding-${proposalId}`),
+    ).toBeNull();
+    expect(
+      await screen.findByTestId(
+        `finding-item-019fa8d0-0000-7000-8000-000000000042`,
+      ),
+    ).toBeTruthy();
+    // Accept still must not have applied the view recipe.
+    expect(
+      (screen.getByRole("checkbox", { name: /error/i }) as HTMLInputElement)
+        .checked,
+    ).toBe(false);
+  });
+
+  it("Edit-and-accept and Dismiss drive host APIs for Proposed findings (#646)", async () => {
+    const event = defaultEventPage().events[0]!;
+    const eventRef: host.LogBookmarkEventRefDto = {
+      corpusId: "c1",
+      seq: event.seq,
+      source: event.source,
+      timestampHint: event.ts,
+      timeQualityHint: event.timeQuality,
+    };
+    const proposalId = "019fa8d0-0000-7000-8000-000000000051";
+    const proposedOnly: host.ResolvedInvestigationDocumentDto = {
+      document: {
+        schemaVersion: 5,
+        id: "019fa8d0-0000-7000-8000-000000000050",
+        revision: 2,
+        title: "Investigation · proposals",
+        status: "active",
+        corpusLinks: [{ corpusId: "c1" }],
+        evidence: [],
+        findings: [],
+        notes: [],
+        proposedFindings: [
+          {
+            id: proposalId,
+            status: "proposed",
+            kind: "observation",
+            title: "Original proposal title",
+            whyItMatters: "Original why",
+            evidence: [{ eventRef, role: "supporting" }],
+            viewRecipe: null,
+            corpusId: "c1",
+            investigationId: "019fa8d0-0000-7000-8000-000000000050",
+            idempotencyKey: "edit-1",
+            createdAt: 2,
+            updatedAt: 2,
+          },
+        ],
+        createdAt: 1,
+        updatedAt: 2,
+      },
+      evidence: [],
+    };
+    const afterEdit: host.ResolvedInvestigationDocumentDto = {
+      document: {
+        ...proposedOnly.document,
+        revision: 3,
+        findings: [
+          {
+            id: "019fa8d0-0000-7000-8000-000000000052",
+            kind: "observation",
+            lifecycle: "accepted",
+            title: "Human edited title",
+            whyItMatters: "Human edited why",
+            evidenceIds: [],
+            provenance: "human",
+            createdAt: 3,
+            updatedAt: 3,
+          },
+        ],
+        proposedFindings: [
+          {
+            ...proposedOnly.document.proposedFindings![0]!,
+            status: "accepted",
+            acceptance: { acceptedAt: 3, edited: true },
+            acceptedFindingId: "019fa8d0-0000-7000-8000-000000000052",
+          },
+        ],
+      },
+      evidence: [],
+    };
+    const proposalId2 = "019fa8d0-0000-7000-8000-000000000061";
+    const proposedDismiss: host.ResolvedInvestigationDocumentDto = {
+      document: {
+        schemaVersion: 5,
+        id: "019fa8d0-0000-7000-8000-000000000060",
+        revision: 2,
+        title: "Investigation · dismiss",
+        status: "active",
+        corpusLinks: [{ corpusId: "c1" }],
+        evidence: [],
+        findings: [],
+        notes: [],
+        proposedFindings: [
+          {
+            id: proposalId2,
+            status: "proposed",
+            kind: "hypothesis",
+            title: "Dismiss me",
+            whyItMatters: "Not actionable",
+            evidence: [{ eventRef, role: "supporting" }],
+            corpusId: "c1",
+            investigationId: "019fa8d0-0000-7000-8000-000000000060",
+            idempotencyKey: "dismiss-1",
+            createdAt: 2,
+            updatedAt: 2,
+          },
+        ],
+        createdAt: 1,
+        updatedAt: 2,
+      },
+      evidence: [],
+    };
+    const afterDismiss: host.ResolvedInvestigationDocumentDto = {
+      document: {
+        ...proposedDismiss.document,
+        revision: 3,
+        proposedFindings: [
+          {
+            ...proposedDismiss.document.proposedFindings![0]!,
+            status: "dismissed",
+            dismissReason: "Out of scope for this incident",
+          },
+        ],
+      },
+      evidence: [],
+    };
+
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(
+      proposedOnly,
+    );
+    vi.mocked(host.hostLogAcceptProposedFinding).mockResolvedValue(afterEdit);
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    await openInvestigationView(1);
+    fireEvent.click(screen.getByTestId(`edit-accept-proposed-${proposalId}`));
+    fireEvent.change(screen.getByTestId(`proposed-edit-title-${proposalId}`), {
+      target: { value: "Human edited title" },
+    });
+    fireEvent.change(screen.getByTestId(`proposed-edit-why-${proposalId}`), {
+      target: { value: "Human edited why" },
+    });
+    fireEvent.click(screen.getByTestId(`confirm-edit-accept-${proposalId}`));
+    await waitFor(() =>
+      expect(host.hostLogAcceptProposedFinding).toHaveBeenCalledWith(
+        "c1",
+        proposedOnly.document.id,
+        expect.objectContaining({
+          proposalId,
+          expectedRevision: 2,
+          edited: true,
+          title: "Human edited title",
+          whyItMatters: "Human edited why",
+        }),
+      ),
+    );
+
+    // Dismiss path (fresh mount)
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(
+      proposedDismiss,
+    );
+    vi.mocked(host.hostLogDismissProposedFinding).mockResolvedValue(
+      afterDismiss,
+    );
+    vi.stubGlobal(
+      "prompt",
+      vi.fn(() => "Out of scope for this incident"),
+    );
+    const view2 = render(<LogExplorer corpusId="c2" />);
+    // defaultEventPage still uses c1 corpus in events — load with c1 via rerender path:
+    view2.unmount();
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(
+      proposedDismiss,
+    );
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    await openInvestigationView(1);
+    fireEvent.click(screen.getByTestId(`dismiss-proposed-${proposalId2}`));
+    await waitFor(() =>
+      expect(host.hostLogDismissProposedFinding).toHaveBeenCalledWith(
+        "c1",
+        proposedDismiss.document.id,
+        expect.objectContaining({
+          proposalId: proposalId2,
+          expectedRevision: 2,
+          reason: "Out of scope for this incident",
+        }),
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId(`proposed-finding-${proposalId2}`),
+      ).toBeNull(),
+    );
+  });
+
   it("reloads investigation with suspended lens and blocks Apply under different noise policy (#819)", async () => {
     const event = defaultEventPage().events[0]!;
     const eventRef: host.LogBookmarkEventRefDto = {
