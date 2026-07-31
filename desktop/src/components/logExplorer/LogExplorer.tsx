@@ -70,6 +70,7 @@ import {
 } from "../../lib/logDiagnosticReport";
 import { applyLogNav, type LogNavAction } from "../../lib/logExplorer/logNav";
 import { governedIdToSafeInteger } from "../../lib/citations";
+import { subscribeLogExplorerNavTargets } from "../../lib/engine/platform";
 import {
   clampLaneCount,
   computeGaps,
@@ -2527,28 +2528,24 @@ export function LogExplorer({ corpusId }: Props) {
 
     void (async () => {
       try {
-        const { listen } = await import("@tauri-apps/api/event");
-        stopListen = await listen<LogExplorerNavTargetDto>(
-          "log-explorer-nav-target",
-          () => {
-            // Deliver only via take() so a cleared/replayed target never applies.
-            void (async () => {
-              try {
-                const pending = await hostTakeLogExplorerNavTarget(corpusId);
-                if (cancelled || !pending) return;
-                await applyExactNavTarget(pending);
-              } catch (err) {
-                if (!cancelled) {
-                  setError(
-                    `Exact navigation failed: ${
-                      err instanceof Error ? err.message : String(err)
-                    }`,
-                  );
-                }
+        stopListen = await subscribeLogExplorerNavTargets(() => {
+          // Deliver only via take() so a cleared/replayed target never applies.
+          void (async () => {
+            try {
+              const pending = await hostTakeLogExplorerNavTarget(corpusId);
+              if (cancelled || !pending) return;
+              await applyExactNavTarget(pending);
+            } catch (err) {
+              if (!cancelled) {
+                setError(
+                  `Exact navigation failed: ${
+                    err instanceof Error ? err.message : String(err)
+                  }`,
+                );
               }
-            })();
-          },
-        );
+            }
+          })();
+        });
       } catch {
         // Browser preview / unit tests have no Tauri event bus.
       }
