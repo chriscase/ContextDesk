@@ -520,20 +520,23 @@ fn first_json_ts_field(raw: &str, keys: &[&str]) -> Option<ParsedTimestamp> {
         let pattern = format!("\"{key}\"");
         let mut search = raw;
         while let Some(idx) = search.find(&pattern) {
-            let after = &search[idx + pattern.len()..];
+            let Some(after) = search.get(idx + pattern.len()..) else {
+                break;
+            };
             let after = after.trim_start();
             let Some(after) = after.strip_prefix(':') else {
-                search = &search[idx + pattern.len()..];
+                search = search.get(idx + pattern.len()..).unwrap_or("");
                 continue;
             };
             let after = after.trim_start();
             if let Some(rest) = after.strip_prefix('"') {
                 // String timestamp.
                 if let Some(end) = rest.find('"') {
-                    let s = &rest[..end];
-                    let ts = parse_timestamp_text(s);
-                    if !matches!(ts, ParsedTimestamp::Unusable) {
-                        return Some(ts);
+                    if let Some(s) = rest.get(..end) {
+                        let ts = parse_timestamp_text(s);
+                        if !matches!(ts, ParsedTimestamp::Unusable) {
+                            return Some(ts);
+                        }
                     }
                 }
             } else {
@@ -549,7 +552,7 @@ fn first_json_ts_field(raw: &str, keys: &[&str]) -> Option<ParsedTimestamp> {
                     }
                 }
             }
-            search = &search[idx + pattern.len()..];
+            search = search.get(idx + pattern.len()..).unwrap_or("");
         }
     }
     None
@@ -769,7 +772,7 @@ fn decode_unix_epoch_to_secs_i64(raw: i64) -> Option<i64> {
 
 /// True when `raw` is an 8-digit calendar date YYYYMMDD (year 1900–2100).
 fn looks_like_yyyymmdd_integer(raw: i64) -> bool {
-    if !(1_900_0101..=2_100_1231).contains(&raw) {
+    if !(19_000_101..=21_001_231).contains(&raw) {
         return false;
     }
     // Must be exactly 8 decimal digits (no leading zeros beyond year).
@@ -1511,7 +1514,7 @@ fn parse_postgres_stderr(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
     }
     // Prefix before `[pid]` should look like a PG timestamp.
     let prefix = primary.get(..bracket)?.trim();
-    if prefix.len() < 19 || !prefix.as_bytes().get(4).is_some_and(|b| *b == b'-') {
+    if prefix.len() < 19 || prefix.as_bytes().get(4).is_none_or(|b| *b != b'-') {
         return None;
     }
     // Preserve multi-line DETAIL/HINT/STATEMENT in the message body.
