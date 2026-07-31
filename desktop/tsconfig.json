@@ -6,6 +6,12 @@
     "module": "ESNext",
     "skipLibCheck": true,
     "moduleResolution": "bundler",
+    "paths": {
+      "@contextdesk/contracts": ["../packages/contracts/src/index.ts"],
+      "@contextdesk/client": ["../packages/client/src/index.ts"],
+      "@contextdesk/react": ["../packages/react/src/index.ts"],
+      "@contextdesk/ui": ["../packages/ui/src/index.ts"]
+    },
     "allowImportingTsExtensions": true,
     "isolatedModules": true,
     "moduleDetection": "force",

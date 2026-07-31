@@ -10,3 +10,7 @@ fixtures/log-lab/**/binary.log -text -eol
 # text fixtures LF-stable so validation is identical on Windows, macOS, Linux.
 fixtures/incident-evidence/** text eol=lf
 fixtures/incident-evidence/**/*.zip -text -eol
+
+# SDK contract fixtures are byte-exact golden files. Keep their serialized
+# representation stable across Windows, macOS, and Linux checkouts.
+fixtures/contracts/** text eol=lf

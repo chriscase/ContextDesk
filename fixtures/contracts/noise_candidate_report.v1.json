@@ -1,0 +1,109 @@
+{
+  "alreadySuppressedTemplateIds": [
+    41
+  ],
+  "cancelled": false,
+  "candidateCapTruncated": false,
+  "candidates": [
+    {
+      "alreadySuppressed": false,
+      "corpusShareBps": 4120,
+      "errorOrFatalCount": 0,
+      "eventCount": 6058,
+      "explanation": "41.2% of unsuppressed events across 3 sources at a steady rate.",
+      "infoCount": 6058,
+      "levelCounts": [
+        {
+          "count": 6058,
+          "level": "INFO"
+        }
+      ],
+      "levelCountsTruncated": false,
+      "orderSpan": null,
+      "otherLevelCount": 0,
+      "pattern": "GET /health <*>",
+      "proposalKind": "candidate",
+      "reasonCodes": [
+        "high_corpus_share",
+        "steady_background"
+      ],
+      "representatives": [
+        {
+          "level": "INFO",
+          "redactedExcerpt": "GET /health 200",
+          "seq": 43,
+          "source": "worker.log",
+          "timeQuality": "wall",
+          "timestamp": 1735991300
+        }
+      ],
+      "score": 9812,
+      "shape": "steady",
+      "shareBasis": "unsuppressed_events",
+      "sourceCount": 3,
+      "templateFingerprint": "fp-7-001122",
+      "templateId": 7,
+      "timeQuality": "wall",
+      "wallTimeSpan": {
+        "from": 1735400000,
+        "to": 1735991400
+      },
+      "warnCount": 0
+    },
+    {
+      "alreadySuppressed": false,
+      "corpusShareBps": 612,
+      "errorOrFatalCount": 200,
+      "eventCount": 900,
+      "explanation": "Repetitive but severity-bearing; marked risky, never auto-noise.",
+      "infoCount": 0,
+      "levelCounts": [
+        {
+          "count": 700,
+          "level": "WARN"
+        },
+        {
+          "count": 200,
+          "level": "ERROR"
+        }
+      ],
+      "levelCountsTruncated": false,
+      "orderSpan": {
+        "from": 12000,
+        "to": 17000
+      },
+      "otherLevelCount": 0,
+      "pattern": "retry attempt <*> failed",
+      "proposalKind": "candidate",
+      "reasonCodes": [
+        "repetitive_error_risky"
+      ],
+      "representatives": [],
+      "score": 5100,
+      "shape": "bursty",
+      "shareBasis": "unsuppressed_events",
+      "sourceCount": 1,
+      "templateFingerprint": "fp-88-334455",
+      "templateId": 88,
+      "timeQuality": "order_only",
+      "wallTimeSpan": null,
+      "warnCount": 700
+    }
+  ],
+  "corpusEventCount": 25000,
+  "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+  "databaseQueryCount": 4,
+  "disclaimer": "These are noise/suppression *candidates* for human review only. Nothing was auto-suppressed. Activation requires explicit preview and approval via the durable noise policy (#671). Severity alone does not define noise.",
+  "eligibleCandidateCount": 2,
+  "eventRevision": 3,
+  "metadataMissingTemplateIds": [],
+  "rawTimeQuality": "mixed",
+  "responseBytesTruncated": false,
+  "suppressionRevision": 7,
+  "templateAnalysisRevision": 2,
+  "templateScanTruncated": true,
+  "templatesScanned": 648,
+  "timeQuality": "wall",
+  "truncated": false,
+  "unsuppressedEventCount": 14700
+}

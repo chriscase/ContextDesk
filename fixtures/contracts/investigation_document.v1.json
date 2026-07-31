@@ -1,0 +1,163 @@
+{
+  "corpusLinks": [
+    {
+      "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001"
+    }
+  ],
+  "createdAt": 1735991000,
+  "evidence": [
+    {
+      "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+      "createdAt": 1735991500,
+      "eventRefs": [
+        {
+          "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+          "seq": 42,
+          "source": "api.log",
+          "timeQualityHint": "wall",
+          "timestampHint": 1735991449
+        },
+        {
+          "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+          "seq": 44,
+          "source": "api.log",
+          "timeQualityHint": "wall",
+          "timestampHint": 1735991449
+        }
+      ],
+      "id": "0199bbbb-1111-7000-8000-000000000001",
+      "provenance": "human",
+      "title": "burst of connection refusals",
+      "updatedAt": 1735991500
+    }
+  ],
+  "findings": [
+    {
+      "createdAt": 1735991600,
+      "evidenceIds": [
+        "0199bbbb-1111-7000-8000-000000000001"
+      ],
+      "id": "0199bbbb-2222-7000-8000-000000000001",
+      "kind": "observation",
+      "lifecycle": "accepted",
+      "provenance": "human",
+      "title": "error burst at 14:02",
+      "updatedAt": 1735991600,
+      "viewRecipe": {
+        "filters": {
+          "hosts": [],
+          "keyword": "refused",
+          "levels": [
+            "ERROR"
+          ],
+          "seqFrom": null,
+          "seqTo": null,
+          "services": [],
+          "sources": [
+            "api.log"
+          ],
+          "templateId": 41,
+          "timeFrom": 1735991400,
+          "timeTo": 1735991500,
+          "traceId": null
+        },
+        "find": {
+          "caseSensitive": false,
+          "matchMode": "literal",
+          "query": "refused",
+          "semantic": false
+        },
+        "focusedEvent": {
+          "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+          "seq": 42,
+          "source": "api.log",
+          "timeQualityHint": "wall",
+          "timestampHint": 1735991449
+        },
+        "focusedLaneId": "lane-1",
+        "highlights": [],
+        "lanes": [
+          {
+            "id": "lane-1",
+            "label": "api",
+            "sources": [
+              "api.log"
+            ]
+          }
+        ],
+        "linkMode": "follow_cursor",
+        "selection": [
+          {
+            "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+            "seq": 42,
+            "source": "api.log",
+            "timeQualityHint": "wall",
+            "timestampHint": 1735991449
+          }
+        ],
+        "viewportAnchors": [
+          {
+            "eventRef": {
+              "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+              "seq": 42,
+              "source": "api.log",
+              "timeQualityHint": "wall",
+              "timestampHint": 1735991449
+            },
+            "laneId": "lane-1"
+          }
+        ],
+        "visibleLaneCount": 1
+      },
+      "whyItMatters": "Marks the incident onset window."
+    },
+    {
+      "createdAt": 1735991700,
+      "evidenceIds": [
+        "0199bbbb-1111-7000-8000-000000000001"
+      ],
+      "id": "0199bbbb-2222-7000-8000-000000000002",
+      "kind": "inference",
+      "lifecycle": "accepted",
+      "provenance": "human",
+      "title": "pool exhaustion preceded the burst",
+      "updatedAt": 1735991700,
+      "whyItMatters": "Connects the warning trail to the failures."
+    },
+    {
+      "createdAt": 1735991800,
+      "evidenceIds": [
+        "0199bbbb-1111-7000-8000-000000000001"
+      ],
+      "id": "0199bbbb-2222-7000-8000-000000000003",
+      "kind": "hypothesis",
+      "lifecycle": "resolved",
+      "provenance": "human",
+      "title": "db-7 restart caused the cascade",
+      "updatedAt": 1735992000,
+      "whyItMatters": "Testable root-cause explanation."
+    }
+  ],
+  "id": "0199bbbb-0000-7000-8000-000000000001",
+  "notes": [
+    {
+      "body": "Restart at 14:01 per change ticket; burst begins 14:02:11.",
+      "createdAt": 1735992100,
+      "evidenceIds": [
+        "0199bbbb-1111-7000-8000-000000000001"
+      ],
+      "findingIds": [
+        "0199bbbb-2222-7000-8000-000000000003"
+      ],
+      "id": "0199bbbb-3333-7000-8000-000000000001",
+      "provenance": "human",
+      "title": "timeline of operator actions",
+      "updatedAt": 1735992100
+    }
+  ],
+  "revision": 5,
+  "schemaVersion": 3,
+  "status": "active",
+  "title": "checkout-cascade",
+  "updatedAt": 1735992100
+}

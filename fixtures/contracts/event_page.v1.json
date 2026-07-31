@@ -1,0 +1,39 @@
+{
+  "events": [
+    {
+      "activeTimestampBasis": "explicit_wall",
+      "host": "api-7",
+      "level": "ERROR",
+      "message": "connection refused to db-<*>",
+      "seq": 42,
+      "service": "checkout",
+      "source": "api.log",
+      "templateId": 41,
+      "timeQuality": "wall",
+      "timestampProvenance": "explicit_wall_clock",
+      "traceId": "req-9f1",
+      "ts": 1735991449,
+      "unresolvedLocalTimestamp": "2026-01-04 14:30:49"
+    },
+    {
+      "activeTimestampBasis": "order_only",
+      "host": null,
+      "level": "INFO",
+      "message": "GET /health <*>",
+      "seq": 43,
+      "service": null,
+      "source": "worker.log",
+      "templateId": 7,
+      "timeQuality": "order_only",
+      "timestampProvenance": "order_only",
+      "traceId": null,
+      "ts": 17123
+    }
+  ],
+  "nextCursor": 44,
+  "nextTs": 1735991450,
+  "prevCursor": 41,
+  "prevTs": 1735991440,
+  "timeQuality": "wall",
+  "totalMatched": 471
+}

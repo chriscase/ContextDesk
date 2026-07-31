@@ -1,0 +1,15 @@
+{
+  "activeTimestampBasis": "explicit_wall",
+  "host": "api-7",
+  "level": "ERROR",
+  "message": "connection refused to db-<*>",
+  "seq": 42,
+  "service": "checkout",
+  "source": "api.log",
+  "templateId": 41,
+  "timeQuality": "wall",
+  "timestampProvenance": "explicit_wall_clock",
+  "traceId": "req-9f1",
+  "ts": 1735991449,
+  "unresolvedLocalTimestamp": "2026-01-04 14:30:49"
+}

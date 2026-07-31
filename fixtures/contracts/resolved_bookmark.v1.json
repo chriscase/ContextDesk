@@ -1,0 +1,40 @@
+[
+  {
+    "color": "amber",
+    "createdAt": 1735991450,
+    "eventRefs": [
+      {
+        "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+        "seq": 42,
+        "source": "api.log",
+        "timeQualityHint": "wall",
+        "timestampHint": 1735991449
+      },
+      {
+        "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+        "seq": 44,
+        "source": "api.log",
+        "timeQualityHint": "wall",
+        "timestampHint": 1735991449
+      }
+    ],
+    "evidenceStatus": "verified",
+    "id": "0199cccc-0000-7000-8000-000000000001",
+    "label": "refusal burst",
+    "note": "exact noncontiguous set",
+    "seqFrom": 42,
+    "seqTo": 44,
+    "tsFrom": 1735991400,
+    "tsTo": 1735991500,
+    "updatedAt": 1735991460
+  },
+  {
+    "createdAt": 1700000000,
+    "evidenceStatus": "legacy_range",
+    "id": "0199cccc-0000-7000-8000-000000000002",
+    "label": "legacy range",
+    "seqFrom": 100,
+    "seqTo": 200,
+    "updatedAt": 1700000000
+  }
+]

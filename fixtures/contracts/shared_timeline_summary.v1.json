@@ -1,0 +1,73 @@
+{
+  "bucketCount": 2,
+  "bucketWidth": 60,
+  "buckets": [
+    {
+      "end": 1735991460,
+      "index": 0,
+      "start": 1735991400
+    },
+    {
+      "end": 1735991520,
+      "index": 1,
+      "start": 1735991460
+    }
+  ],
+  "counts": [
+    420,
+    51
+  ],
+  "lanes": [
+    {
+      "counts": [
+        280,
+        20
+      ],
+      "laneIndex": 0,
+      "sourceCount": 1,
+      "timeQuality": "wall",
+      "totalMatched": 300
+    }
+  ],
+  "severitySeries": [
+    {
+      "counts": [
+        10,
+        2
+      ],
+      "severity": "error"
+    },
+    {
+      "counts": [
+        10,
+        2
+      ],
+      "severity": "warn"
+    },
+    {
+      "counts": [
+        10,
+        2
+      ],
+      "severity": "info"
+    },
+    {
+      "counts": [
+        10,
+        2
+      ],
+      "severity": "debug"
+    },
+    {
+      "counts": [
+        10,
+        2
+      ],
+      "severity": "other"
+    }
+  ],
+  "spanFrom": 1735991400,
+  "spanTo": 1735991520,
+  "timeQuality": "wall",
+  "totalMatched": 471
+}

@@ -1,0 +1,20 @@
+{
+  "events": [
+    {
+      "activeTimestampBasis": "order_only",
+      "host": null,
+      "level": "INFO",
+      "message": "GET /health <*>",
+      "seq": 43,
+      "service": null,
+      "source": "worker.log",
+      "templateId": 7,
+      "timeQuality": "order_only",
+      "timestampProvenance": "order_only",
+      "traceId": null,
+      "ts": 17123
+    }
+  ],
+  "nextCursor": null,
+  "timeQuality": "order_only"
+}

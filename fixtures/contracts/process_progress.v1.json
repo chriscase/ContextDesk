@@ -1,0 +1,156 @@
+[
+  {
+    "bytes_processed": null,
+    "cancellable": true,
+    "files_processed": 0,
+    "fraction": null,
+    "kind": "log_ingest",
+    "lines_processed": 0,
+    "message": "phase 0",
+    "phase": "starting",
+    "templates": 0
+  },
+  {
+    "bytes_processed": 4096,
+    "cancellable": true,
+    "files_processed": 1,
+    "fraction": 0.5,
+    "kind": "session_context_import",
+    "lines_processed": null,
+    "message": "phase 1",
+    "phase": "scan",
+    "templates": null
+  },
+  {
+    "bytes_processed": null,
+    "cancellable": true,
+    "files_processed": 2,
+    "fraction": 1.0,
+    "kind": "log_ingest",
+    "lines_processed": 2000,
+    "message": "phase 2",
+    "phase": "parse",
+    "templates": null
+  },
+  {
+    "bytes_processed": 12288,
+    "cancellable": true,
+    "files_processed": 3,
+    "fraction": null,
+    "kind": "session_context_import",
+    "lines_processed": null,
+    "message": "phase 3",
+    "phase": "template",
+    "templates": null
+  },
+  {
+    "bytes_processed": null,
+    "cancellable": true,
+    "files_processed": 4,
+    "fraction": 0.5,
+    "kind": "log_ingest",
+    "lines_processed": 4000,
+    "message": "phase 4",
+    "phase": "redact",
+    "templates": 4
+  },
+  {
+    "bytes_processed": 20480,
+    "cancellable": true,
+    "files_processed": 5,
+    "fraction": 1.0,
+    "kind": "session_context_import",
+    "lines_processed": null,
+    "message": "phase 5",
+    "phase": "store",
+    "templates": null
+  },
+  {
+    "bytes_processed": null,
+    "cancellable": true,
+    "files_processed": 6,
+    "fraction": null,
+    "kind": "log_ingest",
+    "lines_processed": 6000,
+    "message": "phase 6",
+    "phase": "embed",
+    "templates": null
+  },
+  {
+    "bytes_processed": 28672,
+    "cancellable": true,
+    "files_processed": 7,
+    "fraction": 0.5,
+    "kind": "session_context_import",
+    "lines_processed": null,
+    "message": "phase 7",
+    "phase": "read",
+    "templates": null
+  },
+  {
+    "bytes_processed": null,
+    "cancellable": true,
+    "files_processed": 8,
+    "fraction": 1.0,
+    "kind": "log_ingest",
+    "lines_processed": 8000,
+    "message": "phase 8",
+    "phase": "validate",
+    "templates": 8
+  },
+  {
+    "bytes_processed": 36864,
+    "cancellable": true,
+    "files_processed": 9,
+    "fraction": null,
+    "kind": "session_context_import",
+    "lines_processed": null,
+    "message": "phase 9",
+    "phase": "extract",
+    "templates": null
+  },
+  {
+    "bytes_processed": null,
+    "cancellable": true,
+    "files_processed": 10,
+    "fraction": 0.5,
+    "kind": "log_ingest",
+    "lines_processed": 10000,
+    "message": "phase 10",
+    "phase": "write",
+    "templates": null
+  },
+  {
+    "bytes_processed": 45056,
+    "cancellable": false,
+    "files_processed": 11,
+    "fraction": 1.0,
+    "kind": "session_context_import",
+    "lines_processed": null,
+    "message": "phase 11",
+    "phase": "completed",
+    "templates": null
+  },
+  {
+    "bytes_processed": null,
+    "cancellable": false,
+    "files_processed": 12,
+    "fraction": null,
+    "kind": "log_ingest",
+    "lines_processed": 12000,
+    "message": "phase 12",
+    "phase": "failed",
+    "templates": 12
+  },
+  {
+    "bytes_processed": 53248,
+    "cancellable": false,
+    "files_processed": 13,
+    "fraction": 0.5,
+    "kind": "session_context_import",
+    "lines_processed": null,
+    "message": "phase 13",
+    "phase": "cancelled",
+    "templates": null
+  }
+]
