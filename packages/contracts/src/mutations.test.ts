@@ -62,9 +62,12 @@ const MUTATIONS: Record<string, Mutation[]> = {
   ],
   "suppression_document.v1.json": [
     { label: "bogus rule state", apply: (r) => { r.rules[0].state = "paused"; } },
+    { label: "bogus resolution kind", apply: (r) => { r.rules[0].resolution.kind = "best_effort"; } },
+    { label: "resolution boolean drift", apply: (r) => { r.rules[0].resolution.matchesNothing = "false"; } },
     { label: "delete predicate", apply: (r) => delete r.rules[0].predicate },
     { label: "audit extra field", apply: (r) => { r.audit[0].actor = "me"; } },
     { label: "revision overflow", apply: (r) => { r.revision = UNSAFE; } },
+    { label: "resolved template overflow", apply: (r) => { r.resolvedTemplateRevision = UNSAFE; } },
     { label: "bogus origin", apply: (r) => { r.previews[0].origin = "agent"; } },
   ],
   "noise_candidate_report.v1.json": [
@@ -76,7 +79,13 @@ const MUTATIONS: Record<string, Mutation[]> = {
   ],
   "investigation_document.v1.json": [
     { label: "bogus finding kind", apply: (r) => { r.findings[0].kind = "decision"; } },
+    { label: "bogus finding policy lens", apply: (r) => { r.findings[0].policyBinding.noiseLens = "revealed"; } },
     { label: "delete evidence eventRefs", apply: (r) => delete r.evidence[0].eventRefs },
+    { label: "delete proposed queue", apply: (r) => delete r.proposedFindings },
+    { label: "bogus proposal status", apply: (r) => { r.proposedFindings[0].status = "auto_accepted"; } },
+    { label: "bogus proposal evidence role", apply: (r) => { r.proposedFindings[0].evidence[0].role = "neutral"; } },
+    { label: "bogus proposal source", apply: (r) => { r.proposedFindings[0].provenance.source = "unknown"; } },
+    { label: "proposal rank overflow", apply: (r) => { r.proposedFindings[0].rankInputs.supportingCount = UNSAFE; } },
     { label: "bogus linkMode", apply: (r) => { r.findings[0].viewRecipe.linkMode = "aligned"; } },
     { label: "revision overflow", apply: (r) => { r.revision = UNSAFE; } },
     { label: "bogus provenance", apply: (r) => { r.findings[0].provenance = "model"; } },

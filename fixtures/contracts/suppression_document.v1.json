@@ -82,6 +82,7 @@
       "token": "0199aaaa-1111-7000-8000-000000000001"
     }
   ],
+  "resolvedTemplateRevision": 11,
   "revision": 7,
   "rules": [
     {
@@ -94,6 +95,11 @@
         "templateId": 41
       },
       "rationale": "Reviewed repetitive success traffic",
+      "resolution": {
+        "explanation": "Enabled rule matches the current exact template.",
+        "kind": "matches_current",
+        "matchesNothing": false
+      },
       "state": "enabled",
       "updatedAt": 1735990100
     },
@@ -107,6 +113,11 @@
         "templateId": 77
       },
       "rationale": "Detector proposal retained for review",
+      "resolution": {
+        "explanation": "Disabled rules exclude nothing.",
+        "kind": "inactive",
+        "matchesNothing": true
+      },
       "state": "disabled",
       "updatedAt": 1735990300
     },
@@ -120,6 +131,11 @@
         "templateId": 99
       },
       "rationale": "Model proposal later removed",
+      "resolution": {
+        "explanation": "The historical target no longer exists.",
+        "kind": "stale_target_missing",
+        "matchesNothing": true
+      },
       "state": "removed",
       "updatedAt": 1735990500
     }

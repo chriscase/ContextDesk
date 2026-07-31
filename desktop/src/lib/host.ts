@@ -2940,6 +2940,23 @@ export type ProposedFindingItemDto = {
   viewRecipe?: InvestigationViewRecipeDto | null;
   corpusId: string;
   investigationId: string;
+  policyBinding?: InvestigationPolicyBindingDto | null;
+  templateRevision?: number | null;
+  suppressionPolicyRevision?: number | null;
+  rankInputs?: {
+    supportingCount: number;
+    contradictingCount: number;
+    timeSpanSecs?: number | null;
+    levelWeight?: number | null;
+  } | null;
+  provenance: {
+    source: "model" | "detector" | "internal";
+    provider?: string | null;
+    modelId?: string | null;
+    runId?: string | null;
+    toolName: string;
+    detectorId?: string | null;
+  };
   idempotencyKey: string;
   acceptance?: { acceptedAt: number; edited: boolean } | null;
   dismissReason?: string | null;
