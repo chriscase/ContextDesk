@@ -6318,7 +6318,6 @@ async fn build_model_options(
     out
 }
 
-
 /// Set default model for new chats. `selection` may be `provider::model` or bare model id.
 #[tauri::command]
 fn set_default_chat_model(state: State<'_, AppState>, model: String) -> Result<String, String> {
@@ -16093,7 +16092,11 @@ mod startup_host_tests {
 mod chat_session_host_tests {
     use super::*;
 
-    fn impact(affects_default: bool, replacement: Option<&str>, remaining: u32) -> CurationImpactDto {
+    fn impact(
+        affects_default: bool,
+        replacement: Option<&str>,
+        remaining: u32,
+    ) -> CurationImpactDto {
         CurationImpactDto {
             affects_default,
             replacement_key: replacement.map(str::to_string),
@@ -16149,7 +16152,8 @@ mod chat_session_host_tests {
 
     #[test]
     fn hiding_the_last_visible_model_is_refused_outright() {
-        let CurationDecision::Reject(message) = curation_decision(&impact(true, None, 0), Some("anything"))
+        let CurationDecision::Reject(message) =
+            curation_decision(&impact(true, None, 0), Some("anything"))
         else {
             panic!("emptying the picker must be refused");
         };
@@ -16177,7 +16181,8 @@ mod chat_session_host_tests {
         let before_profiles = cfg.providers.profiles.clone();
 
         cfg.model_curation.set_provider_hidden(&profile, true);
-        cfg.model_curation.set_model_hidden(&profile, "mistral", true);
+        cfg.model_curation
+            .set_model_hidden(&profile, "mistral", true);
 
         assert_eq!(
             cfg.providers.profiles, before_profiles,
@@ -16200,7 +16205,8 @@ mod chat_session_host_tests {
         cfg.model_tools_enabled
             .insert(model_selection_key(&profile.id, "dolphin"), false);
 
-        cfg.model_curation.set_model_hidden(&profile, "dolphin", true);
+        cfg.model_curation
+            .set_model_hidden(&profile, "dolphin", true);
 
         assert!(
             !model_tools_enabled(&cfg, &profile, "dolphin"),
