@@ -266,6 +266,12 @@ pub enum ProposeFindingErrorCode {
     ConcurrentRevision,
     /// Proposal not in Proposed status for accept/dismiss.
     InvalidLifecycle,
+    /// Provider args tried to target a different investigation than the host selection.
+    WrongInvestigation,
+    /// Host has no active Investigation selected for propose_finding.
+    MissingInvestigation,
+    /// Same idempotency key with a materially different payload.
+    IdempotencyConflict,
 }
 
 impl ProposeFindingErrorCode {
@@ -280,6 +286,9 @@ impl ProposeFindingErrorCode {
             Self::InvalidInput => "invalid_input",
             Self::ConcurrentRevision => "concurrent_revision",
             Self::InvalidLifecycle => "invalid_lifecycle",
+            Self::WrongInvestigation => "wrong_investigation",
+            Self::MissingInvestigation => "missing_investigation",
+            Self::IdempotencyConflict => "idempotency_conflict",
         }
     }
 }
@@ -365,20 +374,6 @@ impl InvestigationStore {
             propose_repair_error(ProposeFindingErrorCode::WrongCorpus, e.to_string())
         })?;
 
-        // Idempotent retry: return existing proposal without a new revision.
-        if let Some(existing) = document
-            .proposed_findings
-            .iter()
-            .find(|p| p.idempotency_key == idempotency_key)
-        {
-            if existing.status == ProposedFindingStatus::Proposed
-                || existing.status == ProposedFindingStatus::Accepted
-                || existing.status == ProposedFindingStatus::Dismissed
-            {
-                return resolve_document_with_policy_lens(document, corpus, Some(noise_lens));
-            }
-        }
-
         if document.revision != input.expected_revision {
             return Err(propose_repair_error(
                 ProposeFindingErrorCode::StaleRevision,
@@ -444,6 +439,35 @@ impl InvestigationStore {
             })?;
 
         let rank_inputs = input.rank_inputs.map(sanitize_rank_inputs).transpose()?;
+
+        // Exact idempotency (#646 harden): match the proposal with this key only.
+        // Same key + same canonical payload → return existing (any terminal status).
+        // Same key + different payload → typed idempotency_conflict.
+        if let Some(existing) = document
+            .proposed_findings
+            .iter()
+            .find(|p| p.idempotency_key == idempotency_key)
+        {
+            if proposal_payload_matches(
+                existing,
+                input.kind,
+                &title,
+                &why_it_matters,
+                caveats.as_deref(),
+                &citations,
+                view_recipe.as_ref(),
+            ) {
+                return resolve_document_with_policy_lens(document, corpus, Some(noise_lens));
+            }
+            return Err(propose_repair_error(
+                ProposeFindingErrorCode::IdempotencyConflict,
+                format!(
+                    "idempotency_key {idempotency_key} already used by proposal {} with a different payload",
+                    existing.id
+                ),
+            ));
+        }
+
         let now = crate::embed::now_unix_secs();
         let proposal = ProposedFindingItem {
             id: Uuid::now_v7().to_string(),
@@ -791,11 +815,100 @@ fn sanitize_rank_inputs(r: ProposalRankInputs) -> CoreResult<ProposalRankInputs>
     Ok(r)
 }
 
-/// Parse propose tool arguments into [`ProposeFindingInput`] (strict, compact).
+/// Trusted host-only fields that may appear on Model provenance.
+///
+/// Provider/model/run come from the execution host (agent turn profile), never
+/// from tool JSON. Absent when the host has no trusted value.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrustedModelProposeContext {
+    /// Provider id from the host profile (never a secret).
+    pub provider: Option<String>,
+    /// Model id from the host profile.
+    pub model_id: Option<String>,
+    /// Run/turn id from the host.
+    pub run_id: Option<String>,
+}
+
+/// Host-authored Model provenance for the SoftWrite tool path.
+///
+/// Forces `source=Model` and `tool_name=propose_finding`. Model-supplied
+/// provenance fields in tool arguments are ignored by the tool host.
+pub fn host_model_proposal_provenance(
+    ctx: &TrustedModelProposeContext,
+) -> CoreResult<ProposalProvenance> {
+    Ok(ProposalProvenance {
+        source: ProposalSourceKind::Model,
+        provider: sanitize_provenance_field("provider", ctx.provider.clone())?,
+        model_id: sanitize_provenance_field("model_id", ctx.model_id.clone())?,
+        run_id: sanitize_provenance_field("run_id", ctx.run_id.clone())?,
+        tool_name: PROPOSE_FINDING_TOOL.into(),
+        detector_id: None,
+    })
+}
+
+/// Trusted internal/detector provenance — only callable from host/internal APIs,
+/// never from model tool JSON.
+pub fn host_detector_proposal_provenance(
+    detector_id: impl Into<String>,
+) -> CoreResult<ProposalProvenance> {
+    let detector_id = sanitize_provenance_field("detector_id", Some(detector_id.into()))?
+        .ok_or_else(|| {
+            propose_repair_error(
+                ProposeFindingErrorCode::InvalidInput,
+                "detector_id is required for detector provenance",
+            )
+        })?;
+    Ok(ProposalProvenance {
+        source: ProposalSourceKind::Detector,
+        provider: None,
+        model_id: None,
+        run_id: None,
+        tool_name: PROPOSE_FINDING_TOOL.into(),
+        detector_id: Some(detector_id),
+    })
+}
+
+/// Exact payload equality for idempotency (kind/title/why/caveats/evidence/recipe).
+fn proposal_payload_matches(
+    existing: &ProposedFindingItem,
+    kind: FindingKind,
+    title: &str,
+    why_it_matters: &str,
+    caveats: Option<&str>,
+    citations: &[ProposalEvidenceCitation],
+    view_recipe: Option<&FindingViewRecipe>,
+) -> bool {
+    existing.kind == kind
+        && existing.title == title
+        && existing.why_it_matters == why_it_matters
+        && existing.caveats.as_deref() == caveats
+        && existing.evidence == citations
+        && existing.view_recipe.as_ref() == view_recipe
+}
+
+/// Locate the proposal with the given idempotency key (any status).
+pub fn find_proposal_by_idempotency_key<'a>(
+    document: &'a InvestigationDocument,
+    key: &str,
+) -> Option<&'a ProposedFindingItem> {
+    document
+        .proposed_findings
+        .iter()
+        .find(|p| p.idempotency_key == key)
+}
+
+/// Parse propose tool arguments into [`ProposeFindingInput`] without trusting
+/// model provenance. Caller **must** set `provenance` via
+/// [`host_model_proposal_provenance`] (tool path) or
+/// [`host_detector_proposal_provenance`] (internal).
+///
+/// `investigation_id` and `expected_revision` are host-resolved before call;
+/// tool JSON `investigation_id` is not used here.
 pub fn propose_finding_input_from_tool_args(
     args: &Value,
     investigation_id: String,
     expected_revision: u64,
+    provenance: ProposalProvenance,
 ) -> CoreResult<ProposeFindingInput> {
     let idempotency_key = args
         .get("idempotency_key")
@@ -862,7 +975,8 @@ pub fn propose_finding_input_from_tool_args(
             )
         })?),
     };
-    let provenance = parse_provenance(args.get("provenance"))?;
+    // Ignore any model-supplied provenance object entirely.
+    let _ = args.get("provenance");
     Ok(ProposeFindingInput {
         investigation_id,
         expected_revision,
@@ -922,53 +1036,88 @@ fn parse_evidence_array(value: Option<&Value>) -> CoreResult<Vec<ProposalEvidenc
     Ok(out)
 }
 
-fn parse_provenance(value: Option<&Value>) -> CoreResult<ProposalProvenance> {
-    let obj = value.and_then(|v| v.as_object()).ok_or_else(|| {
-        propose_repair_error(
-            ProposeFindingErrorCode::InvalidInput,
-            "provenance object is required",
-        )
-    })?;
-    let source = match obj
-        .get("source")
+/// Dedicated SoftWrite permission preview for `propose_finding` (#646).
+///
+/// Not the durable-memory formatter. Bounded, redacted, Proposed-only.
+pub fn propose_finding_permission_preview(
+    args: &Value,
+    host_investigation_id: Option<&str>,
+) -> String {
+    let inv = host_investigation_id
+        .or_else(|| args.get("investigation_id").and_then(|v| v.as_str()))
+        .unwrap_or("(host investigation required)");
+    let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+    let title = args
+        .get("title")
         .and_then(|v| v.as_str())
-        .unwrap_or("model")
-    {
-        "model" => ProposalSourceKind::Model,
-        "detector" => ProposalSourceKind::Detector,
-        "internal" => ProposalSourceKind::Internal,
-        other => {
-            return Err(propose_repair_error(
-                ProposeFindingErrorCode::InvalidInput,
-                format!("provenance.source invalid: {other:?}"),
-            ))
-        }
+        .unwrap_or("(missing title)");
+    let title = crate::redact::redact_candidate(title).text;
+    let why = args
+        .get("why_it_matters")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let why = crate::redact::redact_candidate(why).text;
+    let why = crate::text::truncate_bytes(&why, 400);
+    let caveats = args.get("caveats").and_then(|v| v.as_str()).unwrap_or("");
+    let caveats = if caveats.is_empty() {
+        String::new()
+    } else {
+        let c = crate::redact::redact_candidate(caveats).text;
+        format!("caveats: {}\n", crate::text::truncate_bytes(&c, 200))
     };
-    let tool_name = obj
-        .get("tool_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or(PROPOSE_FINDING_TOOL)
-        .to_string();
-    Ok(ProposalProvenance {
-        source,
-        provider: obj
-            .get("provider")
+    let evidence = args
+        .get("evidence")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut supporting = 0u32;
+    let mut contradicting = 0u32;
+    let mut identity_lines = Vec::new();
+    for (i, item) in evidence.iter().take(MAX_PROPOSAL_EVIDENCE_REFS).enumerate() {
+        let role = item
+            .get("role")
             .and_then(|v| v.as_str())
-            .map(str::to_string),
-        model_id: obj
-            .get("model_id")
+            .unwrap_or("supporting");
+        match role {
+            "contradicting" => contradicting += 1,
+            _ => supporting += 1,
+        }
+        let er = item.get("event_ref");
+        let seq = er
+            .and_then(|v| v.get("seq"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let source = er
+            .and_then(|v| v.get("source"))
             .and_then(|v| v.as_str())
-            .map(str::to_string),
-        run_id: obj
-            .get("run_id")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        tool_name,
-        detector_id: obj
-            .get("detector_id")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-    })
+            .unwrap_or("?");
+        let source = crate::text::truncate_bytes(source, 64);
+        identity_lines.push(format!("  [{i}] {role} seq={seq} source={source}"));
+    }
+    if evidence.len() > MAX_PROPOSAL_EVIDENCE_REFS {
+        identity_lines.push(format!(
+            "  … {} more identities omitted",
+            evidence.len() - MAX_PROPOSAL_EVIDENCE_REFS
+        ));
+    }
+    let identities = if identity_lines.is_empty() {
+        "  (none)".into()
+    } else {
+        identity_lines.join("\n")
+    };
+    format!(
+        "--- propose_finding (SoftWrite) ---\n\
+         outcome: Proposed only — never accepted evidence, never Explorer mutation\n\
+         investigation: {inv}\n\
+         kind: {kind}\n\
+         title: {title}\n\
+         why_it_matters: {why}\n\
+         {caveats}\
+         supporting_count: {supporting}\n\
+         contradicting_count: {contradicting}\n\
+         exact_evidence_identities:\n{identities}\n\
+         Accept creates a durable Proposed item for human review (Accept / Edit-and-accept / Dismiss)."
+    )
 }
 
 /// Stable tool name for agent-proposed findings (#646).
@@ -982,13 +1131,13 @@ pub fn propose_finding_tool_spec() -> crate::tools::ToolSpec {
         name: PROPOSE_FINDING_TOOL.into(),
         description: "Propose a structured finding for human review on the linked Investigation. \
 Creates only a Proposed item — never accepted evidence, never Explorer mutation. \
-Requires exact event identities from prior search_logs. SoftWrite: durable proposal queue only."
+Requires exact event identities from prior search_logs. SoftWrite: durable proposal queue only. Provenance is host-authored (source=Model, tool_name=propose_finding); do not supply provenance."
             .into(),
         side_effect: ToolSideEffect::SoftWrite,
         parameters: json!({
             "type": "object",
             "properties": {
-                "investigation_id": { "type": "string", "description": "Active investigation UUIDv7" },
+                "investigation_id": { "type": "string", "description": "Must match host-selected active Investigation when supplied; host binding is authoritative" },
                 "expected_revision": { "type": "integer", "minimum": 1 },
                 "idempotency_key": { "type": "string", "maxLength": 128 },
                 "kind": { "type": "string", "enum": ["observation", "inference", "hypothesis"] },
@@ -1027,29 +1176,14 @@ Requires exact event identities from prior search_logs. SoftWrite: durable propo
                         "timeSpanSecs": { "type": "integer" },
                         "levelWeight": { "type": "integer", "minimum": 0, "maximum": 100 }
                     }
-                },
-                "provenance": {
-                    "type": "object",
-                    "properties": {
-                        "source": { "type": "string", "enum": ["model", "detector", "internal"] },
-                        "provider": { "type": "string" },
-                        "model_id": { "type": "string" },
-                        "run_id": { "type": "string" },
-                        "tool_name": { "type": "string" },
-                        "detector_id": { "type": "string" }
-                    },
-                    "required": ["source", "tool_name"]
                 }
             },
             "required": [
-                "investigation_id",
-                "expected_revision",
                 "idempotency_key",
                 "kind",
                 "title",
                 "why_it_matters",
-                "evidence",
-                "provenance"
+                "evidence"
             ],
             "additionalProperties": false
         }),
@@ -1408,5 +1542,97 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("stale_revision"), "{err}");
+    }
+
+    #[test]
+    fn idempotency_exact_match_not_latest_open_and_conflict_on_payload_change() {
+        let cache = tempfile::tempdir().unwrap();
+        let durable = tempfile::tempdir().unwrap();
+        let corpus = fixture_corpus(&cache);
+        let store = InvestigationStore::new(durable.path());
+        let doc = store.create("Idempotency multi", &corpus).unwrap();
+
+        let mut a = base_input(&corpus, &doc.id, 1);
+        a.idempotency_key = "key-a".into();
+        a.title = "Proposal A".into();
+        let r1 = store.propose_finding(&corpus, a).unwrap();
+        let id_a = r1.document.proposed_findings[0].id.clone();
+
+        let mut b = base_input(&corpus, &doc.id, r1.document.revision);
+        b.idempotency_key = "key-b".into();
+        b.title = "Proposal B".into();
+        let r2 = store.propose_finding(&corpus, b).unwrap();
+        assert_eq!(r2.document.proposed_findings.len(), 2);
+        let id_b = r2
+            .document
+            .proposed_findings
+            .iter()
+            .find(|p| p.idempotency_key == "key-b")
+            .unwrap()
+            .id
+            .clone();
+        assert_ne!(id_a, id_b);
+
+        // Retry key-a with same payload → same proposal id A (not latest B).
+        let mut a_retry = base_input(&corpus, &doc.id, r2.document.revision);
+        a_retry.idempotency_key = "key-a".into();
+        a_retry.title = "Proposal A".into();
+        let r3 = store.propose_finding(&corpus, a_retry).unwrap();
+        assert_eq!(r3.document.revision, r2.document.revision);
+        assert_eq!(r3.document.proposed_findings.len(), 2);
+        let matched = find_proposal_by_idempotency_key(&r3.document, "key-a").unwrap();
+        assert_eq!(matched.id, id_a);
+        assert_eq!(matched.title, "Proposal A");
+
+        // Same key, different payload → idempotency_conflict
+        let mut a_conflict = base_input(&corpus, &doc.id, r3.document.revision);
+        a_conflict.idempotency_key = "key-a".into();
+        a_conflict.title = "Different title under key-a".into();
+        let err = store
+            .propose_finding(&corpus, a_conflict)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("idempotency_conflict"), "{err}");
+        assert!(err.contains(&id_a), "must identify prior proposal: {err}");
+    }
+
+    #[test]
+    fn host_model_provenance_forces_model_and_tool_name() {
+        let p = host_model_proposal_provenance(&TrustedModelProposeContext {
+            provider: Some("openai_compatible".into()),
+            model_id: Some("gpt-test".into()),
+            run_id: Some("run-9".into()),
+        })
+        .unwrap();
+        assert_eq!(p.source, ProposalSourceKind::Model);
+        assert_eq!(p.tool_name, PROPOSE_FINDING_TOOL);
+        assert_eq!(p.model_id.as_deref(), Some("gpt-test"));
+        assert!(p.detector_id.is_none());
+
+        let d = host_detector_proposal_provenance("det-1").unwrap();
+        assert_eq!(d.source, ProposalSourceKind::Detector);
+        assert_eq!(d.detector_id.as_deref(), Some("det-1"));
+    }
+
+    #[test]
+    fn permission_preview_is_dedicated_and_not_memory_formatter() {
+        let args = serde_json::json!({
+            "kind": "hypothesis",
+            "title": "Preview title",
+            "why_it_matters": "Rationale text",
+            "caveats": "Limited sample",
+            "evidence": [
+                {"event_ref": {"corpusId": "c", "seq": 1, "source": "a.log", "timestampHint": 1, "timeQualityHint": "wall"}, "role": "supporting"},
+                {"event_ref": {"corpusId": "c", "seq": 2, "source": "b.log", "timestampHint": 2, "timeQualityHint": "wall"}, "role": "contradicting"}
+            ]
+        });
+        let preview = propose_finding_permission_preview(&args, Some("inv-host-1"));
+        assert!(preview.contains("propose_finding (SoftWrite)"));
+        assert!(preview.contains("Proposed only"));
+        assert!(preview.contains("inv-host-1"));
+        assert!(preview.contains("Preview title"));
+        assert!(preview.contains("supporting_count: 1"));
+        assert!(preview.contains("contradicting_count: 1"));
+        assert!(!preview.contains("memory draft"));
     }
 }

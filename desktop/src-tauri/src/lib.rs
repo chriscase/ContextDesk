@@ -776,6 +776,12 @@ fn build_linked_log_fallback_host(
     host.set_log_only_tool_surface(true);
     host.set_log_corpus_scope(Some(context.corpus_id.clone()));
     host.set_active_log_corpus(Some(context.corpus_id.clone()));
+    // Bind propose_finding to the newest active Investigation for this corpus (#646).
+    if let Ok(store) = investigation_store(state) {
+        if let Ok(Some(summary)) = active_investigation_for_corpus(&store, &context.corpus_id) {
+            host.set_active_investigation_id(Some(summary.id));
+        }
+    }
     if context.noise_lens_suspended {
         host.pin_log_suppression_lens_suspended(&context.corpus_id)
             .map_err(|error| error.to_string())?;
@@ -4613,6 +4619,20 @@ async fn agent_turn(
     if let Some(context) = log_explorer_context.as_ref() {
         host.set_log_corpus_scope(Some(context.corpus_id.clone()));
         host.set_active_log_corpus(Some(context.corpus_id.clone()));
+        // Host-selected active Investigation for propose_finding (#646).
+        if let Ok(store) = investigation_store(&state) {
+            if let Ok(Some(summary)) = active_investigation_for_corpus(&store, &context.corpus_id) {
+                host.set_active_investigation_id(Some(summary.id));
+            } else {
+                host.set_active_investigation_id(None);
+            }
+        }
+        // Host-authored Model provenance for propose_finding (never from tool JSON).
+        host.set_propose_model_context(
+            Some(profile.id.clone()),
+            Some(profile.chat_model.clone()),
+            Some(req.session_id.clone()),
+        );
         if let Some(corpus) = validated_log_corpus {
             if let Err(error) = host.seed_log_corpus_handle(&context.corpus_id, corpus) {
                 tracing::warn!(error = %error, "linked corpus preflight handoff failed");
