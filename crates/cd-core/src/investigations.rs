@@ -1357,7 +1357,8 @@ impl InvestigationStore {
     ///
     /// Missing and stale reference occurrences are counted honestly while the
     /// original recipe remains unchanged for a caller-controlled preview/apply
-    /// decision. Findings without a saved recipe fail closed.
+    /// decision. Findings without a saved recipe fail closed. This method never
+    /// mutates the Investigation document or the Explorer view.
     pub fn resolve_finding_view_recipe(
         &self,
         investigation_id: &str,
@@ -1440,6 +1441,28 @@ impl InvestigationStore {
             missing_count,
             stale_count,
         })
+    }
+
+    /// Trusted-host Apply gate for a finding view recipe (#656).
+    ///
+    /// Revalidates every exact reference. Returns the durable recipe only when
+    /// every reference is verified. Missing or stale references fail closed with
+    /// a typed explanation — callers must not mutate the Explorer on error.
+    /// Does not mutate the Investigation document.
+    pub fn apply_finding_view_recipe(
+        &self,
+        investigation_id: &str,
+        finding_id: &str,
+        corpus: &LogCorpus,
+    ) -> CoreResult<FindingViewRecipeResolution> {
+        let resolved = self.resolve_finding_view_recipe(investigation_id, finding_id, corpus)?;
+        if resolved.missing_count > 0 || resolved.stale_count > 0 {
+            return Err(CoreError::Policy(format!(
+                "Apply blocked: finding {finding_id} view recipe has {} missing and {} stale exact references; fix or refresh evidence before Apply",
+                resolved.missing_count, resolved.stale_count
+            )));
+        }
+        Ok(resolved)
     }
 
     fn ensure_root(&self) -> CoreResult<()> {
@@ -3893,6 +3916,55 @@ mod tests {
         assert_eq!(
             store.load(&document.id, &corpus).unwrap().document.revision,
             1
+        );
+    }
+
+    #[test]
+    fn investigation_apply_finding_view_fails_closed_on_stale_or_missing_refs() {
+        let cache = tempfile::tempdir().unwrap();
+        let durable = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&cache);
+        let store = InvestigationStore::new(durable.path());
+        let document = store.create("Apply gate", &corpus).unwrap();
+        let mut input = finding_input(&corpus);
+        input.view_recipe = Some(finding_view_recipe(&corpus));
+        let added = store
+            .add_human_finding(&document.id, 1, &corpus, input)
+            .unwrap();
+        let finding_id = added.document.findings[0].id.clone();
+        let clean = store
+            .apply_finding_view_recipe(&document.id, &finding_id, &corpus)
+            .expect("verified recipe must apply");
+        assert_eq!(clean.missing_count, 0);
+        assert_eq!(clean.stale_count, 0);
+        assert_eq!(
+            clean.view_recipe,
+            added.document.findings[0]
+                .view_recipe
+                .clone()
+                .expect("recipe")
+        );
+
+        corpus
+            .with_connection(|connection| {
+                connection
+                    .execute("DELETE FROM events WHERE seq = 12", [])
+                    .map_err(|error| CoreError::Message(format!("test delete: {error}")))?;
+                Ok(())
+            })
+            .unwrap();
+        let err = store
+            .apply_finding_view_recipe(&document.id, &finding_id, &corpus)
+            .expect_err("missing refs must block Apply");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Apply blocked") && msg.contains("missing"),
+            "{msg}"
+        );
+        // Document unchanged by failed Apply.
+        assert_eq!(
+            store.load(&document.id, &corpus).unwrap().document.revision,
+            added.document.revision
         );
     }
 

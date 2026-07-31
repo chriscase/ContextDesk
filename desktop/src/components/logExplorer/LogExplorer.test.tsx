@@ -210,6 +210,7 @@ vi.mock("../../lib/host", () => ({
   hostLogPreviewInvestigationEvidence: vi.fn(),
   hostLogPreviewInvestigationFindingView: vi.fn(),
   hostLogRecomputeInvestigationFindingView: vi.fn(),
+  hostLogApplyInvestigationFindingView: vi.fn(),
   hostPrepareLogDiagnosticReport: vi.fn(async (manifest) => {
     const actual = await vi.importActual<
       typeof import("../../lib/logDiagnosticReport")
@@ -4476,6 +4477,9 @@ describe("LogExplorer shell", () => {
     vi.mocked(host.hostLogPreviewInvestigationFindingView).mockResolvedValue(
       preview,
     );
+    vi.mocked(host.hostLogApplyInvestigationFindingView).mockResolvedValue(
+      preview,
+    );
     vi.mocked(host.hostLogQueryEventNeighborhood).mockResolvedValue(
       eventNeighborhood(event),
     );
@@ -4529,9 +4533,11 @@ describe("LogExplorer shell", () => {
     expect(
       selectedRow?.classList.contains("log-explorer__row--highlight"),
     ).toBe(true);
+    // Preview once + trusted-host Apply once (not a second Preview-as-Apply).
     expect(host.hostLogPreviewInvestigationFindingView).toHaveBeenCalledTimes(
-      2,
+      1,
     );
+    expect(host.hostLogApplyInvestigationFindingView).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByTestId("bookmark-restore-view"));
     await waitFor(() =>
@@ -4628,6 +4634,11 @@ describe("LogExplorer shell", () => {
       missingCount: 0,
       staleCount: 1,
     });
+    vi.mocked(host.hostLogApplyInvestigationFindingView).mockRejectedValue(
+      new Error(
+        "Apply blocked: finding view recipe has 0 missing and 1 stale exact references",
+      ),
+    );
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByText("auth failure");
@@ -4647,6 +4658,151 @@ describe("LogExplorer shell", () => {
       ).disabled,
     ).toBe(true);
     expect(host.hostLogQueryEventNeighborhood).not.toHaveBeenCalled();
+    expect(host.hostLogApplyInvestigationFindingView).not.toHaveBeenCalled();
+  });
+
+  it("surfaces host Apply rejection without mutating Explorer when clean preview enables Apply", async () => {
+    // Real entry point: clean Preview enables Apply → click Apply → trusted host
+    // rejects → filters/selection stay put and the typed host explanation surfaces.
+    const event = defaultEventPage().events[0]!;
+    const eventRef: host.LogBookmarkEventRefDto = {
+      corpusId: "c1",
+      seq: event.seq,
+      source: event.source,
+      timestampHint: event.ts,
+      timeQualityHint: event.timeQuality,
+    };
+    const recipe: host.InvestigationViewRecipeDto = {
+      filters: {
+        levels: ["error"],
+        sources: [],
+        services: [],
+        hosts: [],
+        timeFrom: null,
+        timeTo: null,
+        seqFrom: null,
+        seqTo: null,
+        templateId: null,
+        traceId: null,
+        keyword: null,
+      },
+      lanes: [{ id: "lane-0", label: "All sources", sources: [] }],
+      visibleLaneCount: 1,
+      linkMode: "independent",
+      focusedLaneId: "lane-0",
+      focusedEvent: eventRef,
+      selection: [eventRef],
+      highlights: [eventRef],
+      find: null,
+      viewportAnchors: [{ laneId: "lane-0", eventRef }],
+    };
+    const finding: host.InvestigationFindingItemDto = {
+      id: "019fa8d0-0000-7000-8000-000000000031",
+      kind: "observation",
+      lifecycle: "accepted",
+      title: "Apply host rejection view",
+      whyItMatters: "Host fail-closed must not schedule a local view apply.",
+      evidenceIds: [],
+      viewRecipe: recipe,
+      provenance: "human",
+      createdAt: 3,
+      updatedAt: 3,
+    };
+    const loaded: host.ResolvedInvestigationDocumentDto = {
+      document: {
+        schemaVersion: 3,
+        id: "019fa8d0-0000-7000-8000-000000000030",
+        revision: 3,
+        title: "Investigation · fixture",
+        status: "active",
+        corpusLinks: [{ corpusId: "c1" }],
+        evidence: [],
+        findings: [finding],
+        notes: [],
+        createdAt: 1,
+        updatedAt: 3,
+      },
+      evidence: [],
+    };
+    const cleanPreview = {
+      investigationId: loaded.document.id,
+      revision: loaded.document.revision,
+      findingId: finding.id,
+      recipe,
+      missingCount: 0,
+      staleCount: 0,
+    };
+    const hostRejectMessage =
+      "Apply blocked: finding view recipe has 0 missing and 1 stale exact references; fix or refresh evidence before Apply";
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(loaded);
+    vi.mocked(host.hostLogPreviewInvestigationFindingView).mockResolvedValue(
+      cleanPreview,
+    );
+    vi.mocked(host.hostLogApplyInvestigationFindingView).mockRejectedValue(
+      new Error(hostRejectMessage),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    await openInvestigationView(1);
+    fireEvent.click(await screen.findByTestId(`finding-item-${finding.id}`));
+
+    const errorCheckboxBefore = screen.getByRole("checkbox", {
+      name: /error/i,
+    }) as HTMLInputElement;
+    expect(errorCheckboxBefore.checked).toBe(false);
+    const selectedBefore = document.querySelectorAll(
+      ".log-explorer__row--selected",
+    ).length;
+    const queryCountBefore = vi.mocked(host.hostLogQueryEvents).mock.calls
+      .length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview saved view" }));
+    const viewPreview = await screen.findByTestId(
+      `finding-view-preview-${finding.id}`,
+    );
+    expect(viewPreview.textContent).toContain(
+      "Preview only · current Explorer unchanged",
+    );
+    // Clean preview must enable Apply so the host gate is actually exercised.
+    const applyButton = within(viewPreview).getByRole("button", {
+      name: "Apply saved view",
+    }) as HTMLButtonElement;
+    expect(applyButton.disabled).toBe(false);
+
+    fireEvent.click(applyButton);
+
+    // Host typed explanation surfaces; Apply must not schedule local mutation.
+    // String(Error) prefixes "Error: " — match the host typed body either way.
+    const alert = await screen.findByRole("alert", {}, { timeout: 3000 });
+    expect(alert.textContent ?? "").toMatch(
+      /Apply blocked:.*stale exact references/i,
+    );
+    expect(host.hostLogApplyInvestigationFindingView).toHaveBeenCalledTimes(1);
+    expect(host.hostLogApplyInvestigationFindingView).toHaveBeenCalledWith(
+      "c1",
+      loaded.document.id,
+      finding.id,
+    );
+
+    // Filters, selection, and neighborhood navigation stay at pre-Apply state.
+    expect(
+      (screen.getByRole("checkbox", { name: /error/i }) as HTMLInputElement)
+        .checked,
+    ).toBe(false);
+    expect(
+      document.querySelectorAll(".log-explorer__row--selected").length,
+    ).toBe(selectedBefore);
+    expect(host.hostLogQueryEventNeighborhood).not.toHaveBeenCalled();
+    // No "Applied saved Explorer view" status and no Restore prior view affordance.
+    expect(screen.queryByTestId("bookmark-restore-view")).toBeNull();
+    expect(screen.getByRole("status").textContent ?? "").not.toContain(
+      "Applied saved Explorer view",
+    );
+    // Host reject path may re-preview for honest counts, but must not run query apply.
+    expect(vi.mocked(host.hostLogQueryEvents).mock.calls.length).toBe(
+      queryCountBefore,
+    );
   });
 
   it("reloads investigation with suspended lens and blocks Apply under different noise policy (#819)", async () => {
