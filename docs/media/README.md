@@ -7,27 +7,37 @@ company-data behavior, or owner acceptance.
 
 ## Exact app-build capture template
 
-The application used for the current three public frames was built from exact
-app-source SHA
-`4cbdf664a794af3f424cd5bba8a4c621c3df3bae`. Later documentation-only commits
-may advance repository `HEAD` without changing those packaged application
-bytes.
+`docs/media/public-assets.json` is the authority for which app-source SHA each
+published frame came from, so this section states it **per file** rather than in
+aggregate. The current gallery was not captured from a single build — it spans
+two, recorded below. Later documentation-only commits may advance repository
+`HEAD` without changing the packaged application bytes.
 
 | Property | Required value |
 | --- | --- |
 | App | Packaged macOS `.app` from `desktop/src-tauri/target/release/bundle/macos/ContextDesk.app` |
-| App-source SHA | `4cbdf664a794af3f424cd5bba8a4c621c3df3bae` |
 | Capture method | Native packaged-app window capture, cropped to the application window |
 | Updater signing | Public key present; private key intentionally unset for the local unsigned bundle |
 
-| File | Surface | Dimensions |
-| --- | --- | --- |
-| `gallery/logs-library-demo.png` | Synthetic 25,000-event corpus in the Logs library | 1100 × 760 PNG |
-| `gallery/log-explorer-investigation.png` | Synthetic Log Explorer investigation with aligned CPU/heap/client tracks, two lanes, payload-focused rows, and the chat rail collapsed | 1195 × 768 PNG |
-| `gallery/help-appearance.png` | Demo-datasets Help article with the public Appearance picker open | 1100 × 760 PNG |
+| File | Surface | Dimensions | App-source SHA |
+| --- | --- | --- | --- |
+| `gallery/logs-library-demo.png` | Synthetic 25,000-event corpus in the Logs library | 1100 × 760 PNG | `4cbdf664a794af3f424cd5bba8a4c621c3df3bae` |
+| `gallery/log-explorer-investigation.png` | Synthetic Log Explorer investigation with aligned CPU/heap/client tracks, two lanes, payload-focused rows, and the chat rail collapsed | 1195 × 768 PNG | `fb30c99638a7c443c0d6acd23f914f865b9577eb` |
+| `gallery/help-appearance.png` | Demo-datasets Help article with the public Appearance picker open | 1100 × 760 PNG | `4cbdf664a794af3f424cd5bba8a4c621c3df3bae` |
+
+`scripts/check_public_media.mjs` requires every `sourceSha` recorded in the
+ledger to appear in this file, so a recapture cannot silently leave this table
+naming a build that no longer produced the frame.
 
 The exact Git blob identities and completed byte-level publication review are
 recorded in `docs/media/public-assets.json`.
+
+**Known residual — this is not a single-build gallery.** #734 asks for one
+exact packaged-app SHA and #677 asks for frames current with the promoted
+build. Two frames predate the third, and `gallery/logs-library-demo.png` was
+captured before the Logs toolbar was regrouped, so it no longer matches
+production. Closing that requires native recapture from one freshly built
+`.app`; it cannot be discharged by editing this file.
 
 ## Publication privacy gate
 

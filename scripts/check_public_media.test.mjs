@@ -54,6 +54,10 @@ function withRepository(runTest) {
     const absolute = path.join(root, ...pathname.split("/"));
     fs.writeFileSync(absolute, Buffer.from("synthetic-png-bytes"));
     const gitBlob = git(root, ["hash-object", "--", absolute]);
+    fs.writeFileSync(
+      path.join(root, "docs", "media", "README.md"),
+      `# Public product media\n\nApp-source SHA \`${SOURCE_SHA}\`.\n`,
+    );
     writeManifest(root, [asset(pathname, gitBlob)]);
     runTest({ root, pathname, absolute, gitBlob });
   } finally {
@@ -67,7 +71,7 @@ test("valid manifest passes with concise output", () => {
     assert.equal(result.status, 0, result.stderr);
     assert.equal(
       result.stdout,
-      "public media manifest valid: 1 assets, 0 published references\n",
+      "public media manifest valid: 1 assets, 0 published references, 1 recorded capture build(s)\n",
     );
     assert.equal(result.stderr, "");
   });
@@ -169,6 +173,10 @@ test("a raster symlink escaping docs/media fails closed", () => {
     fs.writeFileSync(outside, "outside");
     fs.rmSync(absolute);
     fs.symlinkSync(outside, absolute);
+    fs.writeFileSync(
+      path.join(root, "docs", "media", "README.md"),
+      `# Public product media\n\nApp-source SHA \`${SOURCE_SHA}\`.\n`,
+    );
     writeManifest(root, [asset(pathname, gitBlob)]);
     const result = run(root);
     assert.notEqual(result.status, 0);
@@ -184,5 +192,33 @@ test("malformed source SHA fails closed", () => {
     const result = run(root);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /sourceSha.*40-hex/);
+  });
+});
+
+test("a capture SHA missing from the provenance record fails closed", () => {
+  withRepository(({ root, pathname, gitBlob }) => {
+    // Exactly the drift that occurred on main: the ledger recorded a second
+    // capture build while docs/media/README.md still claimed a single SHA.
+    const second = asset(pathname.replace("frame.png", "second.png"), gitBlob);
+    second.sourceSha = "fedcba9876543210fedcba9876543210fedcba98";
+    const absolute = path.join(root, "docs", "media", "gallery", "second.png");
+    fs.writeFileSync(absolute, Buffer.from("synthetic-png-bytes"));
+    second.gitBlob = git(root, ["hash-object", "--", absolute]);
+    writeManifest(root, [asset(pathname, gitBlob), second]);
+
+    const drifted = run(root);
+    assert.notEqual(drifted.status, 0);
+    assert.match(
+      drifted.stderr,
+      /does not record capture provenance for source SHA fedcba98/,
+    );
+
+    fs.appendFileSync(
+      path.join(root, "docs", "media", "README.md"),
+      `\nAlso captured from \`${second.sourceSha}\`.\n`,
+    );
+    const recorded = run(root);
+    assert.equal(recorded.status, 0, recorded.stderr);
+    assert.match(recorded.stdout, /2 recorded capture build\(s\)/);
   });
 });

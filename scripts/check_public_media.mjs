@@ -207,8 +207,38 @@ export function validatePublicMedia(
   }
 
   const published = validatePublishedReferences(root, seen);
+  const provenance = validateProvenanceRecord(root, parsed.assets);
 
-  return { assets: inventory.length, published };
+  return { assets: inventory.length, published, provenance };
+}
+
+/**
+ * The ledger records the app-source SHA per frame; `docs/media/README.md` is
+ * where a human reads it. Those two drifted apart once already — the prose
+ * claimed all three frames came from one build while the ledger recorded two —
+ * which is exactly the "one exact packaged-app SHA" claim #734 asks for. Require
+ * every recorded SHA to appear in the provenance record so a recapture cannot
+ * leave stale prose behind.
+ */
+export function validateProvenanceRecord(
+  root,
+  assets,
+  document = "docs/media/README.md",
+) {
+  const documentPath = path.join(root, document);
+  if (!fs.existsSync(documentPath)) {
+    throw new Error(`${document}: capture provenance record is missing`);
+  }
+  const text = fs.readFileSync(documentPath, "utf8");
+  const shas = [...new Set(assets.map((asset) => asset.sourceSha.toLowerCase()))];
+  for (const sha of shas) {
+    if (!text.toLowerCase().includes(sha)) {
+      throw new Error(
+        `${document}: does not record capture provenance for source SHA ${sha}`,
+      );
+    }
+  }
+  return shas.length;
 }
 
 /**
@@ -263,7 +293,8 @@ function main() {
     : path.join(repositoryRoot, "docs/media/public-assets.json");
   const result = validatePublicMedia(repositoryRoot, manifestPath);
   process.stdout.write(
-    `public media manifest valid: ${result.assets} assets, ${result.published} published references\n`,
+    `public media manifest valid: ${result.assets} assets, ${result.published} published references, ` +
+      `${result.provenance} recorded capture build(s)\n`,
   );
 }
 
