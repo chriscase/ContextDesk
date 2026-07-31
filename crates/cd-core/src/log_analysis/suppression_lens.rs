@@ -709,13 +709,15 @@ mod tests {
         assert_ne!(other.corpus_id, suppressed.id());
     }
 
+    /// Enforcement cost must not grow with the corpus, or #824's
+    /// time-to-first-use work would be paid back on every page.
+    ///
     /// One-machine bounded observation, not a universal latency claim.
-    #[test]
-    fn enforcement_stays_off_the_policy_path_at_twenty_five_thousand_events() {
+    fn measure_enforcement(event_count: u64) -> std::time::Duration {
         let temp = tempfile::tempdir().expect("temp");
         let corpus = LogCorpus::create(temp.path(), "lens scale").expect("create");
-        let mut events = Vec::with_capacity(25_000);
-        for seq in 1..=25_000u64 {
+        let mut events = Vec::with_capacity(event_count as usize);
+        for seq in 1..=event_count {
             let template_id = if seq % 5 == 0 {
                 SIGNAL_TEMPLATE
             } else {
@@ -726,8 +728,8 @@ mod tests {
         corpus.push_events(&events).expect("push");
         corpus
             .upsert_templates([
-                template(NOISE_TEMPLATE, "routine health <*>", 20_000),
-                template(SIGNAL_TEMPLATE, "payment gateway <*>", 5_000),
+                template(NOISE_TEMPLATE, "routine health <*>", event_count / 5 * 4),
+                template(SIGNAL_TEMPLATE, "payment gateway <*>", event_count / 5),
             ])
             .expect("templates");
         enable_noise_rule(&corpus);
@@ -749,17 +751,30 @@ mod tests {
         assert_eq!(
             corpus.suppression_lens_load_count() - baseline,
             1,
-            "1,000 enforced queries over 25k events must resolve the policy once"
+            "1,000 enforced queries over {event_count} events must resolve the policy once"
         );
         // Generous: this guards against reintroducing a per-query sidecar read
-        // (~1000x this budget), not against small machine-to-machine variance.
+        // (~1000x this budget), not against machine-to-machine variance.
         assert!(
             elapsed < std::time::Duration::from_secs(2),
-            "enforcement overhead regressed: {elapsed:?} for 1,000 queries"
+            "enforcement overhead regressed at {event_count} events: {elapsed:?} for 1,000 queries"
         );
         println!(
-            "PASS suppression-lens-enforcement events=25000 queries=1000 sidecar_loads=1 elapsed_ms={} (one-machine observation; not a universal claim)",
+            "PASS suppression-lens-enforcement events={event_count} queries=1000 sidecar_loads=1 elapsed_ms={} (one-machine observation; not a universal claim)",
             elapsed.as_millis()
+        );
+        elapsed
+    }
+
+    #[test]
+    fn enforcement_cost_does_not_grow_with_corpus_size() {
+        let small = measure_enforcement(25_000);
+        let large = measure_enforcement(100_000);
+        // The trusted set is a function of the sidecar and template identity,
+        // never of event volume, so quadrupling the corpus must not move this.
+        assert!(
+            large < small + std::time::Duration::from_millis(500),
+            "enforcement scaled with corpus size: 25k={small:?} 100k={large:?}"
         );
     }
 }
