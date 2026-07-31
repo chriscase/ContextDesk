@@ -23,8 +23,8 @@
     <path d="M664 160H715" stroke="#38bdf8" stroke-width="4" marker-end="url(#a)"/>
     <rect x="726" y="100" width="132" height="120" rx="12" fill="#064e3b" stroke="#34d399" stroke-width="2"/>
     <text x="792" y="135" fill="#e5e7eb" font-size="16" font-weight="700">Publish</text>
-    <text x="792" y="163" fill="#9ca3af" font-size="13">latest manifest</text>
-    <text x="792" y="184" fill="#9ca3af" font-size="13">only if complete</text>
+    <text x="792" y="163" fill="#e5e7eb" font-size="13">latest manifest</text>
+    <text x="792" y="184" fill="#e5e7eb" font-size="13">only if complete</text>
   </g>
   <text x="450" y="278" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="14">No restore, remote deletion, bidirectional sync, or S3 indexing in Phase A.</text>
 </svg>

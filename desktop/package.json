@@ -9,7 +9,7 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint .",
-    "test": "vitest run && node --test scripts/gen-tauri-conf.test.mjs ../scripts/check_help_corpus.test.mjs ../scripts/check_design_handbook.test.mjs",
+    "test": "vitest run && node --test scripts/gen-tauri-conf.test.mjs ../scripts/check_help_corpus.test.mjs ../scripts/check_design_handbook.test.mjs ../scripts/check_public_media.test.mjs ../scripts/check_packaged_demo_manifest.test.mjs",
     "test:watch": "vitest",
     "preview": "vite preview",
     "gen:tauri-conf": "node scripts/gen-tauri-conf.mjs",

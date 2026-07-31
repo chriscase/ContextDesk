@@ -14,6 +14,8 @@ html[data-theme="slate"] {
   /* ≥4.5:1 on --bg-app/#0f1419 (~4.83) and --bg-panel/#161b22 (~4.51) (#253) */
   --text-faint: #7b838e;
   --accent: #58a6ff;
+  /* Accent used as small text on --bg-elevated; must clear WCAG AA there. */
+  --accent-text: #58a6ff;
   --accent-strong: #79b8ff;
   --accent-soft: rgb(88 166 255 / 0.15);
   --accent-on: #0b1020;

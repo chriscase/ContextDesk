@@ -1,6 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 310" role="img" aria-labelledby="title desc">
   <title id="title">Grounded chat and context-budget flow</title>
   <desc id="desc">A question combines bounded history and selected context, retrieves evidence through tools, fits the model budget, and returns an answer with search trail and citations.</desc>
+  <!-- Full-bleed canvas: Help renders diagrams through <img> with a base64 data
+       URL, so artwork cannot inherit the page theme. Without this rect the
+       diagram title and footnote sit on the near-white .help-figure surface in
+       the Light and Sand themes (#540). -->
+  <rect width="980" height="310" fill="#0f172a"/>
   <defs>
     <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
       <path d="M0 0 8 4 0 8Z" fill="#38bdf8"/>

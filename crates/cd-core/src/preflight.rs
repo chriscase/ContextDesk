@@ -381,12 +381,23 @@ pub fn run_preflight(input: PreflightInput<'_>) -> PreflightReport {
 
             // #121: Anthropic is wired; key check above covers credentials.
 
-            // Remote kinds (OpenAI-compatible, Anthropic, …) — only report "responded"
-            // when the host supplied a real probe result (`provider_reachable`), never
-            // for a structural URL-shape check alone (#126).
+            // Remote kinds (OpenAI-compatible, Anthropic, Grok Build) — only report
+            // "responded" when the host supplied a real probe result
+            // (`provider_reachable`), never for a structural URL-shape check alone
+            // (#126).
+            //
+            // Grok Build belongs here: the desktop host already runs the same
+            // `discovery::probe_provider` round trip for it and reports the outcome,
+            // but this match previously excluded the kind, so that measurement was
+            // discarded. The visible effect was a Grok profile reporting launch-ready
+            // with no probe ever consumed, and a *failed* Grok probe not blocking.
+            // `provider.grok_session` remains session-file presence only and is never
+            // evidence of reachability (#746).
             let remote_probe_kinds = matches!(
                 p.kind,
-                ProviderKind::OpenAiCompatible | ProviderKind::Anthropic
+                ProviderKind::OpenAiCompatible
+                    | ProviderKind::Anthropic
+                    | ProviderKind::XaiGrokBuild
             );
             if remote_probe_kinds {
                 let host_detail = input
@@ -964,6 +975,189 @@ mod tests {
             .items
             .iter()
             .any(|i| { i.id == "confluence.pat" && i.level == PreflightLevel::Warn }));
+    }
+
+    /// Grok Build profile shaped like the desktop host builds it.
+    fn grok_providers() -> ProviderConfig {
+        use crate::providers::{ProviderKind, ProviderProfile};
+        let mut providers = ProviderConfig::default();
+        providers.profiles.push(ProviderProfile {
+            id: "xai-grok-build".into(),
+            label: "Grok Build session".into(),
+            kind: ProviderKind::XaiGrokBuild,
+            base_url: "https://api.x.ai/v1".into(),
+            api_key_ref: None,
+            chat_model: "grok-4".into(),
+            embedding_model: None,
+            embedding_base_url: None,
+            local_only: false,
+            deadline_preference: Default::default(),
+            capabilities: Default::default(),
+        });
+        providers.active_id = Some("xai-grok-build".into());
+        providers
+    }
+
+    fn grok_report(
+        ws: &Workspace,
+        providers: &ProviderConfig,
+        provider_reachable: Option<bool>,
+        grok_session_present: Option<bool>,
+    ) -> PreflightReport {
+        run_preflight(PreflightInput {
+            workspace: Some(ws),
+            providers,
+            data_dir_writable: true,
+            ollama_reachable: None,
+            provider_reachable,
+            provider_probe_detail: provider_reachable.map(|ok| {
+                if ok {
+                    "models list ok"
+                } else {
+                    "session rejected"
+                }
+                .to_string()
+            }),
+            active_key_present: Some(true),
+            confluence: None,
+            confluence_pat_present: None,
+            grok_session_present,
+            connectors: &[],
+            durable_memory_active: None,
+        })
+    }
+
+    /// #746: the desktop host runs a real `discovery::probe_provider` round trip
+    /// for Grok Build, but this match previously excluded the kind, so the
+    /// measurement was silently discarded and a Grok profile read as launch-ready
+    /// having never been probed.
+    #[test]
+    fn grok_unprobed_is_unverified_not_ready() {
+        let root = std::env::temp_dir();
+        let ws = Workspace::new("t", vec![PathBuf::from(&root)]);
+        let providers = grok_providers();
+        let report = grok_report(&ws, &providers, None, Some(true));
+
+        let remote = report
+            .items
+            .iter()
+            .find(|i| i.id == "provider.remote")
+            .expect("an active Grok profile must carry a probe-outcome item");
+        assert_eq!(remote.level, PreflightLevel::Warn);
+        assert!(
+            remote.detail.contains("not a probe"),
+            "unmeasured Grok reachability must say so: {}",
+            remote.detail
+        );
+        // Unverified must not block work.
+        assert!(!report.has_blocking);
+    }
+
+    #[test]
+    fn grok_failed_probe_blocks() {
+        let root = std::env::temp_dir();
+        let ws = Workspace::new("t", vec![PathBuf::from(&root)]);
+        let providers = grok_providers();
+        let report = grok_report(&ws, &providers, Some(false), Some(true));
+
+        let remote = report
+            .items
+            .iter()
+            .find(|i| i.id == "provider.remote")
+            .expect("provider.remote item");
+        assert_eq!(remote.level, PreflightLevel::Fail);
+        assert!(
+            remote.detail.contains("session rejected"),
+            "{}",
+            remote.detail
+        );
+        assert!(
+            report.has_blocking,
+            "a failed Grok probe must block launch readiness"
+        );
+    }
+
+    #[test]
+    fn grok_successful_probe_can_be_ready() {
+        let root = std::env::temp_dir();
+        let ws = Workspace::new("t", vec![PathBuf::from(&root)]);
+        let providers = grok_providers();
+        let report = grok_report(&ws, &providers, Some(true), Some(true));
+
+        let remote = report
+            .items
+            .iter()
+            .find(|i| i.id == "provider.remote")
+            .expect("provider.remote item");
+        assert_eq!(remote.level, PreflightLevel::Pass);
+        assert!(
+            remote.detail.contains("Live probe succeeded"),
+            "{}",
+            remote.detail
+        );
+        assert!(!report.has_blocking);
+        // No launch-critical probe item may be left unmeasured.
+        assert!(!report.items.iter().any(|i| {
+            matches!(
+                i.id.as_str(),
+                "provider.key" | "provider.ollama" | "provider.remote"
+            ) && i.level == PreflightLevel::Warn
+        }));
+    }
+
+    /// Session-file presence is credential material, never reachability (#746).
+    #[test]
+    fn grok_session_presence_is_not_reachability() {
+        let root = std::env::temp_dir();
+        let ws = Workspace::new("t", vec![PathBuf::from(&root)]);
+        let providers = grok_providers();
+        // Session file present, probe never run.
+        let report = grok_report(&ws, &providers, None, Some(true));
+
+        let session = report
+            .items
+            .iter()
+            .find(|i| i.id == "provider.grok_session")
+            .expect("provider.grok_session item");
+        assert_eq!(session.level, PreflightLevel::Pass);
+        assert!(
+            !session.detail.to_lowercase().contains("reachable"),
+            "session presence must not imply reachability: {}",
+            session.detail
+        );
+        // The presence item must not satisfy the probe requirement.
+        let remote = report
+            .items
+            .iter()
+            .find(|i| i.id == "provider.remote")
+            .expect("provider.remote item");
+        assert_eq!(remote.level, PreflightLevel::Warn);
+    }
+
+    /// The kinds whose probe outcome is consumed must stay in step with the kinds
+    /// the desktop host actually probes.
+    #[test]
+    fn every_remote_provider_kind_consumes_its_probe_outcome() {
+        use crate::providers::ProviderKind;
+        let root = std::env::temp_dir();
+        let ws = Workspace::new("t", vec![PathBuf::from(&root)]);
+        for kind in [
+            ProviderKind::OpenAiCompatible,
+            ProviderKind::Anthropic,
+            ProviderKind::XaiGrokBuild,
+        ] {
+            let mut providers = grok_providers();
+            providers.profiles[0].kind = kind;
+            providers.profiles[0].api_key_ref = Some("k".into());
+            let report = grok_report(&ws, &providers, None, Some(true));
+            assert!(
+                report
+                    .items
+                    .iter()
+                    .any(|i| i.id == "provider.remote" && i.level == PreflightLevel::Warn),
+                "{kind:?} must report an unmeasured probe rather than nothing"
+            );
+        }
     }
 
     #[test]

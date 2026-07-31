@@ -28,6 +28,8 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Five-theme appearance registry (Dark/Light/Slate/Sand/Forest) | Shipped | desktop/src/lib/skins.ts:SKINS | #99 |
 | External module sandbox | Roadmap | docs/ | #94 |
 | Privacy-reviewed README product gallery | Shipped | docs/media/public-assets.json:assets | #653 |
+| Optional first-run packaged demo corpus install | Shipped | desktop/src-tauri/src/lib.rs:install_demo_log_corpus | #732 |
+| Byte-exact packaged demo fixture manifest | Shipped | desktop/src-tauri/src/lib.rs:validate_demo_log_resource_against_manifest | #739 — proves fixture identity only, not ingest performance |
 | Proven multi-OS release installers (tag run) | Roadmap | .github/workflows/release.yml | #172 residual — workflow present; no public tag artifacts yet |
 | Release packaging docs + dispatch dry path | Shipped | docs/PACKAGING.md:Packaging | #55 #99 path documented |
 | Provider tools capability detect + persist | Shipped | crates/cd-core/src/providers.rs:set_profile_tools_enabled | #327 |

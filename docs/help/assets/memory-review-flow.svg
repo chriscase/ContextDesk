@@ -1,6 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 340" role="img" aria-labelledby="title desc">
   <title id="title">Durable memory review and recall flow</title>
   <desc id="desc">Explicit saves and rule-based cues enter a review step, approved and redacted records enter durable memory with embeddings, and bounded recall returns citations to later chats.</desc>
+  <!-- Full-bleed canvas: Help renders diagrams through <img> with a base64 data
+       URL, so artwork cannot inherit the page theme. Without this rect the
+       diagram title and footnote sit on the near-white .help-figure surface in
+       the Light and Sand themes (#540). -->
+  <rect width="1020" height="340" fill="#0f172a"/>
   <defs>
     <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
       <path d="M0 0 8 4 0 8Z" fill="#38bdf8"/>

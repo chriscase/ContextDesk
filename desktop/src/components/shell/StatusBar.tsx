@@ -1,6 +1,12 @@
+import type { PreflightReadiness } from "../../lib/preflightCategories";
+
 type Props = {
   busy: boolean;
-  setupIncomplete: boolean;
+  /**
+   * Three-state readiness (#746). `ready` means launch-critical provider
+   * probes actually succeeded — configuration alone never earns it.
+   */
+  readiness: PreflightReadiness;
   scopeLabel: string;
   egressLabel: string;
   onOpenPreflight: () => void;
@@ -8,10 +14,22 @@ type Props = {
   onOpenAi: () => void;
 };
 
+const READINESS_LABEL: Record<PreflightReadiness, string> = {
+  blocked: "Setup incomplete",
+  unverified: "Not verified",
+  ready: "Ready",
+};
+
+const PREFLIGHT_LABEL: Record<PreflightReadiness, string> = {
+  blocked: "Preflight issues",
+  unverified: "Preflight unverified",
+  ready: "Preflight ok",
+};
+
 /** Bottom status bar (#146). */
 export function StatusBar({
   busy,
-  setupIncomplete,
+  readiness,
   scopeLabel,
   egressLabel,
   onOpenPreflight,
@@ -24,20 +42,27 @@ export function StatusBar({
         <span
           className="status-bar__dot"
           data-live={busy ? "true" : undefined}
-          data-warn={!busy && setupIncomplete ? "true" : undefined}
-          data-ok={!busy && !setupIncomplete ? "true" : undefined}
+          data-warn={!busy && readiness === "blocked" ? "true" : undefined}
+          data-unverified={
+            !busy && readiness === "unverified" ? "true" : undefined
+          }
+          data-ok={!busy && readiness === "ready" ? "true" : undefined}
           aria-hidden
         />
-        <span>
-          {busy
-            ? "Live · agent turn"
-            : setupIncomplete
-              ? "Setup incomplete"
-              : "Ready"}
+        <span data-testid="status-bar-readiness">
+          {busy ? "Live · agent turn" : READINESS_LABEL[readiness]}
         </span>
         <span aria-hidden>·</span>
-        <button type="button" onClick={onOpenPreflight}>
-          Preflight {setupIncomplete ? "issues" : "ok"}
+        <button
+          type="button"
+          onClick={onOpenPreflight}
+          title={
+            readiness === "unverified"
+              ? "A configured provider has not answered a live check yet."
+              : undefined
+          }
+        >
+          {PREFLIGHT_LABEL[readiness]}
         </button>
       </span>
       <span className="status-bar__right">

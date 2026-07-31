@@ -395,7 +395,11 @@ ol.md-inline-list {
   margin: 0 0 var(--space-3);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--bg-elevated, var(--bg-panel)) 55%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--bg-elevated, var(--bg-panel)) 55%,
+    transparent
+  );
   -webkit-overflow-scrolling: touch;
 }
 
@@ -411,7 +415,8 @@ ol.md-inline-list {
 .md-table td {
   padding: 8px 12px;
   border-bottom: 1px solid var(--border-soft);
-  border-right: 1px solid color-mix(in srgb, var(--border-soft) 70%, transparent);
+  border-right: 1px solid
+    color-mix(in srgb, var(--border-soft) 70%, transparent);
   vertical-align: top;
   word-break: break-word;
 }
@@ -764,6 +769,21 @@ ol.md-inline-list {
   font-size: var(--text-sm);
 }
 
+/*
+ * Unverified provider readiness (#746). Informational, not blocking: it shares
+ * the blocked note's shape but keeps the action grid below it fully usable.
+ */
+.empty-state__unverified-note {
+  margin: 0 0 var(--space-3);
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--warning);
+  border-radius: var(--radius-md);
+  background: var(--overlay-faint);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
 .first-chat-workflow-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
@@ -811,9 +831,12 @@ ol.md-inline-list {
   font-size: var(--text-sm);
 }
 
-.chat-action-card > span:not(.chat-action-card__kind):not(.chat-starter__label) {
+.chat-action-card
+  > span:not(.chat-action-card__kind):not(.chat-starter__label) {
   font-size: var(--text-2xs);
-  color: var(--text-faint);
+  /* --text-faint falls below WCAG AA on --bg-elevated in dark, slate, and
+     light; --text-muted clears it in every skin (#539). */
+  color: var(--text-muted);
   line-height: 1.35;
 }
 

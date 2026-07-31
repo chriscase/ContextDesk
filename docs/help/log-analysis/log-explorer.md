@@ -547,4 +547,4 @@ re-create bookmarks and noise policy after import if needed.
 ## Limits
 
 Live tail, multi-corpus merge in one window, and SIEM alerting are not shipped.
-See [How log analysis works](log-analysis-pipeline.md).
+See [How log analysis works](help://log-analysis-pipeline).

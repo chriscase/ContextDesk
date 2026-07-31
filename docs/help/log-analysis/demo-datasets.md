@@ -41,6 +41,22 @@ fixtures, or the optional operational-metrics document. The trusted host sends
 the packaged input through the same bounded ingest, redaction, diagnostics, and
 cancellation path as **Import logs…**.
 
+### What the packaged demo is checked against
+
+Before ingest, the host compares every packaged file against an embedded
+manifest of exact relative paths, byte lengths, and SHA-256 digests. It refuses
+to publish a corpus or set the demo marker if anything is missing, extra,
+duplicated, symlinked, truncated, or altered by a single byte — a filename
+allowlist alone cannot tell a stale or accidentally replaced file from the real
+one. After ingest it re-checks the imported source and event counts before the
+demo is activated.
+
+That manifest proves **fixture identity only**: that the logs you imported are
+byte-for-byte the pinned demonstration corpus. It is not a claim about ingest
+speed, analysis quality, or correctness — on this dataset or on your own logs.
+Any timing you observe describes this dataset on your hardware and nothing
+more.
+
 ## Where the source-checkout fixtures are
 
 All demo fixtures are checked into the source repository. Clone the matching

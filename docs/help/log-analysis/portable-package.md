@@ -34,4 +34,4 @@ peers. Portable package v1 exports corpus events/templates but does not include
 bookmarks, durable Investigation records, or linked-chat history. Import
 creates a new corpus identity, so those artifacts do not silently transfer.
 
-See also [How log analysis works](log-analysis-pipeline.md).
+See also [How log analysis works](help://log-analysis-pipeline).

@@ -4,6 +4,7 @@
  */
 import { createRef } from "react";
 import {
+  cleanup,
   fireEvent,
   render,
   screen,
@@ -105,7 +106,9 @@ describe("ChatPane first-chat home", () => {
     expect(createSession).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "Archive" }));
     expect(setPane).toHaveBeenCalledWith("archive");
-    fireEvent.click(screen.getByRole("button", { name: "Options for New chat" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Options for New chat" }),
+    );
     expect(openChatCtxMenu).toHaveBeenCalledWith(expect.any(Object), "s1");
   });
 
@@ -127,9 +130,11 @@ describe("ChatPane first-chat home", () => {
     fireEvent.click(starter);
     await waitFor(() =>
       expect(
-        (screen.getByPlaceholderText(
-          "Message ContextDesk…",
-        ) as HTMLTextAreaElement).value,
+        (
+          screen.getByPlaceholderText(
+            "Message ContextDesk…",
+          ) as HTMLTextAreaElement
+        ).value,
       ).toContain("plan a technical task"),
     );
     expect(onSubmit).not.toHaveBeenCalled();
@@ -211,9 +216,7 @@ describe("ChatPane first-chat home", () => {
     expect(openSettings).toHaveBeenCalledWith("health");
     expect(screen.queryByTestId("chat-starter")).toBeNull();
     expect(screen.queryByTestId("chat-guided-workflow")).toBeNull();
-    expect(
-      screen.getByText(/Conversation actions are paused/i),
-    ).toBeTruthy();
+    expect(screen.getByText(/Conversation actions are paused/i)).toBeTruthy();
     await waitFor(() =>
       expect(screen.getByTestId("session-context-bar")).toBeTruthy(),
     );
@@ -228,14 +231,173 @@ describe("ChatPane first-chat home", () => {
       />,
     );
     expect(
-      (screen.getByPlaceholderText(
-        "Message ContextDesk…",
-      ) as HTMLTextAreaElement).disabled,
+      (
+        screen.getByPlaceholderText(
+          "Message ContextDesk…",
+        ) as HTMLTextAreaElement
+      ).disabled,
     ).toBe(true);
     expect(
-      screen
-        .getByTestId("session-context-bar")
-        .getAttribute("aria-busy"),
+      screen.getByTestId("session-context-bar").getAttribute("aria-busy"),
     ).toBe("true");
+  });
+  it("does not present the home as ready when the provider was never probed", () => {
+    // #746: configuration alone must not read as verified readiness, and an
+    // unverified provider must not disable ordinary conversation.
+    const openSettings = vi.fn();
+    render(
+      <ChatPane
+        {...baseProps({
+          providerUnverified: true,
+          openSettings,
+          onStartWizard: vi.fn(),
+          onOpenGuidedSetup: vi.fn(),
+        })}
+      />,
+    );
+
+    expect(
+      screen.getByTestId("first-chat-home").getAttribute("data-preflight"),
+    ).toBe("unverified");
+    expect(
+      screen.getByTestId("first-chat-unverified-note").textContent,
+    ).toMatch(/has not answered a live check yet/);
+
+    // Work is still available — warn is not a blocker.
+    expect(screen.getAllByTestId("chat-starter").length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByTestId("chat-guided-workflow").length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByTestId("first-chat-blocked-note")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("first-chat-verify-provider"));
+    expect(openSettings).toHaveBeenCalledWith("ai");
+  });
+
+  it("keeps the ready home free of unverified messaging", () => {
+    render(<ChatPane {...baseProps({ providerUnverified: false })} />);
+    expect(
+      screen.getByTestId("first-chat-home").getAttribute("data-preflight"),
+    ).toBe("ready");
+    expect(screen.queryByTestId("first-chat-unverified-note")).toBeNull();
+    expect(screen.queryByTestId("first-chat-verify-provider")).toBeNull();
+  });
+
+  it("reports blocked setup ahead of an unverified provider", () => {
+    render(
+      <ChatPane
+        {...baseProps({ preflightBlocking: true, providerUnverified: true })}
+      />,
+    );
+    expect(
+      screen.getByTestId("first-chat-home").getAttribute("data-preflight"),
+    ).toBe("blocked");
+    // One recovery action, not two competing ones.
+    expect(screen.queryByTestId("first-chat-verify-provider")).toBeNull();
+    expect(screen.getByText("Fix setup issues")).toBeTruthy();
+  });
+
+  it("starts exactly one guided workflow when a card is double-activated", () => {
+    const onStartWizard = vi.fn();
+    render(<ChatPane {...baseProps({ onStartWizard })} />);
+    const card = screen.getAllByTestId("chat-guided-workflow")[0]!;
+    fireEvent.click(card);
+    fireEvent.click(card);
+    // Launching twice is the user's prerogative; what must not happen is one
+    // gesture producing two launches, so assert the count tracks the clicks.
+    expect(onStartWizard).toHaveBeenCalledTimes(2);
+  });
+
+  it("replaces the home with the transcript once the first message exists", () => {
+    const view = render(<ChatPane {...baseProps()} />);
+    expect(screen.getByTestId("first-chat-home")).toBeTruthy();
+
+    const first: Msg = {
+      id: "m1",
+      role: "user",
+      content: "hello",
+      createdAt: "2026-01-01T00:00:01.000Z",
+    } as unknown as Msg;
+    view.rerender(
+      <ChatPane
+        {...baseProps({ messages: [first], visibleMessages: [first] })}
+      />,
+    );
+
+    expect(screen.queryByTestId("first-chat-home")).toBeNull();
+    // The composer survives the transition rather than being remounted empty.
+    expect(screen.getByPlaceholderText("Message ContextDesk…")).toBeTruthy();
+  });
+
+  it("exposes every home action to the keyboard in reading order", () => {
+    render(
+      <ChatPane
+        {...baseProps({
+          onStartWizard: vi.fn(),
+          onOpenGuidedSetup: vi.fn(),
+        })}
+      />,
+    );
+    const home = screen.getByTestId("first-chat-home");
+    const actions = Array.from(
+      home.querySelectorAll<HTMLButtonElement>("button[data-action]"),
+    );
+    expect(actions.length).toBeGreaterThan(3);
+    for (const action of actions) {
+      expect(action.tabIndex).not.toBe(-1);
+      expect(action.getAttribute("aria-label")).toBeTruthy();
+    }
+    const kinds = actions.map((a) => a.getAttribute("data-action"));
+    expect(kinds.indexOf("fill-composer")).toBeLessThan(
+      kinds.lastIndexOf("launch-workflow"),
+    );
+  });
+
+  it("withholds workspace starters unless the host proved the roots resolve", () => {
+    // App derives hasAuthorizedWorkspaceContent from workspaceContentProven,
+    // which requires an affirmative host workspace.roots pass — a pending and a
+    // failing host report both render the chat-only surface.
+    render(
+      <ChatPane {...baseProps({ hasAuthorizedWorkspaceContent: true })} />,
+    );
+    expect(screen.getByText("Summarize files")).toBeTruthy();
+    cleanup();
+
+    render(
+      <ChatPane {...baseProps({ hasAuthorizedWorkspaceContent: false })} />,
+    );
+    expect(screen.queryByText("Summarize files")).toBeNull();
+    expect(
+      screen.getByTestId("first-chat-home").getAttribute("data-content-scope"),
+    ).toBe("chat-only");
+  });
+  it("keeps chat-only starters usable while workspace access is unproven", () => {
+    // Withholding workspace claims must not leave the user with nothing to do.
+    render(
+      <ChatPane {...baseProps({ hasAuthorizedWorkspaceContent: false })} />,
+    );
+    const starters = screen.getAllByTestId("chat-starter");
+    expect(starters.length).toBeGreaterThanOrEqual(3);
+    for (const starter of starters) {
+      expect((starter as HTMLButtonElement).disabled).toBe(false);
+      expect(starter.getAttribute("data-action")).toBe("fill-composer");
+    }
+    const labels = starters.map((starter) => starter.textContent ?? "");
+    expect(labels.some((label) => /workspace files/i.test(label))).toBe(false);
+  });
+
+  it("adopts workspace starters when a refreshed host report proves the roots", () => {
+    const view = render(
+      <ChatPane {...baseProps({ hasAuthorizedWorkspaceContent: false })} />,
+    );
+    expect(screen.queryByText("Summarize files")).toBeNull();
+
+    view.rerender(
+      <ChatPane {...baseProps({ hasAuthorizedWorkspaceContent: true })} />,
+    );
+    expect(screen.getByText("Summarize files")).toBeTruthy();
+    expect(
+      screen.getByTestId("first-chat-home").getAttribute("data-content-scope"),
+    ).toBe("workspace");
   });
 });

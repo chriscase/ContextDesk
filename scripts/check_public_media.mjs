@@ -206,7 +206,134 @@ export function validatePublicMedia(
     );
   }
 
-  return { assets: inventory.length };
+  const published = validatePublishedReferences(root, seen);
+  const provenance = validateProvenanceRecord(root, parsed.assets);
+
+  return { assets: inventory.length, published, provenance };
+}
+
+/**
+ * The ledger records the app-source SHA per frame; `docs/media/README.md` is
+ * where a human reads it. Those two drifted apart once already — the prose
+ * claimed all three frames came from one build while the ledger recorded two —
+ * which is exactly the "one exact packaged-app SHA" claim #734 asks for. Require
+ * every recorded SHA to appear in the provenance record so a recapture cannot
+ * leave stale prose behind.
+ */
+export function validateProvenanceRecord(
+  root,
+  assets,
+  document = "docs/media/README.md",
+) {
+  const documentPath = path.join(root, document);
+  if (!fs.existsSync(documentPath)) {
+    throw new Error(`${document}: capture provenance record is missing`);
+  }
+  const text = fs.readFileSync(documentPath, "utf8");
+  const shas = [...new Set(assets.map((asset) => asset.sourceSha.toLowerCase()))];
+  for (const sha of shas) {
+    if (!text.toLowerCase().includes(sha)) {
+      throw new Error(
+        `${document}: does not record capture provenance for source SHA ${sha}`,
+      );
+    }
+  }
+  return shas.length;
+}
+
+/**
+ * README is the published product-communication surface (#677/#734). The
+ * manifest is only a privacy gate if every raster the README actually shows is
+ * a ledger entry: a raster committed outside `docs/media/` would otherwise be
+ * published with no blob identity, source SHA, or privacy review.
+ */
+export function validatePublishedReferences(
+  root,
+  listed,
+  documents = ["README.md"],
+) {
+  let references = 0;
+  for (const document of documents) {
+    const documentPath = path.join(root, document);
+    if (!fs.existsSync(documentPath)) continue;
+    const text = fs.readFileSync(documentPath, "utf8");
+    for (const { target, form } of collectPublishedImageTargets(text, document)) {
+      // Remote badges are not repository media and carry no local bytes.
+      if (/^(?:https?:)?\/\//i.test(target) || target.startsWith("data:")) {
+        continue;
+      }
+      if (!RASTER_EXTENSION_RE.test(target)) continue;
+      const normalized = target.replace(/^\.\//, "");
+      if (!listed.has(normalized)) {
+        throw new Error(
+          `${document}: published raster '${target}' (${form}) is not in the public media ledger`,
+        );
+      }
+      references += 1;
+    }
+  }
+  return references;
+}
+
+/**
+ * Every syntax GitHub actually renders as an image, not just the inline one.
+ *
+ * The first version of this check matched `![alt](path)` only, so
+ * reference-style images and raw `<img>` tags — both of which GitHub renders in
+ * a README — could publish a raster with no ledger entry at all. Ambiguous
+ * local raster syntax is rejected rather than skipped, because silently
+ * ignoring a form is exactly the hole this closes.
+ */
+export function collectPublishedImageTargets(text, document = "<memory>") {
+  const targets = [];
+
+  // Link reference definitions: `[label]: target "optional title"`.
+  const definitions = new Map();
+  for (const match of text.matchAll(
+    /^[ \t]{0,3}\[([^\]]+)\]:[ \t]*(\S+)(?:[ \t]+["'(].*)?[ \t]*$/gm,
+  )) {
+    definitions.set(match[1].trim().toLowerCase(), match[2]);
+  }
+
+  // Inline: ![alt](target "title")
+  for (const match of text.matchAll(/!\[[^\]]*\]\(\s*([^)\s]+)[^)]*\)/g)) {
+    targets.push({ target: match[1], form: "inline" });
+  }
+
+  // Full reference ![alt][label], collapsed ![label][], shortcut ![label].
+  for (const match of text.matchAll(/!\[([^\]]*)\](?:\[([^\]]*)\])?/g)) {
+    const end = match.index + match[0].length;
+    // Skip the inline form, already collected above.
+    if (match[2] === undefined && text.slice(end, end + 1) === "(") continue;
+    const label = (match[2] && match[2].trim()) || match[1].trim();
+    if (!label) continue;
+    const target = definitions.get(label.toLowerCase());
+    if (target === undefined) {
+      // A reference image with no definition renders as literal text, but an
+      // unresolvable *local raster* reference is the ambiguous case this must
+      // not wave through.
+      if (RASTER_EXTENSION_RE.test(label)) {
+        throw new Error(
+          `${document}: reference image '${match[0]}' has no link definition`,
+        );
+      }
+      continue;
+    }
+    targets.push({ target, form: "reference" });
+  }
+
+  // Raw HTML: <img src="target">
+  for (const match of text.matchAll(/<img\b([^>]*)>/gi)) {
+    const src = match[1].match(/\bsrc\s*=\s*("([^"]*)"|'([^']*)')/i);
+    if (!src) {
+      throw new Error(
+        `${document}: <img> tag without a quoted literal src cannot be checked: ${match[0]}`,
+      );
+    }
+    targets.push({ target: src[2] ?? src[3] ?? "", form: "html" });
+  }
+
+  return targets;
 }
 
 function main() {
@@ -225,7 +352,10 @@ function main() {
     ? path.resolve(repositoryRoot, args[1])
     : path.join(repositoryRoot, "docs/media/public-assets.json");
   const result = validatePublicMedia(repositoryRoot, manifestPath);
-  process.stdout.write(`public media manifest valid: ${result.assets} assets\n`);
+  process.stdout.write(
+    `public media manifest valid: ${result.assets} assets, ${result.published} published references, ` +
+      `${result.provenance} recorded capture build(s)\n`,
+  );
 }
 
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";

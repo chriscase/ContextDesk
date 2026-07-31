@@ -4,10 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const validator = path.join(scriptDir, "check_public_media.mjs");
+const { collectPublishedImageTargets } = await import(
+  pathToFileURL(validator).href
+);
 const SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567";
 
 function run(root, manifest = "docs/media/public-assets.json") {
@@ -54,6 +57,10 @@ function withRepository(runTest) {
     const absolute = path.join(root, ...pathname.split("/"));
     fs.writeFileSync(absolute, Buffer.from("synthetic-png-bytes"));
     const gitBlob = git(root, ["hash-object", "--", absolute]);
+    fs.writeFileSync(
+      path.join(root, "docs", "media", "README.md"),
+      `# Public product media\n\nApp-source SHA \`${SOURCE_SHA}\`.\n`,
+    );
     writeManifest(root, [asset(pathname, gitBlob)]);
     runTest({ root, pathname, absolute, gitBlob });
   } finally {
@@ -65,8 +72,61 @@ test("valid manifest passes with concise output", () => {
   withRepository(({ root }) => {
     const result = run(root);
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, "public media manifest valid: 1 assets\n");
+    assert.equal(
+      result.stdout,
+      "public media manifest valid: 1 assets, 0 published references, 1 recorded capture build(s)\n",
+    );
     assert.equal(result.stderr, "");
+  });
+});
+
+test("the checked-in public media ledger validates against the real repository", () => {
+  const repoRoot = path.resolve(scriptDir, "..");
+  const result = run(repoRoot);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^public media manifest valid: \d+ assets/);
+
+  // Non-vacuous yield: cross-check the reported reference count against an
+  // independent scan of the README, so an extractor that quietly matches
+  // nothing cannot report success.
+  const readme = fs.readFileSync(path.join(repoRoot, "README.md"), "utf8");
+  const localRasters = collectPublishedImageTargets(readme, "README.md").filter(
+    (entry) =>
+      !/^(?:https?:)?\/\//i.test(entry.target) &&
+      /\.(?:png|jpe?g|webp|gif)$/i.test(entry.target),
+  );
+  assert.ok(localRasters.length > 0, "README publishes no local rasters");
+  assert.match(
+    result.stdout,
+    new RegExp(`${localRasters.length} published references`),
+  );
+});
+
+test("a README raster outside the ledger fails closed", () => {
+  withRepository(({ root, pathname }) => {
+    fs.writeFileSync(
+      path.join(root, "README.md"),
+      `# Fixture\n\n![CI](https://example.invalid/badge.svg)\n\n![Listed](${pathname})\n`,
+    );
+    const listed = run(root);
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.match(listed.stdout, /1 published references/);
+
+    fs.mkdirSync(path.join(root, "docs", "images"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, "docs", "images", "unreviewed.png"),
+      "unreviewed",
+    );
+    fs.appendFileSync(
+      path.join(root, "README.md"),
+      "\n![Unreviewed](docs/images/unreviewed.png)\n",
+    );
+    const smuggled = run(root);
+    assert.notEqual(smuggled.status, 0);
+    assert.match(
+      smuggled.stderr,
+      /published raster 'docs\/images\/unreviewed\.png' \(inline\) is not in the public media ledger/,
+    );
   });
 });
 
@@ -132,6 +192,10 @@ test("a raster symlink escaping docs/media fails closed", () => {
     fs.writeFileSync(outside, "outside");
     fs.rmSync(absolute);
     fs.symlinkSync(outside, absolute);
+    fs.writeFileSync(
+      path.join(root, "docs", "media", "README.md"),
+      `# Public product media\n\nApp-source SHA \`${SOURCE_SHA}\`.\n`,
+    );
     writeManifest(root, [asset(pathname, gitBlob)]);
     const result = run(root);
     assert.notEqual(result.status, 0);
@@ -148,4 +212,119 @@ test("malformed source SHA fails closed", () => {
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /sourceSha.*40-hex/);
   });
+});
+
+test("a capture SHA missing from the provenance record fails closed", () => {
+  withRepository(({ root, pathname, gitBlob }) => {
+    // Exactly the drift that occurred on main: the ledger recorded a second
+    // capture build while docs/media/README.md still claimed a single SHA.
+    const second = asset(pathname.replace("frame.png", "second.png"), gitBlob);
+    second.sourceSha = "fedcba9876543210fedcba9876543210fedcba98";
+    const absolute = path.join(root, "docs", "media", "gallery", "second.png");
+    fs.writeFileSync(absolute, Buffer.from("synthetic-png-bytes"));
+    second.gitBlob = git(root, ["hash-object", "--", absolute]);
+    writeManifest(root, [asset(pathname, gitBlob), second]);
+
+    const drifted = run(root);
+    assert.notEqual(drifted.status, 0);
+    assert.match(
+      drifted.stderr,
+      /does not record capture provenance for source SHA fedcba98/,
+    );
+
+    fs.appendFileSync(
+      path.join(root, "docs", "media", "README.md"),
+      `\nAlso captured from \`${second.sourceSha}\`.\n`,
+    );
+    const recorded = run(root);
+    assert.equal(recorded.status, 0, recorded.stderr);
+    assert.match(recorded.stdout, /2 recorded capture build\(s\)/);
+  });
+});
+
+test("reference-style and HTML images cannot bypass the ledger", () => {
+  withRepository(({ root, pathname }) => {
+    const readme = path.join(root, "README.md");
+    fs.mkdirSync(path.join(root, "docs", "images"), { recursive: true });
+    fs.writeFileSync(path.join(root, "docs", "images", "smuggled.png"), "x");
+
+    fs.writeFileSync(readme, `# Fixture\n\n![Listed](${pathname})\n`);
+    assert.match(run(root).stdout, /1 published references/);
+
+    // 1. Full reference style.
+    fs.writeFileSync(
+      readme,
+      `# Fixture\n\n![Smuggled][shot]\n\n[shot]: docs/images/smuggled.png\n`,
+    );
+    const fullRef = run(root);
+    assert.notEqual(fullRef.status, 0);
+    assert.match(
+      fullRef.stderr,
+      /published raster 'docs\/images\/smuggled\.png' \(reference\)/,
+    );
+
+    // 2. Collapsed reference style.
+    fs.writeFileSync(
+      readme,
+      `# Fixture\n\n![shot][]\n\n[shot]: docs/images/smuggled.png\n`,
+    );
+    assert.match(
+      run(root).stderr,
+      /\(reference\) is not in the public media ledger/,
+    );
+
+    // 3. Raw HTML img.
+    fs.writeFileSync(
+      readme,
+      `# Fixture\n\n<img src="docs/images/smuggled.png" alt="Smuggled">\n`,
+    );
+    const html = run(root);
+    assert.notEqual(html.status, 0);
+    assert.match(
+      html.stderr,
+      /published raster 'docs\/images\/smuggled\.png' \(html\)/,
+    );
+
+    // 4. An <img> whose src is not a quoted literal is ambiguous, not ignored.
+    fs.writeFileSync(readme, `# Fixture\n\n<img src={shot} alt="Dynamic">\n`);
+    const dynamic = run(root);
+    assert.notEqual(dynamic.status, 0);
+    assert.match(dynamic.stderr, /without a quoted literal src cannot be checked/);
+
+    // 5. A reference image naming a raster with no definition is ambiguous.
+    fs.writeFileSync(readme, `# Fixture\n\n![docs/images/smuggled.png]\n`);
+    const dangling = run(root);
+    assert.notEqual(dangling.status, 0);
+    assert.match(dangling.stderr, /has no link definition/);
+
+    // Ledger-listed assets still pass in every covered form.
+    fs.writeFileSync(
+      readme,
+      `# Fixture\n\n![Inline](${pathname})\n\n![Ref][ok]\n\n` +
+        `<img src="${pathname}" alt="Html">\n\n[ok]: ${pathname}\n`,
+    );
+    const allForms = run(root);
+    assert.equal(allForms.status, 0, allForms.stderr);
+    assert.match(allForms.stdout, /3 published references/);
+  });
+});
+
+test("published image extraction covers every rendered form", () => {
+  const found = collectPublishedImageTargets(
+    `![a](docs/media/gallery/one.png)\n` +
+      `![b][two]\n` +
+      `<img src="docs/media/gallery/three.png">\n` +
+      `![CI](https://example.invalid/badge.svg)\n\n` +
+      `[two]: docs/media/gallery/two.png\n`,
+  );
+  assert.deepEqual(found.map((f) => f.form).sort(), [
+    "html",
+    "inline",
+    "inline",
+    "reference",
+  ]);
+  assert.ok(
+    found.some((f) => f.target === "docs/media/gallery/two.png"),
+    "reference definitions must resolve to their target",
+  );
 });

@@ -97,3 +97,49 @@ describe("runClientPreflight anthropic", () => {
     expect(url?.level).toBe("fail");
   });
 });
+
+describe("Grok Build client mirror honesty (#746)", () => {
+  function grokSetup(overrides: Partial<AppSetupState> = {}): AppSetupState {
+    return {
+      ...baseSetup(),
+      providerKind: "xai_grok_build",
+      providerLabel: "Grok Build session",
+      baseUrl: "https://api.x.ai/v1",
+      chatModel: "grok-4",
+      hasApiKey: true,
+      ...overrides,
+    };
+  }
+
+  it("reports an unmeasured connection rather than nothing", () => {
+    // The mirror cannot probe. Emitting no provider.remote item at all made a
+    // Grok profile read as fully ready before any host report arrived.
+    const report = runClientPreflight(grokSetup({ remoteReachable: null }));
+    const remote = report.items.find((i) => i.id === "provider.remote");
+    expect(remote).toBeTruthy();
+    expect(remote!.level).toBe("warn");
+    expect(report.hasBlocking).toBe(false);
+  });
+
+  it("does not treat session-file presence as reachability", () => {
+    const report = runClientPreflight(grokSetup({ remoteReachable: null }));
+    const optIn = report.items.find((i) => i.id === "provider.grok_opt_in");
+    expect(optIn!.level).toBe("pass");
+    expect(report.items.find((i) => i.id === "provider.remote")!.level).toBe(
+      "warn",
+    );
+  });
+
+  it("passes and blocks on a real outcome", () => {
+    expect(
+      runClientPreflight(grokSetup({ remoteReachable: true })).items.find(
+        (i) => i.id === "provider.remote",
+      )!.level,
+    ).toBe("pass");
+    const failed = runClientPreflight(grokSetup({ remoteReachable: false }));
+    expect(failed.items.find((i) => i.id === "provider.remote")!.level).toBe(
+      "fail",
+    );
+    expect(failed.hasBlocking).toBe(true);
+  });
+});

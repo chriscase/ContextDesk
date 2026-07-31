@@ -56,5 +56,8 @@ if [ "$fail" -ne 0 ]; then
 fi
 node "$ROOT/scripts/check_design_handbook.mjs" "$ROOT"
 node "$ROOT/scripts/check_incident_evidence_drift.mjs"
+node "$ROOT/scripts/check_public_media.mjs" "$ROOT"
+node "$ROOT/scripts/check_help_corpus.mjs"
+node "$ROOT/scripts/check_packaged_demo_manifest.mjs" "$ROOT"
 echo "check_claims: OK"
 exit 0

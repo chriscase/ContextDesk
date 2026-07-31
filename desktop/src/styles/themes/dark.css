@@ -13,6 +13,8 @@ html[data-theme="dark"] {
   /* ≥4.5:1 on --bg-app/#0b0c0e and --bg-panel/#12141a (#150) */
   --text-faint: #7a808c;
   --accent: #6ea8fe;
+  /* Accent used as small text on --bg-elevated; must clear WCAG AA there. */
+  --accent-text: #6ea8fe;
   --accent-strong: #4c8dff;
   --accent-soft: rgb(110 168 254 / 0.14);
   --accent-on: #0b1020;

@@ -967,6 +967,16 @@ button.citation-chip:hover {
   background: var(--warning);
 }
 
+/*
+ * Unverified readiness (#746): configured but never probed. Distinct from both
+ * healthy and blocked, and shape-differentiated so the state does not rely on
+ * color alone.
+ */
+.status-bar__dot[data-unverified="true"] {
+  background: transparent;
+  border: 1px solid var(--warning);
+}
+
 .status-bar__dot[data-ok="true"] {
   background: var(--success);
 }

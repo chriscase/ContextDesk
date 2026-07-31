@@ -108,6 +108,7 @@ flowchart LR
 | Investigation loop             | How does an engineer preserve, revisit, and act on discoveries without losing control? | **Partial**: manual evidence/findings/notes and view recipes have production anchors; proposal history and reports remain #646/#532 | [Investigation loop](proven-methods/INVESTIGATION_LOOP.md)                         |
 | Deterministic demo and model evaluation | How can product behavior and provider/model grounding be compared without leaking the answer key? | **Partial**: deterministic fixtures, production evaluation paths, and the bundled/exportable lab chapter ship; live provider quality remains environment-dependent | [Demo and model evaluation lab](proven-methods/DEMO_EVALUATION_LAB.md) |
 | Incident evidence interchange | How can authorized logs and metrics move from a producer into a validated, versioned hand-off? | **Partial**: v1 normative schema, fixtures, offline directory/ZIP validation, deterministic ZIP packing, producer templates, and Help ship (#764/#765); product import/attachment remains #763 | [Incident Evidence Bundle](proven-methods/INCIDENT_EVIDENCE_BUNDLE.md) |
+| Bundled Help truth and delivery | How does shipped in-app documentation stay checkably true instead of silently rotting? | **Partial**: structural validation, bidirectional link/anchor resolution, whole-asset-set safety and theme-independent legibility, packaging assertion, and offline delivery ship; corpus prose accuracy, contextual-Help coverage, and rendered diagram quality remain human review | [Bundled Help truth and delivery](proven-methods/HELP_TRUTH_AND_DELIVERY.md) |
 | Future method documentation    | How should another process be documented and challenged?                               | **Shipped**: maintenance contract, chapter template, structural checks, and export path                                             | [Method chapter template](proven-methods/METHOD_TEMPLATE.md)                       |
 
 ## From-scratch staged implementation path
@@ -232,7 +233,6 @@ This first version intentionally leaves several chapters for follow-up:
 - durable memory capture, recall, supersession, and privacy;
 - bounded workspace/file indexing and hybrid retrieval;
 - connector and database read isolation;
-- Help corpus authoring, validation, and offline delivery;
 - package/import safety and compatibility evolution;
 - provider-specific native acceptance for the phase-aware lifecycle on #649;
 - timestamp policy after the remaining #670 work ships;

@@ -15,7 +15,11 @@ describe("HelpTip", () => {
 
   it("opens in a portal dialog and closes on Escape with focus restore", async () => {
     render(
-      <HelpTip label="Find vs Filter" title="Find vs Filter" content={HELP_FIND_VS_FILTER} />,
+      <HelpTip
+        label="Find vs Filter"
+        title="Find vs Filter"
+        content={HELP_FIND_VS_FILTER}
+      />,
     );
     const btn = screen.getByRole("button", { name: "Help: Find vs Filter" });
     fireEvent.click(btn);
@@ -35,8 +39,16 @@ describe("HelpTip", () => {
   it("keeps only one tip open at a time", async () => {
     render(
       <>
-        <HelpTip label="A" title="Alpha" content={{ title: "Alpha", definition: "first" }} />
-        <HelpTip label="B" title="Beta" content={{ title: "Beta", definition: "second" }} />
+        <HelpTip
+          label="A"
+          title="Alpha"
+          content={{ title: "Alpha", definition: "first" }}
+        />
+        <HelpTip
+          label="B"
+          title="Beta"
+          content={{ title: "Beta", definition: "second" }}
+        />
       </>,
     );
     fireEvent.click(screen.getByRole("button", { name: "Help: A" }));
@@ -64,13 +76,7 @@ describe("HelpTip", () => {
   it("hands full Help to the main window when opened from a standalone surface", async () => {
     const received = vi.fn();
     const unsubscribe = subscribeHelpAcrossWindows(received);
-    render(
-      <HelpTip
-        label="Find"
-        title="Find"
-        content={HELP_FIND_VS_FILTER}
-      />,
-    );
+    render(<HelpTip label="Find" title="Find" content={HELP_FIND_VS_FILTER} />);
     fireEvent.click(screen.getByRole("button", { name: "Help: Find" }));
     fireEvent.click(await screen.findByTestId("help-tip-full-link"));
     expect(received).toHaveBeenCalledWith({
@@ -113,5 +119,60 @@ describe("HelpTip", () => {
       expect(screen.queryByTestId("help-tip-popover")).toBeNull(),
     );
     expect(document.activeElement).toBe(trigger);
+  });
+
+  it("restores focus to the trigger when Open full Help is activated", async () => {
+    // Escape (:248) and the close button (:337) both restored the invoker, but
+    // this path unmounted the panel and dropped focus to <body> — including in
+    // the narrow sheet, where focus had deliberately been moved into the panel.
+    const onOpenHelp = vi.fn();
+    render(
+      <HelpTip
+        label="Find"
+        title="Find"
+        content={HELP_FIND_VS_FILTER}
+        onOpenHelp={onOpenHelp}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: "Help: Find" });
+    fireEvent.click(trigger);
+    const full = await screen.findByTestId("help-tip-full-link");
+    fireEvent.click(full);
+
+    expect(onOpenHelp).toHaveBeenCalledWith("log-explorer", "find-vs-filter");
+    await waitFor(() =>
+      expect(screen.queryByTestId("help-tip-popover")).toBeNull(),
+    );
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("restores focus to the trigger when the close button is used", async () => {
+    render(<HelpTip label="Find" title="Find" content={HELP_FIND_VS_FILTER} />);
+    const trigger = screen.getByRole("button", { name: "Help: Find" });
+    fireEvent.click(trigger);
+    await screen.findByTestId("help-tip-popover");
+    fireEvent.click(screen.getByRole("button", { name: "Close help" }));
+    await waitFor(() =>
+      expect(screen.queryByTestId("help-tip-popover")).toBeNull(),
+    );
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("dismisses on an outside pointerdown in non-modal popover mode", async () => {
+    // Previously untested entirely. The non-modal pattern deliberately lets
+    // focus follow the pointer rather than snapping back to the invoker, so
+    // this pins the dismissal without asserting a focus steal.
+    render(<HelpTip label="Find" title="Find" content={HELP_FIND_VS_FILTER} />);
+    const trigger = screen.getByRole("button", { name: "Help: Find" });
+    fireEvent.click(trigger);
+    const panel = await screen.findByTestId("help-tip-popover");
+    expect(panel.getAttribute("aria-modal")).toBe("false");
+    expect(panel.getAttribute("data-presentation")).toBe("popover");
+    expect(screen.queryByTestId("help-tip-backdrop")).toBeNull();
+
+    fireEvent.pointerDown(document.body);
+    await waitFor(() =>
+      expect(screen.queryByTestId("help-tip-popover")).toBeNull(),
+    );
   });
 });

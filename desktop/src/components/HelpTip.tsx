@@ -356,6 +356,12 @@ export function HelpTip({
                         requestHelpAcrossWindows(parsed);
                       }
                       close();
+                      // The panel that owns focus is about to unmount. Escape
+                      // and the close button both restore the invoker; this
+                      // path did not, so keyboard users were dropped onto
+                      // <body> — including in the narrow modal sheet, where
+                      // focus had been moved into the panel deliberately.
+                      btnRef.current?.focus();
                     }}
                   >
                     Open full Help
