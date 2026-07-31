@@ -4060,8 +4060,8 @@ impl ToolHost {
             .document
             .proposed_findings
             .iter()
-            .filter(|p| p.status == crate::investigations::ProposedFindingStatus::Proposed)
-            .last()
+            .rev()
+            .find(|p| p.status == crate::investigations::ProposedFindingStatus::Proposed)
             .or_else(|| resolved.document.proposed_findings.last())
             .ok_or_else(|| {
                 CoreError::Message("propose_finding succeeded without a proposal row".into())
