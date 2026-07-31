@@ -3600,9 +3600,14 @@ export function LogExplorer({ corpusId }: Props) {
         // could persist fewer events than the person selected: by then
         // selectedEvidenceRefs() sees only residents and its all-or-nothing
         // guard never fires. Report the exact loss (#656).
+        // Cause-neutral on purpose: this effect only observes that a seq left
+        // `laneEvents`. It cannot distinguish a filter/lane change from the
+        // resident window sliding during ordinary paging, and in the paging
+        // case the events still match the filters — so naming a cause would be
+        // wrong exactly where the loss is most surprising.
         setStatus(
           `Selection reduced to ${next.size} of ${prev.size} events — ` +
-            "the others are no longer visible under current filters/lanes",
+            "the others are no longer loaded in the current view",
         );
       }
       return next;

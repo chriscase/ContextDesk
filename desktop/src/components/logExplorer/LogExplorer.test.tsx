@@ -4581,6 +4581,12 @@ describe("LogExplorer shell", () => {
         "Selection reduced to 1 of 2 events",
       ),
     );
+    // Cause-neutral: the same effect fires when the resident window slides
+    // during ordinary paging, where the dropped events DO still match the
+    // filters. Blaming filters/lanes would be wrong in that case.
+    expect(screen.getByRole("status").textContent).toContain(
+      "no longer loaded in the current view",
+    );
     // The surviving selection is still exact, and the loss was not silent.
     expect(
       document.querySelectorAll(".log-explorer__row--selected").length,
