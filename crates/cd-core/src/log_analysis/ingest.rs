@@ -2828,7 +2828,6 @@ fn ingest_path_inner_with_limits_and_fault(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn ingest_path_into_cache(
     cache_root: &Path,
     path: &Path,
@@ -4451,7 +4450,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn selection_skips_deselected_sources_and_never_publishes_empty() {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("cache");
@@ -4531,6 +4529,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn nested_zip_success_from_directory_and_archive_preserves_virtual_identities() {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("cache");
