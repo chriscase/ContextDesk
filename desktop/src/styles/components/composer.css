@@ -350,7 +350,10 @@
 .btn--sm {
   padding: 3px 8px;
   font-size: var(--text-xs);
-  min-height: 22px;
+  /* WCAG 2.2 target-size floor. Padding stays as-is so density is unchanged;
+     only the minimum box grows, from 22px (#767). */
+  min-height: 24px;
+  min-width: 24px;
   gap: 4px;
 }
 

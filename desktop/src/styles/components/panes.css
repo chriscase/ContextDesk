@@ -1077,7 +1077,12 @@
 .log-timezone-review__zone-field input:focus-visible,
 .log-timezone-review button:focus-visible,
 .log-import-confidence__source-actions button:focus-visible {
-  outline: 2px solid var(--focus-ring);
+  /* --focus-ring is a box-shadow list, not a colour; passing it to `outline`
+     made this declaration invalid. These controls kept a ring only because the
+     shared button rule in base.css still applied (#767). */
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--accent);
   outline-offset: 2px;
 }
 

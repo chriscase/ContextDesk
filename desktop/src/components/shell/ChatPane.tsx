@@ -291,9 +291,14 @@ export function ChatPane(props: ChatPaneProps) {
           ) : null}
         </div>
       </header>
+      {/*
+        A region, not a tabpanel: this sits *inside* the chat tabpanel and has
+        no tab of its own, so `role="tabpanel"` here described a relationship
+        that does not exist.
+      */}
       <div
         id="session-panel-chat"
-        role="tabpanel"
+        role="region"
         aria-label="Chat transcript"
         className="chat-scroll-wrap"
       >
@@ -301,6 +306,10 @@ export function ChatPane(props: ChatPaneProps) {
           className="chat-scroll"
           ref={chatScrollRef}
           onScroll={onChatScroll}
+          // The transcript scrolls, so it must be reachable and scrollable
+          // without a pointer. Focus styling lives in base.css.
+          tabIndex={0}
+          aria-label={`Transcript for ${activeSession?.title || "this chat"}`}
         >
           {isFolded && hiddenCount > 0 ? (
             <div className="compact-banner" role="status">

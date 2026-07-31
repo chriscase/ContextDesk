@@ -357,7 +357,7 @@
   border-bottom: 1px solid var(--border-soft);
   color: var(--text-muted);
   font-family: var(--font-mono);
-  font-size: var(--font-size-xs);
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
@@ -381,7 +381,14 @@
 
 .help-code__toolbar button:focus-visible,
 .help-code pre:focus-visible {
-  outline: 2px solid var(--focus-ring);
+  /* --focus-ring is a box-shadow list, not a colour: passing it to `outline`
+     made the whole declaration invalid, so the scrollable <pre> — which is
+     tabbable and not matched by the shared button focus rule — had no visible
+     focus at all. Longhands keep width and style even if the colour ever
+     regresses again (#767). */
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--accent);
   outline-offset: -2px;
 }
 
@@ -392,7 +399,7 @@
   padding: 0.85rem;
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: var(--font-size-sm);
+  font-size: var(--text-sm);
   line-height: 1.55;
   white-space: pre;
 }

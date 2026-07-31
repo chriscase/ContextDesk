@@ -8,7 +8,14 @@ import {
   hostTrashChatSession,
   type SessionSearchHitDto,
 } from "../../lib/host";
+import { nextRovingIndex } from "../../lib/a11y";
 import { IconPin } from "../icons";
+
+const SCOPE_TABS = [
+  ["active", "Chats"],
+  ["archived", "Archived"],
+  ["trash", "Trash"],
+] as const;
 
 type Props = {
   /** Bump to force a refresh after external session changes. */
@@ -109,14 +116,26 @@ export function ChatArchivePane({
         className="archive-scope"
         role="tablist"
         aria-label="Archive scope"
+        // Roving tabindex leaves the unselected tabs at -1, so without arrow
+        // handling Archived and Trash were unreachable by keyboard entirely —
+        // a keyboard-only user could not restore a trashed chat.
+        onKeyDown={(e) => {
+          const order = SCOPE_TABS.map(([id]) => id);
+          const current = order.indexOf(scope);
+          const next = nextRovingIndex(
+            current < 0 ? 0 : current,
+            order.length,
+            e.key,
+          );
+          if (next == null) return;
+          e.preventDefault();
+          setScope(order[next]!);
+          window.requestAnimationFrame(() => {
+            document.getElementById(`archive-scope-tab-${order[next]}`)?.focus();
+          });
+        }}
       >
-        {(
-          [
-            ["active", "Chats"],
-            ["archived", "Archived"],
-            ["trash", "Trash"],
-          ] as const
-        ).map(([id, label]) => (
+        {SCOPE_TABS.map(([id, label]) => (
           <button
             key={id}
             id={`archive-scope-tab-${id}`}

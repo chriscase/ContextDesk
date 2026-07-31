@@ -16,6 +16,13 @@
   --fg-muted: var(--text-muted);
   --text-secondary: var(--text-muted);
   --border-subtle: var(--border);
+  /* --bg was referenced by the error banner's detail block and the import
+     confidence <pre> but never defined, so both `background` declarations were
+     invalid and those surfaces painted nothing (#767). */
+  --bg: var(--bg-app);
+  /* Raised chip/control fill on long-form reading surfaces. Themes re-tint
+     --bg-elevated, so this tracks each skin without its own per-theme copy. */
+  --surface-raised: var(--bg-elevated);
 
   --radius-sm: 6px;
   --radius-md: 10px;
@@ -41,11 +48,18 @@
   --text-sm: 0.6875rem; /* 11px */
   --text-md: 0.75rem; /* 12px — body */
   --text-lg: 0.875rem; /* 14px */
+  /* Display step, above the UI scale. Only long-form reading surfaces
+     (Handbook, Help) use it; without it their `font-size` declarations were
+     invalid at computed-value time and silently inherited body size, which
+     rendered Handbook h2 *smaller* than h3 (#767). */
+  --text-xl: 1.125rem; /* 18px — section headings / display */
   --ui-scale: 1;
 
   /* Defaults (dark). Each theme may re-tint for light skins (#300). */
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.18);
   --shadow-md: 0 12px 36px rgb(0 0 0 / 0.4);
+  /* Floating layers (popover galleries, detached panels). */
+  --shadow-lg: 0 20px 52px rgb(0 0 0 / 0.5);
   --shadow-inset: 0 1px 0 rgb(255 255 255 / 0.04) inset;
   --composer-shadow: var(--shadow-inset), 0 10px 28px rgb(0 0 0 / 0.22);
   --composer-shadow-focus:

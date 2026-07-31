@@ -122,6 +122,42 @@ select:focus-visible {
   box-shadow: var(--focus-ring);
 }
 
+/* Scrollable regions are tabbable so keyboard users can reach and scroll their
+   content, but they are not matched by the control rule above. Give them a real
+   outline instead of leaving focus invisible (#767).
+
+   Longhands, deliberately: with the `outline` shorthand a bad colour token
+   invalidates the whole declaration and the indicator vanishes — which is the
+   exact defect this rule exists to fix. As longhands, width and style survive
+   regardless of what the colour resolves to. */
+.chat-scroll:focus-visible,
+.banner__tech:focus-visible,
+.source-view__code:focus-visible {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--accent);
+  outline-offset: -2px;
+}
+
+/*
+ * Forced-colors (Windows High Contrast) does not paint box-shadow, so the
+ * shared focus ring above disappears entirely and every control — including
+ * the first and last pane tabs — becomes focus-invisible. An `outline` with a
+ * system colour is painted, and this block is inert outside forced-colors.
+ */
+@media (forced-colors: active) {
+  button:focus-visible,
+  textarea:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  [tabindex]:focus-visible {
+    outline-width: 3px;
+    outline-style: solid;
+    outline-color: Highlight;
+    outline-offset: 1px;
+  }
+}
+
 code,
 pre,
 .mono {

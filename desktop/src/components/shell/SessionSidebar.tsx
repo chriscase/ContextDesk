@@ -128,6 +128,9 @@ export function SessionSidebar({
                     type="button"
                     className="session-list__item"
                     data-active={s.id === activeSessionId ? "true" : undefined}
+                    // data-active is a styling hook only; aria-current is what
+                    // tells assistive tech which conversation is open.
+                    aria-current={s.id === activeSessionId ? "true" : undefined}
                     title={`${s.title} — right-click for options`}
                     onClick={() => onSelect(s.id)}
                     onContextMenu={(e) => onContextMenu(e, s.id)}
