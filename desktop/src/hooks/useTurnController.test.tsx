@@ -193,8 +193,13 @@ describe("classifyCompletedCitation", () => {
     expect(classifyCompletedCitation("help://log-explorer#lanes")).toBe(
       "help",
     );
-    expect(classifyCompletedCitation("log_template:template-17")).toBe("log");
-    expect(classifyCompletedCitation("log_event:event_42")).toBe("log");
+    // Non-u64 legacy forms fail closed (never file I/O); only digits are "log".
+    expect(classifyCompletedCitation("log_template:template-17")).toBe(
+      "invalid",
+    );
+    expect(classifyCompletedCitation("log_event:event_42")).toBe("invalid");
+    expect(classifyCompletedCitation("log_event:42")).toBe("log");
+    expect(classifyCompletedCitation("log_template:7")).toBe("log");
     expect(classifyCompletedCitation("https://example.com/evidence")).toBe(
       "deferred",
     );
