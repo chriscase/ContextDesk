@@ -74,6 +74,7 @@ import {
 import { applyLogNav, type LogNavAction } from "../../lib/logExplorer/logNav";
 import { governedIdToSafeInteger } from "../../lib/citations";
 import { subscribeLogExplorerNavTargets } from "../../lib/engine/platform";
+import { refreshAfterTimeRevision } from "../../lib/logExplorer/timeRevisionRefresh";
 import {
   formatPolicyBindingStatus,
   policyBindingBlocksApply,
@@ -7370,16 +7371,18 @@ export function LogExplorer({ corpusId }: Props) {
           onChanged={async () => {
             // #819 — a timezone apply/undo publishes a new corpus revision, so
             // every downstream snapshot must be re-derived before any query
-            // runs. Order matters: invalidate in-flight requests first, then
-            // reload trusted suppression resolution, then reload the active
-            // investigation under the current lens, and only then repaint
-            // facets and rows. No query may reuse pre-change exclusions.
-            eventsRequestRef.current += 1;
-            await refreshSummary();
-            await refreshSuppressionPolicy();
-            await reloadActiveInvestigation();
-            await loadFacets();
-            await loadEvents();
+            // reads exclusions. The order is the contract and is asserted by
+            // lib/logExplorer/timeRevisionRefresh.test.ts.
+            await refreshAfterTimeRevision({
+              invalidateInFlight: () => {
+                eventsRequestRef.current += 1;
+              },
+              refreshSummary,
+              refreshSuppressionPolicy,
+              reloadActiveInvestigation,
+              loadFacets,
+              loadEvents,
+            });
           }}
         />
       ) : null}

@@ -3410,6 +3410,124 @@ mod tests {
         );
     }
 
+    /// #819 — recompute replaces the view recipe and policy binding and nothing
+    /// else: citations, epistemic kind, lifecycle, provenance, identity, and
+    /// creation time all survive unchanged.
+    #[test]
+    fn recompute_preserves_citations_lifecycle_and_provenance() {
+        let cache = tempfile::tempdir().unwrap();
+        let durable = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&cache);
+        let store = InvestigationStore::new(durable.path());
+        let document = store.create("Preservation", &corpus).unwrap();
+        let binding =
+            InvestigationPolicyBinding::capture(&corpus, InvestigationNoiseLens::Active).unwrap();
+        let mut input = finding_input(&corpus);
+        input.kind = FindingKind::Hypothesis;
+        input.view_recipe = Some(finding_view_recipe(&corpus));
+        let saved = store
+            .add_human_finding_bound(&document.id, 1, &corpus, binding.clone(), input)
+            .unwrap();
+        let before = saved.document.findings[0].clone();
+        assert!(
+            !before.evidence_ids.is_empty(),
+            "fixture must cite evidence"
+        );
+
+        let mut next_recipe = finding_view_recipe(&corpus);
+        next_recipe.filters.keyword = Some("recomputed".into());
+        let after = store
+            .recompute_human_finding_view(
+                &document.id,
+                saved.document.revision,
+                &corpus,
+                binding.clone(),
+                &before.id,
+                next_recipe,
+            )
+            .unwrap()
+            .document
+            .findings[0]
+            .clone();
+
+        // Replaced.
+        assert_eq!(
+            after
+                .view_recipe
+                .as_ref()
+                .and_then(|r| r.filters.keyword.as_deref()),
+            Some("recomputed")
+        );
+        assert_eq!(after.policy_binding.as_ref(), Some(&binding));
+        // Preserved.
+        assert_eq!(after.id, before.id, "identity must not change");
+        assert_eq!(after.evidence_ids, before.evidence_ids, "citations");
+        assert_eq!(after.kind, before.kind, "epistemic kind");
+        assert_eq!(after.lifecycle, before.lifecycle, "lifecycle");
+        assert_eq!(after.provenance, before.provenance, "provenance");
+        assert_eq!(after.title, before.title);
+        assert_eq!(after.why_it_matters, before.why_it_matters);
+        assert_eq!(after.created_at, before.created_at, "creation time");
+    }
+
+    /// #819 — concurrent recompute of one finding: exactly one winner, and the
+    /// loser mutates nothing.
+    #[test]
+    fn concurrent_recompute_has_exactly_one_winner() {
+        let cache = tempfile::tempdir().unwrap();
+        let durable = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&cache);
+        let store = InvestigationStore::new(durable.path());
+        let document = store.create("Concurrent recompute", &corpus).unwrap();
+        let binding =
+            InvestigationPolicyBinding::capture(&corpus, InvestigationNoiseLens::Active).unwrap();
+        let mut input = finding_input(&corpus);
+        input.view_recipe = Some(finding_view_recipe(&corpus));
+        let saved = store
+            .add_human_finding_bound(&document.id, 1, &corpus, binding.clone(), input)
+            .unwrap();
+        let finding_id = saved.document.findings[0].id.clone();
+        let shared_revision = saved.document.revision;
+
+        let mut first_recipe = finding_view_recipe(&corpus);
+        first_recipe.filters.keyword = Some("first".into());
+        let mut second_recipe = finding_view_recipe(&corpus);
+        second_recipe.filters.keyword = Some("second".into());
+
+        // Both callers read the same revision; only one may publish.
+        let first = store.recompute_human_finding_view(
+            &document.id,
+            shared_revision,
+            &corpus,
+            binding.clone(),
+            &finding_id,
+            first_recipe,
+        );
+        let second = store.recompute_human_finding_view(
+            &document.id,
+            shared_revision,
+            &corpus,
+            binding,
+            &finding_id,
+            second_recipe,
+        );
+        assert!(first.is_ok(), "first recompute must win");
+        assert!(second.is_err(), "second must fail closed on stale revision");
+
+        let reopened = store
+            .load_with_policy_lens(&document.id, &corpus, InvestigationNoiseLens::Active)
+            .unwrap();
+        assert_eq!(reopened.document.revision, shared_revision + 1);
+        assert_eq!(
+            reopened.document.findings[0]
+                .view_recipe
+                .as_ref()
+                .and_then(|r| r.filters.keyword.as_deref()),
+            Some("first"),
+            "the loser must not overwrite the winner"
+        );
+    }
+
     #[test]
     fn investigation_policy_binding_distinguishes_suspended_and_active_lenses() {
         let cache = tempfile::tempdir().unwrap();
