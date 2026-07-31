@@ -14,9 +14,11 @@
  *   min(36rem, 100vw-2rem) form, z-order above the popover, and the
  *   pointerdown+click regression scenario; suppression error alert; axe on
  *   the open preview dialog.
- * - Narrow-sheet probe: measures whether the `.log-explorer--narrow
- *   .log-explorer__suppress-dialog--sheet` styles (log-explorer.css:3403) can
- *   still reach the body-portaled dialog (see FINDING below).
+ * - Narrow bottom sheet (#834 follow-up repair): the portaled dialog receives
+ *   its sheet styling from the directly applied --sheet class (no
+ *   .log-explorer ancestor, no body mutation) — top radii, square bottom,
+ *   full bounded width, bottom docking, internal scrolling, plus outside
+ *   dismissal, focus return, and no orphan overlay on unmount.
  *
  * HONESTY: everything proven here is renderer-level (real CSS/layout/focus/
  * ARIA in headless Chromium via Vitest browser mode) — it is NOT native
@@ -24,10 +26,9 @@
  *
  * Assertions derive from: issues #818/#819/#823/#825 (governed noise review,
  * human-only suppression), #834 / commit b469f0d (suppression preview as a
- * viewport dialog), src/styles/components/log-explorer.css (backdrop
- * 1055-1068, popover 2815-2835, dialog 3282-3298, narrow sheet 3403-3408),
- * and the reference unit suites NoisePolicy.test.tsx /
- * NoiseCandidateReview.test.tsx.
+ * viewport dialog), src/styles/components/log-explorer.css (dialog backdrop,
+ * popover, suppress dialog, and narrow-sheet rules), and the reference unit
+ * suites NoisePolicy.test.tsx / NoiseCandidateReview.test.tsx.
  */
 import "./support/styles";
 import { createRef, type RefObject } from "react";
@@ -492,9 +493,17 @@ describe("noise suppression surfaces (renderer-level)", () => {
     ).toBeNull();
   });
 
-  it("narrow-sheet probe: the body-portaled dialog escapes the narrow sheet selector", async () => {
+  it("renders the narrow suppress dialog as a bottom sheet on the portaled backdrop (#834)", async () => {
+    // Regression for the #834 follow-up repair: the portaled dialog left the
+    // .log-explorer subtree, so the sheet rule must select the directly
+    // applied --sheet class (log-explorer.css), not a .log-explorer--narrow
+    // ancestor. No body/ancestor mutation happens here — the sheet styling
+    // must arrive purely from narrow={true}.
     await setViewport("narrow");
-    renderSuppressDialog({ narrow: true });
+    const { view, triggerRef, onDismiss } = renderSuppressDialog({
+      narrow: true,
+    });
+    const rem = remPx();
 
     const form = screen.getByRole("dialog", {
       name: "Suppress exact template",
@@ -502,61 +511,85 @@ describe("noise suppression surfaces (renderer-level)", () => {
     expect(
       form.classList.contains("log-explorer__suppress-dialog--sheet"),
     ).toBe(true);
-    const rem = remPx();
+    expect(document.body.classList.contains("log-explorer--narrow")).toBe(
+      false,
+    );
 
-    // FINDING: the #834 portal (commit b469f0d) moved SuppressTemplateDialog
-    // to document.body, but the bottom-sheet styling is selected by
-    // `.log-explorer--narrow .log-explorer__suppress-dialog--sheet`
-    // (log-explorer.css:3403) — an ancestor scope the portaled dialog can no
-    // longer match, because document.body is never inside .log-explorer. So
-    // at narrow widths with narrow=true the --sheet class is present but
-    // inert, and the dialog renders with desktop styling instead of the
-    // bottom sheet. The assertions below pin the CURRENT actual behavior.
-    const desktopStyle = getComputedStyle(form);
-    expect(desktopStyle.borderTopLeftRadius).toBe("11px");
-    // Sheet styling would zero the bottom radii (12px 12px 0 0).
-    expect(desktopStyle.borderBottomLeftRadius).toBe("11px");
-    const desktopRect = form.getBoundingClientRect();
-    // Desktop width min(36rem, 100vw - 2rem) = 576px at 640, not the sheet's
-    // full padded width; top-anchored at min(18vh, 9rem), not bottom-docked.
+    // Backdrop: still the fixed full-viewport overlay.
+    const backdrop = screen.getByTestId("suppress-template-backdrop");
+    expect(backdrop.parentElement).toBe(document.body);
+    expect(getComputedStyle(backdrop).position).toBe("fixed");
+    const backdropRect = backdrop.getBoundingClientRect();
+    expect(Math.abs(backdropRect.left)).toBeLessThanOrEqual(0.5);
+    expect(Math.abs(backdropRect.top)).toBeLessThanOrEqual(0.5);
     expect(
-      Math.abs(
-        desktopRect.width - Math.min(36 * rem, window.innerWidth - 2 * rem),
-      ),
+      Math.abs(backdropRect.width - window.innerWidth),
+    ).toBeLessThanOrEqual(0.5);
+    expect(
+      Math.abs(backdropRect.height - window.innerHeight),
+    ).toBeLessThanOrEqual(0.5);
+
+    // Sheet geometry: rounded top corners, square bottom corners.
+    const sheetStyle = getComputedStyle(form);
+    expect(sheetStyle.borderTopLeftRadius).toBe("12px");
+    expect(sheetStyle.borderTopRightRadius).toBe("12px");
+    expect(sheetStyle.borderBottomLeftRadius).toBe("0px");
+    expect(sheetStyle.borderBottomRightRadius).toBe("0px");
+
+    // Full bounded width (100% of the backdrop's 1rem-padded content box)
+    // and bottom docking (margin-top auto against the 1rem bottom padding).
+    const sheetRect = form.getBoundingClientRect();
+    expect(
+      Math.abs(sheetRect.width - (backdropRect.width - 2 * rem)),
     ).toBeLessThanOrEqual(1);
     expect(
-      Math.abs(
-        desktopRect.top - Math.min(0.18 * window.innerHeight, 9 * rem),
-      ),
+      Math.abs(sheetRect.bottom - (backdropRect.bottom - rem)),
     ).toBeLessThanOrEqual(1);
 
-    // Repair evidence: the sheet CSS itself still works — when a portal-side
-    // ancestor carries the scope class, the same rule applies and the dialog
-    // becomes a bottom sheet. (One viable fix: toggle `log-explorer--narrow`
-    // — or a portal-carried class/attribute with a :has()-free selector — on
-    // the portaled backdrop or body while the dialog is narrow.)
-    document.body.classList.add("log-explorer--narrow");
-    try {
-      // Selector-match change on an existing element: wait a painted frame
-      // before reading recomputed styles (see nextPaintedFrame docs).
-      await nextPaintedFrame();
-      const sheetStyle = getComputedStyle(form);
-      expect(sheetStyle.borderTopLeftRadius).toBe("12px");
-      expect(sheetStyle.borderBottomLeftRadius).toBe("0px");
-      const backdropRect = screen
-        .getByTestId("suppress-template-backdrop")
-        .getBoundingClientRect();
-      const sheetRect = form.getBoundingClientRect();
-      // width: 100% of the backdrop's padded content box.
-      expect(
-        Math.abs(sheetRect.width - (backdropRect.width - 2 * rem)),
-      ).toBeLessThanOrEqual(1);
-      // margin-top: auto bottom-docks the sheet above the 1rem padding.
-      expect(
-        Math.abs(sheetRect.bottom - (backdropRect.bottom - rem)),
-      ).toBeLessThanOrEqual(1);
-    } finally {
-      document.body.classList.remove("log-explorer--narrow");
-    }
+    // Internal scrolling: the sheet is height-bounded to 86vh and scrolls its
+    // own content; the page never scrolls horizontally.
+    expect(sheetStyle.overflow).toBe("auto");
+    expect(
+      Math.abs(parseFloat(sheetStyle.maxHeight) - 0.86 * window.innerHeight),
+    ).toBeLessThanOrEqual(1);
+    expect(sheetRect.height).toBeLessThanOrEqual(
+      0.86 * window.innerHeight + 1,
+    );
+    expectNoHorizontalPageOverflow();
+
+    // The loaded preview keeps the sheet contract and holds a baseline.
+    fireEvent.change(screen.getByLabelText("Rationale (required)"), {
+      target: { value: "Known repetitive health traffic." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Preview impact" }));
+    await screen.findByRole("button", { name: "Confirm suppression" });
+    await nextPaintedFrame();
+    const loadedRect = form.getBoundingClientRect();
+    expect(
+      Math.abs(loadedRect.bottom - (backdropRect.bottom - rem)),
+    ).toBeLessThanOrEqual(1);
+    expect(loadedRect.height).toBeLessThanOrEqual(
+      0.86 * window.innerHeight + 1,
+    );
+    await expect(page.elementLocator(backdrop)).toMatchScreenshot(
+      "suppress-preview-sheet-dark-narrow",
+    );
+
+    // Outside dismissal still works from the sheet: the resync path runs,
+    // focus returns to the trigger, and the parent is asked to close.
+    fireEvent.mouseDown(backdrop);
+    await waitFor(() => {
+      expect(onDismiss).toHaveBeenCalledTimes(1);
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(triggerRef.current);
+    });
+
+    // No orphan overlay: unmounting (what the parent does on dismiss) removes
+    // the portaled backdrop from document.body.
+    view.unmount();
+    expect(
+      document.querySelector('[data-testid="suppress-template-backdrop"]'),
+    ).toBeNull();
   });
 });

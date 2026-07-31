@@ -3400,7 +3400,11 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.log-explorer--narrow .log-explorer__suppress-dialog--sheet {
+/* The suppress dialog is portaled to document.body (#834), so a
+   .log-explorer--narrow ancestor can never match it. The --sheet class is
+   itself the narrow signal: SuppressTemplateDialog applies it only when its
+   narrow prop is true, which keeps this rule portal-local. */
+.log-explorer__suppress-dialog--sheet {
   border-radius: 12px 12px 0 0;
   margin-top: auto;
   max-height: 86vh;
