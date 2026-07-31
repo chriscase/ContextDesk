@@ -3,7 +3,11 @@
  * Mirrors crates/cd-core/src/preflight.rs category rules for client reports.
  */
 
-import type { PreflightItem, PreflightLevel } from "./preflight";
+import type {
+  PreflightItem,
+  PreflightLevel,
+  PreflightReport,
+} from "./preflight";
 
 export type PreflightCategory = "launch" | "work" | "optional";
 
@@ -76,6 +80,31 @@ export function unverifiedProbeItems(items: PreflightItem[]): PreflightItem[] {
   return items.filter(
     (item) => item.level === "warn" && UNVERIFIED_PROBE_ID_SET.has(item.id),
   );
+}
+
+/**
+ * Whether workspace-dependent starters may be offered (#539).
+ *
+ * "Configured" is not "reachable". Only the host can stat a root —
+ * `preflight.rs` fails `workspace.roots` on missing paths — and the browser
+ * mirror emits that same id at `pass` purely from a non-empty root list. Since
+ * `useShellState` falls back to the client mirror until the first host report
+ * arrives, merely checking for the absence of a failure is satisfied vacuously
+ * during that window, and starters claiming workspace access appear for roots
+ * that may not exist.
+ *
+ * So this requires an affirmative host `pass`, not the absence of a failure.
+ * A null report means "not proven yet", never "fine". Chat-only starters are
+ * unaffected and stay available throughout.
+ */
+export function workspaceContentProven(
+  hostReport: PreflightReport | null | undefined,
+  configuredRootCount: number,
+): boolean {
+  if (configuredRootCount <= 0) return false;
+  if (!hostReport) return false;
+  const roots = hostReport.items.find((item) => item.id === "workspace.roots");
+  return roots?.level === "pass";
 }
 
 export type PreflightReadiness = "blocked" | "unverified" | "ready";

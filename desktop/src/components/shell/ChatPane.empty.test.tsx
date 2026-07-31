@@ -353,9 +353,10 @@ describe("ChatPane first-chat home", () => {
     );
   });
 
-  it("withholds workspace starters when a configured root does not resolve", () => {
-    // hasAuthorizedWorkspaceContent means reachable, not merely configured:
-    // App derives it from workspace.roots, which only the host can fail.
+  it("withholds workspace starters unless the host proved the roots resolve", () => {
+    // App derives hasAuthorizedWorkspaceContent from workspaceContentProven,
+    // which requires an affirmative host workspace.roots pass — a pending and a
+    // failing host report both render the chat-only surface.
     render(
       <ChatPane {...baseProps({ hasAuthorizedWorkspaceContent: true })} />,
     );
@@ -369,5 +370,34 @@ describe("ChatPane first-chat home", () => {
     expect(
       screen.getByTestId("first-chat-home").getAttribute("data-content-scope"),
     ).toBe("chat-only");
+  });
+  it("keeps chat-only starters usable while workspace access is unproven", () => {
+    // Withholding workspace claims must not leave the user with nothing to do.
+    render(
+      <ChatPane {...baseProps({ hasAuthorizedWorkspaceContent: false })} />,
+    );
+    const starters = screen.getAllByTestId("chat-starter");
+    expect(starters.length).toBeGreaterThanOrEqual(3);
+    for (const starter of starters) {
+      expect((starter as HTMLButtonElement).disabled).toBe(false);
+      expect(starter.getAttribute("data-action")).toBe("fill-composer");
+    }
+    const labels = starters.map((starter) => starter.textContent ?? "");
+    expect(labels.some((label) => /workspace files/i.test(label))).toBe(false);
+  });
+
+  it("adopts workspace starters when a refreshed host report proves the roots", () => {
+    const view = render(
+      <ChatPane {...baseProps({ hasAuthorizedWorkspaceContent: false })} />,
+    );
+    expect(screen.queryByText("Summarize files")).toBeNull();
+
+    view.rerender(
+      <ChatPane {...baseProps({ hasAuthorizedWorkspaceContent: true })} />,
+    );
+    expect(screen.getByText("Summarize files")).toBeTruthy();
+    expect(
+      screen.getByTestId("first-chat-home").getAttribute("data-content-scope"),
+    ).toBe("workspace");
   });
 });

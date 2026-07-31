@@ -110,12 +110,88 @@ test("shipped UI help locators and settings routes resolve in the corpus", () =>
     externalAssetReferences: collectExternalAssetReferences(repoRoot),
   });
   const references = validateSourceHelpReferences(repoRoot, corpus);
-  assert.ok(
-    references.locators >= 8,
-    `expected the rich contextual Help locators to be checked, saw ${references.locators}`,
+
+  // Non-vacuous yield: cross-check the validator's count against an independent
+  // inventory of the governed content module, so a scan that silently stops
+  // matching cannot report success. A ">= N" floor let locators disappear one
+  // at a time.
+  const contentModule = fs.readFileSync(
+    path.join(repoRoot, "desktop", "src", "lib", "helpContent.ts"),
+    "utf8",
+  );
+  const declared = (contentModule.match(/^\s*helpLocator:\s*"/gm) ?? []).length;
+  assert.ok(declared > 0, "governed help content module declares no locators");
+  assert.equal(
+    references.declarations,
+    declared,
+    "validator must discover exactly the declared helpLocator call sites",
+  );
+  assert.equal(
+    references.locators,
+    declared,
+    "every declaration must be validated, not only the well-formed ones",
   );
   assert.ok(references.routes >= 7);
   assert.deepEqual(validateHelpPackaging(repoRoot), { resource: "help" });
+});
+
+test("helpLocator declarations are discovered before they are validated", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "contextdesk-loc-"));
+  try {
+    const libDir = path.join(root, "desktop", "src", "lib");
+    fs.mkdirSync(libDir, { recursive: true });
+    const corpus = {
+      ids: ["fixture-page"],
+      anchors: new Map([["fixture-page", new Set(["flow"])]]),
+    };
+    const contentPath = path.join(libDir, "helpContent.ts");
+    const write = (body) => fs.writeFileSync(contentPath, body);
+    const check = () => validateSourceHelpReferences(root, corpus);
+
+    write(`export const tip = { helpLocator: "help://fixture-page#flow" };\n`);
+    const ok = check();
+    assert.equal(ok.declarations, 1);
+    assert.equal(ok.locators, 1);
+
+    // 1. Deleted entirely — the previous scan reported success with nothing to find.
+    write(`export const tip = { title: "No locator" };\n`);
+    assert.throws(check, /found no helpLocator declarations/);
+
+    // 2. Malformed scheme — invisible to a help:// string scan.
+    write(`export const tip = { helpLocator: "htp://fixture-page#flow" };\n`);
+    assert.throws(check, /is not a canonical help:\/\/ locator/);
+
+    // 3. Missing page.
+    write(`export const tip = { helpLocator: "help://deleted-page#flow" };\n`);
+    assert.throws(check, /unknown help link/);
+
+    // 4. Missing anchor.
+    write(`export const tip = { helpLocator: "help://fixture-page#gone" };\n`);
+    assert.throws(check, /points at a heading that does not exist/);
+
+    // 5. Dynamic values cannot be checked, so they must not pass.
+    write(
+      `const page = "fixture-page";\nexport const tip = { helpLocator: \`help://\${page}\` };\n`,
+    );
+    assert.throws(check, /must be a literal canonical string/);
+    write(`export const tip = { helpLocator: locatorFor(page) };\n`);
+    assert.throws(check, /must be a literal canonical string/);
+
+    // 6. Empty literal.
+    write(`export const tip = { helpLocator: "" };\n`);
+    assert.throws(check, /must not be empty/);
+
+    // A type member declares the field; it is not a call site.
+    write(
+      `export type Content = { helpLocator?: string };\n` +
+        `export const tip = { helpLocator: "help://fixture-page" };\n`,
+    );
+    const typed = check();
+    assert.equal(typed.declarations, 1);
+    assert.equal(typed.typeMembers, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("page anchors mirror the cd-core heading anchor rules", () => {
@@ -280,11 +356,17 @@ test("a UI locator pointing at a missing page or heading fails closed", () => {
       /unknown help link/,
     );
 
-    // Test files are excluded so parser fixtures cannot break the gate.
-    fs.writeFileSync(contentPath, "export const tip = {};\n");
+    // Test files are excluded so parser fixtures cannot break the gate — but
+    // the governed module must still carry a real declaration, since an empty
+    // inventory is itself a failure now.
+    fs.writeFileSync(
+      contentPath,
+      `export const tip = { helpLocator: "help://fixture-page#flow" };\n`,
+    );
     fs.writeFileSync(
       path.join(libDir, "help.test.ts"),
-      `expect(parse("help://not-a-real-page?query"));\n`,
+      `expect(parse("help://not-a-real-page?query"));\n` +
+        `const bogus = { helpLocator: someRuntimeValue };\n`,
     );
     assert.doesNotThrow(() => validateSourceHelpReferences(root, corpus));
 

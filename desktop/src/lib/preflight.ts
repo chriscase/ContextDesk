@@ -181,6 +181,27 @@ export function runClientPreflight(s: AppSetupState): PreflightReport {
           : "Session file missing — run `grok login`, then Use again.",
         fixAction: "ai",
       });
+      // Session-file presence above is credential material, never reachability.
+      // The host probes Grok for real; this mirror cannot, so it reports the
+      // outcome as unmeasured rather than letting the surface read as ready
+      // (#746). Mirrors the cd-core `provider.remote` contract.
+      items.push({
+        id: "provider.remote",
+        title: "Connection test",
+        level:
+          s.remoteReachable === true
+            ? "pass"
+            : s.remoteReachable === false
+              ? "fail"
+              : "warn",
+        detail:
+          s.remoteReachable === true
+            ? "Endpoint responded."
+            : s.remoteReachable === false
+              ? "Last test failed — check the session and network."
+              : "Run Test connection for a live check.",
+        fixAction: "ai",
+      });
     }
 
     if (

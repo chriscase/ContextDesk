@@ -29,6 +29,15 @@ two, recorded below. Later documentation-only commits may advance repository
 ledger to appear in this file, so a recapture cannot silently leave this table
 naming a build that no longer produced the frame.
 
+It also requires every image the top-level `README.md` publishes to be a ledger
+entry. Enforcement covers the three forms GitHub renders — inline
+`![alt](path)`, reference style (`![alt][label]` with its `[label]:`
+definition, including the collapsed and shortcut spellings), and raw
+`<img src="path">`. Remote `http(s)`/`data:` sources are skipped as
+non-repository media. Local raster syntax the checker cannot resolve — an
+`<img>` whose `src` is not a quoted literal, or a reference image naming a
+raster with no definition — is rejected rather than ignored.
+
 The exact Git blob identities and completed byte-level publication review are
 recorded in `docs/media/public-assets.json`.
 
@@ -77,12 +86,12 @@ that an untested model or provider was used.
 
 ## Recapture procedure
 
-1. Use the already-built packaged application whose exact app-source SHA is
-   `4cbdf664a794af3f424cd5bba8a4c621c3df3bae`. A later repository `HEAD` is
-   acceptable only when every intervening change is documentation-only and
-   cannot alter the packaged application bytes.
-2. If the app must be rebuilt, check out the exact app-source SHA in an
-   isolated worktree and build it:
+1. Build one packaged application and capture every frame from it, so the
+   gallery stops spanning two builds (see the residual above). Record that one
+   app-source SHA against every replaced frame in the ledger. A later
+   repository `HEAD` is acceptable only when every intervening change is
+   documentation-only and cannot alter the packaged application bytes.
+2. Check out that exact app-source SHA in an isolated worktree and build it:
 
    ```sh
    cd desktop

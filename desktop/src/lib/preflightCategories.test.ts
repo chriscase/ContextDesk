@@ -5,6 +5,7 @@ import {
   isLaunchBlockingLevel,
   preflightReadiness,
   unverifiedProbeItems,
+  workspaceContentProven,
 } from "./preflightCategories";
 import type { PreflightItem } from "./preflight";
 
@@ -145,5 +146,101 @@ describe("readiness truthfulness (#746)", () => {
 
   it("reports ready for an empty report rather than inventing doubt", () => {
     expect(preflightReadiness([], false)).toBe("ready");
+  });
+});
+
+describe("workspace authorization requires host truth (#539)", () => {
+  const item = (
+    id: string,
+    level: PreflightItem["level"],
+    detail = "",
+  ): PreflightItem => ({ id, title: id, level, detail });
+
+  const report = (items: PreflightItem[]) => ({
+    items,
+    hasBlocking: items.some((i) => i.level === "fail"),
+  });
+
+  it("withholds workspace content while the host report is still pending", () => {
+    // useShellState starts with hostPreflightReport === null and falls back to
+    // the client mirror, which reports workspace.roots as passing from a
+    // non-empty list alone. Absence of a failure is not proof.
+    expect(workspaceContentProven(null, 3)).toBe(false);
+    expect(workspaceContentProven(undefined, 3)).toBe(false);
+  });
+
+  it("withholds workspace content when the host fails the roots check", () => {
+    const hostFail = report([
+      item("workspace.roots", "fail", "Missing path(s): /gone"),
+    ]);
+    expect(workspaceContentProven(hostFail, 3)).toBe(false);
+  });
+
+  it("authorizes workspace content only on an affirmative host pass", () => {
+    const hostPass = report([
+      item("workspace.roots", "pass", "3 root(s) configured."),
+    ]);
+    expect(workspaceContentProven(hostPass, 3)).toBe(true);
+  });
+
+  it("treats a host report with no roots item as unproven", () => {
+    // A host that stops emitting the item must not silently authorize.
+    expect(
+      workspaceContentProven(report([item("provider.key", "pass")]), 3),
+    ).toBe(false);
+  });
+
+  it("never authorizes when no roots are configured, however healthy the report", () => {
+    const hostPass = report([item("workspace.roots", "pass", "ok")]);
+    expect(workspaceContentProven(hostPass, 0)).toBe(false);
+  });
+
+  it("flips as a refreshed report replaces a pending or failing one", () => {
+    const failing = report([
+      item("workspace.roots", "fail", "Missing path(s)"),
+    ]);
+    const passing = report([item("workspace.roots", "pass", "ok")]);
+    expect(workspaceContentProven(null, 2)).toBe(false);
+    expect(workspaceContentProven(failing, 2)).toBe(false);
+    expect(workspaceContentProven(passing, 2)).toBe(true);
+    // …and back again when a later refresh loses the roots.
+    expect(workspaceContentProven(failing, 2)).toBe(false);
+  });
+});
+
+describe("Grok Build readiness (#746)", () => {
+  const item = (
+    id: string,
+    level: PreflightItem["level"],
+    detail = "",
+  ): PreflightItem => ({ id, title: id, level, detail });
+
+  it("is unverified when the Grok probe has not run", () => {
+    // Session-file presence is credential material, not reachability, so
+    // provider.grok_opt_in passing must not make the surface read as ready.
+    const items = [
+      item("provider.grok_opt_in", "pass", "Using session credentials."),
+      item("provider.remote", "warn", "Run Test connection for a live check."),
+    ];
+    expect(preflightReadiness(items, false)).toBe("unverified");
+    expect(unverifiedProbeItems(items).map((i) => i.id)).toEqual([
+      "provider.remote",
+    ]);
+  });
+
+  it("is ready only once the Grok probe succeeded", () => {
+    const items = [
+      item("provider.grok_opt_in", "pass", "Using session credentials."),
+      item("provider.remote", "pass", "Endpoint responded."),
+    ];
+    expect(preflightReadiness(items, false)).toBe("ready");
+  });
+
+  it("is blocked when the Grok probe failed", () => {
+    const items = [
+      item("provider.grok_opt_in", "pass", "Using session credentials."),
+      item("provider.remote", "fail", "Last test failed."),
+    ];
+    expect(preflightReadiness(items, true)).toBe("blocked");
   });
 });

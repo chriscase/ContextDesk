@@ -883,18 +883,86 @@ export function validateSourceHelpReferences(
     absoluteSourceRoot,
     new Set([".ts", ".tsx", ".js", ".jsx"]),
   );
+
+  /*
+   * Discover declarations first, then validate their values.
+   *
+   * Scanning for well-formed `help://…` strings only ever inspects locators
+   * that are already valid: delete a `helpLocator`, misspell its scheme, or
+   * compute it at runtime and the site simply vanishes from the scan while the
+   * gate reports success. So find every `helpLocator:` property assignment,
+   * require a literal canonical value, and reject anything else.
+   *
+   * Type members (`helpLocator?: string`) declare the field rather than name a
+   * page; they are recognized narrowly and counted separately.
+   */
+  const declarationRe = /(?<![\w$.])helpLocator\s*(\?)?\s*:\s*([^\n]*)/g;
+  const typeValueRe = /^(?:string|\s*string\b|readonly\s|\w+\s*\|)/;
   let locators = 0;
+  let declarations = 0;
+  let typeMembers = 0;
+
   for (const file of files) {
     const source = path.relative(repositoryRoot, file);
     const text = fs.readFileSync(file, "utf8");
+
+    for (const match of text.matchAll(declarationRe)) {
+      const optional = match[1] === "?";
+      const raw = match[2].trim();
+      if (optional || typeValueRe.test(raw)) {
+        typeMembers += 1;
+        continue;
+      }
+      declarations += 1;
+      // A leading double-quoted literal followed only by punctuation that can
+      // legally close the property. Anything else — concatenation, a template,
+      // a call, an identifier — is not statically checkable and is rejected.
+      const literal = raw.match(/^"([^"\\]*)"[\s,;})\]]*(?:\/\/.*)?$/);
+      if (!literal) {
+        throw new Error(
+          `${source}: helpLocator must be a literal canonical string, found \`${raw}\` — ` +
+            `a computed or non-literal value cannot be checked against the corpus`,
+        );
+      }
+      const value = literal[1];
+      if (!value) {
+        throw new Error(`${source}: helpLocator must not be empty`);
+      }
+      const parsed = value.match(/^help:\/\/([a-z0-9-]+)(?:#([a-z0-9-]+))?$/);
+      if (!parsed) {
+        throw new Error(
+          `${source}: helpLocator '${value}' is not a canonical help:// locator`,
+        );
+      }
+      assertLocatorResolves(
+        { pageId: parsed[1], anchor: parsed[2], text: value },
+        { ids, anchors },
+        source,
+      );
+      locators += 1;
+    }
+
+    // Canonical locators written anywhere else in governed source (comments,
+    // helper calls) still have to resolve.
     for (const match of text.matchAll(HELP_LOCATOR_RE)) {
       assertLocatorResolves(
         { pageId: match[1], anchor: match[2], text: match[0] },
         { ids, anchors },
         source,
       );
-      locators += 1;
     }
+  }
+
+  if (declarations === 0) {
+    throw new Error(
+      `${sourceRoot}: found no helpLocator declarations — the contextual Help ` +
+        `inventory cannot be empty, so the scan is broken or the module moved`,
+    );
+  }
+  if (locators !== declarations) {
+    throw new Error(
+      `${sourceRoot}: ${declarations} helpLocator declarations but ${locators} validated`,
+    );
   }
 
   // The Settings help router returns bare page ids rather than locators.
@@ -924,7 +992,7 @@ export function validateSourceHelpReferences(
       );
     }
   }
-  return { files: files.length, locators, routes };
+  return { files: files.length, locators, declarations, typeMembers, routes };
 }
 
 /**

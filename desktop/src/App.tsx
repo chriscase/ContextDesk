@@ -56,7 +56,10 @@ import { IdentityPhase } from "./components/launch/IdentityPhase";
 import { PreLaunchScreen } from "./components/launch/PreLaunchScreen";
 import { hostSaveActiveProvider } from "./lib/host";
 import { saveLastGatewayUrl } from "./lib/aiGatewayPrefs";
-import { preflightReadiness } from "./lib/preflightCategories";
+import {
+  preflightReadiness,
+  workspaceContentProven,
+} from "./lib/preflightCategories";
 import type { WizardApplyPayload } from "./components/settings/AiSetupWizard";
 import { shouldSkipSplash } from "./components/launch/splashDuration";
 import {
@@ -182,17 +185,17 @@ export function App() {
   );
 
   /**
-   * Workspace-claiming starters require roots that actually resolve, not just
-   * roots that are configured (#539). A failing `workspace.roots` normally
-   * blocks the home outright, but only the host can check path existence — the
-   * browser mirror cannot — so until the first host report lands, configured
-   * but missing roots would otherwise offer "summarize my workspace files".
+   * Workspace-claiming starters require roots the *host* has proven resolve
+   * (#539). `shell.preflight` falls back to the client mirror until the first
+   * host report arrives, and that mirror reports `workspace.roots` as passing
+   * from a non-empty list alone — so checking for the absence of a failure was
+   * satisfied vacuously during the pending window. Require the affirmative
+   * host pass instead; chat-only starters remain available throughout.
    */
-  const hasAuthorizedWorkspaceContent =
-    shell.setup.workspaceRoots.length > 0 &&
-    !shell.preflight.items.some(
-      (item) => item.id === "workspace.roots" && item.level === "fail",
-    );
+  const hasAuthorizedWorkspaceContent = workspaceContentProven(
+    shell.hostPreflightReport,
+    shell.setup.workspaceRoots.length,
+  );
 
   const scroll = useChatScroll(messages, sessionId, setSessions);
   const {
