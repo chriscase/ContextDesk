@@ -1,5 +1,15 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
+
+/**
+ * @contextdesk/* packages are source-consumed (design handoff §7/B1): the
+ * desktop bundler resolves them straight to their TypeScript sources — no
+ * build step, no npm dependency, no lockfile churn. tsconfig.json carries the
+ * matching `paths` entries for the type checker.
+ */
+const pkg = (name: string) =>
+  fileURLToPath(new URL(`../packages/${name}/src/index.ts`, import.meta.url));
 
 /**
  * Dev port strategy (see scripts/dev-port.mjs, docs/DEV.md):
@@ -23,6 +33,14 @@ const strictPort = Boolean(
 
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: {
+      "@contextdesk/contracts": pkg("contracts"),
+      "@contextdesk/client": pkg("client"),
+      "@contextdesk/react": pkg("react"),
+      "@contextdesk/ui": pkg("ui"),
+    },
+  },
   clearScreen: false,
   server: {
     port,
@@ -30,6 +48,12 @@ export default defineConfig({
     // If not strict and 1450 is busy, Vite will try next ports automatically
     // when strictPort is false — only for bare `npm run dev`.
     host: "127.0.0.1",
+    fs: {
+      // Serve the source-consumed @contextdesk/* packages (repo root).
+      // In a git worktree `.git` is a file, so Vite's workspace-root
+      // detection stops at desktop/ and would otherwise deny ../packages.
+      allow: [fileURLToPath(new URL("..", import.meta.url))],
+    },
   },
   envPrefix: ["VITE_", "TAURI_", "CD_"],
   build: {
@@ -40,6 +64,11 @@ export default defineConfig({
   test: {
     environment: "happy-dom",
     globals: true,
-    include: ["src/**/*.{test,spec}.{ts,tsx}"],
+    // Package tests are part of the desktop suite: @contextdesk/* packages
+    // are source-consumed and have no test runner of their own (B1).
+    include: [
+      "src/**/*.{test,spec}.{ts,tsx}",
+      "../packages/*/src/**/*.{test,spec}.{ts,tsx}",
+    ],
   },
 });
