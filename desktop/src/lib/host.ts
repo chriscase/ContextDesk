@@ -1013,6 +1013,25 @@ export type ModelOptionDto = {
   tools_enabled: boolean;
   /** Why tools are disabled, when known. */
   tools_disabled_reason?: "profile" | "model" | null;
+  /**
+   * Curated out of ordinary pickers (#678). Display state only — the choice
+   * stays configured and the management surface still lists it. Never a
+   * security or redaction claim, and unrelated to whether it works: read
+   * `tools_*` and provider health for that.
+   */
+  hidden?: boolean;
+  /** `provider` or `model`; absent when not hidden. */
+  hidden_by?: "provider" | "model" | null;
+  /** Explicit pin position, lowest first; absent when not pinned. */
+  pinned_rank?: number | null;
+};
+
+/** What hiding a choice would do to the default for new chats (#678). */
+export type CurationImpactDto = {
+  affects_default: boolean;
+  replacement_key?: string | null;
+  replacement_label?: string | null;
+  remaining_visible: number;
 };
 
 export function parseModelSelectionKey(key: string): {
@@ -1033,9 +1052,85 @@ export function modelSelectionKey(providerId: string, modelId: string): string {
   return `${providerId}::${modelId}`;
 }
 
-export async function hostListChatModels(): Promise<ModelOptionDto[]> {
+/**
+ * List selectable chat models.
+ *
+ * Ordinary pickers call this with no arguments and never receive curated-away
+ * choices. Pass `keepKeys` with the conversation's current selection so a chat
+ * already pinned to a hidden model still renders it honestly, and
+ * `includeHidden` only from the management surface (#678).
+ */
+export async function hostListChatModels(opts?: {
+  includeHidden?: boolean;
+  keepKeys?: readonly string[];
+}): Promise<ModelOptionDto[]> {
   if (!isTauri()) return [];
-  return invoke<ModelOptionDto[]>("list_chat_models");
+  return invoke<ModelOptionDto[]>("list_chat_models", {
+    includeHidden: opts?.includeHidden ?? false,
+    keepKeys: opts?.keepKeys ? [...opts.keepKeys] : [],
+  });
+}
+
+/** Preview what hiding a provider (or one model) would do before writing. */
+export async function hostPreviewCurationChange(args: {
+  providerId: string;
+  modelId?: string | null;
+  hidden: boolean;
+}): Promise<CurationImpactDto | null> {
+  if (!isTauri()) return null;
+  return invoke<CurationImpactDto>("preview_curation_change", {
+    providerId: args.providerId,
+    modelId: args.modelId ?? null,
+    hidden: args.hidden,
+  });
+}
+
+/**
+ * Hide or restore one exact model. When the change would take the default out
+ * of ordinary pickers the host refuses unless `acceptReplacement` is the exact
+ * key the preview returned.
+ */
+export async function hostSetModelHidden(args: {
+  providerId: string;
+  modelId: string;
+  hidden: boolean;
+  acceptReplacement?: string | null;
+}): Promise<CurationImpactDto | null> {
+  if (!isTauri()) return null;
+  return invoke<CurationImpactDto>("set_model_hidden", {
+    providerId: args.providerId,
+    modelId: args.modelId,
+    hidden: args.hidden,
+    acceptReplacement: args.acceptReplacement ?? null,
+  });
+}
+
+/** Hide or restore a whole provider profile. Deletes nothing. */
+export async function hostSetProviderHidden(args: {
+  providerId: string;
+  hidden: boolean;
+  acceptReplacement?: string | null;
+}): Promise<CurationImpactDto | null> {
+  if (!isTauri()) return null;
+  return invoke<CurationImpactDto>("set_provider_hidden", {
+    providerId: args.providerId,
+    hidden: args.hidden,
+    acceptReplacement: args.acceptReplacement ?? null,
+  });
+}
+
+/** Pin or unpin one model in the explicit picker order. */
+export async function hostSetModelPinned(args: {
+  providerId: string;
+  modelId: string;
+  pinned: boolean;
+}): Promise<boolean> {
+  if (!isTauri()) return args.pinned;
+  return invoke<boolean>("set_model_pinned", {
+    providerId: args.providerId,
+    modelId: args.modelId,
+    pinned: args.pinned,
+  });
 }
 
 /** Retry or disable native tools for one exact provider/model pair (#650). */

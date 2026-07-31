@@ -64,6 +64,7 @@ import {
   hostOpenLogExplorer,
   hostOpenLogExplorerTarget,
 } from "../../lib/host";
+import { curateModels } from "../../lib/modelCuration";
 import { useMessageWindow } from "../../hooks/useMessageWindow";
 import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
 import { HELP_LINKED_CHAT_CONTEXT } from "../../lib/helpContent";
@@ -500,6 +501,12 @@ export function LinkedChatRail({
 
   const windowed = useMessageWindow(messages, threadRef);
 
+  /**
+   * Selections the rail must keep offered even when curated away, so a linked
+   * chat pinned to a hidden model still shows its real model (#678).
+   */
+  const keepModelKeysRef = useRef<string[]>([]);
+
   const rememberModels = useCallback((options: ModelOptionDto[]) => {
     setModelOptions(options);
     const preferred =
@@ -512,7 +519,9 @@ export function LinkedChatRail({
 
   const loadModels = useCallback(async () => {
     try {
-      const options = await hostListChatModels();
+      const options = await hostListChatModels({
+        keepKeys: keepModelKeysRef.current,
+      });
       setModelLoadError(null);
       return rememberModels(options);
     } catch (error) {
@@ -585,14 +594,20 @@ export function LinkedChatRail({
         option.id === parseModelSelectionKey(selectedModelKey).modelId,
     ) ??
     null;
-  const modelGroups = useMemo(() => {
-    const groups = new Map<string, ModelOptionDto[]>();
-    for (const option of modelOptions) {
-      const group = option.group || option.provider_label || "Other";
-      groups.set(group, [...(groups.get(group) ?? []), option]);
-    }
-    return [...groups.entries()];
-  }, [modelOptions]);
+  // The same curated-selection contract the main composer uses (#678), so a
+  // curation rule can never be true in one picker and not the other.
+  const curatedModels = useMemo(
+    () => curateModels(modelOptions, { selectedKey: selectedModelKey }),
+    [modelOptions, selectedModelKey],
+  );
+  const modelGroups = curatedModels.groups;
+  // Refresh what the next discovery call must keep offered.
+  keepModelKeysRef.current = [
+    ...new Set(
+      [...Object.values(selectionByChat), newChatSelection, selectedModelKey]
+        .filter((k): k is string => Boolean(k)),
+    ),
+  ];
   const showJump =
     Boolean(activeChatId) && (detachedByChat[activeChatId!] || !followActive);
   const hasNewContent = activeChatId
@@ -1687,9 +1702,9 @@ export function LinkedChatRail({
                   : "Loading configured models…"}
               </option>
             ) : (
-              modelGroups.map(([group, options]) => (
-                <optgroup key={group} label={group}>
-                  {options.map((option) => (
+              modelGroups.map((group) => (
+                <optgroup key={group.key} label={group.label}>
+                  {group.options.map((option) => (
                     <option
                       key={option.selection_key}
                       value={option.selection_key}
@@ -1701,6 +1716,7 @@ export function LinkedChatRail({
                       {option.label}
                       {option.is_default ? " · default" : ""}
                       {!option.tools_enabled ? " · tools unavailable" : ""}
+                      {option.hidden ? " · hidden" : ""}
                     </option>
                   ))}
                 </optgroup>

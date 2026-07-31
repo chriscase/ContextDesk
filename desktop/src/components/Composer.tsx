@@ -8,6 +8,7 @@ import {
 } from "react";
 import { IconClose, IconExpand, IconSend } from "./icons";
 import type { ModelOptionDto } from "../lib/host";
+import { curateModels } from "../lib/modelCuration";
 
 type Props = {
   /** Return `false` to reject the send (draft is preserved). */
@@ -152,16 +153,12 @@ export function Composer({
     requestAnimationFrame(() => taRef.current?.focus());
   };
 
-  const groups = useMemo(() => {
-    const map = new Map<string, ModelOptionDto[]>();
-    for (const m of models) {
-      const g = m.group || m.provider_label || "Other";
-      const list = map.get(g) ?? [];
-      list.push(m);
-      map.set(g, list);
-    }
-    return [...map.entries()];
-  }, [models]);
+  // One shared curation contract for every picker (#678) — no local grouping.
+  const curated = useMemo(
+    () => curateModels(models, { selectedKey: selectedModelKey ?? null }),
+    [models, selectedModelKey],
+  );
+  const groups = curated.groups;
 
   const selected: ModelOptionDto | undefined = selectedModelKey
     ? models.find((m) => m.selection_key === selectedModelKey) ||
@@ -249,9 +246,9 @@ export function Composer({
                     {selectValue || "No models listed — check AI settings"}
                   </option>
                 ) : (
-                  groups.map(([group, opts]) => (
-                    <optgroup key={group} label={group}>
-                      {opts.map((m) => (
+                  groups.map((group) => (
+                    <optgroup key={group.key} label={group.label}>
+                      {group.options.map((m) => (
                         <option
                           key={m.selection_key}
                           value={m.selection_key}
@@ -266,6 +263,7 @@ export function Composer({
                           {m.label}
                           {m.is_default ? " · default" : ""}
                           {!m.tools_enabled ? " · tools unavailable" : ""}
+                          {m.hidden ? " · hidden" : ""}
                         </option>
                       ))}
                     </optgroup>
