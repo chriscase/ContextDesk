@@ -144,6 +144,24 @@ describe("progressive disclosure", () => {
     await openPanel();
     expect(host.list).toHaveBeenLastCalledWith({ includeHidden: true });
   });
+
+  it("announces loading without claiming the inventory is empty", async () => {
+    let resolveModels!: (models: ModelOptionDto[]) => void;
+    host.list.mockReturnValue(
+      new Promise<ModelOptionDto[]>((resolve) => {
+        resolveModels = resolve;
+      }),
+    );
+    render(<ModelVisibilityPanel />);
+    await waitFor(() => expect(host.summary).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole("button", { name: "Manage…" }));
+    expect(await screen.findByText("Loading models…")).toBeTruthy();
+    expect(screen.queryByText(/No models are listed/i)).toBeNull();
+
+    await act(async () => resolveModels(INVENTORY));
+    expect(await screen.findByText("gpt-4o")).toBeTruthy();
+  });
 });
 
 describe("the panel never claims to be a privacy control", () => {
@@ -152,6 +170,27 @@ describe("the panel never claims to be a privacy control", () => {
     const dialog = screen.getByRole("dialog", { name: "Model visibility" });
     const blurb = within(dialog).getByText(/never deletes a provider/i);
     expect(blurb.textContent).toMatch(/not a privacy or security control/i);
+  });
+
+  it("names each model and provider in row action accessibility labels", async () => {
+    await openPanel();
+    const row = screen.getAllByRole("listitem")[0]!;
+
+    expect(
+      within(row).getByRole("button", {
+        name: "Pin mistral from Ollama (local)",
+      }),
+    ).toBeTruthy();
+    expect(
+      within(row).getByRole("button", {
+        name: "Hide mistral from Ollama (local)",
+      }),
+    ).toBeTruthy();
+    expect(
+      within(row).getByRole("button", {
+        name: "Hide provider Ollama (local)",
+      }),
+    ).toBeTruthy();
   });
 });
 
@@ -168,7 +207,9 @@ describe("the default can never become silently invalid", () => {
     );
 
     const rows = screen.getAllByRole("listitem");
-    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Hide" }));
+    fireEvent.click(
+      within(rows[0]!).getByRole("button", { name: /^Hide .* from / }),
+    );
 
     const warning = await screen.findByRole("alert");
     expect(warning.textContent).toMatch(/changes the default for new chats/i);
@@ -189,7 +230,9 @@ describe("the default can never become silently invalid", () => {
     );
 
     const rows = screen.getAllByRole("listitem");
-    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Hide" }));
+    fireEvent.click(
+      within(rows[0]!).getByRole("button", { name: /^Hide .* from / }),
+    );
     fireEvent.click(
       await screen.findByRole("button", { name: /Hide and use that default/i }),
     );
@@ -216,7 +259,9 @@ describe("the default can never become silently invalid", () => {
     );
 
     const rows = screen.getAllByRole("listitem");
-    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Hide" }));
+    fireEvent.click(
+      within(rows[0]!).getByRole("button", { name: /^Hide .* from / }),
+    );
     fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
 
     expect(host.setModelHidden).not.toHaveBeenCalled();
@@ -228,7 +273,9 @@ describe("the default can never become silently invalid", () => {
     host.preview.mockResolvedValue(impact({ remaining_visible: 0 }));
 
     const rows = screen.getAllByRole("listitem");
-    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Hide" }));
+    fireEvent.click(
+      within(rows[0]!).getByRole("button", { name: /^Hide .* from / }),
+    );
 
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toMatch(/at least one model must stay visible/i);
@@ -263,7 +310,9 @@ describe("hiding is reversible and non-destructive", () => {
     ]);
     fireEvent.click(screen.getByLabelText(/Show hidden/));
 
-    const restore = await screen.findByRole("button", { name: "Restore" });
+    const restore = await screen.findByRole("button", {
+      name: "Restore llama3 from Ollama (local)",
+    });
     fireEvent.click(restore);
 
     await waitFor(() =>
@@ -287,10 +336,14 @@ describe("hiding is reversible and non-destructive", () => {
     // No per-model toggle while the provider governs it: the model's own
     // setting is preserved underneath and reapplies on provider restore, so a
     // per-model button here would misdescribe both states.
-    expect(within(row).queryByRole("button", { name: "Hide" })).toBeNull();
-    expect(within(row).queryByRole("button", { name: "Restore" })).toBeNull();
     expect(
-      within(row).getByRole("button", { name: "Restore provider" }),
+      within(row).queryByRole("button", { name: /^Hide .* from / }),
+    ).toBeNull();
+    expect(
+      within(row).queryByRole("button", { name: /^Restore .* from / }),
+    ).toBeNull();
+    expect(
+      within(row).getByRole("button", { name: "Restore provider Gateway" }),
     ).toBeTruthy();
   });
 });
@@ -299,7 +352,9 @@ describe("pinning", () => {
   it("pins and unpins an available model", async () => {
     await openPanel();
     const rows = screen.getAllByRole("listitem");
-    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Pin" }));
+    fireEvent.click(
+      within(rows[0]!).getByRole("button", { name: /^Pin .* from / }),
+    );
 
     await waitFor(() =>
       expect(host.setPinned).toHaveBeenCalledWith(
@@ -318,10 +373,11 @@ describe("pinning", () => {
     const row = (await screen.findAllByRole("listitem")).find((li) =>
       li.textContent?.includes("llama3"),
     )!;
-    expect(within(row).getByRole("button", { name: "Pin" })).toHaveProperty(
-      "disabled",
-      true,
-    );
+    expect(
+      within(row).getByRole("button", {
+        name: "Pin llama3 from Ollama (local)",
+      }),
+    ).toHaveProperty("disabled", true);
   });
 });
 
@@ -337,6 +393,23 @@ describe("large inventories stay operable", () => {
     expect(
       screen.getByText(/more match — narrow the search to reach them/i),
     ).toBeTruthy();
+  });
+
+  it("keeps one total bound across pinned and hidden rows", async () => {
+    const pinned = Array.from({ length: 220 }, (_, i) =>
+      model("gw", `pinned-${i}`, { pinned_rank: i }),
+    );
+    const hidden = Array.from({ length: 220 }, (_, i) =>
+      model("gw", `hidden-${i}`, {
+        hidden: true,
+        hidden_by: "model",
+      }),
+    );
+    await openPanel([...pinned, ...hidden]);
+    fireEvent.click(screen.getByLabelText(/Show hidden/));
+
+    expect(screen.getAllByRole("listitem")).toHaveLength(200);
+    expect(screen.getByText(/240 more match/i)).toBeTruthy();
   });
 
   it("search narrows to an exact model", async () => {
@@ -432,7 +505,9 @@ describe("honest failures", () => {
     host.setModelHidden.mockRejectedValue(new Error("config is read-only"));
 
     const rows = screen.getAllByRole("listitem");
-    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Hide" }));
+    fireEvent.click(
+      within(rows[0]!).getByRole("button", { name: /^Hide .* from / }),
+    );
 
     expect((await screen.findByRole("alert")).textContent).toContain(
       "config is read-only",
@@ -464,7 +539,9 @@ describe("curation reaches the rest of the app", () => {
     await screen.findByRole("dialog", { name: "Model visibility" });
 
     const rows = screen.getAllByRole("listitem");
-    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Hide" }));
+    fireEvent.click(
+      within(rows[0]!).getByRole("button", { name: /^Hide .* from / }),
+    );
 
     // Without this the main composer keeps offering the hidden model until an
     // unrelated AI-setup save or an app restart — the feature would look broken.
@@ -480,7 +557,9 @@ describe("curation reaches the rest of the app", () => {
     await screen.findByRole("dialog", { name: "Model visibility" });
 
     const rows = screen.getAllByRole("listitem");
-    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Pin" }));
+    fireEvent.click(
+      within(rows[0]!).getByRole("button", { name: /^Pin .* from / }),
+    );
 
     await waitFor(() => expect(onCurationChanged).toHaveBeenCalled());
   });
@@ -495,7 +574,9 @@ describe("curation reaches the rest of the app", () => {
     await screen.findByRole("dialog", { name: "Model visibility" });
 
     const rows = screen.getAllByRole("listitem");
-    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Hide" }));
+    fireEvent.click(
+      within(rows[0]!).getByRole("button", { name: /^Hide .* from / }),
+    );
 
     await screen.findByRole("alert");
     expect(onCurationChanged).not.toHaveBeenCalled();
@@ -539,8 +620,18 @@ describe("keyboard and focus", () => {
       }),
     );
     const rows = screen.getAllByRole("listitem");
-    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Hide" }));
+    const hide = within(rows[0]!).getByRole("button", {
+      name: "Hide mistral from Ollama (local)",
+    });
+    hide.focus();
+    fireEvent.click(hide);
     await screen.findByRole("alert");
+
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "Cancel" }),
+      ),
+    );
 
     fireEvent.keyDown(window, { key: "Escape" });
 
@@ -550,13 +641,63 @@ describe("keyboard and focus", () => {
       screen.getByRole("dialog", { name: "Model visibility" }),
     ).toBeTruthy();
     expect(host.setModelHidden).not.toHaveBeenCalled();
+    await waitFor(() => expect(document.activeElement).toBe(hide));
+  });
+
+  it("Cancel returns focus to the exact action that opened confirmation", async () => {
+    await openPanel();
+    host.preview.mockResolvedValue(
+      impact({
+        affects_default: true,
+        replacement_key: "gw::gpt-4o",
+        replacement_label: "Gateway · gpt-4o",
+        remaining_visible: 2,
+      }),
+    );
+    const hide = screen.getByRole("button", {
+      name: "Hide llama3 from Ollama (local)",
+    });
+    hide.focus();
+    fireEvent.click(hide);
+
+    const cancel = await screen.findByRole("button", { name: "Cancel" });
+    await waitFor(() => expect(document.activeElement).toBe(cancel));
+    fireEvent.click(cancel);
+
+    await waitFor(() => expect(document.activeElement).toBe(hide));
+  });
+
+  it("moves focus to the replacement row after a successful hide removes one", async () => {
+    host.list
+      .mockResolvedValueOnce(INVENTORY)
+      .mockResolvedValueOnce(INVENTORY.slice(1));
+    render(<ModelVisibilityPanel />);
+    await waitFor(() => expect(host.summary).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Manage…" }));
+    await screen.findByText("gpt-4o");
+
+    const hide = screen.getByRole("button", {
+      name: "Hide mistral from Ollama (local)",
+    });
+    hide.focus();
+    fireEvent.click(hide);
+
+    await waitFor(() => {
+      const focused = document.activeElement as HTMLElement;
+      expect(focused.hasAttribute("data-model-row")).toBe(true);
+      expect(focused.closest("li")?.textContent).toContain("llama3");
+    });
   });
 
   it("keeps row actions out of the tab order for inactive rows", async () => {
     await openPanel();
     const rows = screen.getAllByRole("listitem");
-    const firstPin = within(rows[0]!).getByRole("button", { name: "Pin" });
-    const secondPin = within(rows[1]!).getByRole("button", { name: "Pin" });
+    const firstPin = within(rows[0]!).getByRole("button", {
+      name: /^Pin .* from /,
+    });
+    const secondPin = within(rows[1]!).getByRole("button", {
+      name: /^Pin .* from /,
+    });
 
     // Otherwise Tab walks three buttons per row through the whole inventory.
     expect(firstPin.tabIndex).toBe(0);
@@ -574,13 +715,15 @@ describe("keyboard and focus", () => {
       }),
     );
     const rows = screen.getAllByRole("listitem");
-    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Hide" }));
+    fireEvent.click(
+      within(rows[0]!).getByRole("button", { name: /^Hide .* from / }),
+    );
     await screen.findByRole("alert");
 
     // A second change now would confirm against a stale replacement.
     expect(
       within(screen.getAllByRole("listitem")[1]!).getByRole("button", {
-        name: "Hide",
+        name: /^Hide .* from /,
       }),
     ).toHaveProperty("disabled", true);
   });
@@ -602,7 +745,11 @@ describe("confirmation copy matches the operation", () => {
       }),
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Restore llama3 from Ollama (local)",
+      }),
+    );
 
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toMatch(/Restoring/);

@@ -178,7 +178,7 @@ describe("large inventories stay bounded", () => {
     expect(view.truncated).toBe(1000 - DEFAULT_PICKER_LIMIT);
   });
 
-  it("never drops a pinned choice to satisfy the cap", () => {
+  it("prioritizes pinned choices within the cap", () => {
     const withPin = [
       ...many,
       model("gw", "favourite", { pinned_rank: 0 }),
@@ -186,6 +186,52 @@ describe("large inventories stay bounded", () => {
     const view = curateModels(withPin, { limit: 10 });
     expect(keysOf(view.pinned)).toEqual(["gw::favourite"]);
     expect(view.available.length).toBeLessThanOrEqual(9);
+  });
+
+  it("keeps the total bounded when pinned and hidden bands exceed the cap", () => {
+    const inventory = [
+      ...Array.from({ length: 15 }, (_, i) =>
+        model("gw", `pinned-${i}`, { pinned_rank: i }),
+      ),
+      ...Array.from({ length: 15 }, (_, i) => model("gw", `available-${i}`)),
+      ...Array.from({ length: 15 }, (_, i) =>
+        model("gw", `hidden-${i}`, {
+          hidden: true,
+          hidden_by: "model",
+        }),
+      ),
+    ];
+    const view = curateModels(inventory, { includeHidden: true, limit: 10 });
+
+    expect(
+      view.pinned.length + view.available.length + view.hidden.length,
+    ).toBe(10);
+    expect(view.pinned).toHaveLength(10);
+    expect(view.truncated).toBe(inventory.length - 10);
+  });
+
+  it("preserves a selected hidden choice without exceeding the total cap", () => {
+    const inventory = [
+      ...Array.from({ length: 10 }, (_, i) =>
+        model("gw", `pinned-${i}`, { pinned_rank: i }),
+      ),
+      model("gw", "selected-hidden", {
+        hidden: true,
+        hidden_by: "model",
+      }),
+    ];
+    const view = curateModels(inventory, {
+      includeHidden: true,
+      selectedKey: "gw::selected-hidden",
+      limit: 10,
+    });
+
+    expect(keysOf(view.hidden)).toEqual(["gw::selected-hidden"]);
+    expect(view.pinned).toHaveLength(9);
+    expect(
+      view.pinned.length + view.available.length + view.hidden.length,
+    ).toBe(10);
+    expect(view.truncated).toBe(1);
   });
 
   it("never drops the current selection to satisfy the cap", () => {
@@ -210,7 +256,7 @@ describe("large inventories stay bounded", () => {
     expect(view.truncated).toBe(many.length - 5);
   });
 
-  it("caps the hidden band too, so Show hidden cannot dump the inventory", () => {
+  it("caps the hidden band, so Show hidden cannot dump the inventory", () => {
     const manyHidden = Array.from({ length: 400 }, (_, i) =>
       model("gw", `h-${i}`, { hidden: true, hidden_by: "model" }),
     );

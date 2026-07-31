@@ -626,6 +626,46 @@ describe("LinkedChatRail", () => {
     );
   });
 
+  it("reports truncated model choices with the exact Settings search route", async () => {
+    const models: host.ModelOptionDto[] = Array.from(
+      { length: 250 },
+      (_, i) => ({
+        id: `model-${i}`,
+        label: `model-${i}`,
+        selection_key: `gateway::model-${i}`,
+        provider_id: "gateway",
+        provider_label: "Gateway",
+        group: "Gateway",
+        is_default: i === 0,
+        tools_enabled: true,
+        tools_disabled_reason: null,
+        hidden: false,
+        hidden_by: null,
+        pinned_rank: null,
+      }),
+    );
+    vi.mocked(host.hostListChatModels).mockResolvedValue(models);
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+
+    const selector = (await screen.findByLabelText(
+      "Linked chat model",
+    )) as HTMLSelectElement;
+    await waitFor(() => expect(selector.options).toHaveLength(200));
+    expect(
+      screen.getByText(
+        /Showing 200 choices; 50 more are omitted\. Find them in Settings → AI → Model visibility using Search models\./i,
+      ),
+    ).toBeTruthy();
+  });
+
   it("blocks a chat-only provider from masquerading as a linked investigation model", async () => {
     const chatOnly = {
       ...defaultModels[1]!,

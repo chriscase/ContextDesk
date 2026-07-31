@@ -36,6 +36,14 @@ type PendingChange = {
   impact: CurationImpactDto;
 };
 
+type ChangeOrigin = {
+  element: HTMLButtonElement;
+  selectionKey: string;
+  rowIndex: number;
+};
+
+type FocusRepair = Pick<ChangeOrigin, "selectionKey" | "rowIndex">;
+
 type Props = {
   /**
    * Called after any committed curation change so the app re-lists its model
@@ -51,20 +59,26 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
   const [models, setModels] = useState<ModelOptionDto[]>([]);
   const [query, setQuery] = useState("");
   const [showHidden, setShowHidden] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingChange | null>(null);
   const [summary, setSummary] = useState<CurationSummaryDto | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
+  const [focusRepair, setFocusRepair] = useState<FocusRepair | null>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const pendingCancelRef = useRef<HTMLButtonElement>(null);
+  const changeOriginRef = useRef<ChangeOrigin | null>(null);
   /** Discards responses from a superseded reload. */
   const loadTicketRef = useRef(0);
 
   const reload = useCallback(async () => {
     const ticket = (loadTicketRef.current += 1);
+    setLoading(true);
+    setError(null);
     try {
       // The management surface is the one caller that asks for everything.
       const all = await listChatModels({ includeHidden: true });
@@ -74,6 +88,8 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
     } catch (e) {
       if (loadTicketRef.current !== ticket) return;
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (loadTicketRef.current === ticket) setLoading(false);
     }
   }, []);
 
@@ -112,7 +128,7 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
     if (activeIndex > rows.length - 1) setActiveIndex(Math.max(0, rows.length - 1));
   }, [rows.length, activeIndex]);
 
-  const focusRow = (index: number) => {
+  const focusRow = useCallback((index: number) => {
     setActiveIndex(index);
     window.requestAnimationFrame(() => {
       const el = listRef.current?.querySelectorAll<HTMLElement>(
@@ -120,7 +136,24 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
       )[index];
       el?.focus();
     });
-  };
+  }, []);
+
+  // A committed hide can remove the focused row. Prefer the same model when
+  // it remains listed (for example with Show hidden enabled); otherwise move
+  // to the row that took its place, or back to search if the list is empty.
+  useEffect(() => {
+    if (!focusRepair || loading) return;
+    const sameRow = rows.findIndex(
+      (m) => m.selection_key === focusRepair.selectionKey,
+    );
+    const nextIndex =
+      sameRow >= 0
+        ? sameRow
+        : Math.min(focusRepair.rowIndex, rows.length - 1);
+    setFocusRepair(null);
+    if (nextIndex >= 0) focusRow(nextIndex);
+    else window.requestAnimationFrame(() => searchRef.current?.focus());
+  }, [focusRepair, focusRow, loading, rows]);
 
   const runChange = useCallback(
     async (
@@ -149,6 +182,14 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
               });
         setPending(null);
         await reload();
+        const origin = changeOriginRef.current;
+        changeOriginRef.current = null;
+        if (origin) {
+          setFocusRepair({
+            selectionKey: origin.selectionKey,
+            rowIndex: origin.rowIndex,
+          });
+        }
         setSummary(await getCurationSummary());
         await onCurationChanged?.();
         setNote(
@@ -169,7 +210,11 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
 
   /** Ask the host what a change would do before writing anything. */
   const requestChange = useCallback(
-    async (change: Omit<PendingChange, "impact">) => {
+    async (
+      change: Omit<PendingChange, "impact">,
+      origin: ChangeOrigin,
+    ) => {
+      changeOriginRef.current = origin;
       setBusy(true);
       setError(null);
       setNote(null);
@@ -180,10 +225,12 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
           hidden: change.hidden,
         });
         if (!impact) {
+          changeOriginRef.current = null;
           setError("Model visibility is only available in the desktop app.");
           return;
         }
         if (impact.remaining_visible === 0) {
+          changeOriginRef.current = null;
           setError(
             "At least one model must stay visible — restore another choice first.",
           );
@@ -203,6 +250,7 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
         setBusy(false);
         await runChange(change, undefined, impact.state_token);
       } catch (e) {
+        changeOriginRef.current = null;
         setError(e instanceof Error ? e.message : String(e));
       } finally {
         setBusy(false);
@@ -234,7 +282,20 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
     setOpen(false);
     setPending(null);
     setNote(null);
+    changeOriginRef.current = null;
+    setFocusRepair(null);
     window.requestAnimationFrame(() => triggerRef.current?.focus());
+  }, []);
+
+  const cancelPending = useCallback(() => {
+    const origin = changeOriginRef.current;
+    changeOriginRef.current = null;
+    setPending(null);
+    setNote("No change was made.");
+    window.requestAnimationFrame(() => {
+      if (origin?.element.isConnected) origin.element.focus();
+      else searchRef.current?.focus();
+    });
   }, []);
 
   // Escape closes, and opening moves focus into the panel rather than leaving
@@ -246,20 +307,24 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
       e.preventDefault();
       // A pending confirmation is the topmost decision; cancel that first.
       if (pending) {
-        setPending(null);
-        setNote("No change was made.");
+        cancelPending();
         return;
       }
       closePanel();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, pending, closePanel]);
+  }, [open, pending, cancelPending, closePanel]);
 
   useEffect(() => {
     if (!open) return;
     window.requestAnimationFrame(() => searchRef.current?.focus());
   }, [open]);
+
+  useEffect(() => {
+    if (!pending) return;
+    window.requestAnimationFrame(() => pendingCancelRef.current?.focus());
+  }, [pending]);
 
   const summaryText = summary
     ? [
@@ -305,6 +370,7 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
       role="dialog"
       aria-labelledby={`${dialogId}-title`}
       aria-describedby={`${dialogId}-note`}
+      aria-busy={loading || busy}
     >
       <h3 className="settings-connector-block__title" id={`${dialogId}-title`}>
         Model visibility
@@ -370,12 +436,10 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
           <div className="workspace-root-actions">
             <button
               type="button"
+              ref={pendingCancelRef}
               className="btn btn--ghost btn--sm"
               disabled={busy}
-              onClick={() => {
-                setPending(null);
-                setNote("No change was made.");
-              }}
+              onClick={cancelPending}
             >
               Cancel
             </button>
@@ -397,7 +461,11 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
         </div>
       ) : null}
 
-      {view.empty ? (
+      {loading && models.length === 0 ? (
+        <p className="field__hint" role="status">
+          Loading models…
+        </p>
+      ) : error && models.length === 0 ? null : view.empty ? (
         <p className="field__hint" role="status">
           {query
             ? "No models match that search."
@@ -457,6 +525,7 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
                     tabIndex={index === activeIndex ? 0 : -1}
                     disabled={busy || m.hidden || pending !== null}
                     aria-pressed={pinned}
+                    aria-label={`${pinned ? "Unpin" : "Pin"} ${m.label} from ${m.provider_label}`}
                     title={
                       m.hidden
                         ? "Restore this model before pinning it"
@@ -478,14 +547,22 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
                       className="btn btn--ghost btn--sm"
                       tabIndex={index === activeIndex ? 0 : -1}
                       disabled={busy || pending !== null}
-                      onClick={() =>
-                        void requestChange({
-                          kind: "model",
-                          providerId: m.provider_id,
-                          modelId: m.id,
-                          hidden: !m.hidden,
-                          label: `${m.provider_label} · ${m.label}`,
-                        })
+                      aria-label={`${m.hidden ? "Restore" : "Hide"} ${m.label} from ${m.provider_label}`}
+                      onClick={(event) =>
+                        void requestChange(
+                          {
+                            kind: "model",
+                            providerId: m.provider_id,
+                            modelId: m.id,
+                            hidden: !m.hidden,
+                            label: `${m.provider_label} · ${m.label}`,
+                          },
+                          {
+                            element: event.currentTarget,
+                            selectionKey: m.selection_key,
+                            rowIndex: index,
+                          },
+                        )
                       }
                     >
                       {m.hidden ? "Restore" : "Hide"}
@@ -496,14 +573,22 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
                     className="btn btn--ghost btn--sm"
                     tabIndex={index === activeIndex ? 0 : -1}
                     disabled={busy || pending !== null}
+                    aria-label={`${m.hidden_by === "provider" ? "Restore" : "Hide"} provider ${m.provider_label}`}
                     title="Hide or restore every model from this provider"
-                    onClick={() =>
-                      void requestChange({
-                        kind: "provider",
-                        providerId: m.provider_id,
-                        hidden: m.hidden_by !== "provider",
-                        label: m.provider_label,
-                      })
+                    onClick={(event) =>
+                      void requestChange(
+                        {
+                          kind: "provider",
+                          providerId: m.provider_id,
+                          hidden: m.hidden_by !== "provider",
+                          label: m.provider_label,
+                        },
+                        {
+                          element: event.currentTarget,
+                          selectionKey: m.selection_key,
+                          rowIndex: index,
+                        },
+                      )
                     }
                   >
                     {m.hidden_by === "provider"

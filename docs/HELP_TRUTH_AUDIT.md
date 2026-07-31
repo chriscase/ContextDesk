@@ -32,6 +32,7 @@ blanket claim that every future product change is automatically documented.
 | #542 | Deterministic behavior-rich scale profiles | `log-explorer#log-lab-scale-profiles-synthetic` | Explicit 100k command and one-machine measurement disclaimer documented |
 | #543 | Compact corpus-chat switcher and collapsed technical context | `log-explorer#agent-context` plus linked-chat popover | Privacy disclosure remains available without exposing debug UI by default |
 | #745 (partial; issue open) | Conservative broad linked-log prompts receive a host-owned deterministic brief before model participation | `log-explorer#agent-context`, `COMPANY_LOG_DATA_TRIAL.md`, and `design/proven-methods/DETERMINISTIC_CONTEXT_ASSEMBLY.md` | One pinned corpus/suppression revision, 32 KiB text cap, 128 trusted-identity cap, deterministic sections, time-safe correlations, optional one-search deepening before tool-closed synthesis, empty/suppressed-view honesty, no semantic/network backend, visible status, and unchanged tools-disabled honesty documented; exact generated 250,000+ real-provider proof and universal-model-quality non-claim remain explicit |
+| #678 | Reversible, profile-scoped model-picker display curation with bounded searchable management and explicit default replacement | `provider-setup#curate-model-visibility` and `design/proven-methods/DETERMINISTIC_CONTEXT_ASSEMBLY.md` | Pin/hide/provider-hide/restore, profile plus endpoint scope, restart persistence, hard render bounds, selected-model preservation, and non-security/non-health limits documented |
 | #671 Slice 1 (partial; issue open) | Human-confirmed exact-template noise-policy candidate and shared evidence lens | `log-explorer#noise-policy-exact-template-slice-1` plus Noise policy dialogs | Preview, reversible lifecycle/audit, cross-process and stale-fingerprint hardening, exact-reference reveal, and pinned linked-tool exclusion are documented without claiming full-issue completion; rule editing/creator identity, global and tool include-suppressed controls, scale proof, and broader predicates/lifecycle remain explicit |
 
 ## Page-by-page production audit
@@ -40,7 +41,7 @@ blanket claim that every future product change is automatically documented.
 | --- | --- | --- |
 | `product-overview` | sources, trusted core, desktop/agent surfaces | Aligned; diagram label repaired |
 | `first-run` | root selection, provider setup, prelaunch, safe starters | Aligned; provider text split to avoid collision |
-| `provider-setup` | local/remote routes, keychain/host ownership | Aligned; remote-context wording remains bounded |
+| `provider-setup` | local/remote routes, keychain/host ownership, model-picker curation | Aligned; remote-context wording remains bounded and curation is explicitly reversible display state rather than deletion, security, health, or capability evidence |
 | `chat-citations-context` | bounded context, tools, compaction, citations | Aligned; no raw-corpus/model-context claim; broad linked-log host brief is documented in Log Explorer and the proven-method chapter |
 | `workspace-indexing` | allowlist, exclusions, caps, local index | Aligned; exclusion callout repaired |
 | `permission-tiers` | Read / SoftWrite / HardWrite and audit | Aligned; confirmation labels repaired |

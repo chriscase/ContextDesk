@@ -60,7 +60,7 @@ export type CurateOptions = {
   limit?: number;
 };
 
-/** Default render cap. Pinned choices are never dropped by it. */
+/** Default hard cap across every rendered picker band. */
 export const DEFAULT_PICKER_LIMIT = 200;
 
 const PINNED_GROUP_KEY = "__pinned__";
@@ -155,34 +155,37 @@ export function curateModels(
   const sortAll = (list: ModelOptionDto[]) =>
     [...list].sort((a, b) => byPinThenHostOrder(a, b, indexOf));
 
-  const pinned = sortAll(visible.filter((m) => pinRank(m) !== null));
-  let available = sortAll(visible.filter((m) => pinRank(m) === null));
+  const allPinned = sortAll(visible.filter((m) => pinRank(m) !== null));
+  const allAvailable = sortAll(visible.filter((m) => pinRank(m) === null));
+  const allHidden = sortAll(hiddenListed);
 
-  // Cap only the ordinary band: pinned entries are the user's explicit choice
-  // and a selected entry must always render.
-  let truncated = 0;
-  const room = Math.max(0, limit - pinned.length);
-  if (available.length > room) {
-    const kept = available.slice(0, room);
-    if (selected && !isHidden(selected) && pinRank(selected) === null) {
-      if (!kept.some((m) => m.selection_key === selected.selection_key)) {
-        // Swap rather than append, so `limit` is a bound the caller can rely
-        // on. Appending would quietly render limit + 1 rows.
-        if (kept.length >= room && kept.length > 0) kept.pop();
-        kept.push(selected);
-      }
-    }
-    truncated = available.length - kept.length;
-    available = kept;
+  // One cap governs the complete rendered inventory. Pinned rows receive
+  // priority, but cannot make a large user-curated inventory unbounded. The
+  // current selection is the sole exemption in priority: if it falls beyond
+  // the cap, it displaces the final retained row instead of being appended.
+  const capacity = Math.max(0, Math.floor(limit));
+  const candidates = [...allPinned, ...allAvailable, ...allHidden];
+  const retained = new Set(
+    candidates.slice(0, capacity).map((m) => m.selection_key),
+  );
+  if (
+    capacity > 0 &&
+    selected &&
+    candidates.some((m) => m.selection_key === selected.selection_key) &&
+    !retained.has(selected.selection_key)
+  ) {
+    const displaced = candidates
+      .slice(0, capacity)
+      .at(-1)?.selection_key;
+    if (displaced) retained.delete(displaced);
+    retained.add(selected.selection_key);
   }
 
-  // The hidden band is capped too: "Show hidden" on a large gateway would
-  // otherwise render the entire curated-away inventory in one go.
-  let hidden = sortAll(hiddenListed);
-  if (hidden.length > limit) {
-    truncated += hidden.length - limit;
-    hidden = hidden.slice(0, limit);
-  }
+  const retain = (m: ModelOptionDto) => retained.has(m.selection_key);
+  const pinned = allPinned.filter(retain);
+  const available = allAvailable.filter(retain);
+  const hidden = allHidden.filter(retain);
+  const truncated = candidates.length - retained.size;
 
   const groups: CuratedGroup[] = [];
   if (pinned.length > 0) {

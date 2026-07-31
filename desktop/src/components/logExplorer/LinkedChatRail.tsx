@@ -1757,6 +1757,15 @@ export function LinkedChatRail({
               </button>
             </>
           ) : null}
+          {curatedModels.truncated > 0 ? (
+            <>
+              {" · "}Showing {modelGroups.reduce(
+                (count, group) => count + group.options.length,
+                0,
+              )} choices; {curatedModels.truncated} more are omitted. Find them
+              in Settings → AI → Model visibility using Search models.
+            </>
+          ) : null}
         </div>
       </div>
 
