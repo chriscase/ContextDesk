@@ -27,6 +27,7 @@ import {
 } from "./AiSetupWizard";
 import { CapabilityQualificationPanel } from "./CapabilityQualificationPanel";
 import { ModelRoleHintLine } from "./ModelRoleHintLine";
+import { ModelVisibilityPanel } from "./ModelVisibilityPanel";
 
 export type AiSectionProps = {
   baseId: string;
@@ -742,6 +743,7 @@ export function AiSection({
       {modelsNote}
     </p>
   ) : null}
+  {draft.providerKind !== "none" ? <ModelVisibilityPanel /> : null}
   {draft.providerKind !== "none" && draft.chatModel.trim() ? (
     <CapabilityQualificationPanel
       baseId={`${baseId}-cap-qual`}

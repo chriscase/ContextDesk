@@ -1,0 +1,400 @@
+/**
+ * Curated visibility management surface (#678).
+ *
+ * The behaviours that matter here are the ones that keep the feature honest:
+ * nothing is deleted, the default can never become silently invalid, hiding
+ * never launders provider health, and a large inventory stays operable by
+ * keyboard.
+ */
+
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { CurationImpactDto, ModelOptionDto } from "../../lib/host";
+import { ModelVisibilityPanel } from "./ModelVisibilityPanel";
+
+const host = vi.hoisted(() => ({
+  list: vi.fn(),
+  preview: vi.fn(),
+  setModelHidden: vi.fn(),
+  setProviderHidden: vi.fn(),
+  setPinned: vi.fn(),
+}));
+
+vi.mock("../../lib/host", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../lib/host")>();
+  return {
+    ...original,
+    hostListChatModels: host.list,
+    hostPreviewCurationChange: host.preview,
+    hostSetModelHidden: host.setModelHidden,
+    hostSetProviderHidden: host.setProviderHidden,
+    hostSetModelPinned: host.setPinned,
+  };
+});
+
+function model(
+  provider: string,
+  id: string,
+  overrides: Partial<ModelOptionDto> = {},
+): ModelOptionDto {
+  return {
+    id,
+    label: id,
+    selection_key: `${provider}::${id}`,
+    provider_id: provider,
+    provider_label: provider === "ollama" ? "Ollama (local)" : "Gateway",
+    group: provider === "ollama" ? "Ollama (local)" : "Gateway",
+    is_default: false,
+    tools_enabled: true,
+    tools_disabled_reason: null,
+    hidden: false,
+    hidden_by: null,
+    pinned_rank: null,
+    ...overrides,
+  };
+}
+
+function impact(over: Partial<CurationImpactDto> = {}): CurationImpactDto {
+  return {
+    affects_default: false,
+    replacement_key: null,
+    replacement_label: null,
+    remaining_visible: 3,
+    ...over,
+  };
+}
+
+const INVENTORY = [
+  model("ollama", "mistral", { is_default: true }),
+  model("ollama", "llama3"),
+  model("gw", "gpt-4o"),
+];
+
+async function openPanel(inventory: ModelOptionDto[] = INVENTORY) {
+  host.list.mockResolvedValue(inventory);
+  render(<ModelVisibilityPanel />);
+  await waitFor(() => expect(host.list).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole("button", { name: "Manage…" }));
+  await screen.findByRole("dialog", { name: "Model visibility" });
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  host.preview.mockResolvedValue(impact());
+  host.setModelHidden.mockResolvedValue(impact());
+  host.setProviderHidden.mockResolvedValue(impact());
+  host.setPinned.mockResolvedValue(true);
+});
+
+describe("progressive disclosure", () => {
+  it("shows only a count until the user asks to manage", async () => {
+    host.list.mockResolvedValue(INVENTORY);
+    render(<ModelVisibilityPanel />);
+
+    await screen.findByTestId("curation-summary");
+    expect(screen.getByTestId("curation-summary").textContent).toBe("3 shown");
+    // The inventory itself must not be in ordinary Settings.
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByText("gpt-4o")).toBeNull();
+  });
+
+  it("counts hidden and pinned choices in the summary", async () => {
+    host.list.mockResolvedValue([
+      model("ollama", "a"),
+      model("ollama", "b", { hidden: true, hidden_by: "model" }),
+      model("gw", "c", { pinned_rank: 0 }),
+    ]);
+    render(<ModelVisibilityPanel />);
+    await waitFor(() =>
+      expect(screen.getByTestId("curation-summary").textContent).toBe(
+        "2 shown · 1 hidden · 1 pinned",
+      ),
+    );
+  });
+
+  it("asks the host for everything only once opened", async () => {
+    await openPanel();
+    expect(host.list).toHaveBeenLastCalledWith({ includeHidden: true });
+  });
+});
+
+describe("the panel never claims to be a privacy control", () => {
+  it("says plainly that hiding deletes nothing and is not a security control", async () => {
+    await openPanel();
+    const dialog = screen.getByRole("dialog", { name: "Model visibility" });
+    const blurb = within(dialog).getByText(/never deletes a provider/i);
+    expect(blurb.textContent).toMatch(/not a privacy or security control/i);
+  });
+});
+
+describe("the default can never become silently invalid", () => {
+  it("names the exact replacement and waits for confirmation", async () => {
+    await openPanel();
+    host.preview.mockResolvedValue(
+      impact({
+        affects_default: true,
+        replacement_key: "gw::gpt-4o",
+        replacement_label: "Gateway · gpt-4o",
+        remaining_visible: 2,
+      }),
+    );
+
+    const rows = screen.getAllByRole("listitem");
+    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Hide" }));
+
+    const warning = await screen.findByRole("alert");
+    expect(warning.textContent).toMatch(/changes the default for new chats/i);
+    expect(warning.textContent).toContain("Gateway · gpt-4o");
+    // Nothing is written while the user is still deciding.
+    expect(host.setModelHidden).not.toHaveBeenCalled();
+  });
+
+  it("passes the previewed replacement back when the user confirms", async () => {
+    await openPanel();
+    host.preview.mockResolvedValue(
+      impact({
+        affects_default: true,
+        replacement_key: "gw::gpt-4o",
+        replacement_label: "Gateway · gpt-4o",
+        remaining_visible: 2,
+      }),
+    );
+
+    const rows = screen.getAllByRole("listitem");
+    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Hide" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Hide and use that default/i }),
+    );
+
+    await waitFor(() =>
+      expect(host.setModelHidden).toHaveBeenCalledWith(
+        expect.objectContaining({ acceptReplacement: "gw::gpt-4o" }),
+      ),
+    );
+  });
+
+  it("writes nothing when the user cancels", async () => {
+    await openPanel();
+    host.preview.mockResolvedValue(
+      impact({
+        affects_default: true,
+        replacement_key: "gw::gpt-4o",
+        replacement_label: "Gateway · gpt-4o",
+        remaining_visible: 2,
+      }),
+    );
+
+    const rows = screen.getAllByRole("listitem");
+    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Hide" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+
+    expect(host.setModelHidden).not.toHaveBeenCalled();
+    await screen.findByText("No change was made.");
+  });
+
+  it("refuses to empty the picker", async () => {
+    await openPanel();
+    host.preview.mockResolvedValue(impact({ remaining_visible: 0 }));
+
+    const rows = screen.getAllByRole("listitem");
+    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Hide" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toMatch(/at least one model must stay visible/i);
+    expect(host.setModelHidden).not.toHaveBeenCalled();
+  });
+});
+
+describe("hiding is reversible and non-destructive", () => {
+  it("offers Restore for a hidden model and says nothing was deleted", async () => {
+    await openPanel([
+      model("ollama", "mistral", { is_default: true }),
+      model("ollama", "llama3", { hidden: true, hidden_by: "model" }),
+    ]);
+    fireEvent.click(screen.getByLabelText(/Show hidden/));
+
+    const restore = await screen.findByRole("button", { name: "Restore" });
+    fireEvent.click(restore);
+
+    await waitFor(() =>
+      expect(host.setModelHidden).toHaveBeenCalledWith(
+        expect.objectContaining({ modelId: "llama3", hidden: false }),
+      ),
+    );
+  });
+
+  it("explains a model hidden by its provider instead of letting it be toggled", async () => {
+    await openPanel([
+      model("gw", "gpt-4o", { hidden: true, hidden_by: "provider" }),
+      model("ollama", "mistral", { is_default: true }),
+    ]);
+    fireEvent.click(screen.getByLabelText(/Show hidden/));
+
+    const row = (await screen.findAllByRole("listitem")).find((li) =>
+      li.textContent?.includes("gpt-4o"),
+    )!;
+    expect(row.textContent).toMatch(/hidden with its provider/i);
+    // No per-model toggle while the provider governs it: the model's own
+    // setting is preserved underneath and reapplies on provider restore, so a
+    // per-model button here would misdescribe both states.
+    expect(within(row).queryByRole("button", { name: "Hide" })).toBeNull();
+    expect(within(row).queryByRole("button", { name: "Restore" })).toBeNull();
+    expect(
+      within(row).getByRole("button", { name: "Restore provider" }),
+    ).toBeTruthy();
+  });
+});
+
+describe("pinning", () => {
+  it("pins and unpins an available model", async () => {
+    await openPanel();
+    const rows = screen.getAllByRole("listitem");
+    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Pin" }));
+
+    await waitFor(() =>
+      expect(host.setPinned).toHaveBeenCalledWith(
+        expect.objectContaining({ modelId: "mistral", pinned: true }),
+      ),
+    );
+  });
+
+  it("will not pin a hidden model", async () => {
+    await openPanel([
+      model("ollama", "mistral", { is_default: true }),
+      model("ollama", "llama3", { hidden: true, hidden_by: "model" }),
+    ]);
+    fireEvent.click(screen.getByLabelText(/Show hidden/));
+
+    const row = (await screen.findAllByRole("listitem")).find((li) =>
+      li.textContent?.includes("llama3"),
+    )!;
+    expect(within(row).getByRole("button", { name: "Pin" })).toHaveProperty(
+      "disabled",
+      true,
+    );
+  });
+});
+
+describe("large inventories stay operable", () => {
+  const many = Array.from({ length: 500 }, (_, i) =>
+    model("gw", `model-${String(i).padStart(3, "0")}`),
+  );
+
+  it("bounds the list and says what it dropped", async () => {
+    await openPanel([...many, model("ollama", "mistral", { is_default: true })]);
+    const rows = screen.getAllByRole("listitem");
+    expect(rows.length).toBeLessThanOrEqual(200);
+    expect(
+      screen.getByText(/more match — narrow the search to reach them/i),
+    ).toBeTruthy();
+  });
+
+  it("search narrows to an exact model", async () => {
+    await openPanel([...many, model("ollama", "mistral", { is_default: true })]);
+    fireEvent.change(screen.getByLabelText("Search models"), {
+      target: { value: "model-042" },
+    });
+
+    await waitFor(() => {
+      const rows = screen.getAllByRole("listitem");
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.textContent).toContain("model-042");
+    });
+  });
+
+  it("moves focus through rows with the arrow keys", async () => {
+    await openPanel();
+    const list = screen.getByRole("list", { name: "Discovered models" });
+    const rowHandles = () =>
+      list.querySelectorAll<HTMLElement>("[data-model-row]");
+
+    // Roving tabindex: only the active row is reachable by Tab, so arrows are
+    // the only way to the rest.
+    expect(rowHandles()[0]!.tabIndex).toBe(0);
+    expect(rowHandles()[1]!.tabIndex).toBe(-1);
+
+    rowHandles()[0]!.focus();
+    fireEvent.keyDown(list, { key: "ArrowDown" });
+    await act(async () => {
+      await new Promise((r) => requestAnimationFrame(() => r(null)));
+    });
+    expect(document.activeElement).toBe(rowHandles()[1]);
+
+    fireEvent.keyDown(list, { key: "End" });
+    await act(async () => {
+      await new Promise((r) => requestAnimationFrame(() => r(null)));
+    });
+    expect(document.activeElement).toBe(
+      rowHandles()[rowHandles().length - 1],
+    );
+  });
+});
+
+describe("stale discovery", () => {
+  it("keeps the newest inventory when an older reload resolves last", async () => {
+    let resolveFirst!: (v: ModelOptionDto[]) => void;
+    const first = new Promise<ModelOptionDto[]>((r) => {
+      resolveFirst = r;
+    });
+    host.list.mockReturnValueOnce(first).mockResolvedValue(INVENTORY);
+
+    render(<ModelVisibilityPanel />);
+    // A second load supersedes the first while it is still in flight.
+    await act(async () => {
+      fireEvent.click(await screen.findByRole("button", { name: "Manage…" }));
+    });
+    await act(async () => {
+      resolveFirst([model("stale", "should-not-appear")]);
+      await first;
+    });
+
+    await waitFor(() =>
+      expect(screen.queryByText("should-not-appear")).toBeNull(),
+    );
+  });
+});
+
+describe("honest failures", () => {
+  it("surfaces a listing failure instead of showing an empty inventory", async () => {
+    host.list.mockRejectedValue(new Error("provider unreachable"));
+    render(<ModelVisibilityPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "Manage…" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "provider unreachable",
+    );
+  });
+
+  it("reports a rejected write rather than pretending it applied", async () => {
+    await openPanel();
+    host.setModelHidden.mockRejectedValue(new Error("config is read-only"));
+
+    const rows = screen.getAllByRole("listitem");
+    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Hide" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "config is read-only",
+    );
+  });
+
+  it("keeps tool-capability truth visible on a curated row", async () => {
+    await openPanel([
+      model("ollama", "mistral", { is_default: true }),
+      model("ollama", "dolphin", {
+        tools_enabled: false,
+        tools_disabled_reason: "model",
+      }),
+    ]);
+    const row = screen
+      .getAllByRole("listitem")
+      .find((li) => li.textContent?.includes("dolphin"))!;
+    expect(row.textContent).toMatch(/tools unavailable/i);
+  });
+});
