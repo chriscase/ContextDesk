@@ -13,4 +13,4 @@ fixtures/incident-evidence/**/*.zip -text -eol
 
 # SDK contract fixtures are byte-exact golden files. Keep their serialized
 # representation stable across Windows, macOS, and Linux checkouts.
-crates/cd-core/fixtures/contracts/** text eol=lf
+fixtures/contracts/** text eol=lf
