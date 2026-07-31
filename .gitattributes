@@ -14,3 +14,7 @@ fixtures/incident-evidence/**/*.zip -text -eol
 # SDK contract fixtures are byte-exact golden files. Keep their serialized
 # representation stable across Windows, macOS, and Linux checkouts.
 fixtures/contracts/** text eol=lf
+
+# Shared cross-language parser catalogs are also byte-stable golden files, but
+# remain outside exact generated fixture sets such as Log Lab and SDK contracts.
+fixtures/citation-contracts/** text eol=lf

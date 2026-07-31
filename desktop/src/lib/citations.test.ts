@@ -15,7 +15,7 @@ import {
 
 const FIXTURE_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
-  "../../../fixtures/contracts/governed-log-citation-ids.v1.json",
+  "../../../fixtures/citation-contracts/governed-log-citation-ids.v1.json",
 );
 
 type AcceptCase = {

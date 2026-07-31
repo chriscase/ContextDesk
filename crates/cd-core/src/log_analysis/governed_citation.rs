@@ -5,7 +5,7 @@
 //! overflow past `u64::MAX` is rejected explicitly.
 //!
 //! Shared accept/reject fixtures live at
-//! `fixtures/contracts/governed-log-citation-ids.v1.json` and are asserted by
+//! `fixtures/citation-contracts/governed-log-citation-ids.v1.json` and are asserted by
 //! both this module and the TypeScript mirror.
 
 /// Kind of a governed log evidence identity.
@@ -147,7 +147,7 @@ mod tests {
     }
 
     const FIXTURE: &str =
-        include_str!("../../../../fixtures/contracts/governed-log-citation-ids.v1.json");
+        include_str!("../../../../fixtures/citation-contracts/governed-log-citation-ids.v1.json");
     const CATALOG_VERSION: &str = "contextdesk.governed_log_citation_ids.v1";
 
     #[test]
