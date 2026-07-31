@@ -1670,6 +1670,8 @@ fn ingest_lines_from_reader(
     let mut raw_line = Vec::new();
     let mut source_bytes_read = 0u64;
     let mut framer = LogicalRecordFramer::new();
+    // Parallel raw-byte accumulation so source_byte_count stays pre-decode.
+    let mut pending_raw: Vec<u8> = Vec::new();
     loop {
         if cancelled(cancel) {
             emit(
@@ -1713,15 +1715,22 @@ fn ingest_lines_from_reader(
         // MAX_RAW_LOG_LINE_BYTES across the whole record.
         // Lossy UTF-8 so invalid sequences remain as replacement chars (holds
         // require invalid-utf8 records to survive framing, not vanish).
-        let physical = {
+        // Keep the physical source bytes separately so durable original
+        // accounting still measures pre-decode length.
+        let physical_bytes = {
             let without_lf = raw_line.strip_suffix(b"\n").unwrap_or(raw_line.as_slice());
-            let without_cr = without_lf.strip_suffix(b"\r").unwrap_or(without_lf);
-            String::from_utf8_lossy(without_cr).into_owned()
+            without_lf
+                .strip_suffix(b"\r")
+                .unwrap_or(without_lf)
+                .to_vec()
         };
+        let physical = String::from_utf8_lossy(&physical_bytes).into_owned();
         let completed = time_op_ms(ops, IngestOp::ParseFrame, || framer.push_line(&physical));
-        if let Some(logical) = completed {
+        if let Some(_logical) = completed {
+            // `push_line` returned the previous pending record — emit its bytes.
+            let finished = std::mem::take(&mut pending_raw);
             ingest_framed_record(
-                &logical,
+                &finished,
                 source_label,
                 file_hint,
                 corpus,
@@ -1739,10 +1748,15 @@ fn ingest_lines_from_reader(
                 ops,
             )?;
         }
+        if !pending_raw.is_empty() {
+            pending_raw.push(b'\n');
+        }
+        pending_raw.extend_from_slice(&physical_bytes);
     }
-    if let Some(logical) = time_op_ms(ops, IngestOp::ParseFrame, || framer.finish()) {
+    if time_op_ms(ops, IngestOp::ParseFrame, || framer.finish()).is_some() {
+        let finished = std::mem::take(&mut pending_raw);
         ingest_framed_record(
-            &logical,
+            &finished,
             source_label,
             file_hint,
             corpus,
@@ -1766,7 +1780,7 @@ fn ingest_lines_from_reader(
 /// Parse + persist path for one framed logical record.
 #[allow(clippy::too_many_arguments)]
 fn ingest_framed_record(
-    logical: &str,
+    logical_bytes: &[u8],
     source_label: &str,
     file_hint: Option<&Path>,
     corpus: &LogCorpus,
@@ -1783,7 +1797,7 @@ fn ingest_framed_record(
     limits: RawIngestLimits,
     ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
 ) -> CoreResult<()> {
-    if logical.len() > limits.max_line_bytes {
+    if logical_bytes.len() > limits.max_line_bytes {
         emit_ingest_evidence(
             progress,
             LogIngestEvidenceReason::ParseFailed,
@@ -1795,7 +1809,7 @@ fn ingest_framed_record(
         )));
     }
     let prepared_original = time_op_ms(ops, IngestOp::ParseFrame, || {
-        prepare_original_record(logical.as_bytes())
+        prepare_original_record(logical_bytes)
     });
     let line = prepared_original.parser_text.as_str();
     if line.trim().is_empty() {
