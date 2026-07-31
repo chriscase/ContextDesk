@@ -47,6 +47,7 @@ pub mod model_curation;
 pub mod model_role_hints;
 pub mod module_registry;
 pub mod modules;
+pub mod normalized_log_events;
 pub mod object_store;
 pub mod paths;
 pub mod permissions;
