@@ -980,6 +980,11 @@ export function LogExplorer({ corpusId }: Props) {
   const [pendingViewApply, setPendingViewApply] = useState<{
     recipe: InvestigationViewRecipeDto;
     status: string;
+    /**
+     * True when this apply *is* the Restore. The restore point is consumed only
+     * after positioning succeeds, so a failure keeps the one-step return (#656).
+     */
+    consumesRestorePoint?: boolean;
   } | null>(null);
   const [bookmarkRevealState, setBookmarkRevealState] = useState<
     "idle" | "visible" | "revealed" | "missing"
@@ -3847,6 +3852,7 @@ export function LogExplorer({ corpusId }: Props) {
   const scheduleInvestigationViewApply = (
     recipe: InvestigationViewRecipeDto,
     status: string,
+    options?: { consumesRestorePoint?: boolean },
   ) => {
     const nextFilters = recipeFilters(recipe);
     findRequestRef.current += 1;
@@ -3902,7 +3908,11 @@ export function LogExplorer({ corpusId }: Props) {
     setFindMatchMode(recipe.find?.matchMode ?? "literal");
     setFindCaseSensitive(recipe.find?.caseSensitive ?? false);
     setFindUseSemantic(recipe.find?.semantic ?? false);
-    setPendingViewApply({ recipe, status });
+    setPendingViewApply({
+      recipe,
+      status,
+      consumesRestorePoint: options?.consumesRestorePoint ?? false,
+    });
     setStatus(`${status} · positioning…`);
   };
 
@@ -3983,6 +3993,10 @@ export function LogExplorer({ corpusId }: Props) {
       setSelected(new Set(recipe.selection.map((eventRef) => eventRef.seq)));
       setHighlight(new Set(recipe.highlights.map((eventRef) => eventRef.seq)));
       setFocusLaneId(recipe.focusedLaneId);
+      if (pendingViewApply.consumesRestorePoint) {
+        setRevealRestore(null);
+        setBookmarkRevealState("idle");
+      }
       setPendingViewApply(null);
       setStatus(status);
     };
@@ -3991,6 +4005,12 @@ export function LogExplorer({ corpusId }: Props) {
       setPendingViewApply(null);
       setInvestigationError(
         `Saved view could not be applied: ${String(applyError)}`,
+      );
+      // The status still read "<status> · positioning…", whose prefix claims the
+      // view was applied or restored. Say plainly that it was not, and that the
+      // prior view is still one step away (#656).
+      setStatus(
+        "Saved view could not be positioned · Restore prior view is still available",
       );
     });
     return () => {
@@ -4007,12 +4027,13 @@ export function LogExplorer({ corpusId }: Props) {
       suppressSelectionClearStatusRef.current = true;
       setRevealSuppressedEvidence(false);
       setSuppressedBookmarkOffer(null);
+      // The restore point is released by the positioning effect on success, so
+      // a host failure mid-restore leaves the one-step return available (#656).
       scheduleInvestigationViewApply(
         revealRestore,
         "Restored prior Explorer view",
+        { consumesRestorePoint: true },
       );
-      setRevealRestore(null);
-      setBookmarkRevealState("idle");
     }
   };
 

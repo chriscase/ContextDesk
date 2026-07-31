@@ -4535,6 +4535,143 @@ describe("LogExplorer shell", () => {
     expect(host.hostLogApplyInvestigationFindingView).not.toHaveBeenCalled();
   });
 
+  it("keeps Restore prior view reachable when restore positioning fails (#656)", async () => {
+    // #656 requires Restore to return the exact prior logical view, and the
+    // shipped Help contract calls it a "one-step return". restorePriorView
+    // cleared revealRestore synchronously, before the async positioning phase
+    // could fail, so one host error during Restore left a half-applied Explorer
+    // (filters/lanes/link mode already swapped) with the affordance gone.
+    const event = defaultEventPage().events[0]!;
+    const eventRef: host.LogBookmarkEventRefDto = {
+      corpusId: "c1",
+      seq: event.seq,
+      source: event.source,
+      timestampHint: event.ts,
+      timeQualityHint: event.timeQuality,
+    };
+    const recipe: host.InvestigationViewRecipeDto = {
+      filters: {
+        levels: ["error"],
+        sources: [],
+        services: [],
+        hosts: [],
+        timeFrom: null,
+        timeTo: null,
+        seqFrom: null,
+        seqTo: null,
+        templateId: null,
+        traceId: null,
+        keyword: null,
+      },
+      lanes: [{ id: "lane-0", label: "All sources", sources: [] }],
+      visibleLaneCount: 1,
+      linkMode: "independent",
+      focusedLaneId: "lane-0",
+      focusedEvent: eventRef,
+      selection: [eventRef],
+      highlights: [eventRef],
+      find: null,
+      viewportAnchors: [{ laneId: "lane-0", eventRef }],
+    };
+    const finding: host.InvestigationFindingItemDto = {
+      id: "019fa8d0-0000-7000-8000-000000000041",
+      kind: "observation",
+      lifecycle: "accepted",
+      title: "Restore failure view",
+      whyItMatters: "Restore must stay reachable after a positioning failure.",
+      evidenceIds: [],
+      viewRecipe: recipe,
+      provenance: "human",
+      createdAt: 3,
+      updatedAt: 3,
+    };
+    const loaded: host.ResolvedInvestigationDocumentDto = {
+      document: {
+        schemaVersion: 3,
+        id: "019fa8d0-0000-7000-8000-000000000040",
+        revision: 3,
+        title: "Investigation · fixture",
+        status: "active",
+        corpusLinks: [{ corpusId: "c1" }],
+        evidence: [],
+        findings: [finding],
+        notes: [],
+        createdAt: 1,
+        updatedAt: 3,
+      },
+      evidence: [],
+    };
+    const cleanPreview = {
+      investigationId: loaded.document.id,
+      revision: loaded.document.revision,
+      findingId: finding.id,
+      recipe,
+      missingCount: 0,
+      staleCount: 0,
+    };
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(loaded);
+    vi.mocked(host.hostLogPreviewInvestigationFindingView).mockResolvedValue(
+      cleanPreview,
+    );
+    vi.mocked(host.hostLogApplyInvestigationFindingView).mockResolvedValue(
+      cleanPreview,
+    );
+
+    let failPositioning = false;
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockImplementation(
+      async () => {
+        if (failPositioning) throw new Error("corpus handle closed");
+        return eventNeighborhood(event, "found", [event]);
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+
+    // Give the prior view a focused event so Restore has real positioning work.
+    const row = document.querySelector<HTMLElement>(`[data-seq="${event.seq}"]`);
+    expect(row).toBeTruthy();
+    fireEvent.click(row!);
+
+    await openInvestigationView(1);
+    fireEvent.click(await screen.findByTestId(`finding-item-${finding.id}`));
+    fireEvent.click(screen.getByRole("button", { name: "Preview saved view" }));
+    const viewPreview = await screen.findByTestId(
+      `finding-view-preview-${finding.id}`,
+    );
+    fireEvent.click(
+      within(viewPreview).getByRole("button", { name: "Apply saved view" }),
+    );
+
+    const restore = await screen.findByTestId("bookmark-restore-view");
+    expect(restore).toBeTruthy();
+
+    // The host fails only while Restore is repositioning.
+    failPositioning = true;
+    fireEvent.click(restore);
+
+    const alert = await screen.findByRole("alert", {}, { timeout: 3000 });
+    expect(alert.textContent ?? "").toMatch(/Saved view could not be applied/i);
+
+    // The status must not keep claiming the restore happened.
+    expect(screen.getByRole("status").textContent).not.toContain(
+      "Restored prior Explorer view",
+    );
+    expect(screen.getByRole("status").textContent).toContain(
+      "could not be positioned",
+    );
+
+    // The prior view must remain reachable in one step.
+    expect(screen.queryByTestId("bookmark-restore-view")).toBeTruthy();
+
+    // …and once the host recovers, that one step must work.
+    failPositioning = false;
+    fireEvent.click(screen.getByTestId("bookmark-restore-view"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("bookmark-restore-view")).toBeNull(),
+    );
+  });
+
   it("surfaces host Apply rejection without mutating Explorer when clean preview enables Apply", async () => {
     // Real entry point: clean Preview enables Apply → click Apply → trusted host
     // rejects → filters/selection stay put and the typed host explanation surfaces.
