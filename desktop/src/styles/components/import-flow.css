@@ -1,0 +1,455 @@
+/* Unified import flow (#751/#813): pane + guided skins.
+   Breakpoint ladder follows panes.css: 78rem / 54rem / 40rem. */
+
+.import-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  min-width: 0;
+  max-width: 78rem;
+}
+
+.import-flow__lead,
+.import-flow__hint {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  max-width: 65ch;
+}
+
+.import-flow__status {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.import-flow__choose-actions,
+.import-flow__row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.import-flow__spacer {
+  flex: 1;
+}
+
+.import-flow__preflight,
+.import-flow__error-panel,
+.import-flow__summary {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  padding: 0.9rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.import-flow__preflight-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.import-flow__chips {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.import-flow__facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 0.9rem;
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.import-flow__facts dt {
+  color: var(--text-secondary);
+}
+
+.import-flow__facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.import-flow__name {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text);
+  padding: 0.25rem 0.55rem;
+  font-size: 0.85rem;
+  max-width: 18rem;
+  width: 100%;
+}
+
+.import-flow__confirm {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.import-flow__reason {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--warning);
+}
+
+.import-flow__error-panel p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.import-flow__done {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+/* ---- evidence selector ---- */
+
+.import-selector {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  padding: 0.75rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+.import-selector__head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.import-selector__head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.import-selector__summary {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.import-selector__filters {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.import-selector__filter {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  padding: 0.12rem 0.6rem;
+  cursor: pointer;
+}
+
+.import-selector__filter--on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-on);
+}
+
+.import-selector__search {
+  margin-left: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text);
+  padding: 0.2rem 0.55rem;
+  font-size: 0.8rem;
+  min-width: 10rem;
+}
+
+.import-selector__viewport {
+  position: relative;
+  overflow-y: auto;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-app);
+  outline-offset: -2px;
+}
+
+.import-selector__spacer {
+  position: relative;
+  min-width: 40rem;
+}
+
+.import-selector__row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 32px;
+  display: grid;
+  grid-template-columns: 2rem minmax(14rem, 2fr) 6.5rem 5rem minmax(10rem, 3fr);
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0 0.5rem;
+  font-size: 0.8rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+}
+
+.import-selector__row--container {
+  background: color-mix(in srgb, var(--bg-panel) 70%, transparent);
+}
+
+.import-selector__row--focused {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.import-selector__cell {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-selector__cell--name {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.import-selector__disclose {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0 0.2rem;
+}
+
+.import-selector__hint {
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+}
+
+.import-selector__name--archive .import-selector__bang {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+
+.import-selector__chip {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 0.06rem 0.5rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.import-selector__chip--ready {
+  background: color-mix(in srgb, var(--success) 18%, transparent);
+  color: var(--success);
+}
+
+.import-selector__chip--review {
+  background: color-mix(in srgb, var(--warning) 18%, transparent);
+  color: var(--warning);
+}
+
+.import-selector__chip--raw_fallback,
+.import-selector__chip--ignored,
+.import-selector__chip--unsupported {
+  background: color-mix(in srgb, var(--text-secondary) 16%, transparent);
+  color: var(--text-secondary);
+}
+
+.import-selector__chip--supporting {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+
+.import-selector__chip--blocked {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  color: var(--danger);
+}
+
+.import-selector__keys {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+}
+
+/* ---- timezone review card ---- */
+
+.import-time {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  padding: 0.9rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+.import-time__head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.import-time__head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.import-time__count {
+  color: var(--warning);
+  font-size: 0.8rem;
+}
+
+.import-time__lead,
+.import-time__suggestion,
+.import-time__preview,
+.import-time__reason {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  max-width: 70ch;
+}
+
+.import-time__error {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.import-time__zone-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.import-time__zone {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text);
+  padding: 0.3rem 0.6rem;
+  font-size: 0.85rem;
+  min-width: 16rem;
+}
+
+.import-time__ghost {
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 0.82rem;
+  padding: 0.25rem 0.3rem;
+}
+
+.import-time__applied {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.import-time__scope-chip {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 0.15rem 0.7rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: color-mix(in srgb, var(--success) 18%, transparent);
+  color: var(--success);
+}
+
+.import-time__groups summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+}
+
+.import-time__groups ul {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.import-time__group label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+  flex-wrap: wrap;
+}
+
+.import-time__group-mode {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+/* ---- responsive: normal (≤54rem) and narrow (≤40rem) ---- */
+
+@media (max-width: 54rem) {
+  .import-selector__row {
+    grid-template-columns: 2rem minmax(10rem, 3fr) 5.5rem minmax(6rem, 2fr);
+  }
+
+  .import-selector__cell--bytes {
+    display: none;
+  }
+}
+
+@media (max-width: 40rem) {
+  .import-flow__facts {
+    grid-template-columns: 1fr;
+  }
+
+  .import-flow__row,
+  .import-time__zone-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .import-flow__row button,
+  .import-time__zone-row button,
+  .import-time__zone {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .import-flow__spacer {
+    display: none;
+  }
+
+  .import-selector__row {
+    grid-template-columns: 2rem minmax(8rem, 1fr) 5.5rem;
+  }
+
+  .import-selector__cell--why {
+    display: none;
+  }
+
+  .import-selector__search {
+    margin-left: 0;
+    width: 100%;
+  }
+}

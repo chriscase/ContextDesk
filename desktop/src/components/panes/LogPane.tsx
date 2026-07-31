@@ -1,11 +1,14 @@
 /**
  * Log analysis surface: Memory-style list | detail + package import/export.
  */
+import { ImportFlow } from "../importFlow/ImportFlow";
+import { createTauriEngineClient } from "../../lib/engine/tauriEngineClient";
 import {
   useCallback,
   useEffect,
   useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -147,6 +150,9 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [tab, setTab] = useState<DetailTab>("overview");
   const [busy, setBusy] = useState(false);
+  const [showImportFlow, setShowImportFlow] = useState(false);
+  const importFlowRegionId = useId();
+  const paneEngine = useMemo(() => createTauriEngineClient(), []);
   const [ingesting, setIngesting] = useState(false);
   const [reanalyzing, setReanalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1150,6 +1156,18 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
               >
                 Import ContextDesk package…
               </button>
+              <button
+                type="button"
+                className="btn btn--ghost"
+                disabled={busy}
+                aria-describedby={busy ? busyActionDescriptionId : undefined}
+                title={busy ? busyActionDescription : undefined}
+                aria-expanded={showImportFlow}
+                aria-controls={importFlowRegionId}
+                onClick={() => setShowImportFlow((current) => !current)}
+              >
+                {showImportFlow ? "Hide reviewed import" : "Import with review…"}
+              </button>
             </div>
           </div>
 
@@ -1270,6 +1288,22 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
             </div>
           ) : null}
         </nav>
+        {showImportFlow ? (
+          <section
+            id={importFlowRegionId}
+            className="log-pane__import-flow"
+            aria-label="Reviewed import"
+          >
+            <ImportFlow
+              engine={paneEngine}
+              variant="pane"
+              onPublished={(corpusId) => {
+                void refresh();
+                void selectCorpus(corpusId);
+              }}
+            />
+          </section>
+        ) : null}
         <span id={busyActionDescriptionId} className="sr-only">
           {busyActionDescription}
         </span>
