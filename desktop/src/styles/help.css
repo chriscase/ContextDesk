@@ -379,13 +379,16 @@
   background: var(--bg-hover);
 }
 
-.help-code__toolbar button:focus-visible,
+/*
+ * Only the tabbable <pre> needs a rule here. --focus-ring is a box-shadow
+ * list, not a colour, so the old `outline: 2px solid var(--focus-ring)` was
+ * invalid and this scrollable region — which the shared button rule in
+ * base.css does not match — had no focus indicator at all (#767). The Copy
+ * button is a <button>, so base.css already rings it; including it here would
+ * paint a second, inset indicator on top. Longhands keep width and style even
+ * if the colour ever regresses again.
+ */
 .help-code pre:focus-visible {
-  /* --focus-ring is a box-shadow list, not a colour: passing it to `outline`
-     made the whole declaration invalid, so the scrollable <pre> — which is
-     tabbable and not matched by the shared button focus rule — had no visible
-     focus at all. Longhands keep width and style even if the colour ever
-     regresses again (#767). */
   outline-width: 2px;
   outline-style: solid;
   outline-color: var(--accent);

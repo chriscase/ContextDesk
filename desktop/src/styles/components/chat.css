@@ -219,9 +219,10 @@
   align-items: center;
   gap: 10px;
   max-width: var(--chat-measure);
-  /* Centered like every other transcript row so the thinking state does not
-     jump to the left gutter on wide windows (#767). */
-  margin: 0 auto var(--space-2);
+  /* Not auto-centred: this always renders inside .msg__bubble (MessageRow),
+     never as a direct transcript row, so it is already constrained by the
+     bubble and auto margins would be inert. */
+  margin: 0 0 var(--space-2);
   padding: 10px 12px;
   border-radius: 12px;
   border: 1px solid var(--border-soft);

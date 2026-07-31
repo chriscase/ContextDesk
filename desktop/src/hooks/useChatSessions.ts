@@ -37,6 +37,30 @@ export function shouldPersistUiSession(session: ChatSession): boolean {
 export const ACTIVE_SESSION_KEY = "cd-active-session";
 
 /**
+ * A chat carrying nothing the user would miss. Only such a chat may be reused
+ * by "New chat" — a blank chat that was renamed, pinned, given a model or a
+ * skill, or that holds unsent composer text, is *not* interchangeable with a
+ * fresh one, and reusing it would silently hand the user someone else's
+ * settings or resurrect a draft they had abandoned.
+ */
+export function isPristineBlank(
+  session: ChatSession,
+  hasUnsentDraft: boolean,
+): boolean {
+  return (
+    session.messages.length === 0 &&
+    !session.linkedCorpusId &&
+    !session.titleLocked &&
+    !session.pinned &&
+    !session.chatModel &&
+    !session.providerProfileId &&
+    !session.pinnedSkillId &&
+    !hasUnsentDraft &&
+    /^Chat \d+$/.test(session.title.trim())
+  );
+}
+
+/**
  * Next default title. Counting sessions produced repeats — create "Chat 2",
  * trash "Chat 1", create again and you had two "Chat 2"s — so number past the
  * highest one already used instead.
@@ -75,7 +99,12 @@ export function pickRestoredSession(
   return stored ? stored.id : loaded[0]!.id;
 }
 
-export function useChatSessions() {
+export type UseChatSessionsArgs = {
+  /** Whether a conversation holds unsent composer text (drafts live in App). */
+  hasDraft?: (sessionId: string) => boolean;
+};
+
+export function useChatSessions({ hasDraft }: UseChatSessionsArgs = {}) {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [sessionsReady, setSessionsReady] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -221,13 +250,11 @@ export function useChatSessions() {
 
   const createSession = useCallback((): ChatSession => {
     const open = sessions.filter((s) => !s.archived && !s.trashed);
-    // "New chat" while an untouched blank chat is already open should take the
+    // "New chat" while a *pristine* blank chat is already open should take the
     // user there rather than stacking another indistinguishable "Chat N".
     // Blank chats are never persisted, so the extras only ever existed in the
     // sidebar until the next reload.
-    const blank = open.find(
-      (s) => s.messages.length === 0 && !s.linkedCorpusId,
-    );
+    const blank = open.find((s) => isPristineBlank(s, hasDraft?.(s.id) ?? false));
     if (blank) {
       setActiveSessionId(blank.id);
       return blank;
@@ -236,7 +263,7 @@ export function useChatSessions() {
     setSessions((all) => [s, ...all]);
     setActiveSessionId(s.id);
     return s;
-  }, [sessions]);
+  }, [sessions, hasDraft]);
 
   /**
    * Guarantee a non-trashed active chat exists (first send / model pick before

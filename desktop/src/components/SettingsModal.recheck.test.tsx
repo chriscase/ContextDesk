@@ -179,4 +179,28 @@ describe("connectivity recheck is not an edit (#740)", () => {
     await waitFor(() => expect(hostMocks.confirm).toHaveBeenCalledTimes(1));
     expect(onClose).not.toHaveBeenCalled();
   });
+
+  it("preserves an edit made BEFORE the recheck", async () => {
+    // The risky ordering: applyMeasured rebases the clean baseline, so an edit
+    // already in the draft must survive that rebase. Editing after a recheck
+    // (the case above) cannot detect a baseline that swallowed an earlier one.
+    const { onClose } = renderSettings();
+    await waitForHydration();
+
+    fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
+    fireEvent.change(screen.getByLabelText("Workspace name"), {
+      target: { value: "Incident response" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Health" }));
+    await recheck();
+
+    // The workspace rename must still count as unsaved.
+    expect(
+      screen.getByRole("button", { name: "Cancel (unsaved)" }),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByTitle("Close"));
+    await waitFor(() => expect(hostMocks.confirm).toHaveBeenCalledTimes(1));
+    expect(onClose).not.toHaveBeenCalled();
+  });
 });

@@ -149,6 +149,8 @@ export type ChatPaneProps = {
   /** Draft for the active conversation, owned above the pane switch. */
   draft?: string;
   onDraftChange?: (text: string) => void;
+  /** Retire a spent wizard seed so a remount cannot replay it. */
+  onSeedConsumed?: (seedId: number) => void;
   /** Re-test native tool support for one exact provider/model pair (#650). */
   onRetryModelTools?: (model: ModelOptionDto) => Promise<void> | void;
 };
@@ -203,6 +205,7 @@ export function ChatPane(props: ChatPaneProps) {
     externalSeedRequest = null,
     draft,
     onDraftChange,
+    onSeedConsumed,
     onRetryModelTools,
   } = props;
 
@@ -663,7 +666,9 @@ export function ChatPane(props: ChatPaneProps) {
             contextMutationPending
               ? "Updating this chat's context — sending resumes when it finishes"
               : preflightBlocking
-                ? "Setup checks are unresolved — sending opens Settings instead"
+                ? // Sending is not blocked here — it opens Settings instead —
+                  // so this must show while the composer is still usable.
+                  "Setup checks are unresolved — sending opens Settings instead"
                 : undefined
           }
           models={modelOptions}
@@ -672,6 +677,7 @@ export function ChatPane(props: ChatPaneProps) {
           onSetDefaultModel={(key) => void setAppDefaultModel(key)}
           onStop={onStop}
           seedRequest={effectiveSeed}
+          onSeedConsumed={onSeedConsumed}
           draft={draft}
           onDraftChange={onDraftChange}
           onRetryModelTools={onRetryModelTools}

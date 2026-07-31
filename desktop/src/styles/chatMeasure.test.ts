@@ -122,17 +122,4 @@ describe("chat input-stack alignment (#699, #767)", () => {
     expect(input.marginRight).toBe("auto");
   });
 
-  it("the thinking indicator sits on the same centred column", () => {
-    mountChatShell();
-    const el = document.createElement("div");
-    el.className = "thinking-ind";
-    document.querySelector(".chat-transcript")?.appendChild(el);
-
-    const s = getComputedStyle(el);
-    expect(s.maxWidth).toBe(
-      getComputedStyle(document.querySelector(".msg")!).maxWidth,
-    );
-    expect(s.marginLeft).toBe("auto");
-    expect(s.marginRight).toBe("auto");
-  });
 });

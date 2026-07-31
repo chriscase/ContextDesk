@@ -24,6 +24,8 @@ type Props = {
    * (empty-state starter chips — #300 residual).
    */
   seedRequest?: { id: number; text: string } | null;
+  /** Called once the seed has been applied, so the owner can retire it. */
+  onSeedConsumed?: (seedId: number) => void;
   /**
    * Draft text owned by the caller. Supply this (with `onDraftChange`) to keep
    * a draft tied to one conversation and alive across pane switches; omit both
@@ -55,6 +57,7 @@ export function Composer({
   onModelChange,
   onSetDefaultModel,
   seedRequest,
+  onSeedConsumed,
   draft,
   onDraftChange,
   disabledReason,
@@ -88,11 +91,17 @@ export function Composer({
   // the seed request alone is what stops every keystroke from re-seeding.
   const setValueRef = useRef(setValue);
   setValueRef.current = setValue;
+  const onSeedConsumedRef = useRef(onSeedConsumed);
+  onSeedConsumedRef.current = onSeedConsumed;
 
   useEffect(() => {
     if (!seedRequest?.text) return;
     setValueRef.current(seedRequest.text);
     setExpanded(seedRequest.text.length > 80);
+    // Tell the owner the seed is spent. Composer remounts on every pane switch,
+    // so a seed left standing would re-fire on each remount and overwrite the
+    // now-persistent draft — including in a different conversation.
+    onSeedConsumedRef.current?.(seedRequest.id);
     requestAnimationFrame(() => {
       const el = taRef.current;
       if (!el) return;
@@ -102,29 +111,31 @@ export function Composer({
     });
   }, [seedRequest?.id, seedRequest?.text]);
 
-  /**
-   * Put the caret back in the composer after a send, but only when focus is
-   * still inside it — clicking Send disables that button and would otherwise
-   * drop focus to `<body>`. Never steal focus the user moved elsewhere.
-   */
-  const restoreFocus = useCallback(() => {
-    const active = document.activeElement;
-    const cameFromComposer =
-      !active || active === document.body || rootRef.current?.contains(active);
-    if (!cameFromComposer) return;
-    requestAnimationFrame(() => taRef.current?.focus());
-  }, []);
-
   const submit = useCallback(async () => {
     const t = value.trim();
     if (!t || disabled || busy || submittingRef.current) return;
+    // Whether the caret was ours must be decided *now*: by the time the turn
+    // resolves, clicking Send has already disabled that button and dropped
+    // focus to <body>, which is indistinguishable from the user clicking away.
+    const hadFocus = Boolean(rootRef.current?.contains(document.activeElement));
     submittingRef.current = true;
     // Clear immediately on submit so the draft does not sit through the whole
     // agent turn (startTurn awaits network/tools). Restore only if rejected.
     setValue("");
     setExpanded(false);
+    const res = onSubmit(t);
+    // Release at the end of *this task*, not at turn completion. The race the
+    // latch guards is two handlers running against one pre-clear render, which
+    // is confined to a single task; holding it across the awaited turn left the
+    // composer inert after Stop re-enabled it, silently swallowing the next
+    // send. By the time a later task runs, the cleared draft is the guard.
+    queueMicrotask(() => {
+      submittingRef.current = false;
+    });
+    if (hadFocus) {
+      requestAnimationFrame(() => taRef.current?.focus());
+    }
     try {
-      const res = onSubmit(t);
       const accepted = res instanceof Promise ? await res : res;
       if (accepted === false) {
         setValue(t);
@@ -132,11 +143,8 @@ export function Composer({
     } catch {
       // Parent threw before accepting — put the draft back.
       setValue(t);
-    } finally {
-      submittingRef.current = false;
-      restoreFocus();
     }
-  }, [value, disabled, busy, onSubmit, setValue, restoreFocus]);
+  }, [value, disabled, busy, onSubmit, setValue]);
 
   const insertSnippet = (snippet: string) => {
     setValue((v) => (v ? `${v}\n${snippet}` : snippet));
@@ -172,15 +180,20 @@ export function Composer({
 
   const canSend = !disabled && !busy && Boolean(value.trim());
   /**
-   * What the composer is doing, in the user's terms. `busy` already has its own
-   * Stop affordance, so an explicit reason wins; a silent hard-disable never
-   * reaches the user.
+   * What the composer is doing, in the user's terms. A streaming turn always
+   * keeps its own wording (it is what Stop refers to); any other reason is
+   * appended rather than replacing it. A reason given while the composer is
+   * still usable — unresolved setup, say — is shown too, so the explanation
+   * never depends on the input also being disabled.
    */
   const statusHint = busy
-    ? (disabledReason ?? "Waiting for the response — Stop to cancel")
-    : disabled
-      ? (disabledReason ?? "Sending is paused right now")
-      : "Enter ↵ · Shift+Enter newline";
+    ? `Waiting for the response — Stop to cancel${
+        disabledReason ? ` · ${disabledReason}` : ""
+      }`
+    : (disabledReason ??
+      (disabled
+        ? "Sending is paused right now"
+        : "Enter ↵ · Shift+Enter newline"));
 
   return (
     <div
@@ -290,9 +303,12 @@ export function Composer({
                   title={`Re-test native tool support for ${selected.label}`}
                   onClick={() => {
                     setRetryingTools(true);
-                    void Promise.resolve(onRetryModelTools(selected)).finally(
-                      () => setRetryingTools(false),
-                    );
+                    // Reporting the failure is the caller's job (App surfaces
+                    // it); swallowing it here only stops an unhandled
+                    // rejection, and the button must return to rest either way.
+                    void Promise.resolve(onRetryModelTools(selected))
+                      .catch(() => {})
+                      .finally(() => setRetryingTools(false));
                   }}
                 >
                   {retryingTools ? "Retrying…" : "Retry tools"}
@@ -335,8 +351,8 @@ export function Composer({
           <span
             className="composer__hint"
             id={`${id}-hint`}
-            data-kind={disabled || busy ? "status" : "keys"}
-            role={disabled || busy ? "status" : undefined}
+            data-kind={disabled || busy || disabledReason ? "status" : "keys"}
+            role={disabled || busy || disabledReason ? "status" : undefined}
           >
             {statusHint}
           </span>

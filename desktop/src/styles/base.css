@@ -151,10 +151,16 @@ select:focus-visible {
   input:focus-visible,
   select:focus-visible,
   [tabindex]:focus-visible {
-    outline-width: 3px;
-    outline-style: solid;
-    outline-color: Highlight;
-    outline-offset: 1px;
+    /* !important is the standard High Contrast idiom here: component rules
+       set `outline: none` alongside their box-shadow ring, and several
+       (.pane-tabs button, .composer__send, .field__control) out-specify a bare
+       element selector. Without this the fallback loses to the very rules that
+       forced-colors has already stripped the shadow from, leaving no
+       indicator at all. */
+    outline-width: 3px !important;
+    outline-style: solid !important;
+    outline-color: Highlight !important;
+    outline-offset: 1px !important;
   }
 }
 

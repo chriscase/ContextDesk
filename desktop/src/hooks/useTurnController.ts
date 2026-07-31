@@ -95,6 +95,8 @@ export function useTurnController(args: Args) {
   const activeTurnSessionRef = useRef<string | null>(null);
   /** Session that raised the pending permission prompt. */
   const permissionSessionRef = useRef<string | null>(null);
+  /** A request id is consumable once; a second reply must not reach the host. */
+  const permissionInFlightRef = useRef(false);
   /** Synchronous in-flight latch: two sends in one frame must not both start. */
   const turnInFlightRef = useRef(false);
 
@@ -310,8 +312,12 @@ export function useTurnController(args: Args) {
         const err = e instanceof Error ? e.message : String(e);
         // A turn the user already stopped (or replaced) must not reach back and
         // overwrite the partial answer it left behind with a host error.
+        // It still resolves `true`: `false` is the composer's "rejected, put
+        // the draft back" signal, and this prompt was accepted and is already
+        // in the transcript — returning false would re-inject it over whatever
+        // the user has since typed.
         if (isRetired()) {
-          return false;
+          return true;
         }
         setSessions((all) => {
           const cur = all.find((s) => s.id === sid);
@@ -373,22 +379,29 @@ export function useTurnController(args: Args) {
       decision: "deny" | "allow_once" | "allow_session_path",
       typed?: string,
     ) => {
-      if (!permission) return;
+      if (!permission || permissionInFlightRef.current) return;
+      // The host consumes a request id exactly once. A second click (or Escape)
+      // while the first reply is still awaiting would be rejected by the host
+      // and reported as a failed write — a false claim about an operation that
+      // actually succeeded. Latch synchronously and drop the modal now.
+      permissionInFlightRef.current = true;
       // The prompt belongs to the chat that raised it. Answering after a chat
       // switch must not file the tool result under the chat now on screen.
       const owner = permissionSessionRef.current ?? sessionId;
+      const args = pendingToolArgs;
+      const { requestId, toolName } = permission;
+      setPermission(null);
+      setPendingToolArgs({});
+      permissionSessionRef.current = null;
       try {
         const events = await completePermission(
-          permission.requestId,
+          requestId,
           decision,
-          permission.toolName,
-          pendingToolArgs,
+          toolName,
+          args,
           typed,
           owner,
         );
-        setPermission(null);
-        setPendingToolArgs({});
-        permissionSessionRef.current = null;
         // Append tool results as assistant follow-up
         setSessions((all) => {
           const cur = all.find((s) => s.id === owner);
@@ -418,20 +431,26 @@ export function useTurnController(args: Args) {
         // failure. Record it in the conversation that asked for it so the
         // thread stays readable and nothing implies the write succeeded (#691).
         const detail = e instanceof Error ? e.message : String(e);
-        const toolName = permission.toolName.trim() || "The requested write";
-        setPermission(null);
-        setPendingToolArgs({});
-        permissionSessionRef.current = null;
+        const label = toolName.trim() || "The requested write";
         setSessions((all) => {
           const cur = all.find((s) => s.id === owner);
           if (!cur) {
             setAgentError(detail);
             return all;
           }
+          // Only claim nothing was written when the request never reached the
+          // tool. An already-consumed or expired request id means the host
+          // decided this outcome elsewhere, and we cannot honestly say what it
+          // did — so say only what we know.
+          const outcomeUnknown = /expired|unknown|already|host missing/i.test(
+            detail,
+          );
           const failure: Msg = {
             id: crypto.randomUUID(),
             role: "assistant",
-            content: `**${toolName} was not completed.** ${detail}\n\nNothing was written. You can ask again with the missing details, or continue without it.`,
+            content: outcomeUnknown
+              ? `**${label} did not return a result.** ${detail}\n\nContextDesk cannot confirm what happened — check memory or the audit log before retrying.`
+              : `**${label} was not completed.** ${detail}\n\nNothing was written. You can ask again with the missing details, or continue without it.`,
           };
           const updated: ChatSession = {
             ...cur,
@@ -445,6 +464,8 @@ export function useTurnController(args: Args) {
           });
           return all.map((s) => (s.id === owner ? updated : s));
         });
+      } finally {
+        permissionInFlightRef.current = false;
       }
     },
     [permission, pendingToolArgs, sessionId, setSessions, persistSession],

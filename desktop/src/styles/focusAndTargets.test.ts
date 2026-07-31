@@ -111,7 +111,10 @@ describe("focus visibility", () => {
 
     mount("tokens.css", "themes/dark.css");
     for (const file of all) {
-      for (const m of readFileSync(file, "utf8").matchAll(OUTLINE_TOKEN)) {
+      // Strip comments first — prose describing a past defect is not a
+      // declaration, and matching it would make this test unfixable.
+      const css = readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+      for (const m of css.matchAll(OUTLINE_TOKEN)) {
         const token = m[1]!;
         const value = resolve(token);
         if (!isColour(value)) {
@@ -158,7 +161,16 @@ describe("focus visibility", () => {
    * High Contrast, and is recorded as an owner residual.
    */
   it("declares a forced-colors outline covering the shared controls", () => {
-    const sheet = mount("base.css");
+    // Mount the full cascade, not base.css alone: component rules set
+    // `outline: none` beside their box-shadow ring, so a fallback that is not
+    // author-important loses to the very rules forced-colors has stripped.
+    const sheet = mount(
+      "tokens.css",
+      "themes/dark.css",
+      "base.css",
+      "layout.css",
+      "components/composer.css",
+    );
     const forced: string[] = [];
     for (const rule of Array.from(sheet.cssRules)) {
       if (
@@ -171,6 +183,16 @@ describe("focus visibility", () => {
             // A real outline, not the box-shadow ring forced-colors discards.
             expect(outline.style).toBe("solid");
             expect(outline.width).toBeGreaterThan(0);
+            // Must out-rank the component `outline: none` rules it competes
+            // with, which are more specific than these element selectors.
+            // (outline-color is not asserted here: happy-dom discards the
+            // system colour, so the property never reaches the CSSOM.)
+            expect(inner.style.getPropertyPriority("outline-style")).toBe(
+              "important",
+            );
+            expect(inner.style.getPropertyPriority("outline-width")).toBe(
+              "important",
+            );
             forced.push(inner.selectorText);
           }
         }
@@ -189,15 +211,60 @@ describe("focus visibility", () => {
 });
 
 describe("target size", () => {
-  it("keeps shared small buttons at or above a 24px minimum box", () => {
-    mount("tokens.css", "themes/dark.css", "components/composer.css");
+  /**
+   * Mount in main.tsx import order. A bare body-level button is not enough:
+   * `.banner .btn` and `.todo-row__remove` each re-imposed a 22px floor that
+   * out-specified `.btn--sm`, and layout.css carried a stale duplicate
+   * `.btn--sm` whose 22px won or lost purely on import order.
+   */
+  function mountCascade() {
+    return mount(
+      "tokens.css",
+      "themes/dark.css",
+      "base.css",
+      "layout.css",
+      "components/panes.css",
+      "components/composer.css",
+    );
+  }
 
-    const button = document.createElement("button");
-    button.className = "btn btn--ghost btn--sm";
-    document.body.appendChild(button);
+  function probe(html: string, selector: string): CSSStyleDeclaration {
+    document.body.innerHTML = html;
+    return getComputedStyle(document.querySelector<HTMLElement>(selector)!);
+  }
 
-    const style = getComputedStyle(button);
+  it.each([
+    [
+      "bare shared small button",
+      `<button class="btn btn--ghost btn--sm">Show all</button>`,
+      ".btn--sm",
+    ],
+    [
+      "small button inside an error banner",
+      `<div class="banner"><div class="banner__actions"><button class="btn btn--ghost btn--sm">Dismiss</button></div></div>`,
+      ".banner .btn",
+    ],
+    [
+      "todo row remove control",
+      `<div class="todo-row"><button class="todo-row__remove">×</button></div>`,
+      ".todo-row__remove",
+    ],
+  ])("keeps the %s at or above a 24px minimum box", (_label, html, selector) => {
+    mountCascade();
+    const style = probe(html, selector);
     expect(Number.parseFloat(style.minHeight)).toBeGreaterThanOrEqual(24);
-    expect(Number.parseFloat(style.minWidth)).toBeGreaterThanOrEqual(24);
+  });
+
+  it("leaves exactly one .btn--sm floor in the cascade", () => {
+    const sheet = mountCascade();
+    const floors = styleRules(sheet)
+      .filter((r) =>
+        r.selectorText.split(",").some((s) => s.trim() === ".btn--sm"),
+      )
+      .map((r) => r.style.minHeight)
+      .filter(Boolean);
+
+    // A duplicate block is how the floor silently regressed before.
+    expect(floors).toEqual(["24px"]);
   });
 });

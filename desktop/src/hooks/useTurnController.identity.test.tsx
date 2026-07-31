@@ -367,3 +367,147 @@ describe("host-persisted terminal turns", () => {
     );
   });
 });
+
+describe("outcomes a retired or duplicated action must not fake", () => {
+  it("does not re-inject the sent prompt when a stopped turn's host call rejects", async () => {
+    const h = mountTwoChats();
+    let reject!: (e: Error) => void;
+    const started = new Promise<void>((resolveStarted) => {
+      host.agentTurn.mockImplementation(async (...args: unknown[]) => {
+        const onEvent = args[5] as (ev: EventDto) => void;
+        onEvent({ kind: "text_delta", payload: { text: "partial " } });
+        resolveStarted();
+        await new Promise<never>((_r, rej) => {
+          reject = rej;
+        });
+        return [];
+      });
+    });
+
+    let pending!: Promise<boolean>;
+    await act(async () => {
+      pending = h.rendered.result.current.startTurn("Investigate");
+      await started;
+    });
+    await act(async () => {
+      h.rendered.result.current.stopTurn();
+    });
+
+    await act(async () => {
+      reject(new Error("chat session is unavailable or corrupt"));
+      await pending.catch(() => undefined);
+    });
+
+    // `false` is the composer's "rejected — put the draft back" signal. This
+    // prompt was accepted and is in the transcript, so resolving false would
+    // resurrect it over whatever the user typed after pressing Stop.
+    await expect(pending).resolves.toBe(true);
+    const texts = h.session(h.a.id).messages.map((m) => m.content);
+    expect(texts.some((t) => t.includes("Host error"))).toBe(false);
+  });
+
+  it("answers a permission prompt once, even when the user clicks twice", async () => {
+    const h = mountTwoChats();
+    let release!: () => void;
+    const asked = new Promise<void>((resolveAsked) => {
+      host.agentTurn.mockImplementation(async (...args: unknown[]) => {
+        const onEvent = args[5] as (ev: EventDto) => void;
+        onEvent({
+          kind: "permission_required",
+          payload: {
+            request_id: "req-dup",
+            tool_name: "save_memory",
+            side_effect: "SoftWrite",
+            target: "memory/note.md",
+            preview: "draft",
+            arguments: { content: "hello" },
+          },
+        });
+        resolveAsked();
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        return [];
+      });
+    });
+
+    let pending!: Promise<boolean>;
+    await act(async () => {
+      pending = h.rendered.result.current.startTurn("Remember this");
+      await asked;
+    });
+
+    let settle!: (events: EventDto[]) => void;
+    host.completePermission.mockReturnValue(
+      new Promise<EventDto[]>((r) => {
+        settle = r;
+      }),
+    );
+
+    // Two replies dispatched before the first resolves. The host consumes a
+    // request id once, so the second would come back as a failure and write a
+    // false "Nothing was written" line under a write that actually succeeded.
+    await act(async () => {
+      void h.rendered.result.current.respondPermission("allow_once");
+      void h.rendered.result.current.respondPermission("allow_once");
+      settle([{ kind: "tool", payload: { name: "save_memory", ok: true } }]);
+    });
+
+    expect(host.completePermission).toHaveBeenCalledTimes(1);
+    const texts = h.session(h.a.id).messages.map((m) => m.content);
+    expect(texts.some((t) => t.includes("Nothing was written"))).toBe(false);
+
+    release();
+    await act(async () => {
+      await pending;
+    });
+  });
+
+  it("refuses to claim nothing was written when the outcome is unknowable", async () => {
+    const h = mountTwoChats();
+    let release!: () => void;
+    const asked = new Promise<void>((resolveAsked) => {
+      host.agentTurn.mockImplementation(async (...args: unknown[]) => {
+        const onEvent = args[5] as (ev: EventDto) => void;
+        onEvent({
+          kind: "permission_required",
+          payload: {
+            request_id: "req-gone",
+            tool_name: "save_memory",
+            side_effect: "SoftWrite",
+            target: "memory/note.md",
+            preview: "draft",
+            arguments: { content: "hello" },
+          },
+        });
+        resolveAsked();
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        return [];
+      });
+    });
+
+    let pending!: Promise<boolean>;
+    await act(async () => {
+      pending = h.rendered.result.current.startTurn("Remember this");
+      await asked;
+    });
+
+    host.completePermission.mockRejectedValue(
+      new Error("unknown or expired permission request"),
+    );
+    await act(async () => {
+      await h.rendered.result.current.respondPermission("allow_once");
+    });
+
+    const last = h.session(h.a.id).messages.at(-1)!;
+    expect(last.content).not.toContain("Nothing was written");
+    expect(last.content).toMatch(/cannot confirm what happened/i);
+
+    release();
+    await act(async () => {
+      await pending;
+    });
+  });
+});

@@ -84,7 +84,12 @@ export function App() {
       shell.completeSplash();
     }
   }, [shell.launchPhase, shell.completeSplash]);
-  const sessionsApi = useChatSessions();
+  // Drafts are owned above the pane switch that unmounts ChatPane, so a draft
+  // belongs to its conversation and survives a trip to Help, Memory, or
+  // Archive. Declared before the session store because "New chat" must know
+  // whether a blank chat is holding unsent text before it reuses it.
+  const drafts = useComposerDrafts();
+  const sessionsApi = useChatSessions({ hasDraft: drafts.hasDraft });
   const {
     sessions,
     setSessions,
@@ -112,9 +117,6 @@ export function App() {
       setSessions,
     });
   const linkedCorpusPending = pendingSessionIds.has(resolvedSessionId);
-  // Owned above the pane switch that unmounts ChatPane, so a draft belongs to
-  // its conversation and survives a trip to Help, Memory, or Archive.
-  const drafts = useComposerDrafts();
   const { retainSessions } = drafts;
   useEffect(() => {
     // Trashing a chat must not leave its draft behind for a recycled id.
@@ -855,18 +857,39 @@ export function App() {
                   },
                   hasAuthorizedWorkspaceContent,
                   externalSeedRequest: wizardSeedRequest,
-                  draft: drafts.draftFor(resolvedSessionId),
-                  onDraftChange: (text: string) =>
-                    drafts.setDraft(resolvedSessionId, text),
+                  // Before a session id exists there is nowhere to key a draft,
+                  // and a controlled empty string would swallow every
+                  // keystroke — fall back to the composer's own state.
+                  draft: resolvedSessionId
+                    ? drafts.draftFor(resolvedSessionId)
+                    : undefined,
+                  onDraftChange: resolvedSessionId
+                    ? (text: string) => drafts.setDraft(resolvedSessionId, text)
+                    : undefined,
+                  onSeedConsumed: (seedId: number) => {
+                    // Retire the wizard seed so a later ChatPane remount cannot
+                    // replay it over the user's draft, or into another chat.
+                    setWizardSeedRequest((cur) =>
+                      cur?.id === seedId ? null : cur,
+                    );
+                  },
                   onRetryModelTools: async (model) => {
                     // Clear the learned rejection for this exact pair, then
                     // re-list so the picker reflects measured truth again.
-                    await hostSetModelToolsEnabled({
-                      providerId: model.provider_id,
-                      modelId: model.id,
-                      toolsEnabled: true,
-                    });
-                    await shell.refreshChatModels();
+                    try {
+                      await hostSetModelToolsEnabled({
+                        providerId: model.provider_id,
+                        modelId: model.id,
+                        toolsEnabled: true,
+                      });
+                      await shell.refreshChatModels();
+                    } catch (error) {
+                      turn.setAgentError(
+                        `Could not re-enable tools for ${model.provider_label} · ${model.label}: ${
+                          error instanceof Error ? error.message : String(error)
+                        }`,
+                      );
+                    }
                   },
                   setPane: (p) => shell.setPane(p),
                   chatScrollRef,

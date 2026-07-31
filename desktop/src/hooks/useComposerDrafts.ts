@@ -13,6 +13,8 @@ import { useCallback, useMemo, useState } from "react";
 export type ComposerDrafts = {
   /** Draft for one conversation; empty string when there is none. */
   draftFor: (sessionId: string) => string;
+  /** Whether a conversation is holding unsent text. */
+  hasDraft: (sessionId: string) => boolean;
   setDraft: (sessionId: string, text: string) => void;
   clearDraft: (sessionId: string) => void;
   /** Drop drafts for conversations that no longer exist. */
@@ -24,6 +26,11 @@ export function useComposerDrafts(): ComposerDrafts {
 
   const draftFor = useCallback(
     (sessionId: string) => (sessionId ? (drafts[sessionId] ?? "") : ""),
+    [drafts],
+  );
+
+  const hasDraft = useCallback(
+    (sessionId: string) => Boolean(sessionId && (drafts[sessionId] ?? "").trim()),
     [drafts],
   );
 
@@ -64,7 +71,7 @@ export function useComposerDrafts(): ComposerDrafts {
 
   // Stable identity so callers can depend on it in effects without looping.
   return useMemo(
-    () => ({ draftFor, setDraft, clearDraft, retainSessions }),
-    [draftFor, setDraft, clearDraft, retainSessions],
+    () => ({ draftFor, hasDraft, setDraft, clearDraft, retainSessions }),
+    [draftFor, hasDraft, setDraft, clearDraft, retainSessions],
   );
 }
