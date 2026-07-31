@@ -4,20 +4,23 @@ mod log_lab_generator;
 use async_trait::async_trait;
 use cd_core::agent::{run_agent_turn, AgentOptions, ChatBackend, LogExplorerTurnContext};
 use cd_core::chat::{ChatCompletion, ChatMessage, FunctionCall, ToolCallMsg};
+use cd_core::embed::ConceptEmbedBackend;
 use cd_core::error::CoreResult;
 use cd_core::events::{StreamEvent, ToolPhase};
 use cd_core::index::KeywordIndex;
 use cd_core::investigations::InvestigationStore;
 use cd_core::log_analysis::{
     activate_template_suppression, add_line_bookmark, cluster_problems, export_corpus_zip,
-    import_corpus_zip_path, ingest_path, ingest_path_with_observer, list_bookmarks,
-    load_suppression_document, mutate_template_suppression_rule, preview_template_suppression,
-    query_event_count, query_event_neighborhood, query_event_rows, query_events, query_facets,
-    query_shared_timeline_summary, query_source_catalog, query_timeline_summary, search_events,
-    search_events_advanced, timeline, ActivateSuppressionPreview, EventNeighborhoodQuery,
-    EventQuery, EventSearchQuery, LogCorpus, LogSourceCatalogQuery, NewSuppressionPreview,
+    import_corpus_zip_path, ingest_path, ingest_path_with_observer, ingest_path_with_policy,
+    list_bookmarks, load_suppression_document, mutate_template_suppression_rule,
+    preview_template_suppression, query_event_count, query_event_neighborhood, query_event_rows,
+    query_events, query_facets, query_shared_timeline_summary, query_source_catalog,
+    query_timeline_summary, search_events, search_events_advanced, timeline,
+    ActivateSuppressionPreview, EmbeddingState, EventNeighborhoodQuery, EventQuery,
+    EventSearchQuery, LogCorpus, LogEmbedPolicy, LogSourceCatalogQuery, NewSuppressionPreview,
     SearchMatchMode, SharedTimelineSummaryQuery, SuppressionRuleMutation, SuppressionRuleOrigin,
-    TimeQuality, TimelineSummaryQuery, MAX_EVENT_PAGE, MAX_REGEX_SCAN_EVENTS,
+    TimeQuality, TimelineSummaryQuery, LOCAL_EMBED_DEFER_SOURCE_BYTES, MAX_EVENT_PAGE,
+    MAX_REGEX_SCAN_EVENTS, TRIAGE_STRESS_250K_SOURCE_BYTES,
 };
 use cd_core::process_progress::{
     CancelFlag, ProcessProgress, ProcessProgressObserver, RecordingProcessProgress,
@@ -1046,13 +1049,62 @@ async fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
     let cache = workspace.path().join("cache");
     let import_root = generated.join("scenarios/triage-stress/import");
     let import_started = Instant::now();
-    let report = ingest_path(&cache, &import_root, "triage-stress-250k", None, "none").unwrap();
+    // Production embedding policy (#824): local SoftWrite with real backend
+    // available; optional embed must defer past first use for this corpus.
+    let policy = LogEmbedPolicy::local_default();
+    let backend = std::sync::Arc::new(ConceptEmbedBackend::new(32));
+    let report = ingest_path_with_policy(
+        &cache,
+        &import_root,
+        "triage-stress-250k",
+        &policy,
+        Some(backend),
+    )
+    .unwrap();
     let import_ms = import_started.elapsed().as_millis();
     assert_eq!(report.stats.lines, DEFAULT_TRIAGE_STRESS_EVENT_COUNT as u64);
     assert_eq!(report.stats.files as usize, TRIAGE_STRESS_SOURCE_COUNT);
     assert_eq!(
         report.stats.templates as usize,
         TRIAGE_STRESS_PARSER_TEMPLATE_COUNT
+    );
+    assert_eq!(
+        report.stats.source_bytes, TRIAGE_STRESS_250K_SOURCE_BYTES,
+        "authoritative streamed source-byte identity for packaged 250k path"
+    );
+    assert!(
+        report.stats.source_bytes > LOCAL_EMBED_DEFER_SOURCE_BYTES,
+        "250k must cross production defer threshold"
+    );
+    assert_eq!(
+        report.embedding.state,
+        EmbeddingState::Deferred,
+        "production policy must defer optional embed past first use for 250k"
+    );
+    assert!(
+        report.phase_timings.embedding_deferred,
+        "phase timings must record deferred optional embedding"
+    );
+    assert_eq!(
+        report.phase_timings.optional_embedding_ms, 0,
+        "deferred embed must not burn wall time as if it ran"
+    );
+    // Severity identity from product generator (prescribed counts).
+    assert_eq!(
+        report.stats.level_counts.get("error").copied().unwrap_or(0),
+        45_000
+    );
+    assert_eq!(
+        report.stats.level_counts.get("warn").copied().unwrap_or(0),
+        37_500
+    );
+    assert_eq!(
+        report.stats.level_counts.get("debug").copied().unwrap_or(0),
+        7_500
+    );
+    assert_eq!(
+        report.stats.level_counts.get("info").copied().unwrap_or(0),
+        160_000
     );
 
     let cold_open_started = Instant::now();
@@ -1422,11 +1474,21 @@ async fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
     );
 
     eprintln!(
-        "PASS triage-stress-250k events={} files={} templates={} source_bytes={} generation_ms={} import_ms={} cold_open_ms={} summary_ms={} first_rows_ms={} exact_count_ms={} facets_ms={} source_catalog_ms={} bookmarks_ms={} investigation_ms={} shared_timeline_ms={} agent_timeline_ms={} cluster_ms={} broad_triage_ms={} linked_agent_ms={} broad_triage_bytes={} broad_triage_identities={} suppression_template_id={} suppression_hidden={} suppression_preview_ms={} suppression_activate_ms={} suppression_rows_ms={} suppression_count_ms={} suppression_facets_ms={} suppression_timeline_ms={} suppression_disable_ms={} tree_sha256={} (one-machine observation; not a universal claim)",
+        "PASS triage-stress-250k events={} files={} templates={} source_bytes={} embedding_state={:?} embedding_deferred={} total_ms={} discover_read_ms={} parse_frame_ms={} template_analysis_ms={} persist_index_ms={} optional_embedding_ms={} validation_ms={} publication_ms={} generation_ms={} import_ms={} cold_open_ms={} summary_ms={} first_rows_ms={} exact_count_ms={} facets_ms={} source_catalog_ms={} bookmarks_ms={} investigation_ms={} shared_timeline_ms={} agent_timeline_ms={} cluster_ms={} broad_triage_ms={} linked_agent_ms={} broad_triage_bytes={} broad_triage_identities={} suppression_template_id={} suppression_hidden={} suppression_preview_ms={} suppression_activate_ms={} suppression_rows_ms={} suppression_count_ms={} suppression_facets_ms={} suppression_timeline_ms={} suppression_disable_ms={} tree_sha256={} (one-machine observation; not a universal claim)",
         report.stats.lines,
         report.stats.files,
         report.stats.templates,
         report.stats.source_bytes,
+        report.embedding.state,
+        report.phase_timings.embedding_deferred,
+        report.phase_timings.total_ms,
+        report.phase_timings.discover_read_ms,
+        report.phase_timings.parse_frame_ms,
+        report.phase_timings.template_analysis_ms,
+        report.phase_timings.persist_index_ms,
+        report.phase_timings.optional_embedding_ms,
+        report.phase_timings.validation_ms,
+        report.phase_timings.publication_ms,
         generation_ms,
         import_ms,
         cold_open_ms,
