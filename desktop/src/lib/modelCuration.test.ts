@@ -208,6 +208,16 @@ describe("large inventories stay bounded", () => {
     expect(view.truncated).toBe(many.length - 5);
   });
 
+  it("caps the hidden band too, so Show hidden cannot dump the inventory", () => {
+    const manyHidden = Array.from({ length: 400 }, (_, i) =>
+      model("gw", `h-${i}`, { hidden: true, hidden_by: "model" }),
+    );
+    const view = curateModels(manyHidden, { includeHidden: true, limit: 10 });
+    expect(view.hidden).toHaveLength(10);
+    expect(view.truncated).toBe(390);
+    expect(view.hiddenCount).toBe(400);
+  });
+
   it("search narrows a large inventory to a usable list", () => {
     const view = curateModels(many, { query: "model-0042" });
     expect(keysOf(view.available)).toEqual(["gw::model-0042"]);

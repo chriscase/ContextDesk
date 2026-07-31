@@ -427,3 +427,162 @@ describe("honest failures", () => {
     expect(row.textContent).toMatch(/tools unavailable/i);
   });
 });
+
+describe("curation reaches the rest of the app", () => {
+  it("tells the app to re-list its pickers after a hide", async () => {
+    const onCurationChanged = vi.fn();
+    host.list.mockResolvedValue(INVENTORY);
+    render(<ModelVisibilityPanel onCurationChanged={onCurationChanged} />);
+    await waitFor(() => expect(host.summary).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Manage…" }));
+    await screen.findByRole("dialog", { name: "Model visibility" });
+
+    const rows = screen.getAllByRole("listitem");
+    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Hide" }));
+
+    // Without this the main composer keeps offering the hidden model until an
+    // unrelated AI-setup save or an app restart — the feature would look broken.
+    await waitFor(() => expect(onCurationChanged).toHaveBeenCalled());
+  });
+
+  it("tells the app after a pin too", async () => {
+    const onCurationChanged = vi.fn();
+    host.list.mockResolvedValue(INVENTORY);
+    render(<ModelVisibilityPanel onCurationChanged={onCurationChanged} />);
+    await waitFor(() => expect(host.summary).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Manage…" }));
+    await screen.findByRole("dialog", { name: "Model visibility" });
+
+    const rows = screen.getAllByRole("listitem");
+    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Pin" }));
+
+    await waitFor(() => expect(onCurationChanged).toHaveBeenCalled());
+  });
+
+  it("does not announce a change that failed", async () => {
+    const onCurationChanged = vi.fn();
+    host.list.mockResolvedValue(INVENTORY);
+    host.setModelHidden.mockRejectedValue(new Error("config is read-only"));
+    render(<ModelVisibilityPanel onCurationChanged={onCurationChanged} />);
+    await waitFor(() => expect(host.summary).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Manage…" }));
+    await screen.findByRole("dialog", { name: "Model visibility" });
+
+    const rows = screen.getAllByRole("listitem");
+    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Hide" }));
+
+    await screen.findByRole("alert");
+    expect(onCurationChanged).not.toHaveBeenCalled();
+  });
+});
+
+describe("keyboard and focus", () => {
+  it("moves focus into the panel on open and back to the trigger on close", async () => {
+    await openPanel();
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByLabelText("Search models")),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "Manage…" }),
+      ),
+    );
+  });
+
+  it("closes on Escape and returns focus", async () => {
+    await openPanel();
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Model visibility" }),
+      ).toBeNull(),
+    );
+  });
+
+  it("Escape cancels a pending confirmation before it closes the panel", async () => {
+    await openPanel();
+    host.preview.mockResolvedValue(
+      impact({
+        affects_default: true,
+        replacement_key: "gw::gpt-4o",
+        replacement_label: "Gateway · gpt-4o",
+        remaining_visible: 2,
+      }),
+    );
+    const rows = screen.getAllByRole("listitem");
+    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Hide" }));
+    await screen.findByRole("alert");
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    // The decision is dismissed; the panel itself stays open.
+    await screen.findByText("No change was made.");
+    expect(
+      screen.getByRole("dialog", { name: "Model visibility" }),
+    ).toBeTruthy();
+    expect(host.setModelHidden).not.toHaveBeenCalled();
+  });
+
+  it("keeps row actions out of the tab order for inactive rows", async () => {
+    await openPanel();
+    const rows = screen.getAllByRole("listitem");
+    const firstPin = within(rows[0]!).getByRole("button", { name: "Pin" });
+    const secondPin = within(rows[1]!).getByRole("button", { name: "Pin" });
+
+    // Otherwise Tab walks three buttons per row through the whole inventory.
+    expect(firstPin.tabIndex).toBe(0);
+    expect(secondPin.tabIndex).toBe(-1);
+  });
+
+  it("locks the list while a replacement decision is pending", async () => {
+    await openPanel();
+    host.preview.mockResolvedValue(
+      impact({
+        affects_default: true,
+        replacement_key: "gw::gpt-4o",
+        replacement_label: "Gateway · gpt-4o",
+        remaining_visible: 2,
+      }),
+    );
+    const rows = screen.getAllByRole("listitem");
+    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Hide" }));
+    await screen.findByRole("alert");
+
+    // A second change now would confirm against a stale replacement.
+    expect(
+      within(screen.getAllByRole("listitem")[1]!).getByRole("button", {
+        name: "Hide",
+      }),
+    ).toHaveProperty("disabled", true);
+  });
+});
+
+describe("confirmation copy matches the operation", () => {
+  it("says Restoring, not Hiding, when restoring", async () => {
+    await openPanel([
+      model("ollama", "mistral", { is_default: true }),
+      model("ollama", "llama3", { hidden: true, hidden_by: "model" }),
+    ]);
+    fireEvent.click(screen.getByLabelText(/Show hidden/));
+    host.preview.mockResolvedValue(
+      impact({
+        affects_default: true,
+        replacement_key: "ollama::llama3",
+        replacement_label: "Ollama (local) · llama3",
+        remaining_visible: 2,
+      }),
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toMatch(/Restoring/);
+    expect(alert.textContent).not.toMatch(/Hiding/);
+    expect(
+      screen.getByRole("button", { name: /Restore and use that default/i }),
+    ).toBeTruthy();
+  });
+});

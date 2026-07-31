@@ -273,6 +273,14 @@ export function Composer({
             </label>
           ) : null}
 
+          {curated.truncated > 0 ? (
+            <span className="composer__capability" role="status">
+              {curated.truncated} more model
+              {curated.truncated === 1 ? "" : "s"} not listed — narrow the
+              inventory in Settings → AI
+            </span>
+          ) : null}
+
           {selectValue && onSetDefaultModel && !selectedIsDefault ? (
             <button
               type="button"

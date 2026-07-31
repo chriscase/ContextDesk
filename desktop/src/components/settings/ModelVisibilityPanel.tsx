@@ -36,7 +36,16 @@ type PendingChange = {
   impact: CurationImpactDto;
 };
 
-export function ModelVisibilityPanel() {
+type Props = {
+  /**
+   * Called after any committed curation change so the app re-lists its model
+   * pickers. Without it, hiding a model has no visible effect in the main
+   * window until the next AI-setup save or app restart (#678).
+   */
+  onCurationChanged?: () => void | Promise<void>;
+};
+
+export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
   const baseId = useId();
   const [open, setOpen] = useState(false);
   const [models, setModels] = useState<ModelOptionDto[]>([]);
@@ -50,6 +59,7 @@ export function ModelVisibilityPanel() {
   const [activeIndex, setActiveIndex] = useState(0);
   const listRef = useRef<HTMLUListElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
   /** Discards responses from a superseded reload. */
   const loadTicketRef = useRef(0);
 
@@ -134,6 +144,7 @@ export function ModelVisibilityPanel() {
         setPending(null);
         await reload();
         setSummary(await hostGetCurationSummary());
+        await onCurationChanged?.();
         setNote(
           change.hidden
             ? `${change.label} is hidden from ordinary pickers. Nothing was deleted.`
@@ -147,7 +158,7 @@ export function ModelVisibilityPanel() {
         setBusy(false);
       }
     },
-    [reload],
+    [reload, onCurationChanged],
   );
 
   /** Ask the host what a change would do before writing anything. */
@@ -199,12 +210,44 @@ export function ModelVisibilityPanel() {
       });
       await reload();
       setSummary(await hostGetCurationSummary());
+      await onCurationChanged?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
   };
+
+  const closePanel = useCallback(() => {
+    setOpen(false);
+    setPending(null);
+    setNote(null);
+    window.requestAnimationFrame(() => triggerRef.current?.focus());
+  }, []);
+
+  // Escape closes, and opening moves focus into the panel rather than leaving
+  // it on a trigger that is no longer rendered.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      // A pending confirmation is the topmost decision; cancel that first.
+      if (pending) {
+        setPending(null);
+        setNote("No change was made.");
+        return;
+      }
+      closePanel();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, pending, closePanel]);
+
+  useEffect(() => {
+    if (!open) return;
+    window.requestAnimationFrame(() => searchRef.current?.focus());
+  }, [open]);
 
   const summaryText = summary
     ? [
@@ -265,6 +308,7 @@ export function ModelVisibilityPanel() {
           <span className="field__label">Search models</span>
           <input
             id={`${dialogId}-search`}
+            ref={searchRef}
             className="field__control"
             type="search"
             value={query}
@@ -301,11 +345,15 @@ export function ModelVisibilityPanel() {
           <strong>This changes the default for new chats.</strong>{" "}
           {pending.impact.replacement_label ? (
             <>
-              Hiding {pending.label} will make{" "}
-              <strong>{pending.impact.replacement_label}</strong> the default.
+              {pending.hidden ? "Hiding" : "Restoring"} {pending.label} will
+              make <strong>{pending.impact.replacement_label}</strong> the
+              default.
             </>
           ) : (
-            <>Hiding {pending.label} leaves no default available.</>
+            <>
+              {pending.hidden ? "Hiding" : "Restoring"} {pending.label} leaves
+              no default available.
+            </>
           )}
           <div className="workspace-root-actions">
             <button
@@ -330,7 +378,7 @@ export function ModelVisibilityPanel() {
                 )
               }
             >
-              Hide and use that default
+              {pending.hidden ? "Hide" : "Restore"} and use that default
             </button>
           </div>
         </div>
@@ -377,11 +425,18 @@ export function ModelVisibilityPanel() {
                     {!m.tools_enabled ? " · tools unavailable" : ""}
                   </span>
                 </div>
+                {/*
+                  Roving tabindex: the action buttons follow their row out of
+                  the tab order, so Tab moves past the list instead of through
+                  three buttons per row. Arrows move between rows; the row's
+                  own actions are reached by Tab once that row is active.
+                */}
                 <div className="model-visibility__row-actions">
                   <button
                     type="button"
                     className="btn btn--ghost btn--sm"
-                    disabled={busy || m.hidden}
+                    tabIndex={index === activeIndex ? 0 : -1}
+                    disabled={busy || m.hidden || pending !== null}
                     aria-pressed={pinned}
                     title={
                       m.hidden
@@ -402,7 +457,8 @@ export function ModelVisibilityPanel() {
                     <button
                       type="button"
                       className="btn btn--ghost btn--sm"
-                      disabled={busy}
+                      tabIndex={index === activeIndex ? 0 : -1}
+                      disabled={busy || pending !== null}
                       onClick={() =>
                         void requestChange({
                           kind: "model",
@@ -419,7 +475,8 @@ export function ModelVisibilityPanel() {
                   <button
                     type="button"
                     className="btn btn--ghost btn--sm"
-                    disabled={busy}
+                    tabIndex={index === activeIndex ? 0 : -1}
+                    disabled={busy || pending !== null}
                     title="Hide or restore every model from this provider"
                     onClick={() =>
                       void requestChange({
@@ -452,12 +509,7 @@ export function ModelVisibilityPanel() {
         <button
           type="button"
           className="btn btn--ghost"
-          onClick={() => {
-            setOpen(false);
-            setPending(null);
-            setNote(null);
-            window.requestAnimationFrame(() => triggerRef.current?.focus());
-          }}
+          onClick={closePanel}
         >
           Done
         </button>

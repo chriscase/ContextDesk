@@ -5655,6 +5655,15 @@ async fn curation_impact(
         .find(|m| m.is_default)
         .map(|m| m.selection_key.clone());
 
+    // Whether the default is offered *now*, before the change. If it is already
+    // curated away, this change did not do that, and demanding a replacement
+    // would make every unrelated action — including a restore — re-point the
+    // user's default as a side effect.
+    let default_was_visible = default_key
+        .as_ref()
+        .map(|k| before.iter().any(|m| &m.selection_key == k && !m.hidden))
+        .unwrap_or(false);
+
     let after = build_model_options(next, secrets).await;
     let visible: Vec<&ModelOptionDto> = after.iter().filter(|m| !m.hidden).collect();
     let default_still_visible = default_key
@@ -5664,7 +5673,8 @@ async fn curation_impact(
     let replacement = visible.first();
 
     CurationImpactDto {
-        affects_default: default_key.is_some() && !default_still_visible,
+        // A property of the delta, not of the end state.
+        affects_default: default_was_visible && !default_still_visible,
         replacement_key: replacement.map(|m| m.selection_key.clone()),
         replacement_label: replacement.map(|m| format!("{} · {}", m.provider_label, m.label)),
         remaining_visible: visible.len() as u32,
@@ -5748,7 +5758,18 @@ async fn set_model_hidden(
     next.model_curation
         .set_model_hidden(&profile, &model_id, hidden);
     let impact = curation_impact(&cfg, &state.secrets, &next).await;
-    apply_curation(state, next, &impact, accept_replacement).await?;
+    let target = provider_id.clone();
+    let model = model_id.clone();
+    apply_curation(state, &impact, accept_replacement, move |fresh| {
+        // Re-resolve against the current config: the profile could have been
+        // edited or removed while discovery ran.
+        let profile = profile_by_id(fresh, &target)?.clone();
+        fresh
+            .model_curation
+            .set_model_hidden(&profile, &model, hidden);
+        Ok(())
+    })
+    .await?;
     Ok(impact)
 }
 
@@ -5768,7 +5789,13 @@ async fn set_provider_hidden(
     let mut next = cfg.clone();
     next.model_curation.set_provider_hidden(&profile, hidden);
     let impact = curation_impact(&cfg, &state.secrets, &next).await;
-    apply_curation(state, next, &impact, accept_replacement).await?;
+    let target = provider_id.clone();
+    apply_curation(state, &impact, accept_replacement, move |fresh| {
+        let profile = profile_by_id(fresh, &target)?.clone();
+        fresh.model_curation.set_provider_hidden(&profile, hidden);
+        Ok(())
+    })
+    .await?;
     Ok(impact)
 }
 
@@ -5841,28 +5868,42 @@ fn curation_decision(
 }
 
 /// Commit a curation change, enforcing the replacement contract.
+///
+/// `mutate` is applied to a **freshly read** configuration, not to the snapshot
+/// the impact was computed from. Computing the impact performs live provider
+/// discovery and can take seconds; writing that stale snapshot back would
+/// silently revert anything saved meanwhile — a learned tool rejection from a
+/// concurrent turn, a context-budget update, a provider edit.
 async fn apply_curation(
     state: State<'_, AppState>,
-    mut next: AppConfig,
     impact: &CurationImpactDto,
     accept_replacement: Option<String>,
+    mutate: impl FnOnce(&mut AppConfig) -> Result<(), String>,
 ) -> Result<(), String> {
-    match curation_decision(impact, accept_replacement.as_deref()) {
-        CurationDecision::Reject(message) => return Err(message),
-        CurationDecision::Apply => {}
-        CurationDecision::ApplyWithDefault(replacement) => {
-            let (pid, model) = parse_selection_key(&replacement);
-            next.default_chat_model = Some(model);
-            if let Some(pid) = pid {
-                if next.providers.profiles.iter().any(|p| p.id == pid) {
-                    next.providers.active_id = Some(pid);
-                }
+    let decision = curation_decision(impact, accept_replacement.as_deref());
+    if let CurationDecision::Reject(message) = decision {
+        return Err(message);
+    }
+
+    let mut cfg = state.config.lock().expect("config").clone();
+    mutate(&mut cfg)?;
+    if let CurationDecision::ApplyWithDefault(replacement) = decision {
+        let (pid, model) = parse_selection_key(&replacement);
+        cfg.default_chat_model = Some(model.clone());
+        if let Some(pid) = pid {
+            if let Some(profile) = cfg.providers.profiles.iter_mut().find(|p| p.id == pid) {
+                // Keep the profile's own model in step. resolve_default_model
+                // falls back to profile.chat_model, so leaving it pointing at
+                // the choice we just hid would reintroduce it as the default.
+                profile.chat_model = model;
+                let pid = profile.id.clone();
+                cfg.providers.active_id = Some(pid);
             }
         }
     }
     let path = config_path(&state.branding).map_err(|e| e.to_string())?;
-    save_config(&path, &next).map_err(|e| e.to_string())?;
-    *state.config.lock().expect("config") = next;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    *state.config.lock().expect("config") = cfg;
     Ok(())
 }
 

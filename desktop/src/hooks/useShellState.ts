@@ -198,11 +198,17 @@ export function useShellState() {
     }
   }, [setup.baseUrl, setup.providerKind]);
 
-  /** Re-list chat models for the composer picker (after AI setup save). */
-  const refreshChatModels = useCallback(async () => {
+  /**
+   * Re-list chat models for the composer picker.
+   *
+   * `keepKeys` carries the conversation's current selection so a chat pinned to
+   * a curated-away model still gets an option for it rather than silently
+   * rendering someone else's model (#678).
+   */
+  const refreshChatModels = useCallback(async (keepKeys?: readonly string[]) => {
     try {
       const [listed, def] = await Promise.all([
-        hostListChatModels(),
+        hostListChatModels({ keepKeys }),
         hostGetDefaultChatModel(),
       ]);
       setModelOptions(listed);

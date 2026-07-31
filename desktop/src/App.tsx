@@ -683,6 +683,13 @@ export function App() {
             onClose={() => shell.closeSettings(() => {})}
             onSaveSetup={shell.onSaveSetup}
             onRecheckHost={shell.refreshHostPreflight}
+          onCurationChanged={() =>
+            // Keep the conversation's own model listed even if it was just
+            // curated away, so the picker never silently shows a different one.
+            shell.refreshChatModels(
+              effectiveModelKey ? [effectiveModelKey] : undefined,
+            )
+          }
             hostReport={shell.hostPreflightReport}
           />
         </div>

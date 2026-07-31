@@ -45,6 +45,8 @@ type Props = {
   onClose: () => void;
   onSaveSetup: (next: AppSetupState) => void;
   onRecheckHost?: () => void | Promise<void>;
+  /** Curated model visibility changed — re-list the pickers (#678). */
+  onCurationChanged?: () => void | Promise<void>;
   hostReport?: PreflightReport | null;
   /** Leave Settings and open a contextual bundled Help page. */
   onOpenHelp?: (pageId: string) => void;
@@ -94,6 +96,7 @@ export function SettingsModal({
   onClose,
   onSaveSetup,
   onRecheckHost,
+  onCurationChanged,
   hostReport,
   onOpenHelp,
 }: Props) {
@@ -213,6 +216,7 @@ export function SettingsModal({
                 recheck={c.recheck}
                 checking={c.checking}
                 onApplyAndSave={c.applyAndSaveAi}
+                onCurationChanged={onCurationChanged}
               />
             ) : null}
 
