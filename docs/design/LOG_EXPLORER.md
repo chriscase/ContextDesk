@@ -221,11 +221,18 @@ blocks action until refresh.
 (`InvestigationPolicyBindingStatus`, schema version 4), and the display and
 Apply-gating contract in
 [`policyBinding.ts`](../../desktop/src/lib/logExplorer/policyBinding.ts).
-Residual: four states — target missing, fingerprint changed, conflicting
-predicates, and a legacy unbound finding — cannot be produced through the
-shipped UI and are exercised through deterministic test-support fixture
-packages. Invalid predicates remain automated-only because production
-validation rejects importing them.
+**Ordinary use cannot create these historical states.** Re-analysis does not
+reparse events, so template identity never moves; and activation rejects a
+duplicate predicate outright. A stale, conflicting, or unbound record is
+therefore something a corpus *arrives* carrying, not something the product can
+be driven into. Four such states — target missing, fingerprint changed,
+conflicting predicates, and a legacy unbound finding — are exercised through
+deterministic, bounded, `TEST-FIXTURE`-identified acceptance artifacts built
+from typed production structures and consumed by the ordinary release importer
+and loader, which re-derive resolution rather than trusting fixture metadata.
+No production UI, command, capability, or release backdoor exists for creating
+them. Invalid predicates remain automated-only because production validation
+rejects importing them.
 
 A corpus revision can change template identity — re-analysis, a timezone
 declaration, package import. Two durable records must survive that without

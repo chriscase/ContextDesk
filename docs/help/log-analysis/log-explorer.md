@@ -161,6 +161,13 @@ Re-analysis, a timezone declaration, and package import can all change which
 templates a corpus contains. A durable noise rule and a durable finding must
 survive that without quietly changing meaning.
 
+These states usually arrive with imported evidence rather than appearing during
+ordinary work: local re-analysis does not reparse events, so template identity
+does not move, and ContextDesk refuses to create a second rule for a template
+that already has one. You are most likely to see a stale or conflicting rule
+after importing a package built on another machine, or a legacy finding recorded
+before noise policy was captured.
+
 **A rule whose target is gone stays visible.** It remains in the rule list and
 in the audit, labeled **stale — matches nothing**, and it hides zero events.
 ContextDesk does not delete it for you, because the rule and its recorded
