@@ -102,6 +102,7 @@ function renderCompletedTurn(citationId: string) {
       upgradeTitleWithLlm: vi.fn(async () => undefined),
       pinScrollToEnd: vi.fn(),
       refreshMemory: vi.fn(async () => undefined),
+      refreshChatModels: vi.fn(async () => undefined),
       setSourcePath,
       setSourceContent,
       setPaneChat: vi.fn(),

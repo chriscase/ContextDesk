@@ -43,6 +43,7 @@ pub mod mcp_client;
 pub mod memory;
 pub mod memory_fs;
 pub mod model_context;
+pub mod model_curation;
 pub mod model_role_hints;
 pub mod module_registry;
 pub mod modules;

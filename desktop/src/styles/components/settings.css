@@ -790,3 +790,91 @@
   margin-top: 8px;
   word-break: break-word;
 }
+
+/* Curated model visibility (#678) — progressive disclosure: ordinary Settings
+   shows a count, the inventory lives behind Manage. */
+.model-visibility {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--border-soft);
+}
+
+.model-visibility__summary {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.model-visibility__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.model-visibility__search {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+/* Bounded: a gateway can list thousands, so the panel scrolls internally
+   rather than growing the Settings page. */
+.model-visibility__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: min(22rem, 50vh);
+  overflow-y: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+}
+
+.model-visibility__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.model-visibility__row:last-child {
+  border-bottom: 0;
+}
+
+.model-visibility__row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 12rem;
+  border-radius: var(--radius-sm);
+}
+
+.model-visibility__row-main[data-hidden="true"] .model-visibility__name {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+.model-visibility__name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-visibility__row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+}

@@ -23,6 +23,7 @@ import { Titlebar } from "./components/shell/Titlebar";
 import { Workspace } from "./components/shell/Workspace";
 import { useChatScroll } from "./hooks/useChatScroll";
 import { useChatSessions } from "./hooks/useChatSessions";
+import { useComposerDrafts } from "./hooks/useComposerDrafts";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useLinkedCorpusAttachment } from "./hooks/useLinkedCorpusAttachment";
 import { useShellState } from "./hooks/useShellState";
@@ -32,6 +33,7 @@ import {
   hostOpenExternalUrl,
   hostSaveCompositionDraft,
   hostSetDefaultChatModel,
+  hostSetModelToolsEnabled,
   hostWriteMemory,
   modelSelectionKey,
   parseModelSelectionKey,
@@ -82,7 +84,12 @@ export function App() {
       shell.completeSplash();
     }
   }, [shell.launchPhase, shell.completeSplash]);
-  const sessionsApi = useChatSessions();
+  // Drafts are owned above the pane switch that unmounts ChatPane, so a draft
+  // belongs to its conversation and survives a trip to Help, Memory, or
+  // Archive. Declared before the session store because "New chat" must know
+  // whether a blank chat is holding unsent text before it reuses it.
+  const drafts = useComposerDrafts();
+  const sessionsApi = useChatSessions({ hasDraft: drafts.hasDraft });
   const {
     sessions,
     setSessions,
@@ -110,6 +117,11 @@ export function App() {
       setSessions,
     });
   const linkedCorpusPending = pendingSessionIds.has(resolvedSessionId);
+  const { retainSessions } = drafts;
+  useEffect(() => {
+    // Trashing a chat must not leave its draft behind for a recycled id.
+    retainSessions(sessions.map((s) => s.id));
+  }, [sessions, retainSessions]);
 
   const [archiveRefreshKey, setArchiveRefreshKey] = useState(0);
   const [renameTarget, setRenameTarget] = useState<{
@@ -223,6 +235,7 @@ export function App() {
     upgradeTitleWithLlm,
     pinScrollToEnd,
     refreshMemory: shell.refreshMemory,
+    refreshChatModels: shell.refreshChatModels,
     setSourcePath: shell.setSourcePath,
     setSourceContent: shell.setSourceContent,
     setPaneChat: () => shell.setPane("chat"),
@@ -671,6 +684,13 @@ export function App() {
             onClose={() => shell.closeSettings(() => {})}
             onSaveSetup={shell.onSaveSetup}
             onRecheckHost={shell.refreshHostPreflight}
+          onCurationChanged={() =>
+            // Keep the conversation's own model listed even if it was just
+            // curated away, so the picker never silently shows a different one.
+            shell.refreshChatModels(
+              effectiveModelKey ? [effectiveModelKey] : undefined,
+            )
+          }
             hostReport={shell.hostPreflightReport}
           />
         </div>
@@ -845,6 +865,40 @@ export function App() {
                   },
                   hasAuthorizedWorkspaceContent,
                   externalSeedRequest: wizardSeedRequest,
+                  // Before a session id exists there is nowhere to key a draft,
+                  // and a controlled empty string would swallow every
+                  // keystroke — fall back to the composer's own state.
+                  draft: resolvedSessionId
+                    ? drafts.draftFor(resolvedSessionId)
+                    : undefined,
+                  onDraftChange: resolvedSessionId
+                    ? (text: string) => drafts.setDraft(resolvedSessionId, text)
+                    : undefined,
+                  onSeedConsumed: (seedId: number) => {
+                    // Retire the wizard seed so a later ChatPane remount cannot
+                    // replay it over the user's draft, or into another chat.
+                    setWizardSeedRequest((cur) =>
+                      cur?.id === seedId ? null : cur,
+                    );
+                  },
+                  onRetryModelTools: async (model) => {
+                    // Clear the learned rejection for this exact pair, then
+                    // re-list so the picker reflects measured truth again.
+                    try {
+                      await hostSetModelToolsEnabled({
+                        providerId: model.provider_id,
+                        modelId: model.id,
+                        toolsEnabled: true,
+                      });
+                      await shell.refreshChatModels();
+                    } catch (error) {
+                      turn.setAgentError(
+                        `Could not re-enable tools for ${model.provider_label} · ${model.label}: ${
+                          error instanceof Error ? error.message : String(error)
+                        }`,
+                      );
+                    }
+                  },
                   setPane: (p) => shell.setPane(p),
                   chatScrollRef,
                   onChatScroll,

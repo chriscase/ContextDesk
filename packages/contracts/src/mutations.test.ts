@@ -107,6 +107,14 @@ const MUTATIONS: Record<string, Mutation[]> = {
     { label: "delete cancellable", apply: (r) => delete r[0].cancellable },
     { label: "camelCase drift", apply: (r) => { r[0].linesProcessed = r[0].lines_processed; delete r[0].lines_processed; } },
   ],
+  "model_options.v1.json": [
+    { label: "delete provider identity", apply: (r) => delete r[0].provider_id },
+    { label: "bogus availability", apply: (r) => { r[0].availability = "available"; } },
+    { label: "pinned rank overflow", apply: (r) => { r[0].pinned_rank = UNSAFE; } },
+    { label: "nullable detail wrong type", apply: (r) => { r[0].availability_detail = 7; } },
+    { label: "hidden flag wrong type", apply: (r) => { r[0].hidden = "false"; } },
+    { label: "extra field", apply: (r) => { r[0].provider = "legacy"; } },
+  ],
 };
 
 describe("cd.v1 mutation coverage — every corruption must be rejected", () => {

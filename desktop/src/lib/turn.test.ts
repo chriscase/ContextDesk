@@ -71,6 +71,18 @@ describe("applyEventsToMessage", () => {
     ]);
   });
 
+  it("enriches late provenance and preserves equal ids from distinct corpora", () => {
+    const events: EventDto[] = [
+      { kind: "citation", payload: { source_id: "log_event:7", label: "event" } },
+      { kind: "citation", payload: { source_id: "log_event:7", label: "event A", corpus_id: "a" } },
+      { kind: "citation", payload: { source_id: "log_event:7", label: "event B", corpus_id: "b" } },
+    ];
+    expect(applyEventsToMessage(base(), events).msg.citations).toEqual([
+      { id: "log_event:7", label: "event A", title: undefined, corpusId: "a" },
+      { id: "log_event:7", label: "event B", title: undefined, corpusId: "b" },
+    ]);
+  });
+
   it("persists the linked-log fallback notice alongside the grounded answer", () => {
     const events: EventDto[] = [
       {

@@ -1,6 +1,7 @@
 /** Transcript scroll machinery (#146, #696) — follow vs detach vs new response. */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { prefersReducedMotion } from "../lib/a11y";
 import type { ChatSession, Msg } from "../lib/session";
 
 const NEAR_BOTTOM_PX = 120;
@@ -56,7 +57,11 @@ export function useChatScroll(
     [setSessions],
   );
 
-  const pinScrollToEnd = useCallback((behavior: ScrollBehavior = "auto") => {
+  const pinScrollToEnd = useCallback((requested: ScrollBehavior = "auto") => {
+    // The global reduced-motion CSS override cannot reach a scripted scroll,
+    // so honour the preference here (#767).
+    const behavior: ScrollBehavior =
+      requested === "smooth" && prefersReducedMotion() ? "auto" : requested;
     const run = () => {
       const el = chatScrollRef.current;
       if (!el) return;

@@ -1,6 +1,20 @@
 /** Host bridge: Tauri invoke when available; offline research via test hook. */
 
 import type { AppSetupState } from "./preflight";
+import {
+  parseCurationImpact,
+  parseCurationSummary,
+  parseModelOptions,
+  type CurationImpactDto,
+  type CurationSummaryDto,
+  type ModelOptionDto,
+} from "@contextdesk/contracts";
+export { modelSelectionKey, parseModelSelectionKey } from "@contextdesk/contracts";
+export type {
+  CurationImpactDto,
+  CurationSummaryDto,
+  ModelOptionDto,
+} from "@contextdesk/contracts";
 // Type-only (erased at build time): logDiagnosticReport imports types from here
 // as well, so this cannot create a runtime cycle.
 import type { LogDiagnosticSuppressionPolicyInput } from "./logDiagnosticReport";
@@ -1000,42 +1014,102 @@ export type ChatSessionDto = {
   linked_corpus_id?: string | null;
 };
 
-export type ModelOptionDto = {
-  id: string;
-  label: string;
-  /** Unique select value: `provider_id::model_id`. */
-  selection_key: string;
-  provider_id: string;
-  provider_label: string;
-  group: string;
-  is_default: boolean;
-  /** Whether this exact provider/model pair can execute native tools. */
-  tools_enabled: boolean;
-  /** Why tools are disabled, when known. */
-  tools_disabled_reason?: "profile" | "model" | null;
-};
-
-export function parseModelSelectionKey(key: string): {
-  providerId: string | null;
-  modelId: string;
-} {
-  const i = key.indexOf("::");
-  if (i > 0) {
-    return {
-      providerId: key.slice(0, i),
-      modelId: key.slice(i + 2),
-    };
-  }
-  return { providerId: null, modelId: key };
-}
-
-export function modelSelectionKey(providerId: string, modelId: string): string {
-  return `${providerId}::${modelId}`;
-}
-
-export async function hostListChatModels(): Promise<ModelOptionDto[]> {
+/**
+ * List selectable chat models.
+ *
+ * Ordinary pickers call this with no arguments and never receive curated-away
+ * choices. Pass `keepKeys` with the conversation's current selection so a chat
+ * already pinned to a hidden model still renders it honestly, and
+ * `includeHidden` only from the management surface (#678).
+ */
+export async function hostListChatModels(opts?: {
+  includeHidden?: boolean;
+  keepKeys?: readonly string[];
+}): Promise<ModelOptionDto[]> {
   if (!isTauri()) return [];
-  return invoke<ModelOptionDto[]>("list_chat_models");
+  const value = await invoke<unknown>("list_chat_models", {
+    includeHidden: opts?.includeHidden ?? false,
+    keepKeys: opts?.keepKeys ? [...opts.keepKeys] : [],
+  });
+  return parseModelOptions(value);
+}
+
+/** Counts for the Settings entry point. Config-only: never lists or discovers. */
+export async function hostGetCurationSummary(): Promise<CurationSummaryDto | null> {
+  if (!isTauri()) return null;
+  return parseCurationSummary(await invoke<unknown>("get_curation_summary"));
+}
+
+/** Preview what hiding a provider (or one model) would do before writing. */
+export async function hostPreviewCurationChange(args: {
+  providerId: string;
+  modelId?: string | null;
+  hidden: boolean;
+}): Promise<CurationImpactDto | null> {
+  if (!isTauri()) return null;
+  return parseCurationImpact(
+    await invoke<unknown>("preview_curation_change", {
+      providerId: args.providerId,
+      modelId: args.modelId ?? null,
+      hidden: args.hidden,
+    }),
+  );
+}
+
+/**
+ * Hide or restore one exact model. When the change would take the default out
+ * of ordinary pickers the host refuses unless `acceptReplacement` is the exact
+ * key the preview returned.
+ */
+export async function hostSetModelHidden(args: {
+  providerId: string;
+  modelId: string;
+  hidden: boolean;
+  acceptReplacement?: string | null;
+  expectedStateToken?: string | null;
+}): Promise<CurationImpactDto | null> {
+  if (!isTauri()) return null;
+  return parseCurationImpact(
+    await invoke<unknown>("set_model_hidden", {
+      providerId: args.providerId,
+      modelId: args.modelId,
+      hidden: args.hidden,
+      acceptReplacement: args.acceptReplacement ?? null,
+      expectedStateToken: args.expectedStateToken ?? null,
+    }),
+  );
+}
+
+/** Hide or restore a whole provider profile. Deletes nothing. */
+export async function hostSetProviderHidden(args: {
+  providerId: string;
+  hidden: boolean;
+  acceptReplacement?: string | null;
+  expectedStateToken?: string | null;
+}): Promise<CurationImpactDto | null> {
+  if (!isTauri()) return null;
+  return parseCurationImpact(
+    await invoke<unknown>("set_provider_hidden", {
+      providerId: args.providerId,
+      hidden: args.hidden,
+      acceptReplacement: args.acceptReplacement ?? null,
+      expectedStateToken: args.expectedStateToken ?? null,
+    }),
+  );
+}
+
+/** Pin or unpin one model in the explicit picker order. */
+export async function hostSetModelPinned(args: {
+  providerId: string;
+  modelId: string;
+  pinned: boolean;
+}): Promise<boolean> {
+  if (!isTauri()) return args.pinned;
+  return invoke<boolean>("set_model_pinned", {
+    providerId: args.providerId,
+    modelId: args.modelId,
+    pinned: args.pinned,
+  });
 }
 
 /** Retry or disable native tools for one exact provider/model pair (#650). */
@@ -1278,9 +1352,13 @@ export async function hostLoadChatSession(
 
 export async function hostSaveChatSession(
   session: ChatSessionDto,
+  expectedUpdatedAt: string | null = null,
 ): Promise<ChatSessionDto | null> {
   if (!isTauri()) return null;
-  return invoke<ChatSessionDto>("save_chat_session", { session });
+  return invoke<ChatSessionDto>("save_chat_session", {
+    session,
+    expectedUpdatedAt,
+  });
 }
 
 export async function hostRenameChatSession(

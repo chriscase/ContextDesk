@@ -27,6 +27,7 @@ import {
 } from "./AiSetupWizard";
 import { CapabilityQualificationPanel } from "./CapabilityQualificationPanel";
 import { ModelRoleHintLine } from "./ModelRoleHintLine";
+import { ModelVisibilityPanel } from "./ModelVisibilityPanel";
 
 export type AiSectionProps = {
   baseId: string;
@@ -43,6 +44,8 @@ export type AiSectionProps = {
   };
   urlError: string | null;
   recheck: () => void | Promise<void>;
+  /** Curated visibility changed — parent re-lists the pickers (#678). */
+  onCurationChanged?: () => void | Promise<void>;
   checking: boolean;
   onApplyAndSave?: (payload: WizardApplyPayload) => void | Promise<void>;
 };
@@ -58,6 +61,7 @@ export function AiSection({
   remoteUrlCheck,
   urlError,
   recheck,
+  onCurationChanged,
   checking,
   onApplyAndSave,
 }: AiSectionProps) {
@@ -742,6 +746,7 @@ export function AiSection({
       {modelsNote}
     </p>
   ) : null}
+  {draft.providerKind !== "none" ? <ModelVisibilityPanel onCurationChanged={onCurationChanged} /> : null}
   {draft.providerKind !== "none" && draft.chatModel.trim() ? (
     <CapabilityQualificationPanel
       baseId={`${baseId}-cap-qual`}

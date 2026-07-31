@@ -164,6 +164,8 @@ export function useShellState() {
   const [hostPreflightReport, setHostPreflightReport] =
     useState<PreflightReport | null>(null);
   const chatScrollSaveRef = useRef(0);
+  /** Older model-list responses must never overwrite newer host capability truth. */
+  const chatModelRefreshTicketRef = useRef(0);
 
   const clientPreflight = useMemo(() => runClientPreflight(setup), [setup]);
   const preflight = hostPreflightReport ?? clientPreflight;
@@ -198,13 +200,21 @@ export function useShellState() {
     }
   }, [setup.baseUrl, setup.providerKind]);
 
-  /** Re-list chat models for the composer picker (after AI setup save). */
-  const refreshChatModels = useCallback(async () => {
+  /**
+   * Re-list chat models for the composer picker.
+   *
+   * `keepKeys` carries the conversation's current selection so a chat pinned to
+   * a curated-away model still gets an option for it rather than silently
+   * rendering someone else's model (#678).
+   */
+  const refreshChatModels = useCallback(async (keepKeys?: readonly string[]) => {
+    const ticket = (chatModelRefreshTicketRef.current += 1);
     try {
       const [listed, def] = await Promise.all([
-        hostListChatModels(),
+        hostListChatModels({ keepKeys }),
         hostGetDefaultChatModel(),
       ]);
+      if (chatModelRefreshTicketRef.current !== ticket) return;
       setModelOptions(listed);
       if (def?.trim()) setDefaultModelKey(def.trim());
     } catch {

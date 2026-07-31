@@ -3,7 +3,7 @@
  * Owns `sessions` / `activeSessionId` previously inline in App.tsx.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { dialogConfirm } from "../lib/dialogs";
 import {
   hostListChatSessions,
@@ -33,10 +33,106 @@ export function shouldPersistUiSession(session: ChatSession): boolean {
   );
 }
 
-export function useChatSessions() {
+/** Where the last-read conversation is remembered between launches. */
+export const ACTIVE_SESSION_KEY = "cd-active-session";
+
+/**
+ * A chat carrying nothing the user would miss. Only such a chat may be reused
+ * by "New chat" — a blank chat that was renamed, pinned, given a model or a
+ * skill, or that holds unsent composer text, is *not* interchangeable with a
+ * fresh one, and reusing it would silently hand the user someone else's
+ * settings or resurrect a draft they had abandoned.
+ */
+export function isPristineBlank(
+  session: ChatSession,
+  hasUnsentDraft: boolean,
+): boolean {
+  return (
+    session.messages.length === 0 &&
+    !session.linkedCorpusId &&
+    !session.titleLocked &&
+    !session.pinned &&
+    !session.chatModel &&
+    !session.providerProfileId &&
+    !session.pinnedSkillId &&
+    !hasUnsentDraft &&
+    /^Chat \d+$/.test(session.title.trim())
+  );
+}
+
+/**
+ * Next default title. Counting sessions produced repeats — create "Chat 2",
+ * trash "Chat 1", create again and you had two "Chat 2"s — so number past the
+ * highest one already used instead.
+ */
+export function nextChatTitle(existing: readonly ChatSession[]): string {
+  let highest = 0;
+  for (const s of existing) {
+    const m = /^Chat (\d+)$/.exec(s.title.trim());
+    if (m) highest = Math.max(highest, Number(m[1]));
+  }
+  return `Chat ${Math.max(highest + 1, existing.length + 1)}`;
+}
+
+function readStoredActiveSessionId(): string | null {
+  try {
+    return localStorage.getItem(ACTIVE_SESSION_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Choose the conversation to open on launch: the one the user was last
+ * reading, but only while it is still present and open. A stored id for a
+ * chat that has since been archived, trashed, or deleted must not win —
+ * falling through to the newest chat is the honest outcome.
+ */
+export function pickRestoredSession(
+  loaded: readonly ChatSession[],
+  storedId: string | null,
+): string | null {
+  if (loaded.length === 0) return null;
+  const stored =
+    storedId &&
+    loaded.find((s) => s.id === storedId && !s.archived && !s.trashed);
+  return stored ? stored.id : loaded[0]!.id;
+}
+
+/**
+ * Publish open host sessions without erasing a conversation created locally
+ * while hydration/sync was in flight. A local id known to the host but now
+ * absent from `loaded` was archived/trashed and must not be resurrected.
+ */
+export function reconcileOpenSessions(
+  local: readonly ChatSession[],
+  loaded: readonly ChatSession[],
+  knownHostIds: ReadonlySet<string>,
+  hasDraft?: (sessionId: string) => boolean,
+): ChatSession[] {
+  const loadedIds = new Set(loaded.map((session) => session.id));
+  const retainedLocal = local.filter(
+    (session) =>
+      !loadedIds.has(session.id) &&
+      !knownHostIds.has(session.id) &&
+      !isPristineBlank(session, hasDraft?.(session.id) ?? false),
+  );
+  return [...retainedLocal, ...loaded];
+}
+
+export type UseChatSessionsArgs = {
+  /** Whether a conversation holds unsent composer text (drafts live in App). */
+  hasDraft?: (sessionId: string) => boolean;
+};
+
+export function useChatSessions({ hasDraft }: UseChatSessionsArgs = {}) {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [sessionsReady, setSessionsReady] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const persistGenerationRef = useRef(new Map<string, number>());
+  const syncGenerationRef = useRef(0);
+  const hasDraftRef = useRef(hasDraft);
+  hasDraftRef.current = hasDraft;
 
   const resolvedSessionId = activeSessionId ?? sessions[0]?.id ?? "";
   const activeSession =
@@ -71,11 +167,75 @@ export function useChatSessions() {
         if (auto) next = { ...next, title: auto };
       }
     }
+    const generation = (persistGenerationRef.current.get(s.id) ?? 0) + 1;
+    persistGenerationRef.current.set(s.id, generation);
+    const isLatest = () => persistGenerationRef.current.get(s.id) === generation;
+    let saved: ChatSessionDto | null;
     try {
-      const saved = await hostSaveChatSession(sessionToDto(next));
-      if (saved) return sessionFromDto(saved);
-    } catch {
-      /* browser / host unavailable */
+      saved = await hostSaveChatSession(
+        sessionToDto(next),
+        s.hostRevision ?? null,
+      );
+      if (saved) {
+        const materialized = sessionFromDto(saved);
+        if (isLatest()) {
+          setSessions((all) =>
+            all.map((current) =>
+              current.id === s.id && current.updatedAt === s.updatedAt
+                ? materialized
+                : current,
+            ),
+          );
+        }
+        return materialized;
+      }
+    } catch (error) {
+      // Only the newest still-relevant local mutation may reconcile after a
+      // compare-and-swap conflict. An older completion must not retry over a
+      // later title, model, permission result, or turn.
+      if (isLatest() && String(error).includes("chat_session_conflict")) {
+        try {
+          const currentDto = await hostLoadChatSession(s.id);
+          if (currentDto && isLatest()) {
+            const current = sessionFromDto(currentDto);
+            const pendingById = new Map(next.messages.map((m) => [m.id, m]));
+            const currentIds = new Set(current.messages.map((m) => m.id));
+            const merged: ChatSession = {
+              ...next,
+              messages: [
+                ...current.messages.map((m) => pendingById.get(m.id) ?? m),
+                ...next.messages.filter((m) => !currentIds.has(m.id)),
+              ],
+              createdAt: current.createdAt,
+              archived: current.archived,
+              trashed: current.trashed,
+              trashedAt: current.trashedAt,
+              linkedCorpusId: current.linkedCorpusId,
+              hostRevision: current.hostRevision,
+            };
+            saved = await hostSaveChatSession(
+              sessionToDto(merged),
+              current.hostRevision ?? null,
+            );
+            if (saved) {
+              const materialized = sessionFromDto(saved);
+              if (isLatest()) {
+                setSessions((all) =>
+                  all.map((local) =>
+                    local.id === s.id && local.updatedAt === s.updatedAt
+                      ? materialized
+                      : local,
+                  ),
+                );
+              }
+              return materialized;
+            }
+          }
+        } catch {
+          /* a second winner remains authoritative; leave newer UI untouched */
+        }
+      }
+      /* browser / host unavailable, or stale mutation superseded locally */
     }
     return next;
   }, []);
@@ -94,7 +254,10 @@ export function useChatSessions() {
               updatedAt: nowIso(),
             };
             if (updated.messages.length > 0) {
-              void hostSaveChatSession(sessionToDto(updated)).catch(() => {});
+              void hostSaveChatSession(
+                sessionToDto(updated),
+                s.hostRevision ?? null,
+              ).catch(() => {});
             }
             return updated;
           }),
@@ -113,37 +276,43 @@ export function useChatSessions() {
       try {
         const metas = await hostListChatSessions();
         if (cancelled) return;
-        if (metas.length === 0) {
-          const s = newSession("Chat 1", null);
-          setSessions([s]);
-          setActiveSessionId(s.id);
-          setSessionsReady(true);
-          return;
-        }
+        const knownHostIds = new Set(metas.map((meta) => meta.id));
         const loaded: ChatSession[] = [];
         for (const meta of metas) {
           if (meta.archived || meta.trashed) continue;
           try {
             const full = await hostLoadChatSession(meta.id);
-            if (full && !full.trashed) loaded.push(sessionFromDto(full));
+            if (full && !full.archived && !full.trashed) {
+              loaded.push(sessionFromDto(full));
+            }
           } catch {
             /* skip broken */
           }
         }
         if (cancelled) return;
-        if (loaded.length === 0) {
-          const s = newSession("Chat 1", null);
-          setSessions([s]);
-          setActiveSessionId(s.id);
-        } else {
-          setSessions(loaded);
-          setActiveSessionId(loaded[0].id);
-        }
+        setSessions((local) => {
+          let merged = reconcileOpenSessions(
+            local,
+            loaded,
+            knownHostIds,
+            hasDraftRef.current,
+          );
+          if (merged.length === 0) merged = [newSession("Chat 1", null)];
+          setActiveSessionId((current) =>
+            current && merged.some((session) => session.id === current)
+              ? current
+              : pickRestoredSession(merged, readStoredActiveSessionId()),
+          );
+          return merged;
+        });
       } catch {
         if (!cancelled) {
-          const s = newSession("Chat 1", null);
-          setSessions([s]);
-          setActiveSessionId(s.id);
+          setSessions((local) => {
+            if (local.length > 0) return local;
+            const s = newSession("Chat 1", null);
+            setActiveSessionId(s.id);
+            return [s];
+          });
         }
       } finally {
         if (!cancelled) setSessionsReady(true);
@@ -153,6 +322,16 @@ export function useChatSessions() {
       cancelled = true;
     };
   }, []);
+
+  // Remember what the user was reading so the next launch reopens it.
+  useEffect(() => {
+    if (!sessionsReady || !resolvedSessionId) return;
+    try {
+      localStorage.setItem(ACTIVE_SESSION_KEY, resolvedSessionId);
+    } catch {
+      /* storage unavailable — restoration is a convenience, not a guarantee */
+    }
+  }, [sessionsReady, resolvedSessionId]);
 
   const openChatSessions = useMemo(
     () =>
@@ -165,12 +344,22 @@ export function useChatSessions() {
     [sessions],
   );
 
-  const createSession = useCallback(() => {
-    const s = newSession(`Chat ${sessions.length + 1}`, null);
+  const createSession = useCallback((): ChatSession => {
+    const open = sessions.filter((s) => !s.archived && !s.trashed);
+    // "New chat" while a *pristine* blank chat is already open should take the
+    // user there rather than stacking another indistinguishable "Chat N".
+    // Blank chats are never persisted, so the extras only ever existed in the
+    // sidebar until the next reload.
+    const blank = open.find((s) => isPristineBlank(s, hasDraft?.(s.id) ?? false));
+    if (blank) {
+      setActiveSessionId(blank.id);
+      return blank;
+    }
+    const s = newSession(nextChatTitle(sessions), null);
     setSessions((all) => [s, ...all]);
     setActiveSessionId(s.id);
     return s;
-  }, [sessions.length]);
+  }, [sessions, hasDraft]);
 
   /**
    * Guarantee a non-trashed active chat exists (first send / model pick before
@@ -349,28 +538,44 @@ export function useChatSessions() {
   );
 
   const syncSessionsFromHost = useCallback(async () => {
+    const generation = (syncGenerationRef.current += 1);
     try {
       const metas = await hostListChatSessions();
+      if (syncGenerationRef.current !== generation) return;
+      const knownHostIds = new Set(metas.map((meta) => meta.id));
       const loaded: ChatSession[] = [];
       for (const meta of metas) {
-        if (meta.trashed) continue;
+        if (meta.archived || meta.trashed) continue;
         try {
           const full = await hostLoadChatSession(meta.id);
-          if (full) loaded.push(sessionFromDto(full));
+          if (syncGenerationRef.current !== generation) return;
+          if (full && !full.archived && !full.trashed) {
+            loaded.push(sessionFromDto(full));
+          }
         } catch {
           /* skip */
         }
       }
-      if (loaded.length) {
-        setSessions(loaded);
-        if (!loaded.some((s) => s.id === activeSessionId)) {
-          setActiveSessionId(loaded[0].id);
-        }
-      }
+      if (syncGenerationRef.current !== generation) return;
+      setSessions((local) => {
+        let merged = reconcileOpenSessions(
+          local,
+          loaded,
+          knownHostIds,
+          hasDraftRef.current,
+        );
+        if (merged.length === 0) merged = [newSession("Chat 1", null)];
+        setActiveSessionId((current) =>
+          current && merged.some((session) => session.id === current)
+            ? current
+            : merged[0]!.id,
+        );
+        return merged;
+      });
     } catch {
       /* ignore */
     }
-  }, [activeSessionId]);
+  }, []);
 
   /** Patch a session from a full DTO (e.g. after host save). */
   const replaceSession = useCallback((dto: ChatSessionDto) => {

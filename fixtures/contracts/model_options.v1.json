@@ -1,0 +1,18 @@
+[
+  {
+    "availability": "discovered",
+    "availability_detail": null,
+    "group": "Gateway west",
+    "hidden": false,
+    "hidden_by": null,
+    "id": "model::latest",
+    "is_default": true,
+    "label": "Model latest",
+    "pinned_rank": 0,
+    "provider_id": "account::west",
+    "provider_label": "Gateway west",
+    "selection_key": "cd.model.v1:13:account::west13:model::latest",
+    "tools_disabled_reason": null,
+    "tools_enabled": true
+  }
+]

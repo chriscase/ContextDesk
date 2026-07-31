@@ -196,7 +196,8 @@ html[data-platform="macos"] .titlebar {
 .banner .btn {
   padding: 3px 8px;
   font-size: var(--text-xs);
-  min-height: 22px;
+  /* Must not drop below the shared 24px target floor in composer.css (#767). */
+  min-height: 24px;
   gap: 4px;
 }
 
@@ -639,13 +640,18 @@ html[data-platform="macos"] .titlebar {
     color-mix(in srgb, var(--bg-panel) 55%, transparent) 40%,
     var(--bg-panel) 100%
   );
-  padding: 0.55rem 1rem 0.75rem;
+  /* Inline padding must match .chat-scroll's gutter so the shared measure below
+     produces the same outer edges as the transcript (#767). */
+  padding: 0.55rem var(--space-4) 0.75rem;
 }
 
 .composer-dock > .chat-input-surface {
   width: 100%;
-  max-width: 56rem;
-  margin-inline: auto;
+  max-width: var(--chat-measure);
+  /* Same centring longhands the transcript rows use, so one rule change can
+     never leave the two stacks on different columns (#767). */
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .pane-tabs {
@@ -1016,13 +1022,6 @@ button.citation-chip:hover {
   margin-top: var(--space-1);
   padding-left: 0;
   min-height: auto;
-}
-
-.btn--sm {
-  padding: 3px 8px;
-  font-size: var(--text-xs);
-  min-height: 22px;
-  gap: 4px;
 }
 
 .mono--sm {

@@ -57,11 +57,42 @@ reranking, or unqualified) based on the **name** alone.
 - Suggestions never silently change an existing default or role binding; you
   confirm every change.
 - The name classifier accepts one already-visible id and does not enumerate a
-  provider inventory. Provider-scoped hidden-model filtering is separate work
-  tracked by #678; until that production state is connected, do not treat role
-  hints as implementing model visibility preferences.
+  provider inventory. Model visibility preferences are separate display state;
+  they do not turn a name hint into capability evidence.
 - Model inventories and private aliases do not belong in shareable diagnostics
   or public screenshots.
+
+## Curate model visibility
+
+Open **Settings → AI → Model visibility → Manage…** to choose which discovered
+models ordinary pickers offer. The inventory loads only after you open Manage.
+For a large gateway, the panel and chat pickers keep a hard row limit instead
+of mounting the entire inventory. Use **Search models** to reach an omitted
+model; pinned choices are prioritized within the same limit.
+
+- **Pin** moves a visible model into the Pinned band. **Unpin** returns it to
+  the normal provider band.
+- **Hide** removes one model from ordinary pickers. **Hide provider** curates
+  every model in that provider profile. Neither action deletes a profile,
+  credential, local model, or remote model.
+- Turn on **Show hidden** to find **Restore** and **Restore provider** actions.
+  The underlying configuration is retained, so the preference is reversible
+  and persists across restarts.
+- If a hide would replace the default for new chats, ContextDesk names the exact
+  replacement and waits for confirmation. It refuses a change that would leave
+  no visible choice. An existing chat still shows its selected model even if
+  that model is later hidden.
+
+Curation is scoped to the provider profile, normalized endpoint, and model
+identity. Renaming a profile label preserves its preferences; repointing that
+profile to a different endpoint creates a distinct inventory and preference
+scope. Another profile does not inherit those choices.
+
+Hiding is a display preference, **not** a privacy, access-control, health, or
+capability decision. A hidden model remains configured and reachable by its
+existing selection, and an available model can still be unhealthy or have
+tools unavailable. Provider health and qualification results remain the source
+of truth for those properties.
 
 ## Tool calling and context
 

@@ -17,3 +17,4 @@ export const CD_WIRE_VERSION = "cd.v1" as const;
 
 export { ContractViolation } from "./parse";
 export * from "./wireV1";
+export * from "./modelCurationV1";

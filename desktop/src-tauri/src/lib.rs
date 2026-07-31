@@ -18,6 +18,10 @@ use cd_core::keychain_store::{
     KeychainSecretStore, SecretStore,
 };
 use cd_core::memory_fs::{list_memory_files, read_workspace_file, write_memory_file, MemoryFile};
+use cd_core::model_curation::{
+    curation_decision, model_selection_key, parse_model_selection_key, CurationDecision,
+    CurationImpactDto, CurationSummaryDto, ModelAvailability, ModelOptionDto,
+};
 use cd_core::permissions::PermissionDecision;
 use cd_core::preflight::{run_preflight, PreflightInput, PreflightReport};
 use cd_core::probe::{expand_base_candidates, normalize_gateway_input};
@@ -4015,10 +4019,11 @@ fn persist_host_terminal_turn_at(
         else {
             continue;
         };
-        if citations
-            .iter()
-            .any(|citation| citation["id"].as_str() == Some(source_id.as_str()))
-        {
+        let event_corpus = linked_corpus_id.as_deref();
+        if citations.iter().any(|citation| {
+            citation["id"].as_str() == Some(source_id.as_str())
+                && citation.get("corpusId").and_then(|value| value.as_str()) == event_corpus
+        }) {
             continue;
         }
         let mut citation = serde_json::json!({
@@ -4906,13 +4911,12 @@ fn is_governed_log_citation_id(source_id: &str) -> bool {
 ///
 /// The renderer may carry transcript chips, but it cannot invent or broaden
 /// corpus identity. Rules:
-/// 1. If a citation id already exists on the durable message with a host corpus
-///    id, preserve that id (survives detach/relink and restart).
-/// 2. If a citation id already exists on the durable message **without** a
-///    corpus id (legacy unbound), leave it unbound forever — never stamp the
-///    current linked corpus onto historical unbound chips (no substitution).
-/// 3. Only **new** citation ids (not present on the durable message) may be
-///    stamped with the session's host-governed linked_corpus_id when set.
+/// 1. If an exact citation id + corpus pair already exists on the durable
+///    message, preserve it (survives detach/relink and restart).
+/// 2. A lone durable identity remains authoritative when an older renderer
+///    omits its corpus. Multiple same-id corpus identities stay distinct.
+/// 3. Durable unbound legacy identities stay unbound; genuinely new identities
+///    may be stamped only with the session's host-governed linked corpus.
 /// 4. Never accept a free-form renderer/model corpus id that differs from those
 ///    host sources.
 fn sanitize_log_citation_provenance(session: &mut Session, durable: Option<&Session>) {
@@ -4929,8 +4933,9 @@ fn sanitize_log_citation_provenance(session: &mut Session, durable: Option<&Sess
         let Some(items) = citations.as_array_mut() else {
             continue;
         };
-        // value = Some(corpus) when durable bound; None when durable present but unbound
-        let durable_log: HashMap<String, Option<String>> = durable_by_msg
+        // Preserve every trusted (id, corpus) identity. Bare-id maps collapse
+        // citations after relink and can route a chip into the wrong corpus.
+        let durable_log: Vec<(String, Option<String>)> = durable_by_msg
             .get(message.id.as_str())
             .and_then(|m| m.citations.as_ref())
             .and_then(|v| v.as_array())
@@ -4951,7 +4956,7 @@ fn sanitize_log_citation_provenance(session: &mut Session, durable: Option<&Sess
                             .map(str::to_string);
                         Some((id, corpus))
                     })
-                    .collect()
+                    .collect::<Vec<_>>()
             })
             .unwrap_or_default();
 
@@ -4968,14 +4973,30 @@ fn sanitize_log_citation_provenance(session: &mut Session, durable: Option<&Sess
                 obj.remove("corpus_id");
                 continue;
             }
-            let trusted = match durable_log.get(&id) {
-                // Historical bound provenance — never let renderer change it.
-                Some(Some(corpus_id)) => Some(corpus_id.clone()),
-                // Historical unbound — fail closed; do not stamp current link.
-                Some(None) => None,
-                // Truly new citation id on this message — stamp host link if any.
-                None => linked.clone(),
-            };
+            let claimed = obj
+                .get("corpusId")
+                .or_else(|| obj.get("corpus_id"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let same_id = durable_log
+                .iter()
+                .filter(|(durable_id, _)| durable_id == &id)
+                .collect::<Vec<_>>();
+            let trusted = same_id
+                .iter()
+                .find(|(_, corpus)| corpus.as_deref() == claimed)
+                .map(|(_, corpus)| corpus.clone())
+                .or_else(|| {
+                    // A lone historical identity is unambiguous even if an
+                    // older renderer omitted its corpus field.
+                    (same_id.len() == 1).then(|| same_id[0].1.clone())
+                })
+                .unwrap_or_else(|| {
+                    // A genuinely new identity can only receive the current
+                    // host-governed link; never accept renderer provenance.
+                    linked.clone()
+                });
             match trusted {
                 Some(corpus_id) => {
                     obj.insert("corpusId".into(), serde_json::Value::String(corpus_id));
@@ -4990,9 +5011,18 @@ fn sanitize_log_citation_provenance(session: &mut Session, durable: Option<&Sess
     }
 }
 
+#[cfg(test)]
 fn save_chat_session_at(
     store: &cd_core::sessions::SessionStore,
+    session: Session,
+) -> Result<Session, String> {
+    save_chat_session_cas_at(store, session, None)
+}
+
+fn save_chat_session_cas_at(
+    store: &cd_core::sessions::SessionStore,
     mut session: Session,
+    expected_updated_at: Option<&str>,
 ) -> Result<Session, String> {
     // The renderer owns transcript/view fields, but never the governed corpus
     // grant. Preserve the durable host value for an existing chat and strip an
@@ -5001,6 +5031,17 @@ fn save_chat_session_at(
         let durable = store
             .load(&session.id)
             .map_err(|e| format!("chat session is unavailable or corrupt: {e}"))?;
+        if let Some(expected) = expected_updated_at {
+            let durable_revision = serde_json::to_value(durable.updated_at)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .ok_or_else(|| "chat_session_conflict: invalid durable revision".to_string())?;
+            if durable_revision != expected {
+                return Err(
+                    "chat_session_conflict: the conversation changed; reload and retry".to_string(),
+                );
+            }
+        }
         session.linked_corpus_id = durable.linked_corpus_id.clone();
         Some(durable)
     } else {
@@ -5022,17 +5063,28 @@ fn chat_provider_binding_changed(previous: &Session, next: &Session) -> bool {
 }
 
 #[tauri::command]
-fn save_chat_session(state: State<'_, AppState>, session: Session) -> Result<Session, String> {
+fn save_chat_session(
+    state: State<'_, AppState>,
+    session: Session,
+    expected_updated_at: Option<String>,
+) -> Result<Session, String> {
     let _mutation = state
         .chat_session_mutation
         .lock()
         .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     let store = session_store(&state)?;
+    if expected_updated_at.is_none()
+        && store
+            .exists(&session.id)
+            .map_err(|error| error.to_string())?
+    {
+        return Err("chat_session_conflict: expected revision is required".to_string());
+    }
     let provider_binding_changed = store
         .load(&session.id)
         .ok()
         .is_some_and(|previous| chat_provider_binding_changed(&previous, &session));
-    let session = save_chat_session_at(&store, session)?;
+    let session = save_chat_session_cas_at(&store, session, expected_updated_at.as_deref())?;
     if provider_binding_changed {
         state
             .linked_synthesis_checkpoints
@@ -5192,41 +5244,10 @@ fn search_chat_sessions(
         .map_err(|e| e.to_string())
 }
 
-/// A selectable chat model for the UI (grouped by provider source).
-#[derive(Debug, Clone, Serialize)]
-struct ModelOptionDto {
-    /// Model id as sent to the API (e.g. `grok-3`, `mistral`).
-    id: String,
-    /// Display label (usually same as id).
-    label: String,
-    /// Unique select value: `provider_id::model_id`.
-    selection_key: String,
-    /// Provider profile this model belongs to.
-    provider_id: String,
-    /// Human group label for `<optgroup>` (e.g. "Ollama (local)").
-    provider_label: String,
-    /// Stable group key for sorting/grouping.
-    group: String,
-    /// True when this is the app default for new chats.
-    is_default: bool,
-    /// Whether this exact provider/model pair can execute native tools.
-    tools_enabled: bool,
-    /// `profile` for explicit profile disablement or `model` for a learned
-    /// provider/model rejection. `None` means tools are enabled.
-    tools_disabled_reason: Option<String>,
-}
-
-fn model_selection_key(provider_id: &str, model_id: &str) -> String {
-    format!("{provider_id}::{model_id}")
-}
-
 fn parse_selection_key(key: &str) -> (Option<String>, String) {
-    if let Some((pid, mid)) = key.split_once("::") {
-        if !pid.is_empty() && !mid.is_empty() {
-            return (Some(pid.to_string()), mid.to_string());
-        }
-    }
-    (None, key.to_string())
+    let selection = parse_model_selection_key(key);
+    let provider = (!selection.provider_id.is_empty()).then_some(selection.provider_id);
+    (provider, selection.model_id)
 }
 
 fn model_tools_disabled_reason(
@@ -5237,10 +5258,10 @@ fn model_tools_disabled_reason(
     if !profile.capabilities.tools {
         return Some("profile");
     }
-    if cfg
-        .model_tools_enabled
-        .get(&model_selection_key(&profile.id, model_id))
-        == Some(&false)
+    let canonical = model_selection_key(&profile.id, model_id);
+    let legacy = format!("{}::{model_id}", profile.id);
+    if cfg.model_tools_enabled.get(&canonical) == Some(&false)
+        || cfg.model_tools_enabled.get(&legacy) == Some(&false)
     {
         return Some("model");
     }
@@ -5318,12 +5339,24 @@ fn resolve_default_selection(cfg: &AppConfig) -> String {
 async fn models_for_profile(
     profile: &ProviderProfile,
     secrets: &KeychainSecretStore,
-) -> Vec<String> {
+) -> ProfileModelInventory {
     let api_key = profile
         .api_key_ref
         .as_ref()
         .and_then(|r| secrets.get(r).ok().flatten());
     models_for_profile_with_key(profile, api_key.as_deref()).await
+}
+
+#[derive(Debug, Clone)]
+struct ProfileModelCandidate {
+    id: String,
+    availability: ModelAvailability,
+    availability_detail: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ProfileModelInventory {
+    models: Vec<ProfileModelCandidate>,
 }
 
 /// List chat models for the **Settings draft** (not only the saved profile).
@@ -5504,7 +5537,12 @@ async fn list_models_for_draft(
         deadline_preference: Default::default(),
         capabilities: desc.default_capabilities,
     };
-    Ok(models_for_profile_with_key(&profile, api_key.as_deref()).await)
+    Ok(models_for_profile_with_key(&profile, api_key.as_deref())
+        .await
+        .models
+        .into_iter()
+        .map(|model| model.id)
+        .collect())
 }
 
 /// Active provider for Settings hydrate (no secrets).
@@ -5600,13 +5638,282 @@ fn set_model_tools_enabled(
     let key = model_selection_key(provider_id, model_id);
     if tools_enabled {
         cfg.model_tools_enabled.remove(&key);
+        cfg.model_tools_enabled
+            .remove(&format!("{provider_id}::{model_id}"));
     } else {
+        cfg.model_tools_enabled
+            .remove(&format!("{provider_id}::{model_id}"));
         cfg.model_tools_enabled.insert(key, false);
     }
     let path = config_path(&state.branding).map_err(|e| e.to_string())?;
     save_config(&path, &cfg).map_err(|e| e.to_string())?;
     *state.config.lock().expect("config") = cfg;
     Ok(tools_enabled)
+}
+
+// ---------------------------------------------------------------------------
+// Curated visibility (#678) — display only; never deletes configuration
+// ---------------------------------------------------------------------------
+
+fn profile_by_id<'a>(cfg: &'a AppConfig, provider_id: &str) -> Result<&'a ProviderProfile, String> {
+    cfg.providers
+        .profiles
+        .iter()
+        .find(|p| p.id == provider_id)
+        .ok_or_else(|| format!("unknown provider profile: {provider_id}"))
+}
+
+fn curation_state_token(cfg: &AppConfig) -> Result<String, String> {
+    use sha2::Digest;
+    let bytes = serde_json::to_vec(&(&cfg.providers, &cfg.default_chat_model, &cfg.model_curation))
+        .map_err(|error| format!("encode curation state: {error}"))?;
+    Ok(format!("{:x}", sha2::Sha256::digest(bytes)))
+}
+
+fn require_preview_state(cfg: &AppConfig, expected: Option<&str>) -> Result<(), String> {
+    let Some(expected) = expected.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    if curation_state_token(cfg)? != expected {
+        return Err(
+            "model configuration changed after preview — review the current choices again".into(),
+        );
+    }
+    Ok(())
+}
+
+/// What a hypothetical curation change would do to the default selection.
+async fn curation_impact(
+    cfg: &AppConfig,
+    secrets: &KeychainSecretStore,
+    next: &AppConfig,
+) -> Result<CurationImpactDto, String> {
+    let before = build_model_options(cfg, secrets).await;
+    let default_key = before
+        .iter()
+        .find(|m| m.is_default)
+        .map(|m| m.selection_key.clone());
+
+    // Whether the default is offered *now*, before the change. If it is already
+    // curated away, this change did not do that, and demanding a replacement
+    // would make every unrelated action — including a restore — re-point the
+    // user's default as a side effect.
+    let default_was_visible = default_key
+        .as_ref()
+        .map(|k| before.iter().any(|m| &m.selection_key == k && !m.hidden))
+        .unwrap_or(false);
+
+    let after = build_model_options(next, secrets).await;
+    let visible: Vec<&ModelOptionDto> = after.iter().filter(|m| !m.hidden).collect();
+    let default_still_visible = default_key
+        .as_ref()
+        .map(|k| visible.iter().any(|m| &m.selection_key == k))
+        .unwrap_or(false);
+    let replacement = visible
+        .iter()
+        .copied()
+        .find(|model| model.availability == ModelAvailability::Discovered);
+
+    Ok(CurationImpactDto {
+        // A property of the delta, not of the end state.
+        affects_default: default_was_visible && !default_still_visible,
+        replacement_key: replacement.map(|m| m.selection_key.clone()),
+        replacement_label: replacement.map(|m| format!("{} · {}", m.provider_label, m.label)),
+        remaining_visible: visible.len() as u32,
+        state_token: curation_state_token(cfg)?,
+    })
+}
+
+/// Counts for the Settings entry point, read from configuration alone.
+///
+/// Deliberately does **not** list models. Ordinary Settings must not load the
+/// hidden inventory, and it must not trigger discovery against every
+/// configured provider merely because the page was opened (#678).
+#[tauri::command]
+fn get_curation_summary(state: State<'_, AppState>) -> Result<CurationSummaryDto, String> {
+    let cfg = state.config.lock().expect("config");
+    Ok(cfg.model_curation.active_summary(&cfg.providers.profiles))
+}
+
+/// Preview hiding a provider or a model before anything is written.
+///
+/// `model_id` empty means the whole profile. The returned replacement is the
+/// exact choice the pickers would fall to, produced by the same builder the
+/// apply path uses.
+#[tauri::command]
+async fn preview_curation_change(
+    state: State<'_, AppState>,
+    provider_id: String,
+    model_id: Option<String>,
+    hidden: bool,
+) -> Result<CurationImpactDto, String> {
+    let cfg = state.config.lock().expect("config").clone();
+    let mut next = cfg.clone();
+    {
+        let profile = profile_by_id(&cfg, provider_id.trim())?.clone();
+        match model_id.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+            Some(model) => {
+                next.model_curation
+                    .set_model_hidden(&profile, model, hidden);
+            }
+            None => {
+                next.model_curation.set_provider_hidden(&profile, hidden);
+            }
+        }
+    }
+    curation_impact(&cfg, &state.secrets, &next).await
+}
+
+/// Hide or restore one exact provider/model pair.
+///
+/// Refuses rather than silently invalidating the default: when the change
+/// would take the default out of ordinary pickers the caller must pass
+/// `accept_replacement` equal to the previewed replacement key, which is then
+/// promoted to default in the same write.
+#[tauri::command]
+async fn set_model_hidden(
+    state: State<'_, AppState>,
+    provider_id: String,
+    model_id: String,
+    hidden: bool,
+    accept_replacement: Option<String>,
+    expected_state_token: Option<String>,
+) -> Result<CurationImpactDto, String> {
+    let provider_id = provider_id.trim().to_string();
+    let model_id = model_id.trim().to_string();
+    if model_id.is_empty() {
+        return Err("model id is required".into());
+    }
+    let cfg = state.config.lock().expect("config").clone();
+    require_preview_state(&cfg, expected_state_token.as_deref())?;
+    let profile = profile_by_id(&cfg, &provider_id)?.clone();
+
+    let mut next = cfg.clone();
+    next.model_curation
+        .set_model_hidden(&profile, &model_id, hidden);
+    let impact = curation_impact(&cfg, &state.secrets, &next).await?;
+    let target = provider_id.clone();
+    let model = model_id.clone();
+    apply_curation(state, &impact, accept_replacement, move |fresh| {
+        // Re-resolve against the current config: the profile could have been
+        // edited or removed while discovery ran.
+        let profile = profile_by_id(fresh, &target)?.clone();
+        fresh
+            .model_curation
+            .set_model_hidden(&profile, &model, hidden);
+        Ok(())
+    })?;
+    Ok(impact)
+}
+
+/// Hide or restore a whole provider profile. Nothing is deleted: credentials,
+/// base URL, and models all remain configured.
+#[tauri::command]
+async fn set_provider_hidden(
+    state: State<'_, AppState>,
+    provider_id: String,
+    hidden: bool,
+    accept_replacement: Option<String>,
+    expected_state_token: Option<String>,
+) -> Result<CurationImpactDto, String> {
+    let provider_id = provider_id.trim().to_string();
+    let cfg = state.config.lock().expect("config").clone();
+    require_preview_state(&cfg, expected_state_token.as_deref())?;
+    let profile = profile_by_id(&cfg, &provider_id)?.clone();
+
+    let mut next = cfg.clone();
+    next.model_curation.set_provider_hidden(&profile, hidden);
+    let impact = curation_impact(&cfg, &state.secrets, &next).await?;
+    let target = provider_id.clone();
+    apply_curation(state, &impact, accept_replacement, move |fresh| {
+        let profile = profile_by_id(fresh, &target)?.clone();
+        fresh.model_curation.set_provider_hidden(&profile, hidden);
+        Ok(())
+    })?;
+    Ok(impact)
+}
+
+/// Pin or unpin one model. Pinning appends to the explicit user order.
+#[tauri::command]
+async fn set_model_pinned(
+    state: State<'_, AppState>,
+    provider_id: String,
+    model_id: String,
+    pinned: bool,
+) -> Result<bool, String> {
+    let provider_id = provider_id.trim().to_string();
+    let model_id = model_id.trim().to_string();
+    if model_id.is_empty() {
+        return Err("model id is required".into());
+    }
+    let mut guard = state.config.lock().expect("config");
+    let mut cfg = guard.clone();
+    let profile = profile_by_id(&cfg, &provider_id)?.clone();
+    let changed = cfg
+        .model_curation
+        .set_model_pinned(&profile, &model_id, pinned);
+    if changed {
+        let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+        save_config(&path, &cfg).map_err(|e| e.to_string())?;
+        *guard = cfg;
+    }
+    Ok(changed)
+}
+
+/// Commit a curation change, enforcing the replacement contract.
+///
+/// `mutate` is applied to a **freshly read** configuration, not to the snapshot
+/// the impact was computed from. Computing the impact performs live provider
+/// discovery and can take seconds; writing that stale snapshot back would
+/// silently revert anything saved meanwhile — a learned tool rejection from a
+/// concurrent turn, a context-budget update, a provider edit.
+fn apply_curation(
+    state: State<'_, AppState>,
+    impact: &CurationImpactDto,
+    accept_replacement: Option<String>,
+    mutate: impl FnOnce(&mut AppConfig) -> Result<(), String>,
+) -> Result<(), String> {
+    let decision = curation_decision(impact, accept_replacement.as_deref());
+    if let CurationDecision::Reject(message) = decision {
+        return Err(message);
+    }
+
+    let mut guard = state.config.lock().expect("config");
+    if curation_state_token(&guard)? != impact.state_token {
+        return Err(
+            "model configuration changed while discovery was running — review the current choices again"
+                .into(),
+        );
+    }
+    let mut cfg = guard.clone();
+    mutate(&mut cfg)?;
+    if let CurationDecision::ApplyWithDefault(replacement) = decision {
+        let (pid, model) = parse_selection_key(&replacement);
+        let Some(pid) = pid else {
+            return Err("replacement default has no provider identity".into());
+        };
+        let still_configured = cfg
+            .providers
+            .profiles
+            .iter()
+            .any(|profile| profile.id == pid);
+        if !still_configured {
+            return Err("replacement provider is no longer configured — review again".into());
+        }
+        cfg.default_chat_model = Some(model.clone());
+        if let Some(profile) = cfg.providers.profiles.iter_mut().find(|p| p.id == pid) {
+            // Keep the profile's own model in step. resolve_default_model
+            // falls back to profile.chat_model, so leaving it pointing at
+            // the choice we just hid would reintroduce it as the default.
+            profile.chat_model = model;
+            let pid = profile.id.clone();
+            cfg.providers.active_id = Some(pid);
+        }
+    }
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    *guard = cfg;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -5836,15 +6143,18 @@ fn clear_capability_qualification(
 async fn models_for_profile_with_key(
     profile: &ProviderProfile,
     api_key: Option<&str>,
-) -> Vec<String> {
-    let mut ids: Vec<String> = Vec::new();
+) -> ProfileModelInventory {
+    let mut known_ids: Vec<String> = Vec::new();
+    let mut discovered_ids: Vec<String> = Vec::new();
+    let mut discovery_succeeded = false;
     match profile.kind {
         ProviderKind::Ollama => {
             if let Ok(client) =
                 cd_core::chat::OllamaClient::new(&profile.base_url, &profile.chat_model)
             {
                 if let Ok(tags) = client.list_tags().await {
-                    ids.extend(tags.into_iter().filter(|m| looks_like_chat_model_id(m)));
+                    discovery_succeeded = true;
+                    discovered_ids.extend(tags.into_iter().filter(|m| looks_like_chat_model_id(m)));
                 }
             }
         }
@@ -5865,6 +6175,7 @@ async fn models_for_profile_with_key(
                     &policy,
                 ) {
                     if let Ok(listed) = client.list_models().await {
+                        discovery_succeeded = true;
                         let filtered: Vec<String> = listed
                             .into_iter()
                             .filter(|m| looks_like_chat_model_id(m))
@@ -5875,10 +6186,10 @@ async fn models_for_profile_with_key(
                     }
                 }
             }
-            ids.extend(best);
+            discovered_ids.extend(best);
         }
         ProviderKind::XaiGrokBuild => {
-            ids.extend(
+            known_ids.extend(
                 ["grok-3", "grok-3-mini", "grok-2", "grok-2-vision-1212"]
                     .into_iter()
                     .map(str::to_string),
@@ -5898,9 +6209,10 @@ async fn models_for_profile_with_key(
                     ) {
                         let client = client.with_extra_headers(creds.request_headers());
                         if let Ok(listed) = client.list_models().await {
+                            discovery_succeeded = true;
                             for m in listed.into_iter().filter(|m| looks_like_chat_model_id(m)) {
-                                if !ids.iter().any(|x| x == &m) {
-                                    ids.push(m);
+                                if !discovered_ids.iter().any(|x| x == &m) {
+                                    discovered_ids.push(m);
                                 }
                             }
                         }
@@ -5924,6 +6236,7 @@ async fn models_for_profile_with_key(
                     &policy,
                 ) {
                     if let Ok(listed) = client.list_models().await {
+                        discovery_succeeded = true;
                         let filtered: Vec<String> = listed
                             .into_iter()
                             .filter(|m| looks_like_chat_model_id(m))
@@ -5934,24 +6247,111 @@ async fn models_for_profile_with_key(
                     }
                 }
             }
-            ids.extend(best);
+            discovered_ids.extend(best);
         }
     }
 
     let profile_model = profile.chat_model.trim();
-    if !profile_model.is_empty() && !ids.iter().any(|x| x == profile_model) {
-        ids.insert(0, profile_model.to_string());
+    if !profile_model.is_empty()
+        && !known_ids.iter().any(|x| x == profile_model)
+        && !discovered_ids.iter().any(|x| x == profile_model)
+    {
+        known_ids.push(profile_model.to_string());
     }
-    ids.sort();
-    ids.dedup();
-    ids
+    discovered_ids.sort();
+    discovered_ids.dedup();
+    known_ids.extend(discovered_ids.iter().cloned());
+    known_ids.sort();
+    known_ids.dedup();
+    let unavailable_detail = if discovery_succeeded {
+        "Configured model was not returned by the provider's current discovery response."
+    } else {
+        "Model discovery did not succeed; availability is unverified."
+    };
+    ProfileModelInventory {
+        models: known_ids
+            .into_iter()
+            .map(|id| {
+                let discovered = discovered_ids.binary_search(&id).is_ok();
+                ProfileModelCandidate {
+                    id,
+                    availability: if discovered {
+                        ModelAvailability::Discovered
+                    } else {
+                        ModelAvailability::ConfiguredUnverified
+                    },
+                    availability_detail: (!discovered).then(|| unavailable_detail.to_string()),
+                }
+            })
+            .collect(),
+    }
 }
 
 /// List models from **all** configured providers, for grouped UI selection.
+///
+/// `include_hidden` (default false) is what keeps curated-away choices out of
+/// ordinary pickers without a second round trip; the management surface passes
+/// true. `keep_keys` always survives the filter so a chat already pinned to a
+/// hidden model still renders honestly instead of silently losing its
+/// selection (#678).
 #[tauri::command]
-async fn list_chat_models(state: State<'_, AppState>) -> Result<Vec<ModelOptionDto>, String> {
+async fn list_chat_models(
+    state: State<'_, AppState>,
+    include_hidden: Option<bool>,
+    keep_keys: Option<Vec<String>>,
+) -> Result<Vec<ModelOptionDto>, String> {
     let cfg = state.config.lock().expect("config").clone();
-    let default_model = resolve_default_model(&cfg);
+    let mut out = build_model_options(&cfg, &state.secrets).await;
+    retain_picker_visible(&mut out, include_hidden.unwrap_or(false), keep_keys);
+    Ok(out)
+}
+
+/// Drop curated-away options for an ordinary picker.
+///
+/// The app default and any explicitly kept selection always survive: a picker
+/// that cannot render its own value would silently show a different model
+/// (#678). Pure, so the rule is testable without a host.
+fn retain_picker_visible(
+    out: &mut Vec<ModelOptionDto>,
+    include_hidden: bool,
+    keep_keys: Option<Vec<String>>,
+) {
+    if include_hidden {
+        return;
+    }
+    let keep: std::collections::BTreeSet<String> = keep_keys
+        .unwrap_or_default()
+        .into_iter()
+        .map(|k| {
+            let selection = parse_model_selection_key(&k);
+            if selection.provider_id.is_empty() {
+                selection.model_id
+            } else {
+                model_selection_key(&selection.provider_id, &selection.model_id)
+            }
+        })
+        .filter(|k| !k.is_empty())
+        .collect();
+    out.retain(|m| {
+        let selection = parse_model_selection_key(&m.selection_key);
+        let comparable = if selection.provider_id.is_empty() {
+            selection.model_id
+        } else {
+            model_selection_key(&selection.provider_id, &selection.model_id)
+        };
+        !m.hidden || m.is_default || keep.contains(&comparable)
+    });
+}
+
+/// Build the full annotated, ordered model list for a given configuration.
+///
+/// Preview and apply both go through this, so the replacement a user is shown
+/// before confirming is byte-for-byte the one they end up with (#678).
+async fn build_model_options(
+    cfg: &AppConfig,
+    secrets: &KeychainSecretStore,
+) -> Vec<ModelOptionDto> {
+    let default_model = resolve_default_model(cfg);
     let default_pid = cfg
         .providers
         .active()
@@ -5966,16 +6366,26 @@ async fn list_chat_models(state: State<'_, AppState>) -> Result<Vec<ModelOptionD
 
     let mut out: Vec<ModelOptionDto> = Vec::new();
     for profile in &profiles {
-        let ids = models_for_profile(profile, &state.secrets).await;
+        let inventory = models_for_profile(profile, secrets).await;
         let group = provider_group_label(profile);
-        for id in ids {
+        for candidate in inventory.models {
+            let id = candidate.id;
             let selection_key = model_selection_key(&profile.id, &id);
+            let hidden_by = cfg.model_curation.hidden_by(profile, &id);
             out.push(ModelOptionDto {
                 is_default: selection_key == default_key
                     || (id == default_model && profile.id == default_pid),
-                tools_enabled: model_tools_enabled(&cfg, profile, &id),
-                tools_disabled_reason: model_tools_disabled_reason(&cfg, profile, &id)
+                tools_enabled: model_tools_enabled(cfg, profile, &id),
+                tools_disabled_reason: model_tools_disabled_reason(cfg, profile, &id)
                     .map(str::to_string),
+                availability: candidate.availability,
+                availability_detail: candidate.availability_detail,
+                hidden: hidden_by.is_some(),
+                hidden_by: hidden_by.map(|h| match h {
+                    cd_core::model_curation::HiddenBy::Provider => "provider".to_string(),
+                    cd_core::model_curation::HiddenBy::Model => "model".to_string(),
+                }),
+                pinned_rank: cfg.model_curation.pinned_rank(profile, &id),
                 label: id.clone(),
                 selection_key,
                 id,
@@ -6006,27 +6416,47 @@ async fn list_chat_models(state: State<'_, AppState>) -> Result<Vec<ModelOptionD
                 tools_enabled: cfg
                     .providers
                     .active()
-                    .map(|profile| model_tools_enabled(&cfg, profile, &default_model))
+                    .map(|profile| model_tools_enabled(cfg, profile, &default_model))
                     .unwrap_or(true),
                 tools_disabled_reason: cfg.providers.active().and_then(|profile| {
-                    model_tools_disabled_reason(&cfg, profile, &default_model).map(str::to_string)
+                    model_tools_disabled_reason(cfg, profile, &default_model).map(str::to_string)
                 }),
+                availability: ModelAvailability::ConfiguredUnverified,
+                availability_detail: Some(
+                    "The configured default was not confirmed by model discovery.".into(),
+                ),
+                // The default is always offered: it is what a new chat uses.
+                hidden: false,
+                hidden_by: None,
+                pinned_rank: cfg
+                    .providers
+                    .active()
+                    .and_then(|profile| cfg.model_curation.pinned_rank(profile, &default_model)),
             },
         );
     }
 
-    // Group order: active provider first, then alpha by group, then model id.
+    // Pinned first in explicit user order, then active provider, then alpha by
+    // group, then model id. Hidden entries sort last so a management view that
+    // asks for them still reads as a curated list.
     let active_id = cfg.providers.active_id.clone().unwrap_or_default();
     out.sort_by(|a, b| {
         let a_act = a.provider_id == active_id;
         let b_act = b.provider_id == active_id;
-        b_act
-            .cmp(&a_act)
+        a.hidden
+            .cmp(&b.hidden)
+            .then_with(|| match (a.pinned_rank, b.pinned_rank) {
+                (Some(x), Some(y)) => x.cmp(&y),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            })
+            .then_with(|| b_act.cmp(&a_act))
             .then_with(|| a.group.cmp(&b.group))
             .then_with(|| a.id.cmp(&b.id))
     });
 
-    Ok(out)
+    out
 }
 
 /// Set default model for new chats. `selection` may be `provider::model` or bare model id.
@@ -11214,6 +11644,11 @@ pub fn run() {
             get_active_provider,
             set_provider_tools_enabled,
             set_model_tools_enabled,
+            get_curation_summary,
+            preview_curation_change,
+            set_model_hidden,
+            set_provider_hidden,
+            set_model_pinned,
             set_default_chat_model,
             get_default_chat_model,
             suggest_chat_title,
@@ -13811,12 +14246,13 @@ mod startup_host_tests {
         parse_log_explorer_nav_target, persist_host_terminal_turn_at,
         persist_linked_provider_loop_terminal_at, prepare_linked_turn_with,
         provider_profile_for_turn, request_agent_turn_cancel, restore_host_if_generation_matches,
-        save_chat_session_at, set_chat_linked_corpus_at, take_ready_linked_host,
-        validate_linked_log_corpus_at, wait_for_host_readiness, BackgroundIndexBuild,
-        HostInitFlight, HostReadinessFailure, LinkedCheckpointStore, LinkedTurnPreparation,
-        LogExplorerNavTarget, LogExplorerNavTargetStore, LogExplorerTurnContextReq, StdInstant,
-        LINKED_CHECKPOINT_ENTRY_CAP, LINKED_CHECKPOINT_TOTAL_BYTES, LINKED_CHECKPOINT_TTL,
-        LOG_INGEST_CANCEL_KEY, LOG_REANALYZE_CANCEL_KEY,
+        save_chat_session_at, save_chat_session_cas_at, set_chat_linked_corpus_at,
+        take_ready_linked_host, validate_linked_log_corpus_at, wait_for_host_readiness,
+        BackgroundIndexBuild, HostInitFlight, HostReadinessFailure, LinkedCheckpointStore,
+        LinkedTurnPreparation, LogExplorerNavTarget, LogExplorerNavTargetStore,
+        LogExplorerTurnContextReq, StdInstant, LINKED_CHECKPOINT_ENTRY_CAP,
+        LINKED_CHECKPOINT_TOTAL_BYTES, LINKED_CHECKPOINT_TTL, LOG_INGEST_CANCEL_KEY,
+        LOG_REANALYZE_CANCEL_KEY,
     };
     use cd_core::events::StreamEvent;
     use cd_core::index::{KeywordIndex, ReindexStats};
@@ -14980,6 +15416,46 @@ mod startup_host_tests {
     }
 
     #[test]
+    fn generic_save_rejects_a_stale_conversation_revision_without_erasing_history() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let mut original = cd_core::sessions::Session::new("Concurrent");
+        original.messages.push(cd_core::sessions::StoredMessage {
+            id: "user-1".into(),
+            role: "user".into(),
+            content: "first".into(),
+            tools: None,
+            citations: None,
+            trail: None,
+            meta: None,
+        });
+        store.save(&original).expect("save original");
+        let stale_revision = original.updated_at.to_rfc3339();
+        let stale = original.clone();
+
+        let mut newer = original.clone();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        newer.touch();
+        newer.messages.push(cd_core::sessions::StoredMessage {
+            id: "assistant-1".into(),
+            role: "assistant".into(),
+            content: "newer durable answer".into(),
+            tools: None,
+            citations: None,
+            trail: None,
+            meta: None,
+        });
+        store.save(&newer).expect("save concurrent winner");
+
+        let error = save_chat_session_cas_at(&store, stale, Some(&stale_revision))
+            .expect_err("stale renderer must lose");
+        assert!(error.starts_with("chat_session_conflict:"));
+        let reopened = store.load(&original.id).expect("reopen winner");
+        assert_eq!(reopened.messages.len(), 2);
+        assert_eq!(reopened.messages[1].content, "newer durable answer");
+    }
+
+    #[test]
     fn retry_binding_changes_on_provider_or_model_switch_only() {
         let original = cd_core::sessions::Session::new("Bound");
         let mut same = original.clone();
@@ -15358,6 +15834,37 @@ mod startup_host_tests {
             .cloned()
             .expect("new cite");
         assert_eq!(new_cite["corpusId"].as_str(), Some("trusted-corpus"));
+    }
+
+    #[test]
+    fn generic_save_preserves_equal_log_ids_bound_to_distinct_corpora() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let mut durable = cd_core::sessions::Session::new("Cross-corpus evidence");
+        durable.messages.push(cd_core::sessions::StoredMessage {
+            id: "assistant-cross-corpus".into(),
+            role: "assistant".into(),
+            content: "comparison".into(),
+            tools: None,
+            citations: Some(serde_json::json!([
+                {"id":"log_event:7","label":"A","corpusId":"corpus-a"},
+                {"id":"log_event:7","label":"B","corpusId":"corpus-b"}
+            ])),
+            trail: None,
+            meta: None,
+        });
+        store.save(&durable).expect("save durable");
+
+        let renderer = store.load(&durable.id).expect("load renderer");
+        let saved = save_chat_session_at(&store, renderer).expect("generic save");
+        let citations = saved.messages[0]
+            .citations
+            .as_ref()
+            .and_then(|value| value.as_array())
+            .expect("citations");
+        assert_eq!(citations.len(), 2);
+        assert_eq!(citations[0]["corpusId"], "corpus-a");
+        assert_eq!(citations[1]["corpusId"], "corpus-b");
     }
 
     /// #698 — durable legacy log citations without corpusId stay unbound even
@@ -15798,6 +16305,215 @@ mod startup_host_tests {
 #[cfg(test)]
 mod chat_session_host_tests {
     use super::*;
+
+    fn opt(key: &str, hidden: bool, is_default: bool) -> ModelOptionDto {
+        ModelOptionDto {
+            id: key.into(),
+            label: key.into(),
+            selection_key: key.into(),
+            provider_id: "p".into(),
+            provider_label: "P".into(),
+            group: "P".into(),
+            is_default,
+            tools_enabled: true,
+            tools_disabled_reason: None,
+            availability: ModelAvailability::Discovered,
+            availability_detail: None,
+            hidden,
+            hidden_by: hidden.then(|| "model".to_string()),
+            pinned_rank: None,
+        }
+    }
+
+    #[test]
+    fn ordinary_pickers_do_not_receive_curated_away_models() {
+        let mut out = vec![opt("p::keep", false, false), opt("p::gone", true, false)];
+        retain_picker_visible(&mut out, false, None);
+        assert_eq!(
+            out.iter()
+                .map(|m| m.selection_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["p::keep"]
+        );
+    }
+
+    #[test]
+    fn a_hidden_default_is_still_offered_so_new_chats_have_a_model() {
+        let mut out = vec![opt("p::a", false, false), opt("p::def", true, true)];
+        retain_picker_visible(&mut out, false, None);
+        assert!(out.iter().any(|m| m.selection_key == "p::def"));
+    }
+
+    #[test]
+    fn an_explicitly_kept_selection_survives_the_filter() {
+        // A chat pinned to a hidden model must still get an option for it.
+        let mut out = vec![opt("p::a", false, false), opt("p::mine", true, false)];
+        retain_picker_visible(&mut out, false, Some(vec!["  p::mine  ".into()]));
+        assert!(out.iter().any(|m| m.selection_key == "p::mine"));
+    }
+
+    #[test]
+    fn the_management_surface_receives_everything() {
+        let mut out = vec![opt("p::a", false, false), opt("p::b", true, false)];
+        retain_picker_visible(&mut out, true, None);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn blank_keep_keys_do_not_accidentally_keep_everything() {
+        let mut out = vec![opt("p::a", false, false), opt("p::b", true, false)];
+        retain_picker_visible(&mut out, false, Some(vec!["".into(), "   ".into()]));
+        assert_eq!(out.len(), 1);
+    }
+
+    fn impact(
+        affects_default: bool,
+        replacement: Option<&str>,
+        remaining: u32,
+    ) -> CurationImpactDto {
+        CurationImpactDto {
+            affects_default,
+            replacement_key: replacement.map(str::to_string),
+            replacement_label: replacement.map(|r| format!("label {r}")),
+            remaining_visible: remaining,
+            state_token: "state-1".into(),
+        }
+    }
+
+    #[test]
+    fn curation_that_leaves_the_default_alone_applies_without_confirmation() {
+        let decision = curation_decision(&impact(false, Some("p::other"), 4), None);
+        assert_eq!(decision, CurationDecision::Apply);
+    }
+
+    #[test]
+    fn hiding_the_default_is_refused_until_the_exact_replacement_is_echoed_back() {
+        let i = impact(true, Some("p::replacement"), 3);
+
+        // No confirmation at all.
+        let CurationDecision::Reject(message) = curation_decision(&i, None) else {
+            panic!("hiding the default without confirmation must be refused");
+        };
+        assert!(
+            message.contains("p::replacement"),
+            "the refusal must name the exact replacement the user will get: {message}"
+        );
+
+        // A *different* key must not be accepted as consent.
+        assert!(matches!(
+            curation_decision(&i, Some("p::something-else")),
+            CurationDecision::Reject(_)
+        ));
+
+        // Echoing the previewed replacement promotes it in the same write.
+        assert_eq!(
+            curation_decision(&i, Some("p::replacement")),
+            CurationDecision::ApplyWithDefault("p::replacement".into())
+        );
+    }
+
+    #[test]
+    fn confirmation_tolerates_surrounding_whitespace_only() {
+        let i = impact(true, Some("p::replacement"), 2);
+        assert_eq!(
+            curation_decision(&i, Some("  p::replacement  ")),
+            CurationDecision::ApplyWithDefault("p::replacement".into())
+        );
+        assert!(matches!(
+            curation_decision(&i, Some("p::replacemen")),
+            CurationDecision::Reject(_)
+        ));
+    }
+
+    #[test]
+    fn hiding_the_last_visible_model_is_refused_outright() {
+        let CurationDecision::Reject(message) =
+            curation_decision(&impact(true, None, 0), Some("anything"))
+        else {
+            panic!("emptying the picker must be refused");
+        };
+        assert!(
+            message.contains("at least one model must stay visible"),
+            "message should explain the honest way out: {message}"
+        );
+    }
+
+    #[test]
+    fn an_empty_inventory_is_refused_even_when_the_default_is_untouched() {
+        assert!(matches!(
+            curation_decision(&impact(false, None, 0), None),
+            CurationDecision::Reject(_)
+        ));
+    }
+
+    #[test]
+    fn unverified_visible_models_are_not_eligible_default_replacements() {
+        let CurationDecision::Reject(message) = curation_decision(&impact(true, None, 2), None)
+        else {
+            panic!("an unverified replacement must not be applied silently");
+        };
+        assert!(message.contains("discovered replacement"));
+    }
+
+    #[test]
+    fn curation_state_token_rejects_provider_or_default_drift() {
+        let mut cfg = AppConfig {
+            providers: ProviderConfig::with_local_ollama(),
+            ..AppConfig::default()
+        };
+        let token = curation_state_token(&cfg).expect("token");
+        require_preview_state(&cfg, Some(&token)).expect("same state");
+        cfg.default_chat_model = Some("different".into());
+        let error = require_preview_state(&cfg, Some(&token)).expect_err("drift");
+        assert!(error.contains("changed after preview"));
+    }
+
+    #[test]
+    fn curation_never_removes_provider_configuration_or_credentials() {
+        let mut cfg = AppConfig {
+            providers: ProviderConfig::with_local_ollama(),
+            ..AppConfig::default()
+        };
+        let profile = cfg.providers.active().expect("local profile").clone();
+        let before_profiles = cfg.providers.profiles.clone();
+
+        cfg.model_curation.set_provider_hidden(&profile, true);
+        cfg.model_curation
+            .set_model_hidden(&profile, "mistral", true);
+
+        assert_eq!(
+            cfg.providers.profiles, before_profiles,
+            "hiding must not touch profiles, base URLs, or api_key_ref"
+        );
+        assert!(
+            cfg.providers.active().is_some(),
+            "hiding must not clear the active provider"
+        );
+    }
+
+    #[test]
+    fn hidden_state_is_independent_of_tool_capability_truth() {
+        // Hiding a model must not make a tools-rejected model look healthy.
+        let mut cfg = AppConfig {
+            providers: ProviderConfig::with_local_ollama(),
+            ..AppConfig::default()
+        };
+        let profile = cfg.providers.active().expect("local profile").clone();
+        cfg.model_tools_enabled
+            .insert(model_selection_key(&profile.id, "dolphin"), false);
+
+        cfg.model_curation
+            .set_model_hidden(&profile, "dolphin", true);
+
+        assert!(
+            !model_tools_enabled(&cfg, &profile, "dolphin"),
+            "curation must not launder a learned tool rejection"
+        );
+        assert_eq!(
+            model_tools_disabled_reason(&cfg, &profile, "dolphin"),
+            Some("model")
+        );
+    }
 
     #[test]
     fn learned_tool_rejection_is_scoped_to_one_provider_model() {

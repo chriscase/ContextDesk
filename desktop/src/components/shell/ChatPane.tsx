@@ -146,6 +146,13 @@ export type ChatPaneProps = {
   hasAuthorizedWorkspaceContent?: boolean;
   /** External composer seed from wizard completion. */
   externalSeedRequest?: { id: number; text: string } | null;
+  /** Draft for the active conversation, owned above the pane switch. */
+  draft?: string;
+  onDraftChange?: (text: string) => void;
+  /** Retire a spent wizard seed so a remount cannot replay it. */
+  onSeedConsumed?: (seedId: number) => void;
+  /** Re-test native tool support for one exact provider/model pair (#650). */
+  onRetryModelTools?: (model: ModelOptionDto) => Promise<void> | void;
 };
 
 /** Chat tabpanel: session tabs + transcript + composer (#146). */
@@ -196,6 +203,10 @@ export function ChatPane(props: ChatPaneProps) {
     onStartWizard,
     hasAuthorizedWorkspaceContent = false,
     externalSeedRequest = null,
+    draft,
+    onDraftChange,
+    onSeedConsumed,
+    onRetryModelTools,
   } = props;
 
   const windowed = useMessageWindow(visibleMessages, chatScrollRef);
@@ -286,9 +297,14 @@ export function ChatPane(props: ChatPaneProps) {
           ) : null}
         </div>
       </header>
+      {/*
+        A region, not a tabpanel: this sits *inside* the chat tabpanel and has
+        no tab of its own, so `role="tabpanel"` here described a relationship
+        that does not exist.
+      */}
       <div
         id="session-panel-chat"
-        role="tabpanel"
+        role="region"
         aria-label="Chat transcript"
         className="chat-scroll-wrap"
       >
@@ -296,6 +312,10 @@ export function ChatPane(props: ChatPaneProps) {
           className="chat-scroll"
           ref={chatScrollRef}
           onScroll={onChatScroll}
+          // The transcript scrolls, so it must be reachable and scrollable
+          // without a pointer. Focus styling lives in base.css.
+          tabIndex={0}
+          aria-label={`Transcript for ${activeSession?.title || "this chat"}`}
         >
           {isFolded && hiddenCount > 0 ? (
             <div className="compact-banner" role="status">
@@ -642,12 +662,25 @@ export function ChatPane(props: ChatPaneProps) {
           onSubmit={onSubmit}
           disabled={busy || contextMutationPending}
           busy={busy}
+          disabledReason={
+            contextMutationPending
+              ? "Updating this chat's context — sending resumes when it finishes"
+              : preflightBlocking
+                ? // Sending is not blocked here — it opens Settings instead —
+                  // so this must show while the composer is still usable.
+                  "Setup checks are unresolved — sending opens Settings instead"
+                : undefined
+          }
           models={modelOptions}
           selectedModelKey={effectiveModelKey}
           onModelChange={setSessionModel}
           onSetDefaultModel={(key) => void setAppDefaultModel(key)}
           onStop={onStop}
           seedRequest={effectiveSeed}
+          onSeedConsumed={onSeedConsumed}
+          draft={draft}
+          onDraftChange={onDraftChange}
+          onRetryModelTools={onRetryModelTools}
         />
       </div>
     </div>

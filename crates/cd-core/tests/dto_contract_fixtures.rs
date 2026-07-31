@@ -42,6 +42,7 @@ use cd_core::log_analysis::{
     SuppressionRuleOrigin, SuppressionRuleResolution, SuppressionRuleResolutionKind,
     SuppressionRuleState, SuppressionTemplatePredicate, SuppressionTimeSpan, TimeQuality,
 };
+use cd_core::model_curation::{model_selection_key, ModelAvailability, ModelOptionDto};
 use cd_core::process_progress::{ProcessProgress, ProcessProgressKind, ProcessProgressPhase};
 use cd_core::research::EventDto;
 use serde_json::{json, Value};
@@ -717,7 +718,25 @@ fn contract_fixtures() -> Vec<(&'static str, Value)> {
         serde_json::to_value(value).expect("fixture value serializes")
     }
 
+    let model_options = vec![ModelOptionDto {
+        id: "model::latest".into(),
+        label: "Model latest".into(),
+        selection_key: model_selection_key("account::west", "model::latest"),
+        provider_id: "account::west".into(),
+        provider_label: "Gateway west".into(),
+        group: "Gateway west".into(),
+        is_default: true,
+        tools_enabled: true,
+        tools_disabled_reason: None,
+        availability: ModelAvailability::Discovered,
+        availability_detail: None,
+        hidden: false,
+        hidden_by: None,
+        pinned_rank: Some(0),
+    }];
+
     vec![
+        ("model_options.v1.json", to(&model_options)),
         ("event.v1.json", to(&event_dto_sample())),
         ("explorer_event.v1.json", to(&explorer_event_full())),
         ("event_page.v1.json", to(&event_page)),
@@ -838,6 +857,7 @@ fn fixtures_round_trip_through_deserialize() {
     assert_round_trip::<SuppressionDocument>(&dir, "suppression_document.v1.json");
     assert_round_trip::<InvestigationDocument>(&dir, "investigation_document.v1.json");
     assert_round_trip::<Vec<ProcessProgress>>(&dir, "process_progress.v1.json");
+    assert_round_trip::<Vec<ModelOptionDto>>(&dir, "model_options.v1.json");
 }
 
 /// Artifact writer; run explicitly after an intentional wire change.

@@ -166,6 +166,21 @@
 }
 
 /* Quiet tool chips — not big ghost buttons */
+/* Capability truth for the selected provider/model pair (#650). Warning tone,
+   not error: the chat still works, it just cannot call tools. */
+.composer__capability {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-height: 24px;
+  padding: 0 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border-soft));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
 .composer__chip {
   height: 28px;
   padding: 0 0.55rem;
@@ -350,7 +365,10 @@
 .btn--sm {
   padding: 3px 8px;
   font-size: var(--text-xs);
-  min-height: 22px;
+  /* WCAG 2.2 target-size floor. Padding stays as-is so density is unchanged;
+     only the minimum box grows, from 22px (#767). */
+  min-height: 24px;
+  min-width: 24px;
   gap: 4px;
 }
 

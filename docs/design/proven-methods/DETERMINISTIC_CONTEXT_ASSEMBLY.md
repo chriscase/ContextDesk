@@ -5,7 +5,8 @@ budgets, ordinary-versus-linked chat isolation, native tool-capability checks,
 required log grounding, a host-owned deterministic brief for conservatively
 classified broad linked-log prompts, structured log evidence identities,
 withholding of ungrounded linked-chat prose, phase-aware provider deadlines,
-and evidence-preserving synthesis retry. Exact packaged acceptance on a
+evidence-preserving synthesis retry, and bounded reversible model-picker
+curation. Exact packaged acceptance on a
 250,000+ event corpus with a real tools-enabled provider remains open on #745;
 a genuine slow-provider run also remains an environment-dependent acceptance
 step for #649. Neither deterministic retrieval nor passing component tests is a
@@ -44,7 +45,8 @@ synthesis only after required deterministic steps succeed.
 | Session file packs are scoped and bounded                      | **Shipped** | [`session_context.rs`](../../../crates/cd-core/src/session_context.rs)                                           | Not the path for multi-million-line log corpora                                                    |
 | Broad linked-log triage brief                                  | **Shipped (agent-testable)** | [`tool_host.rs`](../../../crates/cd-core/src/tool_host.rs) `build_broad_log_triage_brief` and [`agent.rs`](../../../crates/cd-core/src/agent.rs) broad-turn admission | Exact generated 250,000+ event acceptance with a tools-enabled provider remains #745 |
 | Slow-provider phase lifecycle and synthesis-only retry         | **Shipped (agent-testable)** | One monotonic turn ceiling, bounded phases, immediate cancellation, host-only evidence checkpoint, and tool-closed retry | Native cold/slow tools-enabled provider acceptance remains on #649                                 |
-| Name-based model-role guidance                                 | **Partial** | Versioned hints inform setup, Settings, and preflight without claiming measured capability                       | Provider-scoped hidden-model integration remains #678                                                  |
+| Bounded model-picker display curation                          | **Shipped** | Profile/endpoint/model-scoped pin, hide, provider hide, restore, exact default replacement, search, and one shared render cap | Display state is not deletion, access control, provider health, or capability evidence              |
+| Name-based model-role guidance                                 | **Partial** | Versioned hints inform setup, Settings, and preflight without claiming measured capability                       | Names remain hints rather than a cross-gateway capability standard                                  |
 | Explicit synthetic capability qualification                    | **Partial** | User-triggered probes, cache key isolation, inert tools, Settings control, and mock-transport tests ship (#724) | Packaged proof against real tools-enabled/disabled profiles remains owner/environment residual        |
 | Ranked multi-source context planner                            | **Partial** | Deterministic eligibility and simple ranking ship                                                                | Richer planning must not weaken host policy                                                        |
 
@@ -159,12 +161,16 @@ Keep four evidence bases distinct in both data and presentation:
 `name_hint`, `provider_metadata`, `measured_locally`, and `user_override`.
 Presentation derives its basis label from that typed source rather than trusting
 preformatted copy. Name hints never silently replace an existing user choice.
-The current role-hint slice remains **Partial**: provider-scoped visibility
-preferences depend on #678. Exact user-triggered capability qualification
-(#724) ships as a **Partial** path: synthetic probes, inert host-validated
-tools, local cache isolation, and Settings **Qualify selected model…** are
-wired; packaged proof with real tools-enabled and tools-disabled profiles
-remains an owner/environment residual.
+Model-picker curation is separate, reversible display state: it is scoped by
+provider profile, normalized endpoint, and model identity; it remains bounded
+even when many choices are pinned or hidden; and it never claims capability or
+health. Renaming a profile preserves that scope, while repointing its endpoint
+creates a distinct inventory. The role-hint slice remains **Partial** because
+names are not a cross-gateway capability standard. Exact user-triggered
+capability qualification (#724) ships as a **Partial** path: synthetic probes,
+inert host-validated tools, local cache isolation, and Settings **Qualify
+selected model…** are wired; packaged proof with real tools-enabled and
+tools-disabled profiles remains an owner/environment residual.
 
 ## 4. Inputs, outputs, and portable contracts
 
@@ -282,6 +288,14 @@ string found in untrusted content into trusted evidence.
 12. **Cancellation stops deterministic work.** A cancelled or expired broad
     scan interrupts the database operation and joins its worker; it does not
     leave a detached corpus scan consuming resources.
+13. **Transcript publication is revisioned.** A renderer autosave names the
+    last host revision it observed. The host rejects an older whole-session
+    snapshot, and only the newest still-relevant client mutation may reconcile
+    exact message identities with the winning durable revision.
+14. **Governed citation identity includes provenance.** Equal event/template
+    ids from different corpora remain distinct. Activation carries the exact
+    citation object; an ambiguous bare inline id fails closed rather than using
+    the first matching corpus.
 
 ```mermaid
 flowchart TB
@@ -511,8 +525,8 @@ synthesis step.
 | Contract/unit    | Source ranking and caps; context fitting; capability matrix; binding serialization; untrusted wrapper cannot forge delimiters                                                                    |
 | Core integration | Linked turn requires successful log evidence; a broad prompt receives its deterministic brief before the first provider call; one corpus with event/template/suppression revisions is pinned; ordinary turn excludes log tools; requested workspace search is staged; tools-disabled linked turn fails before provider; structured identity required |
 | Adversarial      | Model prints call-shaped JSON; wrapper metadata appears in output; user asks to reveal evaluator truth; malicious tool text asks for permissions                                                 |
-| Host/session     | Empty-chat link persists; stale/corrupt corpus fails before capability/provider handling; attach failure leaves durable state unchanged; ordinary session has no log scope; cancellation targets exact session |
-| Component UI     | Add context attaches/detaches one corpus; availability/event count/Open Explorer remain visible; Return/Shift+Return/IME; errors remain visible; autoscroll/unread semantics |
+| Host/session     | Empty-chat link persists; stale/corrupt corpus fails before capability/provider handling; attach failure leaves durable state unchanged; ordinary session has no log scope; cancellation targets exact session; stale whole-session save cannot erase a newer durable turn |
+| Component UI     | Add context attaches/detaches one corpus; availability/event count/Open Explorer remain visible; Return/Shift+Return/IME; errors remain visible; autoscroll/unread semantics; hydration/save/archive races retain the current owner; equal citation ids route by exact corpus provenance |
 | Packaged/native  | On an exact 250,000+ event build, a tools-enabled provider receives the host brief before synthesis for a general zero-prep question from main chat and Explorer; visible status is truthful; cited identities reopen; tools-disabled profile is honest; ordinary chat has no corpus; linked chat keeps corpus after switch/reopen |
 | Slow provider    | Deterministic cold/slow provider defaults; retrieval success then synthesis timeout; cancellation in choosing/retrieving/synthesizing; synthesis-only recovery; explicit deadline precedence |
 
@@ -531,7 +545,13 @@ assert the sentinel is absent from model-facing messages.
 - [`SessionContextBar.tsx`](../../../desktop/src/components/SessionContextBar.tsx):
   explicit single-corpus selection, availability, detach, and Explorer entry.
 - [`desktop/src-tauri/src/lib.rs`](../../../desktop/src-tauri/src/lib.rs):
-  atomic validated attachment and provider-free corpus preflight.
+  atomic validated attachment, revision-checked session persistence,
+  host-owned citation provenance, and provider-free corpus preflight.
+- [`useChatSessions.ts`](../../../desktop/src/hooks/useChatSessions.ts): ordered
+  hydration/synchronization and newest-mutation session reconciliation.
+- [`turn.ts`](../../../desktop/src/lib/turn.ts) and
+  [`SourceCitations.tsx`](../../../desktop/src/components/SourceCitations.tsx):
+  provenance-aware citation folding, presentation, and exact activation.
 - [`router.rs`](../../../crates/cd-core/src/router.rs): turn budgets and source
   ranking.
 - [`injection.rs`](../../../crates/cd-core/src/injection.rs): untrusted result
@@ -559,7 +579,10 @@ assert the sentinel is absent from model-facing messages.
 | Cross-source read           | **Partial** | Requested governed reads can be offered after log grounding                | No unrestricted autonomous source crawl                                   |
 | Small-model staging         | **Shipped** | Constrained first log search and tool-closed synthesis path                | No guarantee every small model follows native tools                       |
 | Slow provider lifecycle     | **Shipped (agent-testable)** | Adaptive or explicit whole-turn ceiling, bounded truthful phases, immediate Stop, evidence-preserving synthesis retry | Native cold/slow tools-enabled profile acceptance remains #649 |
-| Model-role guidance         | **Partial** | Versioned name hints are shown with typed basis and confidence; specialty and unknown ids stay selectable | No cross-gateway capability claim; hidden-model integration remains #678 |
+| Model-picker curation       | **Shipped** | Pin/hide/restore state is profile/endpoint/model scoped, persistent, reversible, searchable, and hard-bounded across rendered bands | Not deletion, authorization, redaction, health, or capability qualification |
+| Durable transcript concurrency | **Shipped** | Host compare-and-swap rejects stale whole-session publication; newest client mutation alone may reconcile exact message ids | Not a multi-device collaborative-edit protocol |
+| Cross-corpus citation identity | **Shipped** | Governed chips retain `(source id, corpus provenance)` and activate the exact citation | Ambiguous bare inline ids fail closed rather than guessing |
+| Model-role guidance         | **Partial** | Versioned name hints are shown with typed basis and confidence; specialty and unknown ids stay selectable | No cross-gateway capability claim |
 | Measured qualification      | **Partial** | Explicit synthetic probes record pass/degraded/fail/untested per profile/endpoint/model/schema (#724) | No quality or permanent reliability claim; real packaged profile proof residual |
 | Model proposals changing UI | **Partial** | Structured `log_nav` is opt-in                                             | Rich finding proposal/approval lifecycle remains #646                     |
 | Evaluator-truth exclusion   | **Shipped** | Known-truth fixture discipline keeps the answer key outside attached roots | Not a formal noninterference proof                                        |
@@ -605,9 +628,6 @@ Avoid these shortcuts:
 - #724 residual: packaged proof with real tools-enabled and tools-disabled
   provider profiles (owner environment; synthetic path ships in
   `crates/cd-core/src/capability_qualification.rs` and desktop host IPC).
-- #678: connect provider-scoped hidden-model state without expanding
-  inventories, then qualify exact deployed capabilities through explicit
-  user-triggered probes. Names remain hints and are never a gateway standard.
 - Provider acceptance: a real tools-enabled company profile must be selected
   and exercised; credentials and capability changes cannot be fabricated by an
   agent.

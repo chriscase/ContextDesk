@@ -31,6 +31,8 @@ export type ChatSession = {
   titleLocked: boolean;
   createdAt: string;
   updatedAt: string;
+  /** Last host revision observed; local UI timestamps are not CAS tokens. */
+  hostRevision?: string | null;
   archived: boolean;
   /** Soft-deleted into trash. */
   trashed: boolean;

@@ -37,6 +37,7 @@ html[data-theme="light"] {
   /* Softer elevation — no white “dark-chrome” insets on light (#300). */
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.08);
   --shadow-md: 0 12px 28px rgb(0 0 0 / 0.12);
+  --shadow-lg: 0 20px 44px rgb(0 0 0 / 0.16);
   --shadow-inset: 0 1px 0 rgb(0 0 0 / 0.04) inset;
   --composer-shadow: 0 1px 2px rgb(0 0 0 / 0.06), 0 8px 24px rgb(0 0 0 / 0.08);
   --composer-shadow-focus:

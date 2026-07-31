@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   hostArchiveChatSession,
   hostDeleteChatSession,
@@ -8,7 +8,14 @@ import {
   hostTrashChatSession,
   type SessionSearchHitDto,
 } from "../../lib/host";
+import { nextRovingIndex } from "../../lib/a11y";
 import { IconPin } from "../icons";
+
+const SCOPE_TABS = [
+  ["active", "Chats"],
+  ["archived", "Archived"],
+  ["trash", "Trash"],
+] as const;
 
 type Props = {
   /** Bump to force a refresh after external session changes. */
@@ -47,35 +54,50 @@ export function ChatArchivePane({
   const [loading, setLoading] = useState(false);
   const [scope, setScope] = useState<Scope>("active");
   const [error, setError] = useState<string | null>(null);
+  /** Monotonic id of the newest search; older responses are discarded. */
+  const searchTicketRef = useRef(0);
+  /** Latest rendered inputs, used after a mutation promise settles. */
+  const latestSearchRef = useRef({ query: debounced, scope });
+  latestSearchRef.current = { query: debounced, scope };
+  const mutationTicketRef = useRef(0);
 
   useEffect(() => {
     const t = window.setTimeout(() => setDebounced(query.trim()), 200);
     return () => window.clearTimeout(t);
   }, [query]);
 
-  const runSearch = useCallback(async () => {
+  const runSearch = useCallback(async (searchQuery = debounced, searchScope = scope) => {
+    // Typing fast, or switching scope mid-flight, leaves several searches in
+    // the air. Without a sequence number the slowest one wins, so the list can
+    // settle on results for an older query — or show Trash rows under the
+    // Chats tab — and a stale `finally` clears the spinner while the newest
+    // search is still running.
+    const ticket = (searchTicketRef.current += 1);
+    const isCurrent = () => searchTicketRef.current === ticket;
     setLoading(true);
     setError(null);
     try {
-      const next = await hostSearchChatSessions(debounced, {
+      const next = await hostSearchChatSessions(searchQuery, {
         limit: 80,
         // Active: exclude archived+trashed. Archived: include archived (still exclude trash).
-        includeArchived: scope === "archived",
+        includeArchived: searchScope === "archived",
         includeTrashed: false,
-        onlyTrashed: scope === "trash",
+        onlyTrashed: searchScope === "trash",
       });
+      if (!isCurrent()) return;
       const filtered =
-        scope === "trash"
+        searchScope === "trash"
           ? next
-          : scope === "archived"
+          : searchScope === "archived"
             ? next.filter((h) => h.meta.archived && !h.meta.trashed)
             : next.filter((h) => !h.meta.archived && !h.meta.trashed);
       setHits(filtered);
     } catch (e) {
+      if (!isCurrent()) return;
       setError(e instanceof Error ? e.message : String(e));
       setHits([]);
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }, [debounced, scope]);
 
@@ -84,11 +106,15 @@ export function ChatArchivePane({
   }, [runSearch, refreshKey]);
 
   const mutate = async (fn: () => Promise<unknown>) => {
+    const mutationTicket = (mutationTicketRef.current += 1);
     try {
       await fn();
+      if (mutationTicketRef.current !== mutationTicket) return;
       onSessionsChanged?.();
-      await runSearch();
+      const latest = latestSearchRef.current;
+      await runSearch(latest.query, latest.scope);
     } catch (e) {
+      if (mutationTicketRef.current !== mutationTicket) return;
       setError(e instanceof Error ? e.message : String(e));
     }
   };
@@ -109,14 +135,26 @@ export function ChatArchivePane({
         className="archive-scope"
         role="tablist"
         aria-label="Archive scope"
+        // Roving tabindex leaves the unselected tabs at -1, so without arrow
+        // handling Archived and Trash were unreachable by keyboard entirely —
+        // a keyboard-only user could not restore a trashed chat.
+        onKeyDown={(e) => {
+          const order = SCOPE_TABS.map(([id]) => id);
+          const current = order.indexOf(scope);
+          const next = nextRovingIndex(
+            current < 0 ? 0 : current,
+            order.length,
+            e.key,
+          );
+          if (next == null) return;
+          e.preventDefault();
+          setScope(order[next]!);
+          window.requestAnimationFrame(() => {
+            document.getElementById(`archive-scope-tab-${order[next]}`)?.focus();
+          });
+        }}
       >
-        {(
-          [
-            ["active", "Chats"],
-            ["archived", "Archived"],
-            ["trash", "Trash"],
-          ] as const
-        ).map(([id, label]) => (
+        {SCOPE_TABS.map(([id, label]) => (
           <button
             key={id}
             id={`archive-scope-tab-${id}`}

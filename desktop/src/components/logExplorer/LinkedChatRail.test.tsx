@@ -139,6 +139,12 @@ const defaultModels: host.ModelOptionDto[] = [
     group: "Tools Provider",
     is_default: true,
     tools_enabled: true,
+    tools_disabled_reason: null,
+    availability: "discovered",
+    availability_detail: null,
+    hidden: false,
+    hidden_by: null,
+    pinned_rank: null,
   },
   {
     id: "chat-only",
@@ -150,6 +156,11 @@ const defaultModels: host.ModelOptionDto[] = [
     is_default: false,
     tools_enabled: false,
     tools_disabled_reason: "profile",
+    availability: "discovered",
+    availability_detail: null,
+    hidden: false,
+    hidden_by: null,
+    pinned_rank: null,
   },
 ];
 
@@ -495,6 +506,12 @@ describe("LinkedChatRail", () => {
         group: "Forensics Provider",
         is_default: false,
         tools_enabled: true,
+        tools_disabled_reason: null,
+        availability: "discovered",
+        availability_detail: null,
+        hidden: false,
+        hidden_by: null,
+        pinned_rank: null,
       },
       defaultModels[1]!,
     ];
@@ -607,6 +624,48 @@ describe("LinkedChatRail", () => {
         (screen.getByLabelText("Linked chat model") as HTMLSelectElement).value,
       ).toBe("forensics-provider::forensics-2"),
     );
+  });
+
+  it("reports truncated model choices with the exact Settings search route", async () => {
+    const models: host.ModelOptionDto[] = Array.from(
+      { length: 250 },
+      (_, i) => ({
+        id: `model-${i}`,
+        label: `model-${i}`,
+        selection_key: `gateway::model-${i}`,
+        provider_id: "gateway",
+        provider_label: "Gateway",
+        group: "Gateway",
+        is_default: i === 0,
+        tools_enabled: true,
+        tools_disabled_reason: null,
+        availability: "discovered",
+        availability_detail: null,
+        hidden: false,
+        hidden_by: null,
+        pinned_rank: null,
+      }),
+    );
+    vi.mocked(host.hostListChatModels).mockResolvedValue(models);
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+
+    const selector = (await screen.findByLabelText(
+      "Linked chat model",
+    )) as HTMLSelectElement;
+    await waitFor(() => expect(selector.options).toHaveLength(200));
+    expect(
+      screen.getByText(
+        /Showing 200 choices; 50 more are omitted\. Find them in Settings → AI → Model visibility using Search models\./i,
+      ),
+    ).toBeTruthy();
   });
 
   it("blocks a chat-only provider from masquerading as a linked investigation model", async () => {

@@ -11,6 +11,7 @@ import {
   completePermission,
   hostCancelTurn,
   hostReadFile,
+  modelSelectionKey,
   type MessageMetaDto,
   type ModelOptionDto,
 } from "../lib/host";
@@ -48,6 +49,7 @@ type Args = {
   upgradeTitleWithLlm: (sessionId: string, prompt: string) => Promise<void>;
   pinScrollToEnd: (behavior?: ScrollBehavior) => void;
   refreshMemory: () => Promise<void>;
+  refreshChatModels: (keepKeys?: readonly string[]) => Promise<void>;
   setSourcePath: (p: string | null) => void;
   setSourceContent: (c: string) => void;
   setPaneChat: () => void;
@@ -68,6 +70,7 @@ export function useTurnController(args: Args) {
     upgradeTitleWithLlm,
     pinScrollToEnd,
     refreshMemory,
+    refreshChatModels,
     setSourcePath,
     setSourceContent,
     setPaneChat,
@@ -80,7 +83,25 @@ export function useTurnController(args: Args) {
     Record<string, unknown>
   >({});
   const [agentError, setAgentError] = useState<string | null>(null);
-  const stopRef = useRef(false);
+  /**
+   * Monotonic id of the turn allowed to write to the transcript. Stopping, or
+   * starting a replacement turn, bumps it — so a cancelled turn whose host
+   * promise is still draining can never resume streaming into a later turn.
+   */
+  const turnTokenRef = useRef(0);
+  /**
+   * Session that owns the turn currently in flight. Stop, permission replies,
+   * and failure reporting must target *this* chat, not whatever the user has
+   * since switched to — otherwise a mid-turn chat switch cancels the wrong
+   * session and leaves the real one streaming forever.
+   */
+  const activeTurnSessionRef = useRef<string | null>(null);
+  /** Session that raised the pending permission prompt. */
+  const permissionSessionRef = useRef<string | null>(null);
+  /** A request id is consumable once; a second reply must not reach the host. */
+  const permissionInFlightRef = useRef(false);
+  /** Synchronous in-flight latch: two sends in one frame must not both start. */
+  const turnInFlightRef = useRef(false);
 
   const startTurn = useCallback(
     async (text: string): Promise<boolean> => {
@@ -88,10 +109,21 @@ export function useTurnController(args: Args) {
         onNeedPreflight();
         return false;
       }
+      // `busy` only reaches the composer on the next render, so a second send
+      // dispatched in the same frame would otherwise start a parallel turn.
+      // Reject it here and let the caller keep the draft.
+      if (turnInFlightRef.current) {
+        return false;
+      }
+      turnInFlightRef.current = true;
+      turnTokenRef.current += 1;
+      const myToken = turnTokenRef.current;
+      /** This turn has been stopped, or superseded by a newer one. */
+      const isRetired = () => turnTokenRef.current !== myToken;
       // First send / empty list / post-trash: always have a real session id.
       const target = ensureActiveSession();
       const sid = target.id;
-      stopRef.current = false;
+      activeTurnSessionRef.current = sid;
       setAgentError(null);
       setBusy(true);
       setTurnStartedAt(Date.now());
@@ -163,8 +195,22 @@ export function useTurnController(args: Args) {
           (ev) => {
             // #249: do not drop turn_completed/error after Stop — that left
             // streaming:true forever (original #105 AC#3). Host cancel: #90/#109.
-            if (!shouldProcessEventWhileStopped(stopRef.current, ev.kind)) {
+            if (!shouldProcessEventWhileStopped(isRetired(), ev.kind)) {
               return;
+            }
+
+            if (
+              ev.kind === "error" &&
+              ev.payload?.code === "tools_unsupported"
+            ) {
+              // The host has just persisted learned capability truth for this
+              // exact provider/model pair. Re-list immediately so the main
+              // composer does not continue offering tools on stale data.
+              const keepKey =
+                sessionProvider && sessionModel
+                  ? modelSelectionKey(sessionProvider, sessionModel)
+                  : undefined;
+              void refreshChatModels(keepKey ? [keepKey] : undefined);
             }
 
             if (ev.kind === "permission_required") {
@@ -177,6 +223,7 @@ export function useTurnController(args: Args) {
                 [ev],
               );
               if (perm) {
+                permissionSessionRef.current = sid;
                 setPermission(perm);
                 const a = ev.payload?.arguments;
                 if (a && typeof a === "object" && !Array.isArray(a)) {
@@ -260,19 +307,31 @@ export function useTurnController(args: Args) {
                 updatedAt: nowIso(),
               };
               if (done) {
-                void persistSession(updated).then((saved) => {
-                  setSessions((prev) =>
-                    prev.map((s) => (s.id === saved.id ? saved : s)),
-                  );
-                });
+                void persistSession(updated);
               }
               return all.map((s) => (s.id === sid ? updated : s));
             });
           },
           pinnedSkillId,
+          null,
+          false,
+          // Hand the host the ids this transcript already uses. When the host
+          // persists a terminal turn itself (e.g. a chat pinned to a provider
+          // profile that no longer exists) it de-duplicates against these
+          // instead of writing a second copy of the same exchange.
+          { userMessageId: user.id, assistantMessageId: assistantId },
         );
       } catch (e) {
         const err = e instanceof Error ? e.message : String(e);
+        // A turn the user already stopped (or replaced) must not reach back and
+        // overwrite the partial answer it left behind with a host error.
+        // It still resolves `true`: `false` is the composer's "rejected, put
+        // the draft back" signal, and this prompt was accepted and is already
+        // in the transcript — returning false would re-inject it over whatever
+        // the user has since typed.
+        if (isRetired()) {
+          return true;
+        }
         setSessions((all) => {
           const cur = all.find((s) => s.id === sid);
           if (!cur) return all;
@@ -290,16 +349,18 @@ export function useTurnController(args: Args) {
             ),
             updatedAt: nowIso(),
           };
-          void persistSession(updated).then((saved) => {
-            setSessions((prev) =>
-              prev.map((s) => (s.id === saved.id ? saved : s)),
-            );
-          });
+          void persistSession(updated);
           return all.map((s) => (s.id === sid ? updated : s));
         });
       } finally {
-        setBusy(false);
-        setTurnStartedAt(null);
+        // A retired turn must not clear the latch or the busy flag belonging to
+        // the turn that replaced it.
+        if (!isRetired()) {
+          turnInFlightRef.current = false;
+          activeTurnSessionRef.current = null;
+          setBusy(false);
+          setTurnStartedAt(null);
+        }
       }
       return true;
     },
@@ -313,6 +374,7 @@ export function useTurnController(args: Args) {
       modelOptions,
       defaultModelKey,
       refreshMemory,
+      refreshChatModels,
       persistSession,
       upgradeTitleWithLlm,
       pinScrollToEnd,
@@ -327,21 +389,32 @@ export function useTurnController(args: Args) {
       decision: "deny" | "allow_once" | "allow_session_path",
       typed?: string,
     ) => {
-      if (!permission) return;
+      if (!permission || permissionInFlightRef.current) return;
+      // The host consumes a request id exactly once. A second click (or Escape)
+      // while the first reply is still awaiting would be rejected by the host
+      // and reported as a failed write — a false claim about an operation that
+      // actually succeeded. Latch synchronously and drop the modal now.
+      permissionInFlightRef.current = true;
+      // The prompt belongs to the chat that raised it. Answering after a chat
+      // switch must not file the tool result under the chat now on screen.
+      const owner = permissionSessionRef.current ?? sessionId;
+      const args = pendingToolArgs;
+      const { requestId, toolName } = permission;
+      setPermission(null);
+      setPendingToolArgs({});
+      permissionSessionRef.current = null;
       try {
         const events = await completePermission(
-          permission.requestId,
+          requestId,
           decision,
-          permission.toolName,
-          pendingToolArgs,
+          toolName,
+          args,
           typed,
-          sessionId,
+          owner,
         );
-        setPermission(null);
-        setPendingToolArgs({});
         // Append tool results as assistant follow-up
         setSessions((all) => {
-          const cur = all.find((s) => s.id === sessionId);
+          const cur = all.find((s) => s.id === owner);
           if (!cur) return all;
           const { msg } = applyEventsToMessage(
             {
@@ -356,16 +429,45 @@ export function useTurnController(args: Args) {
             messages: [...cur.messages, msg],
             updatedAt: nowIso(),
           };
-          void persistSession(updated).then((saved) => {
-            setSessions((prev) =>
-              prev.map((s) => (s.id === saved.id ? saved : s)),
-            );
-          });
-          return all.map((s) => (s.id === sessionId ? updated : s));
+          void persistSession(updated);
+          return all.map((s) => (s.id === owner ? updated : s));
         });
       } catch (e) {
-        setAgentError(e instanceof Error ? e.message : String(e));
-        setPermission(null);
+        // A refused or malformed write is a turn-level outcome, not an app
+        // failure. Record it in the conversation that asked for it so the
+        // thread stays readable and nothing implies the write succeeded (#691).
+        const detail = e instanceof Error ? e.message : String(e);
+        const label = toolName.trim() || "The requested write";
+        setSessions((all) => {
+          const cur = all.find((s) => s.id === owner);
+          if (!cur) {
+            setAgentError(detail);
+            return all;
+          }
+          // Only claim nothing was written when the request never reached the
+          // tool. An already-consumed or expired request id means the host
+          // decided this outcome elsewhere, and we cannot honestly say what it
+          // did — so say only what we know.
+          const outcomeUnknown = /expired|unknown|already|host missing/i.test(
+            detail,
+          );
+          const failure: Msg = {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: outcomeUnknown
+              ? `**${label} did not return a result.** ${detail}\n\nContextDesk cannot confirm what happened — check memory or the audit log before retrying.`
+              : `**${label} was not completed.** ${detail}\n\nNothing was written. You can ask again with the missing details, or continue without it.`,
+          };
+          const updated: ChatSession = {
+            ...cur,
+            messages: [...cur.messages, failure],
+            updatedAt: nowIso(),
+          };
+          void persistSession(updated);
+          return all.map((s) => (s.id === owner ? updated : s));
+        });
+      } finally {
+        permissionInFlightRef.current = false;
       }
     },
     [permission, pendingToolArgs, sessionId, setSessions, persistSession],
@@ -373,12 +475,18 @@ export function useTurnController(args: Args) {
 
   const stopTurn = useCallback(() => {
     // True cancellation is host-owned (#90/#109). UI must still finalize so no
-    // assistant bubble stays streaming:true (#249 / #105 AC#3).
-    stopRef.current = true;
-    if (sessionId) {
-      void hostCancelTurn(sessionId);
+    // assistant bubble stays streaming:true (#249 / #105 AC#3). Retiring the
+    // token also keeps late deltas from the cancelled turn out of the
+    // transcript once a replacement turn has started.
+    turnTokenRef.current += 1;
+    // Cancel the chat that is actually streaming. Falling back to the on-screen
+    // session would cancel the wrong turn after a mid-stream chat switch and
+    // leave the real one pinned as streaming forever.
+    const target = activeTurnSessionRef.current ?? sessionId;
+    if (target) {
+      void hostCancelTurn(target);
       setSessions((all) => {
-        const cur = all.find((s) => s.id === sessionId);
+        const cur = all.find((s) => s.id === target);
         if (!cur) return all;
         const messages = finalizeMessagesAfterStop(cur.messages);
         if (messages === cur.messages) return all;
@@ -397,14 +505,11 @@ export function useTurnController(args: Args) {
           updatedAt: nowIso(),
         };
         // Persist partial (or emptied) session so reload matches UI (#249 AC).
-        void persistSession(updated).then((saved) => {
-          setSessions((prev) =>
-            prev.map((s) => (s.id === saved.id ? saved : s)),
-          );
-        });
-        return all.map((s) => (s.id === sessionId ? updated : s));
+        void persistSession(updated);
+        return all.map((s) => (s.id === target ? updated : s));
       });
     }
+    turnInFlightRef.current = false;
     setBusy(false);
     setTurnStartedAt(null);
     // Cancellation is an expected chat action, not an application-wide error.

@@ -181,6 +181,13 @@ pub struct AppConfig {
     /// proven sibling models.
     #[serde(default)]
     pub model_tools_enabled: std::collections::HashMap<String, bool>,
+    /// Which providers/models ordinary pickers offer, and in what order (#678).
+    ///
+    /// Display curation only: it never deletes a profile, a credential
+    /// reference, a locally installed model, or a remote resource, and it is
+    /// never a security or redaction boundary.
+    #[serde(default)]
+    pub model_curation: crate::model_curation::ModelCuration,
 }
 
 fn default_index_max_files() -> usize {
@@ -292,7 +299,11 @@ pub fn load_config(path: &Path) -> CoreResult<AppConfig> {
         return Ok(AppConfig::default());
     }
     let raw = fs::read_to_string(path)?;
-    let cfg: AppConfig = serde_json::from_str(&raw)?;
+    let mut cfg: AppConfig = serde_json::from_str(&raw)?;
+    // Stamp the curation schema version and drop blank/duplicate keys. Entries
+    // written by a newer build are preserved verbatim (#678).
+    cfg.model_curation
+        .migrate_for_profiles(&cfg.providers.profiles);
     refuse_raw_secret_refs(&cfg)?;
     Ok(cfg)
 }
@@ -315,6 +326,99 @@ mod tests {
     use super::*;
     use crate::providers::ProviderConfig;
     use tempfile::tempdir;
+
+    /// #678: curation is only useful if it is still there next launch.
+    #[test]
+    fn curation_survives_a_real_save_and_reload() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut cfg = AppConfig {
+            providers: ProviderConfig::with_local_ollama(),
+            ..AppConfig::default()
+        };
+        let profile = cfg.providers.active().expect("profile").clone();
+        cfg.model_curation
+            .set_model_hidden(&profile, "llama3", true);
+        cfg.model_curation
+            .set_model_pinned(&profile, "mistral", true);
+
+        save_config(&path, &cfg).expect("save");
+        let loaded = load_config(&path).expect("load");
+
+        assert_eq!(
+            loaded.model_curation.hidden_by(&profile, "llama3"),
+            Some(crate::model_curation::HiddenBy::Model),
+            "a hidden model must still be hidden after restart"
+        );
+        assert_eq!(
+            loaded.model_curation.pinned_rank(&profile, "mistral"),
+            Some(0),
+            "pin order must survive restart"
+        );
+        assert_eq!(
+            loaded.model_curation.version,
+            crate::model_curation::CURATION_VERSION
+        );
+
+        // Provider configuration itself is untouched by curation.
+        assert_eq!(loaded.providers.profiles, cfg.providers.profiles);
+    }
+
+    /// A config written before #678 must load, not fail or lose settings.
+    #[test]
+    fn a_config_without_the_curation_field_still_loads() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            // A realistic pre-#678 config: every field this build added is
+            // absent, `providers` is present as it always has been.
+            serde_json::json!({
+                "providers": ProviderConfig::with_local_ollama(),
+                "workspace": null,
+                "theme": "dark",
+                "default_chat_model": "mistral"
+            })
+            .to_string(),
+        )
+        .expect("write legacy config");
+
+        let loaded = load_config(&path).expect("legacy config must load");
+        assert_eq!(loaded.default_chat_model.as_deref(), Some("mistral"));
+        assert!(loaded.model_curation.hidden_models.is_empty());
+        assert_eq!(
+            loaded.model_curation.version,
+            crate::model_curation::CURATION_VERSION,
+            "load should stamp the schema version"
+        );
+    }
+
+    /// Deleting a profile must not delete the user's curation for it: re-adding
+    /// the same endpoint restores their choices.
+    #[test]
+    fn removing_and_re_adding_a_profile_restores_its_curation() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut cfg = AppConfig {
+            providers: ProviderConfig::with_local_ollama(),
+            ..AppConfig::default()
+        };
+        let profile = cfg.providers.active().expect("profile").clone();
+        cfg.model_curation
+            .set_model_hidden(&profile, "llama3", true);
+
+        // User deletes the profile entirely.
+        cfg.providers.profiles.clear();
+        cfg.providers.active_id = None;
+        save_config(&path, &cfg).expect("save");
+        let loaded = load_config(&path).expect("load");
+
+        // Re-adding the same kind + endpoint brings the curation back.
+        assert_eq!(
+            loaded.model_curation.hidden_by(&profile, "llama3"),
+            Some(crate::model_curation::HiddenBy::Model)
+        );
+    }
 
     #[test]
     fn save_load_roundtrip() {

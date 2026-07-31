@@ -1,5 +1,5 @@
 .msg {
-  max-width: 52rem;
+  max-width: var(--chat-measure);
   margin: 0 auto var(--space-4);
 }
 
@@ -218,7 +218,10 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  max-width: 52rem;
+  max-width: var(--chat-measure);
+  /* Not auto-centred: this always renders inside .msg__bubble (MessageRow),
+     never as a direct transcript row, so it is already constrained by the
+     bubble and auto margins would be inert. */
   margin: 0 0 var(--space-2);
   padding: 10px 12px;
   border-radius: 12px;
@@ -472,7 +475,7 @@ ol.md-inline-list {
 
 .message-activity,
 .msg__meta-details {
-  max-width: 52rem;
+  max-width: var(--chat-measure);
   margin: 0 auto var(--space-2);
   color: var(--text-faint);
   font-size: var(--text-xs);
@@ -594,7 +597,7 @@ ol.md-inline-list {
 }
 
 .compact-banner {
-  max-width: 52rem;
+  max-width: var(--chat-measure);
   margin: 0 auto var(--space-3);
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border-soft);
