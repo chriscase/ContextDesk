@@ -2462,7 +2462,7 @@ mod tests {
 
         // Absent is fine: normalizing is optional and raw logs stay first-class.
         let mut diagnostics = Vec::new();
-        validate_component_inventory(&[base.clone()], &mut diagnostics);
+        validate_component_inventory(std::slice::from_ref(&base), &mut diagnostics);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
 
         // Declared on a log component is fine.

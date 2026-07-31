@@ -154,14 +154,15 @@ fn an_old_reader_imports_the_file_as_order_only_and_fabricates_no_instant() {
     // into it. 2026-01-01T00:00:00Z is ~1_767_225_600 epoch seconds; an
     // order-only ordinal for a 12-event file cannot plausibly reach that.
     const EPOCH_2001: i64 = 978_307_200;
-    for bound in [report.stats.ts_min, report.stats.ts_max] {
-        if let Some(value) = bound {
-            assert!(
-                value < EPOCH_2001,
-                "an old reader must not derive a wall-clock instant from the \
-                 producer's `time.instant`; got {value}"
-            );
-        }
+    for value in [report.stats.ts_min, report.stats.ts_max]
+        .into_iter()
+        .flatten()
+    {
+        assert!(
+            value < EPOCH_2001,
+            "an old reader must not derive a wall-clock instant from the \
+             producer's `time.instant`; got {value}"
+        );
     }
 }
 
