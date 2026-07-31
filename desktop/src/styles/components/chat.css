@@ -764,6 +764,21 @@ ol.md-inline-list {
   font-size: var(--text-sm);
 }
 
+/*
+ * Unverified provider readiness (#746). Informational, not blocking: it shares
+ * the blocked note's shape but keeps the action grid below it fully usable.
+ */
+.empty-state__unverified-note {
+  margin: 0 0 var(--space-3);
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--warning);
+  border-radius: var(--radius-md);
+  background: var(--overlay-faint);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
 .first-chat-workflow-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));

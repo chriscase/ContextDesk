@@ -43,10 +43,7 @@ import {
 } from "./lib/errorReport";
 import type { CompositionTarget } from "./components/panes/CompositionPane";
 import type { PaletteItem } from "./lib/commandPalette";
-import {
-  foldPreview,
-  nowIso,
-} from "./lib/session";
+import { foldPreview, nowIso } from "./lib/session";
 import {
   helpOpenRequest,
   parseHelpLocator,
@@ -59,6 +56,7 @@ import { IdentityPhase } from "./components/launch/IdentityPhase";
 import { PreLaunchScreen } from "./components/launch/PreLaunchScreen";
 import { hostSaveActiveProvider } from "./lib/host";
 import { saveLastGatewayUrl } from "./lib/aiGatewayPrefs";
+import { preflightReadiness } from "./lib/preflightCategories";
 import type { WizardApplyPayload } from "./components/settings/AiSetupWizard";
 import { shouldSkipSplash } from "./components/launch/splashDuration";
 import {
@@ -172,6 +170,16 @@ export function App() {
   const hiddenCount = isFolded ? messages.length - compactKeep : 0;
   const visibleMessages = isFolded ? messages.slice(-compactKeep) : messages;
   const hiddenPreview = isFolded ? foldPreview(messages, compactKeep) : "";
+
+  /**
+   * Readiness for status surfaces (#746). `hasBlocking` alone is fail-only, so
+   * it cannot distinguish "a provider answered" from "a provider is configured
+   * and was never asked". Turn state does not change readiness.
+   */
+  const readiness = preflightReadiness(
+    shell.preflight.items,
+    shell.preflight.hasBlocking,
+  );
 
   const scroll = useChatScroll(messages, sessionId, setSessions);
   const {
@@ -842,6 +850,7 @@ export function App() {
                   onSubmit: turn.startTurn,
                   onStop: turn.stopTurn,
                   preflightBlocking: shell.preflight.hasBlocking,
+                  providerUnverified: readiness === "unverified",
                   openSettings: (s) =>
                     shell.openSettings(s ?? "health", chatScrollRef.current),
                   setSourcePath: shell.setSourcePath,
@@ -993,7 +1002,7 @@ export function App() {
           </div>
           <StatusBar
             busy={turn.busy}
-            setupIncomplete={shell.preflight.hasBlocking}
+            readiness={readiness}
             scopeLabel={shell.scopeLabel}
             egressLabel={shell.egressLabel}
             onOpenPreflight={() =>
