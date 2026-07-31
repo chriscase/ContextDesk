@@ -570,4 +570,196 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn a_reused_template_id_with_a_new_fingerprint_excludes_nothing() {
+        let temp = tempfile::tempdir().expect("temp");
+        let corpus = corpus_with_noise(temp.path());
+        enable_noise_rule(&corpus);
+        assert_eq!(
+            trusted_suppression_lens(&corpus).template_ids,
+            vec![NOISE_TEMPLATE]
+        );
+
+        // Same numeric id, different content: a rule must never be re-bound by
+        // coincidence (docs/design/LOG_EXPLORER.md § Rule resolution).
+        corpus
+            .upsert_templates([TemplateRow {
+                info: TemplateInfo {
+                    template_id: NOISE_TEMPLATE,
+                    pattern: "unrelated payment <*>".into(),
+                    token_count: 3,
+                    count: 40,
+                    first_seen: 1_700_000_000,
+                    last_seen: 1_700_000_100,
+                    severity: 4,
+                    example: "unrelated payment path".into(),
+                },
+                content_hash: "sha256:template-7-rewritten".into(),
+                vector: None,
+            }])
+            .expect("re-template");
+
+        let mut query = EventQuery {
+            excluded_template_ids: vec![NOISE_TEMPLATE],
+            limit: 50,
+            ..Default::default()
+        };
+        let applied = apply_trusted_suppression_lens(&corpus, &mut query);
+        assert!(
+            query.excluded_template_ids.is_empty(),
+            "a fingerprint mismatch must hide nothing"
+        );
+        assert_eq!(applied.dropped, 1);
+        assert_eq!(applied.state, SuppressionLensState::Resolved);
+    }
+
+    #[test]
+    fn a_template_revision_change_re_resolves_rather_than_reusing_the_cache() {
+        let temp = tempfile::tempdir().expect("temp");
+        let corpus = corpus_with_noise(temp.path());
+        enable_noise_rule(&corpus);
+        let _ = trusted_suppression_lens(&corpus);
+        let before = corpus.suppression_lens_load_count();
+
+        // Republishing template metadata bumps the template-analysis revision.
+        corpus
+            .upsert_templates([template(SIGNAL_TEMPLATE, "payment gateway <*>", 2)])
+            .expect("republish");
+
+        let _ = trusted_suppression_lens(&corpus);
+        assert_eq!(
+            corpus.suppression_lens_load_count() - before,
+            1,
+            "a template revision change must force exactly one re-resolution"
+        );
+    }
+
+    #[test]
+    fn a_corpus_with_no_sidecar_resolves_to_an_empty_lens() {
+        let temp = tempfile::tempdir().expect("temp");
+        let corpus = corpus_with_noise(temp.path());
+        assert!(!corpus.root().join("suppression.json").exists());
+
+        let lens = trusted_suppression_lens(&corpus);
+        assert_eq!(lens.state, SuppressionLensState::Resolved);
+        assert!(lens.template_ids.is_empty());
+        assert_eq!(lens.policy_revision, Some(0));
+
+        let mut query = EventQuery {
+            excluded_template_ids: vec![NOISE_TEMPLATE],
+            limit: 50,
+            ..Default::default()
+        };
+        apply_trusted_suppression_lens(&corpus, &mut query);
+        assert!(query.excluded_template_ids.is_empty());
+    }
+
+    #[test]
+    fn a_future_schema_version_hides_nothing() {
+        let temp = tempfile::tempdir().expect("temp");
+        let corpus = corpus_with_noise(temp.path());
+        enable_noise_rule(&corpus);
+
+        let path = corpus.root().join("suppression.json");
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("parse");
+        document["schemaVersion"] = serde_json::json!(99);
+        std::fs::write(&path, serde_json::to_vec(&document).expect("encode")).expect("write");
+
+        let lens = trusted_suppression_lens(&corpus);
+        assert_eq!(lens.state, SuppressionLensState::Unavailable);
+        assert!(lens.template_ids.is_empty());
+    }
+
+    #[test]
+    fn a_sidecar_naming_another_corpus_hides_nothing() {
+        let temp = tempfile::tempdir().expect("temp");
+        let corpus = corpus_with_noise(temp.path());
+        enable_noise_rule(&corpus);
+
+        let path = corpus.root().join("suppression.json");
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("parse");
+        document["corpusId"] = serde_json::json!("019fab76-0000-7000-8000-000000000000");
+        std::fs::write(&path, serde_json::to_vec(&document).expect("encode")).expect("write");
+
+        let lens = trusted_suppression_lens(&corpus);
+        assert_eq!(lens.state, SuppressionLensState::Unavailable);
+        assert!(lens.template_ids.is_empty());
+    }
+
+    #[test]
+    fn two_corpora_never_share_an_exclusion_set() {
+        let temp = tempfile::tempdir().expect("temp");
+        let suppressed = corpus_with_noise(temp.path());
+        enable_noise_rule(&suppressed);
+        let untouched = corpus_with_noise(temp.path());
+
+        assert_eq!(
+            trusted_suppression_lens(&suppressed).template_ids,
+            vec![NOISE_TEMPLATE]
+        );
+        let other = trusted_suppression_lens(&untouched);
+        assert!(
+            other.template_ids.is_empty(),
+            "a second corpus must not inherit the first corpus's policy"
+        );
+        assert_eq!(other.corpus_id, untouched.id());
+        assert_ne!(other.corpus_id, suppressed.id());
+    }
+
+    /// One-machine bounded observation, not a universal latency claim.
+    #[test]
+    fn enforcement_stays_off_the_policy_path_at_twenty_five_thousand_events() {
+        let temp = tempfile::tempdir().expect("temp");
+        let corpus = LogCorpus::create(temp.path(), "lens scale").expect("create");
+        let mut events = Vec::with_capacity(25_000);
+        for seq in 1..=25_000u64 {
+            let template_id = if seq % 5 == 0 {
+                SIGNAL_TEMPLATE
+            } else {
+                NOISE_TEMPLATE
+            };
+            events.push(event(seq, template_id, "info", "scale line"));
+        }
+        corpus.push_events(&events).expect("push");
+        corpus
+            .upsert_templates([
+                template(NOISE_TEMPLATE, "routine health <*>", 20_000),
+                template(SIGNAL_TEMPLATE, "payment gateway <*>", 5_000),
+            ])
+            .expect("templates");
+        enable_noise_rule(&corpus);
+
+        let baseline = corpus.suppression_lens_load_count();
+        let started = std::time::Instant::now();
+        for _ in 0..1_000 {
+            let mut query = EventQuery {
+                excluded_template_ids: vec![NOISE_TEMPLATE, SIGNAL_TEMPLATE],
+                limit: 200,
+                ..Default::default()
+            };
+            let applied = apply_trusted_suppression_lens(&corpus, &mut query);
+            assert_eq!(query.excluded_template_ids, vec![NOISE_TEMPLATE]);
+            assert_eq!(applied.dropped, 1);
+        }
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            corpus.suppression_lens_load_count() - baseline,
+            1,
+            "1,000 enforced queries over 25k events must resolve the policy once"
+        );
+        // Generous: this guards against reintroducing a per-query sidecar read
+        // (~1000x this budget), not against small machine-to-machine variance.
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "enforcement overhead regressed: {elapsed:?} for 1,000 queries"
+        );
+        println!(
+            "PASS suppression-lens-enforcement events=25000 queries=1000 sidecar_loads=1 elapsed_ms={} (one-machine observation; not a universal claim)",
+            elapsed.as_millis()
+        );
+    }
 }

@@ -174,6 +174,19 @@ A linked turn pins one policy revision and discloses that revision and the
 number of hidden events. Adapter-level tests prove every tool excludes the same
 identities and restores them after the rule is disabled.
 
+**The host owns the lens.** The webview is outside the trusted computing base
+(`docs/THREAT_MODEL.md`), so exclusions arriving over IPC are a *request*. Each
+Explorer read re-derives the trusted set and intersects the request with it, so
+a stale or compromised renderer can hide at most what the durable policy
+authorizes — never a template it was never granted. Intersection is also what
+preserves **Suspend all** and temporary reveal: both request fewer identities,
+and reducing a set can only reveal more. When the policy cannot be resolved the
+effective set is empty with a typed reason, so nothing is hidden on the strength
+of an unverifiable policy; the Explorer then withholds evidence and offers a
+retry rather than painting a view it cannot describe. The renderer asks the host
+which identities it will honour instead of deriving them, so the disclosed count
+and the enforced set cannot drift apart.
+
 The raw corpus, source catalog, bounded **Original (redacted)** record, and
 direct exact-evidence resolution remain authoritative. If a bookmark or other
 exact identity points to suppressed evidence, Explorer offers a clearly marked
