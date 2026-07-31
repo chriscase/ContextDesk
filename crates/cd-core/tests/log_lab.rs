@@ -1519,9 +1519,102 @@ async fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
     );
 }
 
-/// Explicit local acceptance path for #542. Kept out of the default suite
-/// because it generates and imports the literal 100k UI profile, but it uses
-/// only production core entry points and no network or external service.
+/// #824 — product-path 25k scale: pinned seven-day fixture + production embed policy.
+#[test]
+fn log_lab_product_scale_seven_day_25k_with_production_embed() {
+    let import_root =
+        fixture_root().join("acceptance/seven-day-25k/scenarios/behavior-scale/import");
+    assert!(
+        import_root.is_dir(),
+        "pinned seven-day import tree missing at {}",
+        import_root.display()
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let policy = LogEmbedPolicy::local_default();
+    let backend = std::sync::Arc::new(ConceptEmbedBackend::new(32));
+    let recorder = RecordingProcessProgress::default();
+    let started = Instant::now();
+    let report = cd_core::log_analysis::ingest_path_with_policy_and_observer(
+        cache.path(),
+        &import_root,
+        "seven-day-25k",
+        &policy,
+        Some(backend),
+        &recorder,
+        None,
+    )
+    .unwrap();
+    let wall_ms = started.elapsed().as_millis() as u64;
+    assert_eq!(report.stats.lines, 25_000);
+    assert!(report.stats.files >= 1);
+    assert!(report.stats.source_bytes > 0);
+    // Pinned seven-day is well under 60 MiB → production policy embeds during SoftWrite.
+    assert!(
+        report.stats.source_bytes <= LOCAL_EMBED_DEFER_SOURCE_BYTES,
+        "seven-day source_bytes {} should not defer",
+        report.stats.source_bytes
+    );
+    assert!(
+        !report.phase_timings.embedding_deferred,
+        "seven-day must embed under production policy (not deferred)"
+    );
+    assert!(
+        matches!(
+            report.embedding.state,
+            EmbeddingState::Partial | EmbeddingState::Complete
+        ),
+        "expected embed attempt, got {:?}",
+        report.embedding.state
+    );
+    let phases = recorder.phases();
+    for required in [
+        cd_core::process_progress::ProcessProgressPhase::Scan,
+        cd_core::process_progress::ProcessProgressPhase::Stream,
+        cd_core::process_progress::ProcessProgressPhase::Publish,
+        cd_core::process_progress::ProcessProgressPhase::Completed,
+    ] {
+        assert!(
+            phases.contains(&required),
+            "missing {required:?} in {phases:?}"
+        );
+    }
+    // Same-machine envelope: product seven-day is heavier than synthetic 25k; 60s.
+    assert!(
+        wall_ms < 60_000,
+        "product seven-day 25k wall_ms={wall_ms} exceeded 60s envelope"
+    );
+    let corpus = LogCorpus::open(cache.path(), &report.corpus_id).unwrap();
+    let page = query_events(
+        &corpus,
+        &EventQuery {
+            limit: 200,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(page.events.len(), 200);
+    eprintln!(
+        "PASS product-seven-day-25k events={} files={} source_bytes={} total_ms={} discover_read_ms={} parse_frame_ms={} template_analysis_ms={} persist_index_ms={} optional_embedding_ms={} validation_ms={} publication_ms={} wall_ms={} templates={} embedding_state={:?} embedding_deferred={} (one-machine observation; not a universal claim)",
+        report.stats.lines,
+        report.stats.files,
+        report.stats.source_bytes,
+        report.phase_timings.total_ms,
+        report.phase_timings.discover_read_ms,
+        report.phase_timings.parse_frame_ms,
+        report.phase_timings.template_analysis_ms,
+        report.phase_timings.persist_index_ms,
+        report.phase_timings.optional_embedding_ms,
+        report.phase_timings.validation_ms,
+        report.phase_timings.publication_ms,
+        wall_ms,
+        report.stats.templates,
+        report.embedding.state,
+        report.phase_timings.embedding_deferred
+    );
+}
+
+/// Explicit local acceptance path for #542 / #824. Generates the literal 100k
+/// UI profile and imports under production embed policy.
 #[test]
 #[ignore = "explicit 100k Log Lab product-path proof"]
 fn log_lab_ui_medium_100k_product_path_is_bounded_and_bidirectional() {
@@ -1548,16 +1641,32 @@ fn log_lab_ui_medium_100k_product_path_is_bounded_and_bidirectional() {
 
     let cache = workspace.path().join("cache");
     let import_started = Instant::now();
-    let report = ingest_path(
+    // Production embedding policy (#824) — not embed=None.
+    let policy = LogEmbedPolicy::local_default();
+    let backend = std::sync::Arc::new(ConceptEmbedBackend::new(32));
+    let report = ingest_path_with_policy(
         &cache,
         &generated.join("scenarios/behavior-scale/import"),
         "behavior-ui-100k",
-        None,
-        "none",
+        &policy,
+        Some(backend),
     )
     .unwrap();
     let import_ms = import_started.elapsed().as_millis();
     assert_eq!(report.stats.lines, 100_000);
+    // ui-medium is under the 60 MiB defer bar → embeds during SoftWrite.
+    assert!(
+        report.stats.source_bytes <= LOCAL_EMBED_DEFER_SOURCE_BYTES
+            || report.phase_timings.embedding_deferred,
+        "unexpected 100k size/defer combo: bytes={} deferred={}",
+        report.stats.source_bytes,
+        report.phase_timings.embedding_deferred
+    );
+    // Same-machine envelope (~3× of prior ~15–20s product imports).
+    assert!(
+        import_ms < 90_000,
+        "product ui-medium 100k import_ms={import_ms} exceeded 90s envelope"
+    );
 
     let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
     let first_page_started = Instant::now();
@@ -1736,10 +1845,12 @@ fn log_lab_ui_medium_100k_product_path_is_bounded_and_bidirectional() {
     assert!(neighborhood.events.len() <= 41);
 
     eprintln!(
-        "PASS ui-medium-100k events={} files={} source_bytes={} generation_ms={} import_ms={} first_page_ms={} timeline_ms={} forward_12_pages_ms={} reverse_page_ms={} deep_find_ms={} bounded_regex_50k_ms={} first_page_rows={} timeline_slots={} neighborhood_rows={} tree_sha256={} (one-machine observation; not a universal claim)",
+        "PASS ui-medium-100k events={} files={} source_bytes={} embedding_state={:?} embedding_deferred={} generation_ms={} import_ms={} first_page_ms={} timeline_ms={} forward_12_pages_ms={} reverse_page_ms={} deep_find_ms={} bounded_regex_50k_ms={} first_page_rows={} timeline_slots={} neighborhood_rows={} tree_sha256={} (one-machine observation; not a universal claim)",
         report.stats.lines,
         report.stats.files,
         report.stats.source_bytes,
+        report.embedding.state,
+        report.phase_timings.embedding_deferred,
         generation_ms,
         import_ms,
         first_page_ms,

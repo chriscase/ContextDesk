@@ -77,9 +77,9 @@ percentage.
 
 ### Log corpus ingest phases
 
-`starting` → `scan` → `parse` → `template` → `redact` → `store` → `embed` → `completed` | `failed` | `cancelled`
+`starting` → `scan` → **`stream`** (read, parse, template, and persist — one monotonic phase) → `embed` (optional; may be skipped when deferred) → `validate` → `publish` → `completed` | `failed` | `cancelled`
 
-(Aligned with Help/log pipeline wording: ingest → parse → template → redact → store → embed.)
+Interleaved parse/template/persist work must not emit rewinding bookend phases. Diagnostic `IngestPhaseTimings` accumulate real operation scopes separately from UI chrome.
 
 ### Session context import phases
 

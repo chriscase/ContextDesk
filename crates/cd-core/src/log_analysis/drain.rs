@@ -384,4 +384,63 @@ mod tests {
         // Existing clusters remain addressable — no silent wipe.
         assert!(accepted > 0);
     }
+
+    /// Hostile equal-token flood: cancel mid-scan must reach a terminal
+    /// Cancelled error with measured cancel→terminal wall latency (#824).
+    #[test]
+    fn adversarial_high_cardinality_cancel_to_terminal_is_bounded() {
+        // Fill a large same-length bucket. Encode index in pure letters so
+        // looks_variable (digit heuristic) does not collapse patterns.
+        fn letter_code(i: usize) -> String {
+            // Base-26 style encoding → alphabetic-only token, fixed width-ish.
+            let mut n = i + 1;
+            let mut out = String::new();
+            while n > 0 {
+                out.push((b'a' + ((n % 26) as u8)) as char);
+                n /= 26;
+            }
+            // Pad so all messages share the same token count and roughly length.
+            while out.len() < 6 {
+                out.push('z');
+            }
+            out
+        }
+        let mut d = DrainMiner::with_bounds(4, 80, 1.0, 50_000, 50_000);
+        const N: usize = 3_200; // > 64 so cancel poll fires during scan
+        for i in 0..N {
+            let a = letter_code(i);
+            let b = letter_code(i + 10_000);
+            let c = letter_code(i + 20_000);
+            let dtok = letter_code(i + 30_000);
+            let msg = format!("{a} {b} {c} {dtok}");
+            d.match_or_create(&msg, i as i64, "info").unwrap();
+        }
+        assert!(
+            d.template_count() >= 3_000,
+            "need a large same-length bucket for cancel scan, got {}",
+            d.template_count()
+        );
+
+        let flag = CancelFlag::new();
+        flag.cancel();
+        let t0 = std::time::Instant::now();
+        let err = d
+            .match_or_create_cancellable("qqqqqq wwwwww eeeeee rrrrrr", 1, "info", Some(&flag))
+            .expect_err("hostile cancel path must terminate");
+        let cancel_to_terminal_ms = t0.elapsed().as_millis() as u64;
+        assert!(
+            matches!(err, CoreError::Cancelled),
+            "expected Cancelled terminal, got {err}"
+        );
+        // Linear scan with 64-step cancel polls must finish quickly.
+        assert!(
+            cancel_to_terminal_ms < 2_000,
+            "cancel-to-terminal {cancel_to_terminal_ms}ms exceeded 2s modest bound"
+        );
+        eprintln!(
+            "PASS adversarial-cancel-to-terminal templates={} cancel_to_terminal_ms={} (one-machine observation)",
+            d.template_count(),
+            cancel_to_terminal_ms
+        );
+    }
 }
