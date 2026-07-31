@@ -39,6 +39,10 @@ fn run_conformance(program: &str, script: &str) {
         .arg(root.join(script))
         .arg("--check")
         .arg(root.join("fixtures/normalized-log-events"))
+        // Running the Python reference from inside the repo would otherwise
+        // leave a __pycache__ directory in the working tree on every test run.
+        // Preventing the artifact is better than gitignoring the litter.
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         .output()
         .unwrap_or_else(|error| panic!("run {program}: {error}"));
 
@@ -99,6 +103,7 @@ fn every_reference_producer_emits_a_file_the_rust_validator_accepts() {
         let output = Command::new(program)
             .arg(root.join(script))
             .arg("--emit")
+            .env("PYTHONDONTWRITEBYTECODE", "1")
             .output()
             .unwrap_or_else(|error| panic!("run {program}: {error}"));
         assert!(output.status.success(), "{program} --emit failed");
