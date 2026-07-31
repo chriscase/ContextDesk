@@ -42,6 +42,9 @@ pub const MAX_BUNDLE_ID_CHARS: usize = 256;
 pub const MAX_ID_CHARS: usize = 128;
 /// Max mediaType length.
 pub const MAX_MEDIA_TYPE_CHARS: usize = 128;
+
+/// Maximum characters in a component `contentSchemaId`.
+pub const MAX_CONTENT_SCHEMA_ID_CHARS: usize = 128;
 /// Max privacy notes length.
 pub const MAX_PRIVACY_NOTES_CHARS: usize = 1024;
 
@@ -177,6 +180,22 @@ pub struct ComponentEntry {
     /// Optional lineage (no absolute host paths).
     #[serde(default)]
     pub lineage: Option<Lineage>,
+    /// Optional content contract this component's bytes follow.
+    ///
+    /// Declares that a `log` component is not opaque — for example
+    /// `contextdesk.normalized_log_events.v1`. Additive and optional: a
+    /// reader that does not recognize the value MUST treat the component as
+    /// an ordinary raw log, which is always correct because a normalized file
+    /// is also valid JSON lines.
+    ///
+    /// This is the ONLY mechanism that enrols a component as normalized. A
+    /// future fast path must consult the manifest, never a file extension or
+    /// the directory a file happens to sit in — #763: "folder coincidence
+    /// never implies linkage".
+    ///
+    /// Legal only on `role: "log"`; no new role is introduced.
+    #[serde(default)]
+    pub content_schema_id: Option<String>,
 }
 
 /// Optional component lineage (parent reference without host paths).
@@ -480,6 +499,27 @@ pub fn validate_component_inventory(
             }
             declared_paths.insert(c.path.clone());
         }
+        if let Some(content_schema_id) = &c.content_schema_id {
+            if content_schema_id.trim().is_empty()
+                || content_schema_id.chars().count() > MAX_CONTENT_SCHEMA_ID_CHARS
+            {
+                diagnostics.push(Diagnostic::new(
+                    "content_schema_id_invalid",
+                    format!("{base}.contentSchemaId"),
+                    "contentSchemaId must be a non-empty bounded identifier".to_string(),
+                ));
+            }
+            if c.role != "log" {
+                // A declaration on a non-log component would imply a content
+                // contract the log path will never consult.
+                diagnostics.push(Diagnostic::new(
+                    "content_schema_id_role_invalid",
+                    format!("{base}.contentSchemaId"),
+                    "contentSchemaId is only meaningful on a component with role `log`".to_string(),
+                ));
+            }
+        }
+
         if let Some(label) = &c.source_label {
             if label.len() > MAX_ID_CHARS {
                 diagnostics.push(Diagnostic::new(
@@ -2255,6 +2295,7 @@ mod tests {
                 source_label: None,
                 time_basis: None,
                 lineage: None,
+                content_schema_id: None,
             })
             .collect::<Vec<_>>();
         let mut diagnostics = Vec::new();
@@ -2286,6 +2327,7 @@ mod tests {
             source_label: None,
             time_basis: None,
             lineage: None,
+            content_schema_id: None,
         };
         let mut diagnostics = Vec::new();
         let inventory = validate_component_inventory(&[component], &mut diagnostics);
@@ -2404,6 +2446,83 @@ mod tests {
     }
 
     #[test]
+    fn content_schema_id_is_additive_optional_and_log_only() {
+        let base = ComponentEntry {
+            id: "app-log".into(),
+            role: "log".into(),
+            path: "logs/app.jsonl".into(),
+            media_type: "application/x-ndjson".into(),
+            bytes: 10,
+            sha256: "0".repeat(64),
+            source_label: None,
+            time_basis: None,
+            lineage: None,
+            content_schema_id: None,
+        };
+
+        // Absent is fine: normalizing is optional and raw logs stay first-class.
+        let mut diagnostics = Vec::new();
+        validate_component_inventory(&[base.clone()], &mut diagnostics);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        // Declared on a log component is fine.
+        let mut declared = base.clone();
+        declared.content_schema_id =
+            Some(crate::normalized_log_events::NORMALIZED_LOG_EVENTS_SCHEMA_ID.into());
+        let mut diagnostics = Vec::new();
+        validate_component_inventory(&[declared], &mut diagnostics);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        // Declared on a non-log component is refused: it would imply a content
+        // contract the log path never consults.
+        let mut wrong_role = base.clone();
+        wrong_role.role = "attachment".into();
+        wrong_role.content_schema_id = Some("contextdesk.normalized_log_events.v1".into());
+        let mut diagnostics = Vec::new();
+        validate_component_inventory(&[wrong_role], &mut diagnostics);
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.code == "content_schema_id_role_invalid"));
+
+        // Empty or oversized is refused.
+        for bad in [String::new(), "x".repeat(MAX_CONTENT_SCHEMA_ID_CHARS + 1)] {
+            let mut component = base.clone();
+            component.content_schema_id = Some(bad);
+            let mut diagnostics = Vec::new();
+            validate_component_inventory(&[component], &mut diagnostics);
+            assert!(diagnostics
+                .iter()
+                .any(|d| d.code == "content_schema_id_invalid"));
+        }
+    }
+
+    #[test]
+    fn an_unknown_content_schema_id_is_not_a_validation_failure() {
+        // Forward compatibility: a bundle written by a newer producer that
+        // declares a content contract this build has never heard of must still
+        // validate. The reader treats the component as an ordinary raw log,
+        // which is always safe.
+        let component = ComponentEntry {
+            id: "app-log".into(),
+            role: "log".into(),
+            path: "logs/app.jsonl".into(),
+            media_type: "application/x-ndjson".into(),
+            bytes: 10,
+            sha256: "0".repeat(64),
+            source_label: None,
+            time_basis: None,
+            lineage: None,
+            content_schema_id: Some("contextdesk.some_future_contract.v3".into()),
+        };
+        let mut diagnostics = Vec::new();
+        validate_component_inventory(&[component], &mut diagnostics);
+        assert!(
+            diagnostics.is_empty(),
+            "an unrecognized content contract must degrade, not fail: {diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn manifest_and_component_grammars_match_the_normative_schema() {
         let mut manifest = Manifest {
             schema_id: SCHEMA_ID.into(),
@@ -2472,6 +2591,7 @@ mod tests {
                 parent_id: Some("/Users/example/private.log".into()),
                 note: None,
             }),
+            content_schema_id: None,
         };
         diagnostics.clear();
         validate_component_inventory(&[component], &mut diagnostics);

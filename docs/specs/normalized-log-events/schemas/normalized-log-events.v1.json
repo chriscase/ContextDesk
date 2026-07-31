@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextdesk.local/schemas/normalized_log_events/normalized-log-events.v1.json",
+  "title": "ContextDesk normalized log events v1",
+  "description": "Line grammar for contextdesk.normalized_log_events.v1. The file is JSONL: line 1 is a header, every later non-blank line is an event. JSON Schema validates one line at a time; it cannot check cross-line rules (sourceSeq contiguity) or the timestamp legality matrix's cross-field requirements, so passing this schema is NOT conformance. Run the offline validator.",
+  "$defs": {
+    "header": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["schemaId", "minReaderVersion", "sourceId", "producer"],
+      "properties": {
+        "schemaId": {
+          "type": "string",
+          "const": "contextdesk.normalized_log_events.v1"
+        },
+        "minReaderVersion": { "type": "integer", "minimum": 1 },
+        "sourceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Half of the derived event identity. Scoped to the producer and bundle; a reader assigns its own local ids and keeps this for lineage."
+        },
+        "producer": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["name", "version"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "version": { "type": "string", "minLength": 1, "maxLength": 128 }
+          }
+        },
+        "sourceLabel": { "type": "string", "maxLength": 128 },
+        "redaction": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "ADVISORY ONLY. ContextDesk re-redacts regardless; this never exempts any byte.",
+          "required": ["credentialsRemoved", "personalDataRemoved"],
+          "properties": {
+            "credentialsRemoved": { "type": "boolean" },
+            "personalDataRemoved": { "type": "boolean" },
+            "note": { "type": "string", "maxLength": 1024 }
+          }
+        }
+      }
+    },
+    "instant": {
+      "type": "string",
+      "description": "RFC3339 with an EXPLICIT offset. -00:00 is rejected: RFC3339 reserves it for 'offset unknown', which is the same thing as not having one. An instant without an offset is a guessed instant and has no representation in this contract.",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?([Zz]|[+-](0[0-9]|1[0-9]|2[0-3]):[0-5][0-9])$",
+      "not": { "pattern": "-00:00$" }
+    },
+    "time": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["basis", "resolution"],
+      "properties": {
+        "basis": { "type": "string", "enum": ["wall", "relative", "order"] },
+        "resolution": {
+          "type": "string",
+          "enum": [
+            "source_explicit",
+            "producer_resolved",
+            "unresolved",
+            "order_only"
+          ],
+          "description": "There is deliberately no 'inferred' or 'assumed' value."
+        },
+        "instant": { "$ref": "#/$defs/instant" },
+        "localText": { "type": "string", "maxLength": 256 },
+        "resolvedTimezone": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "observed": { "$ref": "#/$defs/instant" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "resolution": { "enum": ["source_explicit", "producer_resolved"] }
+            },
+            "required": ["resolution"]
+          },
+          "then": { "required": ["instant"], "properties": { "basis": { "const": "wall" } } },
+          "else": { "not": { "required": ["instant"] } }
+        },
+        {
+          "if": {
+            "properties": { "resolution": { "const": "producer_resolved" } },
+            "required": ["resolution"]
+          },
+          "then": { "required": ["localText", "resolvedTimezone"] },
+          "else": { "not": { "required": ["resolvedTimezone"] } }
+        },
+        {
+          "if": {
+            "properties": { "resolution": { "const": "unresolved" } },
+            "required": ["resolution"]
+          },
+          "then": {
+            "required": ["localText"],
+            "properties": { "basis": { "enum": ["order", "relative"] } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "resolution": { "const": "order_only" } },
+            "required": ["resolution"]
+          },
+          "then": {
+            "not": { "required": ["localText"] },
+            "properties": { "basis": { "enum": ["order", "relative"] } }
+          }
+        }
+      ]
+    },
+    "severity": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "#790's four independent fields. `inferred` is required so an inferred severity can never be mistaken for a source-declared one.",
+      "required": ["inferred"],
+      "properties": {
+        "number": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 24,
+          "description": "OTel severity number. ABSENT means unspecified — never encoded as 0, because OTel assigns meaning to 0."
+        },
+        "text": { "type": "string", "maxLength": 128 },
+        "source": {
+          "description": "The source's severity in its own type system, verbatim — a syslog PRI integer, a CEF 0-10, a Windows level, a Pino numeric."
+        },
+        "inferred": { "type": "boolean" }
+      }
+    },
+    "correlation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["class", "value"],
+      "properties": {
+        "class": {
+          "type": "string",
+          "description": "The eleven typed correlation classes from #789. trace and span are deliberately absent — they are their own event fields, so a span id cannot be routed into a trace slot through this mechanism.",
+          "enum": [
+            "request",
+            "session",
+            "transaction",
+            "activity",
+            "audit",
+            "flow",
+            "boot",
+            "container",
+            "pod",
+            "event",
+            "query"
+          ]
+        },
+        "value": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["sourceSeq", "time", "severity", "message", "canonical"],
+      "description": "There is deliberately NO uid/eventId field. Identity is derived from (sourceId, sourceSeq) so it is checkable rather than producer-declared.",
+      "properties": {
+        "sourceSeq": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Strictly increasing and gap-free within the file. Cross-line rule; the offline validator enforces it, JSON Schema cannot."
+        },
+        "time": { "$ref": "#/$defs/time" },
+        "severity": { "$ref": "#/$defs/severity" },
+        "message": { "type": "string", "maxLength": 65536 },
+        "traceId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "not": { "const": "00000000000000000000000000000000" },
+          "description": "32 lowercase hex. Structurally distinct from spanId (#789)."
+        },
+        "spanId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$",
+          "not": { "const": "0000000000000000" },
+          "description": "16 lowercase hex. Never accepted as a trace identifier."
+        },
+        "correlations": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/correlation" }
+        },
+        "attributes": { "type": "object", "maxProperties": 256 },
+        "logger": { "type": "string", "maxLength": 128 },
+        "service": { "type": "string", "maxLength": 128 },
+        "host": { "type": "string", "maxLength": 128 },
+        "canonical": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536,
+          "description": "The original record text, verbatim, newlines included. Retaining it is what makes the contract honest: a reader can always show what the producer saw and can re-parse it. Subject to ContextDesk redaction on import."
+        },
+        "canonicalTruncated": {
+          "type": "boolean",
+          "description": "True when canonical was truncated at the bound. Disclosed rather than silent, so round-trip is never claimed for a record that cannot round-trip."
+        }
+      }
+    }
+  },
+  "oneOf": [{ "$ref": "#/$defs/header" }, { "$ref": "#/$defs/event" }]
+}

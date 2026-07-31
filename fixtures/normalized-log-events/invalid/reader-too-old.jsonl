@@ -1,0 +1,2 @@
+{"minReaderVersion":99,"producer":{"name":"example-exporter","version":"1.0.0"},"redaction":{"credentialsRemoved":true,"personalDataRemoved":false},"schemaId":"contextdesk.normalized_log_events.v1","sourceId":"checkout-api","sourceLabel":"checkout api"}
+{"canonical":"2026-01-01T00:00:00Z INFO checkout step 0 completed","message":"checkout step 0 completed","severity":{"inferred":false,"number":9,"source":6,"text":"INFO"},"sourceSeq":0,"time":{"basis":"wall","instant":"2026-01-01T00:00:00Z","resolution":"source_explicit"}}

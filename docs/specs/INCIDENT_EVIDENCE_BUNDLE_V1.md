@@ -279,6 +279,8 @@ declared component payload bytes. It does not include `manifest.json`, ZIP
 headers, or archive container bytes. Archive size and manifest bytes are
 reported and bounded separately.
 
+---
+
 ## 12. Schema versus authoritative validation
 
 The JSON Schemas provide structural validation and editor/tooling support. They
@@ -320,7 +322,7 @@ the packed ZIP before transfer. Passing JSON Schema alone is not conformance.
 
 ---
 
-## 15. Conformance resources
+## 16. Conformance resources
 
 | Resource | Location |
 | --- | --- |
@@ -333,7 +335,7 @@ the packed ZIP before transfer. Passing JSON Schema alone is not conformance.
 
 ---
 
-## 16. Residual
+## 17. Residual
 
 1. **Product import/attachment UX** for directory and archive forms (#763).
 2. Round-trip product tests once import ships.
