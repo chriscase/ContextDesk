@@ -300,8 +300,6 @@ export function EvidencePanel({
 }: {
   modeControl: ReactNode;
   proposedFindings?: ProposedFindingItemView[];
-  onAcceptProposedFinding?: (id: string) => void;
-  onDismissProposedFinding?: (id: string) => void;
   items: EvidenceItemView[];
   findings?: FindingItemView[];
   notes?: NoteItemView[];
