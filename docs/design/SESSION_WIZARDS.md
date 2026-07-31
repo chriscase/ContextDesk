@@ -79,7 +79,7 @@ percentage.
 
 `starting` → `scan` → **`stream`** (read, parse, template, and persist — one monotonic phase) → `embed` (optional; may be skipped when deferred) → `validate` → `publish` → `completed` | `failed` | `cancelled`
 
-Interleaved parse/template/persist work must not emit rewinding bookend phases. Diagnostic `IngestPhaseTimings` accumulate real operation scopes separately from UI chrome.
+Interleaved parse/template/persist work must not emit rewinding bookend phases. Diagnostic `IngestPhaseTimings` accumulate real operation scopes separately from UI chrome and surface on the SoftWrite completion report (discover/read, parse/frame, template analysis, persist/index, optional embedding, validation, publication) via host DTO + TypeScript — not only as a combined Stream label.
 
 ### Session context import phases
 

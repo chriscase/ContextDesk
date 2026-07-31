@@ -1878,6 +1878,19 @@ export type LogEventRevisionReportDto = {
   tsMax: number | null;
 };
 
+/** Separate ingest operation timings from core (#824). Not a universal SLA. */
+export type LogIngestPhaseTimingsDto = {
+  discoverReadMs: number;
+  parseFrameMs: number;
+  templateAnalysisMs: number;
+  persistIndexMs: number;
+  optionalEmbeddingMs: number;
+  validationMs: number;
+  publicationMs: number;
+  totalMs: number;
+  embeddingDeferred: boolean;
+};
+
 export type LogIngestReportDto = {
   corpusId: string;
   lines: number;
@@ -1901,6 +1914,8 @@ export type LogIngestReportDto = {
   topTemplates: LogTopTemplateDto[];
   embedding?: LogEmbeddingStatusDto | null;
   confidence?: LogImportConfidenceDto | null;
+  /** Completion/diagnostic phase breakdown (#824); optional for older hosts. */
+  phaseTimings?: LogIngestPhaseTimingsDto | null;
 };
 
 export type DemoLogInstallDto = {

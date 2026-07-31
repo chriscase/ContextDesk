@@ -1089,6 +1089,35 @@ async fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
         report.phase_timings.optional_embedding_ms, 0,
         "deferred embed must not burn wall time as if it ran"
     );
+    // Same-machine regression budgets (#824) — not a universal SLA.
+    // Defective observation class (debug): ~548–630 s total / ~579 s template_analysis
+    // from re-tokenizing every stored pattern per event.
+    // After pattern_tokens cache + borrowed message tokens (this branch, debug):
+    //   template_analysis ~137 s, total ~200 s class — materially faster, still
+    //   enforced so a re-tokenize regression fails CI.
+    // Product SoftWrite is release-optimized; same path observed ~5.6 s template /
+    // ~12 s total on this machine (see scale-250k-release evidence) — first usable
+    // corpus is not multi-minute in the shipped profile.
+    // Headroom covers host load on unoptimized test builds only.
+    const BUDGET_250K_TEMPLATE_ANALYSIS_MS: u128 = 200_000; // debug budget
+    const BUDGET_250K_IMPORT_MS: u128 = 280_000; // debug budget
+    assert!(
+        (report.phase_timings.template_analysis_ms as u128)
+            < BUDGET_250K_TEMPLATE_ANALYSIS_MS,
+        "250k template_analysis_ms={} exceeded same-machine budget {}ms (defective class was ~579s)",
+        report.phase_timings.template_analysis_ms,
+        BUDGET_250K_TEMPLATE_ANALYSIS_MS
+    );
+    assert!(
+        import_ms < BUDGET_250K_IMPORT_MS,
+        "250k import_ms={import_ms} exceeded same-machine budget {BUDGET_250K_IMPORT_MS}ms (defective class was ~548–630s)"
+    );
+    assert!(
+        (report.phase_timings.total_ms as u128) < BUDGET_250K_IMPORT_MS,
+        "250k total_ms={} exceeded same-machine budget {}ms",
+        report.phase_timings.total_ms,
+        BUDGET_250K_IMPORT_MS
+    );
     // Severity identity from product generator (prescribed counts).
     assert_eq!(
         report.stats.level_counts.get("error").copied().unwrap_or(0),
@@ -1578,10 +1607,22 @@ fn log_lab_product_scale_seven_day_25k_with_production_embed() {
             "missing {required:?} in {phases:?}"
         );
     }
-    // Same-machine envelope: product seven-day is heavier than synthetic 25k; 60s.
+    // Same-machine regression budgets (#824) — not a universal SLA.
+    // Defective class without Drain token cache was multi-minute at 250k; 25k
+    // product path must stay interactive with headroom for CI load.
     assert!(
-        wall_ms < 60_000,
-        "product seven-day 25k wall_ms={wall_ms} exceeded 60s envelope"
+        wall_ms < 45_000,
+        "product seven-day 25k wall_ms={wall_ms} exceeded 45s same-machine budget"
+    );
+    assert!(
+        report.phase_timings.template_analysis_ms < 20_000,
+        "product seven-day 25k template_analysis_ms={} exceeded 20s budget",
+        report.phase_timings.template_analysis_ms
+    );
+    assert!(
+        report.phase_timings.total_ms < 45_000,
+        "product seven-day 25k total_ms={} exceeded 45s budget",
+        report.phase_timings.total_ms
     );
     let corpus = LogCorpus::open(cache.path(), &report.corpus_id).unwrap();
     let page = query_events(
@@ -1662,10 +1703,21 @@ fn log_lab_ui_medium_100k_product_path_is_bounded_and_bidirectional() {
         report.stats.source_bytes,
         report.phase_timings.embedding_deferred
     );
-    // Same-machine envelope (~3× of prior ~15–20s product imports).
+    // Same-machine regression budgets (#824) — not a universal SLA.
+    // Prior product 100k under production embed was ~18–20s; keep generous headroom.
     assert!(
-        import_ms < 90_000,
-        "product ui-medium 100k import_ms={import_ms} exceeded 90s envelope"
+        import_ms < 60_000,
+        "product ui-medium 100k import_ms={import_ms} exceeded 60s same-machine budget"
+    );
+    assert!(
+        report.phase_timings.template_analysis_ms < 40_000,
+        "product ui-medium 100k template_analysis_ms={} exceeded 40s budget",
+        report.phase_timings.template_analysis_ms
+    );
+    assert!(
+        report.phase_timings.total_ms < 60_000,
+        "product ui-medium 100k total_ms={} exceeded 60s budget",
+        report.phase_timings.total_ms
     );
 
     let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();

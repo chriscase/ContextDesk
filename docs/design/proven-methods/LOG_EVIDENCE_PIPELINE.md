@@ -678,7 +678,7 @@ Persist or expose:
 - active event revision, wall-event count, and one-step undo availability;
 - redaction, encoding normalization, and Original truncation flags;
 - query mode, filter, result/page count, bucket count, and cancellation;
-- per-phase progress and duration; and
+- per-phase progress and duration (progress chrome stays one monotonic Stream for interleaved work; completion diagnostics expose separate discover/read, parse/frame, template-analysis, persist/index, optional-embedding, validation, and publication timings from core through host DTO/TypeScript); and
 - package version/hash verification.
 
 Future #670 observability should add full precision, yearless/abbreviation

@@ -6428,6 +6428,9 @@ struct LogIngestReportDto {
     confidence: cd_core::log_analysis::IngestConfidenceReport,
     top_templates: Vec<LogTopTemplateDto>,
     embedding: cd_core::log_analysis::CorpusEmbeddingStatus,
+    /// Separate operation phase timings (#824). Progress chrome stays one
+    /// monotonic Stream for interleaved work; completion/diagnostics list these.
+    phase_timings: cd_core::log_analysis::IngestPhaseTimings,
 }
 
 const DEMO_LOG_IDENTITY: &str = "contextdesk.demo.logs.seven-day-25k.behavior-scale.v1";
@@ -7650,6 +7653,7 @@ async fn run_log_ingest(
             })
             .collect(),
         embedding: report.embedding,
+        phase_timings: report.phase_timings,
     })
 }
 

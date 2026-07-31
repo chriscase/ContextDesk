@@ -95,6 +95,17 @@ const richReport: LogIngestReportDto = {
     reason: "template_cap_or_backend_failure",
     updatedAt: 1_700_000_301,
   },
+  phaseTimings: {
+    discoverReadMs: 12,
+    parseFrameMs: 340,
+    templateAnalysisMs: 890,
+    persistIndexMs: 410,
+    optionalEmbeddingMs: 55,
+    validationMs: 8,
+    publicationMs: 4,
+    totalMs: 1_720,
+    embeddingDeferred: false,
+  },
   topTemplates: [
     {
       id: 7,
@@ -190,6 +201,17 @@ function expectRichStatsHero() {
   expect(
     within(hero).getByText("connection refused to upstream <*>"),
   ).toBeTruthy();
+  // Separate phase timings surface on completion diagnostics (#824).
+  const phases = within(hero).getByTestId("wizard-ingest-phase-timings");
+  expect(within(phases).getByText("Template analysis")).toBeTruthy();
+  expect(within(phases).getByText("890 ms")).toBeTruthy();
+  expect(within(phases).getByText("1,720 ms")).toBeTruthy();
+  expect(within(phases).getByText("Discover / read")).toBeTruthy();
+  expect(within(phases).getByText("Parse / frame")).toBeTruthy();
+  expect(within(phases).getByText("Persist / index")).toBeTruthy();
+  expect(within(phases).getByText("Optional embedding")).toBeTruthy();
+  expect(within(phases).getByText("Validation")).toBeTruthy();
+  expect(within(phases).getByText("Publication")).toBeTruthy();
 }
 
 function expectExactImportConfidence() {
