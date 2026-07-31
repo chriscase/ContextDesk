@@ -14,6 +14,8 @@ pub mod embed_policy;
 pub mod event_revision;
 pub mod format_profile;
 pub mod governed_citation;
+pub mod import_preview;
+pub mod import_profile;
 pub mod ingest;
 mod ingest_confidence;
 pub mod lanes;

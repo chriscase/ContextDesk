@@ -764,7 +764,96 @@ fn contract_fixtures() -> Vec<(&'static str, Value)> {
             to(&resolved_bookmarks_sample()),
         ),
         ("process_progress.v1.json", to(&process_progress_sample())),
+        (
+            "import_preview_report.v1.json",
+            to(&import_preview_report_sample()),
+        ),
+        ("import_profile.v1.json", to(&import_profile_sample())),
+        (
+            "profile_match_report.v1.json",
+            to(&profile_match_report_sample()),
+        ),
     ]
+}
+
+/// A preview report produced by the real preview pipeline.
+///
+/// Built by running `preview_import_path` over a controlled temporary
+/// directory rather than by hand-assembling structs, so the fixture is the
+/// genuine production serialization — including the classifier's own status,
+/// reason, and grouping decisions. The tree is chosen to exercise a strong
+/// match, a rolled pair that groups, a raw-fallback text file, and an
+/// unsupported binary, so a wire consumer gets a sample of each.
+///
+/// Deterministic: fixed bytes, fixed names, and identity-sorted output. The
+/// temporary path never appears in the report, which is what makes committing
+/// this safe (and is separately asserted in `import_preview_adversarial.rs`).
+fn import_preview_report_sample() -> cd_core::log_analysis::import_preview::ImportPreviewReport {
+    let dir = tempfile::tempdir().expect("fixture tempdir");
+    let json = b"{\"ts\":\"2026-01-01T00:00:00Z\",\"level\":\"info\",\"msg\":\"ready\"}\n";
+    std::fs::create_dir_all(dir.path().join("logs")).expect("create logs dir");
+    std::fs::write(dir.path().join("logs/app.jsonl.1"), json).expect("write");
+    std::fs::write(dir.path().join("logs/app.jsonl.2"), json).expect("write");
+    std::fs::write(dir.path().join("notes.txt"), b"plain prose, no structure\n").expect("write");
+    std::fs::write(dir.path().join("image.log"), [0u8; 64]).expect("write");
+
+    cd_core::log_analysis::import_preview::preview_import_path(dir.path(), None)
+        .expect("fixture preview")
+}
+
+/// A import profile covering both a format-bound log group and a metrics group.
+fn import_profile_sample() -> cd_core::log_analysis::import_profile::ImportProfile {
+    use cd_core::log_analysis::import_preview::ImportItemRole;
+    use cd_core::log_analysis::import_profile::{
+        ImportProfile, ProfileRef, ProfileScope, SafePattern, SourceGroupRule,
+        IMPORT_PROFILE_SCHEMA_ID,
+    };
+
+    ImportProfile {
+        schema_id: IMPORT_PROFILE_SCHEMA_ID.to_string(),
+        min_reader_version: 1,
+        profile_id: "example.web-tier".to_string(),
+        version: 1,
+        scope: ProfileScope {
+            label: "example/web".to_string(),
+        },
+        name: "Example web tier".to_string(),
+        source_groups: vec![
+            SourceGroupRule {
+                group_id: "app-logs".to_string(),
+                include: vec![SafePattern::new("logs/**")],
+                exclude: vec![SafePattern::new("logs/**/debug-*")],
+                role: ImportItemRole::Log,
+                format_profile: Some(ProfileRef {
+                    id: "json-object-line".to_string(),
+                    version: 1,
+                }),
+                framing_profile: None,
+                timestamp_policy: Some("reviewed.utc-explicit".to_string()),
+            },
+            SourceGroupRule {
+                group_id: "metrics".to_string(),
+                include: vec![SafePattern::new("metrics/*.json")],
+                exclude: Vec::new(),
+                role: ImportItemRole::OperationalMetrics,
+                format_profile: None,
+                framing_profile: None,
+                timestamp_policy: None,
+            },
+        ],
+    }
+}
+
+/// The match report for that import profile against that preview.
+///
+/// Freezing this pins the drift/conflict vocabulary a consumer must render —
+/// including the `metrics` group matching nothing, which is drift rather than
+/// silence.
+fn profile_match_report_sample() -> cd_core::log_analysis::import_profile::ProfileMatchReport {
+    cd_core::log_analysis::import_profile::match_profile(
+        &import_profile_sample(),
+        &import_preview_report_sample(),
+    )
 }
 
 fn render(value: &Value) -> String {

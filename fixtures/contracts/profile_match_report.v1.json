@@ -1,0 +1,39 @@
+{
+  "applicability": "not_applicable",
+  "clean": false,
+  "findings": [
+    {
+      "groupId": "metrics",
+      "kind": "drift",
+      "reason": "pattern_matched_nothing"
+    },
+    {
+      "expectedFormatId": "json-object-line",
+      "groupId": "app-logs",
+      "identity": "logs/app.jsonl.1",
+      "kind": "match",
+      "observedFormatId": "json-object-line",
+      "reason": "format_agrees"
+    },
+    {
+      "expectedFormatId": "json-object-line",
+      "groupId": "app-logs",
+      "identity": "logs/app.jsonl.2",
+      "kind": "match",
+      "observedFormatId": "json-object-line",
+      "reason": "format_agrees"
+    }
+  ],
+  "profile": {
+    "digest": "abd716436e00afeca7a8cf65c8a5beeb28783a2fc3fe00a5e48b32c5ed1ac50b",
+    "profileId": "example.web-tier",
+    "version": 1
+  },
+  "proposedRoles": {
+    "logs/app.jsonl.1": "log",
+    "logs/app.jsonl.2": "log"
+  },
+  "validation": {
+    "valid": true
+  }
+}
