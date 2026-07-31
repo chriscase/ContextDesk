@@ -172,6 +172,30 @@ fn invalid_fixtures_fail_for_the_reason_they_are_named_for() {
             "missing-header.jsonl",
             NormalizedLogDiagnosticCode::MissingHeader,
         ),
+        (
+            "reserved-key-ts.jsonl",
+            NormalizedLogDiagnosticCode::ReservedKeyPresent,
+        ),
+        (
+            "reserved-key-timestamp.jsonl",
+            NormalizedLogDiagnosticCode::ReservedKeyPresent,
+        ),
+        (
+            "reserved-key-at-timestamp.jsonl",
+            NormalizedLogDiagnosticCode::ReservedKeyPresent,
+        ),
+        (
+            "instant-offset-hours-out-of-range.jsonl",
+            NormalizedLogDiagnosticCode::InstantMalformed,
+        ),
+        (
+            "instant-offset-minutes-out-of-range.jsonl",
+            NormalizedLogDiagnosticCode::InstantMalformed,
+        ),
+        (
+            "producer-resolved-fake-timezone.jsonl",
+            NormalizedLogDiagnosticCode::ResolvedTimezoneInvalid,
+        ),
     ];
 
     let on_disk: BTreeSet<String> = read_dir_sorted("invalid")

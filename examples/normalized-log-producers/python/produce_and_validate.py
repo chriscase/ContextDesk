@@ -33,6 +33,12 @@ MAX_CANONICAL_BYTES = 64 * 1024
 MAX_ID_CHARS = 128
 MAX_SEVERITY_NUMBER = 24
 MAX_CORRELATIONS = 32
+MAX_MESSAGE_CHARS = 64 * 1024
+
+# Top-level keys an older ContextDesk reader would treat as authoritative
+# wall-clock time. A conforming event must never carry them: it could declare
+# order_only while a sidecar "ts" epoch silently put the corpus on a wall clock.
+RESERVED_EVENT_KEYS = ("ts", "timestamp", "@timestamp")
 
 # The eleven typed correlation classes (#789). Trace and span are deliberately
 # NOT here: they are their own event fields, so a span id cannot be routed into
@@ -104,12 +110,35 @@ def _is_instant(value) -> bool:
     )
 
 
+def _is_iana_zone(value) -> bool:
+    """A real IANA zone, not merely a plausible-looking string."""
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        from zoneinfo import ZoneInfo
+
+        ZoneInfo(value)
+        return True
+    except Exception:
+        return False
+
+
+def _is_int(value) -> bool:
+    # bool is a subclass of int in Python; True must not pass as a sequence
+    # number or a version.
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _is_identifier(value) -> bool:
     return (
         isinstance(value, str)
         and value.strip() != ""
         and len(value) <= MAX_ID_CHARS
-        and not any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+        # Rust's char::is_control covers C0 AND C1 (U+0080-U+009F); matching
+        # it exactly is what keeps the three implementations in agreement.
+        and not any(
+            ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in value
+        )
     )
 
 
@@ -150,6 +179,10 @@ def validate_time(time, errors, line_no):
         errors.append((line_no, "resolved_timezone_invalid", "time.resolvedTimezone"))
     if want_zone == "no" and have["resolvedTimezone"]:
         errors.append((line_no, "resolved_timezone_invalid", "time.resolvedTimezone"))
+    if have["resolvedTimezone"] and not _is_iana_zone(time.get("resolvedTimezone")):
+        # A real zone, not merely a plausible-looking string: producer_resolved
+        # provenance is only worth anything if it is checkable.
+        errors.append((line_no, "resolved_timezone_invalid", "time.resolvedTimezone"))
 
     wall_expected = resolution in WALL_RESOLUTIONS
     if wall_expected and basis != "wall":
@@ -163,36 +196,58 @@ def validate_time(time, errors, line_no):
 
 
 def validate_event(event, expected_seq, errors, line_no):
-    if event.get("sourceSeq") != expected_seq:
+    for reserved in RESERVED_EVENT_KEYS:
+        if reserved in event:
+            errors.append((line_no, "reserved_key_present", reserved))
+
+    if not _is_int(event.get("sourceSeq")) or event.get("sourceSeq") != expected_seq:
         errors.append((line_no, "sequence_not_contiguous", "sourceSeq"))
+
+    message = event.get("message")
+    if not isinstance(message, str):
+        errors.append((line_no, "event_malformed", "message"))
+    elif len(message) > MAX_MESSAGE_CHARS:
+        errors.append((line_no, "bounds_exceeded", "message"))
+
+    if not isinstance(event.get("time"), dict):
+        errors.append((line_no, "event_malformed", "time"))
 
     validate_time(event.get("time"), errors, line_no)
 
     severity = event.get("severity")
-    if not isinstance(severity, dict) or "inferred" not in severity:
+    if not isinstance(severity, dict) or not isinstance(
+        severity.get("inferred"), bool
+    ):
         errors.append((line_no, "event_malformed", "severity"))
     else:
         number = severity.get("number")
         if number is not None and (
-            not isinstance(number, int)
-            or isinstance(number, bool)
-            or number < 0
-            or number > MAX_SEVERITY_NUMBER
+            not _is_int(number) or number < 0 or number > MAX_SEVERITY_NUMBER
         ):
             errors.append((line_no, "severity_number_out_of_range", "severity.number"))
 
     trace = event.get("traceId")
-    if trace is not None and (not TRACE_RE.match(trace) or set(trace) == {"0"}):
+    if trace is not None and (
+        not isinstance(trace, str) or not TRACE_RE.match(trace) or set(trace) == {"0"}
+    ):
         errors.append((line_no, "trace_identifier_malformed", "traceId"))
     span = event.get("spanId")
-    if span is not None and (not SPAN_RE.match(span) or set(span) == {"0"}):
+    if span is not None and (
+        not isinstance(span, str) or not SPAN_RE.match(span) or set(span) == {"0"}
+    ):
         errors.append((line_no, "trace_identifier_malformed", "spanId"))
 
     correlations = event.get("correlations", [])
+    if not isinstance(correlations, list):
+        errors.append((line_no, "event_malformed", "correlations"))
+        correlations = []
     if len(correlations) > MAX_CORRELATIONS:
         errors.append((line_no, "bounds_exceeded", "correlations"))
     seen = set()
     for correlation in correlations:
+        if not isinstance(correlation, dict):
+            errors.append((line_no, "event_malformed", "correlations"))
+            continue
         cls = correlation.get("class")
         if cls not in CORRELATION_CLASSES:
             errors.append((line_no, "event_malformed", "correlations"))
@@ -236,7 +291,7 @@ def validate_file(text: str):
         if header.get("schemaId") != SCHEMA_ID:
             errors.append((1, "schema_id_invalid", "schemaId"))
         version = header.get("minReaderVersion")
-        if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+        if not _is_int(version) or version < 1:
             errors.append((1, "min_reader_version_invalid", "minReaderVersion"))
         elif version > READER_VERSION:
             errors.append((1, "reader_too_old", "minReaderVersion"))
@@ -271,7 +326,7 @@ def validate_file(text: str):
             continue
         validate_event(event, expected_seq, errors, index)
         seq = event.get("sourceSeq")
-        expected_seq = (seq + 1) if isinstance(seq, int) else expected_seq + 1
+        expected_seq = (seq + 1) if _is_int(seq) else expected_seq + 1
 
     return errors
 

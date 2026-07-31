@@ -59,7 +59,7 @@ fn run_conformance(program: &str, script: &str) {
     );
     // Guard against a reference that silently checks nothing.
     assert!(
-        stdout.contains("30 fixtures checked"),
+        stdout.contains("36 fixtures checked"),
         "{program} must check the whole corpus: {stdout}"
     );
 }

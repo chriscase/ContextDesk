@@ -106,6 +106,27 @@ pub const MAX_ERROR_SAMPLES: usize = 5;
 /// Maximum characters of any single re-redacted error sample.
 pub const MAX_ERROR_SAMPLE_CHARS: usize = 256;
 
+/// Top-level event keys a conforming file may never carry.
+///
+/// The old-reader fallback works because a reader predating this contract
+/// treats each line as an ordinary JSON log record. That same generic parser
+/// (`log_analysis::parse::parse_json`) reads `ts`, `timestamp`, `time`, and
+/// `@timestamp` as authoritative wall-clock time, and a bare integer epoch in
+/// any of them becomes an `ExplicitWallClock` instant.
+///
+/// So an event could declare `resolution: "order_only"` — no usable time at
+/// all — while carrying a convenience `"ts": 1767225600`, and the only reader
+/// that exists today would place the corpus on a 2026 wall clock derived from
+/// a producer-supplied epoch with no offset and no timezone. That defeats the
+/// guessed-instant guard and the order-only fallback simultaneously, and it is
+/// reachable without malice: an exporter that spreads its original record into
+/// the event object produces it naturally.
+///
+/// These keys are refused outright. `time` is absent from the list because it
+/// is this contract's own field and is always an object, which the generic
+/// parser decodes as unusable rather than as an instant.
+pub const RESERVED_EVENT_KEYS: &[&str] = &["ts", "timestamp", "@timestamp"];
+
 /// How an event's instant came to exist.
 ///
 /// This enum is the whole timestamp legality story: it names the *provenance*
@@ -467,6 +488,9 @@ pub enum NormalizedLogDiagnosticCode {
     ForbiddenSentinel,
     /// A trace or span identifier was malformed.
     TraceIdentifierMalformed,
+    /// The line carried a top-level key from [`RESERVED_EVENT_KEYS`], which an
+    /// older reader would treat as authoritative wall-clock time.
+    ReservedKeyPresent,
 }
 
 /// One validation finding, with a bounded re-redacted sample.
@@ -577,6 +601,15 @@ fn is_rfc3339_with_offset(value: &str) -> bool {
     }
     if !offset[1..3].iter().all(u8::is_ascii_digit) || !offset[4..6].iter().all(u8::is_ascii_digit)
     {
+        return false;
+    }
+    // Digit shape alone is not an offset: RFC3339 bounds hours to 00-23 and
+    // minutes to 00-59. Without this, `+30:00` and `+99:99` passed here while
+    // the JSON Schema and both reference producers rejected them — the
+    // authority disagreeing with everything that mirrors it.
+    let hours = (offset[1] - b'0') * 10 + (offset[2] - b'0');
+    let minutes = (offset[4] - b'0') * 10 + (offset[5] - b'0');
+    if hours > 23 || minutes > 59 {
         return false;
     }
     rest != "-00:00"
@@ -731,7 +764,14 @@ pub fn validate_event_time(time: &EventTime, line: u64, out: &mut Vec<Normalized
         matches!(time.resolution, TimeResolution::ProducerResolved),
     ) {
         (Some(zone), true) => {
-            if zone.trim().is_empty() || zone.chars().count() > MAX_NORMALIZED_ID_CHARS {
+            // Must be a REAL IANA zone, not merely a non-empty string. The
+            // point of `producer_resolved` is that its provenance is
+            // checkable; accepting "Mars/Olympus" would let a guessed instant
+            // be laundered through a plausible-looking declaration.
+            if zone.trim().is_empty()
+                || zone.chars().count() > MAX_NORMALIZED_ID_CHARS
+                || zone.parse::<chrono_tz::Tz>().is_err()
+            {
                 push(
                     NormalizedLogDiagnosticCode::ResolvedTimezoneInvalid,
                     "time.resolvedTimezone",
@@ -971,6 +1011,22 @@ pub fn validate_file(contents: &str) -> NormalizedLogValidation {
         match serde_json::from_str::<NormalizedLogEvent>(raw) {
             Ok(event) => {
                 let before = diagnostics.len();
+                // Checked against the RAW line, not the typed struct: serde
+                // silently drops unknown fields, so a reserved key is already
+                // invisible by the time we hold a `NormalizedLogEvent`.
+                if let Ok(serde_json::Value::Object(map)) =
+                    serde_json::from_str::<serde_json::Value>(raw)
+                {
+                    for reserved in RESERVED_EVENT_KEYS {
+                        if map.contains_key(*reserved) {
+                            diagnostics.push(NormalizedLogDiagnostic {
+                                code: NormalizedLogDiagnosticCode::ReservedKeyPresent,
+                                line: line_number,
+                                location: Some((*reserved).to_string()),
+                            });
+                        }
+                    }
+                }
                 validate_event(&event, expected_seq, line_number, &mut diagnostics);
                 if diagnostics.len() == before {
                     events_validated += 1;
@@ -1413,6 +1469,116 @@ mod tests {
         assert!(
             codes(&report.diagnostics).contains(&NormalizedLogDiagnosticCode::ForbiddenSentinel)
         );
+    }
+
+    #[test]
+    fn a_reserved_alias_key_is_refused_even_though_serde_would_ignore_it() {
+        // The critical case: an event declares order_only (no usable time),
+        // but carries a sidecar `ts` epoch. serde drops the unknown field, so
+        // this MUST be caught against the raw line. Verified against the real
+        // ingest path: without this guard the old reader placed the corpus on
+        // a 2026 wall clock derived from that epoch.
+        for reserved in RESERVED_EVENT_KEYS {
+            let mut text = serde_json::to_string(&header()).unwrap();
+            let mut item = event(0, explicit());
+            item.time = EventTime {
+                basis: TimeBasis::Order,
+                resolution: TimeResolution::OrderOnly,
+                instant: None,
+                local_text: None,
+                resolved_timezone: None,
+                observed: None,
+            };
+            let mut value = serde_json::to_value(&item).unwrap();
+            value
+                .as_object_mut()
+                .unwrap()
+                .insert((*reserved).to_string(), serde_json::json!(1_767_225_600i64));
+            text.push('\n');
+            text.push_str(&serde_json::to_string(&value).unwrap());
+
+            let report = validate_file(&text);
+            assert!(!report.ok, "{reserved} must be refused");
+            assert!(
+                codes(&report.diagnostics)
+                    .contains(&NormalizedLogDiagnosticCode::ReservedKeyPresent),
+                "{reserved} should report ReservedKeyPresent"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_additive_field_is_still_tolerated() {
+        // The reserved-key guard must not become a blanket deny_unknown_fields:
+        // spec rule 3 permits additive optional fields.
+        let mut text = serde_json::to_string(&header()).unwrap();
+        let mut value = serde_json::to_value(event(0, explicit())).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("futureOptionalField".into(), serde_json::json!({"a": 1}));
+        text.push('\n');
+        text.push_str(&serde_json::to_string(&value).unwrap());
+        let report = validate_file(&text);
+        assert!(report.ok, "{:?}", report.diagnostics);
+    }
+
+    #[test]
+    fn impossible_utc_offsets_are_refused() {
+        // Digit shape is not an offset. These passed before the hour/minute
+        // bounds were added, while the JSON Schema and both reference
+        // producers rejected them — the authority disagreeing with its mirrors.
+        for bad in [
+            "2026-01-01T00:00:00+24:00",
+            "2026-01-01T00:00:00+30:00",
+            "2026-01-01T00:00:00+99:99",
+            "2026-01-01T00:00:00-99:99",
+            "2026-01-01T00:00:00+05:60",
+        ] {
+            let mut time = explicit();
+            time.instant = Some(bad.to_string());
+            let mut out = Vec::new();
+            validate_event_time(&time, 2, &mut out);
+            assert!(
+                codes(&out).contains(&NormalizedLogDiagnosticCode::InstantMalformed),
+                "{bad} must be refused"
+            );
+        }
+        // The boundary values remain legal.
+        for good in ["2026-01-01T00:00:00+23:59", "2026-01-01T00:00:00-23:59"] {
+            let mut time = explicit();
+            time.instant = Some(good.to_string());
+            let mut out = Vec::new();
+            validate_event_time(&time, 2, &mut out);
+            assert!(out.is_empty(), "{good} must stay legal: {out:?}");
+        }
+    }
+
+    #[test]
+    fn a_producer_resolved_timezone_must_be_a_real_iana_zone() {
+        // Otherwise a guessed instant launders through a plausible-looking
+        // declaration and the provenance is worthless.
+        for bad in ["Mars/Olympus", "Not/AZone", "PST", "UTC+5"] {
+            let mut time = explicit();
+            time.resolution = TimeResolution::ProducerResolved;
+            time.local_text = Some("2026-01-01 00:00:00".into());
+            time.resolved_timezone = Some(bad.to_string());
+            let mut out = Vec::new();
+            validate_event_time(&time, 2, &mut out);
+            assert!(
+                codes(&out).contains(&NormalizedLogDiagnosticCode::ResolvedTimezoneInvalid),
+                "{bad} must be refused"
+            );
+        }
+        for good in ["America/Chicago", "UTC", "Europe/London", "Asia/Tokyo"] {
+            let mut time = explicit();
+            time.resolution = TimeResolution::ProducerResolved;
+            time.local_text = Some("2026-01-01 00:00:00".into());
+            time.resolved_timezone = Some(good.to_string());
+            let mut out = Vec::new();
+            validate_event_time(&time, 2, &mut out);
+            assert!(out.is_empty(), "{good} must be accepted: {out:?}");
+        }
     }
 
     #[test]

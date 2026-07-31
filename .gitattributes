@@ -18,3 +18,7 @@ fixtures/contracts/** text eol=lf
 # Shared cross-language parser catalogs are also byte-stable golden files, but
 # remain outside exact generated fixture sets such as Log Lab and SDK contracts.
 fixtures/citation-contracts/** text eol=lf
+# Normalized-log fixtures are byte-stable: LF only, never CRLF.
+# The fixture suite asserts this, so a checkout that rewrote line endings
+# would fail the suite rather than silently changing the corpus.
+fixtures/normalized-log-events/** text eol=lf

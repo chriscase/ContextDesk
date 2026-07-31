@@ -100,13 +100,35 @@ producer-declared timezone.
   guessed instant in disguise. `-00:00` is also rejected: RFC3339 reserves it
   for "offset unknown", which is the same thing as not having one.
 * **`producer_resolved`** is a claim by the *producer*, not source truth. It
-  **MUST** carry the original `localText` and the IANA zone used. A reader
+  **MUST** carry the original `localText` and the IANA zone used, and that zone
+  is **validated as a real IANA identifier** — provenance that cannot be checked
+  is not provenance. A reader
   **MUST NOT** present it as source-declared, and **MAY** filter or distrust it
   differently (#763: a producer default "must retain provenance").
 * **`unresolved`** keeps the text as evidence and no instant (#670:
   "unresolved local time remains evidence, never an instant").
 * **`observed`**, when present, is the producer's own observation time, distinct
   from event time. It never overwrites `instant` (#787).
+
+### Reserved keys (normative)
+
+An event **MUST NOT** carry a top-level `ts`, `timestamp`, or `@timestamp`.
+
+This is not stylistic. A reader predating this contract parses each line as an
+ordinary JSON log record, and that generic parser reads those three keys as
+**authoritative wall-clock time** — a bare integer epoch in any of them becomes
+an explicit instant. An event could therefore declare `order_only` while a
+convenience `"ts": 1767225600` silently placed the corpus on a 2026 wall clock
+derived from a producer epoch with no offset and no zone, defeating both the
+guessed-instant guard and the order-only fallback at once.
+
+It is reachable without malice: an exporter that spreads its original record
+into the event object produces it naturally. The validator therefore checks the
+**raw line**, because a typed deserializer drops unknown fields before any check
+could see them.
+
+`time` is not reserved: it is this contract's own field and is always an object,
+which the generic parser decodes as unusable rather than as an instant.
 
 `wall`, `relative`, and `order` are incompatible axes (#670). Basis is checked
 against resolution: a `wall` basis with no instant, or an `order` basis with
@@ -252,9 +274,9 @@ offline validator.
 | Resource | Location |
 | --- | --- |
 | JSON Schema | `docs/specs/normalized-log-events/schemas/normalized-log-events.v1.json` |
-| Fixtures | `fixtures/normalized-log-events/` (9 valid, 21 invalid) |
+| Fixtures | `fixtures/normalized-log-events/` (9 valid, 27 invalid) |
 | Validator | `crates/cd-core/src/normalized_log_events.rs` |
-| Rust producer | `examples/normalized-log-producers/rust/` |
+| Rust producer | `crates/cd-core/examples/normalized_log_producer.rs` (compiled by the build) |
 | Node producer | `examples/normalized-log-producers/node/` |
 | Python producer | `examples/normalized-log-producers/python/` |
 | Cross-language check | `crates/cd-core/tests/normalized_log_events_cross_language.rs` |
