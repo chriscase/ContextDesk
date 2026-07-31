@@ -1,0 +1,10 @@
+/* Paint root for visual tests — the same tokens base.css paints body with.
+   A stylesheet rule (not an inline style) so var() re-resolves when the test
+   flips html[data-theme]; inline-style var() substitution proved stale on
+   attribute flips in the Vitest tester page. */
+[data-visual-stage] {
+  background: var(--bg-app);
+  color: var(--text);
+  min-height: 100vh;
+  display: flow-root;
+}
