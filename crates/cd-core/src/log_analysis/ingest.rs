@@ -1726,9 +1726,15 @@ fn ingest_lines_from_reader(
         };
         let physical = String::from_utf8_lossy(&physical_bytes).into_owned();
         let completed = time_op_ms(ops, IngestOp::ParseFrame, || framer.push_line(&physical));
-        if let Some(_logical) = completed {
-            // `push_line` returned the previous pending record — emit its bytes.
-            let finished = std::mem::take(&mut pending_raw);
+        if let Some(logical) = completed {
+            // `push_line` has two completion shapes:
+            // 1) Record *includes* the line just pushed (CSV quote close, CRI `F`,
+            //    pretty-JSON brace close) — pending_raw is the prior lines only.
+            // 2) Record is the *previous* pending only (new record start) —
+            //    current line becomes the new pending.
+            // Matching the framer's logical text decides which path applied.
+            let finished =
+                finished_raw_for_completion(&mut pending_raw, &physical_bytes, &physical, &logical);
             ingest_framed_record(
                 &finished,
                 source_label,
@@ -1747,11 +1753,13 @@ fn ingest_lines_from_reader(
                 limits,
                 ops,
             )?;
+        } else {
+            // Still accumulating into the open logical record.
+            if !pending_raw.is_empty() {
+                pending_raw.push(b'\n');
+            }
+            pending_raw.extend_from_slice(&physical_bytes);
         }
-        if !pending_raw.is_empty() {
-            pending_raw.push(b'\n');
-        }
-        pending_raw.extend_from_slice(&physical_bytes);
     }
     if time_op_ms(ops, IngestOp::ParseFrame, || framer.finish()).is_some() {
         let finished = std::mem::take(&mut pending_raw);
@@ -1775,6 +1783,40 @@ fn ingest_lines_from_reader(
         )?;
     }
     Ok(true)
+}
+
+/// Map a framer completion + current physical line onto pre-decode raw bytes.
+///
+/// When `logical` includes the current physical line (CSV/CRI/JSON close), the
+/// finished bytes are `pending_raw + \\n + physical_bytes` and the open pending
+/// is cleared. Otherwise the finished bytes are the prior `pending_raw` and the
+/// current line becomes the new pending (new-record start).
+fn finished_raw_for_completion(
+    pending_raw: &mut Vec<u8>,
+    physical_bytes: &[u8],
+    physical_text: &str,
+    logical: &str,
+) -> Vec<u8> {
+    // Framer completions that close CSV/CRI/JSON include the line just pushed as
+    // the last physical line of `logical`. New-record starts return only the
+    // previous pending, so the last line of `logical` is *not* the current line.
+    let includes_current = logical.lines().next_back() == Some(physical_text);
+
+    if includes_current {
+        let mut finished = std::mem::take(pending_raw);
+        if !finished.is_empty() {
+            finished.push(b'\n');
+        }
+        finished.extend_from_slice(physical_bytes);
+        // Framer pending is empty after take_pending on close paths.
+        *pending_raw = Vec::new();
+        finished
+    } else {
+        let finished = std::mem::take(pending_raw);
+        // Current line opened the next logical record.
+        *pending_raw = physical_bytes.to_vec();
+        finished
+    }
 }
 
 /// Parse + persist path for one framed logical record.
@@ -6884,5 +6926,198 @@ mod tests {
         );
         assert!(LogCorpus::list_ids(&cache).unwrap().is_empty());
         assert_no_ingest_staging(&cache);
+    }
+
+    /// Real `ingest_path` path: multi-line CSV / CRI / pretty-JSON close must
+    /// keep the completing physical line on the closed record (not bleed into
+    /// the next). Catches pending_raw / push_line include-current desync.
+    #[test]
+    fn framing_ingest_close_line_stays_on_record_no_bleed() {
+        use crate::log_analysis::{query_events, EventQuery, MAX_EVENT_PAGE};
+
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+
+        // CSV: middle row closes on a later physical line with RETURNING.
+        std::fs::write(
+            logs.join("csvlog.csv"),
+            "\
+\"2025-06-15 12:10:00.100 UTC\",\"app\",\"LOG\",\"ok\",,,,
+\"2025-06-15 12:10:05.250 UTC\",\"app\",\"ERROR\",\"dup\",\"INSERT INTO orders (id, label)
+VALUES (42, 'demo')
+RETURNING id\"
+\"2025-06-15 12:10:09.900 UTC\",\"app\",\"WARNING\",\"no txn\",,,,
+",
+        )
+        .unwrap();
+
+        // CRI: partial P…F joins payload.
+        std::fs::write(
+            logs.join("cri.log"),
+            "\
+2025-06-15T16:10:00.000000000Z stdout F {\"level\":\"error\",\"msg\":\"cri full record\"}
+2025-06-15T16:10:01.000000000Z stdout P {\"level\":\"warn\",\"msg\":\"cri split 
+2025-06-15T16:10:01.000000000Z stdout F record\"}
+2025-06-15T16:10:02.000000000Z stderr F plain cri payload
+",
+        )
+        .unwrap();
+
+        // Pretty-printed JSON object spanning lines.
+        std::fs::write(
+            logs.join("pretty.jsonl"),
+            r#"{"ts":"2025-06-15T14:40:00Z","level":"error","message":"one line"}
+{
+  "ts": "2025-06-15T14:40:01Z",
+  "level": "info",
+  "message": "pretty printed object"
+}
+{"ts":"2025-06-15T14:40:02Z","level":"info","message":"after pretty"}
+"#,
+        )
+        .unwrap();
+
+        let cache = dir.path().join("cache");
+        let report = ingest_path(&cache, &logs, "frame-close", None, "none").unwrap();
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        let page = query_events(
+            &corpus,
+            &EventQuery {
+                limit: MAX_EVENT_PAGE,
+                sort_by_time: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let csv: Vec<_> = page
+            .events
+            .iter()
+            .filter(|e| e.source.contains("csvlog"))
+            .collect();
+        assert_eq!(
+            csv.len(),
+            3,
+            "csv logical rows: {:?}",
+            csv.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        let error_row = csv
+            .iter()
+            .find(|e| e.message.contains("INSERT INTO orders") || e.message.contains("dup"))
+            .expect("ERROR csv row");
+        assert!(
+            error_row.message.contains("RETURNING id") || error_row.message.contains("VALUES (42"),
+            "CSV close line must stay on ERROR row, got: {}",
+            error_row.message
+        );
+        let warn_row = csv
+            .iter()
+            .find(|e| e.message.contains("no txn") || e.level == "warn" || e.level == "warning")
+            .expect("WARNING csv row");
+        assert!(
+            !warn_row.message.contains("RETURNING"),
+            "RETURNING must not bleed into WARNING: {}",
+            warn_row.message
+        );
+
+        let cri: Vec<_> = page
+            .events
+            .iter()
+            .filter(|e| e.source.contains("cri"))
+            .collect();
+        assert_eq!(cri.len(), 3, "cri logical rows {:?}", cri.len());
+        let split = cri
+            .iter()
+            .find(|e| e.message.contains("cri split"))
+            .expect("CRI partial row");
+        assert!(
+            split.message.contains("record"),
+            "CRI F line must complete partial: {}",
+            split.message
+        );
+
+        let pretty: Vec<_> = page
+            .events
+            .iter()
+            .filter(|e| e.source.contains("pretty"))
+            .collect();
+        assert_eq!(pretty.len(), 3, "pretty json logical rows");
+        let mid = pretty
+            .iter()
+            .find(|e| e.message.contains("pretty printed object"))
+            .expect("pretty object row");
+        assert!(
+            mid.message.contains("pretty printed object"),
+            "pretty-JSON close must stay on object: {}",
+            mid.message
+        );
+        let after = pretty
+            .iter()
+            .find(|e| e.message.contains("after pretty"))
+            .expect("after pretty row");
+        assert!(
+            !after.message.contains("pretty printed object"),
+            "pretty body must not bleed: {}",
+            after.message
+        );
+    }
+
+    #[test]
+    fn framing_ingest_lab_postgres_csvlog_no_bleed() {
+        use crate::log_analysis::{query_events, EventQuery, MAX_EVENT_PAGE};
+        use std::path::PathBuf;
+
+        let lab = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/log-conformance/corpus/postgres-csvlog/postgresql-csv.log");
+        if !lab.exists() {
+            // Worktree without lab fixtures — skip quietly.
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::copy(&lab, logs.join("postgresql-csv.log")).unwrap();
+
+        let cache = dir.path().join("cache");
+        let report = ingest_path(&cache, &logs, "lab-csv", None, "none").unwrap();
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        let page = query_events(
+            &corpus,
+            &EventQuery {
+                limit: MAX_EVENT_PAGE,
+                sort_by_time: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            page.events.len(),
+            3,
+            "lab csvlog must be 3 logical rows, got {}",
+            page.events.len()
+        );
+        let error = page
+            .events
+            .iter()
+            .find(|e| e.message.contains("duplicate key") || e.level == "error")
+            .expect("ERROR event");
+        assert!(
+            error.message.contains("RETURNING") || error.message.contains("VALUES (42"),
+            "ERROR must include closing query lines: {}",
+            error.message
+        );
+        let warning = page
+            .events
+            .iter()
+            .find(|e| {
+                e.message.contains("no transaction") || e.level == "warn" || e.level == "warning"
+            })
+            .expect("WARNING event");
+        assert!(
+            !warning.message.contains("RETURNING"),
+            "WARNING must not start with bled query fragment: {}",
+            warning.message
+        );
     }
 }
