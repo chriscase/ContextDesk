@@ -854,14 +854,14 @@ fn stress() {
     };
     let page = query_events(&corpus, &query).expect("query stress corpus");
 
-    // The physical-line count is what today's pipeline produces. Stated as an
-    // observation, never as a performance or correctness threshold: this
-    // machine is not a universal budget.
+    // Physical line count (pre-framing) vs desired logical records after #788.
+    // Stated as an observation, never as a performance threshold: this machine
+    // is not a universal budget.
     let physical = RECORDS as u64 + (RECORDS as u64).div_ceil(8) * 5;
     println!(
         "stress: {RECORDS} structured records + {} exception blocks\n  \
          desired logical records: {logical}\n  \
-         physical records today:  {physical}\n  \
+         physical lines in corpus:  {physical}\n  \
          ingested in {:?} on this machine (not a threshold)",
         (RECORDS as u64).div_ceil(8),
         elapsed
@@ -885,9 +885,10 @@ fn stress() {
         facets.sources.keys().collect::<Vec<_>>()
     );
     let total: u64 = facets.sources.values().sum();
+    // After logical-record framing lands, the store holds *logical* events.
     assert_eq!(
-        total, physical,
-        "the stress import lost records: expected {physical}, stored {total}"
+        total, logical as u64,
+        "the stress import lost logical records: expected {logical}, stored {total} (physical lines were {physical})"
     );
 }
 
