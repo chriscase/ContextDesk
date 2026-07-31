@@ -157,6 +157,11 @@ describe("a failed capability retry is surfaced", () => {
             is_default: false,
             tools_enabled: false,
             tools_disabled_reason: "model",
+            availability: "discovered",
+            availability_detail: null,
+            hidden: false,
+            hidden_by: null,
+            pinned_rank: null,
           },
         ]}
         selectedModelKey="ollama::dolphin"

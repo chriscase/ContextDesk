@@ -10,7 +10,7 @@
 
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { ModelOptionDto } from "./host";
+import type { ModelOptionDto } from "@contextdesk/contracts";
 import { Composer } from "../components/Composer";
 
 function model(
@@ -28,6 +28,8 @@ function model(
     is_default: false,
     tools_enabled: true,
     tools_disabled_reason: null,
+    availability: "discovered",
+    availability_detail: null,
     hidden: false,
     hidden_by: null,
     pinned_rank: null,

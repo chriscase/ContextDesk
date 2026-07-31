@@ -12,7 +12,7 @@
  * `tools_disabled_reason` and provider health remain the truth for that.
  */
 
-import type { ModelOptionDto } from "./host";
+import type { ModelOptionDto } from "@contextdesk/contracts";
 
 /** One `<optgroup>`-shaped band of the picker. */
 export type CuratedGroup = {

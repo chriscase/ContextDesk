@@ -778,6 +778,12 @@ describe("LogExplorer shell", () => {
         group: "Tools Provider",
         is_default: true,
         tools_enabled: true,
+        tools_disabled_reason: null,
+        availability: "discovered",
+        availability_detail: null,
+        hidden: false,
+        hidden_by: null,
+        pinned_rank: null,
       },
     ]);
     vi.mocked(host.hostLogSearchEvents).mockResolvedValue([]);

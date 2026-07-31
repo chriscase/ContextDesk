@@ -1716,6 +1716,9 @@ export function LinkedChatRail({
                       {option.label}
                       {option.is_default ? " · default" : ""}
                       {!option.tools_enabled ? " · tools unavailable" : ""}
+                      {option.availability === "configured_unverified"
+                        ? " · availability unverified"
+                        : ""}
                       {option.hidden ? " · hidden" : ""}
                     </option>
                   ))}

@@ -139,6 +139,12 @@ const defaultModels: host.ModelOptionDto[] = [
     group: "Tools Provider",
     is_default: true,
     tools_enabled: true,
+    tools_disabled_reason: null,
+    availability: "discovered",
+    availability_detail: null,
+    hidden: false,
+    hidden_by: null,
+    pinned_rank: null,
   },
   {
     id: "chat-only",
@@ -150,6 +156,11 @@ const defaultModels: host.ModelOptionDto[] = [
     is_default: false,
     tools_enabled: false,
     tools_disabled_reason: "profile",
+    availability: "discovered",
+    availability_detail: null,
+    hidden: false,
+    hidden_by: null,
+    pinned_rank: null,
   },
 ];
 
@@ -495,6 +506,12 @@ describe("LinkedChatRail", () => {
         group: "Forensics Provider",
         is_default: false,
         tools_enabled: true,
+        tools_disabled_reason: null,
+        availability: "discovered",
+        availability_detail: null,
+        hidden: false,
+        hidden_by: null,
+        pinned_rank: null,
       },
       defaultModels[1]!,
     ];

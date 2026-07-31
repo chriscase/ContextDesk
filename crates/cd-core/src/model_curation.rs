@@ -14,17 +14,15 @@
 //!
 //! ## Scope identity
 //!
-//! Curation is keyed by **provider kind + endpoint identity + model id**, not
-//! by the profile's display label:
+//! Curation is keyed by **stable profile id + provider kind + endpoint identity
+//! + model id**, not by the profile's display label:
 //!
 //! - Renaming a profile keeps its curation (the upstream is the same).
 //! - Repointing a profile at a different `base_url` does *not* carry curation
 //!   across, because that is a different inventory. The old entries stay in
 //!   config, inert, so pointing back restores the user's choices.
-//! - Two profiles of the same kind aimed at the same endpoint are the same
-//!   upstream and therefore share one curation scope.
-//! - Session-based kinds with no URL fall back to the profile id, so distinct
-//!   profiles stay distinct.
+//! - Two profiles of the same kind aimed at the same endpoint remain distinct.
+//!   They may carry different credentials, tenants, or gateway configuration.
 //!
 //! That is what keeps two providers that both expose `llama3` curated
 //! independently.
@@ -37,15 +35,18 @@ use crate::providers::{ProviderKind, ProviderProfile};
 
 /// Schema version written by this build.
 ///
-/// v1 joined key components with U+001F and assumed that byte could not occur
-/// inside a provider kind, endpoint, or model id. Model ids come from a remote
-/// API and are arbitrary strings, so that was an assumption about data this
-/// process does not control. v2 length-prefixes every component instead.
-pub const CURATION_VERSION: u32 = 2;
+/// v1 joined key components with U+001F. v2 length-prefixed them but scoped
+/// solely by endpoint, allowing two credential profiles to share curation.
+/// v3 adds stable profile id while retaining kind and normalized endpoint.
+pub const CURATION_VERSION: u32 = 3;
+
+/// Versioned prefix for collision-safe provider/model selection identities.
+pub const MODEL_SELECTION_PREFIX: &str = "cd.model.v1:";
 
 /// Identity of one curation scope: an exact upstream inventory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurationScope {
+    profile_id: String,
     kind: ProviderKind,
     endpoint: String,
 }
@@ -54,6 +55,7 @@ impl CurationScope {
     /// Derive the scope for a profile.
     pub fn for_profile(profile: &ProviderProfile) -> Self {
         Self {
+            profile_id: profile.id.trim().to_string(),
             kind: profile.kind,
             endpoint: normalize_endpoint(&profile.base_url, &profile.id),
         }
@@ -62,7 +64,8 @@ impl CurationScope {
     /// Stable key for the provider profile as a whole.
     pub fn provider_key(&self) -> String {
         format!(
-            "p:v2:{}{}",
+            "p:v3:{}{}{}",
+            encode_component(&self.profile_id),
             encode_component(kind_slug(self.kind)),
             encode_component(&self.endpoint)
         )
@@ -71,7 +74,8 @@ impl CurationScope {
     /// Stable key for one model inside this scope.
     pub fn model_key(&self, model_id: &str) -> String {
         format!(
-            "m:v2:{}{}{}",
+            "m:v3:{}{}{}{}",
+            encode_component(&self.profile_id),
             encode_component(kind_slug(self.kind)),
             encode_component(&self.endpoint),
             encode_component(model_id.trim())
@@ -86,7 +90,8 @@ impl CurationScope {
     /// prefix cannot bleed into a longer endpoint.
     pub fn model_key_prefix(&self) -> String {
         format!(
-            "m:v2:{}{}",
+            "m:v3:{}{}{}",
+            encode_component(&self.profile_id),
             encode_component(kind_slug(self.kind)),
             encode_component(&self.endpoint)
         )
@@ -98,6 +103,34 @@ impl CurationScope {
             "m:v1:{}{LEGACY_SEP}{}{LEGACY_SEP}",
             kind_slug(self.kind),
             self.endpoint
+        )
+    }
+
+    /// Endpoint-only v2 prefix, retained for unambiguous migration.
+    fn v2_model_key_prefix(&self) -> String {
+        format!(
+            "m:v2:{}{}",
+            encode_component(kind_slug(self.kind)),
+            encode_component(&self.endpoint)
+        )
+    }
+
+    /// Endpoint-only v2 provider key, retained for unambiguous migration.
+    fn v2_provider_key(&self) -> String {
+        format!(
+            "p:v2:{}{}",
+            encode_component(kind_slug(self.kind)),
+            encode_component(&self.endpoint)
+        )
+    }
+
+    /// Endpoint-only v2 model key, retained for unambiguous migration.
+    fn v2_model_key(&self, model_id: &str) -> String {
+        format!(
+            "m:v2:{}{}{}",
+            encode_component(kind_slug(self.kind)),
+            encode_component(&self.endpoint),
+            encode_component(model_id.trim())
         )
     }
 
@@ -127,6 +160,69 @@ impl CurationScope {
 /// empty.
 fn encode_component(value: &str) -> String {
     format!("{}:{}", value.len(), value)
+}
+
+fn decode_component(input: &str) -> Option<(&str, &str)> {
+    let colon = input.find(':')?;
+    let (length, with_colon) = input.split_at(colon);
+    let len: usize = length.parse().ok()?;
+    let body = with_colon.strip_prefix(':')?;
+    if body.len() < len || !body.is_char_boundary(len) {
+        return None;
+    }
+    Some(body.split_at(len))
+}
+
+/// Exact provider/model identity used by pickers and persisted chat defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSelection {
+    /// Stable provider profile id.
+    pub provider_id: String,
+    /// Model id sent to the provider.
+    pub model_id: String,
+}
+
+/// Encode a provider/model tuple without making assumptions about its contents.
+pub fn model_selection_key(provider_id: &str, model_id: &str) -> String {
+    format!(
+        "{MODEL_SELECTION_PREFIX}{}{}",
+        encode_component(provider_id.trim()),
+        encode_component(model_id.trim())
+    )
+}
+
+/// Decode the canonical identity, with read compatibility for legacy
+/// `provider::model` and bare-model values. New writes always use v1.
+pub fn parse_model_selection_key(key: &str) -> ModelSelection {
+    let trimmed = key.trim();
+    if let Some(rest) = trimmed.strip_prefix(MODEL_SELECTION_PREFIX) {
+        if let Some((provider_id, rest)) = decode_component(rest) {
+            if let Some((model_id, tail)) = decode_component(rest) {
+                if tail.is_empty() && !provider_id.is_empty() && !model_id.is_empty() {
+                    return ModelSelection {
+                        provider_id: provider_id.to_string(),
+                        model_id: model_id.to_string(),
+                    };
+                }
+            }
+        }
+        return ModelSelection {
+            provider_id: String::new(),
+            model_id: String::new(),
+        };
+    }
+    if let Some((provider_id, model_id)) = trimmed.split_once("::") {
+        if !provider_id.is_empty() && !model_id.is_empty() {
+            return ModelSelection {
+                provider_id: provider_id.to_string(),
+                model_id: model_id.to_string(),
+            };
+        }
+    }
+    ModelSelection {
+        provider_id: String::new(),
+        model_id: trimmed.to_string(),
+    }
 }
 
 /// v1 separator, retained only to read and upgrade existing configs.
@@ -219,6 +315,115 @@ pub enum HiddenBy {
     Model,
 }
 
+/// Whether a model was confirmed by live discovery for this profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelAvailability {
+    /// Returned by the configured provider during this request.
+    Discovered,
+    /// Kept visible because it is configured or built in, but discovery did
+    /// not confirm it. Never eligible for silent default replacement.
+    ConfiguredUnverified,
+}
+
+/// Public model-picker DTO owned by the trusted core contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelOptionDto {
+    /// Model id sent to the provider.
+    pub id: String,
+    /// Human display label.
+    pub label: String,
+    /// Collision-safe versioned provider/model selection key.
+    pub selection_key: String,
+    /// Stable provider profile id.
+    pub provider_id: String,
+    /// Human provider group label.
+    pub provider_label: String,
+    /// Stable grouping label.
+    pub group: String,
+    /// Whether this is the configured default.
+    pub is_default: bool,
+    /// Whether native tool execution is enabled.
+    pub tools_enabled: bool,
+    /// Typed reason tools are disabled, when applicable.
+    pub tools_disabled_reason: Option<String>,
+    /// Live discovery status.
+    pub availability: ModelAvailability,
+    /// Honest human explanation when discovery did not verify the model.
+    pub availability_detail: Option<String>,
+    /// Whether ordinary pickers omit this choice.
+    pub hidden: bool,
+    /// Whether a provider or model rule hid the choice.
+    pub hidden_by: Option<String>,
+    /// Explicit pin order.
+    pub pinned_rank: Option<u32>,
+}
+
+/// What hiding one choice would do to the current default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CurationImpactDto {
+    /// Whether the proposed change hides the current default.
+    pub affects_default: bool,
+    /// Exact discovered replacement, when one exists.
+    pub replacement_key: Option<String>,
+    /// Human replacement label.
+    pub replacement_label: Option<String>,
+    /// Number of visible choices after the change.
+    pub remaining_visible: u32,
+    /// Opaque digest of the exact relevant configuration used for the preview.
+    pub state_token: String,
+}
+
+/// Counts only choices owned by profiles that still exist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CurationSummaryDto {
+    /// Hidden model records owned by live profiles.
+    pub hidden_models: u32,
+    /// Hidden live profiles.
+    pub hidden_providers: u32,
+    /// Pinned model records owned by live profiles.
+    pub pinned_models: u32,
+}
+
+/// Trusted replacement decision shared by every host adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CurationDecision {
+    /// Apply without changing the default.
+    Apply,
+    /// Apply and atomically set the named selection as default.
+    ApplyWithDefault(String),
+    /// Refuse with an actionable explanation.
+    Reject(String),
+}
+
+/// Enforce explicit confirmation and a discovered replacement when hiding the
+/// current default.
+pub fn curation_decision(
+    impact: &CurationImpactDto,
+    accept_replacement: Option<&str>,
+) -> CurationDecision {
+    if impact.remaining_visible == 0 {
+        return CurationDecision::Reject(
+            "at least one model must stay visible — restore another choice first".into(),
+        );
+    }
+    if !impact.affects_default {
+        return CurationDecision::Apply;
+    }
+    let Some(replacement) = impact.replacement_key.as_deref() else {
+        return CurationDecision::Reject(
+            "no discovered replacement default is available — verify another provider first".into(),
+        );
+    };
+    let accepted = accept_replacement.map(str::trim).unwrap_or("");
+    if accepted != replacement {
+        return CurationDecision::Reject(format!(
+            "hiding this would change the default for new chats to {replacement}; confirm the replacement to continue"
+        ));
+    }
+    CurationDecision::ApplyWithDefault(replacement.to_string())
+}
+
 /// User-curated visibility and ordering. Purely presentational.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelCuration {
@@ -278,12 +483,56 @@ impl ModelCuration {
         }
     }
 
+    /// Bind endpoint-only v1/v2 entries to a stable profile id when and only
+    /// when exactly one current profile owns that upstream. Ambiguous entries
+    /// are retained inert rather than guessed across accounts.
+    pub fn migrate_for_profiles(&mut self, profiles: &[ProviderProfile]) {
+        let needs_profile_binding = self.version < CURATION_VERSION;
+        self.migrate();
+        if !needs_profile_binding {
+            return;
+        }
+        let mut ownership: std::collections::BTreeMap<String, Vec<CurationScope>> =
+            std::collections::BTreeMap::new();
+        for profile in profiles {
+            let scope = CurationScope::for_profile(profile);
+            ownership
+                .entry(scope.v2_provider_key())
+                .or_default()
+                .push(scope);
+        }
+        for scopes in ownership.values() {
+            if scopes.len() != 1 {
+                continue;
+            }
+            let scope = &scopes[0];
+            let old_provider = scope.v2_provider_key();
+            if self.hidden_providers.remove(&old_provider) {
+                self.hidden_providers.insert(scope.provider_key());
+            }
+            let old_prefix = scope.v2_model_key_prefix();
+            let new_prefix = scope.model_key_prefix();
+            self.hidden_models = self
+                .hidden_models
+                .iter()
+                .map(|key| {
+                    key.strip_prefix(&old_prefix)
+                        .map(|tail| format!("{new_prefix}{tail}"))
+                        .unwrap_or_else(|| key.clone())
+                })
+                .collect();
+            for key in &mut self.pinned_models {
+                if let Some(tail) = key.strip_prefix(&old_prefix) {
+                    *key = format!("{new_prefix}{tail}");
+                }
+            }
+        }
+    }
+
     /// True when the profile itself is hidden.
     pub fn provider_hidden(&self, profile: &ProviderProfile) -> bool {
         let scope = CurationScope::for_profile(profile);
         self.hidden_providers.contains(&scope.provider_key())
-            // A config whose v1 key could not be upgraded is still honoured.
-            || self.hidden_providers.contains(&scope.legacy_provider_key())
     }
 
     /// Why this exact provider/model pair is hidden, if it is.
@@ -296,11 +545,7 @@ impl ModelCuration {
             return Some(HiddenBy::Provider);
         }
         let scope = CurationScope::for_profile(profile);
-        if self.hidden_models.contains(&scope.model_key(model_id))
-            || self
-                .hidden_models
-                .contains(&scope.legacy_model_key(model_id))
-        {
+        if self.hidden_models.contains(&scope.model_key(model_id)) {
             return Some(HiddenBy::Model);
         }
         None
@@ -310,10 +555,9 @@ impl ModelCuration {
     pub fn pinned_rank(&self, profile: &ProviderProfile, model_id: &str) -> Option<u32> {
         let scope = CurationScope::for_profile(profile);
         let key = scope.model_key(model_id);
-        let legacy = scope.legacy_model_key(model_id);
         self.pinned_models
             .iter()
-            .position(|k| *k == key || *k == legacy)
+            .position(|k| *k == key)
             .map(|i| i as u32)
     }
 
@@ -323,7 +567,12 @@ impl ModelCuration {
         let key = scope.provider_key();
         // Any surviving v1 entry is dropped either way, so a write always
         // republishes this scope in the canonical encoding.
-        let had_legacy = self.hidden_providers.remove(&scope.legacy_provider_key());
+        let had_legacy = if self.version < CURATION_VERSION {
+            self.hidden_providers.remove(&scope.legacy_provider_key())
+                || self.hidden_providers.remove(&scope.v2_provider_key())
+        } else {
+            false
+        };
         if hidden {
             self.hidden_providers.insert(key) || had_legacy
         } else {
@@ -341,11 +590,17 @@ impl ModelCuration {
         let scope = CurationScope::for_profile(profile);
         let key = scope.model_key(model_id);
         let legacy = scope.legacy_model_key(model_id);
-        let had_legacy = self.hidden_models.remove(&legacy);
+        let v2 = scope.v2_model_key(model_id);
+        let had_legacy = if self.version < CURATION_VERSION {
+            self.hidden_models.remove(&legacy) || self.hidden_models.remove(&v2)
+        } else {
+            false
+        };
         if hidden {
             // Hiding something pinned is contradictory; drop the pin so the
             // picker cannot show a hidden model in its pinned band.
-            self.pinned_models.retain(|k| k != &key && k != &legacy);
+            self.pinned_models
+                .retain(|k| k != &key && k != &legacy && k != &v2);
             self.hidden_models.insert(key) || had_legacy
         } else {
             self.hidden_models.remove(&key) || had_legacy
@@ -362,7 +617,8 @@ impl ModelCuration {
         let scope = CurationScope::for_profile(profile);
         let key = scope.model_key(model_id);
         let legacy = scope.legacy_model_key(model_id);
-        let already = self.pinned_models.iter().any(|k| *k == key || *k == legacy);
+        let v2 = scope.v2_model_key(model_id);
+        let already = self.pinned_models.contains(&key);
         if pinned == already {
             return false;
         }
@@ -370,9 +626,11 @@ impl ModelCuration {
             // A pinned model must be offered, so pinning restores it.
             self.hidden_models.remove(&key);
             self.hidden_models.remove(&legacy);
+            self.hidden_models.remove(&v2);
             self.pinned_models.push(key);
         } else {
-            self.pinned_models.retain(|k| *k != key && *k != legacy);
+            self.pinned_models
+                .retain(|k| *k != key && *k != legacy && *k != v2);
         }
         true
     }
@@ -406,6 +664,30 @@ impl ModelCuration {
         let in_scope = |k: &String| model_prefixes.iter().any(|p| k.starts_with(p.as_str()));
         self.hidden_models.retain(&in_scope);
         self.pinned_models.retain(|k| in_scope(k));
+    }
+
+    /// Config-only counts for live profiles; retained orphan records do not
+    /// create phantom Settings totals.
+    pub fn active_summary(&self, profiles: &[ProviderProfile]) -> CurationSummaryDto {
+        let scopes: Vec<CurationScope> = profiles.iter().map(CurationScope::for_profile).collect();
+        let provider_keys: BTreeSet<String> =
+            scopes.iter().map(CurationScope::provider_key).collect();
+        let model_prefixes: Vec<String> =
+            scopes.iter().map(CurationScope::model_key_prefix).collect();
+        let active_model = |key: &&String| {
+            model_prefixes
+                .iter()
+                .any(|prefix| key.starts_with(prefix.as_str()))
+        };
+        CurationSummaryDto {
+            hidden_models: self.hidden_models.iter().filter(active_model).count() as u32,
+            hidden_providers: self
+                .hidden_providers
+                .iter()
+                .filter(|key| provider_keys.contains(*key))
+                .count() as u32,
+            pinned_models: self.pinned_models.iter().filter(active_model).count() as u32,
+        }
     }
 }
 
@@ -513,20 +795,20 @@ mod tests {
             pinned_models: vec![scope.legacy_model_key("mistral")],
         };
 
-        c.migrate();
+        c.migrate_for_profiles(std::slice::from_ref(&p));
 
         assert_eq!(c.version, CURATION_VERSION);
         assert_eq!(c.hidden_by(&p, "llama3"), Some(HiddenBy::Provider));
         assert_eq!(c.pinned_rank(&p, "mistral"), Some(0));
 
-        // Canonical republishing: the upgraded entries are in the v2 encoding.
+        // Canonical republishing: the upgraded entries are profile-bound v3.
         assert!(c.hidden_models.contains(&scope.model_key("llama3")));
         assert!(c.hidden_providers.contains(&scope.provider_key()));
         assert_eq!(c.pinned_models, vec![scope.model_key("mistral")]);
     }
 
     #[test]
-    fn an_unconvertible_v1_key_is_kept_and_still_honoured() {
+    fn an_unconvertible_v1_key_is_kept_but_inert() {
         let sep = '\u{1f}';
         // A v1 key whose model id contained the separator cannot be split
         // unambiguously, so there is no correct v2 form for it.
@@ -547,8 +829,8 @@ mod tests {
         );
         assert_eq!(
             c.hidden_by(&p, &format!("x{sep}y")),
-            Some(HiddenBy::Model),
-            "and must still be honoured through the legacy lookup"
+            None,
+            "an ambiguous legacy tuple must stay inert rather than bind to the wrong account"
         );
     }
 
@@ -672,10 +954,105 @@ mod tests {
     #[test]
     fn endpoint_identity_ignores_trailing_slash_and_host_case() {
         let a = profile("a", ProviderKind::Ollama, "http://Localhost:11434/");
-        let b = profile("b", ProviderKind::Ollama, "http://localhost:11434");
+        let b = profile("a", ProviderKind::Ollama, "http://localhost:11434");
         let mut c = ModelCuration::default();
         c.set_model_hidden(&a, "llama3", true);
         assert_eq!(c.hidden_by(&b, "llama3"), Some(HiddenBy::Model));
+    }
+
+    #[test]
+    fn same_endpoint_profiles_are_isolated_by_stable_profile_id() {
+        let a = profile(
+            "account-a",
+            ProviderKind::OpenAiCompatible,
+            "https://gateway/v1",
+        );
+        let b = profile(
+            "account-b",
+            ProviderKind::OpenAiCompatible,
+            "https://gateway/v1",
+        );
+        let mut c = ModelCuration::default();
+        c.set_model_hidden(&a, "shared", true);
+        assert_eq!(c.hidden_by(&a, "shared"), Some(HiddenBy::Model));
+        assert_eq!(c.hidden_by(&b, "shared"), None);
+    }
+
+    #[test]
+    fn ambiguous_endpoint_only_history_never_later_binds_to_one_account() {
+        let a = profile(
+            "account-a",
+            ProviderKind::OpenAiCompatible,
+            "https://gateway/v1",
+        );
+        let b = profile(
+            "account-b",
+            ProviderKind::OpenAiCompatible,
+            "https://gateway/v1",
+        );
+        let old = CurationScope::for_profile(&a).v2_model_key("shared");
+        let mut c = ModelCuration {
+            version: 2,
+            hidden_models: BTreeSet::from([old.clone()]),
+            ..Default::default()
+        };
+        c.migrate_for_profiles(&[a.clone(), b]);
+        assert_eq!(c.hidden_by(&a, "shared"), None);
+        assert!(c.hidden_models.contains(&old));
+
+        // Once stamped v3, deleting the sibling cannot turn uncertainty into
+        // ownership and silently assign the old record to the survivor.
+        c.migrate_for_profiles(std::slice::from_ref(&a));
+        assert_eq!(c.hidden_by(&a, "shared"), None);
+        assert!(c.hidden_models.contains(&old));
+    }
+
+    #[test]
+    fn selection_keys_are_collision_safe_and_read_legacy_values() {
+        let left = model_selection_key("a", "b::c");
+        let right = model_selection_key("a::b", "c");
+        assert_ne!(left, right);
+        assert_eq!(
+            parse_model_selection_key(&left),
+            ModelSelection {
+                provider_id: "a".into(),
+                model_id: "b::c".into(),
+            }
+        );
+        assert_eq!(
+            parse_model_selection_key("legacy::model::tag"),
+            ModelSelection {
+                provider_id: "legacy".into(),
+                model_id: "model::tag".into(),
+            }
+        );
+        assert_eq!(
+            parse_model_selection_key("cd.model.v1:99:short"),
+            ModelSelection {
+                provider_id: String::new(),
+                model_id: String::new(),
+            },
+            "malformed versioned keys must fail closed"
+        );
+    }
+
+    #[test]
+    fn active_summary_omits_retained_orphan_records() {
+        let live = profile("live", ProviderKind::Ollama, "http://live");
+        let gone = profile("gone", ProviderKind::Ollama, "http://gone");
+        let mut c = ModelCuration::default();
+        c.set_model_hidden(&live, "visible-owner", true);
+        c.set_model_hidden(&gone, "orphan", true);
+        c.set_provider_hidden(&gone, true);
+        c.set_model_pinned(&gone, "pin", true);
+        assert_eq!(
+            c.active_summary(std::slice::from_ref(&live)),
+            CurationSummaryDto {
+                hidden_models: 1,
+                hidden_providers: 0,
+                pinned_models: 0,
+            }
+        );
     }
 
     #[test]

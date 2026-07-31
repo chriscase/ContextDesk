@@ -26,6 +26,11 @@ function model(
     is_default: false,
     tools_enabled: true,
     tools_disabled_reason: null,
+    availability: "discovered",
+    availability_detail: null,
+    hidden: false,
+    hidden_by: null,
+    pinned_rank: null,
     ...overrides,
   };
 }

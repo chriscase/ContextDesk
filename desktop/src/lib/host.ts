@@ -1,6 +1,20 @@
 /** Host bridge: Tauri invoke when available; offline research via test hook. */
 
 import type { AppSetupState } from "./preflight";
+import {
+  parseCurationImpact,
+  parseCurationSummary,
+  parseModelOptions,
+  type CurationImpactDto,
+  type CurationSummaryDto,
+  type ModelOptionDto,
+} from "@contextdesk/contracts";
+export { modelSelectionKey, parseModelSelectionKey } from "@contextdesk/contracts";
+export type {
+  CurationImpactDto,
+  CurationSummaryDto,
+  ModelOptionDto,
+} from "@contextdesk/contracts";
 // Type-only (erased at build time): logDiagnosticReport imports types from here
 // as well, so this cannot create a runtime cycle.
 import type { LogDiagnosticSuppressionPolicyInput } from "./logDiagnosticReport";
@@ -1000,58 +1014,6 @@ export type ChatSessionDto = {
   linked_corpus_id?: string | null;
 };
 
-export type ModelOptionDto = {
-  id: string;
-  label: string;
-  /** Unique select value: `provider_id::model_id`. */
-  selection_key: string;
-  provider_id: string;
-  provider_label: string;
-  group: string;
-  is_default: boolean;
-  /** Whether this exact provider/model pair can execute native tools. */
-  tools_enabled: boolean;
-  /** Why tools are disabled, when known. */
-  tools_disabled_reason?: "profile" | "model" | null;
-  /**
-   * Curated out of ordinary pickers (#678). Display state only — the choice
-   * stays configured and the management surface still lists it. Never a
-   * security or redaction claim, and unrelated to whether it works: read
-   * `tools_*` and provider health for that.
-   */
-  hidden?: boolean;
-  /** `provider` or `model`; absent when not hidden. */
-  hidden_by?: "provider" | "model" | null;
-  /** Explicit pin position, lowest first; absent when not pinned. */
-  pinned_rank?: number | null;
-};
-
-/** What hiding a choice would do to the default for new chats (#678). */
-export type CurationImpactDto = {
-  affects_default: boolean;
-  replacement_key?: string | null;
-  replacement_label?: string | null;
-  remaining_visible: number;
-};
-
-export function parseModelSelectionKey(key: string): {
-  providerId: string | null;
-  modelId: string;
-} {
-  const i = key.indexOf("::");
-  if (i > 0) {
-    return {
-      providerId: key.slice(0, i),
-      modelId: key.slice(i + 2),
-    };
-  }
-  return { providerId: null, modelId: key };
-}
-
-export function modelSelectionKey(providerId: string, modelId: string): string {
-  return `${providerId}::${modelId}`;
-}
-
 /**
  * List selectable chat models.
  *
@@ -1065,22 +1027,17 @@ export async function hostListChatModels(opts?: {
   keepKeys?: readonly string[];
 }): Promise<ModelOptionDto[]> {
   if (!isTauri()) return [];
-  return invoke<ModelOptionDto[]>("list_chat_models", {
+  const value = await invoke<unknown>("list_chat_models", {
     includeHidden: opts?.includeHidden ?? false,
     keepKeys: opts?.keepKeys ? [...opts.keepKeys] : [],
   });
+  return parseModelOptions(value);
 }
 
 /** Counts for the Settings entry point. Config-only: never lists or discovers. */
-export type CurationSummaryDto = {
-  hidden_models: number;
-  hidden_providers: number;
-  pinned_models: number;
-};
-
 export async function hostGetCurationSummary(): Promise<CurationSummaryDto | null> {
   if (!isTauri()) return null;
-  return invoke<CurationSummaryDto>("get_curation_summary");
+  return parseCurationSummary(await invoke<unknown>("get_curation_summary"));
 }
 
 /** Preview what hiding a provider (or one model) would do before writing. */
@@ -1090,11 +1047,13 @@ export async function hostPreviewCurationChange(args: {
   hidden: boolean;
 }): Promise<CurationImpactDto | null> {
   if (!isTauri()) return null;
-  return invoke<CurationImpactDto>("preview_curation_change", {
-    providerId: args.providerId,
-    modelId: args.modelId ?? null,
-    hidden: args.hidden,
-  });
+  return parseCurationImpact(
+    await invoke<unknown>("preview_curation_change", {
+      providerId: args.providerId,
+      modelId: args.modelId ?? null,
+      hidden: args.hidden,
+    }),
+  );
 }
 
 /**
@@ -1107,14 +1066,18 @@ export async function hostSetModelHidden(args: {
   modelId: string;
   hidden: boolean;
   acceptReplacement?: string | null;
+  expectedStateToken?: string | null;
 }): Promise<CurationImpactDto | null> {
   if (!isTauri()) return null;
-  return invoke<CurationImpactDto>("set_model_hidden", {
-    providerId: args.providerId,
-    modelId: args.modelId,
-    hidden: args.hidden,
-    acceptReplacement: args.acceptReplacement ?? null,
-  });
+  return parseCurationImpact(
+    await invoke<unknown>("set_model_hidden", {
+      providerId: args.providerId,
+      modelId: args.modelId,
+      hidden: args.hidden,
+      acceptReplacement: args.acceptReplacement ?? null,
+      expectedStateToken: args.expectedStateToken ?? null,
+    }),
+  );
 }
 
 /** Hide or restore a whole provider profile. Deletes nothing. */
@@ -1122,13 +1085,17 @@ export async function hostSetProviderHidden(args: {
   providerId: string;
   hidden: boolean;
   acceptReplacement?: string | null;
+  expectedStateToken?: string | null;
 }): Promise<CurationImpactDto | null> {
   if (!isTauri()) return null;
-  return invoke<CurationImpactDto>("set_provider_hidden", {
-    providerId: args.providerId,
-    hidden: args.hidden,
-    acceptReplacement: args.acceptReplacement ?? null,
-  });
+  return parseCurationImpact(
+    await invoke<unknown>("set_provider_hidden", {
+      providerId: args.providerId,
+      hidden: args.hidden,
+      acceptReplacement: args.acceptReplacement ?? null,
+      expectedStateToken: args.expectedStateToken ?? null,
+    }),
+  );
 }
 
 /** Pin or unpin one model in the explicit picker order. */

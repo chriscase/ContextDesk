@@ -395,7 +395,7 @@ describe("normalizeProviderKind", () => {
 describe("modelSelectionKey / parseModelSelectionKey", () => {
   it("round-trips provider and model", () => {
     const key = modelSelectionKey("ollama-local", "mistral");
-    expect(key).toBe("ollama-local::mistral");
+    expect(key).toMatch(/^cd\.model\.v1:/);
     expect(parseModelSelectionKey(key)).toEqual({
       providerId: "ollama-local",
       modelId: "mistral",
@@ -404,7 +404,7 @@ describe("modelSelectionKey / parseModelSelectionKey", () => {
 
   it("keeps modelId that contains :: after the first separator", () => {
     const key = modelSelectionKey("prov", "org/model::variant");
-    expect(key).toBe("prov::org/model::variant");
+    expect(key).toMatch(/^cd\.model\.v1:/);
     expect(parseModelSelectionKey(key)).toEqual({
       providerId: "prov",
       modelId: "org/model::variant",

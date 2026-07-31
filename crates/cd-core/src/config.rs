@@ -302,7 +302,8 @@ pub fn load_config(path: &Path) -> CoreResult<AppConfig> {
     let mut cfg: AppConfig = serde_json::from_str(&raw)?;
     // Stamp the curation schema version and drop blank/duplicate keys. Entries
     // written by a newer build are preserved verbatim (#678).
-    cfg.model_curation.migrate();
+    cfg.model_curation
+        .migrate_for_profiles(&cfg.providers.profiles);
     refuse_raw_secret_refs(&cfg)?;
     Ok(cfg)
 }

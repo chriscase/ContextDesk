@@ -13,16 +13,16 @@
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
-  hostGetCurationSummary,
-  hostListChatModels,
-  hostPreviewCurationChange,
-  hostSetModelHidden,
-  hostSetModelPinned,
-  hostSetProviderHidden,
+  getCurationSummary,
+  listChatModels,
+  previewCurationChange,
+  setModelHidden,
+  setModelPinned,
+  setProviderHidden,
   type CurationImpactDto,
   type CurationSummaryDto,
   type ModelOptionDto,
-} from "../../lib/host";
+} from "../../lib/engine/modelCuration";
 import { curateModels } from "../../lib/modelCuration";
 import { nextRovingIndex } from "../../lib/a11y";
 
@@ -67,7 +67,7 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
     const ticket = (loadTicketRef.current += 1);
     try {
       // The management surface is the one caller that asks for everything.
-      const all = await hostListChatModels({ includeHidden: true });
+      const all = await listChatModels({ includeHidden: true });
       if (loadTicketRef.current !== ticket) return;
       setModels(all);
       setError(null);
@@ -86,7 +86,7 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
     let cancelled = false;
     void (async () => {
       try {
-        const counts = await hostGetCurationSummary();
+        const counts = await getCurationSummary();
         if (!cancelled) setSummary(counts);
       } catch {
         /* the summary is informational; failures surface on open */
@@ -123,27 +123,33 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
   };
 
   const runChange = useCallback(
-    async (change: Omit<PendingChange, "impact">, accept?: string) => {
+    async (
+      change: Omit<PendingChange, "impact">,
+      accept?: string,
+      expectedStateToken?: string,
+    ) => {
       setBusy(true);
       setError(null);
       setNote(null);
       try {
         const impact =
           change.kind === "model"
-            ? await hostSetModelHidden({
+            ? await setModelHidden({
                 providerId: change.providerId,
                 modelId: change.modelId!,
                 hidden: change.hidden,
                 acceptReplacement: accept ?? null,
+                expectedStateToken: expectedStateToken ?? null,
               })
-            : await hostSetProviderHidden({
+            : await setProviderHidden({
                 providerId: change.providerId,
                 hidden: change.hidden,
                 acceptReplacement: accept ?? null,
+                expectedStateToken: expectedStateToken ?? null,
               });
         setPending(null);
         await reload();
-        setSummary(await hostGetCurationSummary());
+        setSummary(await getCurationSummary());
         await onCurationChanged?.();
         setNote(
           change.hidden
@@ -168,7 +174,7 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
       setError(null);
       setNote(null);
       try {
-        const impact = await hostPreviewCurationChange({
+        const impact = await previewCurationChange({
           providerId: change.providerId,
           modelId: change.modelId ?? null,
           hidden: change.hidden,
@@ -183,13 +189,19 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
           );
           return;
         }
+        if (impact.affects_default && !impact.replacement_key) {
+          setError(
+            "No discovered replacement default is available — verify another provider in AI settings first.",
+          );
+          return;
+        }
         if (impact.affects_default) {
           // Never silently invalidate: name the exact replacement and wait.
           setPending({ ...change, impact });
           return;
         }
         setBusy(false);
-        await runChange(change);
+        await runChange(change, undefined, impact.state_token);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {
@@ -203,13 +215,13 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
     setBusy(true);
     setError(null);
     try {
-      await hostSetModelPinned({
+      await setModelPinned({
         providerId: m.provider_id,
         modelId: m.id,
         pinned: typeof m.pinned_rank !== "number",
       });
       await reload();
-      setSummary(await hostGetCurationSummary());
+      setSummary(await getCurationSummary());
       await onCurationChanged?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -375,6 +387,7 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
                 void runChange(
                   pending,
                   pending.impact.replacement_key ?? undefined,
+                  pending.impact.state_token,
                 )
               }
             >
@@ -423,7 +436,13 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
                         : " · hidden"
                       : ""}
                     {!m.tools_enabled ? " · tools unavailable" : ""}
+                    {m.availability === "configured_unverified"
+                      ? " · availability unverified"
+                      : ""}
                   </span>
+                  {m.availability_detail ? (
+                    <span className="field__hint">{m.availability_detail}</span>
+                  ) : null}
                 </div>
                 {/*
                   Roving tabindex: the action buttons follow their row out of

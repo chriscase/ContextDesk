@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { ModelOptionDto } from "./host";
+import type { ModelOptionDto } from "@contextdesk/contracts";
 import {
   DEFAULT_PICKER_LIMIT,
   curateModels,
@@ -29,6 +29,8 @@ function model(
     is_default: false,
     tools_enabled: true,
     tools_disabled_reason: null,
+    availability: "discovered",
+    availability_detail: null,
     hidden: false,
     hidden_by: null,
     pinned_rank: null,

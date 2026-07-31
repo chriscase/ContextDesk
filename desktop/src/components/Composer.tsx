@@ -263,6 +263,9 @@ export function Composer({
                           {m.label}
                           {m.is_default ? " · default" : ""}
                           {!m.tools_enabled ? " · tools unavailable" : ""}
+                          {m.availability === "configured_unverified"
+                            ? " · availability unverified"
+                            : ""}
                           {m.hidden ? " · hidden" : ""}
                         </option>
                       ))}

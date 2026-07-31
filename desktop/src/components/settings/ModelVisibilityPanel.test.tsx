@@ -16,7 +16,10 @@ import {
   within,
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { CurationImpactDto, ModelOptionDto } from "../../lib/host";
+import type {
+  CurationImpactDto,
+  ModelOptionDto,
+} from "@contextdesk/contracts";
 import { ModelVisibilityPanel } from "./ModelVisibilityPanel";
 
 const host = vi.hoisted(() => ({
@@ -28,16 +31,14 @@ const host = vi.hoisted(() => ({
   setPinned: vi.fn(),
 }));
 
-vi.mock("../../lib/host", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../../lib/host")>();
+vi.mock("../../lib/engine/modelCuration", () => {
   return {
-    ...original,
-    hostGetCurationSummary: host.summary,
-    hostListChatModels: host.list,
-    hostPreviewCurationChange: host.preview,
-    hostSetModelHidden: host.setModelHidden,
-    hostSetProviderHidden: host.setProviderHidden,
-    hostSetModelPinned: host.setPinned,
+    getCurationSummary: host.summary,
+    listChatModels: host.list,
+    previewCurationChange: host.preview,
+    setModelHidden: host.setModelHidden,
+    setProviderHidden: host.setProviderHidden,
+    setModelPinned: host.setPinned,
   };
 });
 
@@ -56,6 +57,8 @@ function model(
     is_default: false,
     tools_enabled: true,
     tools_disabled_reason: null,
+    availability: "discovered",
+    availability_detail: null,
     hidden: false,
     hidden_by: null,
     pinned_rank: null,
@@ -69,6 +72,7 @@ function impact(over: Partial<CurationImpactDto> = {}): CurationImpactDto {
     replacement_key: null,
     replacement_label: null,
     remaining_visible: 3,
+    state_token: "state-1",
     ...over,
   };
 }
@@ -192,7 +196,10 @@ describe("the default can never become silently invalid", () => {
 
     await waitFor(() =>
       expect(host.setModelHidden).toHaveBeenCalledWith(
-        expect.objectContaining({ acceptReplacement: "gw::gpt-4o" }),
+        expect.objectContaining({
+          acceptReplacement: "gw::gpt-4o",
+          expectedStateToken: "state-1",
+        }),
       ),
     );
   });
@@ -225,6 +232,25 @@ describe("the default can never become silently invalid", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toMatch(/at least one model must stay visible/i);
+    expect(host.setModelHidden).not.toHaveBeenCalled();
+  });
+
+  it("refuses an unverified automatic default replacement", async () => {
+    await openPanel();
+    host.preview.mockResolvedValue(
+      impact({
+        affects_default: true,
+        replacement_key: null,
+        replacement_label: null,
+        remaining_visible: 2,
+      }),
+    );
+
+    const rows = screen.getAllByRole("listitem");
+    fireEvent.click(within(rows[0]!).getByRole("button", { name: "Hide" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toMatch(/no discovered replacement default/i);
     expect(host.setModelHidden).not.toHaveBeenCalled();
   });
 });

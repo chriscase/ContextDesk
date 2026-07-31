@@ -11,6 +11,7 @@
  * its own definitions for this batch; migration is a later batch.
  */
 import { checkObject, checkValue, f, type ObjectShape } from "./parse";
+import { parseModelOptions } from "./modelCurationV1";
 
 // ---------------------------------------------------------------------------
 // Enum wire values (exact serde renames)
@@ -1032,6 +1033,7 @@ export const parseBookmarkEventRef = parserFor<WireBookmarkEventRef>(
 export const FIXTURE_PARSERS: Readonly<
   Record<string, (value: unknown) => unknown>
 > = {
+  "model_options.v1.json": parseModelOptions,
   "event.v1.json": parseEventStream,
   "explorer_event.v1.json": parseExplorerEvent,
   "event_page.v1.json": parseEventPage,
