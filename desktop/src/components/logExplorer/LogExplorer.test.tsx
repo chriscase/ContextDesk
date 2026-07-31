@@ -1691,6 +1691,31 @@ describe("LogExplorer shell", () => {
     );
   });
 
+  it("starts counts and facets when a restored window does not deliver animation frames", async () => {
+    const animationFrame = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation(() => 1);
+
+    try {
+      render(<LogExplorer corpusId="c1" />);
+
+      expect(await screen.findByText(/auth failure/)).toBeTruthy();
+      await waitFor(
+        () => {
+          expect(host.hostLogCountEvents).toHaveBeenCalledTimes(1);
+          expect(host.hostLogFacets).toHaveBeenCalledTimes(1);
+        },
+        { timeout: 1_000 },
+      );
+      expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
+        "2 matched · 2 resident",
+      );
+      expect(screen.queryByTestId("log-explorer-facets-loading")).toBeNull();
+    } finally {
+      animationFrame.mockRestore();
+    }
+  });
+
   it("ignores an exact count from an obsolete corpus lifecycle", async () => {
     const counts = {
       c1: deferred<host.EventCountDto>(),

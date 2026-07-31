@@ -1147,6 +1147,7 @@ export function LogExplorer({ corpusId }: Props) {
   const facetRequestRef = useRef(0);
   const facetAfterPaintFrameRef = useRef<number | null>(null);
   const facetStartFrameRef = useRef<number | null>(null);
+  const facetFallbackTimerRef = useRef<number | null>(null);
   const laneSourceRequestRef = useRef(0);
   const laneSourceLoadingRef = useRef(false);
   const eventsRequestRef = useRef(0);
@@ -1908,6 +1909,10 @@ export function LogExplorer({ corpusId }: Props) {
       window.cancelAnimationFrame(facetStartFrameRef.current);
       facetStartFrameRef.current = null;
     }
+    if (facetFallbackTimerRef.current != null) {
+      window.clearTimeout(facetFallbackTimerRef.current);
+      facetFallbackTimerRef.current = null;
+    }
     setTimelineReady(false);
     setFacetsLoading(true);
     const visibleLanes = lanes.slice(0, laneCount);
@@ -2083,55 +2088,80 @@ export function LogExplorer({ corpusId }: Props) {
         // Keep first useful rows on the critical path. Facet aggregation can
         // scan a large corpus and is useful only after the evidence page is
         // available. Two animation frames give React/browser one committed
-        // paint boundary before the background aggregation begins.
+        // paint boundary before the background aggregation begins. A restored
+        // native WebView can temporarily stop delivering animation frames, so
+        // a bounded timer races that paint path and prevents counts/facets from
+        // remaining pending forever.
         if (loadedCurrentView) {
+          let aggregationStarted = false;
+          const startAggregates = () => {
+            if (aggregationStarted) return;
+            aggregationStarted = true;
+            if (facetAfterPaintFrameRef.current != null) {
+              window.cancelAnimationFrame(facetAfterPaintFrameRef.current);
+              facetAfterPaintFrameRef.current = null;
+            }
+            if (facetStartFrameRef.current != null) {
+              window.cancelAnimationFrame(facetStartFrameRef.current);
+              facetStartFrameRef.current = null;
+            }
+            if (facetFallbackTimerRef.current != null) {
+              window.clearTimeout(facetFallbackTimerRef.current);
+              facetFallbackTimerRef.current = null;
+            }
+            if (requestId !== eventsRequestRef.current) return;
+            const applyCount = (laneId: string, total: number) => {
+              if (
+                requestId !== eventsRequestRef.current ||
+                countRequestId !== countRequestRef.current
+              ) {
+                return;
+              }
+              setLaneMatched((previous) => ({
+                ...previous,
+                [laneId]: total,
+              }));
+              setLaneCountStates((previous) => ({
+                ...previous,
+                [laneId]: "ready",
+              }));
+              if (laneCount <= 1 && laneId === "lane-0") {
+                setTotalMatched(total);
+              }
+            };
+            for (const plan of countPlans) {
+              if (plan.query == null) {
+                applyCount(plan.laneId, 0);
+                continue;
+              }
+              void hostLogCountEvents(corpusId, plan.query)
+                .then((count) => applyCount(plan.laneId, count.totalMatched))
+                .catch(() => {
+                  if (
+                    requestId !== eventsRequestRef.current ||
+                    countRequestId !== countRequestRef.current
+                  ) {
+                    return;
+                  }
+                  setLaneCountStates((previous) => ({
+                    ...previous,
+                    [plan.laneId]: "error",
+                  }));
+                });
+            }
+            void loadFacets();
+            loadOptionalMetadata();
+          };
+          facetFallbackTimerRef.current = window.setTimeout(
+            startAggregates,
+            100,
+          );
           facetAfterPaintFrameRef.current = window.requestAnimationFrame(() => {
             facetAfterPaintFrameRef.current = null;
             if (requestId !== eventsRequestRef.current) return;
             facetStartFrameRef.current = window.requestAnimationFrame(() => {
               facetStartFrameRef.current = null;
-              if (requestId !== eventsRequestRef.current) return;
-              const applyCount = (laneId: string, total: number) => {
-                if (
-                  requestId !== eventsRequestRef.current ||
-                  countRequestId !== countRequestRef.current
-                ) {
-                  return;
-                }
-                setLaneMatched((previous) => ({
-                  ...previous,
-                  [laneId]: total,
-                }));
-                setLaneCountStates((previous) => ({
-                  ...previous,
-                  [laneId]: "ready",
-                }));
-                if (laneCount <= 1 && laneId === "lane-0") {
-                  setTotalMatched(total);
-                }
-              };
-              for (const plan of countPlans) {
-                if (plan.query == null) {
-                  applyCount(plan.laneId, 0);
-                  continue;
-                }
-                void hostLogCountEvents(corpusId, plan.query)
-                  .then((count) => applyCount(plan.laneId, count.totalMatched))
-                  .catch(() => {
-                    if (
-                      requestId !== eventsRequestRef.current ||
-                      countRequestId !== countRequestRef.current
-                    ) {
-                      return;
-                    }
-                    setLaneCountStates((previous) => ({
-                      ...previous,
-                      [plan.laneId]: "error",
-                    }));
-                  });
-              }
-              void loadFacets();
-              loadOptionalMetadata();
+              startAggregates();
             });
           });
         } else {
@@ -2277,6 +2307,10 @@ export function LogExplorer({ corpusId }: Props) {
       if (facetStartFrameRef.current != null) {
         window.cancelAnimationFrame(facetStartFrameRef.current);
         facetStartFrameRef.current = null;
+      }
+      if (facetFallbackTimerRef.current != null) {
+        window.clearTimeout(facetFallbackTimerRef.current);
+        facetFallbackTimerRef.current = null;
       }
     };
   }, [loadEvents]);
