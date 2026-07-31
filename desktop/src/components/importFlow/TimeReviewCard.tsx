@@ -62,6 +62,7 @@ export function TimeReviewCard({ engine, report }: Props) {
   const [applied, setApplied] = useState<AppliedScope | null>(null);
   const [applyError, setApplyError] = useState<string | null>(null);
   const [undoing, setUndoing] = useState(false);
+  const [previewNonce, setPreviewNonce] = useState(0);
   const debounceRef = useRef<number | null>(null);
   const requestSeq = useRef(0);
 
@@ -118,7 +119,7 @@ export function TimeReviewCard({ engine, report }: Props) {
     return () => {
       if (debounceRef.current !== null) window.clearTimeout(debounceRef.current);
     };
-  }, [engine, report.corpusId, zone, zoneValid, includedSources, applied, dismissed]);
+  }, [engine, report.corpusId, zone, zoneValid, includedSources, applied, dismissed, previewNonce]);
 
   if (groups.length === 0 || dismissed) return null;
 
@@ -148,9 +149,11 @@ export function TimeReviewCard({ engine, report }: Props) {
           ? "Waiting for the automatic preview…"
           : previewError
             ? `Preview failed: ${previewError}`
-            : previews && previewTotals && previewTotals.affected === 0
-              ? "Nothing to apply — this zone resolves no records."
-              : null;
+            : previews === null
+              ? "Waiting for the automatic preview…"
+              : previewTotals && previewTotals.affected === 0
+                ? "Nothing to apply — this zone resolves no records."
+                : null;
 
   const onApply = async () => {
     if (applyDisabledReason || !previews) return;
@@ -175,9 +178,9 @@ export function TimeReviewCard({ engine, report }: Props) {
       setApplied({ zone: zone.trim(), sourceCount: requests.length, revision: revision.revision });
     } catch (error) {
       setApplyError(error instanceof Error ? error.message : String(error));
-      // A conflict means the corpus moved; the next auto-preview recomputes.
+      // A conflict means the corpus moved; recompute the preview automatically.
       setPreviews(null);
-      requestSeq.current += 1;
+      setPreviewNonce((nonce) => nonce + 1);
     } finally {
       setApplying(false);
     }

@@ -50,6 +50,16 @@ export function ImportFlow({ engine, variant, onPublished, initialState }: Props
     });
   }, [engine]);
 
+  // Unmounting mid-run (for example closing the guided wizard) must never
+  // orphan an ingest that would then publish silently: request cancellation.
+  useEffect(() => {
+    return () => {
+      if (stateRef.current.stage === "running") {
+        void engine.import.cancel();
+      }
+    };
+  }, [engine]);
+
   const choose = async (kind: "directory" | "file") => {
     const path =
       kind === "directory"
