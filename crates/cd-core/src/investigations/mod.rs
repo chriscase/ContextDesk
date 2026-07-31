@@ -3169,6 +3169,35 @@ mod tests {
         .rule_revision
     }
 
+    /// A note that merely *mentions* a bearer header must save with the secret
+    /// redacted, not be rejected outright (#656 "notes pass existing trusted-host
+    /// redaction policy before persistence").
+    #[test]
+    fn investigation_note_mentioning_a_bearer_header_saves_redacted() {
+        let cache = tempfile::tempdir().unwrap();
+        let durable = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&cache);
+        let store = InvestigationStore::new(durable.path());
+        let document = store.create("Redaction", &corpus).unwrap();
+        let mut note = note_input(&corpus, vec![], "Auth header note");
+        note.body = "Gateway rejected the call; the request sent Authorization: Bearer abc123def456 and we should rotate it.".into();
+
+        let saved = store
+            .add_human_note(&document.id, 1, &corpus, note)
+            .expect("a note mentioning a bearer header must be saveable");
+        let stored = &saved.document.notes[0].body;
+        assert!(
+            !stored.contains("abc123def456"),
+            "credential must be redacted: {stored}"
+        );
+        assert!(stored.contains("Bearer ***"), "{stored}");
+
+        // The stored canonical form must reload: validation re-runs redaction,
+        // so a non-idempotent redactor makes the document unreadable.
+        let reloaded = store.load(&document.id, &corpus).unwrap();
+        assert_eq!(reloaded.document.notes[0].body, *stored);
+    }
+
     #[test]
     fn investigation_v1_loads_without_rewrite_and_first_mutation_upgrades_to_current() {
         let cache = tempfile::tempdir().unwrap();

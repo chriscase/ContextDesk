@@ -374,11 +374,36 @@ fn redact_bearer(out: &mut String) -> bool {
     while let Some(rel) = out[search_from..].find("Bearer ") {
         let i = search_from + rel;
         let rest = &out[i + "Bearer ".len()..];
+        // Already redacted. A real bearer token is alphanumeric/-/_/. so it can
+        // never begin with the marker, and re-redacting the marker is not a
+        // no-op: the token scan below finds zero token characters, `.max(8)`
+        // then consumes eight characters of the following prose, and the output
+        // keeps changing on every pass. Callers that persist a redacted value
+        // and later re-validate its canonical form would reject their own
+        // output — which made any note mentioning an auth header unsaveable
+        // (#656).
+        if rest.starts_with("***") {
+            search_from = i + "Bearer ***".len();
+            continue;
+        }
+        // Consume exactly the token run. A previous `.max(8)` floor raised this
+        // to eight characters even when the token was shorter — but the token
+        // charset excludes whitespace, so the floor could only ever swallow
+        // characters that are *not* part of the credential. It therefore added
+        // no protection and silently deleted the following words: "Bearer ab
+        // plus the retry count" became "Bearer ***the retry count". That loss
+        // used to be masked by the canonical-form rejection above; once notes
+        // mentioning an auth header became saveable it would have reached
+        // durable investigation prose (#656).
         let tok_len = rest
             .chars()
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
-            .count()
-            .max(8);
+            .count();
+        if tok_len == 0 {
+            // "Bearer " with no token after it: nothing to redact.
+            search_from = i + "Bearer ".len();
+            continue;
+        }
         let end = (i
             + "Bearer ".len()
             + rest
@@ -455,6 +480,35 @@ mod tests {
         assert!(s.contains("sk-***"), "{s}");
         assert!(s.contains("Bearer ***"), "{s}");
         assert!(!s.contains("abcdefghijklmnop"));
+    }
+
+    #[test]
+    fn bearer_redaction_is_idempotent() {
+        // Persisted values are re-scrubbed when their canonical form is
+        // validated; a redactor that keeps changing its own output makes the
+        // stored value unreadable (#656).
+        let once = scrub_secrets(
+            "Gateway rejected it: Authorization: Bearer abc123def456 and we should rotate it.",
+        );
+        assert!(once.contains("Bearer ***"), "{once}");
+        assert!(!once.contains("abc123def456"), "{once}");
+        let twice = scrub_secrets(&once);
+        assert_eq!(twice, once, "second pass changed the redacted text");
+        assert_eq!(scrub_secrets(&twice), twice);
+
+        // A short token is fully redacted without eating the words after it.
+        // The token charset excludes whitespace, so anything past the token run
+        // is prose, never credential material.
+        let short = scrub_secrets("Header was Bearer ab plus the retry count.");
+        assert_eq!(short, "Header was Bearer *** plus the retry count.");
+        assert_eq!(scrub_secrets(&short), short);
+        let tiny = scrub_secrets("Saw Bearer xyz then the pod restarted.");
+        assert_eq!(tiny, "Saw Bearer *** then the pod restarted.");
+        assert_eq!(scrub_secrets(&tiny), tiny);
+
+        // "Bearer " with no token is left alone rather than eating prose.
+        let bare = scrub_secrets("The Bearer  header was absent entirely.");
+        assert_eq!(bare, "The Bearer  header was absent entirely.");
     }
 
     #[test]

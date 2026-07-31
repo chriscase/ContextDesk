@@ -1034,6 +1034,11 @@ export function LogExplorer({ corpusId }: Props) {
   const [pendingViewApply, setPendingViewApply] = useState<{
     recipe: InvestigationViewRecipeDto;
     status: string;
+    /**
+     * True when this apply *is* the Restore. The restore point is consumed only
+     * after positioning succeeds, so a failure keeps the one-step return (#656).
+     */
+    consumesRestorePoint?: boolean;
   } | null>(null);
   const [bookmarkRevealState, setBookmarkRevealState] = useState<
     "idle" | "visible" | "revealed" | "missing"
@@ -3685,6 +3690,20 @@ export function LogExplorer({ corpusId }: Props) {
             "Selection cleared — event no longer visible under filters/lanes",
           );
         }
+      } else if (!suppressSelectionClearStatusRef.current) {
+        // A partial prune used to be silent, so Save evidence / Create finding
+        // could persist fewer events than the person selected: by then
+        // selectedEvidenceRefs() sees only residents and its all-or-nothing
+        // guard never fires. Report the exact loss (#656).
+        // Cause-neutral on purpose: this effect only observes that a seq left
+        // `laneEvents`. It cannot distinguish a filter/lane change from the
+        // resident window sliding during ordinary paging, and in the paging
+        // case the events still match the filters — so naming a cause would be
+        // wrong exactly where the loss is most surprising.
+        setStatus(
+          `Selection reduced to ${next.size} of ${prev.size} events — ` +
+            "the others are no longer loaded in the current view",
+        );
       }
       return next;
     });
@@ -3942,6 +3961,7 @@ export function LogExplorer({ corpusId }: Props) {
   const scheduleInvestigationViewApply = (
     recipe: InvestigationViewRecipeDto,
     status: string,
+    options?: { consumesRestorePoint?: boolean },
   ) => {
     const nextFilters = recipeFilters(recipe);
     findRequestRef.current += 1;
@@ -3997,7 +4017,11 @@ export function LogExplorer({ corpusId }: Props) {
     setFindMatchMode(recipe.find?.matchMode ?? "literal");
     setFindCaseSensitive(recipe.find?.caseSensitive ?? false);
     setFindUseSemantic(recipe.find?.semantic ?? false);
-    setPendingViewApply({ recipe, status });
+    setPendingViewApply({
+      recipe,
+      status,
+      consumesRestorePoint: options?.consumesRestorePoint ?? false,
+    });
     setStatus(`${status} · positioning…`);
   };
 
@@ -4078,6 +4102,10 @@ export function LogExplorer({ corpusId }: Props) {
       setSelected(new Set(recipe.selection.map((eventRef) => eventRef.seq)));
       setHighlight(new Set(recipe.highlights.map((eventRef) => eventRef.seq)));
       setFocusLaneId(recipe.focusedLaneId);
+      if (pendingViewApply.consumesRestorePoint) {
+        setRevealRestore(null);
+        setBookmarkRevealState("idle");
+      }
       setPendingViewApply(null);
       setStatus(status);
     };
@@ -4086,6 +4114,12 @@ export function LogExplorer({ corpusId }: Props) {
       setPendingViewApply(null);
       setInvestigationError(
         `Saved view could not be applied: ${String(applyError)}`,
+      );
+      // The status still read "<status> · positioning…", whose prefix claims the
+      // view was applied or restored. Say plainly that it was not, and that the
+      // prior view is still one step away (#656).
+      setStatus(
+        "Saved view could not be positioned · Restore prior view is still available",
       );
     });
     return () => {
@@ -4102,12 +4136,13 @@ export function LogExplorer({ corpusId }: Props) {
       suppressSelectionClearStatusRef.current = true;
       setRevealSuppressedEvidence(false);
       setSuppressedBookmarkOffer(null);
+      // The restore point is released by the positioning effect on success, so
+      // a host failure mid-restore leaves the one-step return available (#656).
       scheduleInvestigationViewApply(
         revealRestore,
         "Restored prior Explorer view",
+        { consumesRestorePoint: true },
       );
-      setRevealRestore(null);
-      setBookmarkRevealState("idle");
     }
   };
 
