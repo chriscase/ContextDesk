@@ -142,29 +142,62 @@ impl IngestStats {
     }
 }
 
-/// Measured wall-clock phase timings for one ingest (#824).
+/// Measured wall-clock **operation** timings for one ingest (#824).
 ///
-/// Values are one-machine observations, not a product SLA. Phases map to the
-/// issue language (discover/read, parse/frame, …) via progress labels.
+/// Values accumulate via **scoped timers around actual work**, not via the last
+/// UI progress enum while read/parse/template/persist interleave. Non-overlapping
+/// working subtotals must be bounded by [`Self::total_ms`] / wall time.
+/// Completion diagnostics may list these separately; progress chrome uses one
+/// monotonic streaming phase for the interleaved work.
+///
+/// One-machine observations only — not a product SLA.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IngestPhaseTimings {
-    /// Discover/scan + open/read inventory (ms).
+    /// Inventory / discover + bounded source reads (ms).
     pub discover_read_ms: u64,
-    /// Parse / frame logical records (ms).
+    /// Parse / frame / redaction of logical records (ms).
     pub parse_frame_ms: u64,
-    /// Drain template analysis + redact (ms).
+    /// Drain template matching only (ms).
     pub template_analysis_ms: u64,
-    /// Persist events/templates to the event store (ms).
+    /// Event/template persistence and flushes (ms).
     pub persist_index_ms: u64,
     /// Optional embedding (0 when deferred or not requested) (ms).
     pub optional_embedding_ms: u64,
-    /// Validate + atomic library publication (ms).
+    /// Staged corpus validation before publish (ms).
+    #[serde(default)]
+    pub validation_ms: u64,
+    /// Atomic library publication (ms).
     pub publication_ms: u64,
     /// End-to-end wall time for the ingest operation (ms).
     pub total_ms: u64,
     /// True when optional embedding was deferred past first use.
     pub embedding_deferred: bool,
+}
+
+impl IngestPhaseTimings {
+    /// Sum of non-overlapping working subtotals (excludes total wall).
+    pub fn working_subtotal_ms(&self) -> u64 {
+        self.discover_read_ms
+            .saturating_add(self.parse_frame_ms)
+            .saturating_add(self.template_analysis_ms)
+            .saturating_add(self.persist_index_ms)
+            .saturating_add(self.optional_embedding_ms)
+            .saturating_add(self.validation_ms)
+            .saturating_add(self.publication_ms)
+    }
+}
+
+/// Which real operation a scoped timer attributes wall time to (#824).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IngestOp {
+    DiscoverRead,
+    ParseFrame,
+    Template,
+    Persist,
+    Embed,
+    Validate,
+    Publish,
 }
 
 /// Full ingest report.
@@ -337,7 +370,11 @@ fn cancelled(cancel: Option<&CancelFlag>) -> bool {
     cancel.map(|c| c.is_cancelled()).unwrap_or(false)
 }
 
-/// Tracks wall-clock phase durations for truthful progress and scale proofs (#824).
+/// Wall-clock progress chrome + **operation-scoped** accumulators (#824).
+///
+/// Progress `phase_elapsed_ms` tracks UI phase transitions only (for chrome).
+/// Accounting for diagnostics uses [`IngestPhaseTimings`] filled exclusively by
+/// [`IngestOp`] scopes around real work — never "last emitted UI enum".
 struct IngestProgressClock {
     start: std::time::Instant,
     phase_started: std::time::Instant,
@@ -362,7 +399,8 @@ impl IngestProgressClock {
             let spent = now
                 .saturating_duration_since(self.phase_started)
                 .as_millis() as u64;
-            self.record_phase(self.current_phase, spent);
+            // UI-only: report how long chrome sat on the previous phase.
+            // Do NOT attribute this to operation buckets (interleaved work).
             update.phase_elapsed_ms = Some(spent);
             self.current_phase = update.phase;
             self.phase_started = now;
@@ -375,56 +413,23 @@ impl IngestProgressClock {
 
     fn finish(&mut self) {
         let now = std::time::Instant::now();
-        let spent = now
-            .saturating_duration_since(self.phase_started)
-            .as_millis() as u64;
-        self.record_phase(self.current_phase, spent);
         self.timings.total_ms = now.saturating_duration_since(self.start).as_millis() as u64;
-        // Lock the clock so a subsequent terminal Completed emit does not
-        // double-count the final working phase (e.g. Publish).
         self.current_phase = ProcessProgressPhase::Completed;
         self.phase_started = now;
-    }
-
-    fn record_phase(&mut self, phase: ProcessProgressPhase, ms: u64) {
-        match phase {
-            ProcessProgressPhase::Starting | ProcessProgressPhase::Scan => {
-                self.timings.discover_read_ms = self.timings.discover_read_ms.saturating_add(ms);
-            }
-            ProcessProgressPhase::Parse => {
-                self.timings.parse_frame_ms = self.timings.parse_frame_ms.saturating_add(ms);
-            }
-            ProcessProgressPhase::Template | ProcessProgressPhase::Redact => {
-                self.timings.template_analysis_ms =
-                    self.timings.template_analysis_ms.saturating_add(ms);
-            }
-            ProcessProgressPhase::Store => {
-                self.timings.persist_index_ms = self.timings.persist_index_ms.saturating_add(ms);
-            }
-            ProcessProgressPhase::Embed => {
-                self.timings.optional_embedding_ms =
-                    self.timings.optional_embedding_ms.saturating_add(ms);
-            }
-            ProcessProgressPhase::Publish | ProcessProgressPhase::Validate => {
-                self.timings.publication_ms = self.timings.publication_ms.saturating_add(ms);
-            }
-            _ => {}
-        }
     }
 }
 
 fn emit(progress: &dyn ProcessProgressObserver, mut update: ProcessProgress) {
-    if update.kind == ProcessProgressKind::LogIngest && update.phase != ProcessProgressPhase::Parse
+    if update.kind == ProcessProgressKind::LogIngest && update.phase != ProcessProgressPhase::Stream
     {
         update.fraction = None;
     }
     progress.progress(update);
 }
 
-/// Observer wrapper that stamps elapsed timings onto every progress update.
+/// Observer wrapper that stamps elapsed onto progress and holds op timers.
 ///
-/// `Mutex` (not `RefCell`) because [`ProcessProgressObserver`] is `Sync`;
-/// ingest is single-threaded on the worker, so contention is not a concern.
+/// `Mutex` (not `RefCell`) because [`ProcessProgressObserver`] is `Sync`.
 struct TimedIngestObserver<'a> {
     inner: &'a dyn ProcessProgressObserver,
     clock: std::sync::Mutex<IngestProgressClock>,
@@ -470,12 +475,12 @@ fn parse_file_fraction(completed_files: u64, total_files: u64) -> Option<f32> {
     fraction.is_finite().then_some(fraction.clamp(0.0, 1.0))
 }
 
-fn with_parse_file_fraction(
+fn with_stream_file_fraction(
     mut update: ProcessProgress,
     completed_files: u64,
     total_files: u64,
 ) -> ProcessProgress {
-    debug_assert_eq!(update.phase, ProcessProgressPhase::Parse);
+    debug_assert_eq!(update.phase, ProcessProgressPhase::Stream);
     update.fraction = parse_file_fraction(completed_files, total_files);
     update
 }
@@ -1572,6 +1577,72 @@ fn read_bounded_line(
     }
 }
 
+/// Accumulate operation wall time into shared diagnostic timers (#824).
+///
+/// Times are tracked in **microseconds** then floored to milliseconds on read so
+/// many sub-ms line operations still sum into truthful ms buckets.
+fn add_op_us(ops: &std::sync::Mutex<IngestPhaseTimingsUs>, op: IngestOp, us: u64) {
+    let mut t = ops.lock().expect("ingest op timers");
+    match op {
+        IngestOp::DiscoverRead => t.discover_read_us = t.discover_read_us.saturating_add(us),
+        IngestOp::ParseFrame => t.parse_frame_us = t.parse_frame_us.saturating_add(us),
+        IngestOp::Template => t.template_analysis_us = t.template_analysis_us.saturating_add(us),
+        IngestOp::Persist => t.persist_index_us = t.persist_index_us.saturating_add(us),
+        IngestOp::Embed => t.optional_embedding_us = t.optional_embedding_us.saturating_add(us),
+        IngestOp::Validate => t.validation_us = t.validation_us.saturating_add(us),
+        IngestOp::Publish => t.publication_us = t.publication_us.saturating_add(us),
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+struct IngestPhaseTimingsUs {
+    discover_read_us: u64,
+    parse_frame_us: u64,
+    template_analysis_us: u64,
+    persist_index_us: u64,
+    optional_embedding_us: u64,
+    validation_us: u64,
+    publication_us: u64,
+}
+
+impl IngestPhaseTimingsUs {
+    fn to_ms(&self) -> IngestPhaseTimings {
+        IngestPhaseTimings {
+            discover_read_ms: self.discover_read_us / 1000,
+            parse_frame_ms: self.parse_frame_us / 1000,
+            template_analysis_ms: self.template_analysis_us / 1000,
+            persist_index_ms: self.persist_index_us / 1000,
+            optional_embedding_ms: self.optional_embedding_us / 1000,
+            validation_ms: self.validation_us / 1000,
+            publication_ms: self.publication_us / 1000,
+            total_ms: 0,
+            embedding_deferred: false,
+        }
+    }
+}
+
+fn time_op_ms<R>(
+    ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
+    op: IngestOp,
+    f: impl FnOnce() -> R,
+) -> R {
+    let start = std::time::Instant::now();
+    let result = f();
+    add_op_us(ops, op, start.elapsed().as_micros() as u64);
+    result
+}
+
+fn time_op_result_ms<R, E>(
+    ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
+    op: IngestOp,
+    f: impl FnOnce() -> Result<R, E>,
+) -> Result<R, E> {
+    let start = std::time::Instant::now();
+    let result = f();
+    add_op_us(ops, op, start.elapsed().as_micros() as u64);
+    result
+}
+
 /// Parse lines from a streaming reader into the corpus batch (shared by dir + zip).
 #[allow(clippy::too_many_arguments)]
 fn ingest_lines_from_reader(
@@ -1590,6 +1661,7 @@ fn ingest_lines_from_reader(
     cancel: Option<&CancelFlag>,
     kind: ProcessProgressKind,
     limits: RawIngestLimits,
+    ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
 ) -> CoreResult<bool> {
     let mut raw_line = Vec::new();
     let mut source_bytes_read = 0u64;
@@ -1600,7 +1672,7 @@ fn ingest_lines_from_reader(
                 ProcessProgress::phase(
                     kind,
                     ProcessProgressPhase::Cancelled,
-                    "ingest cancelled during parse",
+                    "ingest cancelled during streaming import",
                     false,
                 )
                 .with_lines(stats.lines)
@@ -1610,14 +1682,16 @@ fn ingest_lines_from_reader(
             return Err(CoreError::Cancelled);
         }
         raw_line.clear();
-        let bytes = read_bounded_line(
-            reader,
-            &mut raw_line,
-            limits.max_line_bytes,
-            cancel,
-            progress,
-            Path::new(source_label),
-        )?;
+        let bytes = time_op_result_ms(ops, IngestOp::DiscoverRead, || {
+            read_bounded_line(
+                reader,
+                &mut raw_line,
+                limits.max_line_bytes,
+                cancel,
+                progress,
+                Path::new(source_label),
+            )
+        })?;
         if bytes == 0 {
             break;
         }
@@ -1629,7 +1703,9 @@ fn ingest_lines_from_reader(
             )));
         }
         stats.source_bytes = stats.source_bytes.saturating_add(bytes as u64);
-        let prepared_original = prepare_original_record(&raw_line);
+        let prepared_original = time_op_ms(ops, IngestOp::ParseFrame, || {
+            prepare_original_record(&raw_line)
+        });
         let line = prepared_original.parser_text.as_str();
         if line.trim().is_empty() {
             continue;
@@ -1637,7 +1713,9 @@ fn ingest_lines_from_reader(
         // Every bounded physical record is fingerprinted independently. A
         // plain banner cannot lock the rest of a file to Plain, and mixed
         // structured records remain independently explainable.
-        let fingerprinted = parse_line_with_fingerprint(line, file_hint, *seq);
+        let fingerprinted = time_op_ms(ops, IngestOp::ParseFrame, || {
+            parse_line_with_fingerprint(line, file_hint, *seq)
+        });
         confidence.observe(source_label, &fingerprinted);
         let parsed = fingerprinted.parsed;
         *stats
@@ -1655,14 +1733,18 @@ fn ingest_lines_from_reader(
             LogFormat::Plain => "plain",
         };
         *stats.format_counts.entry(fmt_key.into()).or_insert(0) += 1;
-        let msg = redact_message(&parsed.message);
+        let msg = time_op_ms(ops, IngestOp::ParseFrame, || {
+            redact_message(&parsed.message)
+        });
         let ts = parsed.ts.unwrap_or(*seq as i64);
         stats.ts_min = Some(stats.ts_min.map_or(ts, |m| m.min(ts)));
         stats.ts_max = Some(stats.ts_max.map_or(ts, |m| m.max(ts)));
         let level_key = parsed.level.to_ascii_lowercase();
         *stats.level_counts.entry(level_key).or_insert(0) += 1;
-        let (tid, params) = miner.match_or_create(&msg, ts, &parsed.level);
-        let params = redact_params(&params);
+        let (tid, params) = time_op_result_ms(ops, IngestOp::Template, || {
+            miner.match_or_create_cancellable(&msg, ts, &parsed.level, cancel)
+        })?;
+        let params = time_op_ms(ops, IngestOp::ParseFrame, || redact_params(&params));
         batch.push(IngestedLogEvent {
             event: LogEvent {
                 seq: *seq,
@@ -1689,8 +1771,8 @@ fn ingest_lines_from_reader(
                     progress,
                     ProcessProgress::phase(
                         kind,
-                        ProcessProgressPhase::Store,
-                        "writing event batches",
+                        ProcessProgressPhase::Stream,
+                        "streaming read, parse, template, and persist",
                         true,
                     )
                     .with_lines(stats.lines)
@@ -1698,17 +1780,22 @@ fn ingest_lines_from_reader(
                     .with_bytes(stats.source_bytes),
                 );
             }
-            corpus.push_ingested_events(batch)?;
+            time_op_result_ms(ops, IngestOp::Persist, || {
+                corpus.push_ingested_events(batch)
+            })?;
             batch.clear();
         }
         if stats.lines.is_multiple_of(PROGRESS_EVERY_LINES) {
             emit(
                 progress,
-                with_parse_file_fraction(
+                with_stream_file_fraction(
                     ProcessProgress::phase(
                         kind,
-                        ProcessProgressPhase::Parse,
-                        format!("parsing {source_label} ({} lines so far)", stats.lines),
+                        ProcessProgressPhase::Stream,
+                        format!(
+                            "streaming import of {source_label} ({} lines so far)",
+                            stats.lines
+                        ),
                         true,
                     )
                     .with_lines(stats.lines)
@@ -1824,6 +1911,7 @@ fn ingest_from_zip(
     kind: ProcessProgressKind,
     budget: &mut RawIngestBudget,
     limits: RawIngestLimits,
+    ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
 ) -> CoreResult<u64> {
     let file = open_selected_regular_file(zip_path)?;
     let archive_identity = portable_source_identity(Path::new(&progress_basename(zip_path)))?;
@@ -1844,6 +1932,7 @@ fn ingest_from_zip(
         kind,
         budget,
         limits,
+        ops,
     )
 }
 
@@ -1865,6 +1954,7 @@ fn ingest_from_zip_file(
     kind: ProcessProgressKind,
     budget: &mut RawIngestBudget,
     limits: RawIngestLimits,
+    ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
 ) -> CoreResult<u64> {
     if cancelled(cancel) {
         emit(
@@ -2125,6 +2215,7 @@ fn ingest_from_zip_file(
                 kind,
                 budget,
                 limits,
+                ops,
             )?;
             files_done += 1;
             continue;
@@ -2158,6 +2249,7 @@ fn ingest_from_zip_file(
             cancel,
             kind,
             limits,
+            ops,
         )?;
         let bounded = reader.into_inner();
         if bounded.member_bytes != plan.expanded_size {
@@ -2190,10 +2282,10 @@ fn ingest_from_zip_file(
         if files_done == 1 || files_done == entry_count || files_done.is_multiple_of(5) {
             emit(
                 progress,
-                with_parse_file_fraction(
+                with_stream_file_fraction(
                     ProcessProgress::phase(
                         kind,
-                        ProcessProgressPhase::Parse,
+                        ProcessProgressPhase::Stream,
                         "Parsing archive entries",
                         true,
                     )
@@ -2288,6 +2380,7 @@ fn ingest_path_inner_with_limits_and_fault(
     let source_label = progress_basename(path);
     let timed = TimedIngestObserver::new(progress);
     let progress = &timed;
+    let ops = std::sync::Mutex::new(IngestPhaseTimingsUs::default());
 
     emit(
         progress,
@@ -2336,6 +2429,7 @@ fn ingest_path_inner_with_limits_and_fault(
             cancel,
             limits,
             fault,
+            &ops,
         ) {
             Ok(report) => report,
             Err(_error) if cancelled(cancel) => {
@@ -2373,7 +2467,9 @@ fn ingest_path_inner_with_limits_and_fault(
             .with_lines(report.stats.lines)
             .with_templates(report.stats.templates as u64),
         );
-        validate_staged_ingest(staging.cache_root(), &report)?;
+        time_op_result_ms(&ops, IngestOp::Validate, || {
+            validate_staged_ingest(staging.cache_root(), &report)
+        })?;
         check_ingest_fault(fault, IngestCheckpoint::BeforePublish)?;
         if cancelled(cancel) {
             emit(
@@ -2398,13 +2494,20 @@ fn ingest_path_inner_with_limits_and_fault(
             .with_lines(report.stats.lines)
             .with_templates(report.stats.templates as u64),
         );
-        staging.publish(cache_root, &report.corpus_id)?;
+        time_op_result_ms(&ops, IngestOp::Publish, || {
+            staging.publish(cache_root, &report.corpus_id)
+        })?;
         Ok(report)
     })();
     let cleanup_result = staging.cleanup_checked();
     let (mut report, cleanup_deferred) = reconcile_ingest_cleanup(ingest_result, cleanup_result)?;
     let embedding_deferred = report.embedding.state == EmbeddingState::Deferred;
-    report.phase_timings = timed.finish_timings(embedding_deferred);
+    let op_us = ops.into_inner().unwrap_or_default();
+    let mut op_timings = op_us.to_ms();
+    let chrome = timed.finish_timings(embedding_deferred);
+    op_timings.total_ms = chrome.total_ms;
+    op_timings.embedding_deferred = embedding_deferred;
+    report.phase_timings = op_timings;
     let defer_note = if embedding_deferred {
         "; optional embedding deferred (keyword/structured first use ready)"
     } else {
@@ -2454,6 +2557,7 @@ fn ingest_path_into_cache(
     cancel: Option<&CancelFlag>,
     limits: RawIngestLimits,
     fault: IngestFaultHook<'_>,
+    ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
 ) -> CoreResult<IngestReport> {
     let kind = ProcessProgressKind::LogIngest;
     let source_label = progress_basename(path);
@@ -2467,7 +2571,7 @@ fn ingest_path_into_cache(
     let mut batch = Vec::with_capacity(256);
     let mut budget = RawIngestBudget::default();
     let private_archive_root = cache_root.join(".nested_archives");
-    let files_done = if is_zip_file(path) {
+    let _files_done = if is_zip_file(path) {
         // Stream members without full extraction. Only nested archive
         // containers are copied into the hidden, bounded per-ingest tree.
         ingest_from_zip(
@@ -2484,6 +2588,7 @@ fn ingest_path_into_cache(
             kind,
             &mut budget,
             limits,
+            ops,
         )?
     } else {
         let inventory = collect_log_files(path, &mut budget, limits, cancel)?;
@@ -2520,10 +2625,10 @@ fn ingest_path_into_cache(
 
         emit(
             progress,
-            with_parse_file_fraction(
+            with_stream_file_fraction(
                 ProcessProgress::phase(
                     kind,
-                    ProcessProgressPhase::Parse,
+                    ProcessProgressPhase::Stream,
                     "parsing and templating lines",
                     true,
                 )
@@ -2560,10 +2665,10 @@ fn ingest_path_into_cache(
             };
             emit(
                 progress,
-                with_parse_file_fraction(
+                with_stream_file_fraction(
                     ProcessProgress::phase(
                         kind,
-                        ProcessProgressPhase::Parse,
+                        ProcessProgressPhase::Stream,
                         format!("opening {}", progress_basename(file)),
                         true,
                     )
@@ -2624,6 +2729,7 @@ fn ingest_path_into_cache(
                     kind,
                     &mut budget,
                     limits,
+                    ops,
                 )?;
                 files_done += 1;
                 continue;
@@ -2634,10 +2740,10 @@ fn ingest_path_into_cache(
                 files_done += 1;
                 emit(
                     progress,
-                    with_parse_file_fraction(
+                    with_stream_file_fraction(
                         ProcessProgress::phase(
                             kind,
-                            ProcessProgressPhase::Parse,
+                            ProcessProgressPhase::Stream,
                             format!(
                                 "skipped oversized {} ({} bytes > {} cap)",
                                 progress_basename(file),
@@ -2696,6 +2802,7 @@ fn ingest_path_into_cache(
                 cancel,
                 kind,
                 limits,
+                ops,
             )?;
             files_done += 1;
             if completely_read {
@@ -2712,11 +2819,11 @@ fn ingest_path_into_cache(
             if files_done == 1 || files_done == file_count || files_done.is_multiple_of(5) {
                 emit(
                     progress,
-                    with_parse_file_fraction(
+                    with_stream_file_fraction(
                         ProcessProgress::phase(
                             kind,
-                            ProcessProgressPhase::Parse,
-                            "Parsing and grouping patterns",
+                            ProcessProgressPhase::Stream,
+                            "Streaming read, parse, template, and persist",
                             true,
                         )
                         .with_lines(stats.lines)
@@ -2732,50 +2839,29 @@ fn ingest_path_into_cache(
         files_done
     };
 
-    emit(
-        progress,
-        ProcessProgress::phase(
-            kind,
-            ProcessProgressPhase::Template,
-            "Grouping parsed patterns",
-            true,
-        )
-        .with_lines(stats.lines)
-        .with_files(files_done)
-        .with_templates(miner.templates().len() as u64),
-    );
-
+    // Monotonic chrome: streaming phase already covered read/parse/template/persist.
+    // Do not emit Template/Redact/Store bookends that rewind UI progress (#824).
     if stats.lines == 0 {
         return Err(CoreError::Message(
             "no safe/importable log events were found".into(),
         ));
     }
 
-    emit(
-        progress,
-        ProcessProgress::phase(
-            kind,
-            ProcessProgressPhase::Redact,
-            "redaction complete for parsed messages",
-            true,
-        )
-        .with_lines(stats.lines)
-        .with_files(files_done),
-    );
-
     if !batch.is_empty() {
         emit(
             progress,
             ProcessProgress::phase(
                 kind,
-                ProcessProgressPhase::Store,
-                "flushing remaining events",
+                ProcessProgressPhase::Stream,
+                "streaming persist of remaining events",
                 // After first store, cancel is less clean; still allow between template persist.
                 true,
             )
             .with_lines(stats.lines),
         );
-        corpus.push_ingested_events(&batch)?;
+        time_op_result_ms(ops, IngestOp::Persist, || {
+            corpus.push_ingested_events(&batch)
+        })?;
     }
     check_ingest_fault(fault, IngestCheckpoint::EventsStored)?;
 
@@ -2799,7 +2885,7 @@ fn ingest_path_into_cache(
         progress,
         ProcessProgress::phase(
             kind,
-            ProcessProgressPhase::Store,
+            ProcessProgressPhase::Stream,
             "persisting template table",
             false, // flush in progress — not cleanly cancellable mid-upsert
         )
@@ -2814,7 +2900,7 @@ fn ingest_path_into_cache(
             vector: None,
         });
     }
-    corpus.upsert_templates(rows)?;
+    time_op_result_ms(ops, IngestOp::Persist, || corpus.upsert_templates(rows))?;
 
     // Embed templates only (#359). Cap bulk SoftWrite so import is not forced
     // through a full multi-k embed pass (semantic can be filled later).
@@ -2854,16 +2940,19 @@ fn ingest_path_into_cache(
                 );
                 return Err(CoreError::Cancelled);
             }
-            if let Some(v) = hash_cache.get(&row.content_hash) {
-                corpus.set_template_vector(row.info.template_id, v.clone())?;
-                embedded += 1;
-                continue;
-            }
-            if let Some(v) = embed_blocking(backend, &row.info.pattern, 5_000) {
-                hash_cache.insert(row.content_hash.clone(), v.clone());
-                corpus.set_template_vector(row.info.template_id, v)?;
-                embedded += 1;
-            }
+            time_op_result_ms(ops, IngestOp::Embed, || -> CoreResult<()> {
+                if let Some(v) = hash_cache.get(&row.content_hash) {
+                    corpus.set_template_vector(row.info.template_id, v.clone())?;
+                    embedded += 1;
+                    return Ok(());
+                }
+                if let Some(v) = embed_blocking(backend, &row.info.pattern, 5_000) {
+                    hash_cache.insert(row.content_hash.clone(), v.clone());
+                    corpus.set_template_vector(row.info.template_id, v)?;
+                    embedded += 1;
+                }
+                Ok(())
+            })?;
             if i % 8 == 0 {
                 emit(
                     progress,
@@ -3548,7 +3637,7 @@ mod tests {
 
         impl ProcessProgressObserver for RemoveAfterInventory {
             fn progress(&self, update: ProcessProgress) {
-                if update.phase == ProcessProgressPhase::Parse
+                if update.phase == ProcessProgressPhase::Stream
                     && !self.removed.swap(true, Ordering::SeqCst)
                 {
                     std::fs::remove_file(&self.source).unwrap();
@@ -5343,15 +5432,14 @@ mod tests {
     }
 
     #[test]
-    fn log_ingest_non_parse_phases_discard_fractions() {
+    fn log_ingest_non_stream_phases_discard_fractions() {
         let recorder = RecordingProcessProgress::default();
         let phases = [
             ProcessProgressPhase::Starting,
             ProcessProgressPhase::Scan,
-            ProcessProgressPhase::Template,
-            ProcessProgressPhase::Redact,
-            ProcessProgressPhase::Store,
             ProcessProgressPhase::Embed,
+            ProcessProgressPhase::Validate,
+            ProcessProgressPhase::Publish,
             ProcessProgressPhase::Completed,
             ProcessProgressPhase::Cancelled,
             ProcessProgressPhase::Failed,
@@ -5368,7 +5456,7 @@ mod tests {
         assert_eq!(updates.len(), phases.len());
         assert!(
             updates.iter().all(|update| update.fraction.is_none()),
-            "non-Parse phases must remain indeterminate: {updates:?}"
+            "non-stream phases must remain indeterminate: {updates:?}"
         );
     }
 
@@ -5395,7 +5483,7 @@ mod tests {
         let updates = recorder.updates.lock().unwrap();
         let parse_fractions: Vec<f32> = updates
             .iter()
-            .filter(|update| update.phase == ProcessProgressPhase::Parse)
+            .filter(|update| update.phase == ProcessProgressPhase::Stream)
             .filter_map(|update| update.fraction)
             .collect();
         assert!(!parse_fractions.is_empty(), "updates={updates:?}");
@@ -5414,7 +5502,7 @@ mod tests {
         assert!(
             updates
                 .iter()
-                .filter(|update| update.phase != ProcessProgressPhase::Parse)
+                .filter(|update| update.phase != ProcessProgressPhase::Stream)
                 .all(|update| update.fraction.is_none()),
             "non-Parse phases must remain indeterminate: {updates:?}"
         );
@@ -5452,14 +5540,15 @@ mod tests {
             "phases={phases:?}"
         );
         assert!(
-            phases.contains(&ProcessProgressPhase::Parse)
-                || phases.contains(&ProcessProgressPhase::Template),
-            "phases={phases:?}"
+            phases.contains(&ProcessProgressPhase::Stream),
+            "streaming phase required (no bookend rewind): {phases:?}"
         );
+        // Monotonic chrome: no Template/Redact/Store bookends after Stream.
         assert!(
-            phases.contains(&ProcessProgressPhase::Store)
-                || phases.contains(&ProcessProgressPhase::Redact),
-            "phases={phases:?}"
+            !phases.contains(&ProcessProgressPhase::Template)
+                && !phases.contains(&ProcessProgressPhase::Redact)
+                && !phases.contains(&ProcessProgressPhase::Store),
+            "must not emit rewinding bookend phases: {phases:?}"
         );
         assert!(
             phases.contains(&ProcessProgressPhase::Embed),
@@ -5604,7 +5693,7 @@ mod tests {
         }
         impl ProcessProgressObserver for CancelMidParse {
             fn progress(&self, update: ProcessProgress) {
-                if update.phase == ProcessProgressPhase::Parse
+                if update.phase == ProcessProgressPhase::Stream
                     && update.lines_processed.unwrap_or(0) >= 2_000
                 {
                     self.flag.cancel();
@@ -5642,6 +5731,82 @@ mod tests {
         );
     }
 
+    /// #824 — real ingest on a blocking pool must not starve async heartbeat/cancel.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_blocking_ingest_allows_async_heartbeat_and_cancel() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let mut f = std::fs::File::create(logs.join("bulk.log")).unwrap();
+        for i in 0..20_000 {
+            writeln!(f, "warn bulk line {i} padding-padding-padding").unwrap();
+        }
+        drop(f);
+
+        let flag = CancelFlag::new();
+        let flag_job = flag.clone();
+        let heartbeat = Arc::new(AtomicU64::new(0));
+        let heartbeat_tick = Arc::clone(&heartbeat);
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let cache_for_job = cache.clone();
+
+        // Async task: must keep progressing while blocking ingest runs.
+        let hb = tokio::spawn(async move {
+            for _ in 0..200 {
+                heartbeat_tick.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        });
+
+        let cancel_watcher = flag.clone();
+        let cancel_task = tokio::spawn(async move {
+            // Give ingest a moment to enter streaming work, then cancel.
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            cancel_watcher.cancel();
+        });
+
+        let logs_path = logs.clone();
+        let job = tokio::task::spawn_blocking(move || {
+            ingest_path_with_observer(
+                &cache_for_job,
+                &logs_path,
+                "off-loop",
+                None,
+                "none",
+                &RecordingProcessProgress::default(),
+                Some(&flag_job),
+            )
+        });
+
+        let result = job.await.expect("join spawn_blocking");
+        let _ = cancel_task.await;
+        let _ = hb.await;
+        let ticks = heartbeat.load(Ordering::SeqCst);
+        assert!(
+            ticks >= 3,
+            "async heartbeat must advance during blocking ingest (ticks={ticks})"
+        );
+        assert!(
+            result.is_err(),
+            "cancel should terminate ingest: {result:?}"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            format!("{err}").to_lowercase().contains("cancel"),
+            "expected cancel error, got {err}"
+        );
+        assert!(
+            LogCorpus::list_ids(&cache).unwrap().is_empty(),
+            "cancel must not publish"
+        );
+        // Source evidence unchanged.
+        let source = std::fs::read_to_string(logs.join("bulk.log")).unwrap();
+        assert!(source.contains("warn bulk line 0"));
+        assert!(source.lines().count() >= 20_000);
+    }
+
     /// #824 — cancel mid-parse leaves a clean library; the same path can SoftWrite again.
     #[test]
     fn ingest_cancel_then_retry_succeeds_with_publish() {
@@ -5662,7 +5827,7 @@ mod tests {
         }
         impl ProcessProgressObserver for CancelMidParse {
             fn progress(&self, update: ProcessProgress) {
-                if update.phase == ProcessProgressPhase::Parse
+                if update.phase == ProcessProgressPhase::Stream
                     && update.lines_processed.unwrap_or(0) >= 1_500
                 {
                     self.flag.cancel();
@@ -5720,6 +5885,92 @@ mod tests {
         assert_no_ingest_staging(&cache);
     }
 
+    /// #824 — operation-scoped subtotals must not exceed wall time (non-overlapping).
+    #[test]
+    fn operation_timers_subtotals_bounded_by_wall_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let mut f = std::fs::File::create(logs.join("ops.log")).unwrap();
+        for i in 0..4_000 {
+            match i % 5 {
+                0 => writeln!(f, "ERROR connection refused host-{i}").unwrap(),
+                1 => writeln!(f, "WARN retry timeout attempt={}", i % 3).unwrap(),
+                _ => writeln!(f, "INFO request completed id={i}").unwrap(),
+            }
+        }
+        drop(f);
+        let recorder = RecordingProcessProgress::default();
+        let wall_start = std::time::Instant::now();
+        let report = ingest_path_with_observer(
+            dir.path(),
+            &logs,
+            "op-timers",
+            None,
+            "none",
+            &recorder,
+            None,
+        )
+        .unwrap();
+        let wall_ms = wall_start.elapsed().as_millis() as u64;
+        let t = &report.phase_timings;
+        let sub = t.working_subtotal_ms();
+        assert!(t.total_ms > 0, "total wall must be instrumented: {t:?}");
+        // Non-overlapping working subtotals are bounded by instrumented total and wall.
+        assert!(
+            sub <= t.total_ms.saturating_add(50),
+            "working subtotal {sub} must be ≤ total {} (+slack): {t:?}",
+            t.total_ms
+        );
+        assert!(
+            sub <= wall_ms.saturating_add(2_000),
+            "working subtotal {sub} must be ≤ wall {wall_ms} (+slack): {t:?}"
+        );
+        assert!(
+            t.parse_frame_ms > 0 || t.template_analysis_ms > 0 || t.persist_index_ms > 0,
+            "at least one streaming operation must accumulate: {t:?}"
+        );
+        assert!(
+            t.publication_ms > 0 || t.validation_ms > 0,
+            "validate/publish must accumulate: {t:?}"
+        );
+        // Progress never rewinds through bookend phases.
+        let phases = recorder.phases();
+        let stream_idxs: Vec<_> = phases
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| **p == ProcessProgressPhase::Stream)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!stream_idxs.is_empty(), "must emit Stream: {phases:?}");
+        let first_stream = stream_idxs[0];
+        for (i, p) in phases.iter().enumerate() {
+            if i > first_stream {
+                assert!(
+                    !matches!(
+                        p,
+                        ProcessProgressPhase::Parse
+                            | ProcessProgressPhase::Template
+                            | ProcessProgressPhase::Redact
+                            | ProcessProgressPhase::Store
+                    ),
+                    "bookend phase {p:?} after Stream rewinds chrome at index {i}: {phases:?}"
+                );
+            }
+        }
+        eprintln!(
+            "PASS op-timers accounting: wall_ms={wall_ms} total_ms={} subtotal_ms={sub} read={} parse={} template={} persist={} embed={} validate={} publish={}",
+            t.total_ms,
+            t.discover_read_ms,
+            t.parse_frame_ms,
+            t.template_analysis_ms,
+            t.persist_index_ms,
+            t.optional_embedding_ms,
+            t.validation_ms,
+            t.publication_ms
+        );
+    }
+
     /// #824 — deterministic 25k scale proof with phase timings (one-machine observation).
     #[test]
     fn scale_proof_25k_records_phase_timings_and_first_page() {
@@ -5761,11 +6012,15 @@ mod tests {
             report.phase_timings.total_ms,
             wall_ms
         );
+        // Measured ~4–5s; 20s envelope catches multi-× regressions without flake.
+        assert!(
+            wall_ms < 20_000,
+            "25k wall_ms={wall_ms} exceeded same-machine envelope (20s)"
+        );
         let phases = recorder.phases();
         for required in [
             ProcessProgressPhase::Scan,
-            ProcessProgressPhase::Parse,
-            ProcessProgressPhase::Store,
+            ProcessProgressPhase::Stream,
             ProcessProgressPhase::Publish,
             ProcessProgressPhase::Completed,
         ] {
@@ -5845,12 +6100,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(page.events.len(), 200);
-        // Same-machine regression budget (one-machine observation, not SLA):
-        // keyword-first-use path without embed should complete under 180s on
-        // developer hardware; tighten only after establishing a new baseline.
+        // Same-machine regression envelope (#824): measured ~16s on one machine;
+        // allow ~3× headroom (45s) so CI noise is tolerated without a 180s no-op bar.
         assert!(
-            wall_ms < 180_000,
-            "100k wall_ms={wall_ms} exceeded same-machine budget (180s); investigate regression"
+            wall_ms < 45_000,
+            "100k wall_ms={wall_ms} exceeded same-machine envelope (45s); investigate regression"
         );
         eprintln!(
             "PASS scale-100k one-machine observation (not a universal SLA): events={} total_ms={} discover_read_ms={} parse_frame_ms={} template_analysis_ms={} persist_index_ms={} optional_embedding_ms={} publication_ms={} wall_ms={} templates={}",

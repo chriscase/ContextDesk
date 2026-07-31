@@ -107,13 +107,18 @@ pub enum ProcessProgressPhase {
     Starting,
     /// Discovering files (log ingest).
     Scan,
-    /// Parsing lines / formats.
+    /// Interleaved streaming work: read, parse/frame, template, and persist (#824).
+    ///
+    /// UI chrome uses one monotonic phase for this work so the progress bar
+    /// never rewinds Store → Parse while those operations interleave.
+    Stream,
+    /// Parsing lines / formats (legacy bookend; prefer [`Self::Stream`] for log ingest).
     Parse,
-    /// Drain-style templating.
+    /// Drain-style templating (legacy bookend; prefer [`Self::Stream`]).
     Template,
-    /// Redacting secrets/PII in messages/params.
+    /// Redacting secrets/PII in messages/params (legacy bookend; prefer [`Self::Stream`]).
     Redact,
-    /// Writing events/templates to the event store.
+    /// Writing events/templates to the event store (legacy bookend; prefer [`Self::Stream`]).
     Store,
     /// Embedding templates only (optional; may be deferred).
     Embed,
@@ -141,6 +146,7 @@ impl ProcessProgressPhase {
         match self {
             Self::Starting => "Starting",
             Self::Scan => "Discover / read",
+            Self::Stream => "Streaming read, parse, template, and persist",
             Self::Parse => "Parse / frame",
             Self::Template => "Template analysis",
             Self::Redact => "Redact",
@@ -155,6 +161,14 @@ impl ProcessProgressPhase {
             Self::Failed => "Failed",
             Self::Cancelled => "Cancelled",
         }
+    }
+
+    /// True when this phase is part of interleaved streaming ingest work.
+    pub fn is_stream_work(self) -> bool {
+        matches!(
+            self,
+            Self::Stream | Self::Parse | Self::Template | Self::Redact | Self::Store
+        )
     }
 }
 

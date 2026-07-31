@@ -43,6 +43,7 @@ export type ProcessProgressKind = "log_ingest" | "session_context_import";
 export type ProcessProgressPhase =
   | "starting"
   | "scan"
+  | "stream"
   | "parse"
   | "template"
   | "redact"
@@ -130,10 +131,7 @@ export function wizardNavCancel(state: WizardNavState): WizardNavState {
  */
 export const LOG_INGEST_PIPELINE: ProcessProgressPhase[] = [
   "scan",
-  "parse",
-  "template",
-  "redact",
-  "store",
+  "stream",
   "embed",
   "validate",
   "publish",
@@ -150,6 +148,7 @@ export function phaseLabel(phase: ProcessProgressPhase): string {
   const map: Record<ProcessProgressPhase, string> = {
     starting: "Starting",
     scan: "Discover / read",
+    stream: "Streaming read, parse, template, and persist",
     parse: "Parse / frame",
     template: "Template analysis",
     redact: "Redact",

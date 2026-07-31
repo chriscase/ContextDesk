@@ -43,8 +43,18 @@ export function ProcessProgressPanel({
       ? SESSION_IMPORT_PIPELINE
       : LOG_INGEST_PIPELINE;
 
-  const active = progress?.phase ?? "starting";
-  const activeIdx = pipeline.indexOf(active as ProcessProgressPhase);
+  // Legacy bookend phases (parse/template/redact/store) map to the monotonic
+  // streaming phase so chrome never rewinds after host upgrades to Stream (#824).
+  const rawActive = progress?.phase ?? "starting";
+  const active: ProcessProgressPhase =
+    k === "log_ingest" &&
+    (rawActive === "parse" ||
+      rawActive === "template" ||
+      rawActive === "redact" ||
+      rawActive === "store")
+      ? "stream"
+      : (rawActive as ProcessProgressPhase);
+  const activeIdx = pipeline.indexOf(active);
   const terminal =
     active === "completed" || active === "failed" || active === "cancelled";
   const running = !terminal && !error;

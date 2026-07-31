@@ -99,13 +99,17 @@ or any later write.
 After SoftWrite ingest, open **Log Explorer** from the Logs library for
 filters, multi-lane evidence, bookmarks, and corpus-linked chat. See
 help://log-explorer. SoftWrite bulk import streams zip/lines and can be
-cancelled; the progress panel shows phase, elapsed wall time, and cancel state.
-The corpus is published atomically—cancel or failure before publication leaves
-nothing in the library. Template embedding is deferred/capped so large dumps
-finish SoftWrite without a mandatory full embed pass; when deferred, completion
-text states that keyword/structured first use is ready. Ordinary imports use the local ONNX model
-when it is installed. Inputs over 64 MiB of actual streamed log bytes are marked
-**deferred**; smaller imports embed at most the 256 most frequent templates.
+cancelled; the progress panel shows a monotonic phase
+(discover → streaming read/parse/template/persist → optional embed → validate →
+publish), elapsed wall time, and cancel state. The corpus is published
+atomically—cancel or failure before publication leaves nothing in the library.
+Template embedding is deferred/capped so large dumps finish SoftWrite without a
+mandatory full embed pass; when deferred, completion text states that
+keyword/structured first use is ready. Ordinary imports use the local ONNX model
+when it is installed. Inputs over **60 MiB** of actual streamed log bytes are
+marked **deferred** (chosen so the packaged triage-stress 250k corpus at
+~63.9 MiB defers past first use while smaller 25k/100k product paths still embed);
+smaller imports embed at most the 256 most frequent templates.
 The corpus Overview always shows its actual semantic state and model.
 
 For a keyword-only or deferred corpus, choose **Re-analyze locally…** in Logs.

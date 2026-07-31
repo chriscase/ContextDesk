@@ -14,8 +14,8 @@ function progress(
 ): ProcessProgressDto {
   return {
     kind: "log_ingest",
-    phase: "parse",
-    message: "Parsing logs",
+    phase: "stream",
+    message: "Streaming import",
     fraction: 0.35,
     lines_processed: 10,
     files_processed: 1,
@@ -45,6 +45,7 @@ describe("ProcessProgressPanel", () => {
   it("includes publication after optional embedding for log ingest (#824)", () => {
     expect(LOG_INGEST_PIPELINE).toContain("publish");
     expect(LOG_INGEST_PIPELINE).toContain("validate");
+    expect(LOG_INGEST_PIPELINE).toContain("stream");
     expect(LOG_INGEST_PIPELINE.indexOf("validate")).toBeGreaterThan(
       LOG_INGEST_PIPELINE.indexOf("embed"),
     );
@@ -61,8 +62,8 @@ describe("ProcessProgressPanel", () => {
     const { container, rerender } = render(
       <ProcessProgressPanel
         progress={progress({
-          phase: "store",
-          message: "Persisting",
+          phase: "stream",
+          message: "Streaming import",
           fraction: null,
         })}
       />,
@@ -70,7 +71,7 @@ describe("ProcessProgressPanel", () => {
     const phaseLi = (name: string) =>
       container.querySelector(`[data-phase="${name}"]`);
 
-    expect(phaseLi("store")?.getAttribute("data-active")).toBe("true");
+    expect(phaseLi("stream")?.getAttribute("data-active")).toBe("true");
     expect(phaseLi("scan")?.getAttribute("data-active")).toBe("false");
 
     // Core always emits Validate before Publish; chrome must not reset.
@@ -86,7 +87,7 @@ describe("ProcessProgressPanel", () => {
     expect(phaseLi("validate")?.getAttribute("data-active")).toBe("true");
     expect(phaseLi("scan")?.getAttribute("data-active")).toBe("false");
     expect(phaseLi("scan")?.getAttribute("data-done")).toBe("true");
-    expect(phaseLi("store")?.getAttribute("data-done")).toBe("true");
+    expect(phaseLi("stream")?.getAttribute("data-done")).toBe("true");
     expect(phaseLi("validate")?.getAttribute("data-done")).toBe("false");
   });
 
@@ -94,8 +95,8 @@ describe("ProcessProgressPanel", () => {
     const { container, rerender } = render(
       <ProcessProgressPanel
         progress={progress({
-          phase: "store",
-          message: "Persisting",
+          phase: "stream",
+          message: "Streaming import",
           fraction: null,
         })}
       />,
@@ -124,7 +125,7 @@ describe("ProcessProgressPanel", () => {
     expect(phaseLi("embed")?.getAttribute("data-seen")).toBe("false");
     expect(phaseLi("embed")?.getAttribute("data-done")).toBe("false");
     expect(phaseLi("embed")?.getAttribute("data-active")).toBe("false");
-    expect(phaseLi("store")?.getAttribute("data-done")).toBe("true");
+    expect(phaseLi("stream")?.getAttribute("data-done")).toBe("true");
     expect(phaseLi("validate")?.getAttribute("data-done")).toBe("true");
     expect(phaseLi("publish")?.getAttribute("data-done")).toBe("true");
   });
@@ -159,7 +160,7 @@ describe("ProcessProgressPanel", () => {
   it("shows wall-clock elapsed when the host reports it (#824)", () => {
     render(
       <ProcessProgressPanel
-        progress={progress({ elapsed_ms: 3_450, phase: "store" })}
+        progress={progress({ elapsed_ms: 3_450, phase: "stream" })}
       />,
     );
     expect(screen.getByTestId("process-progress-elapsed").textContent).toBe(
@@ -194,7 +195,7 @@ describe("ProcessProgressPanel", () => {
   it("does not infer progress from phase position and clears stale width", () => {
     const { rerender } = render(
       <ProcessProgressPanel
-        progress={progress({ phase: "template", fraction: 0.8 })}
+        progress={progress({ phase: "stream", fraction: 0.8 })}
       />,
     );
     const bar = screen.getByRole("progressbar", {
@@ -280,7 +281,7 @@ describe("ProcessProgressPanel", () => {
     const { rerender } = render(
       <ProcessProgressPanel
         progress={progress({
-          phase: "parse",
+          phase: "stream",
           message: "Parsing file 1",
           files_processed: 1,
         })}
@@ -288,31 +289,37 @@ describe("ProcessProgressPanel", () => {
     );
     const status = screen.getByRole("status");
 
-    expect(status.textContent).toBe("Current phase: Parse / frame");
+    expect(status.textContent).toBe(
+      "Current phase: Streaming read, parse, template, and persist",
+    );
     expect(status.textContent).not.toContain("file 1");
 
     rerender(
       <ProcessProgressPanel
         progress={progress({
-          phase: "parse",
+          phase: "stream",
           message: "Parsing file 2",
           files_processed: 2,
         })}
       />,
     );
-    expect(status.textContent).toBe("Current phase: Parse / frame");
+    expect(status.textContent).toBe(
+      "Current phase: Streaming read, parse, template, and persist",
+    );
     expect(status.textContent).not.toContain("file 2");
 
     rerender(
       <ProcessProgressPanel
         progress={progress({
-          phase: "store",
+          phase: "stream",
           message: "Writing corpus",
           fraction: null,
         })}
       />,
     );
-    expect(status.textContent).toBe("Current phase: Persist / index");
+    expect(status.textContent).toBe(
+      "Current phase: Streaming read, parse, template, and persist",
+    );
   });
 
   it("offers cancellation only while the host declares the phase cancellable", () => {
@@ -326,7 +333,7 @@ describe("ProcessProgressPanel", () => {
     rerender(
       <ProcessProgressPanel
         progress={progress({
-          phase: "store",
+          phase: "stream",
           message: "Publishing corpus",
           cancellable: false,
         })}

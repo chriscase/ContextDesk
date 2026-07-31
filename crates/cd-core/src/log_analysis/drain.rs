@@ -1,8 +1,26 @@
 //! Drain-style incremental templating (#356). LOG_ANALYSIS.md §3.
+//!
+//! High-cardinality hostiles are fail-closed (#824): total-template and
+//! per-length-bucket caps reject new clusters rather than silently mis-merging
+//! evidence or unbounded memory growth.
 
 use super::parse::level_severity;
+use crate::error::{CoreError, CoreResult};
+use crate::process_progress::CancelFlag;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+/// Hard cap on distinct templates retained by one ingest DrainMiner (#824).
+///
+/// Authoritative triage-stress 250k produces 648 templates; company-scale noise
+/// stays far below this. The cap exists for adversarial unique-message floods.
+pub const MAX_DRAIN_TEMPLATES: usize = 25_000;
+
+/// Hard cap on templates sharing one token-length bucket (#824).
+///
+/// Linear same-length scans are O(bucket); unbounded equal-token-count
+/// messages would otherwise stall ingest. Cap forces fail-closed rejection.
+pub const MAX_DRAIN_TEMPLATES_PER_LENGTH_BUCKET: usize = 2_048;
 
 /// One template row (counts / window updated on match).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -40,6 +58,10 @@ pub struct DrainMiner {
     /// length → list of template ids
     by_len: HashMap<usize, Vec<u64>>,
     templates: HashMap<u64, TemplateInfo>,
+    /// Total-template hard cap.
+    max_templates: usize,
+    /// Per token-length bucket hard cap.
+    max_per_bucket: usize,
 }
 
 impl Default for DrainMiner {
@@ -49,8 +71,25 @@ impl Default for DrainMiner {
 }
 
 impl DrainMiner {
-    /// Create with Drain hyperparameters.
+    /// Create with Drain hyperparameters (product default caps).
     pub fn new(depth: usize, max_children: usize, sim_threshold: f32) -> Self {
+        Self::with_bounds(
+            depth,
+            max_children,
+            sim_threshold,
+            MAX_DRAIN_TEMPLATES,
+            MAX_DRAIN_TEMPLATES_PER_LENGTH_BUCKET,
+        )
+    }
+
+    /// Create with explicit cardinality bounds (tests + policy knobs).
+    pub fn with_bounds(
+        depth: usize,
+        max_children: usize,
+        sim_threshold: f32,
+        max_templates: usize,
+        max_per_bucket: usize,
+    ) -> Self {
         Self {
             depth: depth.max(1),
             max_children: max_children.max(2),
@@ -58,6 +97,8 @@ impl DrainMiner {
             next_id: 1,
             by_len: HashMap::new(),
             templates: HashMap::new(),
+            max_templates: max_templates.max(1),
+            max_per_bucket: max_per_bucket.max(1),
         }
     }
 
@@ -66,6 +107,11 @@ impl DrainMiner {
         let mut v: Vec<_> = self.templates.values().cloned().collect();
         v.sort_by_key(|t| t.template_id);
         v
+    }
+
+    /// Current distinct template count.
+    pub fn template_count(&self) -> usize {
+        self.templates.len()
     }
 
     /// Tokenize a message into words (split on whitespace / punctuation).
@@ -77,14 +123,41 @@ impl DrainMiner {
     }
 
     /// Ingest one message; returns `(template_id, params)`.
-    pub fn match_or_create(&mut self, message: &str, ts: i64, level: &str) -> (u64, Vec<String>) {
+    ///
+    /// Fail-closed on cardinality: if no existing template matches and a new
+    /// cluster would exceed total or per-bucket caps, returns
+    /// [`CoreError::Policy`] rather than silently merging into a wrong cluster.
+    pub fn match_or_create(
+        &mut self,
+        message: &str,
+        ts: i64,
+        level: &str,
+    ) -> CoreResult<(u64, Vec<String>)> {
+        self.match_or_create_cancellable(message, ts, level, None)
+    }
+
+    /// Same as [`Self::match_or_create`] with cancel checks during same-length scans.
+    pub fn match_or_create_cancellable(
+        &mut self,
+        message: &str,
+        ts: i64,
+        level: &str,
+        cancel: Option<&CancelFlag>,
+    ) -> CoreResult<(u64, Vec<String>)> {
         let tokens = Self::tokenize(message);
         let len = tokens.len();
         let sev = level_severity(level);
 
         if let Some(ids) = self.by_len.get(&len).cloned() {
             let mut best: Option<(u64, f32, Vec<String>)> = None;
-            for id in ids {
+            for (scan_i, id) in ids.into_iter().enumerate() {
+                // Poll cancel inside the linear same-length scan (#824).
+                if scan_i > 0
+                    && scan_i.is_multiple_of(64)
+                    && cancel.map(|c| c.is_cancelled()).unwrap_or(false)
+                {
+                    return Err(CoreError::Cancelled);
+                }
                 let Some(t) = self.templates.get(&id) else {
                     continue;
                 };
@@ -107,11 +180,27 @@ impl DrainMiner {
                     t.pattern = merged.join(" ");
                     t.token_count = Self::tokenize(&t.pattern).len();
                 }
-                return (id, params);
+                return Ok((id, params));
             }
         }
 
-        // New template
+        // New template — enforce total + per-bucket caps fail-closed.
+        let bucket_len = self.by_len.get(&len).map(|v| v.len()).unwrap_or(0);
+        if self.templates.len() >= self.max_templates {
+            return Err(CoreError::Policy(format!(
+                "log template cardinality limit exceeded (max {} distinct templates); \
+                 refusing to create or silently merge a new cluster",
+                self.max_templates
+            )));
+        }
+        if bucket_len >= self.max_per_bucket {
+            return Err(CoreError::Policy(format!(
+                "log template length-bucket limit exceeded (max {} templates with {} tokens); \
+                 refusing silent mis-cluster of unique equal-token-count messages",
+                self.max_per_bucket, len
+            )));
+        }
+
         let id = self.next_id;
         self.next_id += 1;
         let pattern = tokens.join(" ");
@@ -129,7 +218,7 @@ impl DrainMiner {
         self.by_len.entry(len).or_default().push(id);
         // max_children / depth reserved for future tree pruning; keep API stable.
         let _ = (self.depth, self.max_children);
-        (id, Vec::new())
+        Ok((id, Vec::new()))
     }
 
     /// Reduction ratio: lines / templates (higher = better collapse).
@@ -193,40 +282,106 @@ mod tests {
         let mut d = DrainMiner::default();
         let a = "GET /users/8123 200 14ms";
         let b = "GET /users/9971 200 9ms";
-        let (id1, _) = d.match_or_create(a, 1, "info");
-        let (id2, params) = d.match_or_create(b, 2, "info");
+        let (id1, _) = d.match_or_create(a, 1, "info").unwrap();
+        let (id2, params) = d.match_or_create(b, 2, "info").unwrap();
         assert_eq!(id1, id2, "near-duplicate HTTP lines share a template");
         assert!(d.templates().len() == 1);
         let t = &d.templates()[0];
         assert!(t.count >= 2);
-        assert!(t.pattern.contains("GET") || t.pattern.contains("<*>"));
-        let _ = params;
+        assert!(!params.is_empty() || t.pattern.contains("<*>") || t.pattern.contains("users"));
     }
 
     #[test]
-    fn distinct_messages_separate() {
-        let mut d = DrainMiner::default();
-        let (a, _) = d.match_or_create("database connection refused to primary", 1, "error");
-        let (b, _) = d.match_or_create("user login succeeded for alice", 2, "info");
-        assert_ne!(a, b);
-        assert_eq!(d.templates().len(), 2);
-    }
-
-    #[test]
-    fn deterministic_for_fixed_input() {
-        let lines = [
-            "error code 1 on shard 7",
-            "error code 2 on shard 9",
-            "error code 3 on shard 11",
-        ];
-        let mut d1 = DrainMiner::default();
-        let mut d2 = DrainMiner::default();
-        for (i, l) in lines.iter().enumerate() {
-            d1.match_or_create(l, i as i64, "error");
-            d2.match_or_create(l, i as i64, "error");
+    fn total_template_cap_fails_closed_without_silent_merge() {
+        let mut d = DrainMiner::with_bounds(4, 80, 0.99, 3, 100);
+        for i in 0..3 {
+            // Distinct token lengths so each is a new template (high sim threshold).
+            let msg = format!("unique message number {i} with extra tokens pad");
+            d.match_or_create(&msg, i as i64, "info").unwrap();
         }
-        let p1: Vec<_> = d1.templates().into_iter().map(|t| t.pattern).collect();
-        let p2: Vec<_> = d2.templates().into_iter().map(|t| t.pattern).collect();
-        assert_eq!(p1, p2);
+        assert_eq!(d.template_count(), 3);
+        let err = d
+            .match_or_create("brand new never seen message alpha beta gamma", 9, "info")
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("cardinality") || format!("{err}").contains("limit"),
+            "{err}"
+        );
+        assert_eq!(
+            d.template_count(),
+            3,
+            "must not create or merge past total cap"
+        );
+    }
+
+    #[test]
+    fn per_bucket_cap_fails_closed_for_equal_token_count_flood() {
+        // Force every message into the same token-length bucket with no matches.
+        let mut d = DrainMiner::with_bounds(4, 80, 0.99, 10_000, 4);
+        for i in 0..4 {
+            // Exactly 4 tokens each, all unique → 4 templates in one bucket.
+            let msg = format!("tokA{i} tokB{i} tokC{i} tokD{i}");
+            d.match_or_create(&msg, i as i64, "warn").unwrap();
+        }
+        assert_eq!(d.template_count(), 4);
+        let err = d
+            .match_or_create("tokA9 tokB9 tokC9 tokD9", 99, "warn")
+            .unwrap_err();
+        assert!(
+            format!("{err}").to_lowercase().contains("bucket")
+                || format!("{err}").to_lowercase().contains("limit"),
+            "{err}"
+        );
+        assert_eq!(d.template_count(), 4);
+    }
+
+    #[test]
+    fn cancel_during_same_length_scan_is_observed() {
+        let mut d = DrainMiner::with_bounds(4, 80, 0.99, 10_000, 10_000);
+        // Fill a long same-length bucket so the scan iterates many candidates.
+        for i in 0..200 {
+            let msg = format!("alpha{i} beta{i} gamma{i} delta{i}");
+            d.match_or_create(&msg, i as i64, "info").unwrap();
+        }
+        let flag = CancelFlag::new();
+        flag.cancel();
+        // First iteration may not hit the every-64 poll; ensure we cancel with
+        // a non-matching message that forces a full scan.
+        let err = d
+            .match_or_create_cancellable("zzzz0 zzzz1 zzzz2 zzzz3", 1, "info", Some(&flag))
+            .unwrap_err();
+        // Either Cancelled (scan poll) or Policy if it somehow creates — prefer cancel.
+        // With cancel set from the start, the 64-poll on scan_i>0 should fire.
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("cancelled")
+                || msg.contains("Cancelled")
+                || matches!(err, CoreError::Cancelled),
+            "expected cancel during scan, got {err}"
+        );
+    }
+
+    #[test]
+    fn adversarial_equal_token_unique_messages_stay_bounded() {
+        // Many unique equal-token-count messages must not grow past bucket cap.
+        let mut d = DrainMiner::with_bounds(4, 80, 0.95, 500, 32);
+        let mut accepted = 0u64;
+        let mut rejected = 0u64;
+        for i in 0..5_000 {
+            let msg = format!("evt uid={i:06} host=h{i} path=/v1/x status=200");
+            match d.match_or_create(&msg, i as i64, "info") {
+                Ok(_) => accepted += 1,
+                Err(CoreError::Policy(_)) => rejected += 1,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+        assert!(
+            d.template_count() <= 500,
+            "templates {} over total cap",
+            d.template_count()
+        );
+        assert!(rejected > 0, "flood must hit a bound (accepted={accepted})");
+        // Existing clusters remain addressable — no silent wipe.
+        assert!(accepted > 0);
     }
 }

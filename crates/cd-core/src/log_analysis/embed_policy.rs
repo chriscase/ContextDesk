@@ -8,8 +8,24 @@
 use crate::error::{CoreError, CoreResult};
 use serde::{Deserialize, Serialize};
 
-/// Local ingest defers template embedding after 64 MiB of actual streamed input.
-pub const LOCAL_EMBED_DEFER_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+/// Local ingest defers optional template embedding after this many streamed source bytes.
+///
+/// **Measured justification (#824):** the authoritative packaged triage-stress
+/// 250k product corpus streams **63,883,809** source bytes (12 files, 250,000
+/// events, 648 templates). That is **above 60 MiB** (`60 × 1024² = 62,914,560`)
+/// and **below the former 64 MiB** bar, so a 64 MiB threshold never deferred the
+/// real product path. The 60 MiB threshold is chosen so:
+/// - the real 250k packaged path **defers** optional embedding past first use
+///   (keyword/structured ready immediately);
+/// - smaller product paths (pinned seven-day 25k and ui-medium 100k, both well
+///   under 60 MiB of streamed source) **still embed** during SoftWrite.
+///
+/// Do not lower this merely to pass a synthetic fixture — re-measure packaged
+/// product paths if the threshold must move.
+pub const LOCAL_EMBED_DEFER_SOURCE_BYTES: u64 = 60 * 1024 * 1024;
+
+/// Authoritative triage-stress 250k streamed source-byte identity (#824).
+pub const TRIAGE_STRESS_250K_SOURCE_BYTES: u64 = 63_883_809;
 
 /// How a corpus embeds templates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -152,5 +168,26 @@ mod tests {
         assert!(!p.should_defer(LOCAL_EMBED_DEFER_SOURCE_BYTES - 1));
         assert!(!p.should_defer(LOCAL_EMBED_DEFER_SOURCE_BYTES));
         assert!(p.should_defer(LOCAL_EMBED_DEFER_SOURCE_BYTES + 1));
+    }
+
+    #[test]
+    fn authoritative_250k_corpus_crosses_deferral_and_boundary_neighbors_do_not() {
+        let p = LogEmbedPolicy::local_default();
+        // Real packaged triage-stress identity must defer optional embed.
+        const {
+            assert!(
+                TRIAGE_STRESS_250K_SOURCE_BYTES > LOCAL_EMBED_DEFER_SOURCE_BYTES,
+                "250k source bytes must exceed defer threshold"
+            );
+        }
+        assert!(p.should_defer(TRIAGE_STRESS_250K_SOURCE_BYTES));
+        // Strict boundary: at threshold still embeds; one byte over defers.
+        assert!(!p.should_defer(LOCAL_EMBED_DEFER_SOURCE_BYTES));
+        assert!(p.should_defer(LOCAL_EMBED_DEFER_SOURCE_BYTES + 1));
+        // One byte under the measured 250k size still defers (still over 60 MiB).
+        assert!(p.should_defer(TRIAGE_STRESS_250K_SOURCE_BYTES - 1));
+        // Clearly smaller product-scale imports embed during SoftWrite.
+        assert!(!p.should_defer(30 * 1024 * 1024));
+        assert!(!p.should_defer(LOCAL_EMBED_DEFER_SOURCE_BYTES / 2));
     }
 }

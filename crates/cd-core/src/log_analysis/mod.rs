@@ -50,9 +50,12 @@ pub use diagnostics::{
     FailedIngestReason, FailedIngestScanCounts, FailedIngestSourceKind,
     FAILED_INGEST_DIAGNOSTIC_SCHEMA_VERSION, MAX_FAILED_INGEST_EVIDENCE_ENTRIES,
 };
-pub use drain::{DrainMiner, TemplateInfo};
+pub use drain::{
+    DrainMiner, TemplateInfo, MAX_DRAIN_TEMPLATES, MAX_DRAIN_TEMPLATES_PER_LENGTH_BUCKET,
+};
 pub use embed_policy::{
     LogEmbedMode, LogEmbedPolicy, CLOUD_LEAVE_MACHINE_CONFIRM, LOCAL_EMBED_DEFER_SOURCE_BYTES,
+    TRIAGE_STRESS_250K_SOURCE_BYTES,
 };
 pub use event_revision::{
     apply_event_timestamp_revision, undo_event_revision, EventRevisionMetadata,

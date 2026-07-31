@@ -76,15 +76,14 @@ describe("process pipeline labels", () => {
   it("exposes multi-phase log ingest pipeline for progress UI", () => {
     expect(LOG_INGEST_PIPELINE).toEqual([
       "scan",
-      "parse",
-      "template",
-      "redact",
-      "store",
+      "stream",
       "embed",
       "validate",
       "publish",
     ]);
-    expect(phaseLabel("template")).toBe("Template analysis");
+    expect(phaseLabel("stream")).toBe(
+      "Streaming read, parse, template, and persist",
+    );
     expect(phaseLabel("validate")).toBe("Validate");
     expect(phaseLabel("publish")).toBe("Publication");
   });
