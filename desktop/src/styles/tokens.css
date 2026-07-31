@@ -28,6 +28,12 @@
   --space-5: 24px;
   --space-6: 32px;
 
+  /* One reading measure for the whole chat column (#767). Transcript rows, the
+     context shelf, and the composer are each centered at this width inside
+     equal --space-4 gutters, so their outer edges line up exactly. Move this
+     token to resize the column — never widen one surface on its own. */
+  --chat-measure: 52rem;
+
   /* Dense desktop type scale at 16px root (annotations = rendered px at 100% UI scale).
      Tuned to preserve pre-#151 density (~13.5px root era). */
   --text-2xs: 0.5625rem; /* 9px — labels / meta */
