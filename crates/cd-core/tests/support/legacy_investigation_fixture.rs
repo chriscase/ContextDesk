@@ -309,6 +309,7 @@ pub fn install_legacy_unbound_investigation_for_corpus_id(
             updated_at: FIXED_UPDATED_AT,
         }],
         notes: Vec::new(),
+        proposed_findings: Vec::new(),
         created_at: FIXED_CREATED_AT,
         updated_at: FIXED_UPDATED_AT,
     };
