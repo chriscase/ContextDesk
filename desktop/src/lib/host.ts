@@ -3474,6 +3474,52 @@ export async function hostOpenLogExplorer(corpusId: string): Promise<string> {
   return invoke<string>("open_log_explorer", { corpusId });
 }
 
+/** Exact-nav target kind for host-governed Explorer reveal (#698). */
+export type LogExplorerNavTargetKind = "event" | "template";
+
+/** One-shot exact navigation target (string ids only — never JS Number widen). */
+export type LogExplorerNavTargetDto = {
+  kind: LogExplorerNavTargetKind;
+  /** Canonical decimal u64 string. */
+  id: string;
+};
+
+export type OpenLogExplorerTargetResultDto = {
+  windowLabel: string;
+  corpusId: string;
+  target: LogExplorerNavTargetDto;
+};
+
+/**
+ * Host-governed exact navigation: validate corpus + target, open/focus that
+ * corpus's Explorer, stage a one-shot deliver-once target.
+ */
+export async function hostOpenLogExplorerTarget(
+  corpusId: string,
+  target: LogExplorerNavTargetDto,
+): Promise<OpenLogExplorerTargetResultDto> {
+  if (!isTauri()) {
+    throw new Error("Exact log navigation requires Tauri host");
+  }
+  return invoke<OpenLogExplorerTargetResultDto>("open_log_explorer_target", {
+    corpusId,
+    target,
+  });
+}
+
+/**
+ * Take (and clear) the pending exact-nav target for this corpus. Returns null
+ * when nothing is pending — never replays a prior delivery.
+ */
+export async function hostTakeLogExplorerNavTarget(
+  corpusId: string,
+): Promise<LogExplorerNavTargetDto | null> {
+  if (!isTauri()) return null;
+  return invoke<LogExplorerNavTargetDto | null>("take_log_explorer_nav_target", {
+    corpusId,
+  });
+}
+
 /** Import portable package (SoftWrite — new disposable corpus). */
 export async function hostImportLogCorpusPackagePath(
   path: string,

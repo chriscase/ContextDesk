@@ -349,6 +349,127 @@ struct AppState {
     /// In-process capability qualification cache (#724). Memory-only; absent after restart.
     /// Keyed by profile + endpoint fingerprint + exact model + schema version (#650 isolation).
     qualification_store: Mutex<cd_core::capability_qualification::QualificationStore>,
+    /// One-shot exact Log Explorer navigation targets (#698 exact-nav).
+    /// Keyed by corpus id. `take` delivers once; cleared on take, discard, or window destroy.
+    log_explorer_nav_targets: Mutex<LogExplorerNavTargetStore>,
+}
+
+/// One-shot pending target for a Log Explorer window (process-local only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LogExplorerNavTarget {
+    /// `event` or `template`.
+    kind: String,
+    /// Canonical decimal u64 string — never a silent JS Number widen.
+    id: String,
+}
+
+/// Process-local store of one-shot Explorer navigation targets.
+#[derive(Debug, Default)]
+struct LogExplorerNavTargetStore {
+    by_corpus: HashMap<String, LogExplorerNavTarget>,
+}
+
+impl LogExplorerNavTargetStore {
+    fn set(&mut self, corpus_id: String, target: LogExplorerNavTarget) {
+        self.by_corpus.insert(corpus_id, target);
+    }
+
+    fn take(&mut self, corpus_id: &str) -> Option<LogExplorerNavTarget> {
+        self.by_corpus.remove(corpus_id)
+    }
+
+    fn clear(&mut self, corpus_id: &str) {
+        self.by_corpus.remove(corpus_id);
+    }
+
+    fn clear_for_window_label(&mut self, label: &str) {
+        if !label.starts_with("log-explorer-") {
+            return;
+        }
+        self.by_corpus
+            .retain(|corpus_id, _| log_explorer_window_label(corpus_id) != label);
+    }
+
+    #[cfg(test)]
+    fn peek(&self, corpus_id: &str) -> Option<&LogExplorerNavTarget> {
+        self.by_corpus.get(corpus_id)
+    }
+}
+
+/// Stable Tauri window label for a Log Explorer corpus window.
+fn log_explorer_window_label(corpus_id: &str) -> String {
+    format!(
+        "log-explorer-{}",
+        corpus_id
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+            .take(48)
+            .collect::<String>()
+    )
+}
+
+/// Tauri event name delivered to an Explorer window when a new exact target is staged.
+const LOG_EXPLORER_NAV_TARGET_EVENT: &str = "log-explorer-nav-target";
+
+/// Parse a navigation target DTO into a trusted governed identity.
+fn parse_log_explorer_nav_target(
+    kind: &str,
+    id: &str,
+) -> Result<cd_core::log_analysis::GovernedLogCitationId, String> {
+    let kind = kind.trim();
+    let id = id.trim();
+    let prefix = match kind {
+        "event" => "log_event:",
+        "template" => "log_template:",
+        _ => {
+            return Err(format!(
+                "unsupported log navigation kind `{kind}` (expected event or template)"
+            ))
+        }
+    };
+    let raw = format!("{prefix}{id}");
+    cd_core::log_analysis::parse_governed_log_citation_id(&raw)
+        .ok_or_else(|| format!("invalid governed log identity `{raw}`"))
+}
+
+/// Fail closed when the cited evidence is missing from the opened corpus.
+fn ensure_log_nav_evidence_exists(
+    corpus: &cd_core::log_analysis::LogCorpus,
+    parsed: &cd_core::log_analysis::GovernedLogCitationId,
+) -> Result<(), String> {
+    use cd_core::log_analysis::{
+        query_event_neighborhood, EventNeighborhoodQuery, EventQuery, GovernedLogCitationKind,
+        TargetResolveStatus,
+    };
+    match parsed.kind {
+        GovernedLogCitationKind::Event => {
+            let nb = query_event_neighborhood(
+                corpus,
+                &EventNeighborhoodQuery {
+                    target_seq: parsed.value,
+                    before: 0,
+                    after: 0,
+                    filter: EventQuery::default(),
+                    sort_by_time: true,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            if nb.status == TargetResolveStatus::Missing {
+                return Err(format!("event {} was not found in this corpus", parsed.id));
+            }
+            Ok(())
+        }
+        GovernedLogCitationKind::Template => {
+            if corpus.template_pattern(parsed.value).is_none() {
+                return Err(format!(
+                    "template {} was not found in this corpus",
+                    parsed.id
+                ));
+            }
+            Ok(())
+        }
+    }
 }
 
 fn workspace_from_cfg(cfg: &AppConfig) -> Option<Workspace> {
@@ -4748,24 +4869,11 @@ fn should_persist_chat_session(session: &Session) -> bool {
 }
 
 /// Whether a citation id is a governed log evidence identity (#701 / #698).
+///
+/// Delegates to the shared core grammar: lowercase `log_event:<u64>` /
+/// `log_template:<u64>` only (digits, canonical form, overflow rejected).
 fn is_governed_log_citation_id(source_id: &str) -> bool {
-    let id = source_id.trim();
-    if id.is_empty() {
-        return false;
-    }
-    let (prefix, rest) = match id.split_once(':') {
-        Some(parts) => parts,
-        None => return false,
-    };
-    if !matches!(prefix, "log_template" | "log_event") || rest.is_empty() {
-        return false;
-    }
-    rest.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
-        && rest
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphanumeric())
+    cd_core::log_analysis::is_governed_log_citation_id(source_id)
 }
 
 /// Host-owned log citation provenance (#698).
@@ -8110,6 +8218,10 @@ fn discard_log_corpus(state: State<'_, AppState>, corpus_id: String) -> Result<(
     if active_log_corpus_snapshot(&state).as_deref() == Some(corpus_id.as_str()) {
         set_active_log_corpus_state_nonblocking(&state, None);
     }
+    // Discarded corpus must not keep a staged exact-nav target for replay.
+    if let Ok(mut store) = state.log_explorer_nav_targets.lock() {
+        store.clear(&corpus_id);
+    }
     Ok(())
 }
 
@@ -9718,15 +9830,7 @@ async fn open_log_explorer(
     let title = format!("Log Explorer · {corpus_name}");
     // Set active corpus so agent tools resolve without id.
     set_active_log_corpus_state_nonblocking(&state, Some(corpus_id.clone()));
-    // Window labels: alphanumeric + `-` only (Tauri constraint). Keep short.
-    let label = format!(
-        "log-explorer-{}",
-        corpus_id
-            .chars()
-            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-            .take(48)
-            .collect::<String>()
-    );
+    let label = log_explorer_window_label(&corpus_id);
     use tauri::Manager;
     if let Some(w) = app.get_webview_window(&label) {
         let _ = w.set_focus();
@@ -9749,6 +9853,116 @@ async fn open_log_explorer(
         .build()
         .map_err(|e| format!("open log explorer window: {e}"))?;
     Ok(label)
+}
+
+/// Host-governed exact navigation into a corpus Explorer (#698).
+///
+/// Validates the corpus and target, stages a one-shot pending target, opens or
+/// focuses exactly that corpus's Explorer, and never substitutes another corpus.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenLogExplorerTargetResult {
+    window_label: String,
+    corpus_id: String,
+    target: LogExplorerNavTarget,
+}
+
+#[tauri::command]
+async fn open_log_explorer_target(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    corpus_id: String,
+    target: LogExplorerNavTarget,
+) -> Result<OpenLogExplorerTargetResult, String> {
+    let corpus_id = corpus_id.trim().to_string();
+    if corpus_id.is_empty() {
+        return Err("corpus id is required for exact log navigation".into());
+    }
+    let parsed = parse_log_explorer_nav_target(&target.kind, &target.id)?;
+    let staged = LogExplorerNavTarget {
+        kind: parsed.kind.as_str().to_string(),
+        id: parsed.id.clone(),
+    };
+
+    // Validate corpus + evidence before staging or opening a window.
+    let cache = log_cache_dir(&state)?;
+    let handles = Arc::clone(&state.log_corpus_handles);
+    let open_corpus_id = corpus_id.clone();
+    let evidence_id = parsed.clone();
+    let corpus_name = tokio::task::spawn_blocking(move || {
+        let corpus = handles.open(&cache, &open_corpus_id)?;
+        ensure_log_nav_evidence_exists(&corpus, &evidence_id)?;
+        Ok::<_, String>(corpus.name().to_string())
+    })
+    .await
+    .map_err(|error| format!("open log explorer target task join: {error}"))??;
+
+    {
+        let mut store = state
+            .log_explorer_nav_targets
+            .lock()
+            .map_err(|_| "log explorer nav target store poisoned".to_string())?;
+        // Replace any prior pending target for this corpus (last writer wins;
+        // previous undelivered target is dropped — never stale multi-queue).
+        store.set(corpus_id.clone(), staged.clone());
+    }
+
+    let title = format!("Log Explorer · {corpus_name}");
+    set_active_log_corpus_state_nonblocking(&state, Some(corpus_id.clone()));
+    let label = log_explorer_window_label(&corpus_id);
+    use tauri::Emitter;
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window(&label) {
+        let _ = w.set_focus();
+        let _ = w.unminimize();
+        // Notify an already-open Explorer so it can take the new one-shot target.
+        let _ = w.emit(LOG_EXPLORER_NAV_TARGET_EVENT, staged.clone());
+        return Ok(OpenLogExplorerTargetResult {
+            window_label: label,
+            corpus_id,
+            target: staged,
+        });
+    }
+
+    let url = log_explorer_webview_url(&app, &corpus_id)?;
+    tauri::WebviewWindowBuilder::new(&app, &label, url)
+        .title(title)
+        .inner_size(1400.0, 900.0)
+        .min_inner_size(800.0, 600.0)
+        .resizable(true)
+        .maximizable(true)
+        .minimizable(true)
+        .closable(true)
+        .decorations(true)
+        .background_color(tauri::window::Color(0x0b, 0x0c, 0x0e, 0xff))
+        .build()
+        .map_err(|e| format!("open log explorer window: {e}"))?;
+    // Fresh window will take the pending target on mount (no emit required).
+    Ok(OpenLogExplorerTargetResult {
+        window_label: label,
+        corpus_id,
+        target: staged,
+    })
+}
+
+/// Deliver and clear the one-shot exact-nav target for this corpus's Explorer.
+///
+/// Returns `None` when nothing is pending (already delivered, cleared on close,
+/// or never staged). Safe to call repeatedly — never replays a prior target.
+#[tauri::command]
+fn take_log_explorer_nav_target(
+    state: State<'_, AppState>,
+    corpus_id: String,
+) -> Result<Option<LogExplorerNavTarget>, String> {
+    let corpus_id = corpus_id.trim().to_string();
+    if corpus_id.is_empty() {
+        return Err("corpus id is required".into());
+    }
+    let mut store = state
+        .log_explorer_nav_targets
+        .lock()
+        .map_err(|_| "log explorer nav target store poisoned".to_string())?;
+    Ok(store.take(&corpus_id))
 }
 
 fn handbook_webview_url(app: &tauri::AppHandle) -> Result<tauri::WebviewUrl, String> {
@@ -10562,12 +10776,25 @@ pub fn run() {
         qualification_store: Mutex::new(
             cd_core::capability_qualification::QualificationStore::default(),
         ),
+        log_explorer_nav_targets: Mutex::new(LogExplorerNavTargetStore::default()),
     };
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         // Opt-in signed updates (#173). Check/install only via Settings — never silent.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
+        .on_window_event(|window, event| {
+            // Close/destroy clears undelivered exact-nav targets so reopen never
+            // replays a stale citation reveal.
+            if let tauri::WindowEvent::Destroyed = event {
+                let label = window.label().to_string();
+                if let Some(state) = window.try_state::<AppState>() {
+                    if let Ok(mut store) = state.log_explorer_nav_targets.lock() {
+                        store.clear_for_window_label(&label);
+                    }
+                }
+            }
+        })
         .setup(|app| {
             // Dark window/webview fill before React mounts (avoids white flash).
             use tauri::Manager;
@@ -10743,6 +10970,8 @@ pub fn run() {
             list_chat_sessions_for_corpus,
             set_chat_linked_corpus,
             open_log_explorer,
+            open_log_explorer_target,
+            take_log_explorer_nav_target,
             export_log_corpus_package,
             prepare_log_diagnostic_report,
             release_log_diagnostic_report,
@@ -12801,18 +13030,20 @@ mod startup_host_tests {
     use super::{
         admit_agent_turn, build_and_install_background_index, chat_provider_binding_changed,
         chat_turn_cancel_key, desktop_log_ingest_embed_plan_nonblocking,
-        event_to_dto_with_linked_corpus, finish_agent_turn, host_readiness_terminal_events,
-        install_prepared_durable_memory, is_governed_log_citation_id, linked_log_fallback_notice,
-        linked_log_host_terminal_events, linked_log_preflight_at, linked_log_turn_context,
-        load_session_for_turn, log_search_cancel_key, normalize_log_corpus_id,
-        persist_host_terminal_turn_at, persist_linked_provider_loop_terminal_at,
-        prepare_linked_turn_with, provider_profile_for_turn, request_agent_turn_cancel,
-        restore_host_if_generation_matches, save_chat_session_at, set_chat_linked_corpus_at,
-        take_ready_linked_host, validate_linked_log_corpus_at, wait_for_host_readiness,
-        BackgroundIndexBuild, HostInitFlight, HostReadinessFailure, LinkedCheckpointStore,
-        LinkedTurnPreparation, LogExplorerTurnContextReq, StdInstant, LINKED_CHECKPOINT_ENTRY_CAP,
-        LINKED_CHECKPOINT_TOTAL_BYTES, LINKED_CHECKPOINT_TTL, LOG_INGEST_CANCEL_KEY,
-        LOG_REANALYZE_CANCEL_KEY,
+        ensure_log_nav_evidence_exists, event_to_dto_with_linked_corpus, finish_agent_turn,
+        host_readiness_terminal_events, install_prepared_durable_memory,
+        is_governed_log_citation_id, linked_log_fallback_notice, linked_log_host_terminal_events,
+        linked_log_preflight_at, linked_log_turn_context, load_session_for_turn,
+        log_explorer_window_label, log_search_cancel_key, normalize_log_corpus_id,
+        parse_log_explorer_nav_target, persist_host_terminal_turn_at,
+        persist_linked_provider_loop_terminal_at, prepare_linked_turn_with,
+        provider_profile_for_turn, request_agent_turn_cancel, restore_host_if_generation_matches,
+        save_chat_session_at, set_chat_linked_corpus_at, take_ready_linked_host,
+        validate_linked_log_corpus_at, wait_for_host_readiness, BackgroundIndexBuild,
+        HostInitFlight, HostReadinessFailure, LinkedCheckpointStore, LinkedTurnPreparation,
+        LogExplorerNavTarget, LogExplorerNavTargetStore, LogExplorerTurnContextReq, StdInstant,
+        LINKED_CHECKPOINT_ENTRY_CAP, LINKED_CHECKPOINT_TOTAL_BYTES, LINKED_CHECKPOINT_TTL,
+        LOG_INGEST_CANCEL_KEY, LOG_REANALYZE_CANCEL_KEY,
     };
     use cd_core::events::StreamEvent;
     use cd_core::index::{KeywordIndex, ReindexStats};
@@ -14137,6 +14368,128 @@ mod startup_host_tests {
         )
         .expect("turn context");
         assert!(ctx.is_some());
+    }
+
+    #[test]
+    fn governed_log_citation_id_uses_strict_u64_grammar() {
+        assert!(is_governed_log_citation_id("log_event:42"));
+        assert!(is_governed_log_citation_id("log_template:7"));
+        assert!(is_governed_log_citation_id(
+            "log_event:18446744073709551615"
+        ));
+        assert!(!is_governed_log_citation_id("log_event:"));
+        assert!(!is_governed_log_citation_id("log_event:42/../x"));
+        assert!(!is_governed_log_citation_id("LOG_EVENT:42"));
+        assert!(!is_governed_log_citation_id("log_event:event_42"));
+        assert!(!is_governed_log_citation_id(
+            "log_event:18446744073709551616"
+        ));
+        assert!(!is_governed_log_citation_id("log_event:01"));
+    }
+
+    #[test]
+    fn exact_nav_target_parse_and_deliver_once_store() {
+        let parsed = parse_log_explorer_nav_target("event", "9007199254740993")
+            .expect("unsafe-for-JS u64 still parses on host");
+        assert_eq!(parsed.id, "9007199254740993");
+        assert_eq!(parsed.value, 9007199254740993);
+        assert!(parse_log_explorer_nav_target("event", "01").is_err());
+        assert!(parse_log_explorer_nav_target("EVENT", "1").is_err());
+        assert!(parse_log_explorer_nav_target("event", "18446744073709551616").is_err());
+
+        let mut store = LogExplorerNavTargetStore::default();
+        let corpus_a = "corpus-a".to_string();
+        let corpus_b = "corpus-b".to_string();
+        let target_a = LogExplorerNavTarget {
+            kind: "event".into(),
+            id: "42".into(),
+        };
+        let target_b = LogExplorerNavTarget {
+            kind: "template".into(),
+            id: "7".into(),
+        };
+        store.set(corpus_a.clone(), target_a.clone());
+        store.set(corpus_b.clone(), target_b.clone());
+        // Colliding bare ids across corpora stay independent.
+        store.set(
+            corpus_b.clone(),
+            LogExplorerNavTarget {
+                kind: "event".into(),
+                id: "42".into(),
+            },
+        );
+        assert_eq!(store.peek(&corpus_a).map(|t| t.id.as_str()), Some("42"));
+        let first = store.take(&corpus_a).expect("first take");
+        assert_eq!(first, target_a);
+        assert!(store.take(&corpus_a).is_none(), "deliver-once: no replay");
+        // Rapid replace: last writer wins, prior undelivered target dropped.
+        store.set(
+            corpus_b.clone(),
+            LogExplorerNavTarget {
+                kind: "event".into(),
+                id: "99".into(),
+            },
+        );
+        let last = store.take(&corpus_b).expect("last target");
+        assert_eq!(last.id, "99");
+        assert!(store.take(&corpus_b).is_none());
+
+        // Window destroy clears undelivered targets for that label only.
+        store.set(corpus_a.clone(), target_a.clone());
+        store.set(
+            "other".into(),
+            LogExplorerNavTarget {
+                kind: "event".into(),
+                id: "1".into(),
+            },
+        );
+        let label = log_explorer_window_label(&corpus_a);
+        store.clear_for_window_label(&label);
+        assert!(store.peek(&corpus_a).is_none());
+        assert!(store.peek("other").is_some());
+    }
+
+    #[test]
+    fn exact_nav_missing_evidence_and_corpus_fail_closed() {
+        let cache = tempfile::tempdir().expect("cache");
+        let logs = tempfile::tempdir().expect("logs");
+        std::fs::write(
+            logs.path().join("app.log"),
+            b"2026-07-28T12:00:00Z ERROR checkout failed\n",
+        )
+        .expect("fixture");
+        let report =
+            cd_core::log_analysis::ingest_path(cache.path(), logs.path(), "nav", None, "none")
+                .expect("ingest");
+        let corpus =
+            cd_core::log_analysis::LogCorpus::open(cache.path(), &report.corpus_id).expect("open");
+
+        let event0 = parse_log_explorer_nav_target("event", "0").expect("event 0");
+        ensure_log_nav_evidence_exists(&corpus, &event0).expect("seq 0 exists after ingest");
+
+        let missing = parse_log_explorer_nav_target("event", "999999").expect("grammar ok");
+        let err = ensure_log_nav_evidence_exists(&corpus, &missing).expect_err("missing event");
+        assert!(
+            err.to_lowercase().contains("not found"),
+            "missing evidence must fail visibly: {err}"
+        );
+
+        let missing_template =
+            parse_log_explorer_nav_target("template", "999999").expect("grammar ok");
+        let err = ensure_log_nav_evidence_exists(&corpus, &missing_template)
+            .expect_err("missing template");
+        assert!(
+            err.to_lowercase().contains("not found"),
+            "missing template must fail visibly: {err}"
+        );
+
+        // Discarded corpus cannot be opened for substitution.
+        cd_core::log_analysis::LogCorpus::discard(cache.path(), &report.corpus_id)
+            .expect("discard");
+        assert!(
+            cd_core::log_analysis::LogCorpus::open(cache.path(), &report.corpus_id).is_err(),
+            "discarded corpus must not open"
+        );
     }
 
     #[test]

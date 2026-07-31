@@ -3,9 +3,11 @@ import { openPersistedLogCitation } from "../../lib/citations";
 
 describe("persisted log citation routing (#698)", () => {
   const openExplorer = vi.fn();
+  const openExplorerTarget = vi.fn();
 
   beforeEach(() => {
     openExplorer.mockReset();
+    openExplorerTarget.mockReset();
   });
 
   it("opens the citation's original corpus after detach or replacement", async () => {
@@ -20,6 +22,34 @@ describe("persisted log citation routing (#698)", () => {
     );
 
     expect(openExplorer).toHaveBeenCalledWith("corpus-original");
+    expect(unavailable).not.toHaveBeenCalled();
+  });
+
+  it("routes event and template through host exact-nav with string ids", async () => {
+    openExplorerTarget.mockResolvedValue({
+      windowLabel: "log-explorer-c1",
+      corpusId: "c1",
+      target: { kind: "event", id: "9007199254740993" },
+    });
+    const unavailable = vi.fn();
+
+    await openPersistedLogCitation(
+      "log_event:9007199254740993",
+      "c1",
+      unavailable,
+      openExplorer,
+      openExplorerTarget,
+    );
+
+    expect(openExplorer).not.toHaveBeenCalled();
+    expect(openExplorerTarget).toHaveBeenCalledWith("c1", {
+      kind: "event",
+      id: "9007199254740993",
+    });
+    // String identity preserved — not Number-widened.
+    const target = openExplorerTarget.mock.calls[0][1];
+    expect(target.id).toBe("9007199254740993");
+    expect(target.id).not.toBe(String(Number(target.id)));
     expect(unavailable).not.toHaveBeenCalled();
   });
 
@@ -51,6 +81,7 @@ describe("persisted log citation routing (#698)", () => {
     );
 
     expect(openExplorer).not.toHaveBeenCalled();
+    expect(openExplorerTarget).not.toHaveBeenCalled();
     expect(unavailable).toHaveBeenCalledWith(
       "log_template:7",
       expect.stringMatching(/does not record.*will not substitute/i),

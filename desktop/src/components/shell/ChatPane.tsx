@@ -9,6 +9,7 @@ import { useMessageWindow } from "../../hooks/useMessageWindow";
 import type { ChatSession, Msg } from "../../lib/session";
 import {
   hostOpenLogExplorer,
+  hostOpenLogExplorerTarget,
   type BrandingDto,
   type ModelOptionDto,
 } from "../../lib/host";
@@ -64,7 +65,7 @@ const CONTEXT_SAFE_STARTERS: Starter[] = [
   },
 ];
 
-/** Open a host-authored log citation; never substitutes the active corpus (#698). */
+/** Open a host-authored log citation via exact-nav; never substitutes corpus (#698). */
 export async function openPersistedLogCitation(
   sourceId: string,
   corpusId: string | undefined,
@@ -75,6 +76,7 @@ export async function openPersistedLogCitation(
     corpusId,
     showUnavailable,
     hostOpenLogExplorer,
+    (id, target) => hostOpenLogExplorerTarget(id, target),
   );
 }
 
