@@ -309,6 +309,60 @@ pub fn apply_source_timezone(
     preview_token: &str,
     declared_at: i64,
 ) -> CoreResult<EventRevisionReport> {
+    apply_source_timezones(
+        cache_root,
+        corpus_id,
+        expected_revision,
+        &[SourceTimezoneApplyRequest {
+            source: source.into(),
+            iana_timezone: iana_timezone.into(),
+            preview_token: preview_token.into(),
+        }],
+        declared_at,
+    )
+}
+
+/// One source's share of a multi-source timezone application.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SourceTimezoneApplyRequest {
+    /// Portable source identity, exactly as stored on events.
+    pub source: String,
+    /// IANA zone this source's local timestamps should resolve under.
+    pub iana_timezone: String,
+    /// Fingerprint of the preview the user saw; recomputed and matched here.
+    pub preview_token: String,
+}
+
+/// Apply reviewed timezone declarations across one or more sources as a
+/// single atomic event revision.
+///
+/// Every source's preview is recomputed server-side and its token must still
+/// match; a mismatch on any source fails the whole application before any
+/// staging happens, so a stale preview can never be partially applied.
+pub fn apply_source_timezones(
+    cache_root: &Path,
+    corpus_id: &str,
+    expected_revision: u64,
+    requests: &[SourceTimezoneApplyRequest],
+    declared_at: i64,
+) -> CoreResult<EventRevisionReport> {
+    if requests.is_empty() {
+        return Err(CoreError::Message(
+            "timezone apply requires at least one source".into(),
+        ));
+    }
+    {
+        let mut seen = std::collections::BTreeSet::new();
+        for request in requests {
+            if !seen.insert(request.source.as_str()) {
+                return Err(CoreError::Message(format!(
+                    "timezone apply lists source {:?} more than once",
+                    request.source
+                )));
+            }
+        }
+    }
     let corpus = LogCorpus::open(cache_root, corpus_id)?;
     let (current_revision, current_metadata) = revision_state(&corpus)?;
     if current_revision != expected_revision {
@@ -319,46 +373,54 @@ pub fn apply_source_timezone(
     let applied_revision = expected_revision
         .checked_add(1)
         .ok_or_else(|| CoreError::Message("timezone event revision overflow".into()))?;
-    let resolver = resolver_for(source, iana_timezone, declared_at, applied_revision)?;
-    let preview = preview_source_timezone(
-        cache_root,
-        corpus_id,
-        expected_revision,
-        source,
-        iana_timezone,
-    )?;
-    if preview.declaration_fingerprint != preview_token {
-        return Err(CoreError::Message(
-            "timezone preview token no longer matches this source, zone, or corpus revision".into(),
-        ));
-    }
-    let records = source_records(&corpus, source)?;
-    let mut updates = Vec::new();
-    for record in records {
-        let parsed = parsed_record(&record);
-        if let TimestampResolution::Resolved { unix_seconds, .. } = resolver
-            .resolve(source, &parsed)
-            .map_err(|error| CoreError::Message(error.to_string()))?
-        {
-            if record.ts == unix_seconds
-                && record.active_timestamp_basis == ActiveTimestampBasis::ResolvedLocal
-            {
-                continue;
-            }
-            updates.push(EventTimestampUpdate {
-                seq: record.seq,
-                source: source.into(),
-                expected_ts: record.ts,
-                expected_active_timestamp_basis: record.active_timestamp_basis,
-                expected_timestamp_provenance: record.timestamp_provenance,
-                expected_unresolved_local_timestamp: record.unresolved_local_timestamp,
-                revised_ts: unix_seconds,
-                revised_active_timestamp_basis: ActiveTimestampBasis::ResolvedLocal,
-            });
-        }
-    }
     let mut declarations = declarations_from_details(&current_metadata.details)?;
-    declarations.insert(source.into(), resolver.declaration().clone());
+    let mut updates = Vec::new();
+    for request in requests {
+        let source = request.source.as_str();
+        let resolver = resolver_for(
+            source,
+            &request.iana_timezone,
+            declared_at,
+            applied_revision,
+        )?;
+        let preview = preview_source_timezone(
+            cache_root,
+            corpus_id,
+            expected_revision,
+            source,
+            &request.iana_timezone,
+        )?;
+        if preview.declaration_fingerprint != request.preview_token {
+            return Err(CoreError::Message(format!(
+                "timezone preview token no longer matches source {source:?}, its zone, or the corpus revision"
+            )));
+        }
+        let records = source_records(&corpus, source)?;
+        for record in records {
+            let parsed = parsed_record(&record);
+            if let TimestampResolution::Resolved { unix_seconds, .. } = resolver
+                .resolve(source, &parsed)
+                .map_err(|error| CoreError::Message(error.to_string()))?
+            {
+                if record.ts == unix_seconds
+                    && record.active_timestamp_basis == ActiveTimestampBasis::ResolvedLocal
+                {
+                    continue;
+                }
+                updates.push(EventTimestampUpdate {
+                    seq: record.seq,
+                    source: source.into(),
+                    expected_ts: record.ts,
+                    expected_active_timestamp_basis: record.active_timestamp_basis,
+                    expected_timestamp_provenance: record.timestamp_provenance,
+                    expected_unresolved_local_timestamp: record.unresolved_local_timestamp,
+                    revised_ts: unix_seconds,
+                    revised_active_timestamp_basis: ActiveTimestampBasis::ResolvedLocal,
+                });
+            }
+        }
+        declarations.insert(source.into(), resolver.declaration().clone());
+    }
     let metadata =
         metadata_with_declarations(current_metadata, &declarations, "timezone_resolution.apply")?;
     apply_event_timestamp_revision(
@@ -473,6 +535,146 @@ mod tests {
         let corpus_id = corpus.id().to_string();
         drop(corpus);
         (cache, corpus_id)
+    }
+
+    fn two_source_fixture() -> (tempfile::TempDir, String) {
+        let cache = tempfile::tempdir().expect("cache");
+        let corpus = LogCorpus::create(cache.path(), "timezone multi apply").unwrap();
+        let local = |seq: u64, source: &str, stamp: &str| LogEvent {
+            seq,
+            ts: seq as i64,
+            timestamp_provenance: TimestampProvenance::UnresolvedLocal,
+            active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
+            unresolved_local_timestamp: Some(stamp.into()),
+            level: "info".into(),
+            service: Some("api".into()),
+            host: Some("host-a".into()),
+            template_id: 1,
+            params: vec![],
+            trace_id: None,
+            message: "local".into(),
+            source: source.into(),
+        };
+        corpus
+            .push_events(&[
+                local(0, "a/app.log", "2021-03-05 02:53:53,654"),
+                local(1, "b/app.log", "2021-03-05 03:10:00,000"),
+            ])
+            .unwrap();
+        corpus.flush().unwrap();
+        let corpus_id = corpus.id().to_string();
+        drop(corpus);
+        (cache, corpus_id)
+    }
+
+    #[test]
+    fn multi_source_apply_is_one_atomic_revision_and_fails_whole_on_any_stale_token() {
+        let (cache, corpus_id) = two_source_fixture();
+        let rev = load_timezone_resolution_state(cache.path(), &corpus_id)
+            .unwrap()
+            .scope
+            .event_revision;
+        let preview_a = preview_source_timezone(
+            cache.path(),
+            &corpus_id,
+            rev,
+            "a/app.log",
+            "America/Chicago",
+        )
+        .unwrap();
+        let preview_b =
+            preview_source_timezone(cache.path(), &corpus_id, rev, "b/app.log", "Europe/Berlin")
+                .unwrap();
+        assert_eq!(preview_a.affected_records, 1);
+        assert_eq!(preview_b.affected_records, 1);
+
+        // A bad token on the SECOND source fails the whole apply before staging.
+        let err = apply_source_timezones(
+            cache.path(),
+            &corpus_id,
+            rev,
+            &[
+                SourceTimezoneApplyRequest {
+                    source: "a/app.log".into(),
+                    iana_timezone: "America/Chicago".into(),
+                    preview_token: preview_a.declaration_fingerprint.clone(),
+                },
+                SourceTimezoneApplyRequest {
+                    source: "b/app.log".into(),
+                    iana_timezone: "Europe/Berlin".into(),
+                    preview_token: "stale".into(),
+                },
+            ],
+            1_700_000_000,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("b/app.log"), "err: {err}");
+        let state = load_timezone_resolution_state(cache.path(), &corpus_id).unwrap();
+        assert_eq!(state.scope.event_revision, rev, "nothing applied");
+        assert!(state.declarations.is_empty());
+
+        // Duplicate source listing is refused outright.
+        let dup = apply_source_timezones(
+            cache.path(),
+            &corpus_id,
+            rev,
+            &[
+                SourceTimezoneApplyRequest {
+                    source: "a/app.log".into(),
+                    iana_timezone: "America/Chicago".into(),
+                    preview_token: preview_a.declaration_fingerprint.clone(),
+                },
+                SourceTimezoneApplyRequest {
+                    source: "a/app.log".into(),
+                    iana_timezone: "UTC".into(),
+                    preview_token: preview_a.declaration_fingerprint.clone(),
+                },
+            ],
+            1_700_000_000,
+        )
+        .unwrap_err();
+        assert!(dup.to_string().contains("more than once"), "err: {dup}");
+
+        // Both valid tokens: exactly one revision, both declarations saved,
+        // both records resolved, and one undo restores everything.
+        let report = apply_source_timezones(
+            cache.path(),
+            &corpus_id,
+            rev,
+            &[
+                SourceTimezoneApplyRequest {
+                    source: "a/app.log".into(),
+                    iana_timezone: "America/Chicago".into(),
+                    preview_token: preview_a.declaration_fingerprint,
+                },
+                SourceTimezoneApplyRequest {
+                    source: "b/app.log".into(),
+                    iana_timezone: "Europe/Berlin".into(),
+                    preview_token: preview_b.declaration_fingerprint,
+                },
+            ],
+            1_700_000_000,
+        )
+        .unwrap();
+        assert_eq!(report.revision, rev + 1);
+        assert_eq!(report.changed_events, 2);
+        let state = load_timezone_resolution_state(cache.path(), &corpus_id).unwrap();
+        assert_eq!(state.scope.event_revision, rev + 1);
+        assert_eq!(state.declarations.len(), 2);
+        assert_eq!(
+            corpus_time_quality(&LogCorpus::open(cache.path(), &corpus_id).unwrap()),
+            TimeQuality::Wall
+        );
+        undo_event_revision(cache.path(), &corpus_id, rev + 1, None).unwrap();
+        let state = load_timezone_resolution_state(cache.path(), &corpus_id).unwrap();
+        // Undo publishes forward as its own revision; the declarations and
+        // record bases return to their pre-apply state.
+        assert_eq!(state.scope.event_revision, rev + 2);
+        assert!(state.declarations.is_empty());
+        assert_eq!(
+            corpus_time_quality(&LogCorpus::open(cache.path(), &corpus_id).unwrap()),
+            TimeQuality::OrderOnly
+        );
     }
 
     fn large_sparse_fixture() -> (tempfile::TempDir, String) {

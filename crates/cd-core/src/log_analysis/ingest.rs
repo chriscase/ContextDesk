@@ -219,6 +219,24 @@ pub struct IngestReport {
     pub phase_timings: IngestPhaseTimings,
 }
 
+/// Explicit user selection carried from a reviewed import preview (#751).
+///
+/// Identities use the same portable form the preview reports
+/// ([`portable_source_identity`] and `archive!/member` chains), so a
+/// deselected preview row maps one-to-one onto a skipped ingest source.
+/// Skips are counted as `ignored: user_deselected` — never silent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IngestSelection {
+    /// Portable identities the user explicitly deselected.
+    pub deselected: std::collections::BTreeSet<String>,
+}
+
+impl IngestSelection {
+    fn skips(selection: Option<&IngestSelection>, identity: &str) -> bool {
+        selection.is_some_and(|s| s.deselected.contains(identity))
+    }
+}
+
 /// Ingest a file or directory into a new corpus under `cache_root`.
 ///
 /// Streams line-by-line (bounded memory). `embed` is optional — when present,
@@ -265,6 +283,7 @@ pub fn ingest_path_with_observer(
         None,
         progress,
         cancel,
+        None,
         None,
     )
 }
@@ -324,6 +343,7 @@ pub fn ingest_path_with_policy_and_observer(
         progress,
         cancel,
         None,
+        None,
     )
 }
 
@@ -365,6 +385,58 @@ pub fn ingest_path_with_policy_and_observer_managed(
         progress,
         cancel,
         Some(managed_identity),
+        None,
+    )
+}
+
+/// Managed policy ingest honoring an explicit reviewed selection (#751).
+///
+/// Identical to [`ingest_path_with_policy_and_observer_managed`] except that
+/// sources the user deselected in a reviewed import preview are skipped and
+/// counted as `ignored: user_deselected`. Deselecting everything importable
+/// fails with the standard zero-event refusal — a selection can never publish
+/// an empty corpus.
+#[allow(clippy::too_many_arguments)]
+pub fn ingest_path_with_policy_selection_and_observer_managed(
+    cache_root: &Path,
+    path: &Path,
+    name: &str,
+    policy: &LogEmbedPolicy,
+    embed: Option<Arc<dyn EmbedBackend>>,
+    progress: &dyn ProcessProgressObserver,
+    cancel: Option<&CancelFlag>,
+    managed_identity: &str,
+    selection: &IngestSelection,
+) -> CoreResult<IngestReport> {
+    policy.assert_embed_allowed()?;
+    if selection.deselected.len() > super::import_preview::MAX_IMPORT_PREVIEW_ITEMS {
+        return Err(CoreError::Policy(format!(
+            "import selection lists {} deselected identities (limit {})",
+            selection.deselected.len(),
+            super::import_preview::MAX_IMPORT_PREVIEW_ITEMS
+        )));
+    }
+    let backend = match policy.mode {
+        LogEmbedMode::None => None,
+        LogEmbedMode::Local | LogEmbedMode::Cloud => embed,
+    };
+    if policy.mode == LogEmbedMode::Cloud && backend.is_none() {
+        return Err(CoreError::Config(
+            "cloud embed mode requires an EmbedBackend (key from keychain)".into(),
+        ));
+    }
+    ingest_path_inner(
+        cache_root,
+        path,
+        name,
+        backend.as_deref(),
+        policy.model_id.as_str(),
+        policy.mode,
+        policy.defer_above_source_bytes,
+        progress,
+        cancel,
+        Some(managed_identity),
+        Some(selection),
     )
 }
 
@@ -2082,6 +2154,7 @@ fn ingest_from_zip(
         budget,
         limits,
         ops,
+        None,
     )
 }
 
@@ -2104,6 +2177,7 @@ fn ingest_from_zip_file(
     budget: &mut RawIngestBudget,
     limits: RawIngestLimits,
     ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
+    selection: Option<&IngestSelection>,
 ) -> CoreResult<u64> {
     if cancelled(cancel) {
         emit(
@@ -2299,6 +2373,11 @@ fn ingest_from_zip_file(
                 )));
             }
         };
+        if IngestSelection::skips(selection, &source_identity) {
+            stats.ignored("user_deselected", Path::new(&source_identity));
+            files_done += 1;
+            continue;
+        }
         let nested_archive =
             plan.disposition == ZipEntryDisposition::NestedArchive || has_zip_signature(head);
         if nested_archive {
@@ -2365,6 +2444,7 @@ fn ingest_from_zip_file(
                 budget,
                 limits,
                 ops,
+                selection,
             )?;
             files_done += 1;
             continue;
@@ -2464,6 +2544,7 @@ fn ingest_path_inner(
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
     managed_identity: Option<&str>,
+    selection: Option<&IngestSelection>,
 ) -> CoreResult<IngestReport> {
     ingest_path_inner_with_fault(
         cache_root,
@@ -2476,6 +2557,7 @@ fn ingest_path_inner(
         progress,
         cancel,
         managed_identity,
+        selection,
         None,
     )
 }
@@ -2492,6 +2574,7 @@ fn ingest_path_inner_with_fault(
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
     managed_identity: Option<&str>,
+    selection: Option<&IngestSelection>,
     fault: IngestFaultHook<'_>,
 ) -> CoreResult<IngestReport> {
     ingest_path_inner_with_limits_and_fault(
@@ -2505,6 +2588,7 @@ fn ingest_path_inner_with_fault(
         progress,
         cancel,
         managed_identity,
+        selection,
         RawIngestLimits::default(),
         fault,
     )
@@ -2522,6 +2606,7 @@ fn ingest_path_inner_with_limits_and_fault(
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
     managed_identity: Option<&str>,
+    selection: Option<&IngestSelection>,
     limits: RawIngestLimits,
     fault: IngestFaultHook<'_>,
 ) -> CoreResult<IngestReport> {
@@ -2576,6 +2661,7 @@ fn ingest_path_inner_with_limits_and_fault(
             defer_above_source_bytes,
             progress,
             cancel,
+            selection,
             limits,
             fault,
             &ops,
@@ -2694,6 +2780,7 @@ fn ingest_path_inner_with_limits_and_fault(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn ingest_path_into_cache(
     cache_root: &Path,
     path: &Path,
@@ -2704,6 +2791,7 @@ fn ingest_path_into_cache(
     defer_above_source_bytes: Option<u64>,
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
+    selection: Option<&IngestSelection>,
     limits: RawIngestLimits,
     fault: IngestFaultHook<'_>,
     ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
@@ -2848,6 +2936,11 @@ fn ingest_path_into_cache(
                 )
             };
             let rel = portable_source_identity(rel_path)?;
+            if IngestSelection::skips(selection, &rel) {
+                stats.ignored("user_deselected", file);
+                files_done += 1;
+                continue;
+            }
             let mut signature = [0u8; 4];
             let signature_len = match fh.read(&mut signature) {
                 Ok(read) => read,
@@ -2879,6 +2972,7 @@ fn ingest_path_into_cache(
                     &mut budget,
                     limits,
                     ops,
+                    selection,
                 )?;
                 files_done += 1;
                 continue;
@@ -3942,6 +4036,7 @@ mod tests {
             progress,
             cancel,
             None,
+            None,
             limits,
             None,
         )
@@ -4308,6 +4403,86 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn selection_skips_deselected_sources_and_never_publishes_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("visible.log"), "level=info msg=visible\n").unwrap();
+        std::fs::write(logs.join("extra.log"), "level=info msg=extra\n").unwrap();
+        let inner = zip_bytes(&[("deep/app.log", b"level=error msg=nested-visible\n")]);
+        std::fs::write(logs.join("host-a.zip"), &inner).unwrap();
+
+        let policy = LogEmbedPolicy {
+            mode: LogEmbedMode::None,
+            ..LogEmbedPolicy::default()
+        };
+        let selection = IngestSelection {
+            deselected: [
+                "extra.log".to_string(),
+                "host-a.zip!/deep/app.log".to_string(),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let report = ingest_path_with_policy_selection_and_observer_managed(
+            &cache,
+            &logs,
+            "selection-skips",
+            &policy,
+            None,
+            &NoopProcessProgress,
+            None,
+            "managed-selection-test",
+            &selection,
+        )
+        .unwrap();
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        let mut sources = corpus.with_events(|events| {
+            events
+                .iter()
+                .map(|event| event.source.clone())
+                .collect::<Vec<_>>()
+        });
+        sources.sort();
+        sources.dedup();
+        assert_eq!(sources, ["visible.log"]);
+        // Skips are disclosed, never silent: counted as ignored with a
+        // stable reason code.
+        assert_eq!(
+            report.stats.exclusion_counts.get("user_deselected"),
+            Some(&2)
+        );
+
+        // Deselecting every importable source refuses to publish a corpus.
+        let all = IngestSelection {
+            deselected: [
+                "visible.log".to_string(),
+                "extra.log".to_string(),
+                "host-a.zip!/deep/app.log".to_string(),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let err = ingest_path_with_policy_selection_and_observer_managed(
+            &cache,
+            &logs,
+            "selection-empty",
+            &policy,
+            None,
+            &NoopProcessProgress,
+            None,
+            "managed-selection-empty",
+            &all,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("no safe/importable log events"),
+            "unexpected error: {err}"
+        );
+    }
+
     fn nested_zip_success_from_directory_and_archive_preserves_virtual_identities() {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("cache");
@@ -5846,6 +6021,7 @@ mod tests {
                 &NoopProcessProgress,
                 None,
                 None,
+                None,
                 Some(&hook),
             )
             .unwrap_err();
@@ -5897,6 +6073,7 @@ mod tests {
             None,
             &observer,
             Some(&cancel),
+            None,
             None,
             Some(&hook),
         )
