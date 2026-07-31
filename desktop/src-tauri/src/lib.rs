@@ -8693,6 +8693,36 @@ fn get_active_log_corpus(state: State<'_, AppState>) -> Result<Option<String>, S
 
 // ── Log Explorer (#480–#487) ────────────────────────────────────────────────
 
+/// Reduce a renderer-supplied exclusion set to what the durable policy allows.
+///
+/// The webview is outside the trusted computing base (`docs/THREAT_MODEL.md`),
+/// so `excludedTemplateIds` arriving over IPC is a **request**, never
+/// authority. Every Explorer read path routes through here before touching the
+/// corpus, so a stale or compromised renderer cannot hide evidence the #671
+/// policy does not authorize. Suspend and temporary reveal keep working
+/// because they send fewer ids and this can only ever remove more.
+///
+/// This never fails the query: an unreadable policy yields an empty effective
+/// set, which shows everything rather than withholding evidence.
+fn enforce_log_suppression_lens(
+    corpus: &cd_core::log_analysis::LogCorpus,
+    query: &mut cd_core::log_analysis::EventQuery,
+) {
+    let _ = cd_core::log_analysis::apply_trusted_suppression_lens(corpus, query);
+}
+
+/// Open a corpus and reduce the query's exclusions in one step.
+fn open_log_corpus_with_lens(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+    query: &mut cd_core::log_analysis::EventQuery,
+) -> Result<Arc<cd_core::log_analysis::LogCorpus>, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    enforce_log_suppression_lens(&corpus, query);
+    Ok(corpus)
+}
+
 /// Paged/keyset event query for the Log Explorer.
 fn query_log_events_at(
     handles: &LogCorpusHandleCache,
@@ -8700,8 +8730,9 @@ fn query_log_events_at(
     corpus_id: &str,
     query: &cd_core::log_analysis::EventQuery,
 ) -> Result<cd_core::log_analysis::EventPage, String> {
-    let corpus = handles.open(cache, corpus_id)?;
-    cd_core::log_analysis::query_events(&corpus, query).map_err(|e| e.to_string())
+    let mut query = query.clone();
+    let corpus = open_log_corpus_with_lens(handles, cache, corpus_id, &mut query)?;
+    cd_core::log_analysis::query_events(&corpus, &query).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -8724,8 +8755,9 @@ fn query_log_event_rows_at(
     corpus_id: &str,
     query: &cd_core::log_analysis::EventQuery,
 ) -> Result<cd_core::log_analysis::EventRowsPage, String> {
-    let corpus = handles.open(cache, corpus_id)?;
-    cd_core::log_analysis::query_event_rows(&corpus, query).map_err(|e| e.to_string())
+    let mut query = query.clone();
+    let corpus = open_log_corpus_with_lens(handles, cache, corpus_id, &mut query)?;
+    cd_core::log_analysis::query_event_rows(&corpus, &query).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -8750,8 +8782,9 @@ fn count_log_events_at(
     corpus_id: &str,
     query: &cd_core::log_analysis::EventQuery,
 ) -> Result<cd_core::log_analysis::EventCount, String> {
-    let corpus = handles.open(cache, corpus_id)?;
-    cd_core::log_analysis::query_event_count(&corpus, query).map_err(|e| e.to_string())
+    let mut query = query.clone();
+    let corpus = open_log_corpus_with_lens(handles, cache, corpus_id, &mut query)?;
+    cd_core::log_analysis::query_event_count(&corpus, &query).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -8856,8 +8889,9 @@ fn query_log_timeline_at(
     corpus_id: &str,
     query: &cd_core::log_analysis::TimelineSummaryQuery,
 ) -> Result<cd_core::log_analysis::TimelineSummary, String> {
-    let corpus = handles.open(cache, corpus_id)?;
-    cd_core::log_analysis::query_timeline_summary(&corpus, query).map_err(|e| e.to_string())
+    let mut query = query.clone();
+    let corpus = open_log_corpus_with_lens(handles, cache, corpus_id, &mut query.filter)?;
+    cd_core::log_analysis::query_timeline_summary(&corpus, &query).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -8880,8 +8914,9 @@ fn query_log_shared_timeline_at(
     corpus_id: &str,
     query: &cd_core::log_analysis::SharedTimelineSummaryQuery,
 ) -> Result<cd_core::log_analysis::SharedTimelineSummary, String> {
-    let corpus = handles.open(cache, corpus_id)?;
-    cd_core::log_analysis::query_shared_timeline_summary(&corpus, query).map_err(|e| e.to_string())
+    let mut query = query.clone();
+    let corpus = open_log_corpus_with_lens(handles, cache, corpus_id, &mut query.filter)?;
+    cd_core::log_analysis::query_shared_timeline_summary(&corpus, &query).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -8906,8 +8941,9 @@ fn query_log_event_neighborhood_at(
     corpus_id: &str,
     query: &cd_core::log_analysis::EventNeighborhoodQuery,
 ) -> Result<cd_core::log_analysis::EventNeighborhood, String> {
-    let corpus = handles.open(cache, corpus_id)?;
-    cd_core::log_analysis::query_event_neighborhood(&corpus, query).map_err(|e| e.to_string())
+    let mut query = query.clone();
+    let corpus = open_log_corpus_with_lens(handles, cache, corpus_id, &mut query.filter)?;
+    cd_core::log_analysis::query_event_neighborhood(&corpus, &query).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -8932,8 +8968,9 @@ fn query_log_facets_at(
     corpus_id: &str,
     query: &cd_core::log_analysis::EventQuery,
 ) -> Result<cd_core::log_analysis::LogFacets, String> {
-    let corpus = handles.open(cache, corpus_id)?;
-    cd_core::log_analysis::query_facets(&corpus, query).map_err(|e| e.to_string())
+    let mut query = query.clone();
+    let corpus = open_log_corpus_with_lens(handles, cache, corpus_id, &mut query)?;
+    cd_core::log_analysis::query_facets(&corpus, &query).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -9030,7 +9067,7 @@ async fn log_search_events(
     } else {
         None
     };
-    let q = cd_core::log_analysis::EventSearchQuery {
+    let mut q = cd_core::log_analysis::EventSearchQuery {
         query: args.query,
         semantic,
         k: args.k.unwrap_or(50) as usize,
@@ -9042,7 +9079,9 @@ async fn log_search_events(
     let cancel_for_job = cancel.clone();
     let handles = Arc::clone(&state.log_corpus_handles);
     let result = tokio::task::spawn_blocking(move || {
-        let corpus = handles.open(&cache, &corpus_id)?;
+        // Find is a lensed surface too: without this, a stale renderer could
+        // hide a search hit the durable policy no longer suppresses.
+        let corpus = open_log_corpus_with_lens(&handles, &cache, &corpus_id, &mut q.filter)?;
         let is_cancelled = || cancel_for_job.load(std::sync::atomic::Ordering::SeqCst);
         cd_core::log_analysis::search_events_advanced_with_cancel(
             &corpus,
@@ -9136,6 +9175,34 @@ async fn log_load_suppression(
         .map_err(|error| format!("log suppression load task join: {error}"))?
 }
 
+fn log_suppression_lens_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+) -> Result<cd_core::log_analysis::TrustedSuppressionLens, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    Ok((*cd_core::log_analysis::trusted_suppression_lens(&corpus)).clone())
+}
+
+/// The exact exclusion set the host will honour for this corpus (#819).
+///
+/// The renderer asks for this instead of deriving exclusions from the policy
+/// document itself, so its disclosure ("N rules · M excluded") describes what
+/// the host actually enforces. Requesting these ids back is still only a
+/// request — enforcement re-derives the trusted set on every query — so this is
+/// disclosure, not a capability token.
+#[tauri::command]
+async fn log_suppression_lens(
+    state: State<'_, AppState>,
+    corpus_id: String,
+) -> Result<cd_core::log_analysis::TrustedSuppressionLens, String> {
+    let cache = log_cache_dir(&state)?;
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || log_suppression_lens_at(&handles, &cache, &corpus_id))
+        .await
+        .map_err(|error| format!("log suppression lens task join: {error}"))?
+}
+
 fn log_suppression_diagnostic_snapshot_at(
     handles: &LogCorpusHandleCache,
     cache: &std::path::Path,
@@ -9224,14 +9291,18 @@ fn activate_log_template_suppression_at(
     args: LogActivateTemplateSuppressionArgs,
 ) -> Result<cd_core::log_analysis::SuppressionMutationResult, String> {
     let corpus = handles.open(cache, &args.corpus_id)?;
-    cd_core::log_analysis::activate_template_suppression(
+    let result = cd_core::log_analysis::activate_template_suppression(
         &corpus,
         args.expected_revision,
         cd_core::log_analysis::ActivateSuppressionPreview {
             preview_token: args.preview_token,
         },
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string());
+    // Drop the cached lens whether or not activation succeeded: a failure can
+    // still have been preceded by another writer publishing a new sidecar.
+    cd_core::log_analysis::invalidate_trusted_suppression_lens(&corpus);
+    result
 }
 
 /// Activate one current human-authored preview.
@@ -9264,13 +9335,17 @@ fn mutate_log_template_suppression_rule_at(
     args: LogMutateTemplateSuppressionRuleArgs,
 ) -> Result<cd_core::log_analysis::SuppressionMutationResult, String> {
     let corpus = handles.open(cache, &args.corpus_id)?;
-    cd_core::log_analysis::mutate_template_suppression_rule(
+    let result = cd_core::log_analysis::mutate_template_suppression_rule(
         &corpus,
         args.expected_revision,
         &args.rule_id,
         args.mutation,
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string());
+    // Disabling or removing a rule must stop hiding its events on the very next
+    // query, not once the sidecar's observed identity happens to be rechecked.
+    cd_core::log_analysis::invalidate_trusted_suppression_lens(&corpus);
+    result
 }
 
 /// Disable, re-enable, or tombstone one durable suppression rule.
@@ -11188,6 +11263,7 @@ pub fn run() {
             cancel_log_search,
             log_propose_noise_candidates,
             log_load_suppression,
+            log_suppression_lens,
             log_suppression_diagnostic_snapshot,
             log_preview_template_suppression,
             log_activate_template_suppression,
@@ -12193,6 +12269,411 @@ mod log_original_host_tests {
         assert!(
             !shared_command.contains("ensure_host("),
             "local bounded summary must not construct the agent host"
+        );
+    }
+}
+
+/// The Explorer's exclusion lens is the host's decision, not the renderer's (#819).
+#[cfg(test)]
+mod log_suppression_lens_host_tests {
+    use super::*;
+    use cd_core::log_analysis::{
+        ActiveTimestampBasis, LogEvent, SuppressionLensState, TemplateInfo, TemplateRow,
+        TimestampProvenance,
+    };
+
+    /// Template 1 is genuinely suppressed; templates 2 and 3 are evidence that
+    /// no renderer may hide. Template 3 is the ERROR family.
+    const SUPPRESSED: u64 = 1;
+    const OTHER: u64 = 2;
+    const ERRORS: u64 = 3;
+
+    fn lens_fixture() -> (tempfile::TempDir, PathBuf, String, LogCorpusHandleCache) {
+        let root = tempfile::tempdir().expect("temp root");
+        let cache = root.path().join("cache");
+        let corpus =
+            cd_core::log_analysis::LogCorpus::create(&cache, "lens-host").expect("create corpus");
+        corpus
+            .upsert_templates((1..=3u64).map(|template_id| TemplateRow {
+                info: TemplateInfo {
+                    template_id,
+                    pattern: format!("family {template_id} <*>"),
+                    token_count: 3,
+                    count: 20,
+                    first_seen: 1_700_000_000,
+                    last_seen: 1_700_001_200,
+                    severity: if template_id == ERRORS { 4 } else { 1 },
+                    example: format!("family {template_id} sample"),
+                },
+                content_hash: format!("sha256:fp-{template_id}"),
+                vector: None,
+            }))
+            .expect("templates");
+        let mut events = Vec::new();
+        let mut seq = 1u64;
+        for template_id in 1..=3u64 {
+            for step in 0..20u64 {
+                events.push(LogEvent {
+                    seq,
+                    ts: 1_700_000_000 + (step * 60 + template_id) as i64,
+                    timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
+                    level: if template_id == ERRORS {
+                        "ERROR".into()
+                    } else {
+                        "INFO".into()
+                    },
+                    service: Some("svc".into()),
+                    host: Some("host-1".into()),
+                    template_id,
+                    params: Vec::new(),
+                    trace_id: None,
+                    message: format!("family {template_id} sample"),
+                    source: "app.log".into(),
+                });
+                seq += 1;
+            }
+        }
+        corpus.push_events(&events).expect("events");
+        corpus.flush().expect("flush");
+        let corpus_id = corpus.id().to_string();
+        drop(corpus);
+
+        let handles = LogCorpusHandleCache::default();
+        let opened = handles.open(&cache, &corpus_id).expect("open");
+        let preview = cd_core::log_analysis::preview_template_suppression(
+            &opened,
+            0,
+            cd_core::log_analysis::NewSuppressionPreview {
+                name: "Family one".into(),
+                rationale: "Repeated background line".into(),
+                template_id: SUPPRESSED,
+                origin: cd_core::log_analysis::SuppressionRuleOrigin::Human,
+            },
+        )
+        .expect("preview");
+        cd_core::log_analysis::activate_template_suppression(
+            &opened,
+            preview.rule_revision,
+            cd_core::log_analysis::ActivateSuppressionPreview {
+                preview_token: preview.token.clone(),
+            },
+        )
+        .expect("activate");
+        cd_core::log_analysis::invalidate_trusted_suppression_lens(&opened);
+        drop(opened);
+        (root, cache, corpus_id, handles)
+    }
+
+    /// A renderer that asks to hide every template it knows about.
+    fn hostile_query() -> cd_core::log_analysis::EventQuery {
+        cd_core::log_analysis::EventQuery {
+            excluded_template_ids: vec![SUPPRESSED, OTHER, ERRORS, 9_999],
+            limit: 200,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn every_explorer_surface_reduces_a_hostile_exclusion_set_to_the_policy() {
+        let (_root, cache, corpus_id, handles) = lens_fixture();
+
+        let rows =
+            query_log_event_rows_at(&handles, &cache, &corpus_id, &hostile_query()).expect("rows");
+        let seen: std::collections::BTreeSet<u64> =
+            rows.events.iter().map(|event| event.template_id).collect();
+        assert_eq!(
+            seen,
+            [OTHER, ERRORS].into_iter().collect(),
+            "only the policy-authorized template may be hidden"
+        );
+
+        let page =
+            query_log_events_at(&handles, &cache, &corpus_id, &hostile_query()).expect("page");
+        assert!(page
+            .events
+            .iter()
+            .all(|event| event.template_id != SUPPRESSED));
+        assert!(page.events.iter().any(|event| event.template_id == ERRORS));
+
+        // Counts, facets and both timelines must agree with the rows.
+        let count =
+            count_log_events_at(&handles, &cache, &corpus_id, &hostile_query()).expect("count");
+        assert_eq!(count.total_matched, 40, "20 other + 20 error events remain");
+
+        let facets =
+            query_log_facets_at(&handles, &cache, &corpus_id, &hostile_query()).expect("facets");
+        let error_facet: u64 = facets
+            .levels
+            .iter()
+            .filter(|(level, _)| level.eq_ignore_ascii_case("error"))
+            .map(|(_, count)| *count)
+            .sum();
+        assert_eq!(
+            error_facet, 20,
+            "facets must not drop unauthorized evidence"
+        );
+
+        let timeline = query_log_timeline_at(
+            &handles,
+            &cache,
+            &corpus_id,
+            &cd_core::log_analysis::TimelineSummaryQuery {
+                filter: hostile_query(),
+                ..Default::default()
+            },
+        )
+        .expect("timeline");
+        assert_eq!(timeline.total_matched, 40);
+
+        let shared = query_log_shared_timeline_at(
+            &handles,
+            &cache,
+            &corpus_id,
+            &cd_core::log_analysis::SharedTimelineSummaryQuery {
+                filter: hostile_query(),
+                ..Default::default()
+            },
+        )
+        .expect("shared timeline");
+        assert_eq!(shared.total_matched, 40);
+
+        let neighborhood = query_log_event_neighborhood_at(
+            &handles,
+            &cache,
+            &corpus_id,
+            &cd_core::log_analysis::EventNeighborhoodQuery {
+                target_seq: 41,
+                filter: hostile_query(),
+                ..Default::default()
+            },
+        )
+        .expect("neighborhood");
+        assert!(neighborhood
+            .events
+            .iter()
+            .all(|event| event.template_id != SUPPRESSED));
+        assert!(neighborhood
+            .events
+            .iter()
+            .any(|event| event.template_id == ERRORS));
+    }
+
+    #[test]
+    fn suspending_the_lens_still_reveals_everything() {
+        let (_root, cache, corpus_id, handles) = lens_fixture();
+        // Suspend and temporary reveal both send an empty set.
+        let suspended = cd_core::log_analysis::EventQuery {
+            excluded_template_ids: vec![],
+            limit: 200,
+            ..Default::default()
+        };
+        let count = count_log_events_at(&handles, &cache, &corpus_id, &suspended).expect("count");
+        assert_eq!(count.total_matched, 60, "suspend must hide nothing");
+    }
+
+    #[test]
+    fn disabling_a_rule_stops_hiding_its_events_on_the_next_query() {
+        let (_root, cache, corpus_id, handles) = lens_fixture();
+        let before =
+            count_log_events_at(&handles, &cache, &corpus_id, &hostile_query()).expect("before");
+        assert_eq!(before.total_matched, 40);
+
+        let corpus = handles.open(&cache, &corpus_id).expect("open");
+        let document = cd_core::log_analysis::load_suppression_document(&corpus).expect("document");
+        let rule_id = document
+            .rules
+            .iter()
+            .find(|rule| rule.predicate.template_id == SUPPRESSED)
+            .map(|rule| rule.id.clone())
+            .expect("rule");
+        let revision = document.revision;
+        drop(corpus);
+
+        mutate_log_template_suppression_rule_at(
+            &handles,
+            &cache,
+            LogMutateTemplateSuppressionRuleArgs {
+                corpus_id: corpus_id.clone(),
+                expected_revision: revision,
+                rule_id,
+                mutation: cd_core::log_analysis::SuppressionRuleMutation::Disable,
+            },
+        )
+        .expect("disable");
+
+        let after =
+            count_log_events_at(&handles, &cache, &corpus_id, &hostile_query()).expect("after");
+        assert_eq!(
+            after.total_matched, 60,
+            "a disabled rule must stop excluding immediately"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_policy_hides_nothing_and_reports_it() {
+        let (_root, cache, corpus_id, handles) = lens_fixture();
+        let corpus = handles.open(&cache, &corpus_id).expect("open");
+        std::fs::write(corpus.root().join("suppression.json"), b"{ truncated")
+            .expect("corrupt sidecar");
+        drop(corpus);
+
+        let lens = log_suppression_lens_at(&handles, &cache, &corpus_id).expect("lens");
+        assert_eq!(lens.state, SuppressionLensState::Unavailable);
+        assert!(lens.template_ids.is_empty());
+        assert!(lens.reason.is_some());
+
+        let count =
+            count_log_events_at(&handles, &cache, &corpus_id, &hostile_query()).expect("count");
+        assert_eq!(
+            count.total_matched, 60,
+            "an unreadable policy must withhold no evidence"
+        );
+    }
+
+    #[test]
+    fn the_disclosed_lens_matches_what_queries_enforce() {
+        let (_root, cache, corpus_id, handles) = lens_fixture();
+        let lens = log_suppression_lens_at(&handles, &cache, &corpus_id).expect("lens");
+        assert_eq!(lens.state, SuppressionLensState::Resolved);
+        assert_eq!(lens.template_ids, vec![SUPPRESSED]);
+        assert_eq!(lens.corpus_id, corpus_id);
+
+        // Echoing the disclosed set back is a no-op, so an honest renderer sees
+        // exactly what it was told.
+        let honest = cd_core::log_analysis::EventQuery {
+            excluded_template_ids: lens.template_ids.clone(),
+            limit: 200,
+            ..Default::default()
+        };
+        let count = count_log_events_at(&handles, &cache, &corpus_id, &honest).expect("count");
+        assert_eq!(count.total_matched, 40);
+    }
+
+    #[test]
+    fn concurrent_explorer_reads_agree_on_one_effective_lens() {
+        let (_root, cache, corpus_id, handles) = lens_fixture();
+        let handles = Arc::new(handles);
+        let mut workers = Vec::new();
+        for _ in 0..6 {
+            let handles = Arc::clone(&handles);
+            let cache = cache.clone();
+            let corpus_id = corpus_id.clone();
+            workers.push(std::thread::spawn(move || {
+                (0..16)
+                    .map(|_| {
+                        count_log_events_at(&handles, &cache, &corpus_id, &hostile_query())
+                            .expect("count")
+                            .total_matched
+                    })
+                    .collect::<Vec<_>>()
+            }));
+        }
+        for worker in workers {
+            for observed in worker.join().expect("worker") {
+                assert_eq!(observed, 40);
+            }
+        }
+    }
+
+    /// Structural guard: a future Explorer read command cannot quietly forward
+    /// a renderer exclusion set straight to cd-core.
+    #[test]
+    fn every_renderer_supplied_event_filter_is_routed_through_the_lens() {
+        let src = include_str!("lib.rs");
+        let lensed = [
+            "fn query_log_events_at(",
+            "fn query_log_event_rows_at(",
+            "fn count_log_events_at(",
+            "fn query_log_facets_at(",
+            "fn query_log_timeline_at(",
+            "fn query_log_shared_timeline_at(",
+            "fn query_log_event_neighborhood_at(",
+        ];
+        for signature in lensed {
+            let start = src.find(signature).unwrap_or_else(|| panic!("{signature}"));
+            let end = src[start..]
+                .find("\n}\n")
+                .map(|offset| start + offset)
+                .unwrap_or_else(|| panic!("{signature} body"));
+            let body = &src[start..end];
+            assert!(
+                body.contains("open_log_corpus_with_lens"),
+                "{signature} must reduce renderer exclusions before querying"
+            );
+            assert!(
+                !body.contains("handles.open("),
+                "{signature} must not bypass the lens by opening the corpus directly"
+            );
+        }
+
+        // Find runs the same filter shape and is lensed inside its blocking task.
+        let search_start = src
+            .find("async fn log_search_events(")
+            .expect("search command");
+        let search_end = src[search_start..]
+            .find("/// Signal cooperative cancellation")
+            .map(|offset| search_start + offset)
+            .expect("search boundary");
+        assert!(
+            src[search_start..search_end].contains("open_log_corpus_with_lens"),
+            "Find must reduce renderer exclusions too"
+        );
+
+        // Completeness: anything that *accepts* a renderer-supplied event filter
+        // must either be one of the lensed helpers above or be enforcement
+        // itself. Only parameter positions are scanned, so a test constructing
+        // its own EventQuery is not a finding.
+        let primitives = [
+            "fn enforce_log_suppression_lens(",
+            "fn open_log_corpus_with_lens(",
+        ];
+        let mut unlensed = Vec::new();
+        for pattern in [
+            "query: &cd_core::log_analysis::EventQuery",
+            "query: cd_core::log_analysis::EventQuery",
+            "query: &mut cd_core::log_analysis::EventQuery",
+            "filter: Option<cd_core::log_analysis::EventQuery>",
+        ] {
+            for (offset, _) in src.match_indices(pattern) {
+                let Some(fn_start) = src[..offset].rfind("fn ") else {
+                    continue;
+                };
+                // An IPC args struct carries the filter as a field, not a
+                // parameter; its command is checked explicitly above.
+                if src[..offset]
+                    .rfind("struct ")
+                    .is_some_and(|struct_start| struct_start > fn_start)
+                {
+                    continue;
+                }
+                let name_end = src[fn_start..]
+                    .find('(')
+                    .map(|end| fn_start + end + 1)
+                    .unwrap_or(fn_start);
+                let signature = &src[fn_start..name_end];
+                let body_end = src[fn_start..]
+                    .find("\n}\n")
+                    .map(|end| fn_start + end)
+                    .unwrap_or(src.len());
+                let body = &src[fn_start..body_end];
+                let routed = lensed.contains(&signature)
+                    || primitives.contains(&signature)
+                    // A thin command wrapper that only forwards to a lensed helper.
+                    || lensed
+                        .iter()
+                        .any(|helper| body.contains(helper.trim_start_matches("fn ")));
+                if !routed {
+                    unlensed.push(signature.to_string());
+                }
+            }
+        }
+        unlensed.sort();
+        unlensed.dedup();
+        assert!(
+            unlensed.is_empty(),
+            "these accept a renderer event filter but never reach the lens: {unlensed:?}"
         );
     }
 }

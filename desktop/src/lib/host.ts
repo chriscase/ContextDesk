@@ -2537,6 +2537,26 @@ export type SuppressionDocumentDto = {
   resolvedTemplateRevision?: number | null;
 };
 
+/** Whether the host could establish a trusted exclusion set (#819). */
+export type SuppressionLensState = "resolved" | "unavailable";
+
+/**
+ * The exclusion set the host enforces, as the host reports it.
+ *
+ * `templateIds` is empty whenever `state` is `unavailable`, because a policy
+ * that cannot be read must hide nothing rather than keep hiding stale ids.
+ */
+export type TrustedSuppressionLensDto = {
+  corpusId: string;
+  state: SuppressionLensState;
+  /** Payload-free explanation; present only when unavailable. */
+  reason?: string | null;
+  templateIds: number[];
+  policyRevision?: number | null;
+  eventRevision: number;
+  templateAnalysisRevision: number;
+};
+
 /** Active = enabled matches_current rules apply; Suspended = exclude nothing. */
 export type InvestigationNoiseLens = "active" | "suspended";
 
@@ -3265,6 +3285,30 @@ export async function hostLogLoadSuppression(
     };
   }
   return invoke<SuppressionDocumentDto>("log_load_suppression", { corpusId });
+}
+
+/**
+ * The exact exclusion set the host will honour for this corpus (#819).
+ *
+ * The renderer is outside the trusted computing base, so this is disclosure,
+ * not a capability: every query re-derives the trusted set host-side and
+ * intersects whatever the renderer asked for. Sending these ids back can
+ * therefore never hide more than the durable policy authorizes, and sending
+ * fewer — Suspend all, temporary reveal — still hides less.
+ */
+export async function hostLogSuppressionLens(
+  corpusId: string,
+): Promise<TrustedSuppressionLensDto> {
+  if (!isTauri()) {
+    return {
+      corpusId,
+      state: "resolved",
+      templateIds: [],
+      eventRevision: 0,
+      templateAnalysisRevision: 0,
+    };
+  }
+  return invoke<TrustedSuppressionLensDto>("log_suppression_lens", { corpusId });
 }
 
 /** Read-only, bounded exact-template proposals for explicit human review. */

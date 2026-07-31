@@ -756,6 +756,69 @@ fn sidecar_path(corpus_root: &Path) -> PathBuf {
     corpus_root.join(SIDECAR_FILENAME)
 }
 
+/// Cheap observable identity of the suppression sidecar.
+///
+/// Mutations publish by atomic rename under [`mutation_guard`], including from
+/// another process, so a rewrite lands as a new inode rather than an in-place
+/// edit. Comparing this before trusting a cached resolution therefore catches a
+/// policy change this process was never told about, at the cost of one `stat`
+/// instead of a read, parse, and resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidecarIdentity {
+    /// No sidecar: the corpus has no durable policy and hides nothing.
+    Absent,
+    /// A sidecar was present with this identity.
+    Present {
+        len: u64,
+        modified_ns: Option<i128>,
+        #[cfg(unix)]
+        device: u64,
+        #[cfg(unix)]
+        inode: u64,
+    },
+    /// The sidecar could not be measured. Callers must neither trust nor
+    /// populate a cache entry from this reading.
+    Unmeasurable,
+}
+
+impl SidecarIdentity {
+    pub(crate) fn observe(corpus_root: &Path) -> Self {
+        let metadata = match std::fs::symlink_metadata(sidecar_path(corpus_root)) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Self::Absent,
+            Err(_) => return Self::Unmeasurable,
+        };
+        if !metadata.file_type().is_file() {
+            // A symlink or directory here is refused by the loader; treat it as
+            // unmeasurable so the refusal is re-derived every time.
+            return Self::Unmeasurable;
+        }
+        let modified_ns = metadata.modified().ok().map(|modified| {
+            match modified.duration_since(std::time::UNIX_EPOCH) {
+                Ok(delta) => delta.as_nanos() as i128,
+                Err(error) => -(error.duration().as_nanos() as i128),
+            }
+        });
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Self::Present {
+                len: metadata.len(),
+                modified_ns,
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self::Present {
+                len: metadata.len(),
+                modified_ns,
+            }
+        }
+    }
+}
+
 fn lock_path(corpus_root: &Path) -> PathBuf {
     corpus_root.join(LOCK_FILENAME)
 }

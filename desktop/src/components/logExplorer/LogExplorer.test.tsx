@@ -9,6 +9,7 @@ import {
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import checkoutTruth from "../../../../fixtures/log-lab/scenarios/checkout-cascade/truth/manifest.json";
 import * as host from "../../lib/host";
+import { ruleContributesToExclusion } from "../../lib/logExplorer/policyBinding";
 import { LogExplorer } from "./LogExplorer";
 
 vi.mock("../../lib/host", () => ({
@@ -53,6 +54,14 @@ vi.mock("../../lib/host", () => ({
     rules: [],
     previews: [],
     audit: [],
+  })),
+  hostLogSuppressionLens: vi.fn(async (corpusId: string) => ({
+    corpusId,
+    state: "resolved" as const,
+    templateIds: [],
+    policyRevision: 0,
+    eventRevision: 0,
+    templateAnalysisRevision: 0,
   })),
   hostLogProposeNoiseCandidates: vi.fn(async () => ({
     corpusId: "c1",
@@ -613,6 +622,41 @@ async function openInvestigationView(expectedItems: number) {
   fireEvent.click(option);
 }
 
+
+/**
+ * The Explorer reads two host facts about suppression (#819): the durable
+ * document (for the rule list) and the trusted lens (for the query set). The
+ * host derives the second from the first — enabled rules that resolve as
+ * matches_current — so tests configure both together rather than letting the
+ * disclosed set drift from the enforced one.
+ */
+function lensFor(
+  document: host.SuppressionDocumentDto,
+): host.TrustedSuppressionLensDto {
+  const templateIds = [
+    ...new Set(
+      document.rules
+        .filter((rule) =>
+          ruleContributesToExclusion(rule.state, rule.resolution ?? null),
+        )
+        .map((rule) => rule.predicate.templateId),
+    ),
+  ].sort((a, b) => a - b);
+  return {
+    corpusId: document.corpusId,
+    state: "resolved",
+    templateIds,
+    policyRevision: document.revision,
+    eventRevision: 0,
+    templateAnalysisRevision: document.resolvedTemplateRevision ?? 0,
+  };
+}
+
+function useSuppressionPolicy(document: host.SuppressionDocumentDto): void {
+  vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(document);
+  vi.mocked(host.hostLogSuppressionLens).mockResolvedValue(lensFor(document));
+}
+
 describe("LogExplorer shell", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -690,7 +734,7 @@ describe("LogExplorer shell", () => {
       reason: "Original representation unavailable for this corpus",
     });
     vi.mocked(host.hostLogListBookmarks).mockResolvedValue([]);
-    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue({
+    useSuppressionPolicy({
       schemaVersion: 1,
       corpusId: "c1",
       revision: 0,
@@ -862,7 +906,7 @@ describe("LogExplorer shell", () => {
   });
 
   it("excludes only matches_current templates; stale enabled rules match nothing (#819)", async () => {
-    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+    useSuppressionPolicy(
       suppressionDocument("enabled", 4, [
         {
           id: "019fb-stale-rule",
@@ -944,8 +988,62 @@ describe("LogExplorer shell", () => {
     );
   });
 
-  it("applies one suppression lens to rows, counts, facets, timeline, and Find", async () => {
+  it("defers to the host lens instead of deriving exclusions from the rules (#819)", async () => {
+    // The durable document still carries an enabled, applying rule for
+    // template 2 — the rule list must keep showing it — but the host reports
+    // an empty enforced set, as it would when that rule was disabled by
+    // another window between the two reads. The renderer is not the authority,
+    // so it must request nothing rather than re-deriving template 2 itself.
     vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+      suppressionDocument("enabled", 4),
+    );
+    vi.mocked(host.hostLogSuppressionLens).mockResolvedValue({
+      corpusId: "c1",
+      state: "resolved",
+      templateIds: [],
+      policyRevision: 9,
+      eventRevision: 0,
+      templateAnalysisRevision: 0,
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+    await waitFor(() => expect(host.hostLogQueryEventRows).toHaveBeenCalled());
+
+    for (const [, query] of vi.mocked(host.hostLogQueryEventRows).mock.calls) {
+      expect(query?.excludedTemplateIds ?? []).toEqual([]);
+    }
+    // The hidden-count probe must not invent the rule's template either.
+    for (const [, query] of vi.mocked(host.hostLogCountEvents).mock.calls) {
+      expect(query?.templateIds ?? []).toEqual([]);
+    }
+  });
+
+  it("withholds evidence and offers retry when the host lens is unavailable (#819)", async () => {
+    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+      suppressionDocument("enabled", 4),
+    );
+    vi.mocked(host.hostLogSuppressionLens).mockResolvedValue({
+      corpusId: "c1",
+      state: "unavailable",
+      reason: "suppression sidecar changed while it was being read",
+      templateIds: [],
+      eventRevision: 0,
+      templateAnalysisRevision: 0,
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /Noise · unavailable/ }),
+      ).toBeTruthy(),
+    );
+    // Same fail-closed display contract as an unreadable policy (#817): never
+    // paint a reduced view the UI cannot describe.
+    expect(host.hostLogQueryEventRows).not.toHaveBeenCalled();
+  });
+
+  it("applies one suppression lens to rows, counts, facets, timeline, and Find", async () => {
+    useSuppressionPolicy(
       suppressionDocument(),
     );
     vi.mocked(host.hostLogCountEvents).mockImplementation(
@@ -995,7 +1093,7 @@ describe("LogExplorer shell", () => {
 
   it("discloses active rule and excluded counts on every reduced surface (#817)", async () => {
     vi.stubGlobal("localStorage", memoryStorage());
-    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+    useSuppressionPolicy(
       suppressionDocument(),
     );
     vi.mocked(host.hostLogCountEvents).mockImplementation(
@@ -1032,7 +1130,7 @@ describe("LogExplorer shell", () => {
     vi.stubGlobal("localStorage", memoryStorage());
     const mutate = vi.mocked(host.hostLogMutateTemplateSuppressionRule);
     mutate.mockClear();
-    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+    useSuppressionPolicy(
       suppressionDocument("enabled", 3),
     );
     // Policy-hidden count uses templateIds filter; view counts use exclusions.
@@ -1132,7 +1230,7 @@ describe("LogExplorer shell", () => {
 
   it("keeps multi-rule exclusions and discloses both rules (#817)", async () => {
     vi.stubGlobal("localStorage", memoryStorage());
-    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+    useSuppressionPolicy(
       multiRuleSuppressionDocument(8),
     );
     vi.mocked(host.hostLogCountEvents).mockImplementation(
@@ -1167,7 +1265,7 @@ describe("LogExplorer shell", () => {
 
   it("discloses zero-match enabled rules without inventing excluded events (#817)", async () => {
     vi.stubGlobal("localStorage", memoryStorage());
-    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+    useSuppressionPolicy(
       suppressionDocument("enabled", 2),
     );
     vi.mocked(host.hostLogCountEvents).mockImplementation(
@@ -1198,7 +1296,7 @@ describe("LogExplorer shell", () => {
   it("restores suspend flag after Explorer remount for the same corpus (#817)", async () => {
     const store = memoryStorage();
     vi.stubGlobal("localStorage", store);
-    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+    useSuppressionPolicy(
       suppressionDocument(),
     );
     vi.mocked(host.hostLogCountEvents).mockImplementation(
@@ -1253,6 +1351,10 @@ describe("LogExplorer shell", () => {
         ...suppressionDocument(),
         corpusId,
       }),
+    );
+    vi.mocked(host.hostLogSuppressionLens).mockImplementation(
+      async (corpusId) =>
+        lensFor({ ...suppressionDocument(), corpusId }),
     );
     vi.mocked(host.hostLogCountEvents).mockImplementation(
       async (_corpusId, query) => ({
@@ -1392,6 +1494,10 @@ describe("LogExplorer shell", () => {
     vi.mocked(host.hostLogLoadSuppression)
       .mockResolvedValueOnce(emptyPolicy)
       .mockResolvedValue(suppressionDocument());
+    // The enforced lens follows the same before/after activation sequence.
+    vi.mocked(host.hostLogSuppressionLens)
+      .mockResolvedValueOnce(lensFor(emptyPolicy))
+      .mockResolvedValue(lensFor(suppressionDocument()));
     vi.mocked(host.hostLogQueryEvents).mockImplementation(
       async (_corpusId, query) => {
         const excluded = query?.excludedTemplateIds ?? [];
@@ -3528,7 +3634,7 @@ describe("LogExplorer shell", () => {
   it("requires an explicit temporary reveal for a noise-suppressed bookmark and reapplies policy on restore", async () => {
     const allEvents = defaultEventPage().events;
     const target = allEvents.find((event) => event.templateId === 2)!;
-    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+    useSuppressionPolicy(
       suppressionDocument(),
     );
     vi.mocked(host.hostLogCountEvents).mockImplementation(
@@ -3617,7 +3723,7 @@ describe("LogExplorer shell", () => {
     vi.stubGlobal("localStorage", store);
     const allEvents = defaultEventPage().events;
     const target = allEvents.find((event) => event.templateId === 2)!;
-    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+    useSuppressionPolicy(
       suppressionDocument(),
     );
     vi.mocked(host.hostLogCountEvents).mockImplementation(
@@ -5307,7 +5413,7 @@ describe("LogExplorer shell", () => {
       ],
     };
 
-    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue({
+    useSuppressionPolicy({
       schemaVersion: 1,
       corpusId: "c1",
       revision: 2,
@@ -8403,7 +8509,7 @@ describe("LogExplorer shell", () => {
       },
       documentText: metricDocument,
     });
-    vi.mocked(host.hostLogLoadSuppression).mockResolvedValue(
+    useSuppressionPolicy(
       suppressionDocument(),
     );
     vi.mocked(host.hostLogCountEvents).mockImplementation(
