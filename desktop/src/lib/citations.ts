@@ -3,7 +3,7 @@
  * (#701 / #698). Pure — no host I/O.
  *
  * Governed log identities use one canonical grammar shared with Rust
- * (`fixtures/log-lab/governed-log-citation-ids.v1.json`):
+ * (`fixtures/contracts/governed-log-citation-ids.v1.json`):
  * lowercase `log_event:<u64>` / `log_template:<u64>`, digits only, canonical
  * form, explicit overflow reject. IDs stay strings through routing; any path
  * that needs a JS number requires `Number.isSafeInteger`.
