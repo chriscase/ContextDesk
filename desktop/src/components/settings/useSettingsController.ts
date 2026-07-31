@@ -2,7 +2,7 @@
  * Shared settings draft / dirty / save / reset state for SettingsModal shell (#147).
  * Sections stay presentational; secrets stay transient (never in setup / localStorage).
  */
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { shouldResetSettingsOnOpen } from "../../lib/settingsOpenGate";
 import { saveLastGatewayUrl } from "../../lib/aiGatewayPrefs";
 import {
@@ -257,6 +257,21 @@ export function useSettingsController({
   const clientReport = useMemo(() => runClientPreflight(draft), [draft, probeTick]);
   const report = hostReport ?? clientReport;
 
+  /**
+   * Record a *measured* fact (a live reachability probe) rather than a user
+   * edit. It moves the clean baseline with the draft, so inspecting
+   * connectivity never leaves Settings claiming unsaved changes (#740).
+   * Any field the user really did edit stays dirty, because the same update
+   * is applied to both sides.
+   */
+  const applyMeasured = useCallback(
+    (update: (current: AppSetupState) => AppSetupState) => {
+      cleanDraftRef.current = update(cleanDraftRef.current);
+      setDraft(update);
+    },
+    [],
+  );
+
   const dirty = useMemo(() => {
     if (apiKeyDraft.trim() || cfTokenDraft.trim() || xTokenDraft.trim()) return true;
     return JSON.stringify(draft) !== JSON.stringify(cleanDraftRef.current);
@@ -325,10 +340,10 @@ export function useSettingsController({
       if (draft.providerKind === "ollama") {
         const ok = await hostCheckOllama(draft.baseUrl);
         if (ok !== null) {
-          setDraft((d) => ({ ...d, ollamaReachable: ok }));
+          applyMeasured((d) => ({ ...d, ollamaReachable: ok }));
         } else {
           // Browser without Tauri: mark warn via null, not fake true
-          setDraft((d) => ({ ...d, ollamaReachable: null }));
+          applyMeasured((d) => ({ ...d, ollamaReachable: null }));
         }
       } else if (
         draft.providerKind === "openai_compatible" ||
@@ -340,16 +355,16 @@ export function useSettingsController({
           setProbeNote(
             `URL ok · effective ${probe.effective_base} · ${probe.candidates.length} candidate base(s)`,
           );
-          setDraft((d) => ({ ...d, remoteReachable: true }));
+          applyMeasured((d) => ({ ...d, remoteReachable: true }));
         } else {
           setProbeNote(probe.error ?? "Probe failed");
-          setDraft((d) => ({ ...d, remoteReachable: false }));
+          applyMeasured((d) => ({ ...d, remoteReachable: false }));
         }
         const hostPf = await hostPreflight();
         if (hostPf) {
           const remote = hostPf.items.find((i) => i.id === "provider.remote");
           if (remote) {
-            setDraft((d) => ({
+            applyMeasured((d) => ({
               ...d,
               remoteReachable: remote.level === "pass" || probe.ok,
             }));
