@@ -4177,6 +4177,9 @@ describe("LogExplorer shell", () => {
         .mock.calls[0]![1].eventRefs?.map((eventRef) => eventRef.seq),
     ).toEqual([10, 12]);
 
+    // The host call can resolve before React commits the saved bookmark into
+    // local state. Wait for that state before exercising duplicate detection.
+    await screen.findByTestId("bookmark-activate-bm-exact");
     fireEvent.click(screen.getByRole("button", { name: "Bookmark (B)" }));
     await screen.findByText("Already bookmarked: 2 selected events");
     expect(host.hostLogAddBookmark).toHaveBeenCalledTimes(1);
