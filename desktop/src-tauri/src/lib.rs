@@ -9881,10 +9881,11 @@ fn apply_log_investigation_finding_view_at(
     corpus_id: &str,
     investigation_id: &str,
     finding_id: &str,
+    noise_lens: cd_core::investigations::InvestigationNoiseLens,
 ) -> Result<cd_core::investigations::FindingViewRecipeResolution, String> {
     let corpus = handles.open(cache, corpus_id)?;
     store
-        .apply_finding_view_recipe(investigation_id, finding_id, &corpus)
+        .apply_finding_view_recipe(investigation_id, finding_id, &corpus, noise_lens)
         .map_err(|e| e.to_string())
 }
 
@@ -9899,6 +9900,7 @@ fn log_apply_investigation_finding_view(
     corpus_id: String,
     investigation_id: String,
     finding_id: String,
+    noise_lens: cd_core::investigations::InvestigationNoiseLens,
 ) -> Result<cd_core::investigations::FindingViewRecipeResolution, String> {
     let cache = log_cache_dir(&state)?;
     let store = investigation_store(&state)?;
@@ -9909,6 +9911,7 @@ fn log_apply_investigation_finding_view(
         &corpus_id,
         &investigation_id,
         &finding_id,
+        noise_lens,
     )
 }
 
@@ -16297,6 +16300,10 @@ mod log_investigation_apply_host_tests {
             "Tauri Apply command must delegate to the SoftWrite helper, not open corpus ad-hoc"
         );
         assert!(
+            command_body.contains("noise_lens"),
+            "Tauri Apply command must pass the caller's explicit current suppression lens"
+        );
+        assert!(
             !command_body.contains("LogCorpus::open"),
             "Apply command must not bypass the shared handle-cache SoftWrite path"
         );
@@ -16339,11 +16346,16 @@ mod log_investigation_apply_host_tests {
             &corpus_id,
             &document.id,
             &finding_id,
+            cd_core::investigations::InvestigationNoiseLens::Active,
         )
         .expect("verified SoftWrite Apply must succeed");
         assert_eq!(clean.missing_count, 0);
         assert_eq!(clean.stale_count, 0);
         assert_eq!(clean.finding_id, finding_id);
+        assert_eq!(
+            clean.policy_binding.status,
+            cd_core::investigations::InvestigationPolicyBindingStatus::Current
+        );
         assert_eq!(
             clean.view_recipe.filters.levels,
             vec!["error".to_string()],
@@ -16409,6 +16421,7 @@ mod log_investigation_apply_host_tests {
             &corpus_id,
             &document.id,
             &finding_id,
+            cd_core::investigations::InvestigationNoiseLens::Active,
         )
         .expect_err("missing exact refs must fail closed on SoftWrite Apply path");
         assert!(
@@ -16423,6 +16436,7 @@ mod log_investigation_apply_host_tests {
             &corpus_id,
             &document.id,
             "019fa8d0-0000-7000-8000-00000000dead",
+            cd_core::investigations::InvestigationNoiseLens::Active,
         )
         .expect_err("unknown finding must fail closed");
         assert!(

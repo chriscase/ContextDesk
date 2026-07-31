@@ -3668,13 +3668,14 @@ export async function hostLogApplyInvestigationFindingView(
   corpusId: string,
   investigationId: string,
   findingId: string,
+  noiseLens: InvestigationNoiseLens = "active",
 ): Promise<InvestigationFindingViewPreviewDto> {
   if (!isTauri()) {
     throw new Error("Investigation view apply requires Tauri host");
   }
   return invoke<InvestigationFindingViewPreviewDto>(
     "log_apply_investigation_finding_view",
-    { corpusId, investigationId, findingId },
+    { corpusId, investigationId, findingId, noiseLens },
   );
 }
 

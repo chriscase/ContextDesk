@@ -5039,6 +5039,14 @@ describe("LogExplorer shell", () => {
       investigationId: loaded.document.id,
       revision: loaded.document.revision,
       findingId: finding.id,
+      policyBinding: {
+        binding: null,
+        currentSuppressionPolicyRevision: 1,
+        currentResolvedTemplateRevision: 1,
+        currentEffectivePolicySha256: "sha",
+        currentNoiseLens: "active" as const,
+        status: "current" as const,
+      },
       recipe,
       missingCount: 0,
       staleCount: 0,
@@ -5094,6 +5102,7 @@ describe("LogExplorer shell", () => {
       "c1",
       loaded.document.id,
       finding.id,
+      "active",
     );
 
     // Filters, selection, and neighborhood navigation stay at pre-Apply state.

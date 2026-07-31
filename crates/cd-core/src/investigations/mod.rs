@@ -1466,8 +1466,34 @@ impl InvestigationStore {
         investigation_id: &str,
         finding_id: &str,
         corpus: &LogCorpus,
+        current_noise_lens: InvestigationNoiseLens,
     ) -> CoreResult<FindingViewRecipeResolution> {
-        let resolved = self.resolve_finding_view_recipe(investigation_id, finding_id, corpus)?;
+        let resolved = self.resolve_finding_view_recipe_with_policy_lens(
+            investigation_id,
+            finding_id,
+            corpus,
+            current_noise_lens,
+        )?;
+        if resolved.policy_binding.status != InvestigationPolicyBindingStatus::Current {
+            let reason = match resolved.policy_binding.status {
+                InvestigationPolicyBindingStatus::UnboundLegacy => {
+                    "legacy finding has no noise-policy binding"
+                }
+                InvestigationPolicyBindingStatus::MadeUnderDifferentPolicy => {
+                    "finding was made under a different noise policy"
+                }
+                InvestigationPolicyBindingStatus::MadeUnderDifferentLens => {
+                    "finding was made under a different noise lens"
+                }
+                InvestigationPolicyBindingStatus::CurrentLensUnknown => {
+                    "current noise lens could not be verified"
+                }
+                InvestigationPolicyBindingStatus::Current => unreachable!(),
+            };
+            return Err(CoreError::Policy(format!(
+                "Apply blocked: {reason}; review or recompute the saved view before Apply"
+            )));
+        }
         if resolved.missing_count > 0 || resolved.stale_count > 0 {
             return Err(CoreError::Policy(format!(
                 "Apply blocked: finding {finding_id} view recipe has {} missing and {} stale exact references; fix or refresh evidence before Apply",
@@ -3406,6 +3432,20 @@ mod tests {
             Some(&view.view_recipe),
             saved.document.findings[0].view_recipe.as_ref()
         );
+        let apply_error = store
+            .apply_finding_view_recipe(
+                &document.id,
+                &finding_id,
+                &corpus,
+                InvestigationNoiseLens::Active,
+            )
+            .expect_err("Apply must fail closed across a suppression-policy revision");
+        assert!(
+            apply_error
+                .to_string()
+                .contains("made under a different noise policy"),
+            "{apply_error}"
+        );
         assert_eq!(reopened.document.revision, saved.document.revision);
 
         let current_binding =
@@ -4005,7 +4045,12 @@ mod tests {
             .unwrap();
         let finding_id = added.document.findings[0].id.clone();
         let clean = store
-            .apply_finding_view_recipe(&document.id, &finding_id, &corpus)
+            .apply_finding_view_recipe(
+                &document.id,
+                &finding_id,
+                &corpus,
+                InvestigationNoiseLens::Active,
+            )
             .expect("verified recipe must apply");
         assert_eq!(clean.missing_count, 0);
         assert_eq!(clean.stale_count, 0);
@@ -4026,7 +4071,12 @@ mod tests {
             })
             .unwrap();
         let err = store
-            .apply_finding_view_recipe(&document.id, &finding_id, &corpus)
+            .apply_finding_view_recipe(
+                &document.id,
+                &finding_id,
+                &corpus,
+                InvestigationNoiseLens::Active,
+            )
             .expect_err("missing refs must block Apply");
         let msg = format!("{err}");
         assert!(
