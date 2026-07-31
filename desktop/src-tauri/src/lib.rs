@@ -8161,8 +8161,7 @@ async fn ingest_log_path(
             "a log import is already running",
         )?;
     }
-    let result =
-        run_log_ingest(app, &state, PathBuf::from(path), name, None, None, cancel).await;
+    let result = run_log_ingest(app, &state, PathBuf::from(path), name, None, None, cancel).await;
     remove_cancel_if_owned(
         &mut state.cancels.lock().expect("cancels"),
         LOG_INGEST_CANCEL_KEY,
@@ -8849,8 +8848,11 @@ async fn log_preview_import(
     path: String,
 ) -> Result<cd_core::log_analysis::import_preview::ImportPreviewReport, String> {
     tokio::task::spawn_blocking(move || {
-        cd_core::log_analysis::import_preview::preview_import_path(std::path::Path::new(&path), None)
-            .map_err(|error| error.to_string())
+        cd_core::log_analysis::import_preview::preview_import_path(
+            std::path::Path::new(&path),
+            None,
+        )
+        .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| format!("import preview task join: {error}"))?
