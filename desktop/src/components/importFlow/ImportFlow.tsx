@@ -21,6 +21,7 @@ import {
   importDisabledReason,
   importFlowReducer,
   selectedImportableCount,
+  type ImportFlowState,
 } from "./importFlowState";
 
 type Props = {
@@ -29,10 +30,15 @@ type Props = {
   variant: "pane" | "guided";
   /** Called after atomic publication with the new corpus id. */
   onPublished?: (corpusId: string) => void;
+  /** Fixture start state for visual tests and previews. Never set in product code. */
+  initialState?: ImportFlowState;
 };
 
-export function ImportFlow({ engine, variant, onPublished }: Props) {
-  const [state, dispatch] = useReducer(importFlowReducer, INITIAL_IMPORT_FLOW_STATE);
+export function ImportFlow({ engine, variant, onPublished, initialState }: Props) {
+  const [state, dispatch] = useReducer(
+    importFlowReducer,
+    initialState ?? INITIAL_IMPORT_FLOW_STATE,
+  );
   const [confirmed, setConfirmed] = useState(false);
   const stateRef = useRef(state);
   stateRef.current = state;

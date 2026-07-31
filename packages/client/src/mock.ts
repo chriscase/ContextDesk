@@ -181,21 +181,21 @@ export class MockEngineClient implements EngineClient {
   #phase(
     phase: WireProcessProgress["phase"],
     message: string,
-    determinate: boolean,
+    cancellable: boolean,
     extra: Partial<WireProcessProgress> = {},
   ): WireProcessProgress {
     return {
       kind: "log_ingest",
       phase,
       message,
-      determinate,
+      cancellable,
       fraction: null,
       lines_processed: null,
       files_processed: null,
       bytes_processed: null,
-      templates_seen: null,
+      templates: null,
       ...extra,
-    } as WireProcessProgress;
+    } satisfies WireProcessProgress;
   }
 
   readonly import = {
