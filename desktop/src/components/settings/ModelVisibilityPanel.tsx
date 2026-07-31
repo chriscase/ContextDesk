@@ -13,15 +13,17 @@
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
+  hostGetCurationSummary,
   hostListChatModels,
   hostPreviewCurationChange,
   hostSetModelHidden,
   hostSetModelPinned,
   hostSetProviderHidden,
   type CurationImpactDto,
+  type CurationSummaryDto,
   type ModelOptionDto,
 } from "../../lib/host";
-import { curateModels, curationSummary } from "../../lib/modelCuration";
+import { curateModels } from "../../lib/modelCuration";
 import { nextRovingIndex } from "../../lib/a11y";
 
 /** A change awaiting the user's explicit acceptance of a new default. */
@@ -44,6 +46,7 @@ export function ModelVisibilityPanel() {
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingChange | null>(null);
+  const [summary, setSummary] = useState<CurationSummaryDto | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   const listRef = useRef<HTMLUListElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -64,9 +67,25 @@ export function ModelVisibilityPanel() {
     }
   }, []);
 
+  /**
+   * Ordinary Settings loads counts only. Listing models means discovery
+   * against every configured provider, and the AC is explicit that the hidden
+   * inventory must not be loaded by default — so that waits for Manage.
+   */
   useEffect(() => {
-    void reload();
-  }, [reload]);
+    let cancelled = false;
+    void (async () => {
+      try {
+        const counts = await hostGetCurationSummary();
+        if (!cancelled) setSummary(counts);
+      } catch {
+        /* the summary is informational; failures surface on open */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const view = useMemo(
     () => curateModels(models, { query, includeHidden: showHidden }),
@@ -114,6 +133,7 @@ export function ModelVisibilityPanel() {
               });
         setPending(null);
         await reload();
+        setSummary(await hostGetCurationSummary());
         setNote(
           change.hidden
             ? `${change.label} is hidden from ordinary pickers. Nothing was deleted.`
@@ -178,6 +198,7 @@ export function ModelVisibilityPanel() {
         pinned: typeof m.pinned_rank !== "number",
       });
       await reload();
+      setSummary(await hostGetCurationSummary());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -185,7 +206,17 @@ export function ModelVisibilityPanel() {
     }
   };
 
-  const summary = curationSummary(models);
+  const summaryText = summary
+    ? [
+        summary.hidden_models > 0 ? `${summary.hidden_models} hidden` : null,
+        summary.hidden_providers > 0
+          ? `${summary.hidden_providers} provider${summary.hidden_providers === 1 ? "" : "s"} hidden`
+          : null,
+        summary.pinned_models > 0 ? `${summary.pinned_models} pinned` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ") || "Nothing hidden"
+    : "…";
   const dialogId = `${baseId}-visibility`;
 
   if (!open) {
@@ -194,7 +225,7 @@ export function ModelVisibilityPanel() {
         <div className="model-visibility__summary">
           <span className="field__label">Model visibility</span>
           <span className="field__hint" data-testid="curation-summary">
-            {summary}
+            {summaryText}
           </span>
         </div>
         <button

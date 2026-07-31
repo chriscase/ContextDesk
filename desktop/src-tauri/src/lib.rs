@@ -5671,6 +5671,28 @@ async fn curation_impact(
     }
 }
 
+/// Counts for the Settings entry point, read from configuration alone.
+///
+/// Deliberately does **not** list models. Ordinary Settings must not load the
+/// hidden inventory, and it must not trigger discovery against every
+/// configured provider merely because the page was opened (#678).
+#[derive(Debug, Clone, Serialize)]
+struct CurationSummaryDto {
+    hidden_models: u32,
+    hidden_providers: u32,
+    pinned_models: u32,
+}
+
+#[tauri::command]
+fn get_curation_summary(state: State<'_, AppState>) -> Result<CurationSummaryDto, String> {
+    let cfg = state.config.lock().expect("config");
+    Ok(CurationSummaryDto {
+        hidden_models: cfg.model_curation.hidden_models.len() as u32,
+        hidden_providers: cfg.model_curation.hidden_providers.len() as u32,
+        pinned_models: cfg.model_curation.pinned_models.len() as u32,
+    })
+}
+
 /// Preview hiding a provider or a model before anything is written.
 ///
 /// `model_id` empty means the whole profile. The returned replacement is the
@@ -11503,6 +11525,7 @@ pub fn run() {
             get_active_provider,
             set_provider_tools_enabled,
             set_model_tools_enabled,
+            get_curation_summary,
             preview_curation_change,
             set_model_hidden,
             set_provider_hidden,

@@ -21,6 +21,7 @@ import { ModelVisibilityPanel } from "./ModelVisibilityPanel";
 
 const host = vi.hoisted(() => ({
   list: vi.fn(),
+  summary: vi.fn(),
   preview: vi.fn(),
   setModelHidden: vi.fn(),
   setProviderHidden: vi.fn(),
@@ -31,6 +32,7 @@ vi.mock("../../lib/host", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../lib/host")>();
   return {
     ...original,
+    hostGetCurationSummary: host.summary,
     hostListChatModels: host.list,
     hostPreviewCurationChange: host.preview,
     hostSetModelHidden: host.setModelHidden,
@@ -80,13 +82,18 @@ const INVENTORY = [
 async function openPanel(inventory: ModelOptionDto[] = INVENTORY) {
   host.list.mockResolvedValue(inventory);
   render(<ModelVisibilityPanel />);
-  await waitFor(() => expect(host.list).toHaveBeenCalled());
+  await waitFor(() => expect(host.summary).toHaveBeenCalled());
   fireEvent.click(screen.getByRole("button", { name: "Manage…" }));
   await screen.findByRole("dialog", { name: "Model visibility" });
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
+  host.summary.mockResolvedValue({
+    hidden_models: 0,
+    hidden_providers: 0,
+    pinned_models: 0,
+  });
   host.preview.mockResolvedValue(impact());
   host.setModelHidden.mockResolvedValue(impact());
   host.setProviderHidden.mockResolvedValue(impact());
@@ -94,27 +101,37 @@ beforeEach(() => {
 });
 
 describe("progressive disclosure", () => {
-  it("shows only a count until the user asks to manage", async () => {
+  it("never lists or discovers models until the user asks to manage", async () => {
     host.list.mockResolvedValue(INVENTORY);
     render(<ModelVisibilityPanel />);
 
-    await screen.findByTestId("curation-summary");
-    expect(screen.getByTestId("curation-summary").textContent).toBe("3 shown");
-    // The inventory itself must not be in ordinary Settings.
+    await waitFor(() => expect(host.summary).toHaveBeenCalled());
+    // Listing means provider discovery and would load the hidden inventory;
+    // ordinary Settings must do neither.
+    expect(host.list).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.queryByText("gpt-4o")).toBeNull();
   });
 
-  it("counts hidden and pinned choices in the summary", async () => {
-    host.list.mockResolvedValue([
-      model("ollama", "a"),
-      model("ollama", "b", { hidden: true, hidden_by: "model" }),
-      model("gw", "c", { pinned_rank: 0 }),
-    ]);
+  it("summarises curation from configuration alone", async () => {
+    host.summary.mockResolvedValue({
+      hidden_models: 1,
+      hidden_providers: 2,
+      pinned_models: 1,
+    });
     render(<ModelVisibilityPanel />);
     await waitFor(() =>
       expect(screen.getByTestId("curation-summary").textContent).toBe(
-        "2 shown · 1 hidden · 1 pinned",
+        "1 hidden · 2 providers hidden · 1 pinned",
+      ),
+    );
+  });
+
+  it("says so plainly when nothing is curated", async () => {
+    render(<ModelVisibilityPanel />);
+    await waitFor(() =>
+      expect(screen.getByTestId("curation-summary").textContent).toBe(
+        "Nothing hidden",
       ),
     );
   });
@@ -346,18 +363,29 @@ describe("stale discovery", () => {
     host.list.mockReturnValueOnce(first).mockResolvedValue(INVENTORY);
 
     render(<ModelVisibilityPanel />);
-    // A second load supersedes the first while it is still in flight.
+    await waitFor(() => expect(host.summary).toHaveBeenCalled());
+
+    // Open: load A starts and is left in flight.
+    fireEvent.click(screen.getByRole("button", { name: "Manage…" }));
+    await screen.findByRole("dialog", { name: "Model visibility" });
+
+    // Close and reopen: load B supersedes A.
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
     await act(async () => {
-      fireEvent.click(await screen.findByRole("button", { name: "Manage…" }));
+      fireEvent.click(screen.getByRole("button", { name: "Manage…" }));
     });
+
+    // The stale response lands last and must be discarded.
     await act(async () => {
       resolveFirst([model("stale", "should-not-appear")]);
       await first;
     });
 
+    expect(host.list).toHaveBeenCalledTimes(2);
     await waitFor(() =>
       expect(screen.queryByText("should-not-appear")).toBeNull(),
     );
+    expect(screen.getByText("gpt-4o")).toBeTruthy();
   });
 });
 
@@ -365,7 +393,8 @@ describe("honest failures", () => {
   it("surfaces a listing failure instead of showing an empty inventory", async () => {
     host.list.mockRejectedValue(new Error("provider unreachable"));
     render(<ModelVisibilityPanel />);
-    fireEvent.click(await screen.findByRole("button", { name: "Manage…" }));
+    await waitFor(() => expect(host.summary).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Manage…" }));
 
     expect((await screen.findByRole("alert")).textContent).toContain(
       "provider unreachable",

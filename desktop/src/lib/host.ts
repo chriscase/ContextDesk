@@ -1071,6 +1071,18 @@ export async function hostListChatModels(opts?: {
   });
 }
 
+/** Counts for the Settings entry point. Config-only: never lists or discovers. */
+export type CurationSummaryDto = {
+  hidden_models: number;
+  hidden_providers: number;
+  pinned_models: number;
+};
+
+export async function hostGetCurationSummary(): Promise<CurationSummaryDto | null> {
+  if (!isTauri()) return null;
+  return invoke<CurationSummaryDto>("get_curation_summary");
+}
+
 /** Preview what hiding a provider (or one model) would do before writing. */
 export async function hostPreviewCurationChange(args: {
   providerId: string;
