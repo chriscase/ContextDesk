@@ -45,7 +45,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::CoreResult;
+use crate::error::{CoreError, CoreResult};
 use crate::process_progress::CancelFlag;
 
 use super::format_profile::{
@@ -1264,6 +1264,133 @@ pub fn preview_import_path(
     super::ingest::preview_import_path_impl(path, cancel)
 }
 
+/// Version of the import-plan binding contract.
+///
+/// Bumped whenever the token derivation or verification semantics change so
+/// a stale client can never present an old-format token as current.
+pub const IMPORT_PLAN_VERSION: u32 = 1;
+
+/// Deterministic token binding a reviewed preview to its exact inventory.
+///
+/// Covers the plan version, preview schema version, source kind, truncation
+/// state, and every itemized entry's identity, byte count, status, and role.
+/// Any inventory change — content resized, entries added or removed, a
+/// classification shift — produces a different token, so a run presenting a
+/// stale token fails closed before any staging.
+pub fn import_plan_token(report: &ImportPreviewReport) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(IMPORT_PLAN_VERSION.to_le_bytes());
+    hasher.update(report.schema_version.to_le_bytes());
+    hasher.update(
+        serde_json::to_string(&report.source_kind)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    hasher.update([u8::from(report.truncated)]);
+    for item in &report.items {
+        hasher.update(item.identity.as_bytes());
+        hasher.update([0x1f]);
+        hasher.update(item.bytes.to_le_bytes());
+        hasher.update(
+            serde_json::to_string(&item.status)
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+        hasher.update(
+            serde_json::to_string(&item.role)
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+        hasher.update([0x1e]);
+    }
+    let digest = hasher.finalize();
+    let mut token = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(token, "{byte:02x}");
+    }
+    token
+}
+
+/// Whether one previewed item may import as log events at all.
+///
+/// This is the single trusted routing rule shared by every layer: only
+/// `role == Log` content with a selectable status becomes events. Supporting
+/// material (metrics, attachments, readmes), ignored noise, unsupported
+/// content, and blocked entries never do.
+pub fn event_importable(item: &ImportPreviewItem) -> bool {
+    item.role == ImportItemRole::Log && item.status.is_selectable()
+}
+
+/// Re-enumerate a reviewed root and fail closed on any drift before a run.
+///
+/// Verifies the plan version and token against a fresh bounded preview of
+/// `path`, then checks every selected identity still exists and is
+/// event-importable. Returns the trusted allowlist the ingest honors.
+/// A truncated preview stays importable, but only its itemized identities can
+/// ever be selected — unreviewed tail entries are skipped by the allowlist
+/// and counted, never silently imported.
+pub fn verify_import_plan(
+    path: &Path,
+    plan_version: u32,
+    plan_token: &str,
+    selected: &[String],
+    cancel: Option<&CancelFlag>,
+) -> CoreResult<super::ingest::IngestSelection> {
+    if plan_version != IMPORT_PLAN_VERSION {
+        return Err(CoreError::Policy(format!(
+            "import plan version {plan_version} is not supported by this build (expected {IMPORT_PLAN_VERSION})"
+        )));
+    }
+    if selected.is_empty() {
+        return Err(CoreError::Policy(
+            "import plan selects nothing that would import as log events".into(),
+        ));
+    }
+    if selected.len() > MAX_IMPORT_PREVIEW_ITEMS {
+        return Err(CoreError::Policy(format!(
+            "import plan selects {} identities (limit {MAX_IMPORT_PREVIEW_ITEMS})",
+            selected.len()
+        )));
+    }
+    let current = preview_import_path(path, cancel)?;
+    let current_token = import_plan_token(&current);
+    if current_token != plan_token {
+        return Err(CoreError::Policy(
+            "import plan is stale: the reviewed content changed on disk since the preview \
+             (files were added, removed, resized, or reclassified) — review the selection again"
+                .into(),
+        ));
+    }
+    let by_identity: std::collections::BTreeMap<&str, &ImportPreviewItem> = current
+        .items
+        .iter()
+        .map(|item| (item.identity.as_str(), item))
+        .collect();
+    let mut allow = std::collections::BTreeSet::new();
+    for identity in selected {
+        let Some(item) = by_identity.get(identity.as_str()) else {
+            return Err(CoreError::Policy(format!(
+                "import plan selects an identity the preview does not contain: {identity:?}"
+            )));
+        };
+        if !event_importable(item) {
+            return Err(CoreError::Policy(format!(
+                "import plan selects {identity:?} which cannot import as log events \
+                 (status {:?}, role {:?})",
+                item.status, item.role
+            )));
+        }
+        if !allow.insert(identity.clone()) {
+            return Err(CoreError::Policy(format!(
+                "import plan lists {identity:?} more than once"
+            )));
+        }
+    }
+    Ok(super::ingest::IngestSelection { selected: allow })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1282,6 +1409,132 @@ mod tests {
             binary: false,
             empty: false,
         }
+    }
+
+    #[test]
+    fn plan_token_binds_inventory_and_fails_closed_on_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("a.log"), "level=info msg=alpha\n").unwrap();
+        std::fs::write(logs.join("b.log"), "level=warn msg=beta\n").unwrap();
+        let report = preview_import_path(&logs, None).unwrap();
+        let token = import_plan_token(&report);
+        let selected = vec!["a.log".to_string(), "b.log".to_string()];
+
+        // Happy path: unchanged inventory verifies and returns the allowlist.
+        let plan = verify_import_plan(&logs, IMPORT_PLAN_VERSION, &token, &selected, None).unwrap();
+        assert_eq!(plan.selected.len(), 2);
+
+        // Unsupported plan version fails closed.
+        let err = verify_import_plan(&logs, IMPORT_PLAN_VERSION + 1, &token, &selected, None)
+            .unwrap_err();
+        assert!(err.to_string().contains("not supported"), "{err}");
+
+        // Mutation after preview (content resized) fails closed.
+        std::fs::write(
+            logs.join("a.log"),
+            "level=info msg=alpha rewritten longer\n",
+        )
+        .unwrap();
+        let err =
+            verify_import_plan(&logs, IMPORT_PLAN_VERSION, &token, &selected, None).unwrap_err();
+        assert!(err.to_string().contains("stale"), "{err}");
+
+        // Re-preview after the mutation gives a fresh working token…
+        let report2 = preview_import_path(&logs, None).unwrap();
+        let token2 = import_plan_token(&report2);
+        assert_ne!(token, token2);
+        verify_import_plan(&logs, IMPORT_PLAN_VERSION, &token2, &selected, None).unwrap();
+
+        // …and an added unreviewed tail entry breaks that token too.
+        std::fs::write(logs.join("c.log"), "level=info msg=tail\n").unwrap();
+        let err =
+            verify_import_plan(&logs, IMPORT_PLAN_VERSION, &token2, &selected, None).unwrap_err();
+        assert!(err.to_string().contains("stale"), "{err}");
+    }
+
+    #[test]
+    fn verify_import_plan_rejects_role_confusion_unknowns_empty_and_duplicates() {
+        // The trusted routing rule itself: manifest-declared supporting
+        // material can never import as log events. (Live previews wire the
+        // manifest seam in a later slice; the gate is contract-level now.)
+        let declared_metrics = item_from_sample(
+            "metrics/ops.json",
+            256,
+            &sample_of(&[r#"{"series":[]}"#]),
+            Some(ImportItemRole::OperationalMetrics),
+            true,
+        );
+        assert_eq!(declared_metrics.status, ImportItemStatus::Supporting);
+        assert!(!event_importable(&declared_metrics));
+
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("app.log"), "level=info msg=alpha\n").unwrap();
+        // A binary blob previews as Unsupported with role Unknown — the live
+        // path's non-Log rejection case.
+        std::fs::write(logs.join("core.dump"), [0u8, 159, 146, 150, 0, 1, 2]).unwrap();
+        let report = preview_import_path(&logs, None).unwrap();
+        let blob = report
+            .items
+            .iter()
+            .find(|item| item.identity == "core.dump")
+            .expect("binary item present");
+        assert!(!event_importable(blob));
+        let token = import_plan_token(&report);
+
+        // Selecting non-event content fails closed.
+        let err = verify_import_plan(
+            &logs,
+            IMPORT_PLAN_VERSION,
+            &token,
+            &["app.log".to_string(), "core.dump".to_string()],
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("cannot import as log events"),
+            "{err}"
+        );
+
+        // The log source alone verifies.
+        let plan = verify_import_plan(
+            &logs,
+            IMPORT_PLAN_VERSION,
+            &token,
+            &["app.log".to_string()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.selected.len(), 1);
+
+        // Unknown identity fails closed.
+        let err = verify_import_plan(
+            &logs,
+            IMPORT_PLAN_VERSION,
+            &token,
+            &["ghost.log".to_string()],
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("does not contain"), "{err}");
+
+        // Empty selection fails closed before any ingest work.
+        let err = verify_import_plan(&logs, IMPORT_PLAN_VERSION, &token, &[], None).unwrap_err();
+        assert!(err.to_string().contains("selects nothing"), "{err}");
+
+        // Duplicate listing fails closed.
+        let err = verify_import_plan(
+            &logs,
+            IMPORT_PLAN_VERSION,
+            &token,
+            &["app.log".to_string(), "app.log".to_string()],
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("more than once"), "{err}");
     }
 
     #[test]
