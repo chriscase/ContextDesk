@@ -1209,6 +1209,95 @@ fn read_bounded_line<R: std::io::BufRead>(
     }
 }
 
+/// Rewrite a file into **canonical form**: one line per record, object keys
+/// sorted, no insignificant whitespace, LF endings.
+///
+/// Canonical form exists so three independent implementations can be compared
+/// byte-for-byte instead of by interpretation. JSON permits key order and
+/// spacing to vary freely, so two conforming producers can emit semantically
+/// identical files that share no bytes; a cross-language test over such files
+/// can only assert "both validated", which is far weaker than "both produced
+/// the same bytes".
+///
+/// Canonicalizing does **not** re-validate and does not repair. A
+/// non-conforming record is copied through in canonical shape, because a tool
+/// that silently dropped or fixed records would make the output a claim the
+/// input never supported. Validate first, then canonicalize.
+///
+/// Returns the number of records written.
+pub fn canonicalize_stream<R: std::io::BufRead, W: std::io::Write>(
+    reader: R,
+    writer: &mut W,
+) -> CoreResult<u64> {
+    let mut reader = reader;
+    let mut raw: Vec<u8> = Vec::new();
+    let mut written = 0u64;
+
+    loop {
+        raw.clear();
+        let read = read_bounded_line(&mut reader, &mut raw, MAX_NORMALIZED_LINE_BYTES + 1)
+            .map_err(|error| crate::error::CoreError::Message(format!("read: {error}")))?;
+        if read == 0 {
+            break;
+        }
+        if raw.last() == Some(&b'\n') {
+            raw.pop();
+        }
+        if raw.last() == Some(&b'\r') {
+            raw.pop();
+        }
+        if raw.len() > MAX_NORMALIZED_LINE_BYTES {
+            return Err(crate::error::CoreError::Policy(
+                "record exceeds the maximum line length".into(),
+            ));
+        }
+        let text = std::str::from_utf8(&raw)
+            .map_err(|_| crate::error::CoreError::Policy("record is not valid UTF-8".into()))?;
+        if text.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(text)
+            .map_err(|_| crate::error::CoreError::Policy("record is not valid JSON".into()))?;
+        let canonical = canonical_json(&value);
+        writer
+            .write_all(canonical.as_bytes())
+            .and_then(|()| writer.write_all(b"\n"))
+            .map_err(|error| crate::error::CoreError::Message(format!("write: {error}")))?;
+        written += 1;
+    }
+    Ok(written)
+}
+
+/// Serialize a value with object keys sorted and no insignificant whitespace.
+///
+/// `serde_json`'s `Map` preserves insertion order unless the `preserve_order`
+/// feature is off; sorting explicitly here means canonical output does not
+/// depend on which feature flags happen to be enabled downstream.
+pub fn canonical_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let body: Vec<String> = keys
+                .into_iter()
+                .map(|key| {
+                    format!(
+                        "{}:{}",
+                        serde_json::Value::String(key.clone()),
+                        canonical_json(&map[key])
+                    )
+                })
+                .collect();
+            format!("{{{}}}", body.join(","))
+        }
+        serde_json::Value::Array(items) => {
+            let body: Vec<String> = items.iter().map(canonical_json).collect();
+            format!("[{}]", body.join(","))
+        }
+        other => other.to_string(),
+    }
+}
+
 /// Shared event-line checking used by both the buffered and streaming paths,
 /// so the two can never drift about what conformance means.
 fn validate_line_as_event(
