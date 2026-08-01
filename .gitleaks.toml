@@ -13,3 +13,17 @@ useDefault = true
 [[allowlists]]
 description = "Offline redaction unit-test fixtures (not live credentials)"
 paths = ['''crates/cd-core/src/redact\.rs''']
+
+# The frozen import-plan contract contains a public, deterministic SHA-256
+# capability token. Its field name and entropy intentionally resemble an API
+# token, so constrain this false-positive exemption to that exact JSON field,
+# fixture path. Other content in the fixture remains scanned.
+[[rules]]
+id = "generic-api-key"
+
+  [[rules.allowlists]]
+  description = "Deterministic import-plan contract token (not a credential)"
+  condition = "AND"
+  regexTarget = "line"
+  regexes = ['''"planToken": "[0-9a-f]{64}",''']
+  paths = ['''^fixtures/contracts/import_preview_plan\.v1\.json$''']
