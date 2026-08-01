@@ -259,6 +259,12 @@ pub struct ImportPreviewItem {
     /// Group this item was folded into, when its fingerprint agreed with peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
+    /// Host-only fingerprint of the bounded source evidence used to build
+    /// this row. It is deliberately absent from the renderer DTO: the plan
+    /// token needs change detection, while the webview does not need a raw
+    /// content correlation handle.
+    #[serde(skip)]
+    pub(crate) plan_fingerprint: String,
 }
 
 /// A set of rolled/date-suffixed sources whose content fingerprints agree.
@@ -413,6 +419,10 @@ pub(super) struct BoundedSample {
     binary: bool,
     /// True when the source held no non-whitespace bytes.
     empty: bool,
+    /// SHA-256 over the bytes actually examined. Streaming archive members
+    /// cover the full member; seekable ordinary files cover the bounded
+    /// head/interior/tail windows by design.
+    content_fingerprint: String,
 }
 
 impl BoundedSample {
@@ -474,6 +484,8 @@ pub(super) fn align_to_records(bytes: &[u8], at_source_start: bool, at_source_en
 }
 
 pub(super) fn sample_bounded<R: Read + Seek>(reader: &mut R, total_bytes: u64) -> BoundedSample {
+    use sha2::{Digest, Sha256};
+
     let window = IMPORT_PREVIEW_SAMPLE_WINDOW_BYTES as u64;
     let mut offsets = vec![0u64];
     if total_bytes > window.saturating_mul(2) {
@@ -487,6 +499,7 @@ pub(super) fn sample_bounded<R: Read + Seek>(reader: &mut R, total_bytes: u64) -
         empty: true,
         ..BoundedSample::default()
     };
+    let mut content_hasher = Sha256::new();
     for offset in offsets.into_iter().take(IMPORT_PREVIEW_SAMPLE_WINDOWS) {
         if reader.seek(SeekFrom::Start(offset)).is_err() {
             continue;
@@ -500,12 +513,16 @@ pub(super) fn sample_bounded<R: Read + Seek>(reader: &mut R, total_bytes: u64) -
             continue;
         }
         let bytes = &buf[..read];
+        content_hasher.update(offset.to_le_bytes());
+        content_hasher.update((read as u64).to_le_bytes());
+        content_hasher.update(bytes);
         // Binary detection runs on the RAW window: a binary blob has no
         // newlines to align to, and alignment would otherwise turn it into an
         // empty (and therefore "empty file") sample.
         if is_binary(bytes) {
             sample.binary = true;
             sample.empty = false;
+            sample.content_fingerprint = sha256_digest_hex(content_hasher.finalize());
             return sample;
         }
         let at_source_start = offset == 0;
@@ -522,6 +539,7 @@ pub(super) fn sample_bounded<R: Read + Seek>(reader: &mut R, total_bytes: u64) -
         }
         sample.windows.push(text);
     }
+    sample.content_fingerprint = sha256_digest_hex(content_hasher.finalize());
     sample
 }
 
@@ -562,6 +580,8 @@ pub(super) fn sample_streaming<R: Read>(
     total_bytes: u64,
     cancel: Option<&CancelFlag>,
 ) -> CoreResult<SampleOutcome> {
+    use sha2::{Digest, Sha256};
+
     let window = IMPORT_PREVIEW_SAMPLE_WINDOW_BYTES;
     let mut head: Vec<u8> = Vec::new();
     let mut middle: Vec<u8> = Vec::new();
@@ -571,6 +591,7 @@ pub(super) fn sample_streaming<R: Read>(
     let mut middle_taken = false;
     let mut binary = false;
     let mut chunk = vec![0u8; 8 * 1024];
+    let mut content_hasher = Sha256::new();
 
     loop {
         if cancel.is_some_and(CancelFlag::is_cancelled) {
@@ -587,6 +608,7 @@ pub(super) fn sample_streaming<R: Read>(
             Err(_) => return Ok(SampleOutcome::ReadFailed),
         };
         let bytes = &chunk[..read];
+        content_hasher.update(bytes);
         if !binary && is_binary(bytes) {
             binary = true;
         }
@@ -614,6 +636,7 @@ pub(super) fn sample_streaming<R: Read>(
             windows: Vec::new(),
             binary: true,
             empty: false,
+            content_fingerprint: sha256_digest_hex(content_hasher.finalize()),
         }));
     }
 
@@ -645,7 +668,33 @@ pub(super) fn sample_streaming<R: Read>(
         windows,
         binary: false,
         empty,
+        content_fingerprint: sha256_digest_hex(content_hasher.finalize()),
     }))
+}
+
+fn sha256_digest_hex(digest: impl AsRef<[u8]>) -> String {
+    let bytes = digest.as_ref();
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write;
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+fn bounded_sample_plan_fingerprint(sample: &BoundedSample) -> String {
+    if !sample.content_fingerprint.is_empty() {
+        return sample.content_fingerprint.clone();
+    }
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"contextdesk-import-preview-sample-v1");
+    hasher.update([u8::from(sample.binary), u8::from(sample.empty)]);
+    for window in &sample.windows {
+        hasher.update((window.len() as u64).to_le_bytes());
+        hasher.update(window.as_bytes());
+    }
+    sha256_digest_hex(hasher.finalize())
 }
 
 /// Fill `buf` as far as the reader allows without treating a short read as EOF.
@@ -961,6 +1010,7 @@ pub(super) fn item_for_test(
         reasons: Vec::new(),
         representative: None,
         group_id: None,
+        plan_fingerprint: String::new(),
     }
 }
 
@@ -1188,6 +1238,7 @@ pub(super) fn item_from_sample(
         reasons,
         representative,
         group_id: None,
+        plan_fingerprint: bounded_sample_plan_fingerprint(sample),
     }
 }
 
@@ -1215,6 +1266,7 @@ pub(super) fn excluded_item(
         reasons: vec![reason],
         representative: None,
         group_id: None,
+        plan_fingerprint: String::new(),
     }
 }
 
@@ -1302,6 +1354,7 @@ pub fn import_plan_token(report: &ImportPreviewReport) -> String {
                 .unwrap_or_default()
                 .as_bytes(),
         );
+        hasher.update(item.plan_fingerprint.as_bytes());
         hasher.update([0x1e]);
     }
     let digest = hasher.finalize();
@@ -1388,8 +1441,9 @@ pub fn verify_import_plan(
     let current_token = import_plan_token(&current);
     if current_token != plan_token {
         return Err(CoreError::Policy(
-            "import plan is stale: the reviewed content changed on disk since the preview \
-             (files were added, removed, resized, or reclassified) — review the selection again"
+            "import plan is stale: the reviewed source state changed on disk since the preview \
+             (files were added, removed, replaced, resized, or reclassified) — review the \
+             selection again"
                 .into(),
         ));
     }
@@ -1418,7 +1472,11 @@ pub fn verify_import_plan(
             )));
         }
     }
-    Ok(super::ingest::IngestSelection { selected: allow })
+    Ok(super::ingest::IngestSelection::reviewed(
+        allow,
+        plan_version,
+        plan_token.to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -1430,6 +1488,7 @@ mod tests {
             windows: vec![lines.join("\n")],
             binary: false,
             empty: lines.iter().all(|l| l.trim().is_empty()),
+            content_fingerprint: String::new(),
         }
     }
 
@@ -1438,6 +1497,7 @@ mod tests {
             windows: windows.iter().map(|w| (*w).to_string()).collect(),
             binary: false,
             empty: false,
+            content_fingerprint: String::new(),
         }
     }
 
@@ -1461,14 +1521,30 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("not supported"), "{err}");
 
-        // Mutation after preview (content resized) fails closed.
+        // Same-size, same-format replacement still fails closed: the token is
+        // bound to the bounded content evidence, not only file length/status.
+        std::fs::write(logs.join("a.log"), "level=warn msg=omega\n").unwrap();
+        let err =
+            verify_import_plan(&logs, IMPORT_PLAN_VERSION, &token, &selected, None).unwrap_err();
+        assert!(err.to_string().contains("stale"), "{err}");
+        let same_size_report = preview_import_path(&logs, None).unwrap();
+        let same_size_token = import_plan_token(&same_size_report);
+        assert_ne!(token, same_size_token);
+
+        // Mutation after preview (content resized) fails closed too.
         std::fs::write(
             logs.join("a.log"),
             "level=info msg=alpha rewritten longer\n",
         )
         .unwrap();
-        let err =
-            verify_import_plan(&logs, IMPORT_PLAN_VERSION, &token, &selected, None).unwrap_err();
+        let err = verify_import_plan(
+            &logs,
+            IMPORT_PLAN_VERSION,
+            &same_size_token,
+            &selected,
+            None,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("stale"), "{err}");
 
         // Re-preview after the mutation gives a fresh working token…

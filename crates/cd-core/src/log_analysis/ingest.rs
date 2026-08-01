@@ -231,11 +231,53 @@ pub struct IngestReport {
 pub struct IngestSelection {
     /// Exact reviewed identities that may produce log events.
     pub selected: std::collections::BTreeSet<String>,
+    /// Private binding carried only by selections issued after trusted plan
+    /// verification. Ad-hoc allowlists remain useful to lower-level callers,
+    /// but cannot claim the final pre-publication revalidation guarantee.
+    reviewed_plan: Option<ReviewedPlanBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReviewedPlanBinding {
+    version: u32,
+    token: String,
 }
 
 impl IngestSelection {
+    pub(crate) fn reviewed(
+        selected: std::collections::BTreeSet<String>,
+        version: u32,
+        token: String,
+    ) -> Self {
+        Self {
+            selected,
+            reviewed_plan: Some(ReviewedPlanBinding { version, token }),
+        }
+    }
+
+    fn reviewed_binding(&self) -> Option<(u32, &str)> {
+        self.reviewed_plan
+            .as_ref()
+            .map(|binding| (binding.version, binding.token.as_str()))
+    }
+
     fn skips(selection: Option<&IngestSelection>, identity: &str) -> bool {
         selection.is_some_and(|s| !s.selected.contains(identity))
+    }
+
+    /// Whether an archive container has any exact reviewed leaf beneath it.
+    ///
+    /// Containers are traversal-only: selecting `outer.zip!/app.log` permits
+    /// opening `outer.zip`, but never permits any sibling leaf to emit events.
+    /// The `!/` boundary prevents `a.zip` from authorizing `a.zipx!/app.log`.
+    fn skips_archive(selection: Option<&IngestSelection>, identity: &str) -> bool {
+        selection.is_some_and(|selection| {
+            !selection.selected.iter().any(|selected| {
+                selected
+                    .strip_prefix(identity)
+                    .is_some_and(|suffix| suffix.starts_with("!/"))
+            })
+        })
     }
 }
 
@@ -2314,9 +2356,8 @@ fn ingest_from_zip_file(
 
         stats.discover();
         let rel = plan.identity.as_str();
-        let nested_archive_identity = archive_member_identity(archive_identity, rel);
         let source_identity = if prefix_members {
-            nested_archive_identity.clone()
+            archive_member_identity(archive_identity, rel)
         } else {
             rel.to_string()
         };
@@ -2424,14 +2465,14 @@ fn ingest_from_zip_file(
                 )));
             }
         };
-        if IngestSelection::skips(selection, &source_identity) {
-            stats.ignored("not_selected", Path::new(&source_identity));
-            files_done += 1;
-            continue;
-        }
         let nested_archive =
             plan.disposition == ZipEntryDisposition::NestedArchive || has_zip_signature(head);
         if nested_archive {
+            if IngestSelection::skips_archive(selection, &source_identity) {
+                stats.ignored("not_selected", Path::new(&source_identity));
+                files_done += 1;
+                continue;
+            }
             let next_depth = archive_depth.saturating_add(1);
             if next_depth > limits.max_archive_depth {
                 return Err(CoreError::Policy(format!(
@@ -2479,7 +2520,7 @@ fn ingest_from_zip_file(
             let nested_file = open_selected_regular_file(&staged.path)?;
             ingest_from_zip_file(
                 nested_file,
-                &nested_archive_identity,
+                &source_identity,
                 next_depth,
                 true,
                 private_staging_root,
@@ -2497,6 +2538,11 @@ fn ingest_from_zip_file(
                 ops,
                 selection,
             )?;
+            files_done += 1;
+            continue;
+        }
+        if IngestSelection::skips(selection, &source_identity) {
+            stats.ignored("not_selected", Path::new(&source_identity));
             files_done += 1;
             continue;
         }
@@ -2757,6 +2803,16 @@ fn ingest_path_inner_with_limits_and_fault(
             validate_staged_ingest(staging.cache_root(), &report)
         })?;
         check_ingest_fault(fault, IngestCheckpoint::BeforePublish)?;
+        // Verification before the run is necessary but not sufficient: the
+        // reviewed source can change while the private corpus is being built.
+        // Re-enumerate and bind it again at the last safe point. A mismatch
+        // removes the staging tree below and publishes nothing.
+        if let Some(selection) = selection {
+            if let Some((version, token)) = selection.reviewed_binding() {
+                let selected = selection.selected.iter().cloned().collect::<Vec<_>>();
+                super::import_preview::verify_import_plan(path, version, token, &selected, cancel)?;
+            }
+        }
         if cancelled(cancel) {
             emit(
                 progress,
@@ -2987,11 +3043,6 @@ fn ingest_path_into_cache(
                 )
             };
             let rel = portable_source_identity(rel_path)?;
-            if IngestSelection::skips(selection, &rel) {
-                stats.ignored("not_selected", file);
-                files_done += 1;
-                continue;
-            }
             let mut signature = [0u8; 4];
             let signature_len = match fh.read(&mut signature) {
                 Ok(read) => read,
@@ -3005,6 +3056,11 @@ fn ingest_path_into_cache(
             fh.seek(SeekFrom::Start(0))
                 .map_err(|e| CoreError::Message(format!("rewind log source: {e}")))?;
             if has_zip_extension(file) || has_zip_signature(&signature[..signature_len]) {
+                if IngestSelection::skips_archive(selection, &rel) {
+                    stats.ignored("not_selected", file);
+                    files_done += 1;
+                    continue;
+                }
                 ingest_from_zip_file(
                     fh,
                     &rel,
@@ -3025,6 +3081,11 @@ fn ingest_path_into_cache(
                     ops,
                     selection,
                 )?;
+                files_done += 1;
+                continue;
+            }
+            if IngestSelection::skips(selection, &rel) {
+                stats.ignored("not_selected", file);
                 files_done += 1;
                 continue;
             }
@@ -3639,7 +3700,9 @@ pub(super) fn preview_import_path_impl(
             ));
         } else {
             let sample = sample_bounded(&mut file, bytes);
-            items.push(item_from_sample(&identity, bytes, &sample, None, false));
+            let mut item = item_from_sample(&identity, bytes, &sample, None, false);
+            bind_preview_item_to_open_file_state(&mut item, &file);
+            items.push(item);
         }
         return Ok(finish_report(
             ImportSourceKind::File,
@@ -3772,7 +3835,9 @@ pub(super) fn preview_import_path_impl(
         }
 
         let sample = sample_bounded(&mut file, bytes);
-        items.push(item_from_sample(&identity, bytes, &sample, None, false));
+        let mut item = item_from_sample(&identity, bytes, &sample, None, false);
+        bind_preview_item_to_open_file_state(&mut item, &file);
+        items.push(item);
     }
 
     Ok(finish_report(
@@ -3781,6 +3846,47 @@ pub(super) fn preview_import_path_impl(
         truncated,
         None,
     ))
+}
+
+/// Bind a seekable ordinary-file preview row to the opened source object as
+/// well as its bounded content windows. Preview remains bounded, while a
+/// same-length rewrite outside those windows still changes normal filesystem
+/// identity/mtime state and therefore invalidates the reviewed plan.
+fn bind_preview_item_to_open_file_state(item: &mut ImportPreviewItem, file: &std::fs::File) {
+    let Ok(metadata) = file.metadata() else {
+        return;
+    };
+    item.plan_fingerprint.push_str("|source-state-v1");
+    item.plan_fingerprint
+        .push_str(&format!("|len:{}", metadata.len()));
+    if let Ok(modified) = metadata.modified() {
+        match modified.duration_since(std::time::UNIX_EPOCH) {
+            Ok(duration) => item.plan_fingerprint.push_str(&format!(
+                "|mtime:{}:{}",
+                duration.as_secs(),
+                duration.subsec_nanos()
+            )),
+            Err(error) => {
+                let duration = error.duration();
+                item.plan_fingerprint.push_str(&format!(
+                    "|mtime:-{}:{}",
+                    duration.as_secs(),
+                    duration.subsec_nanos()
+                ));
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        item.plan_fingerprint.push_str(&format!(
+            "|dev:{}|ino:{}|ctime:{}:{}",
+            metadata.dev(),
+            metadata.ino(),
+            metadata.ctime(),
+            metadata.ctime_nsec()
+        ));
+    }
 }
 
 /// Portable identity of a walked path relative to the selected root.
@@ -3928,7 +4034,7 @@ fn preview_zip_members<R: Read + Seek>(
             continue;
         }
 
-        let Ok(mut entry) = archive.by_name(&plan.identity) else {
+        let Ok(entry) = archive.by_name(&plan.identity) else {
             items.push(excluded_item(
                 &identity,
                 plan.expanded_size,
@@ -3937,11 +4043,28 @@ fn preview_zip_members<R: Read + Seek>(
             ));
             continue;
         };
+        let mut reader = BufReader::with_capacity(8 * 1024, entry);
+        let nested_archive = match reader.fill_buf() {
+            Ok(head) => {
+                plan.disposition == ZipEntryDisposition::NestedArchive || has_zip_signature(head)
+            }
+            Err(_) => {
+                items.push(excluded_item(
+                    &identity,
+                    plan.expanded_size,
+                    ImportItemStatus::Unsupported,
+                    ImportPreviewReason::ReadFailed,
+                ));
+                continue;
+            }
+        };
 
-        // A nested archive is buffered and inventoried recursively.
+        // A nested archive, including a signature-only container, is buffered
+        // and inventoried recursively. This mirrors ingest's extension-or-
+        // signature rule and keeps the reviewed virtual identities reachable.
         // `ZipArchive` needs `Read + Seek`, which `Cursor<Vec<u8>>` provides,
         // so preview never stages anything to disk the way ingest must.
-        if plan.disposition == ZipEntryDisposition::NestedArchive {
+        if nested_archive {
             if archive_depth + 1 > limits.max_archive_depth {
                 items.push(excluded_item(
                     &identity,
@@ -3964,7 +4087,7 @@ fn preview_zip_members<R: Read + Seek>(
                 continue;
             }
             let mut buf = Vec::new();
-            if std::io::Read::take(&mut entry, plan.expanded_size)
+            if std::io::Read::take(&mut reader, plan.expanded_size)
                 .read_to_end(&mut buf)
                 .is_err()
             {
@@ -3976,7 +4099,7 @@ fn preview_zip_members<R: Read + Seek>(
                 ));
                 continue;
             }
-            drop(entry);
+            drop(reader);
             let mut nested = std::io::Cursor::new(buf);
             preview_zip_members(
                 &mut nested,
@@ -4001,7 +4124,7 @@ fn preview_zip_members<R: Read + Seek>(
         // Cancellation propagates as `Err(Cancelled)`; a read/decompression
         // failure becomes an explicit ledger row rather than a classification
         // of whatever bytes happened to arrive.
-        let sample = match sample_streaming(&mut entry, plan.expanded_size, cancel)? {
+        let sample = match sample_streaming(&mut reader, plan.expanded_size, cancel)? {
             SampleOutcome::Sampled(sample) => sample,
             SampleOutcome::ReadFailed => {
                 items.push(excluded_item(
@@ -4101,6 +4224,72 @@ mod tests {
             zip.write_all(body).unwrap();
         }
         zip.finish().unwrap().into_inner()
+    }
+
+    fn ingest_one_reviewed_source(
+        cache: &Path,
+        path: &Path,
+        name: &str,
+        selected_identity: &str,
+    ) -> (IngestReport, Vec<String>) {
+        use super::super::import_preview::{
+            event_importable, import_plan_token, preview_import_path, verify_import_plan,
+            IMPORT_PLAN_VERSION,
+        };
+
+        let preview = preview_import_path(path, None).unwrap();
+        let selected_item = preview
+            .items
+            .iter()
+            .find(|item| item.identity == selected_identity)
+            .unwrap_or_else(|| {
+                panic!(
+                    "preview did not expose {selected_identity:?}; identities: {:?}",
+                    preview
+                        .items
+                        .iter()
+                        .map(|item| item.identity.as_str())
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert!(
+            event_importable(selected_item),
+            "reviewed leaf must be importable: {selected_item:?}"
+        );
+        let selection = verify_import_plan(
+            path,
+            IMPORT_PLAN_VERSION,
+            &import_plan_token(&preview),
+            &[selected_identity.to_string()],
+            None,
+        )
+        .unwrap();
+        let policy = LogEmbedPolicy {
+            mode: LogEmbedMode::None,
+            ..LogEmbedPolicy::default()
+        };
+        let report = ingest_path_with_policy_selection_and_observer_managed(
+            cache,
+            path,
+            name,
+            &policy,
+            None,
+            &NoopProcessProgress,
+            None,
+            &format!("managed-{name}"),
+            &selection,
+        )
+        .unwrap();
+        let corpus = LogCorpus::open(cache, &report.corpus_id).unwrap();
+        let mut sources = corpus.with_events(|events| {
+            events
+                .iter()
+                .map(|event| event.source.clone())
+                .collect::<Vec<_>>()
+        });
+        sources.sort();
+        sources.dedup();
+        (report, sources)
     }
 
     fn with_bounded_zip64_end_records(bytes: Vec<u8>) -> Vec<u8> {
@@ -4470,6 +4659,7 @@ mod tests {
         };
         let selection = IngestSelection {
             selected: ["visible.log".to_string()].into_iter().collect(),
+            ..IngestSelection::default()
         };
         let report = ingest_path_with_policy_selection_and_observer_managed(
             &cache,
@@ -4587,6 +4777,70 @@ mod tests {
     }
 
     #[test]
+    fn reviewed_source_change_after_initial_verification_never_publishes() {
+        use super::super::import_preview::{
+            import_plan_token, preview_import_path, verify_import_plan, IMPORT_PLAN_VERSION,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let source = logs.join("app.log");
+        let reviewed = "level=info msg=alpha\n";
+        let replacement = "level=warn msg=omega\n";
+        assert_eq!(reviewed.len(), replacement.len());
+        std::fs::write(&source, reviewed).unwrap();
+
+        let preview = preview_import_path(&logs, None).unwrap();
+        let token = import_plan_token(&preview);
+        let selection = verify_import_plan(
+            &logs,
+            IMPORT_PLAN_VERSION,
+            &token,
+            &["app.log".to_string()],
+            None,
+        )
+        .unwrap();
+
+        // Deterministically replace the source only after the staged corpus
+        // has passed validation. The final reviewed-plan check must catch the
+        // same-size, same-format drift before the atomic publication point.
+        let mutated = std::sync::atomic::AtomicBool::new(false);
+        let hook = |checkpoint| {
+            if checkpoint == IngestCheckpoint::BeforePublish
+                && !mutated.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                std::fs::write(&source, replacement).unwrap();
+            }
+            Ok(())
+        };
+        let error = ingest_path_inner_with_fault(
+            &cache,
+            &logs,
+            "reviewed-source-drift",
+            None,
+            "none",
+            LogEmbedMode::None,
+            None,
+            &NoopProcessProgress,
+            None,
+            None,
+            Some(&selection),
+            Some(&hook),
+        )
+        .unwrap_err();
+
+        assert!(mutated.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            error.to_string().contains("import plan is stale"),
+            "{error}"
+        );
+        assert!(LogCorpus::list_ids(&cache).unwrap().is_empty());
+        assert_no_ingest_staging(&cache);
+    }
+
+    #[test]
     fn direct_zip_root_selection_has_no_member_bleed() {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("cache");
@@ -4607,6 +4861,7 @@ mod tests {
         // Selecting one member of a directly-chosen ZIP imports only it.
         let selection = IngestSelection {
             selected: ["a.log".to_string()].into_iter().collect(),
+            ..IngestSelection::default()
         };
         let report = ingest_path_with_policy_selection_and_observer_managed(
             &cache,
@@ -4649,6 +4904,82 @@ mod tests {
             err.to_string().contains("no safe/importable log events"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn reviewed_nested_leaf_in_direct_zip_is_reachable_without_sibling_bleed() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let outer = dir.path().join("outer.zip");
+        let inner = zip_bytes(&[
+            ("nested/selected.log", b"level=error msg=selected\n"),
+            ("nested/sibling.log", b"level=warn msg=sibling\n"),
+        ]);
+        std::fs::write(
+            &outer,
+            zip_bytes(&[
+                ("inner.zip", &inner),
+                ("root.log", b"level=info msg=root\n"),
+            ]),
+        )
+        .unwrap();
+
+        let selected = "inner.zip!/nested/selected.log";
+        let (report, sources) =
+            ingest_one_reviewed_source(&cache, &outer, "direct-nested-selection", selected);
+        assert_eq!(sources, [selected]);
+        assert_eq!(report.stats.files, 1);
+        assert_eq!(report.stats.exclusion_counts.get("not_selected"), Some(&2));
+    }
+
+    #[test]
+    fn reviewed_leaf_in_directory_zip_is_reachable_without_sibling_bleed() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(
+            logs.join("support.zip"),
+            zip_bytes(&[
+                ("selected.log", b"level=error msg=selected\n"),
+                ("sibling.log", b"level=warn msg=sibling\n"),
+            ]),
+        )
+        .unwrap();
+        std::fs::write(logs.join("outside.log"), "level=info msg=outside\n").unwrap();
+
+        let selected = "support.zip!/selected.log";
+        let (report, sources) =
+            ingest_one_reviewed_source(&cache, &logs, "directory-zip-selection", selected);
+        assert_eq!(sources, [selected]);
+        assert_eq!(report.stats.files, 1);
+        assert_eq!(report.stats.exclusion_counts.get("not_selected"), Some(&2));
+    }
+
+    #[test]
+    fn reviewed_leaf_in_signature_only_nested_archive_is_reachable() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let outer = dir.path().join("outer.zip");
+        let inner = zip_bytes(&[
+            ("selected.log", b"level=error msg=selected\n"),
+            ("sibling.log", b"level=warn msg=sibling\n"),
+        ]);
+        std::fs::write(
+            &outer,
+            zip_bytes(&[
+                ("inner.bundle", &inner),
+                ("root.log", b"level=info msg=root\n"),
+            ]),
+        )
+        .unwrap();
+
+        let selected = "inner.bundle!/selected.log";
+        let (report, sources) =
+            ingest_one_reviewed_source(&cache, &outer, "signature-nested-selection", selected);
+        assert_eq!(sources, [selected]);
+        assert_eq!(report.stats.files, 1);
+        assert_eq!(report.stats.exclusion_counts.get("not_selected"), Some(&2));
     }
 
     #[test]
@@ -4709,8 +5040,8 @@ mod tests {
         assert_eq!(
             archive_sources,
             [
-                "outer.zip!/host-b.bundle!/deep/app.log",
-                "outer.zip!/host-b.zip!/deep/app.log",
+                "host-b.bundle!/deep/app.log",
+                "host-b.zip!/deep/app.log",
                 "visible.log"
             ]
         );
