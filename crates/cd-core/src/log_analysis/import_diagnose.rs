@@ -910,10 +910,9 @@ mod tests {
     #[test]
     fn diagnose_zip_and_nested_zip() {
         ensure_fixtures();
-        let root = fixture_root();
-        let outer = root.join("archives/nested.zip");
-        // Build inner zip bytes
-        let inner_path = root.join("archives/inner_tmp.zip");
+        // Build under tempfile so checked-in fixtures stay unmodified.
+        let tmp = tempfile::tempdir().unwrap();
+        let inner_path = tmp.path().join("inner.zip");
         make_zip(
             &inner_path,
             &[(
@@ -922,6 +921,7 @@ mod tests {
             )],
         );
         let inner_bytes = fs::read(&inner_path).unwrap();
+        let outer = tmp.path().join("nested.zip");
         make_zip(
             &outer,
             &[
@@ -929,7 +929,6 @@ mod tests {
                 ("inner.zip", &inner_bytes),
             ],
         );
-        let _ = fs::remove_file(&inner_path);
 
         let report = diagnose_log_import(&outer, ImportDiagnoseOptions::default()).unwrap();
         assert!(
