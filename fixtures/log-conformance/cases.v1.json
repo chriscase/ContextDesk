@@ -43,19 +43,12 @@
       "input": "postgres-stderr/prefix-m-p.log",
       "title": "%m with an unambiguous UTC abbreviation is a wall clock",
       "note": "`2025-06-15 12:00:00.123 UTC` names a zone that has exactly one meaning, so it is an instant rather than order-only evidence. There is no PostgreSQL grammar today, so the whole line falls back to plain text.",
-      "status": "gap",
-      "issue": "751",
+      "status": "holds",
       "desired": {
         "kind": "record_field",
         "where_contains": "database system is ready",
         "field": "timestamp_provenance",
         "value": "explicit_wall_clock"
-      },
-      "observed": {
-        "kind": "record_field",
-        "where_contains": "database system is ready",
-        "field": "timestamp_provenance",
-        "value": "order_only"
       }
     },
     {
@@ -96,13 +89,13 @@
       "dimension": "timestamp_provenance",
       "input": "postgres-stderr/prefix-ambiguous-zone.log",
       "title": "An ambiguous zone abbreviation never becomes an instant",
-      "note": "CST is North American or Chinese depending on deployment. No amount of grammar work may turn this into a wall clock without an explicit source timezone policy.",
+      "note": "CST is North American or Chinese depending on deployment. No amount of grammar work may turn this into a wall clock without an explicit source timezone policy. Asserted on active_timestamp_basis, the field that carries 'ts is the ingest position, not calendar time'. The original assertion used timestamp_provenance=order_only, which is unsatisfiable alongside the companion case pg-stderr-ambiguous-zone-evidence-retained: retaining local evidence is exactly what TimestampProvenance::UnresolvedLocal records ('validated a complete local calendar timestamp but no timezone'), while OrderOnly means 'no usable calendar timestamp was present' -- false here. The sibling case json-ts-offsetless-local-order-only already encodes this class the same way.",
       "status": "holds",
       "invariant": true,
       "desired": {
         "kind": "record_field",
         "where_contains": "already a transaction in progress",
-        "field": "timestamp_provenance",
+        "field": "active_timestamp_basis",
         "value": "order_only"
       }
     },
@@ -113,19 +106,12 @@
       "input": "postgres-stderr/prefix-ambiguous-zone.log",
       "title": "The local calendar text should still be retained as evidence",
       "note": "Refusing to resolve is correct; discarding the evidence is not. The local portion is a complete calendar time and should be retained so an explicit timezone policy can resolve it later.",
-      "status": "gap",
-      "issue": "751",
+      "status": "holds",
       "desired": {
         "kind": "record_field",
         "where_contains": "already a transaction in progress",
         "field": "unresolved_local_timestamp",
         "value": "2025-06-15 08:05:10.004"
-      },
-      "observed": {
-        "kind": "record_field",
-        "where_contains": "already a transaction in progress",
-        "field": "unresolved_local_timestamp",
-        "value": null
       }
     },
     {
@@ -208,19 +194,12 @@
       "input": "postgres-jsonlog/postgresql-json.log",
       "title": "jsonlog `timestamp` is a documented field with an unambiguous zone",
       "note": "The value is `2025-06-15 12:20:05.250 UTC`. The alias is found, but the text is neither RFC3339 nor a bare local datetime, so it is discarded entirely and the row becomes order-only.",
-      "status": "gap",
-      "issue": "751",
+      "status": "holds",
       "desired": {
         "kind": "record_field",
         "where_contains": "duplicate key value violates",
         "field": "timestamp_provenance",
         "value": "explicit_wall_clock"
-      },
-      "observed": {
-        "kind": "record_field",
-        "where_contains": "duplicate key value violates",
-        "field": "timestamp_provenance",
-        "value": "order_only"
       }
     },
     {
@@ -379,9 +358,10 @@
       "desired": {
         "kind": "record_field",
         "where_contains": "linux calendar string",
-        "field": "timestamp_provenance",
+        "field": "active_timestamp_basis",
         "value": "order_only"
-      }
+      },
+      "note": "Same correction as pg-stderr-ambiguous-zone-not-resolved: asserted on active_timestamp_basis, the field meaning 'ts is the ingest position'. A ctime string carries a complete calendar time with no zone, so retaining it as evidence is UnresolvedLocal by definition; the invariant being protected is that it never becomes an instant, which this assertion still catches because any promotion would set the basis to explicit_wall."
     },
     {
       "id": "json-ts-linux-calendar-evidence",
@@ -390,19 +370,12 @@
       "input": "structured/json-ts-matrix.log",
       "title": "`Sun Jun 15 12:00:00 2025` is complete local evidence and should be retained",
       "note": "Refusing to resolve it is right. Discarding it means an explicit source-timezone policy can never recover the row.",
-      "status": "gap",
-      "issue": "751",
+      "status": "holds",
       "desired": {
         "kind": "record_field",
         "where_contains": "linux calendar string",
         "field": "unresolved_local_timestamp",
         "value": "Sun Jun 15 12:00:00 2025"
-      },
-      "observed": {
-        "kind": "record_field",
-        "where_contains": "linux calendar string",
-        "field": "unresolved_local_timestamp",
-        "value": null
       }
     },
     {

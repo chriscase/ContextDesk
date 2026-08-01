@@ -644,7 +644,106 @@ fn parse_timestamp_text(value: &str) -> ParsedTimestamp {
     if is_complete_local_timestamp(value) {
         return ParsedTimestamp::UnresolvedLocal(value.to_string());
     }
+    // `YYYY-MM-DD HH:MM:SS[.fff] <ZONE>` — PostgreSQL's `%m`/`%t` prefix and its
+    // jsonlog `timestamp` field both use this shape, which is not RFC3339.
+    if let Some(parsed) = parse_zone_suffixed_local(value) {
+        return parsed;
+    }
+    // `Sun Jun 15 12:00:00 2025` — the C `ctime`/`date` calendar rendering.
+    if let Some(parsed) = parse_ctime_calendar(value) {
+        return parsed;
+    }
     ParsedTimestamp::Unusable
+}
+
+/// Zone abbreviations whose meaning is unambiguous worldwide.
+///
+/// Deliberately tiny. `CST` is North American *or* Chinese, `IST` is Indian,
+/// Irish or Israeli, `BST` is British or Bougainville — none may become an
+/// instant without an explicit source-timezone policy, so they resolve to
+/// retained local evidence instead.
+const UNAMBIGUOUS_UTC_ZONES: &[&str] = &["UTC", "GMT", "UT", "Z", "ZULU"];
+
+/// Zone abbreviations recognised as *zones* but deliberately not interpreted.
+///
+/// Recognising the token matters: it proves the trailing word is a timezone
+/// rather than message text, so the calendar portion in front of it is real
+/// evidence. Refusing to interpret it is what keeps `08:05:10 CST` from
+/// becoming a guessed instant.
+const AMBIGUOUS_LOCAL_ZONES: &[&str] = &[
+    "EST", "EDT", "CST", "CDT", "MST", "MDT", "PST", "PDT", "AST", "ADT", "HST", "AKST", "AKDT",
+    "CET", "CEST", "EET", "EEST", "WET", "WEST", "BST", "IST", "MSK", "MSD", "JST", "KST", "SGT",
+    "HKT", "AEST", "AEDT", "ACST", "ACDT", "AWST", "NZST", "NZDT", "BRT", "ART", "CLT", "PET",
+];
+
+/// Split `YYYY-MM-DD HH:MM:SS[.fff] <ZONE>` into calendar text and zone token.
+///
+/// Returns `None` when the trailing word is not a timezone we recognise, so a
+/// fabricated suffix such as `2025-06-15 12:00:00.123 NOTAZONE` is never
+/// mistaken for a stamped timestamp.
+fn split_zone_suffixed_local(value: &str) -> Option<(&str, &str)> {
+    let value = value.trim();
+    let (calendar, zone) = value.rsplit_once(' ')?;
+    let calendar = calendar.trim_end();
+    if !is_complete_local_timestamp(calendar) {
+        return None;
+    }
+    let upper = zone.to_ascii_uppercase();
+    if UNAMBIGUOUS_UTC_ZONES.contains(&upper.as_str())
+        || AMBIGUOUS_LOCAL_ZONES.contains(&upper.as_str())
+    {
+        Some((calendar, zone))
+    } else {
+        None
+    }
+}
+
+/// Interpret a zone-suffixed local timestamp.
+///
+/// An unambiguous UTC-equivalent zone yields a real instant. Every other
+/// recognised abbreviation yields the calendar text as retained local evidence
+/// — never a guessed instant.
+fn parse_zone_suffixed_local(value: &str) -> Option<ParsedTimestamp> {
+    let (calendar, zone) = split_zone_suffixed_local(value)?;
+    if !UNAMBIGUOUS_UTC_ZONES.contains(&zone.to_ascii_uppercase().as_str()) {
+        return Some(ParsedTimestamp::UnresolvedLocal(calendar.to_string()));
+    }
+    let mut canonical = calendar.to_string();
+    if canonical.as_bytes().get(19) == Some(&b',') {
+        canonical.replace_range(19..20, ".");
+    }
+    for format in [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+    ] {
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(&canonical, format) {
+            let secs = naive.and_utc().timestamp();
+            if epoch_secs_in_policy(secs) {
+                return Some(ParsedTimestamp::ExplicitWallClock(secs));
+            }
+            return Some(ParsedTimestamp::Unusable);
+        }
+    }
+    None
+}
+
+/// `Sun Jun 15 12:00:00 2025` — C `ctime`/`date` output, which carries no zone.
+///
+/// Complete local calendar evidence, so it is retained verbatim rather than
+/// discarded, but never an instant: the producer's zone is unstated.
+fn parse_ctime_calendar(value: &str) -> Option<ParsedTimestamp> {
+    let value = value.trim();
+    if value.len() > 64 {
+        return None;
+    }
+    for format in ["%a %b %e %H:%M:%S %Y", "%a %b %d %H:%M:%S %Y"] {
+        if chrono::NaiveDateTime::parse_from_str(value, format).is_ok() {
+            return Some(ParsedTimestamp::UnresolvedLocal(value.to_string()));
+        }
+    }
+    None
 }
 
 fn is_complete_local_timestamp(value: &str) -> bool {
@@ -1523,11 +1622,18 @@ fn parse_postgres_stderr(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
     } else {
         message.trim_start().to_string()
     };
+    // `log_line_prefix` stamps `%m`/`%t` as `YYYY-MM-DD HH:MM:SS[.mmm] ZONE`.
+    // `UTC` names one instant; `CST` and friends name several, so those keep
+    // the calendar text as local evidence and stay order-only.
+    let (ts, timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp) =
+        parse_zone_suffixed_local(prefix)
+            .unwrap_or(ParsedTimestamp::Unusable)
+            .into_stored_fields(ingest_seq);
     Some(ParsedLine {
-        ts: Some(ingest_seq as i64),
-        timestamp_provenance: TimestampProvenance::OrderOnly,
-        active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
-        unresolved_local_timestamp: None,
+        ts: Some(ts),
+        timestamp_provenance,
+        active_timestamp_basis,
+        unresolved_local_timestamp,
         level: normalize_level(sev),
         service: None,
         host: None,
@@ -2603,5 +2709,127 @@ mod tests {
         assert_eq!(normalize_level("CRITICAL"), "critical");
         assert_ne!(normalize_level("TRACE"), normalize_level("DEBUG"));
         assert_ne!(normalize_level("CRITICAL"), normalize_level("FATAL"));
+    }
+
+    #[test]
+    fn unambiguous_utc_suffix_is_an_instant() {
+        // `%m` / jsonlog `timestamp`: `YYYY-MM-DD HH:MM:SS.mmm UTC`.
+        assert_eq!(
+            parse_timestamp_text("2025-06-15 12:00:00.123 UTC"),
+            ParsedTimestamp::ExplicitWallClock(1_749_988_800),
+            "UTC names exactly one instant"
+        );
+        // Fractional seconds are truncated to whole seconds, like every other path.
+        assert_eq!(
+            parse_timestamp_text("2025-06-15 12:00:00 GMT"),
+            ParsedTimestamp::ExplicitWallClock(1_749_988_800)
+        );
+    }
+
+    #[test]
+    fn ambiguous_zone_suffix_is_evidence_not_an_instant() {
+        // CST is North American or Chinese. Retained, never resolved — and the
+        // retained text is the calendar portion only, without the zone token.
+        assert_eq!(
+            parse_timestamp_text("2025-06-15 08:05:10.004 CST"),
+            ParsedTimestamp::UnresolvedLocal("2025-06-15 08:05:10.004".to_string())
+        );
+        for zone in ["IST", "BST", "EDT", "JST", "AEST"] {
+            let probe = format!("2025-06-15 08:05:10 {zone}");
+            assert!(
+                matches!(
+                    parse_timestamp_text(&probe),
+                    ParsedTimestamp::UnresolvedLocal(_)
+                ),
+                "{zone} must not resolve to an instant"
+            );
+        }
+    }
+
+    #[test]
+    fn fabricated_timezone_suffixes_are_rejected() {
+        // Adversarial: a trailing word that merely looks like a zone must not
+        // license an instant, and must not license evidence either — otherwise
+        // any message beginning with a date becomes a timestamp.
+        for probe in [
+            "2025-06-15 12:00:00.123 NOTAZONE",
+            "2025-06-15 12:00:00.123 UTCX",
+            "2025-06-15 12:00:00.123 XUTC",
+            "2025-06-15 12:00:00.123 UTC extra",
+            "2025-06-15 12:00:00.123 utc_",
+            "2025-06-15 12:00:00.123 00",
+        ] {
+            assert_eq!(
+                parse_timestamp_text(probe),
+                ParsedTimestamp::Unusable,
+                "fabricated suffix accepted: {probe:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_offsets_still_win_over_the_suffix_path() {
+        // The new zone-suffix branch runs only after RFC3339 fails, so an
+        // explicit offset remains authoritative.
+        assert_eq!(
+            parse_timestamp_text("2025-06-15T12:00:00Z"),
+            ParsedTimestamp::ExplicitWallClock(1_749_988_800)
+        );
+        assert_eq!(
+            parse_timestamp_text("2025-06-15T17:30:00+05:30"),
+            ParsedTimestamp::ExplicitWallClock(1_749_988_800)
+        );
+    }
+
+    #[test]
+    fn ctime_calendar_is_evidence_never_an_instant() {
+        assert_eq!(
+            parse_timestamp_text("Sun Jun 15 12:00:00 2025"),
+            ParsedTimestamp::UnresolvedLocal("Sun Jun 15 12:00:00 2025".to_string())
+        );
+        // A malformed calendar string stays unusable rather than half-parsed.
+        assert_eq!(
+            parse_timestamp_text("Sun Jun 32 12:00:00 2025"),
+            ParsedTimestamp::Unusable
+        );
+        assert_eq!(
+            parse_timestamp_text("Sun Jun 15 2025"),
+            ParsedTimestamp::Unusable
+        );
+    }
+
+    #[test]
+    fn postgres_stderr_utc_and_ambiguous_prefixes() {
+        let utc = parse_line(
+            "2025-06-15 12:00:00.123 UTC [1042] LOG:  database system is ready to accept connections",
+            None,
+            0,
+        );
+        assert_eq!(
+            utc.timestamp_provenance,
+            TimestampProvenance::ExplicitWallClock
+        );
+        assert_eq!(utc.ts, Some(1_749_988_800));
+        assert_eq!(utc.level, "log");
+
+        let ambiguous = parse_line(
+            "2025-06-15 08:05:10.004 CST [3001] WARNING:  there is already a transaction in progress",
+            None,
+            7,
+        );
+        assert_eq!(
+            ambiguous.timestamp_provenance,
+            TimestampProvenance::UnresolvedLocal
+        );
+        assert_eq!(
+            ambiguous.active_timestamp_basis,
+            ActiveTimestampBasis::OrderOnly,
+            "an ambiguous zone must never present as calendar time"
+        );
+        assert_eq!(
+            ambiguous.unresolved_local_timestamp.as_deref(),
+            Some("2025-06-15 08:05:10.004")
+        );
+        assert_eq!(ambiguous.ts, Some(7), "ts stays the ingest position");
     }
 }
