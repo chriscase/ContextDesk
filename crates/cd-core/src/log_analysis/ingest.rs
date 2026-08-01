@@ -6962,8 +6962,8 @@ RETURNING id\"
             logs.join("cri.log"),
             "\
 2025-06-15T16:10:00.000000000Z stdout F {\"level\":\"error\",\"msg\":\"cri full record\"}
-2025-06-15T16:10:01.000000000Z stdout P {\"level\":\"warn\",\"msg\":\"cri split 
-2025-06-15T16:10:01.000000000Z stdout F record\"}
+2025-06-15T16:10:01.000000000Z stdout P {\"level\":\"warn\",\"msg\":\"cri split
+2025-06-15T16:10:01.000000000Z stdout F  record\"}
 2025-06-15T16:10:02.000000000Z stderr F plain cri payload
 ",
         )
