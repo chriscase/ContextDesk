@@ -494,7 +494,17 @@ fn parse_json(raw: &str, ingest_seq: u64) -> ParsedLine {
     };
     let (ts, timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp) =
         timestamp.into_stored_fields(ingest_seq);
-    let level = get_level().unwrap_or_else(|| "unknown".into());
+    // #791: a transport envelope carries the application record in a payload
+    // field. Read the payload's severity only when the envelope declared none,
+    // so nothing the payload says can overwrite envelope metadata. Timestamp,
+    // host, service and stream above are already fixed from the outer object
+    // and are not revisited.
+    let level = get_level()
+        .or_else(|| {
+            let payload = obj.and_then(|o| o.get("log")).and_then(|v| v.as_str())?;
+            inner_payload_severity(payload, raw)
+        })
+        .unwrap_or_else(|| "unknown".into());
     let message = get_str(&["message", "msg", "log", "text"]).unwrap_or_else(|| raw.to_string());
     // #789: only true trace identifiers — never span_id or request_id.
     let trace_id = get_str(&["trace_id", "traceId", "trace"]);
@@ -567,6 +577,125 @@ fn normalize_numeric_level(n: i64) -> String {
         31..=40 => "warn".into(),
         41..=50 => "error".into(),
         51.. => "fatal".into(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bounded envelope payload interpretation (#791)
+// ---------------------------------------------------------------------------
+//
+// A transport envelope often carries a payload in its own grammar: Docker's
+// `json-file` wraps an application record in `log`, RFC5424 wraps CEF. The
+// envelope owns time, stream, host and transport metadata; the payload owns
+// application semantics such as severity.
+//
+// Only severity is read back out, and only when the envelope did not state one.
+// Nothing the payload says may overwrite envelope provenance — that is the
+// explicit non-goal in #791 ("Inner parsing must not silently overwrite
+// container timestamp, source, host, stream, facility, or transport metadata").
+
+/// Largest payload the parser will look inside.
+const MAX_INNER_PAYLOAD_BYTES: usize = 64 * 1024;
+
+/// Read an application severity out of one bounded envelope payload.
+///
+/// Returns `None` for anything unrecognised, oversized, or self-referential, so
+/// a malformed or hostile payload degrades to the envelope's own behavior
+/// rather than failing the record. Exactly one layer is decoded; the result is
+/// a severity string and never a new record, so there is no recursion to bound
+/// beyond this call.
+fn inner_payload_severity(payload: &str, envelope: &str) -> Option<String> {
+    let payload = payload.trim();
+    if payload.is_empty() || payload.len() > MAX_INNER_PAYLOAD_BYTES {
+        return None;
+    }
+    // Self-referential payload: an envelope whose `log` field is the envelope
+    // again must not be walked.
+    if payload == envelope.trim() {
+        return None;
+    }
+
+    if let Ok(serde_json::Value::Object(inner)) = serde_json::from_str::<serde_json::Value>(payload)
+    {
+        for key in ["level", "severity", "lvl", "error_severity"] {
+            match inner.get(key) {
+                Some(serde_json::Value::String(s)) => return Some(normalize_level(s)),
+                Some(serde_json::Value::Number(n)) => {
+                    if let Some(i) = n.as_i64() {
+                        return Some(normalize_numeric_level(i));
+                    }
+                }
+                _ => {}
+            }
+        }
+        return None;
+    }
+
+    if let Some(level) = cef_severity_level(payload) {
+        return Some(level);
+    }
+
+    // logfmt payload: `level=warn msg="…"`.
+    if looks_like_logfmt(payload) {
+        for token in split_logfmt_tokens(payload) {
+            if let Some((key, value)) = token.split_once('=') {
+                if matches!(key, "level" | "severity" | "lvl") {
+                    return Some(normalize_level(value.trim_matches('"')));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Map a CEF `CEF:0|…|Severity|…` header onto a normalized level.
+///
+/// The documented scale is 0–10 with the bands Low (0–3), Medium (4–6),
+/// High (7–8) and Very-High (9–10); the named forms are accepted too. Anything
+/// shorter than the seven mandatory header fields, or with a severity outside
+/// the scale, is not CEF we understand and yields `None`.
+fn cef_severity_level(payload: &str) -> Option<String> {
+    let rest = payload.trim().strip_prefix("CEF:")?;
+    // Split on unescaped pipes: `\|` is a literal pipe inside a header field.
+    let mut fields: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut escaped = false;
+    for ch in rest.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '|' {
+            fields.push(std::mem::take(&mut current));
+            if fields.len() > 8 {
+                break;
+            }
+        } else {
+            current.push(ch);
+        }
+    }
+    fields.push(current);
+    // version | vendor | product | dev-version | signature | name | severity
+    if fields.len() < 7 {
+        return None;
+    }
+    let severity = fields[6].trim();
+    if let Ok(value) = severity.parse::<u8>() {
+        return match value {
+            0..=3 => Some("info".into()),
+            4..=6 => Some("warn".into()),
+            7..=8 => Some("error".into()),
+            9..=10 => Some("fatal".into()),
+            _ => None,
+        };
+    }
+    match severity.to_ascii_lowercase().as_str() {
+        "low" | "unknown" => Some("info".into()),
+        "medium" => Some("warn".into()),
+        "high" => Some("error".into()),
+        "very-high" | "very high" => Some("fatal".into()),
+        _ => None,
     }
 }
 
@@ -1488,7 +1617,12 @@ fn parse_rfc5424_body(rest: &str, ingest_seq: u64, raw: &str) -> Option<ParsedLi
     let (_procid, rest) = take_token(rest)?;
     let (_msgid, rest) = take_token(rest)?;
     let message = rfc5424_message(rest);
-    let level = level_from_message_text(&message);
+    // #791: RFC5424 commonly transports a CEF payload whose header states a
+    // documented 0–10 severity. Reading it is strictly better than the
+    // substring scan below, which would call this record `info` because it
+    // contains neither "error" nor "warn". Malformed CEF falls back.
+    let level =
+        inner_payload_severity(&message, raw).unwrap_or_else(|| level_from_message_text(&message));
     let host = if host_tok == "-" {
         None
     } else {
@@ -2709,6 +2843,119 @@ mod tests {
         assert_eq!(normalize_level("CRITICAL"), "critical");
         assert_ne!(normalize_level("TRACE"), normalize_level("DEBUG"));
         assert_ne!(normalize_level("CRITICAL"), normalize_level("FATAL"));
+    }
+
+    #[test]
+    fn envelope_severity_never_overwrites_an_envelope_that_stated_one() {
+        // #791's hard rule: the payload may fill a gap, never overrule the
+        // transport. Outer says info, inner says fatal — outer wins.
+        let line = r#"{"log":"{\"level\":60,\"msg\":\"inner\"}","stream":"stdout","time":"2025-06-15T16:00:00Z","level":"info"}"#;
+        let parsed = parse_line(line, None, 0);
+        assert_eq!(parsed.level, "info", "inner payload overruled the envelope");
+    }
+
+    #[test]
+    fn envelope_timestamp_survives_inner_payload_interpretation() {
+        // The inner record carries its own, different time. Container time is
+        // authoritative and must not move.
+        let line = r#"{"log":"{\"level\":50,\"time\":1000000000,\"msg\":\"inner\"}","stream":"stdout","time":"2025-06-15T16:00:00Z"}"#;
+        let parsed = parse_line(line, None, 0);
+        assert_eq!(parsed.level, "error", "inner severity should fill the gap");
+        assert_eq!(
+            parsed.ts,
+            Some(1_750_003_200),
+            "container time must remain authoritative"
+        );
+        assert_eq!(
+            parsed.timestamp_provenance,
+            TimestampProvenance::ExplicitWallClock
+        );
+    }
+
+    #[test]
+    fn self_referential_payload_is_not_walked() {
+        // A payload identical to its own envelope must terminate immediately.
+        let envelope = r#"{"log":"{\"log\":\"x\"}","stream":"stdout"}"#;
+        assert_eq!(inner_payload_severity(envelope, envelope), None);
+        // Repeated identical payloads are still each read once, cheaply.
+        let payload = r#"{"level":40,"msg":"repeat"}"#;
+        for _ in 0..1000 {
+            assert_eq!(
+                inner_payload_severity(payload, "outer"),
+                Some("warn".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_payload_is_not_decoded() {
+        let big = format!(
+            "{{\"level\":\"error\",\"pad\":\"{}\"}}",
+            "x".repeat(MAX_INNER_PAYLOAD_BYTES)
+        );
+        assert_eq!(
+            inner_payload_severity(&big, "outer"),
+            None,
+            "an oversized payload must be skipped, not decoded"
+        );
+    }
+
+    #[test]
+    fn cef_severity_bands_and_malformed_headers() {
+        let cef = |sev: &str| format!("CEF:0|Example|Gateway|1.0|100|blocked|{sev}|src=192.0.2.9");
+        assert_eq!(cef_severity_level(&cef("0")).as_deref(), Some("info"));
+        assert_eq!(cef_severity_level(&cef("3")).as_deref(), Some("info"));
+        assert_eq!(cef_severity_level(&cef("4")).as_deref(), Some("warn"));
+        assert_eq!(cef_severity_level(&cef("5")).as_deref(), Some("warn"));
+        assert_eq!(cef_severity_level(&cef("7")).as_deref(), Some("error"));
+        assert_eq!(cef_severity_level(&cef("10")).as_deref(), Some("fatal"));
+        assert_eq!(cef_severity_level(&cef("Medium")).as_deref(), Some("warn"));
+
+        // Malformed: out of scale, non-numeric, too few header fields, no prefix.
+        for bad in [
+            cef("11"),
+            cef("-1"),
+            cef("banana"),
+            "CEF:0|Example|Gateway|1.0|100|blocked".to_string(),
+            "CEF:0".to_string(),
+            "not cef at all".to_string(),
+        ] {
+            assert_eq!(
+                cef_severity_level(&bad),
+                None,
+                "accepted malformed CEF: {bad}"
+            );
+        }
+
+        // An escaped pipe inside a header field must not shift the severity
+        // column — that would read the wrong field as severity.
+        let escaped = r"CEF:0|Ex\|ample|Gateway|1.0|100|blocked|9|src=192.0.2.9";
+        assert_eq!(cef_severity_level(escaped).as_deref(), Some("fatal"));
+    }
+
+    #[test]
+    fn malformed_inner_payload_falls_back_safely() {
+        // Truncated JSON, a bare array, and plain text all yield no severity
+        // rather than a wrong one or a panic.
+        for payload in [
+            "{\"level\":\"error\"",
+            "[]",
+            "just some text",
+            "",
+            "   ",
+            "{}",
+        ] {
+            assert_eq!(
+                inner_payload_severity(payload, "outer"),
+                None,
+                "payload {payload:?} produced a severity it should not have"
+            );
+        }
+        // The envelope still parses and keeps its own behavior.
+        let line = r#"{"log":"not json at all","stream":"stdout","time":"2025-06-15T16:00:00Z"}"#;
+        let parsed = parse_line(line, None, 0);
+        assert_eq!(parsed.level, "unknown");
+        assert_eq!(parsed.ts, Some(1_750_003_200));
     }
 
     #[test]

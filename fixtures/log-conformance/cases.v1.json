@@ -755,20 +755,14 @@
       "input": "layered/docker-json-file.log",
       "title": "The payload inside `log` is never interpreted",
       "note": "The inner record is a complete Pino object with numeric level 50 (error). The envelope's `log` field is treated as message text, so the inner severity, timestamp, and fields are all invisible. This is the layered case #791 exists for.",
-      "status": "gap",
-      "issue": "791",
+      "status": "holds",
       "desired": {
         "kind": "record_field",
         "where_contains": "inner pino record",
         "field": "level",
         "value": "error"
       },
-      "observed": {
-        "kind": "record_field",
-        "where_contains": "inner pino record",
-        "field": "level",
-        "value": "unknown"
-      }
+      "invariant": true
     },
     {
       "id": "cri-partial-fragment-joined",
@@ -804,20 +798,14 @@
       "input": "layered/syslog-payload.log",
       "title": "A CEF payload's severity is not read",
       "note": "The RFC5424 record carries a CEF:0 payload whose severity field is 5 -- the medium band of the documented 0-10 scale. The syslog path instead infers severity by scanning the message for the substrings `error` and `warn`, finds neither, and reports info.",
-      "status": "gap",
-      "issue": "791",
+      "status": "holds",
       "desired": {
         "kind": "record_field",
         "where_contains": "CEF:0",
         "field": "level",
         "value": "warn"
       },
-      "observed": {
-        "kind": "record_field",
-        "where_contains": "CEF:0",
-        "field": "level",
-        "value": "info"
-      }
+      "invariant": true
     },
     {
       "id": "rfc3164-logfmt-payload-level",
