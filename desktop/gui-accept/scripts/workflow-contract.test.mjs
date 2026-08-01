@@ -54,4 +54,14 @@ describe("gui-accept workflow contract", () => {
     assert.match(job, /npm test/);
     assert.doesNotMatch(job, /wdio|tauri-driver|xvfb/i);
   });
+
+  it("uploads the hidden run directory as retained evidence", () => {
+    const y = readFileSync(wf, "utf8");
+    const start = y.indexOf("- name: Upload artifacts");
+    assert.ok(start > 0, "workflow must retain GUI acceptance artifacts");
+    const upload = y.slice(start);
+    assert.match(upload, /path:\s*desktop\/gui-accept\/\.runs\//);
+    assert.match(upload, /include-hidden-files:\s*true/);
+    assert.match(upload, /if-no-files-found:\s*error/);
+  });
 });
