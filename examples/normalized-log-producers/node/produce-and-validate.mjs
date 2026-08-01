@@ -28,6 +28,9 @@ const MAX_ID_CHARS = 128;
 const MAX_SEVERITY_NUMBER = 24;
 const MAX_CORRELATIONS = 32;
 const MAX_MESSAGE_CHARS = 64 * 1024;
+// Bounds parser work and stack use: a deeply nested attribute map is the cheap
+// way to make a validator expensive.
+const MAX_JSON_DEPTH = 32;
 
 /**
  * Top-level keys an older ContextDesk reader treats as authoritative
@@ -90,6 +93,16 @@ const isInstant = (value) =>
   INSTANT_RE.test(value) &&
   // RFC3339 reserves -00:00 for "offset unknown" — the same as not having one.
   !value.endsWith("-00:00");
+
+const jsonDepth = (value) => {
+  if (Array.isArray(value)) {
+    return 1 + Math.max(0, ...value.map(jsonDepth));
+  }
+  if (typeof value === "object" && value !== null) {
+    return 1 + Math.max(0, ...Object.values(value).map(jsonDepth));
+  }
+  return 0;
+};
 
 /** A real IANA zone, not merely a plausible-looking string. */
 const isIanaZone = (value) => {
@@ -258,6 +271,15 @@ function validateEvent(event, expectedSeq, errors, line) {
       /^0+$/.test(event.spanId)
     ) {
       errors.push([line, "trace_identifier_malformed", "spanId"]);
+    }
+  }
+
+  if (typeof event.attributes === "object" && event.attributes !== null) {
+    for (const value of Object.values(event.attributes)) {
+      if (jsonDepth(value) > MAX_JSON_DEPTH) {
+        errors.push([line, "depth_exceeded", "attributes"]);
+        break;
+      }
     }
   }
 

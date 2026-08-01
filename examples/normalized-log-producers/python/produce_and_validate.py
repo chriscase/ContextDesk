@@ -34,6 +34,9 @@ MAX_ID_CHARS = 128
 MAX_SEVERITY_NUMBER = 24
 MAX_CORRELATIONS = 32
 MAX_MESSAGE_CHARS = 64 * 1024
+# Bounds parser work and stack use: a deeply nested attribute map is the cheap
+# way to make a validator expensive.
+MAX_JSON_DEPTH = 32
 
 # Top-level keys an older ContextDesk reader would treat as authoritative
 # wall-clock time. A conforming event must never carry them: it could declare
@@ -108,6 +111,14 @@ def _is_instant(value) -> bool:
         # thing as not having one.
         and not value.endswith("-00:00")
     )
+
+
+def _json_depth(value) -> int:
+    if isinstance(value, dict):
+        return 1 + max((_json_depth(v) for v in value.values()), default=0)
+    if isinstance(value, list):
+        return 1 + max((_json_depth(v) for v in value), default=0)
+    return 0
 
 
 def _is_iana_zone(value) -> bool:
@@ -254,6 +265,13 @@ def validate_event(event, expected_seq, errors, line_no):
         not isinstance(span, str) or not SPAN_RE.match(span) or set(span) == {"0"}
     ):
         errors.append((line_no, "trace_identifier_malformed", "spanId"))
+
+    attributes = event.get("attributes")
+    if isinstance(attributes, dict):
+        for value in attributes.values():
+            if _json_depth(value) > MAX_JSON_DEPTH:
+                errors.append((line_no, "depth_exceeded", "attributes"))
+                break
 
     correlations = event.get("correlations", [])
     if not isinstance(correlations, list):

@@ -17,6 +17,20 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+/// Number of `.jsonl` fixtures on disk across valid/ and invalid/.
+fn count_fixtures() -> usize {
+    ["valid", "invalid"]
+        .iter()
+        .map(|sub| {
+            std::fs::read_dir(repo_root().join("fixtures/normalized-log-events").join(sub))
+                .expect("read fixture dir")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+                .count()
+        })
+        .sum()
+}
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -57,10 +71,13 @@ fn run_conformance(program: &str, script: &str) {
         stdout.contains("0 disagreement(s)"),
         "{program} did not report agreement: {stdout}"
     );
-    // Guard against a reference that silently checks nothing.
+    // Guard against a reference that silently checks nothing — and derive the
+    // expected count from disk rather than hardcoding it, so adding a fixture
+    // cannot leave a reference quietly checking a stale subset.
+    let expected = count_fixtures();
     assert!(
-        stdout.contains("36 fixtures checked"),
-        "{program} must check the whole corpus: {stdout}"
+        stdout.contains(&format!("{expected} fixtures checked")),
+        "{program} must check the whole corpus of {expected}: {stdout}"
     );
 }
 

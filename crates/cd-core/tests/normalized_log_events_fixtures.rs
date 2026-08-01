@@ -196,6 +196,42 @@ fn invalid_fixtures_fail_for_the_reason_they_are_named_for() {
             "producer-resolved-fake-timezone.jsonl",
             NormalizedLogDiagnosticCode::ResolvedTimezoneInvalid,
         ),
+        (
+            "severity-inferred-claims-high-confidence.jsonl",
+            NormalizedLogDiagnosticCode::SeverityProvenanceInconsistent,
+        ),
+        (
+            "severity-declared-claims-low-confidence.jsonl",
+            NormalizedLogDiagnosticCode::SeverityProvenanceInconsistent,
+        ),
+        (
+            "severity-absent-carrying-raw.jsonl",
+            NormalizedLogDiagnosticCode::SeverityProvenanceInconsistent,
+        ),
+        (
+            "severity-schema-mapped-claims-low.jsonl",
+            NormalizedLogDiagnosticCode::SeverityProvenanceInconsistent,
+        ),
+        (
+            "trace-id-holding-span-value.jsonl",
+            NormalizedLogDiagnosticCode::TraceIdentifierMalformed,
+        ),
+        (
+            "span-id-holding-trace-value.jsonl",
+            NormalizedLogDiagnosticCode::TraceIdentifierMalformed,
+        ),
+        (
+            "trace-id-uppercase.jsonl",
+            NormalizedLogDiagnosticCode::TraceIdentifierMalformed,
+        ),
+        (
+            "attribute-nesting-too-deep.jsonl",
+            NormalizedLogDiagnosticCode::DepthExceeded,
+        ),
+        (
+            "canary-forbidden-sentinel-in-canonical.jsonl",
+            NormalizedLogDiagnosticCode::ForbiddenSentinel,
+        ),
     ];
 
     let on_disk: BTreeSet<String> = read_dir_sorted("invalid")
@@ -338,6 +374,31 @@ fn no_fixture_contains_a_real_looking_secret_or_host_path() {
                     "{sub}/{name} must stay synthetic and shareable ({needle})"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn every_fixture_is_already_in_canonical_form() {
+    // The corpus is the shared cross-language reference, so it should BE the
+    // canonical bytes rather than merely canonicalize to them. Otherwise a
+    // byte-comparison across languages is comparing formatting accidents.
+    use cd_core::normalized_log_events::canonicalize_stream;
+    for sub in ["valid", "invalid"] {
+        for (name, body) in read_dir_sorted(sub) {
+            if body.trim().is_empty() {
+                continue;
+            }
+            let mut out = Vec::new();
+            if canonicalize_stream(std::io::Cursor::new(body.as_bytes()), &mut out).is_err() {
+                // invalid/ deliberately contains non-JSON lines.
+                continue;
+            }
+            assert_eq!(
+                String::from_utf8(out).expect("utf8"),
+                body,
+                "{sub}/{name} is not already canonical"
+            );
         }
     }
 }
