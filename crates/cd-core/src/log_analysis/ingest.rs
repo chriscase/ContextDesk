@@ -3700,9 +3700,7 @@ pub(super) fn preview_import_path_impl(
             ));
         } else {
             let sample = sample_bounded(&mut file, bytes);
-            let mut item = item_from_sample(&identity, bytes, &sample, None, false);
-            bind_preview_item_to_open_file_state(&mut item, &file);
-            items.push(item);
+            items.push(item_from_sample(&identity, bytes, &sample, None, false));
         }
         return Ok(finish_report(
             ImportSourceKind::File,
@@ -3835,9 +3833,7 @@ pub(super) fn preview_import_path_impl(
         }
 
         let sample = sample_bounded(&mut file, bytes);
-        let mut item = item_from_sample(&identity, bytes, &sample, None, false);
-        bind_preview_item_to_open_file_state(&mut item, &file);
-        items.push(item);
+        items.push(item_from_sample(&identity, bytes, &sample, None, false));
     }
 
     Ok(finish_report(
@@ -3846,47 +3842,6 @@ pub(super) fn preview_import_path_impl(
         truncated,
         None,
     ))
-}
-
-/// Bind a seekable ordinary-file preview row to the opened source object as
-/// well as its bounded content windows. Preview remains bounded, while a
-/// same-length rewrite outside those windows still changes normal filesystem
-/// identity/mtime state and therefore invalidates the reviewed plan.
-fn bind_preview_item_to_open_file_state(item: &mut ImportPreviewItem, file: &std::fs::File) {
-    let Ok(metadata) = file.metadata() else {
-        return;
-    };
-    item.plan_fingerprint.push_str("|source-state-v1");
-    item.plan_fingerprint
-        .push_str(&format!("|len:{}", metadata.len()));
-    if let Ok(modified) = metadata.modified() {
-        match modified.duration_since(std::time::UNIX_EPOCH) {
-            Ok(duration) => item.plan_fingerprint.push_str(&format!(
-                "|mtime:{}:{}",
-                duration.as_secs(),
-                duration.subsec_nanos()
-            )),
-            Err(error) => {
-                let duration = error.duration();
-                item.plan_fingerprint.push_str(&format!(
-                    "|mtime:-{}:{}",
-                    duration.as_secs(),
-                    duration.subsec_nanos()
-                ));
-            }
-        }
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        item.plan_fingerprint.push_str(&format!(
-            "|dev:{}|ino:{}|ctime:{}:{}",
-            metadata.dev(),
-            metadata.ino(),
-            metadata.ctime(),
-            metadata.ctime_nsec()
-        ));
-    }
 }
 
 /// Portable identity of a walked path relative to the selected root.
