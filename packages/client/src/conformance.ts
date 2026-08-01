@@ -8,7 +8,7 @@
  * schema-valid previews, the trusted zero-importable refusal, #824 progress
  * honesty, cancellation, and atomic stale-guarded timezone application.
  */
-import { parseImportPreviewReport } from "@contextdesk/contracts";
+import { parseImportPreviewPlan } from "@contextdesk/contracts";
 import type { WireProcessProgress } from "@contextdesk/contracts";
 import { EngineError, type EngineClient } from "./engine";
 
@@ -24,14 +24,27 @@ export type ConformanceHarness = {
   createClient: () => EngineClient;
   /** A previewable root path (interpreted by the adapter's fake or mock). */
   previewPath: string;
-  /**
-   * Identities that must be deselected to make the preview zero-importable.
-   * The harness owner derives this from its fixture.
-   */
+  /** Every identity the preview offers as event-importable, in report order. */
   allImportableIdentities: string[];
+  /** An identity the preview lists that must never import as events. */
+  nonEventIdentity: string;
   /** Two unresolved sources available for timezone review after a run. */
   unresolvedSources: [string, string];
 };
+
+async function runWithPlan(
+  client: EngineClient,
+  harness: ConformanceHarness,
+  selected?: string[],
+) {
+  const plan = await client.import.preview(harness.previewPath);
+  return client.import.run({
+    path: harness.previewPath,
+    planToken: plan.planToken,
+    planVersion: plan.planVersion,
+    selected: selected ?? harness.allImportableIdentities,
+  });
+}
 
 function assert(condition: boolean, detail: string): void {
   if (!condition) throw new Error(`conformance: ${detail}`);
@@ -60,13 +73,17 @@ async function expectEngineError(
 export function engineClientConformance(harness: ConformanceHarness): ConformanceCheck[] {
   return [
     {
-      name: "preview satisfies the frozen import_preview_report contract",
+      name: "preview satisfies the frozen import_preview_plan contract",
       run: async () => {
         const client = harness.createClient();
-        const report = await client.import.preview(harness.previewPath);
+        const plan = await client.import.preview(harness.previewPath);
         // Round-trip through JSON so hidden non-wire values cannot pass.
-        parseImportPreviewReport(JSON.parse(JSON.stringify(report)));
-        assert(report.counts.total === report.items.length, "counts.total matches items");
+        parseImportPreviewPlan(JSON.parse(JSON.stringify(plan)));
+        assert(
+          plan.report.counts.total === plan.report.items.length,
+          "counts.total matches items",
+        );
+        assert(plan.planToken.length > 0, "plan token present");
       },
     },
     {
@@ -76,10 +93,7 @@ export function engineClientConformance(harness: ConformanceHarness): Conformanc
         const events: WireProcessProgress[] = [];
         client.events.onProcessProgress((progress) => events.push(progress));
         await expectEngineError(
-          client.import.run({
-            path: harness.previewPath,
-            deselected: harness.allImportableIdentities,
-          }),
+          runWithPlan(client, harness, []),
           "invalid",
           "zero-importable run",
         );
@@ -90,12 +104,46 @@ export function engineClientConformance(harness: ConformanceHarness): Conformanc
       },
     },
     {
+      name: "a stale plan token is refused before any progress",
+      run: async () => {
+        const client = harness.createClient();
+        const events: WireProcessProgress[] = [];
+        client.events.onProcessProgress((progress) => events.push(progress));
+        const error = await expectEngineError(
+          client.import.run({
+            path: harness.previewPath,
+            planToken: "tampered",
+            planVersion: 1,
+            selected: harness.allImportableIdentities,
+          }),
+          "conflict",
+          "stale-plan run",
+        );
+        assert(error.message.includes("stale"), "stale plans say so plainly");
+        assert(events.length === 0, "a refused plan emits no progress at all");
+      },
+    },
+    {
+      name: "selecting non-event content is refused — supporting never becomes events",
+      run: async () => {
+        const client = harness.createClient();
+        await expectEngineError(
+          runWithPlan(client, harness, [
+            harness.allImportableIdentities[0]!,
+            harness.nonEventIdentity,
+          ]),
+          "invalid",
+          "role-confusion run",
+        );
+      },
+    },
+    {
       name: "progress is truthful: fraction only on stream, one terminal phase",
       run: async () => {
         const client = harness.createClient();
         const events: WireProcessProgress[] = [];
         client.events.onProcessProgress((progress) => events.push(progress));
-        await client.import.run({ path: harness.previewPath, deselected: [] });
+        await runWithPlan(client, harness);
         assert(events.length > 0, "a run emits progress");
         const terminal = events.filter((event) =>
           ["completed", "failed", "cancelled"].includes(event.phase),
@@ -122,7 +170,13 @@ export function engineClientConformance(harness: ConformanceHarness): Conformanc
         const client = harness.createClient();
         const events: WireProcessProgress[] = [];
         client.events.onProcessProgress((progress) => events.push(progress));
-        const running = client.import.run({ path: harness.previewPath, deselected: [] });
+        const plan = await client.import.preview(harness.previewPath);
+        const running = client.import.run({
+          path: harness.previewPath,
+          planToken: plan.planToken,
+          planVersion: plan.planVersion,
+          selected: harness.allImportableIdentities,
+        });
         await client.import.cancel();
         await expectEngineError(running, "cancelled", "cancelled run");
         assert(
@@ -135,7 +189,7 @@ export function engineClientConformance(harness: ConformanceHarness): Conformanc
       name: "stale preview token fails the whole timezone apply atomically",
       run: async () => {
         const client = harness.createClient();
-        const report = await client.import.run({ path: harness.previewPath, deselected: [] });
+        const report = await runWithPlan(client, harness);
         const state = await client.time.state(report.corpusId);
         const [first, second] = harness.unresolvedSources;
         const good = await client.time.preview(
@@ -164,7 +218,7 @@ export function engineClientConformance(harness: ConformanceHarness): Conformanc
       name: "multi-source apply is one revision; undo publishes forward and clears",
       run: async () => {
         const client = harness.createClient();
-        const report = await client.import.run({ path: harness.previewPath, deselected: [] });
+        const report = await runWithPlan(client, harness);
         const state = await client.time.state(report.corpusId);
         const [first, second] = harness.unresolvedSources;
         const previews = await Promise.all([

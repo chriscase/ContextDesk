@@ -8,7 +8,7 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { WireImportPreviewReport, WireProcessProgress } from "@contextdesk/contracts";
+import type { WireImportPreviewPlan, WireProcessProgress } from "@contextdesk/contracts";
 import {
   EngineError,
   classifyEngineMessage,
@@ -68,12 +68,14 @@ export function createTauriEngineClient(
   return {
     import: {
       preview: (path: string) =>
-        call<WireImportPreviewReport>(transport, "log_preview_import", { path }),
+        call<WireImportPreviewPlan>(transport, "log_preview_import", { path }),
       run: async (request: ImportRunRequest): Promise<ImportRunReport> => {
         const report = await call<HostIngestReport>(transport, "log_run_import", {
           path: request.path,
           name: request.name ?? null,
-          deselected: request.deselected,
+          planToken: request.planToken,
+          planVersion: request.planVersion,
+          selected: request.selected,
         });
         return report;
       },

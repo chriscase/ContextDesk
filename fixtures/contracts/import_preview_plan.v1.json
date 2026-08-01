@@ -1,0 +1,106 @@
+{
+  "planToken": "a3bb82a2dd909c0c1b7af831a6c6cd21bb29ec707bce34b54906a5f2b341f51c",
+  "planVersion": 1,
+  "report": {
+    "counts": {
+      "blocked": 0,
+      "ignored": 0,
+      "rawFallback": 1,
+      "ready": 2,
+      "review": 0,
+      "selected": 2,
+      "supporting": 0,
+      "total": 4,
+      "unsupported": 1
+    },
+    "groups": [
+      {
+        "formatId": "json-object-line",
+        "formatVersion": 1,
+        "groupId": "logs/app.jsonl#json-object-line@1",
+        "memberIdentities": [
+          "logs/app.jsonl.1",
+          "logs/app.jsonl.2"
+        ],
+        "possibleOverlap": true,
+        "stem": "logs/app.jsonl"
+      }
+    ],
+    "items": [
+      {
+        "basename": "image.log",
+        "bytes": 64,
+        "identity": "image.log",
+        "reasons": [
+          "binary_content",
+          "weak_name_hint_only"
+        ],
+        "role": "unknown",
+        "selected": false,
+        "status": "unsupported"
+      },
+      {
+        "basename": "app.jsonl.1",
+        "bytes": 59,
+        "decisiveClueCodes": [
+          "content.json_object"
+        ],
+        "formatId": "json-object-line",
+        "formatVersion": 1,
+        "groupId": "logs/app.jsonl#json-object-line@1",
+        "identity": "logs/app.jsonl.1",
+        "outcome": "matched",
+        "reasons": [
+          "strong_format_match"
+        ],
+        "representative": "{\"ts\":\"2026-01-01T00:00:00Z\",\"level\":\"info\",\"msg\":\"ready\"}",
+        "role": "log",
+        "score": 100,
+        "selected": true,
+        "status": "ready"
+      },
+      {
+        "basename": "app.jsonl.2",
+        "bytes": 59,
+        "decisiveClueCodes": [
+          "content.json_object"
+        ],
+        "formatId": "json-object-line",
+        "formatVersion": 1,
+        "groupId": "logs/app.jsonl#json-object-line@1",
+        "identity": "logs/app.jsonl.2",
+        "outcome": "matched",
+        "reasons": [
+          "strong_format_match"
+        ],
+        "representative": "{\"ts\":\"2026-01-01T00:00:00Z\",\"level\":\"info\",\"msg\":\"ready\"}",
+        "role": "log",
+        "score": 100,
+        "selected": true,
+        "status": "ready"
+      },
+      {
+        "basename": "notes.txt",
+        "bytes": 26,
+        "decisiveClueCodes": [
+          "fallback.no_structured_match"
+        ],
+        "formatId": "plain-line",
+        "formatVersion": 1,
+        "identity": "notes.txt",
+        "outcome": "unknown",
+        "reasons": [
+          "no_structured_match"
+        ],
+        "representative": "plain prose, no structure",
+        "role": "log",
+        "score": 0,
+        "selected": false,
+        "status": "raw_fallback"
+      }
+    ],
+    "schemaVersion": 1,
+    "sourceKind": "directory",
+    "truncated": false
+  }
+}

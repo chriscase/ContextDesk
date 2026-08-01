@@ -1313,6 +1313,36 @@ pub fn import_plan_token(report: &ImportPreviewReport) -> String {
     token
 }
 
+/// A reviewed preview plus the plan binding a run to exactly this inventory.
+///
+/// The transportable wire shape every adapter returns from a preview: the
+/// frozen report, the deterministic [`import_plan_token`], and the plan
+/// contract version a run must present back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImportPreviewPlan {
+    /// The bounded inventory the user reviews.
+    pub report: ImportPreviewReport,
+    /// Token binding a run to this exact inventory.
+    pub plan_token: String,
+    /// Plan contract version ([`IMPORT_PLAN_VERSION`]).
+    pub plan_version: u32,
+}
+
+/// Preview a path and bind the result into a runnable plan.
+pub fn preview_import_plan(
+    path: &Path,
+    cancel: Option<&CancelFlag>,
+) -> CoreResult<ImportPreviewPlan> {
+    let report = preview_import_path(path, cancel)?;
+    let plan_token = import_plan_token(&report);
+    Ok(ImportPreviewPlan {
+        report,
+        plan_token,
+        plan_version: IMPORT_PLAN_VERSION,
+    })
+}
+
 /// Whether one previewed item may import as log events at all.
 ///
 /// This is the single trusted routing rule shared by every layer: only

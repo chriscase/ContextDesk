@@ -8,7 +8,7 @@
  * preview tokens) with the core's own message shapes, so UI code exercised
  * against it meets the real engine's edges.
  */
-import type { WireImportPreviewReport, WireProcessProgress } from "@contextdesk/contracts";
+import type { WireImportPreviewPlan, WireImportPreviewReport, WireProcessProgress } from "@contextdesk/contracts";
 import {
   EngineError,
   type EngineClient,
@@ -133,10 +133,28 @@ export function defaultMockPreview(): WireImportPreviewReport {
   };
 }
 
+/** The shared trusted routing rule: only selectable log-role items become events. */
+function eventImportable(item: WireImportPreviewReport["items"][number]): boolean {
+  return item.role === "log" && item.status !== "blocked";
+}
+
 function importableLogIdentities(preview: WireImportPreviewReport): string[] {
-  return preview.items
-    .filter((item) => item.status !== "blocked" && item.role === "log")
-    .map((item) => item.identity);
+  return preview.items.filter(eventImportable).map((item) => item.identity);
+}
+
+/** Deterministic mock plan token over the fixture inventory. */
+export function mockPlanToken(preview: WireImportPreviewReport): string {
+  const canonical = JSON.stringify([
+    preview.schemaVersion,
+    preview.sourceKind,
+    preview.truncated,
+    preview.items.map((item) => [item.identity, item.bytes, item.status, item.role]),
+  ]);
+  let hash = 0;
+  for (let index = 0; index < canonical.length; index += 1) {
+    hash = (hash * 31 + canonical.charCodeAt(index)) >>> 0;
+  }
+  return `mock-plan-${hash.toString(16).padStart(8, "0")}`;
 }
 
 /** Deterministic mock engine client. */
@@ -199,21 +217,53 @@ export class MockEngineClient implements EngineClient {
   }
 
   readonly import = {
-    preview: async (_path: string): Promise<WireImportPreviewReport> => {
+    preview: async (_path: string): Promise<WireImportPreviewPlan> => {
       await this.#park();
-      return structuredClone(this.#preview);
+      return {
+        report: structuredClone(this.#preview),
+        planToken: mockPlanToken(this.#preview),
+        planVersion: 1,
+      };
     },
     run: async (request: ImportRunRequest): Promise<ImportRunReport> => {
       if (this.#running) {
         throw new EngineError("conflict", "a log import is already running");
       }
-      const deselected = new Set(request.deselected);
-      const importable = importableLogIdentities(this.#preview).filter(
-        (identity) => !deselected.has(identity),
-      );
-      if (importable.length === 0) {
-        throw new EngineError("invalid", "no safe/importable log events were found");
+      if (request.planVersion !== 1) {
+        throw new EngineError(
+          "invalid",
+          `import plan version ${request.planVersion} is not supported by this build (expected 1)`,
+        );
       }
+      if (request.planToken !== mockPlanToken(this.#preview)) {
+        throw new EngineError(
+          "conflict",
+          "import plan is stale: the reviewed content changed on disk since the preview — review the selection again",
+        );
+      }
+      if (request.selected.length === 0) {
+        throw new EngineError(
+          "invalid",
+          "import plan selects nothing that would import as log events",
+        );
+      }
+      const byIdentity = new Map(this.#preview.items.map((item) => [item.identity, item]));
+      for (const identity of request.selected) {
+        const item = byIdentity.get(identity);
+        if (!item) {
+          throw new EngineError(
+            "invalid",
+            `import plan selects an identity the preview does not contain: "${identity}"`,
+          );
+        }
+        if (!eventImportable(item)) {
+          throw new EngineError(
+            "invalid",
+            `import plan selects "${identity}" which cannot import as log events`,
+          );
+        }
+      }
+      const importable = [...new Set(request.selected)];
       if (this.#failNextRun !== undefined) {
         const message = this.#failNextRun;
         this.#failNextRun = undefined;
@@ -251,6 +301,8 @@ export class MockEngineClient implements EngineClient {
       const corpusId = "mock-corpus-0001";
       this.#corpora.set(corpusId, { revision: 1, declarations: {} });
       const unresolvedSources = importable.filter((identity) => identity.endsWith(".log"));
+      const notSelected =
+        importableLogIdentities(this.#preview).length - importable.length;
       return {
         corpusId,
         lines: importable.length * 1_000,
@@ -258,9 +310,8 @@ export class MockEngineClient implements EngineClient {
         discoveredFiles: this.#preview.counts.total,
         excludedFiles: this.#preview.counts.blocked,
         failedFiles: 0,
-        ignoredFiles: this.#preview.counts.ignored + deselected.size,
-        exclusionCounts:
-          deselected.size > 0 ? { user_deselected: deselected.size } : {},
+        ignoredFiles: this.#preview.counts.ignored + notSelected,
+        exclusionCounts: notSelected > 0 ? { not_selected: notSelected } : {},
         exclusionExamples: [],
         partial: false,
         confidence: {

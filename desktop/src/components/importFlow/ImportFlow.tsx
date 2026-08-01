@@ -17,9 +17,9 @@ import { EvidenceSelector } from "./EvidenceSelector";
 import { TimeReviewCard } from "./TimeReviewCard";
 import {
   INITIAL_IMPORT_FLOW_STATE,
-  deselectedForRun,
   importDisabledReason,
   importFlowReducer,
+  selectedForRun,
   selectedImportableCount,
   type ImportFlowState,
 } from "./importFlowState";
@@ -30,11 +30,26 @@ type Props = {
   variant: "pane" | "guided";
   /** Called after atomic publication with the new corpus id. */
   onPublished?: (corpusId: string) => void;
+  /**
+   * Monotonic close-request signal from the hosting surface (wizard Cancel,
+   * Escape). Outside a run the flow exits immediately; during a run it
+   * requests cancellation and stays truthfully visible until the engine
+   * acknowledges. `onExit` fires exactly when leaving is safe.
+   */
+  exitSignal?: number;
+  onExit?: () => void;
   /** Fixture start state for visual tests and previews. Never set in product code. */
   initialState?: ImportFlowState;
 };
 
-export function ImportFlow({ engine, variant, onPublished, initialState }: Props) {
+export function ImportFlow({
+  engine,
+  variant,
+  onPublished,
+  exitSignal = 0,
+  onExit,
+  initialState,
+}: Props) {
   const [state, dispatch] = useReducer(
     importFlowReducer,
     initialState ?? INITIAL_IMPORT_FLOW_STATE,
@@ -50,8 +65,37 @@ export function ImportFlow({ engine, variant, onPublished, initialState }: Props
     });
   }, [engine]);
 
-  // Unmounting mid-run (for example closing the guided wizard) must never
-  // orphan an ingest that would then publish silently: request cancellation.
+  // Close requests: outside a run exit immediately; during a run request
+  // cancellation and stay visible until the engine acknowledges. The wizard
+  // must never disappear while publication continues unobserved.
+  const lastExitSignal = useRef(exitSignal);
+  useEffect(() => {
+    if (exitSignal === lastExitSignal.current) return;
+    lastExitSignal.current = exitSignal;
+    if (stateRef.current.stage !== "running") {
+      onExit?.();
+      return;
+    }
+    dispatch({ type: "EXIT_REQUESTED" });
+    void engine.import.cancel();
+  }, [exitSignal, engine, onExit]);
+
+  // Acknowledgement: once a requested exit sees the run reach any terminal
+  // state — cancelled, failed, or published — leaving is safe.
+  useEffect(() => {
+    if (!state.exitRequested) return;
+    if (
+      state.stage === "run_cancelled" ||
+      state.stage === "run_failed" ||
+      state.stage === "summary"
+    ) {
+      onExit?.();
+    }
+  }, [state.exitRequested, state.stage, onExit]);
+
+  // Unmount while a run is somehow still live (App-level teardown): request
+  // cancellation as a backstop so an ingest never publishes silently after
+  // its surface is gone.
   useEffect(() => {
     return () => {
       if (stateRef.current.stage === "running") {
@@ -70,8 +114,8 @@ export function ImportFlow({ engine, variant, onPublished, initialState }: Props
     if (!path) return;
     dispatch({ type: "PATH_CHOSEN", path });
     try {
-      const report = await engine.import.preview(path);
-      dispatch({ type: "PREVIEW_OK", report });
+      const plan = await engine.import.preview(path);
+      dispatch({ type: "PREVIEW_OK", plan });
     } catch (error) {
       dispatch({
         type: "PREVIEW_FAILED",
@@ -82,13 +126,15 @@ export function ImportFlow({ engine, variant, onPublished, initialState }: Props
 
   const runImport = async () => {
     const current = stateRef.current;
-    if (importDisabledReason(current) !== null || !current.path) return;
+    if (importDisabledReason(current) !== null || !current.path || !current.plan) return;
     dispatch({ type: "RUN_STARTED" });
     try {
       const report = await engine.import.run({
         path: current.path,
         name: current.corpusName.trim() || undefined,
-        deselected: deselectedForRun(current),
+        planToken: current.plan.planToken,
+        planVersion: current.plan.planVersion,
+        selected: selectedForRun(current),
       });
       dispatch({ type: "PUBLISHED", report });
       onPublished?.(report.corpusId);
@@ -246,14 +292,23 @@ export function ImportFlow({ engine, variant, onPublished, initialState }: Props
       ) : null}
 
       {state.stage === "running" ? (
-        <ProcessProgressPanel
-          progress={(state.progress as ProcessProgressDto | null) ?? null}
-          kind="log_ingest"
-          error={null}
-          onCancel={() => {
-            void engine.import.cancel();
-          }}
-        />
+        <>
+          <ProcessProgressPanel
+            progress={(state.progress as ProcessProgressDto | null) ?? null}
+            kind="log_ingest"
+            error={null}
+            onCancel={() => {
+              void engine.import.cancel();
+            }}
+          />
+          {state.exitRequested ? (
+            <p className="import-flow__reason" role="status">
+              {state.progress && state.progress.cancellable === false
+                ? "Publication is in progress and cannot be cancelled. This stays visible until it completes."
+                : "Cancelling — waiting for the engine to acknowledge…"}
+            </p>
+          ) : null}
+        </>
       ) : null}
 
       {state.stage === "run_failed" ? (

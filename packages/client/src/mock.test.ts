@@ -15,6 +15,7 @@ describe("mock engine client conformance", () => {
     createClient: () => createMockEngineClient(),
     previewPath: "/incidents/checkout-outage",
     allImportableIdentities: IMPORTABLE_LOG_IDENTITIES,
+    nonEventIdentity: "metrics/gateway-metrics.json",
     unresolvedSources: ["api/api-gateway.log", "support.zip!/host-a.zip!/logs/app.log"],
   });
 
@@ -26,11 +27,12 @@ describe("mock engine client conformance", () => {
 });
 
 describe("mock engine client determinism", () => {
-  it("returns the same preview bytes on every call", async () => {
+  it("returns the same preview plan bytes on every call", async () => {
     const client = createMockEngineClient();
     const first = await client.import.preview("/a");
     const second = await client.import.preview("/b");
     expect(JSON.stringify(first)).toBe(JSON.stringify(second));
+    expect(first.planToken).toMatch(/^mock-plan-[0-9a-f]{8}$/);
   });
 
   it("default preview is a valid frozen-contract report with every ledger state", () => {
@@ -51,25 +53,38 @@ describe("mock engine client determinism", () => {
     }
   });
 
-  it("counts deselected sources as user_deselected, never silently", async () => {
+  it("counts unselected importable sources as not_selected, never silently", async () => {
     const client = createMockEngineClient();
+    const plan = await client.import.preview("/incidents");
     const report = await client.import.run({
       path: "/incidents",
-      deselected: ["notes/console-notes.txt"],
+      planToken: plan.planToken,
+      planVersion: plan.planVersion,
+      selected: IMPORTABLE_LOG_IDENTITIES.filter(
+        (identity) => identity !== "notes/console-notes.txt",
+      ),
     });
-    expect(report.exclusionCounts).toEqual({ user_deselected: 1 });
+    expect(report.exclusionCounts).toEqual({ not_selected: 1 });
   });
 
   it("scripted failure emits a failed phase and preserves the message", async () => {
     const client = createMockEngineClient({ failNextRun: "disk full while staging" });
     const phases: string[] = [];
     client.events.onProcessProgress((progress) => phases.push(progress.phase));
-    await expect(
-      client.import.run({ path: "/incidents", deselected: [] }),
-    ).rejects.toMatchObject({ code: "failed", message: "disk full while staging" });
+    const plan = await client.import.preview("/incidents");
+    const request = {
+      path: "/incidents",
+      planToken: plan.planToken,
+      planVersion: plan.planVersion,
+      selected: IMPORTABLE_LOG_IDENTITIES,
+    };
+    await expect(client.import.run(request)).rejects.toMatchObject({
+      code: "failed",
+      message: "disk full while staging",
+    });
     expect(phases).toEqual(["failed"]);
     // Retry succeeds: the failure script is one-shot.
-    const retry = await client.import.run({ path: "/incidents", deselected: [] });
+    const retry = await client.import.run(request);
     expect(retry.corpusId).toBe("mock-corpus-0001");
   });
 });

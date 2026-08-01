@@ -8842,34 +8842,58 @@ async fn log_load_timezone_state(
 /// Read-only bounded import preview over a file, directory, or ZIP (#751).
 ///
 /// Never writes or stages anything; classification, counts, and reasons come
-/// from trusted core. Cancellable via the shared log-ingest cancel key.
+/// from trusted core. Registers the shared log-ingest cancel flag, so
+/// `cancel_log_ingest` genuinely aborts a long preview walk.
 #[tauri::command]
 async fn log_preview_import(
+    state: State<'_, AppState>,
     path: String,
-) -> Result<cd_core::log_analysis::import_preview::ImportPreviewReport, String> {
-    tokio::task::spawn_blocking(move || {
-        cd_core::log_analysis::import_preview::preview_import_path(
+) -> Result<cd_core::log_analysis::import_preview::ImportPreviewPlan, String> {
+    let cancel = cd_core::process_progress::CancelFlag::new();
+    let cancel_registration = cancel.inner_arc();
+    {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        register_exclusive_cancel(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            Arc::clone(&cancel_registration),
+            "a log import is already running",
+        )?;
+    }
+    let result = tokio::task::spawn_blocking(move || {
+        cd_core::log_analysis::import_preview::preview_import_plan(
             std::path::Path::new(&path),
-            None,
+            Some(&cancel),
         )
         .map_err(|error| error.to_string())
     })
     .await
-    .map_err(|error| format!("import preview task join: {error}"))?
+    .map_err(|error| format!("import preview task join: {error}"));
+    remove_cancel_if_owned(
+        &mut state.cancels.lock().expect("cancels"),
+        LOG_INGEST_CANCEL_KEY,
+        &cancel_registration,
+    );
+    result?
 }
 
-/// Run a reviewed import honoring explicit deselections (#751).
+/// Run a reviewed, plan-bound import (#751).
 ///
-/// The zero-importable refusal lives in trusted core: a selection that
-/// deselects every importable source fails before any staging, so the UI's
-/// disabled state is a courtesy, never the enforcement.
+/// Trusted core re-enumerates the root and verifies the plan token before
+/// any ingest work: a stale plan (content changed, entries appeared or
+/// disappeared, classifications shifted), an unknown or duplicate identity,
+/// a selection of non-event content, or an empty selection all fail closed
+/// before staging. The UI's disabled state is a courtesy, never the
+/// enforcement.
 #[tauri::command]
 async fn log_run_import(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     path: String,
     name: Option<String>,
-    deselected: Vec<String>,
+    plan_token: String,
+    plan_version: u32,
+    selected: Vec<String>,
 ) -> Result<LogIngestReportDto, String> {
     let cancel = cd_core::process_progress::CancelFlag::new();
     let cancel_registration = cancel.inner_arc();
@@ -8882,12 +8906,30 @@ async fn log_run_import(
             "a log import is already running",
         )?;
     }
-    let selection = if deselected.is_empty() {
-        None
-    } else {
-        Some(cd_core::log_analysis::IngestSelection {
-            deselected: deselected.into_iter().collect(),
-        })
+    let verify_path = PathBuf::from(&path);
+    let verify_cancel = cancel.clone();
+    let selection = tokio::task::spawn_blocking(move || {
+        cd_core::log_analysis::import_preview::verify_import_plan(
+            &verify_path,
+            plan_version,
+            &plan_token,
+            &selected,
+            Some(&verify_cancel),
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("import plan verification task join: {error}"));
+    let selection = match selection {
+        Ok(Ok(selection)) => selection,
+        Ok(Err(message)) | Err(message) => {
+            remove_cancel_if_owned(
+                &mut state.cancels.lock().expect("cancels"),
+                LOG_INGEST_CANCEL_KEY,
+                &cancel_registration,
+            );
+            return Err(message);
+        }
     };
     let result = run_log_ingest(
         app,
@@ -8895,7 +8937,7 @@ async fn log_run_import(
         PathBuf::from(path),
         name,
         None,
-        selection,
+        Some(selection),
         cancel,
     )
     .await;
@@ -12408,6 +12450,63 @@ mod log_noise_candidate_host_tests {
     }
 
     /// #824 — SoftWrite ingest must not run DuckDB/analysis on the UI event loop.
+    #[test]
+    fn log_run_import_verifies_the_plan_in_trusted_core_before_any_ingest() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("async fn log_run_import(")
+            .expect("log_run_import");
+        let end = source[start..]
+            .find("\n#[tauri::command]")
+            .map(|offset| start + offset)
+            .expect("log_run_import boundary");
+        let body = &source[start..end];
+        let verify = body
+            .find("verify_import_plan")
+            .expect("log_run_import must call verify_import_plan");
+        let run = body
+            .find("run_log_ingest(")
+            .expect("log_run_import must call run_log_ingest");
+        assert!(
+            verify < run,
+            "plan verification must complete before any ingest work starts"
+        );
+        assert!(
+            !body.contains("deselected"),
+            "the run request is an exact allowlist, never a deny-list"
+        );
+        assert!(
+            body.contains("selected: Vec<String>"),
+            "the run request carries the exact reviewed selection"
+        );
+    }
+
+    #[test]
+    fn log_preview_import_registers_a_real_cancel_flag() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("async fn log_preview_import(")
+            .expect("log_preview_import");
+        let end = source[start..]
+            .find("\n#[tauri::command]")
+            .map(|offset| start + offset)
+            .expect("log_preview_import boundary");
+        let body = &source[start..end];
+        assert!(
+            body.contains("register_exclusive_cancel"),
+            "preview must register the shared cancel key"
+        );
+        assert!(
+            body.contains("Some(&cancel)"),
+            "preview must pass its cancel flag into trusted core — the \
+             cancellable claim has to be real"
+        );
+        assert!(
+            body.contains("preview_import_plan"),
+            "preview returns the plan-bound wire shape"
+        );
+    }
+
     #[test]
     fn run_log_ingest_keeps_core_ingest_off_the_event_loop() {
         let source = include_str!("lib.rs");

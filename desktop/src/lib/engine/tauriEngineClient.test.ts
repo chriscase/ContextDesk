@@ -1,12 +1,13 @@
 /**
- * Tauri adapter conformance.
+ * Tauri ADAPTER conformance — a mapping proof, not a host proof.
  *
- * The adapter is exercised against a deterministic fake transport that
- * implements the host command semantics (the same refusals and progress
- * discipline the Rust side enforces), then run through the exact
- * `engineClientConformance` suite the mock passes — one behavioral contract,
- * two adapters. Real IPC is exercised by the Rust command tests; this proves
- * the adapter's mapping, error classification, and event wiring.
+ * The adapter runs the shared `engineClientConformance` suite against a
+ * deterministic fake transport, which proves the adapter's argument mapping,
+ * error-string classification, and event wiring hold the same behavioral
+ * contract the mock satisfies. It does NOT execute the Rust commands: host
+ * behavior (plan verification, allowlist ingest, zero-importable refusal,
+ * cancellation) is proven by the cd-core tests over real filesystems and the
+ * src-tauri source-contract tests that pin the command wiring.
  */
 import { describe, expect, it, vi } from "vitest";
 
@@ -68,7 +69,9 @@ function createFakeTransport(): TauriTransport {
             model.import.run({
               path: args!.path as string,
               name: (args!.name as string | null) ?? undefined,
-              deselected: args!.deselected as string[],
+              planToken: args!.planToken as string,
+              planVersion: args!.planVersion as number,
+              selected: args!.selected as string[],
             }),
           ) as Promise<T>;
         case "cancel_log_ingest":
@@ -115,6 +118,7 @@ describe("tauri engine adapter conformance", () => {
     createClient: () => createTauriEngineClient(createFakeTransport()),
     previewPath: "/incidents/checkout-outage",
     allImportableIdentities: IMPORTABLE_LOG_IDENTITIES,
+    nonEventIdentity: "metrics/gateway-metrics.json",
     unresolvedSources: ["api/api-gateway.log", "support.zip!/host-a.zip!/logs/app.log"],
   });
 
@@ -146,7 +150,11 @@ describe("tauri engine adapter mapping", () => {
       invoke: async <T>(command: string, args?: Record<string, unknown>) => {
         invocations.push([command, args]);
         if (command === "log_preview_import") {
-          return defaultMockPreview() as T;
+          return {
+            report: defaultMockPreview(),
+            planToken: "t",
+            planVersion: 1,
+          } as T;
         }
         throw "unreachable";
       },

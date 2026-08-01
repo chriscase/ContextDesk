@@ -8,7 +8,7 @@
  * the components render; trusted enforcement stays in core — these guards
  * are the courtesy layer that explains itself inline.
  */
-import type { WireImportPreviewItem, WireImportPreviewReport } from "@contextdesk/contracts";
+import type { WireImportPreviewItem, WireImportPreviewPlan, WireImportPreviewReport } from "@contextdesk/contracts";
 import type { ImportRunReport } from "@contextdesk/client";
 import type { WireProcessProgress } from "@contextdesk/contracts";
 
@@ -28,11 +28,19 @@ export type ImportFlowState = {
   stage: ImportFlowStage;
   path: string | null;
   corpusName: string;
+  /** The reviewed plan binding a run to its exact inventory. */
+  plan: WireImportPreviewPlan | null;
   report: WireImportPreviewReport | null;
   /** Identities currently selected for import (leaf identities only). */
   selected: ReadonlySet<string>;
   /** Anchor for shift-range selection, a leaf identity. */
   rangeAnchor: string | null;
+  /**
+   * The user asked to leave while a run was live. The flow stays visible,
+   * requests cancellation, and only exits after the engine acknowledges
+   * cancellation, failure, or publication.
+   */
+  exitRequested: boolean;
   error: string | null;
   progress: WireProcessProgress | null;
   runReport: ImportRunReport | null;
@@ -42,9 +50,11 @@ export const INITIAL_IMPORT_FLOW_STATE: ImportFlowState = {
   stage: "choose",
   path: null,
   corpusName: "incident",
+  plan: null,
   report: null,
   selected: new Set(),
   rangeAnchor: null,
+  exitRequested: false,
   error: null,
   progress: null,
   runReport: null,
@@ -52,7 +62,7 @@ export const INITIAL_IMPORT_FLOW_STATE: ImportFlowState = {
 
 export type ImportFlowEvent =
   | { type: "PATH_CHOSEN"; path: string }
-  | { type: "PREVIEW_OK"; report: WireImportPreviewReport }
+  | { type: "PREVIEW_OK"; plan: WireImportPreviewPlan }
   | { type: "PREVIEW_FAILED"; message: string }
   | { type: "OPEN_SELECTOR" }
   | { type: "CLOSE_SELECTOR" }
@@ -68,16 +78,23 @@ export type ImportFlowEvent =
   | { type: "RUN_FAILED"; message: string }
   | { type: "RUN_CANCELLED" }
   | { type: "RETRY" }
+  | { type: "EXIT_REQUESTED" }
   | { type: "RESET" };
 
-/** Whether an item may ever be chosen for import. Blocked never is. */
+/**
+ * Whether an item may be chosen for import — the UI mirror of the trusted
+ * routing rule (`event_importable` in core): only selectable log-role
+ * content ever becomes events. Supporting material, ignored noise,
+ * unsupported content, and blocked entries are visible, counted, and never
+ * selectable.
+ */
 export function isSelectable(item: WireImportPreviewItem): boolean {
-  return item.status !== "blocked";
+  return item.status !== "blocked" && item.role === "log";
 }
 
 /** Whether an item would produce log events when imported. */
 export function isImportableAsEvents(item: WireImportPreviewItem): boolean {
-  return isSelectable(item) && item.role === "log";
+  return isSelectable(item);
 }
 
 /** Deterministic preselection straight from the trusted preview. */
@@ -90,18 +107,18 @@ export function preselectedIdentities(report: WireImportPreviewReport): Set<stri
 }
 
 /**
- * The wire deselection for a run: every discovered identity not currently
- * selected. Blocked identities are always deselected so the run skips (for
- * example) a too-deep nested archive instead of aborting on it — the run
- * mirrors exactly what the user reviewed.
+ * The exact allowlist for a run: every selected, event-importable identity
+ * in report order. The engine re-verifies this against a fresh enumeration
+ * and its plan token, so anything outside this list — deselected rows,
+ * supporting material, blocked entries, an unreviewed truncation tail —
+ * can never import.
  */
-export function deselectedForRun(state: ImportFlowState): string[] {
+export function selectedForRun(state: ImportFlowState): string[] {
   const report = state.report;
   if (!report) return [];
   return report.items
-    .filter((item) => !state.selected.has(item.identity))
-    .map((item) => item.identity)
-    .sort();
+    .filter((item) => isImportableAsEvents(item) && state.selected.has(item.identity))
+    .map((item) => item.identity);
 }
 
 /** Count of selected sources that will produce events. */
@@ -273,10 +290,11 @@ export function importFlowReducer(
       };
     case "PREVIEW_OK": {
       if (state.stage !== "previewing") return state;
-      const selected = preselectedIdentities(event.report);
+      const selected = preselectedIdentities(event.plan.report);
       const next: ImportFlowState = {
         ...state,
-        report: event.report,
+        plan: event.plan,
+        report: event.plan.report,
         selected,
         error: null,
       };
@@ -359,7 +377,7 @@ export function importFlowReducer(
     case "RUN_STARTED":
       if (state.stage !== "preflight" && state.stage !== "selector") return state;
       if (importDisabledReason(state) !== null) return state;
-      return { ...state, stage: "running", progress: null, error: null };
+      return { ...state, stage: "running", progress: null, error: null, exitRequested: false };
     case "PROGRESS":
       if (state.stage !== "running") return state;
       return { ...state, progress: event.progress };
@@ -374,7 +392,10 @@ export function importFlowReducer(
       return { ...state, stage: "run_cancelled", error: null };
     case "RETRY":
       if (state.stage !== "run_failed" && state.stage !== "run_cancelled") return state;
-      return { ...state, stage: "preflight", error: null, progress: null };
+      return { ...state, stage: "preflight", error: null, progress: null, exitRequested: false };
+    case "EXIT_REQUESTED":
+      if (state.stage !== "running") return state;
+      return { ...state, exitRequested: true };
     case "RESET":
       return { ...INITIAL_IMPORT_FLOW_STATE, corpusName: state.corpusName };
     default:

@@ -7,7 +7,7 @@
  * `@contextdesk/contracts` wherever a frozen contract exists so a drifting
  * host surfaces as a `ContractViolation`, not a silent mismatch.
  */
-import type { WireImportPreviewReport, WireProcessProgress } from "@contextdesk/contracts";
+import type { WireImportPreviewPlan, WireProcessProgress } from "@contextdesk/contracts";
 
 /** Stable classification of an engine failure for UI branching. */
 export type EngineErrorCode =
@@ -42,7 +42,8 @@ export function classifyEngineMessage(message: string): EngineErrorCode {
   if (
     lower.includes("no safe/importable log events") ||
     lower.includes("no importable log file entries") ||
-    lower.includes("selection lists")
+    lower.includes("selection lists") ||
+    lower.includes("import plan")
   ) {
     return "invalid";
   }
@@ -93,14 +94,18 @@ export type ImportRunReport = {
   confidence: ImportConfidence;
 };
 
-/** Request for a reviewed import run. */
+/** Request for a reviewed, plan-bound import run. */
 export type ImportRunRequest = {
   /** Root path exactly as previewed. */
   path: string;
   /** Corpus display name. */
   name?: string;
-  /** Portable identities the user deselected in review. */
-  deselected: string[];
+  /** Token from the reviewed [`WireImportPreviewPlan`]. */
+  planToken: string;
+  /** Plan contract version from the same plan. */
+  planVersion: number;
+  /** Exact reviewed identities that may produce log events. */
+  selected: string[];
 };
 
 /** One saved timezone declaration (host wire shape). */
@@ -170,9 +175,13 @@ export type Unsubscribe = () => void;
 
 /** Import planning and execution. */
 export interface ImportService {
-  /** Bounded read-only preview of a file, directory, or archive. */
-  preview(path: string): Promise<WireImportPreviewReport>;
-  /** Run a reviewed import. Rejects `invalid` when nothing importable remains. */
+  /** Bounded read-only preview bound into a runnable plan. */
+  preview(path: string): Promise<WireImportPreviewPlan>;
+  /**
+   * Run a reviewed import. The engine re-enumerates and fails closed
+   * (`invalid`) on a stale plan, drifted content, non-event selections, or
+   * an empty selection — before any staging.
+   */
   run(request: ImportRunRequest): Promise<ImportRunReport>;
   /** Request cancellation of the running import. Resolves whether a run was live. */
   cancel(): Promise<boolean>;

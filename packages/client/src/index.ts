@@ -32,6 +32,7 @@ export {
   MockEngineClient,
   createMockEngineClient,
   defaultMockPreview,
+  mockPlanToken,
   MOCK_DECLARED_AT_UNIX_SECS,
   type MockScenario,
 } from "./mock";
