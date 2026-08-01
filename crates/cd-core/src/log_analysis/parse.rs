@@ -2846,6 +2846,42 @@ mod tests {
     }
 
     #[test]
+    fn json_calendar_and_epoch_are_never_confused() {
+        // Three shapes that all "look like a time" and must land in three
+        // different places. Confusing any pair fabricates calendar time.
+        let epoch = parse_line(r#"{"ts":1749988800,"message":"epoch"}"#, None, 0);
+        assert_eq!(
+            epoch.timestamp_provenance,
+            TimestampProvenance::ExplicitWallClock
+        );
+        assert_eq!(epoch.ts, Some(1_749_988_800));
+
+        let calendar = parse_line(
+            r#"{"ts":"Sun Jun 15 12:00:00 2025","message":"ctime"}"#,
+            None,
+            5,
+        );
+        assert_eq!(
+            calendar.timestamp_provenance,
+            TimestampProvenance::UnresolvedLocal
+        );
+        assert_eq!(calendar.ts, Some(5), "ctime text is not an instant");
+        assert_eq!(
+            calendar.unresolved_local_timestamp.as_deref(),
+            Some("Sun Jun 15 12:00:00 2025")
+        );
+
+        // A date-shaped integer is neither: not an epoch, not calendar evidence.
+        let datelike = parse_line(r#"{"ts":20250615,"message":"yyyymmdd"}"#, None, 9);
+        assert_eq!(
+            datelike.timestamp_provenance,
+            TimestampProvenance::OrderOnly
+        );
+        assert_eq!(datelike.ts, Some(9));
+        assert_eq!(datelike.unresolved_local_timestamp, None);
+    }
+
+    #[test]
     fn envelope_severity_never_overwrites_an_envelope_that_stated_one() {
         // #791's hard rule: the payload may fill a gap, never overrule the
         // transport. Outer says info, inner says fatal — outer wins.
@@ -2875,8 +2911,20 @@ mod tests {
     #[test]
     fn self_referential_payload_is_not_walked() {
         // A payload identical to its own envelope must terminate immediately.
-        let envelope = r#"{"log":"{\"log\":\"x\"}","stream":"stdout"}"#;
-        assert_eq!(inner_payload_severity(envelope, envelope), None);
+        // The payload must carry a severity, or this proves nothing: without a
+        // severity the walk returns None anyway and the guard is untested.
+        let envelope = r#"{"level":"fatal","log":"self","stream":"stdout"}"#;
+        assert_eq!(
+            inner_payload_severity(envelope, envelope),
+            None,
+            "a payload identical to its own envelope must not be walked"
+        );
+        // Same text, different envelope: now a legitimate payload whose severity
+        // is read, so the guard turns on identity and nothing else.
+        assert_eq!(
+            inner_payload_severity(envelope, "a different envelope"),
+            Some("fatal".to_string())
+        );
         // Repeated identical payloads are still each read once, cheaply.
         let payload = r#"{"level":40,"msg":"repeat"}"#;
         for _ in 0..1000 {
