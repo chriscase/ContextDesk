@@ -274,11 +274,7 @@ impl LogicalRecordFramer {
             match ch {
                 '"' => self.json_in_string = true,
                 '{' => self.json_depth += 1,
-                '}' => {
-                    if self.json_depth > 0 {
-                        self.json_depth -= 1;
-                    }
-                }
+                '}' if self.json_depth > 0 => self.json_depth -= 1,
                 _ => {}
             }
         }
