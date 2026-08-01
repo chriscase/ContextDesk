@@ -1732,9 +1732,16 @@ fn ingest_lines_from_reader(
             //    pretty-JSON brace close) — pending_raw is the prior lines only.
             // 2) Record is the *previous* pending only (new record start) —
             //    current line becomes the new pending.
-            // Matching the framer's logical text decides which path applied.
-            let finished =
-                finished_raw_for_completion(&mut pending_raw, &physical_bytes, &physical, &logical);
+            // The framer reports which applied. It used to be inferred by
+            // comparing the record's last line to the pushed line, which is
+            // wrong whenever two consecutive physical lines are identical: the
+            // comparison says "included", the two events are glued into one,
+            // and the trailing record is dropped for having no raw bytes.
+            let finished = finished_raw_for_completion(
+                &mut pending_raw,
+                &physical_bytes,
+                logical.includes_pushed_line,
+            );
             ingest_framed_record(
                 &finished,
                 source_label,
@@ -1787,21 +1794,19 @@ fn ingest_lines_from_reader(
 
 /// Map a framer completion + current physical line onto pre-decode raw bytes.
 ///
-/// When `logical` includes the current physical line (CSV/CRI/JSON close), the
+/// When the record includes the current physical line (CSV/CRI/JSON close), the
 /// finished bytes are `pending_raw + \\n + physical_bytes` and the open pending
 /// is cleared. Otherwise the finished bytes are the prior `pending_raw` and the
 /// current line becomes the new pending (new-record start).
+///
+/// `includes_current` comes from the framer rather than being inferred from the
+/// text, so identical consecutive physical lines cannot desynchronise the raw
+/// byte stream from the framed records.
 fn finished_raw_for_completion(
     pending_raw: &mut Vec<u8>,
     physical_bytes: &[u8],
-    physical_text: &str,
-    logical: &str,
+    includes_current: bool,
 ) -> Vec<u8> {
-    // Framer completions that close CSV/CRI/JSON include the line just pushed as
-    // the last physical line of `logical`. New-record starts return only the
-    // previous pending, so the last line of `logical` is *not* the current line.
-    let includes_current = logical.lines().next_back() == Some(physical_text);
-
     if includes_current {
         let mut finished = std::mem::take(pending_raw);
         if !finished.is_empty() {
@@ -7118,6 +7123,56 @@ RETURNING id\"
             !warning.message.contains("RETURNING"),
             "WARNING must not start with bled query fragment: {}",
             warning.message
+        );
+    }
+
+    /// Identical consecutive physical lines must stay separate events.
+    ///
+    /// The raw-byte side of framing once inferred "did this completion include
+    /// the line I just pushed?" by comparing the record's last line to that
+    /// line. Two identical consecutive lines make that comparison true when the
+    /// record actually excluded the line: the pair is glued into one event and
+    /// the trailing one is dropped for having no raw bytes. Repeated lines are
+    /// ordinary in real logs, so this is silent evidence loss.
+    #[test]
+    fn framing_ingest_keeps_identical_consecutive_lines_separate() {
+        use crate::log_analysis::{query_events, EventQuery, MAX_EVENT_PAGE};
+
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(
+            logs.join("repeats.log"),
+            "alpha unique first\nrepeated line\nrepeated line\nrepeated line\nomega unique last\n",
+        )
+        .unwrap();
+
+        let cache = tempfile::tempdir().unwrap();
+        let report = ingest_path(cache.path(), &logs, "repeats", None, "").unwrap();
+        let corpus = LogCorpus::open(cache.path(), &report.corpus_id).unwrap();
+        let page = query_events(
+            &corpus,
+            &EventQuery {
+                limit: MAX_EVENT_PAGE,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let messages: Vec<&str> = page.events.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(
+            messages.len(),
+            5,
+            "identical consecutive lines were merged or dropped: {messages:?}"
+        );
+        assert_eq!(
+            messages.iter().filter(|m| **m == "repeated line").count(),
+            3,
+            "each repeat must survive as its own event: {messages:?}"
+        );
+        assert!(
+            messages.iter().all(|m| !m.contains('\n')),
+            "no record may glue two physical lines here: {messages:?}"
         );
     }
 }

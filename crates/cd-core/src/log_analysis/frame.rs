@@ -3,21 +3,112 @@
 //! Physical newlines are not always record boundaries: PostgreSQL DETAIL/HINT
 //! lines, CSV quoted fields, stack traces, CRI partial tags, and pretty-printed
 //! JSON must stay one logical event. A timestamped line always starts a new
-//! record (false-continuation protection). Absolute line-byte limits remain
-//! enforced by the caller (`MAX_RAW_LOG_LINE_BYTES`).
+//! record (false-continuation protection).
+//!
+//! Accumulation is bounded here, not only by the caller. A single unbalanced
+//! quote, an unterminated CRI `P`, or a stray `{` would otherwise absorb every
+//! following line to end of file; the caller's per-physical-line limit cannot
+//! see that, and its whole-record limit only fires once the record finally
+//! closes — which for these shapes means at EOF, after the damage. On exceeding
+//! [`MAX_LOGICAL_RECORD_BYTES`], [`MAX_PHYSICAL_LINES_PER_RECORD`], or
+//! [`MAX_JSON_FRAMING_DEPTH`] the open record is completed with
+//! `truncated = true` and framing resumes, so an overflow never cascades and no
+//! physical line is dropped.
+
+/// Largest logical record the framer will accumulate before force-completing it.
+///
+/// A single unbalanced quote, an unterminated CRI `P`, or a stray `{` would
+/// otherwise absorb every following line to end of file.
+pub const MAX_LOGICAL_RECORD_BYTES: usize = 1024 * 1024;
+
+/// Largest number of physical lines joined into one logical record.
+pub const MAX_PHYSICAL_LINES_PER_RECORD: usize = 5_000;
+
+/// Deepest pretty-JSON nesting the framer will track before giving up.
+pub const MAX_JSON_FRAMING_DEPTH: i32 = 64;
+
+/// One completed logical record plus the facts its caller cannot re-derive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FramedRecord {
+    /// Joined logical text.
+    pub text: String,
+    /// Whether the physical line just pushed is the last line of `text`.
+    ///
+    /// CSV quote close, CRI `F`, and pretty-JSON brace close all complete a
+    /// record *including* the line that closed it; a new-record start completes
+    /// the previous record *excluding* it. Callers keeping parallel pre-decode
+    /// bytes must know which happened. Comparing the record's last line to the
+    /// pushed line looks equivalent and is not: two identical consecutive
+    /// physical lines make that comparison true when the record actually
+    /// excluded the line, which silently glues two events and drops one.
+    pub includes_pushed_line: bool,
+    /// The record hit a framing bound and was closed early.
+    pub truncated: bool,
+}
+
+/// Incremental RFC4180 quote tracker.
+///
+/// Deliberately streaming: re-scanning the accumulated record after every
+/// physical line is O(n²) in the record size, which turns one unbalanced quote
+/// into an effectively unbounded hang.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct CsvQuoteScanner {
+    open: bool,
+    /// Saw `"` while open; it either closes the field or is the first half of
+    /// an escaped `""`. The next character decides.
+    deferred_close: bool,
+}
+
+impl CsvQuoteScanner {
+    fn feed_str(&mut self, text: &str) {
+        for ch in text.chars() {
+            self.feed(ch);
+        }
+    }
+
+    fn feed(&mut self, ch: char) {
+        if self.deferred_close {
+            self.deferred_close = false;
+            if ch == '"' {
+                // `""` inside a quoted field: still open, both consumed.
+                return;
+            }
+            self.open = false;
+            // Fall through: `ch` is ordinary content outside the field.
+        }
+        if ch == '"' {
+            if self.open {
+                self.deferred_close = true;
+            } else {
+                self.open = true;
+            }
+        }
+    }
+
+    /// Whether a quoted field is still open right now.
+    fn is_open(self) -> bool {
+        self.open && !self.deferred_close
+    }
+}
 
 /// Streaming framer: push physical lines, pull completed logical records.
 #[derive(Debug, Default)]
 pub struct LogicalRecordFramer {
     pending: String,
-    /// Unclosed double-quote in a CSV-shaped record.
-    csv_open_quote: bool,
+    /// Physical lines currently joined into `pending`.
+    pending_lines: usize,
+    /// Incremental CSV quote state over `pending`.
+    csv: CsvQuoteScanner,
+    /// Whether the open record is CSV-shaped at all.
+    csv_record: bool,
     /// CRI stream tagged the previous physical line as partial (`P`).
     cri_partial_open: bool,
     /// Pretty-printed / multi-line JSON brace depth (0 = not in JSON accumulate).
     json_depth: i32,
     json_in_string: bool,
     json_escape: bool,
+    /// The open record already exceeded a bound and must close at the next line.
+    over_bound: bool,
 }
 
 impl LogicalRecordFramer {
@@ -28,16 +119,23 @@ impl LogicalRecordFramer {
 
     /// Feed one physical line (without trailing `\n`; `\r` is stripped).
     /// Returns a completed logical record when the line terminates one.
-    pub fn push_line(&mut self, physical: &str) -> Option<String> {
+    pub fn push_line(&mut self, physical: &str) -> Option<FramedRecord> {
         let line = physical.strip_suffix('\r').unwrap_or(physical);
 
-        if self.csv_open_quote {
+        // A record that already blew a bound closes here, before this line is
+        // appended, so the overflow can never cascade into the rest of the file.
+        if self.over_bound {
+            let finished = self.take_pending(false, true);
+            self.start_new(line);
+            return finished;
+        }
+
+        if self.csv.is_open() {
             self.append_line(line);
-            self.csv_open_quote = csv_quote_open(&self.pending);
-            if !self.csv_open_quote {
-                return self.take_pending();
+            if !self.csv.is_open() {
+                return self.take_pending(true, false);
             }
-            return None;
+            return self.close_if_over_bound_including();
         }
 
         if self.cri_partial_open {
@@ -45,35 +143,35 @@ impl LogicalRecordFramer {
             self.append_line(line);
             if cri_is_full(line) {
                 self.cri_partial_open = false;
-                return self.take_pending();
+                return self.take_pending(true, false);
             }
             // Another `P` keeps the partial open; unrelated lines still attach
             // until `F` (kubelet emits contiguous P…P F runs).
-            return None;
+            return self.close_if_over_bound_including();
         }
 
         if self.json_depth > 0 {
             self.append_line(line);
             self.feed_json_line(line);
             if self.json_depth == 0 {
-                return self.take_pending();
+                return self.take_pending(true, false);
             }
-            return None;
+            return self.close_if_over_bound_including();
         }
 
         if self.pending.is_empty() {
             self.start_new(line);
-            return self.maybe_complete_singleton();
+            return None;
         }
 
         if is_continuation_of(&self.pending, line) {
             self.append_line(line);
             // CRI partial may open mid-stream only as a new record start.
-            return None;
+            return self.close_if_over_bound_including();
         }
 
         // New record starts: emit previous, begin this line.
-        let finished = self.take_pending();
+        let finished = self.take_pending(false, false);
         self.start_new(line);
         // If the new line is itself a complete singleton, leave it pending for
         // the next push or finish() so callers see stable one-at-a-time emits
@@ -82,19 +180,43 @@ impl LogicalRecordFramer {
     }
 
     /// Flush any remaining buffered logical record at EOF.
-    pub fn finish(&mut self) -> Option<String> {
-        self.csv_open_quote = false;
+    pub fn finish(&mut self) -> Option<FramedRecord> {
+        let truncated = self.over_bound;
+        self.csv = CsvQuoteScanner::default();
+        self.csv_record = false;
         self.cri_partial_open = false;
         self.json_depth = 0;
         self.json_in_string = false;
         self.json_escape = false;
-        self.take_pending()
+        self.over_bound = false;
+        self.take_pending(false, truncated)
+    }
+
+    /// After appending `line`, decide whether the open record blew a bound.
+    ///
+    /// The record is not closed mid-line: the current line is already part of
+    /// it, so it is marked over-bound and closed at the next push (or EOF).
+    /// That keeps the completing line owned by the record it completed.
+    fn close_if_over_bound_including(&mut self) -> Option<FramedRecord> {
+        if self.pending.len() > MAX_LOGICAL_RECORD_BYTES
+            || self.pending_lines > MAX_PHYSICAL_LINES_PER_RECORD
+            || self.json_depth > MAX_JSON_FRAMING_DEPTH
+        {
+            self.over_bound = true;
+        }
+        None
     }
 
     fn start_new(&mut self, line: &str) {
         self.pending.clear();
         self.pending.push_str(line);
-        self.csv_open_quote = looks_like_csv_record(line) && csv_quote_open(line);
+        self.pending_lines = 1;
+        self.over_bound = false;
+        self.csv = CsvQuoteScanner::default();
+        self.csv_record = looks_like_csv_record(line);
+        if self.csv_record {
+            self.csv.feed_str(line);
+        }
         self.cri_partial_open = cri_is_partial(line);
         self.json_depth = 0;
         self.json_in_string = false;
@@ -104,27 +226,34 @@ impl LogicalRecordFramer {
         }
     }
 
-    fn maybe_complete_singleton(&mut self) -> Option<String> {
-        if self.csv_open_quote || self.cri_partial_open || self.json_depth > 0 {
-            return None;
-        }
-        // Keep singleton pending until the next record arrives or finish(),
-        // so multi-line continuations can still attach.
-        None
-    }
-
     fn append_line(&mut self, line: &str) {
         if !self.pending.is_empty() {
             self.pending.push('\n');
+            if self.csv_record {
+                self.csv.feed('\n');
+            }
         }
         self.pending.push_str(line);
+        self.pending_lines += 1;
+        if self.csv_record {
+            self.csv.feed_str(line);
+        }
     }
 
-    fn take_pending(&mut self) -> Option<String> {
+    fn take_pending(
+        &mut self,
+        includes_pushed_line: bool,
+        truncated: bool,
+    ) -> Option<FramedRecord> {
         if self.pending.is_empty() {
             None
         } else {
-            Some(std::mem::take(&mut self.pending))
+            self.pending_lines = 0;
+            Some(FramedRecord {
+                text: std::mem::take(&mut self.pending),
+                includes_pushed_line,
+                truncated,
+            })
         }
     }
 
@@ -340,19 +469,16 @@ fn looks_like_csv_record(line: &str) -> bool {
 }
 
 /// True when the CSV record still has an open double-quote (RFC-style `""` escapes).
+///
+/// Whole-text form, kept as the reference the incremental scanner is checked
+/// against. The framer itself uses
+/// [`CsvQuoteScanner`] incrementally; calling this per physical line is what
+/// made an unbalanced quote quadratic.
+#[cfg(test)]
 fn csv_quote_open(text: &str) -> bool {
-    let mut open = false;
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '"' {
-            if open && chars.peek() == Some(&'"') {
-                chars.next(); // escaped quote
-            } else {
-                open = !open;
-            }
-        }
-    }
-    open
+    let mut scanner = CsvQuoteScanner::default();
+    scanner.feed_str(text);
+    scanner.is_open()
 }
 
 fn cri_line(line: &str) -> Option<(&str, &str, &str)> {
@@ -381,6 +507,14 @@ fn cri_is_full(line: &str) -> bool {
 
 /// Frame an entire text blob into logical records (tests / small fixtures).
 pub fn frame_text(text: &str) -> Vec<String> {
+    frame_text_records(text)
+        .into_iter()
+        .map(|rec| rec.text)
+        .collect()
+}
+
+/// Frame an entire text blob, keeping each record's completion facts.
+pub fn frame_text_records(text: &str) -> Vec<FramedRecord> {
     let mut framer = LogicalRecordFramer::new();
     let mut out = Vec::new();
     for line in text.split_inclusive('\n') {
@@ -504,8 +638,153 @@ at com.example.A.main
         assert!(f.push_line("2025-06-15 13:00:00,100 ERROR boom").is_none());
         assert!(f.push_line("at com.example.A.main").is_none());
         let last = f.finish().expect("flush");
-        assert!(last.contains("ERROR boom"));
-        assert!(last.contains("at com.example.A.main"));
+        assert!(last.text.contains("ERROR boom"));
+        assert!(last.text.contains("at com.example.A.main"));
+    }
+
+    #[test]
+    fn identical_consecutive_lines_stay_separate_records() {
+        // Repeated identical lines are ordinary in real logs (retries,
+        // heartbeats, repeated errors). Inferring "did this completion include
+        // the pushed line?" by comparing text says yes here, which glues the
+        // pair into one event and drops the trailing one.
+        let recs = frame_text_records("alpha\nrepeated\nrepeated\nomega\n");
+        assert_eq!(
+            recs.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(),
+            vec!["alpha", "repeated", "repeated", "omega"],
+        );
+        for rec in &recs {
+            assert!(
+                !rec.includes_pushed_line,
+                "a new-record start never includes the line that opened the next record: {rec:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn close_paths_report_including_the_pushed_line() {
+        // The other half of the same contract: CSV/CRI/JSON closes really do
+        // own their completing line, so raw byte accounting must add it.
+        let csv = frame_text_records(
+            "\"a\",\"b\",\"c\",\"open\nstill\nclosed\"\n\"x\",\"y\",\"z\",\"w\"\n",
+        );
+        assert!(
+            csv[0].includes_pushed_line,
+            "the CSV closing line belongs to the record it closed: {csv:?}"
+        );
+        assert!(csv[0].text.contains("closed\""));
+
+        let cri = frame_text_records(
+            "2025-06-15T16:10:01.000000000Z stdout P open\n\
+             2025-06-15T16:10:01.000000000Z stdout F close\n",
+        );
+        assert!(cri[0].includes_pushed_line, "{cri:?}");
+    }
+
+    #[test]
+    fn an_unclosed_csv_quote_is_bounded_and_framing_recovers() {
+        // One stray quote must not absorb the rest of the file.
+        let mut text = String::from("\"a\",\"b\",\"c\",\"open\n");
+        let extra = MAX_PHYSICAL_LINES_PER_RECORD + 500;
+        for i in 0..extra {
+            text.push_str(&format!("2025-06-15 12:00:00 UTC record {i}\n"));
+        }
+        let recs = frame_text_records(&text);
+        assert!(
+            recs.len() > 1,
+            "the unbalanced quote swallowed the whole file: {} record(s)",
+            recs.len()
+        );
+        assert!(
+            recs[0].truncated,
+            "the capped record must say so: {:?}",
+            recs[0]
+        );
+        assert!(
+            recs.last().is_some_and(|r| !r.truncated),
+            "framing must recover to ordinary records after the cap"
+        );
+        // Nothing is dropped: every physical line still appears somewhere.
+        let joined: usize = recs.iter().map(|r| r.text.lines().count()).sum();
+        assert_eq!(joined, extra + 1, "framing lost physical lines");
+    }
+
+    #[test]
+    fn an_unterminated_cri_partial_is_bounded() {
+        let mut text = String::from("2025-06-15T16:10:01.000000000Z stdout P open\n");
+        for i in 0..(MAX_PHYSICAL_LINES_PER_RECORD + 100) {
+            text.push_str(&format!("2025-06-15 12:00:00 UTC record {i}\n"));
+        }
+        let recs = frame_text_records(&text);
+        assert!(recs.len() > 1, "unterminated CRI P swallowed the file");
+        assert!(recs[0].truncated);
+    }
+
+    #[test]
+    fn an_unclosed_pretty_json_object_is_bounded() {
+        let mut text = String::from("{\n");
+        for i in 0..(MAX_PHYSICAL_LINES_PER_RECORD + 100) {
+            text.push_str(&format!("  \"k{i}\": {i},\n"));
+        }
+        let recs = frame_text_records(&text);
+        assert!(recs.len() > 1, "unclosed JSON swallowed the file");
+        assert!(recs[0].truncated);
+    }
+
+    #[test]
+    fn a_single_oversized_record_is_capped_by_bytes() {
+        // Long lines, few of them: the byte cap must fire before the line cap.
+        let filler = "x".repeat(64 * 1024);
+        let mut text = String::from("\"a\",\"b\",\"c\",\"open\n");
+        for _ in 0..40 {
+            text.push_str(&filler);
+            text.push('\n');
+        }
+        let recs = frame_text_records(&text);
+        assert!(recs[0].truncated, "byte cap did not fire");
+        assert!(
+            recs[0].text.len() <= MAX_LOGICAL_RECORD_BYTES + 64 * 1024 + 32,
+            "record grew well past the byte cap: {}",
+            recs[0].text.len()
+        );
+    }
+
+    #[test]
+    fn incremental_csv_quote_state_matches_a_whole_text_scan() {
+        // The incremental scanner replaced a per-line whole-record rescan. It
+        // must agree with that scan on every shape, including `""` escapes and
+        // escapes split across a physical newline.
+        for probe in [
+            "",
+            "\"a\"",
+            "\"a",
+            "\"a\"\"b\"",
+            "\"a\"\"b",
+            "\"a\nb\"",
+            "\"a\"\"\nb\"",
+            "\"a\",\"b\",\"c\",\"open\nmore\nclose\"",
+            "no quotes at all",
+            "\"\"\"\"",
+            "\"\"\"",
+        ] {
+            let mut scanner = CsvQuoteScanner::default();
+            scanner.feed_str(probe);
+            assert_eq!(
+                scanner.is_open(),
+                csv_quote_open(probe),
+                "incremental and whole-text scans disagree on {probe:?}"
+            );
+            // Feeding character by character must also agree with feeding whole.
+            let mut split = CsvQuoteScanner::default();
+            for ch in probe.chars() {
+                split.feed(ch);
+            }
+            assert_eq!(
+                split.is_open(),
+                scanner.is_open(),
+                "chunking changed {probe:?}"
+            );
+        }
     }
 
     #[test]
