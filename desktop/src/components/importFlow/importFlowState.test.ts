@@ -212,6 +212,59 @@ describe("run lifecycle", () => {
 });
 
 describe("timezone groups", () => {
+  it("ignores time-less order-only sources whose empty wire arrays are omitted", () => {
+    const report: ImportRunReport = {
+      corpusId: "c",
+      lines: 12,
+      files: 2,
+      discoveredFiles: 2,
+      excludedFiles: 0,
+      failedFiles: 0,
+      ignoredFiles: 0,
+      exclusionCounts: {},
+      exclusionExamples: [],
+      partial: false,
+      confidence: {
+        corpusTimeQuality: "order_only",
+        counts: {
+          wall: 0,
+          orderOnly: 2,
+          mixed: 0,
+          matched: 1,
+          ambiguous: 0,
+          unknown: 1,
+          unresolved: 1,
+        },
+        sources: [
+          {
+            source: "raw-without-time.log",
+            lines: 7,
+            outcome: "unknown",
+            timeQuality: "order_only",
+            // Rust omits both empty vectors from the camelCase JSON wire.
+          },
+          {
+            source: "local-calendar.log",
+            lines: 5,
+            formatId: "wildfly",
+            outcome: "matched",
+            timeQuality: "order_only",
+            unresolvedReasons: ["no_timezone"],
+          },
+        ],
+      },
+    };
+
+    expect(timezoneGroups(report)).toEqual([
+      {
+        key: "wildfly·no_timezone",
+        label: "wildfly · no timezone",
+        sources: ["local-calendar.log"],
+        records: 5,
+      },
+    ]);
+  });
+
   it("groups unresolved sources deterministically by format and reason", () => {
     const report: ImportRunReport = {
       corpusId: "c",

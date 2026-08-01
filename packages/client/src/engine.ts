@@ -60,8 +60,10 @@ export type ImportSourceConfidence = {
   runnerUpMargin?: number;
   producerHint?: string;
   timeQuality: "wall" | "mixed" | "order_only";
-  unresolvedReasons: ("no_timezone" | "zone_abbreviation_not_resolved")[];
-  timestampPrefixSamples: string[];
+  /** Omitted by the Rust wire when the source has no unresolved-time reason. */
+  unresolvedReasons?: ("no_timezone" | "zone_abbreviation_not_resolved")[];
+  /** Omitted by the Rust wire when there are no bounded timestamp samples. */
+  timestampPrefixSamples?: string[];
 };
 
 /** Import confidence report subset the flow consumes. */

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { createMockEngineClient } from "@contextdesk/client";
+import { createMockEngineClient, type ImportRunReport } from "@contextdesk/client";
 import { ImportFlow } from "./ImportFlow";
 
 const dialogMocks = vi.hoisted(() => ({
@@ -206,6 +206,65 @@ describe("ImportFlow preview cancellation lifecycle", () => {
 });
 
 describe("ImportFlow timezone tail", () => {
+  it("renders after publication when empty confidence arrays are omitted on the wire", async () => {
+    const client = createMockEngineClient();
+    const report: ImportRunReport = {
+      corpusId: "mixed-time-corpus",
+      lines: 12,
+      files: 2,
+      discoveredFiles: 2,
+      excludedFiles: 0,
+      failedFiles: 0,
+      ignoredFiles: 0,
+      exclusionCounts: {},
+      exclusionExamples: [],
+      partial: false,
+      confidence: {
+        corpusTimeQuality: "order_only",
+        counts: {
+          wall: 0,
+          orderOnly: 2,
+          mixed: 0,
+          matched: 1,
+          ambiguous: 0,
+          unknown: 1,
+          unresolved: 1,
+        },
+        sources: [
+          {
+            source: "raw-without-time.log",
+            lines: 7,
+            outcome: "unknown",
+            timeQuality: "order_only",
+          },
+          {
+            source: "local-calendar.log",
+            lines: 5,
+            formatId: "wildfly",
+            outcome: "matched",
+            timeQuality: "order_only",
+            unresolvedReasons: ["no_timezone"],
+          },
+        ],
+      },
+    };
+    vi.spyOn(client.import, "run").mockResolvedValue(report);
+
+    await toPreflight(client);
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: /I understand and want to proceed/,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+
+    expect(
+      await screen.findByRole("region", { name: "Import finished" }),
+    ).toBeTruthy();
+    expect(screen.getByText("Place local timestamps")).toBeTruthy();
+    expect(screen.getByText("1 source unresolved")).toBeTruthy();
+  });
+
   it("shows the corpus-wide time card only when sources are unresolved", async () => {
     await toPreflight();
     fireEvent.click(screen.getByRole("checkbox", { name: /I understand and want to proceed/ }));
