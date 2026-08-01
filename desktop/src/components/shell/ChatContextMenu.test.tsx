@@ -5,7 +5,7 @@ import {
   type MouseEvent,
 } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatSession } from "../../lib/session";
 import { ChatContextMenu } from "./ChatContextMenu";
 
@@ -30,6 +30,7 @@ const session: ChatSession = {
 };
 
 type HarnessProps = {
+  position?: { x: number; y: number };
   outsidePointer?: (event: MouseEvent<HTMLButtonElement>) => void;
   onOutsideClick?: () => void;
   actions?: Partial<
@@ -41,6 +42,7 @@ type HarnessProps = {
 };
 
 function Harness({
+  position = { x: 20, y: 30 },
   outsidePointer,
   onOutsideClick,
   actions = {},
@@ -73,8 +75,8 @@ function Harness({
       </button>
       {open ? (
         <ChatContextMenu
-          x={20}
-          y={30}
+          x={position.x}
+          y={position.y}
           target={session}
           origin={triggerRef.current}
           onDismiss={() => setOpen(false)}
@@ -95,7 +97,37 @@ function openMenu() {
   return { trigger, menu: screen.getByRole("menu") };
 }
 
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
 describe("ChatContextMenu", () => {
+  it("clamps a menu opened at the bottom-right inside the viewport", async () => {
+    vi.stubGlobal("innerWidth", 1100);
+    vi.stubGlobal("innerHeight", 800);
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect");
+    rect.mockReturnValue({
+      bottom: 970,
+      height: 180,
+      left: 1088,
+      right: 1256,
+      top: 790,
+      width: 168,
+      x: 1088,
+      y: 790,
+      toJSON: () => ({}),
+    });
+
+    render(<Harness position={{ x: 1088, y: 790 }} />);
+    const { menu } = openMenu();
+
+    await waitFor(() => {
+      expect(menu.style.left).toBe("924px");
+      expect(menu.style.top).toBe("612px");
+    });
+  });
+
   it("enters on the first action and supports wrapped arrow, Home, and End navigation", async () => {
     render(<Harness />);
     const { menu } = openMenu();

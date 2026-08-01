@@ -32,6 +32,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { page } from "vitest/browser";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { ChatPane } from "../src/components/shell/ChatPane";
+import { ChatContextMenu } from "../src/components/shell/ChatContextMenu";
 import { PreLaunchScreen } from "../src/components/launch/PreLaunchScreen";
 import { SettingsModal } from "../src/components/SettingsModal";
 import type { SkinId } from "../src/lib/skins";
@@ -39,6 +40,7 @@ import {
   applyTheme,
   expectNoAxeViolations,
   expectNoHorizontalPageOverflow,
+  expectWithinViewport,
   nextPaintedFrame,
   renderVisual,
   resetVisualState,
@@ -171,6 +173,35 @@ beforeEach(async () => {
     path: "/Users/visual/Documents/ContextDesk",
     label: "Documents/ContextDesk",
     exists: true,
+  });
+});
+
+describe("chat session context menu", () => {
+  it("shifts a bottom-right opening point fully inside a narrow viewport", async () => {
+    await setViewport("narrow");
+    renderVisual(
+      <ChatContextMenu
+        x={639}
+        y={799}
+        target={chatSession([])}
+        origin={null}
+        onDismiss={vi.fn()}
+        onOpen={vi.fn()}
+        onRename={vi.fn()}
+        onTogglePin={vi.fn()}
+        onArchive={vi.fn()}
+        onTrash={vi.fn()}
+      />,
+    );
+    await nextPaintedFrame();
+
+    const menu = screen.getByRole("menu");
+    expectWithinViewport(menu);
+    expect(rect(menu).right).toBeLessThanOrEqual(window.innerWidth - 7);
+    expect(rect(menu).bottom).toBeLessThanOrEqual(window.innerHeight - 7);
+    expect(rect(menu).left).toBeGreaterThanOrEqual(7);
+    expect(rect(menu).top).toBeGreaterThanOrEqual(7);
+    expectNoHorizontalPageOverflow();
   });
 });
 
