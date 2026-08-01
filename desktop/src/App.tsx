@@ -64,12 +64,16 @@ import {
 } from "./lib/preflightCategories";
 import type { WizardApplyPayload } from "./components/settings/AiSetupWizard";
 import { shouldSkipSplash } from "./components/launch/splashDuration";
+import { GuidedImportWizard } from "./components/importFlow/GuidedImportWizard";
+import { createTauriEngineClient } from "./lib/engine/tauriEngineClient";
 import {
   WizardCatalog,
   LogTroubleshootingWizard,
   MemoryPrimerWizard,
   type WizardOutcome,
 } from "./components/wizards";
+
+const tauriEngine = createTauriEngineClient();
 
 export function App() {
   const shell = useShellState();
@@ -1105,6 +1109,25 @@ export function App() {
             setWizardSessionId(null);
           }}
           onComplete={onWizardComplete}
+          helpAvailable
+          onLearnMore={(pageId) => {
+            setActiveWizardId(null);
+            setWizardSessionId(null);
+            openHelp({ pageId });
+          }}
+        />
+      ) : null}
+      {activeWizardId === "log-import" ? (
+        <GuidedImportWizard
+          engine={tauriEngine}
+          onCancel={() => {
+            setActiveWizardId(null);
+            setWizardSessionId(null);
+          }}
+          onComplete={() => {
+            setActiveWizardId(null);
+            setWizardSessionId(null);
+          }}
           helpAvailable
           onLearnMore={(pageId) => {
             setActiveWizardId(null);

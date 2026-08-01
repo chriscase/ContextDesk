@@ -124,6 +124,15 @@ const MUTATIONS: Record<string, Mutation[]> = {
     { label: "group member wrong type", apply: (r) => { r.groups[0].memberIdentities = "logs/app.jsonl.1"; } },
     { label: "delete possibleOverlap", apply: (r) => delete r.groups[0].possibleOverlap },
   ],
+  "import_preview_plan.v1.json": [
+    { label: "delete planToken", apply: (r) => delete r.planToken },
+    { label: "planToken wrong type", apply: (r) => { r.planToken = 42; } },
+    { label: "delete planVersion", apply: (r) => delete r.planVersion },
+    { label: "planVersion overflow", apply: (r) => { r.planVersion = UNSAFE; } },
+    { label: "delete report", apply: (r) => delete r.report },
+    { label: "nested report drift", apply: (r) => { r.report.items[0].status = "fine"; } },
+    { label: "extra field", apply: (r) => { r.tail = []; } },
+  ],
   "import_profile.v1.json": [
     { label: "delete schemaId", apply: (r) => delete r.schemaId },
     { label: "delete profileId", apply: (r) => delete r.profileId },

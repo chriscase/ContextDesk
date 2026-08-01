@@ -94,6 +94,29 @@ The `log-triage` skill can provide this method to a chat; see
 help://skills-context-packs. A skill does not bypass corpus ingest confirmation
 or any later write.
 
+## Review files before import
+
+Use **Logs → Import with review…** when a folder or ZIP contains material you
+may not want treated as log events. ContextDesk first performs a read-only,
+bounded preview; nothing is staged or published yet. A straightforward input
+goes directly to **Ready to import**. Open **Review selection…** when you want
+the complete decision surface or when a source needs attention.
+
+The selector keeps directory and nested `archive.zip!/member` identities
+distinct, explains every ready/review/raw/supporting/ignored/unsupported/blocked
+classification, and sends an exact allowlist to trusted core. Supporting,
+ignored, unsupported, and blocked items remain visible with reasons but cannot
+become log events. If the reviewed inventory is added to, removed from,
+resized, or reclassified before Import, the run stops and asks for a fresh
+review. A truncated preview never imports its unseen tail.
+
+Cancel or Escape during a run requests cancellation and keeps the flow visible
+until the engine acknowledges a cancelled, failed, or published terminal state.
+Publication itself remains atomic. After publication, **Place local
+timestamps** offers corpus-wide or selected-source IANA application as a
+non-blocking review card; **Decide later** preserves order-only evidence without
+guessing a timezone.
+
 ## Investigation workspace
 
 After SoftWrite ingest, open **Log Explorer** from the Logs library for

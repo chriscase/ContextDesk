@@ -54,6 +54,29 @@ export const LOG_TROUBLESHOOTING_WIZARD: WizardDef = {
   ],
 };
 
+export const LOG_IMPORT_WIZARD: WizardDef = {
+  id: "log-import",
+  title: "Import logs",
+  description:
+    "Choose files, folders, or archives; review what will import; publish one corpus atomically.",
+  thumbnailSvgId: "folder",
+  helpPageId: "log-analysis-pipeline",
+  steps: [
+    {
+      id: "import",
+      title: "Import",
+      stageSvgId: "folder",
+      body: "custom",
+    },
+    {
+      id: "ready",
+      title: "Ready",
+      stageSvgId: "ready",
+      body: "ready",
+    },
+  ],
+};
+
 export const MEMORY_PRIMER_WIZARD: WizardDef = {
   id: "memory-primer",
   title: "Memory primer",
@@ -89,6 +112,7 @@ export const MEMORY_PRIMER_WIZARD: WizardDef = {
 /** All registered wizards for the optional catalog. */
 export const WIZARD_CATALOG: WizardDef[] = [
   LOG_TROUBLESHOOTING_WIZARD,
+  LOG_IMPORT_WIZARD,
   MEMORY_PRIMER_WIZARD,
 ];
 

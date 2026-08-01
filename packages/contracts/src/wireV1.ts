@@ -1369,6 +1369,24 @@ export type WireProfileMatchReport = {
   proposedRoles: Record<string, ImportItemRole>;
 };
 
+/** A reviewed preview plus the plan binding a run to exactly this inventory. */
+export type WireImportPreviewPlan = {
+  report: WireImportPreviewReport;
+  planToken: string;
+  planVersion: number;
+};
+
+const importPreviewPlanShape: ObjectShape = {
+  report: f.req(f.obj(importPreviewReportShape)),
+  planToken: f.req(f.str),
+  planVersion: f.req(f.u64),
+};
+
+export const parseImportPreviewPlan = parserFor<WireImportPreviewPlan>(
+  "importPreviewPlan",
+  importPreviewPlanShape,
+);
+
 export const parseImportPreviewReport = parserFor<WireImportPreviewReport>(
   "importPreviewReport",
   importPreviewReportShape,
@@ -1404,6 +1422,7 @@ export const FIXTURE_PARSERS: Readonly<
   "resolved_bookmark.v1.json": parseResolvedBookmarks,
   "process_progress.v1.json": parseProcessProgressStream,
   "import_preview_report.v1.json": parseImportPreviewReport,
+  "import_preview_plan.v1.json": parseImportPreviewPlan,
   "import_profile.v1.json": parseImportProfile,
   "profile_match_report.v1.json": parseProfileMatchReport,
 };

@@ -7970,12 +7970,14 @@ fn desktop_log_ingest_embed_plan_nonblocking(
 /// Runs on a blocking thread pool so the UI event loop is not starved. Both
 /// callers use the same exclusive admission, diagnostics, cancellation,
 /// progress, bounded core ingest policy, and active-corpus handoff.
+#[allow(clippy::too_many_arguments)]
 async fn run_log_ingest(
     app: tauri::AppHandle,
     state: &AppState,
     path: PathBuf,
     name: Option<String>,
     managed_identity: Option<String>,
+    selection: Option<cd_core::log_analysis::IngestSelection>,
     cancel: cd_core::process_progress::CancelFlag,
 ) -> Result<LogIngestReportDto, LogIngestRunError> {
     let selected_path = path;
@@ -8009,8 +8011,45 @@ async fn run_log_ingest(
     let name_owned = name.unwrap_or_else(|| "corpus".into());
     let cancel_for_job = cancel.clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        let result = if let Some(identity) = managed_identity {
-            cd_core::log_analysis::ingest_path_with_policy_and_observer_managed(
+        let result = match (managed_identity, selection) {
+            (Some(identity), Some(selection)) => {
+                cd_core::log_analysis::ingest_path_with_policy_selection_and_observer_managed(
+                    &cache,
+                    &selected_path,
+                    &name_owned,
+                    &policy,
+                    embed_backend,
+                    &progress,
+                    Some(&cancel_for_job),
+                    &identity,
+                    &selection,
+                )
+            }
+            (Some(identity), None) => {
+                cd_core::log_analysis::ingest_path_with_policy_and_observer_managed(
+                    &cache,
+                    &selected_path,
+                    &name_owned,
+                    &policy,
+                    embed_backend,
+                    &progress,
+                    Some(&cancel_for_job),
+                    &identity,
+                )
+            }
+            (None, Some(selection)) => {
+                cd_core::log_analysis::ingest_path_with_policy_selection_and_observer(
+                    &cache,
+                    &selected_path,
+                    &name_owned,
+                    &policy,
+                    embed_backend,
+                    &progress,
+                    Some(&cancel_for_job),
+                    &selection,
+                )
+            }
+            (None, None) => cd_core::log_analysis::ingest_path_with_policy_and_observer(
                 &cache,
                 &selected_path,
                 &name_owned,
@@ -8018,18 +8057,7 @@ async fn run_log_ingest(
                 embed_backend,
                 &progress,
                 Some(&cancel_for_job),
-                &identity,
-            )
-        } else {
-            cd_core::log_analysis::ingest_path_with_policy_and_observer(
-                &cache,
-                &selected_path,
-                &name_owned,
-                &policy,
-                embed_backend,
-                &progress,
-                Some(&cancel_for_job),
-            )
+            ),
         };
         result.map_err(|error| match error {
             cd_core::error::CoreError::Cancelled => LogIngestRunError::Cancelled,
@@ -8133,7 +8161,7 @@ async fn ingest_log_path(
             "a log import is already running",
         )?;
     }
-    let result = run_log_ingest(app, &state, PathBuf::from(path), name, None, cancel).await;
+    let result = run_log_ingest(app, &state, PathBuf::from(path), name, None, None, cancel).await;
     remove_cancel_if_owned(
         &mut state.cancels.lock().expect("cancels"),
         LOG_INGEST_CANCEL_KEY,
@@ -8242,6 +8270,7 @@ impl DemoLogInstallBackend for TauriDemoLogInstallBackend<'_> {
             resource,
             Some(DEMO_LOG_NAME.into()),
             Some(DEMO_LOG_IDENTITY.into()),
+            None,
             cancel.clone(),
         )
         .await?;
@@ -8808,6 +8837,164 @@ async fn log_load_timezone_state(
     })
     .await
     .map_err(|error| format!("timezone state task join: {error}"))?
+}
+
+/// Read-only bounded import preview over a file, directory, or ZIP (#751).
+///
+/// Never writes or stages anything; classification, counts, and reasons come
+/// from trusted core. Registers the shared log-ingest cancel flag, so
+/// `cancel_log_ingest` genuinely aborts a long preview walk.
+#[tauri::command]
+async fn log_preview_import(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<cd_core::log_analysis::import_preview::ImportPreviewPlan, String> {
+    let cancel = cd_core::process_progress::CancelFlag::new();
+    let cancel_registration = cancel.inner_arc();
+    {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        register_exclusive_cancel(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            Arc::clone(&cancel_registration),
+            "a log import is already running",
+        )?;
+    }
+    let result = tokio::task::spawn_blocking(move || {
+        cd_core::log_analysis::import_preview::preview_import_plan(
+            std::path::Path::new(&path),
+            Some(&cancel),
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("import preview task join: {error}"));
+    remove_cancel_if_owned(
+        &mut state.cancels.lock().expect("cancels"),
+        LOG_INGEST_CANCEL_KEY,
+        &cancel_registration,
+    );
+    result?
+}
+
+/// Run a reviewed, plan-bound import (#751).
+///
+/// Trusted core re-enumerates the root and verifies the plan token before
+/// any ingest work: a stale plan (content changed, entries appeared or
+/// disappeared, classifications shifted), an unknown or duplicate identity,
+/// a selection of non-event content, or an empty selection all fail closed
+/// before staging. The UI's disabled state is a courtesy, never the
+/// enforcement.
+#[tauri::command]
+async fn log_run_import(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    name: Option<String>,
+    plan_token: String,
+    plan_version: u32,
+    selected: Vec<String>,
+) -> Result<LogIngestReportDto, String> {
+    let cancel = cd_core::process_progress::CancelFlag::new();
+    let cancel_registration = cancel.inner_arc();
+    {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        register_exclusive_cancel(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            Arc::clone(&cancel_registration),
+            "a log import is already running",
+        )?;
+    }
+    let verify_path = PathBuf::from(&path);
+    let verify_cancel = cancel.clone();
+    let selection = tokio::task::spawn_blocking(move || {
+        cd_core::log_analysis::import_preview::verify_import_plan(
+            &verify_path,
+            plan_version,
+            &plan_token,
+            &selected,
+            Some(&verify_cancel),
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("import plan verification task join: {error}"));
+    let selection = match selection {
+        Ok(Ok(selection)) => selection,
+        Ok(Err(message)) | Err(message) => {
+            remove_cancel_if_owned(
+                &mut state.cancels.lock().expect("cancels"),
+                LOG_INGEST_CANCEL_KEY,
+                &cancel_registration,
+            );
+            return Err(message);
+        }
+    };
+    let result = run_log_ingest(
+        app,
+        &state,
+        PathBuf::from(path),
+        name,
+        None,
+        Some(selection),
+        cancel,
+    )
+    .await;
+    remove_cancel_if_owned(
+        &mut state.cancels.lock().expect("cancels"),
+        LOG_INGEST_CANCEL_KEY,
+        &cancel_registration,
+    );
+    result.map_err(LogIngestRunError::into_message)
+}
+
+/// Apply reviewed timezone declarations to one or more sources atomically
+/// (#813). Every preview token is recomputed and matched server-side; any
+/// mismatch fails the whole application before staging.
+#[tauri::command]
+async fn log_apply_source_timezones(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    expected_revision: u64,
+    requests: Vec<cd_core::log_analysis::SourceTimezoneApplyRequest>,
+) -> Result<cd_core::log_analysis::EventRevisionReport, String> {
+    let cache = log_cache_dir(&state)?;
+    let declared_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "system time is before the Unix epoch".to_string())?
+        .as_secs();
+    let declared_at = i64::try_from(declared_at)
+        .map_err(|_| "system time is outside the supported range".to_string())?;
+    tokio::task::spawn_blocking(move || {
+        cd_core::log_analysis::apply_source_timezones(
+            &cache,
+            &corpus_id,
+            expected_revision,
+            &requests,
+            declared_at,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("timezone apply task join: {error}"))?
+}
+
+/// One-step undo of the current event revision (#813). Publishes forward:
+/// the restored state becomes a new revision, preserving the audit chain.
+#[tauri::command]
+async fn log_undo_event_revision(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    expected_revision: u64,
+) -> Result<cd_core::log_analysis::EventRevisionReport, String> {
+    let cache = log_cache_dir(&state)?;
+    tokio::task::spawn_blocking(move || {
+        cd_core::log_analysis::undo_event_revision(&cache, &corpus_id, expected_revision, None)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("event revision undo task join: {error}"))?
 }
 
 #[tauri::command]
@@ -11700,6 +11887,10 @@ pub fn run() {
             log_search,
             discard_log_corpus,
             log_load_timezone_state,
+            log_preview_import,
+            log_run_import,
+            log_apply_source_timezones,
+            log_undo_event_revision,
             log_preview_source_timezone,
             log_apply_source_timezone,
             log_clear_source_timezone,
@@ -12259,6 +12450,63 @@ mod log_noise_candidate_host_tests {
     }
 
     /// #824 — SoftWrite ingest must not run DuckDB/analysis on the UI event loop.
+    #[test]
+    fn log_run_import_verifies_the_plan_in_trusted_core_before_any_ingest() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("async fn log_run_import(")
+            .expect("log_run_import");
+        let end = source[start..]
+            .find("\n#[tauri::command]")
+            .map(|offset| start + offset)
+            .expect("log_run_import boundary");
+        let body = &source[start..end];
+        let verify = body
+            .find("verify_import_plan")
+            .expect("log_run_import must call verify_import_plan");
+        let run = body
+            .find("run_log_ingest(")
+            .expect("log_run_import must call run_log_ingest");
+        assert!(
+            verify < run,
+            "plan verification must complete before any ingest work starts"
+        );
+        assert!(
+            !body.contains("deselected"),
+            "the run request is an exact allowlist, never a deny-list"
+        );
+        assert!(
+            body.contains("selected: Vec<String>"),
+            "the run request carries the exact reviewed selection"
+        );
+    }
+
+    #[test]
+    fn log_preview_import_registers_a_real_cancel_flag() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("async fn log_preview_import(")
+            .expect("log_preview_import");
+        let end = source[start..]
+            .find("\n#[tauri::command]")
+            .map(|offset| start + offset)
+            .expect("log_preview_import boundary");
+        let body = &source[start..end];
+        assert!(
+            body.contains("register_exclusive_cancel"),
+            "preview must register the shared cancel key"
+        );
+        assert!(
+            body.contains("Some(&cancel)"),
+            "preview must pass its cancel flag into trusted core — the \
+             cancellable claim has to be real"
+        );
+        assert!(
+            body.contains("preview_import_plan"),
+            "preview returns the plan-bound wire shape"
+        );
+    }
+
     #[test]
     fn run_log_ingest_keeps_core_ingest_off_the_event_loop() {
         let source = include_str!("lib.rs");

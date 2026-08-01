@@ -325,7 +325,7 @@ describe("LogPane", () => {
       name: "Logs actions",
     });
     expect(within(toolbar).getAllByRole("group")).toHaveLength(4);
-    expect(within(toolbar).getAllByRole("button")).toHaveLength(7);
+    expect(within(toolbar).getAllByRole("button")).toHaveLength(8);
     expect(
       within(toolbar).queryByRole("button", {
         name: /more logs actions/i,

@@ -768,12 +768,29 @@ fn contract_fixtures() -> Vec<(&'static str, Value)> {
             "import_preview_report.v1.json",
             to(&import_preview_report_sample()),
         ),
+        (
+            "import_preview_plan.v1.json",
+            to(&import_preview_plan_sample()),
+        ),
         ("import_profile.v1.json", to(&import_profile_sample())),
         (
             "profile_match_report.v1.json",
             to(&profile_match_report_sample()),
         ),
     ]
+}
+
+/// The report wrapped into a runnable plan by the real binding fn, so the
+/// committed token is the genuine production derivation over the committed
+/// report — a wire consumer can trust the pair verbatim.
+fn import_preview_plan_sample() -> cd_core::log_analysis::import_preview::ImportPreviewPlan {
+    let report = import_preview_report_sample();
+    let plan_token = cd_core::log_analysis::import_preview::import_plan_token(&report);
+    cd_core::log_analysis::import_preview::ImportPreviewPlan {
+        report,
+        plan_token,
+        plan_version: cd_core::log_analysis::import_preview::IMPORT_PLAN_VERSION,
+    }
 }
 
 /// A preview report produced by the real preview pipeline.

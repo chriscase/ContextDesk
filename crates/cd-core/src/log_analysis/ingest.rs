@@ -219,6 +219,68 @@ pub struct IngestReport {
     pub phase_timings: IngestPhaseTimings,
 }
 
+/// Trusted allowlist carried from a verified import plan (#751).
+///
+/// Identities use the same portable form the preview reports
+/// ([`portable_source_identity`] and `archive!/member` chains). Anything the
+/// walk discovers that is *not* in the allowlist is skipped and counted as
+/// `ignored: not_selected` — never silent. Build one through
+/// [`super::import_preview::verify_import_plan`], which re-enumerates the
+/// root and fails closed on any drift from the reviewed preview.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IngestSelection {
+    /// Exact reviewed identities that may produce log events.
+    pub selected: std::collections::BTreeSet<String>,
+    /// Private binding carried only by selections issued after trusted plan
+    /// verification. Ad-hoc allowlists remain useful to lower-level callers,
+    /// but cannot claim the final pre-publication revalidation guarantee.
+    reviewed_plan: Option<ReviewedPlanBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReviewedPlanBinding {
+    version: u32,
+    token: String,
+}
+
+impl IngestSelection {
+    pub(crate) fn reviewed(
+        selected: std::collections::BTreeSet<String>,
+        version: u32,
+        token: String,
+    ) -> Self {
+        Self {
+            selected,
+            reviewed_plan: Some(ReviewedPlanBinding { version, token }),
+        }
+    }
+
+    fn reviewed_binding(&self) -> Option<(u32, &str)> {
+        self.reviewed_plan
+            .as_ref()
+            .map(|binding| (binding.version, binding.token.as_str()))
+    }
+
+    fn skips(selection: Option<&IngestSelection>, identity: &str) -> bool {
+        selection.is_some_and(|s| !s.selected.contains(identity))
+    }
+
+    /// Whether an archive container has any exact reviewed leaf beneath it.
+    ///
+    /// Containers are traversal-only: selecting `outer.zip!/app.log` permits
+    /// opening `outer.zip`, but never permits any sibling leaf to emit events.
+    /// The `!/` boundary prevents `a.zip` from authorizing `a.zipx!/app.log`.
+    fn skips_archive(selection: Option<&IngestSelection>, identity: &str) -> bool {
+        selection.is_some_and(|selection| {
+            !selection.selected.iter().any(|selected| {
+                selected
+                    .strip_prefix(identity)
+                    .is_some_and(|suffix| suffix.starts_with("!/"))
+            })
+        })
+    }
+}
+
 /// Ingest a file or directory into a new corpus under `cache_root`.
 ///
 /// Streams line-by-line (bounded memory). `embed` is optional — when present,
@@ -265,6 +327,7 @@ pub fn ingest_path_with_observer(
         None,
         progress,
         cancel,
+        None,
         None,
     )
 }
@@ -324,6 +387,7 @@ pub fn ingest_path_with_policy_and_observer(
         progress,
         cancel,
         None,
+        None,
     )
 }
 
@@ -365,6 +429,106 @@ pub fn ingest_path_with_policy_and_observer_managed(
         progress,
         cancel,
         Some(managed_identity),
+        None,
+    )
+}
+
+/// Policy ingest honoring an explicit reviewed selection (#751), unmanaged.
+///
+/// See [`ingest_path_with_policy_selection_and_observer_managed`] for the
+/// selection semantics; this variant is for ordinary user-invoked imports
+/// that do not reserve a host-managed identity.
+#[allow(clippy::too_many_arguments)]
+pub fn ingest_path_with_policy_selection_and_observer(
+    cache_root: &Path,
+    path: &Path,
+    name: &str,
+    policy: &LogEmbedPolicy,
+    embed: Option<Arc<dyn EmbedBackend>>,
+    progress: &dyn ProcessProgressObserver,
+    cancel: Option<&CancelFlag>,
+    selection: &IngestSelection,
+) -> CoreResult<IngestReport> {
+    policy.assert_embed_allowed()?;
+    if selection.selected.len() > super::import_preview::MAX_IMPORT_PREVIEW_ITEMS {
+        return Err(CoreError::Policy(format!(
+            "import selection lists {} identities (limit {})",
+            selection.selected.len(),
+            super::import_preview::MAX_IMPORT_PREVIEW_ITEMS
+        )));
+    }
+    let backend = match policy.mode {
+        LogEmbedMode::None => None,
+        LogEmbedMode::Local | LogEmbedMode::Cloud => embed,
+    };
+    if policy.mode == LogEmbedMode::Cloud && backend.is_none() {
+        return Err(CoreError::Config(
+            "cloud embed mode requires an EmbedBackend (key from keychain)".into(),
+        ));
+    }
+    ingest_path_inner(
+        cache_root,
+        path,
+        name,
+        backend.as_deref(),
+        policy.model_id.as_str(),
+        policy.mode,
+        policy.defer_above_source_bytes,
+        progress,
+        cancel,
+        None,
+        Some(selection),
+    )
+}
+
+/// Managed policy ingest honoring an explicit reviewed selection (#751).
+///
+/// Identical to [`ingest_path_with_policy_and_observer_managed`] except that
+/// sources the user deselected in a reviewed import preview are skipped and
+/// counted as `ignored: user_deselected`. Deselecting everything importable
+/// fails with the standard zero-event refusal — a selection can never publish
+/// an empty corpus.
+#[allow(clippy::too_many_arguments)]
+pub fn ingest_path_with_policy_selection_and_observer_managed(
+    cache_root: &Path,
+    path: &Path,
+    name: &str,
+    policy: &LogEmbedPolicy,
+    embed: Option<Arc<dyn EmbedBackend>>,
+    progress: &dyn ProcessProgressObserver,
+    cancel: Option<&CancelFlag>,
+    managed_identity: &str,
+    selection: &IngestSelection,
+) -> CoreResult<IngestReport> {
+    policy.assert_embed_allowed()?;
+    if selection.selected.len() > super::import_preview::MAX_IMPORT_PREVIEW_ITEMS {
+        return Err(CoreError::Policy(format!(
+            "import selection lists {} identities (limit {})",
+            selection.selected.len(),
+            super::import_preview::MAX_IMPORT_PREVIEW_ITEMS
+        )));
+    }
+    let backend = match policy.mode {
+        LogEmbedMode::None => None,
+        LogEmbedMode::Local | LogEmbedMode::Cloud => embed,
+    };
+    if policy.mode == LogEmbedMode::Cloud && backend.is_none() {
+        return Err(CoreError::Config(
+            "cloud embed mode requires an EmbedBackend (key from keychain)".into(),
+        ));
+    }
+    ingest_path_inner(
+        cache_root,
+        path,
+        name,
+        backend.as_deref(),
+        policy.model_id.as_str(),
+        policy.mode,
+        policy.defer_above_source_bytes,
+        progress,
+        cancel,
+        Some(managed_identity),
+        Some(selection),
     )
 }
 
@@ -2061,6 +2225,7 @@ fn ingest_from_zip(
     budget: &mut RawIngestBudget,
     limits: RawIngestLimits,
     ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
+    selection: Option<&IngestSelection>,
 ) -> CoreResult<u64> {
     let file = open_selected_regular_file(zip_path)?;
     let archive_identity = portable_source_identity(Path::new(&progress_basename(zip_path)))?;
@@ -2082,6 +2247,7 @@ fn ingest_from_zip(
         budget,
         limits,
         ops,
+        selection,
     )
 }
 
@@ -2104,6 +2270,7 @@ fn ingest_from_zip_file(
     budget: &mut RawIngestBudget,
     limits: RawIngestLimits,
     ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
+    selection: Option<&IngestSelection>,
 ) -> CoreResult<u64> {
     if cancelled(cancel) {
         emit(
@@ -2189,9 +2356,8 @@ fn ingest_from_zip_file(
 
         stats.discover();
         let rel = plan.identity.as_str();
-        let nested_archive_identity = archive_member_identity(archive_identity, rel);
         let source_identity = if prefix_members {
-            nested_archive_identity.clone()
+            archive_member_identity(archive_identity, rel)
         } else {
             rel.to_string()
         };
@@ -2302,6 +2468,11 @@ fn ingest_from_zip_file(
         let nested_archive =
             plan.disposition == ZipEntryDisposition::NestedArchive || has_zip_signature(head);
         if nested_archive {
+            if IngestSelection::skips_archive(selection, &source_identity) {
+                stats.ignored("not_selected", Path::new(&source_identity));
+                files_done += 1;
+                continue;
+            }
             let next_depth = archive_depth.saturating_add(1);
             if next_depth > limits.max_archive_depth {
                 return Err(CoreError::Policy(format!(
@@ -2349,7 +2520,7 @@ fn ingest_from_zip_file(
             let nested_file = open_selected_regular_file(&staged.path)?;
             ingest_from_zip_file(
                 nested_file,
-                &nested_archive_identity,
+                &source_identity,
                 next_depth,
                 true,
                 private_staging_root,
@@ -2365,7 +2536,13 @@ fn ingest_from_zip_file(
                 budget,
                 limits,
                 ops,
+                selection,
             )?;
+            files_done += 1;
+            continue;
+        }
+        if IngestSelection::skips(selection, &source_identity) {
+            stats.ignored("not_selected", Path::new(&source_identity));
             files_done += 1;
             continue;
         }
@@ -2464,6 +2641,7 @@ fn ingest_path_inner(
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
     managed_identity: Option<&str>,
+    selection: Option<&IngestSelection>,
 ) -> CoreResult<IngestReport> {
     ingest_path_inner_with_fault(
         cache_root,
@@ -2476,6 +2654,7 @@ fn ingest_path_inner(
         progress,
         cancel,
         managed_identity,
+        selection,
         None,
     )
 }
@@ -2492,6 +2671,7 @@ fn ingest_path_inner_with_fault(
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
     managed_identity: Option<&str>,
+    selection: Option<&IngestSelection>,
     fault: IngestFaultHook<'_>,
 ) -> CoreResult<IngestReport> {
     ingest_path_inner_with_limits_and_fault(
@@ -2505,6 +2685,7 @@ fn ingest_path_inner_with_fault(
         progress,
         cancel,
         managed_identity,
+        selection,
         RawIngestLimits::default(),
         fault,
     )
@@ -2522,6 +2703,7 @@ fn ingest_path_inner_with_limits_and_fault(
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
     managed_identity: Option<&str>,
+    selection: Option<&IngestSelection>,
     limits: RawIngestLimits,
     fault: IngestFaultHook<'_>,
 ) -> CoreResult<IngestReport> {
@@ -2576,6 +2758,7 @@ fn ingest_path_inner_with_limits_and_fault(
             defer_above_source_bytes,
             progress,
             cancel,
+            selection,
             limits,
             fault,
             &ops,
@@ -2620,6 +2803,16 @@ fn ingest_path_inner_with_limits_and_fault(
             validate_staged_ingest(staging.cache_root(), &report)
         })?;
         check_ingest_fault(fault, IngestCheckpoint::BeforePublish)?;
+        // Verification before the run is necessary but not sufficient: the
+        // reviewed source can change while the private corpus is being built.
+        // Re-enumerate and bind it again at the last safe point. A mismatch
+        // removes the staging tree below and publishes nothing.
+        if let Some(selection) = selection {
+            if let Some((version, token)) = selection.reviewed_binding() {
+                let selected = selection.selected.iter().cloned().collect::<Vec<_>>();
+                super::import_preview::verify_import_plan(path, version, token, &selected, cancel)?;
+            }
+        }
         if cancelled(cancel) {
             emit(
                 progress,
@@ -2704,6 +2897,7 @@ fn ingest_path_into_cache(
     defer_above_source_bytes: Option<u64>,
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
+    selection: Option<&IngestSelection>,
     limits: RawIngestLimits,
     fault: IngestFaultHook<'_>,
     ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
@@ -2738,6 +2932,7 @@ fn ingest_path_into_cache(
             &mut budget,
             limits,
             ops,
+            selection,
         )?
     } else {
         let inventory = collect_log_files(path, &mut budget, limits, cancel)?;
@@ -2861,6 +3056,11 @@ fn ingest_path_into_cache(
             fh.seek(SeekFrom::Start(0))
                 .map_err(|e| CoreError::Message(format!("rewind log source: {e}")))?;
             if has_zip_extension(file) || has_zip_signature(&signature[..signature_len]) {
+                if IngestSelection::skips_archive(selection, &rel) {
+                    stats.ignored("not_selected", file);
+                    files_done += 1;
+                    continue;
+                }
                 ingest_from_zip_file(
                     fh,
                     &rel,
@@ -2879,7 +3079,13 @@ fn ingest_path_into_cache(
                     &mut budget,
                     limits,
                     ops,
+                    selection,
                 )?;
+                files_done += 1;
+                continue;
+            }
+            if IngestSelection::skips(selection, &rel) {
+                stats.ignored("not_selected", file);
                 files_done += 1;
                 continue;
             }
@@ -3783,7 +3989,7 @@ fn preview_zip_members<R: Read + Seek>(
             continue;
         }
 
-        let Ok(mut entry) = archive.by_name(&plan.identity) else {
+        let Ok(entry) = archive.by_name(&plan.identity) else {
             items.push(excluded_item(
                 &identity,
                 plan.expanded_size,
@@ -3792,11 +3998,28 @@ fn preview_zip_members<R: Read + Seek>(
             ));
             continue;
         };
+        let mut reader = BufReader::with_capacity(8 * 1024, entry);
+        let nested_archive = match reader.fill_buf() {
+            Ok(head) => {
+                plan.disposition == ZipEntryDisposition::NestedArchive || has_zip_signature(head)
+            }
+            Err(_) => {
+                items.push(excluded_item(
+                    &identity,
+                    plan.expanded_size,
+                    ImportItemStatus::Unsupported,
+                    ImportPreviewReason::ReadFailed,
+                ));
+                continue;
+            }
+        };
 
-        // A nested archive is buffered and inventoried recursively.
+        // A nested archive, including a signature-only container, is buffered
+        // and inventoried recursively. This mirrors ingest's extension-or-
+        // signature rule and keeps the reviewed virtual identities reachable.
         // `ZipArchive` needs `Read + Seek`, which `Cursor<Vec<u8>>` provides,
         // so preview never stages anything to disk the way ingest must.
-        if plan.disposition == ZipEntryDisposition::NestedArchive {
+        if nested_archive {
             if archive_depth + 1 > limits.max_archive_depth {
                 items.push(excluded_item(
                     &identity,
@@ -3819,7 +4042,7 @@ fn preview_zip_members<R: Read + Seek>(
                 continue;
             }
             let mut buf = Vec::new();
-            if std::io::Read::take(&mut entry, plan.expanded_size)
+            if std::io::Read::take(&mut reader, plan.expanded_size)
                 .read_to_end(&mut buf)
                 .is_err()
             {
@@ -3831,7 +4054,7 @@ fn preview_zip_members<R: Read + Seek>(
                 ));
                 continue;
             }
-            drop(entry);
+            drop(reader);
             let mut nested = std::io::Cursor::new(buf);
             preview_zip_members(
                 &mut nested,
@@ -3856,7 +4079,7 @@ fn preview_zip_members<R: Read + Seek>(
         // Cancellation propagates as `Err(Cancelled)`; a read/decompression
         // failure becomes an explicit ledger row rather than a classification
         // of whatever bytes happened to arrive.
-        let sample = match sample_streaming(&mut entry, plan.expanded_size, cancel)? {
+        let sample = match sample_streaming(&mut reader, plan.expanded_size, cancel)? {
             SampleOutcome::Sampled(sample) => sample,
             SampleOutcome::ReadFailed => {
                 items.push(excluded_item(
@@ -3942,6 +4165,7 @@ mod tests {
             progress,
             cancel,
             None,
+            None,
             limits,
             None,
         )
@@ -3955,6 +4179,72 @@ mod tests {
             zip.write_all(body).unwrap();
         }
         zip.finish().unwrap().into_inner()
+    }
+
+    fn ingest_one_reviewed_source(
+        cache: &Path,
+        path: &Path,
+        name: &str,
+        selected_identity: &str,
+    ) -> (IngestReport, Vec<String>) {
+        use super::super::import_preview::{
+            event_importable, import_plan_token, preview_import_path, verify_import_plan,
+            IMPORT_PLAN_VERSION,
+        };
+
+        let preview = preview_import_path(path, None).unwrap();
+        let selected_item = preview
+            .items
+            .iter()
+            .find(|item| item.identity == selected_identity)
+            .unwrap_or_else(|| {
+                panic!(
+                    "preview did not expose {selected_identity:?}; identities: {:?}",
+                    preview
+                        .items
+                        .iter()
+                        .map(|item| item.identity.as_str())
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert!(
+            event_importable(selected_item),
+            "reviewed leaf must be importable: {selected_item:?}"
+        );
+        let selection = verify_import_plan(
+            path,
+            IMPORT_PLAN_VERSION,
+            &import_plan_token(&preview),
+            &[selected_identity.to_string()],
+            None,
+        )
+        .unwrap();
+        let policy = LogEmbedPolicy {
+            mode: LogEmbedMode::None,
+            ..LogEmbedPolicy::default()
+        };
+        let report = ingest_path_with_policy_selection_and_observer_managed(
+            cache,
+            path,
+            name,
+            &policy,
+            None,
+            &NoopProcessProgress,
+            None,
+            &format!("managed-{name}"),
+            &selection,
+        )
+        .unwrap();
+        let corpus = LogCorpus::open(cache, &report.corpus_id).unwrap();
+        let mut sources = corpus.with_events(|events| {
+            events
+                .iter()
+                .map(|event| event.source.clone())
+                .collect::<Vec<_>>()
+        });
+        sources.sort();
+        sources.dedup();
+        (report, sources)
     }
 
     fn with_bounded_zip64_end_records(bytes: Vec<u8>) -> Vec<u8> {
@@ -4308,6 +4598,346 @@ mod tests {
     }
 
     #[test]
+    fn selection_allowlist_skips_unlisted_sources_and_never_publishes_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("visible.log"), "level=info msg=visible\n").unwrap();
+        std::fs::write(logs.join("extra.log"), "level=info msg=extra\n").unwrap();
+        let inner = zip_bytes(&[("deep/app.log", b"level=error msg=nested-visible\n")]);
+        std::fs::write(logs.join("host-a.zip"), &inner).unwrap();
+
+        let policy = LogEmbedPolicy {
+            mode: LogEmbedMode::None,
+            ..LogEmbedPolicy::default()
+        };
+        let selection = IngestSelection {
+            selected: ["visible.log".to_string()].into_iter().collect(),
+            ..IngestSelection::default()
+        };
+        let report = ingest_path_with_policy_selection_and_observer_managed(
+            &cache,
+            &logs,
+            "selection-allowlist",
+            &policy,
+            None,
+            &NoopProcessProgress,
+            None,
+            "managed-selection-test",
+            &selection,
+        )
+        .unwrap();
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        let mut sources = corpus.with_events(|events| {
+            events
+                .iter()
+                .map(|event| event.source.clone())
+                .collect::<Vec<_>>()
+        });
+        sources.sort();
+        sources.dedup();
+        assert_eq!(sources, ["visible.log"]);
+        // Everything discovered but unlisted is disclosed, never silent.
+        assert_eq!(report.stats.exclusion_counts.get("not_selected"), Some(&2));
+
+        // An empty allowlist skips everything and refuses to publish.
+        let none = IngestSelection::default();
+        let err = ingest_path_with_policy_selection_and_observer_managed(
+            &cache,
+            &logs,
+            "selection-empty",
+            &policy,
+            None,
+            &NoopProcessProgress,
+            None,
+            "managed-selection-empty",
+            &none,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("no safe/importable log events"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn truncated_preview_tail_is_never_imported_silently() {
+        use super::super::import_preview::{
+            import_plan_token, preview_import_path, verify_import_plan, IMPORT_PLAN_VERSION,
+            MAX_IMPORT_PREVIEW_ITEMS,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        // Ten entries beyond the itemization bound: the preview must disclose
+        // truncation, and the unreviewed tail must never import.
+        let total = MAX_IMPORT_PREVIEW_ITEMS + 10;
+        for index in 0..total {
+            std::fs::write(logs.join(format!("f{index:05}.log")), "level=info msg=x\n").unwrap();
+        }
+        let report = preview_import_path(&logs, None).unwrap();
+        assert!(report.truncated, "preview must disclose the tail");
+        assert_eq!(report.items.len(), MAX_IMPORT_PREVIEW_ITEMS);
+
+        // The reviewed selection covers three itemized identities; the plan
+        // verifies against an unchanged tree (re-enumeration truncates
+        // identically, so the token is stable).
+        let token = import_plan_token(&report);
+        let selected: Vec<String> = report
+            .items
+            .iter()
+            .take(3)
+            .map(|item| item.identity.clone())
+            .collect();
+        let selection =
+            verify_import_plan(&logs, IMPORT_PLAN_VERSION, &token, &selected, None).unwrap();
+
+        let policy = LogEmbedPolicy {
+            mode: LogEmbedMode::None,
+            ..LogEmbedPolicy::default()
+        };
+        let ingest_report = ingest_path_with_policy_selection_and_observer_managed(
+            &cache,
+            &logs,
+            "truncated-tail",
+            &policy,
+            None,
+            &NoopProcessProgress,
+            None,
+            "managed-truncated-tail",
+            &selection,
+        )
+        .unwrap();
+        assert_eq!(ingest_report.stats.files as usize, 3);
+        assert_eq!(
+            ingest_report.stats.exclusion_counts.get("not_selected"),
+            Some(&((total - 3) as u64)),
+            "every unreviewed or unselected entry is counted, never silent"
+        );
+        let corpus = LogCorpus::open(&cache, &ingest_report.corpus_id).unwrap();
+        let mut sources = corpus.with_events(|events| {
+            events
+                .iter()
+                .map(|event| event.source.clone())
+                .collect::<Vec<_>>()
+        });
+        sources.sort();
+        sources.dedup();
+        assert_eq!(sources.len(), 3);
+        for source in &sources {
+            assert!(selected.contains(source), "only reviewed identities import");
+        }
+    }
+
+    #[test]
+    fn reviewed_source_change_after_initial_verification_never_publishes() {
+        use super::super::import_preview::{
+            import_plan_token, preview_import_path, verify_import_plan, IMPORT_PLAN_VERSION,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let source = logs.join("app.log");
+        let reviewed = "level=info msg=alpha\n";
+        let replacement = "level=warn msg=omega\n";
+        assert_eq!(reviewed.len(), replacement.len());
+        std::fs::write(&source, reviewed).unwrap();
+
+        let preview = preview_import_path(&logs, None).unwrap();
+        let token = import_plan_token(&preview);
+        let selection = verify_import_plan(
+            &logs,
+            IMPORT_PLAN_VERSION,
+            &token,
+            &["app.log".to_string()],
+            None,
+        )
+        .unwrap();
+
+        // Deterministically replace the source only after the staged corpus
+        // has passed validation. The final reviewed-plan check must catch the
+        // same-size, same-format drift before the atomic publication point.
+        let mutated = std::sync::atomic::AtomicBool::new(false);
+        let hook = |checkpoint| {
+            if checkpoint == IngestCheckpoint::BeforePublish
+                && !mutated.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                std::fs::write(&source, replacement).unwrap();
+            }
+            Ok(())
+        };
+        let error = ingest_path_inner_with_fault(
+            &cache,
+            &logs,
+            "reviewed-source-drift",
+            None,
+            "none",
+            LogEmbedMode::None,
+            None,
+            &NoopProcessProgress,
+            None,
+            None,
+            Some(&selection),
+            Some(&hook),
+        )
+        .unwrap_err();
+
+        assert!(mutated.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            error.to_string().contains("import plan is stale"),
+            "{error}"
+        );
+        assert!(LogCorpus::list_ids(&cache).unwrap().is_empty());
+        assert_no_ingest_staging(&cache);
+    }
+
+    #[test]
+    fn direct_zip_root_selection_has_no_member_bleed() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let root_zip = dir.path().join("support.zip");
+        std::fs::write(
+            &root_zip,
+            zip_bytes(&[
+                ("a.log", b"level=info msg=alpha\n"),
+                ("deep/b.log", b"level=warn msg=beta\n"),
+            ]),
+        )
+        .unwrap();
+
+        let policy = LogEmbedPolicy {
+            mode: LogEmbedMode::None,
+            ..LogEmbedPolicy::default()
+        };
+        // Selecting one member of a directly-chosen ZIP imports only it.
+        let selection = IngestSelection {
+            selected: ["a.log".to_string()].into_iter().collect(),
+            ..IngestSelection::default()
+        };
+        let report = ingest_path_with_policy_selection_and_observer_managed(
+            &cache,
+            &root_zip,
+            "direct-zip-selection",
+            &policy,
+            None,
+            &NoopProcessProgress,
+            None,
+            "managed-direct-zip",
+            &selection,
+        )
+        .unwrap();
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        let mut sources = corpus.with_events(|events| {
+            events
+                .iter()
+                .map(|event| event.source.clone())
+                .collect::<Vec<_>>()
+        });
+        sources.sort();
+        sources.dedup();
+        assert_eq!(sources, ["a.log"], "no deselected member may bleed through");
+        assert_eq!(report.stats.exclusion_counts.get("not_selected"), Some(&1));
+
+        // Deselect-all on a direct ZIP refuses to publish anything.
+        let err = ingest_path_with_policy_selection_and_observer_managed(
+            &cache,
+            &root_zip,
+            "direct-zip-empty",
+            &policy,
+            None,
+            &NoopProcessProgress,
+            None,
+            "managed-direct-zip-empty",
+            &IngestSelection::default(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("no safe/importable log events"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn reviewed_nested_leaf_in_direct_zip_is_reachable_without_sibling_bleed() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let outer = dir.path().join("outer.zip");
+        let inner = zip_bytes(&[
+            ("nested/selected.log", b"level=error msg=selected\n"),
+            ("nested/sibling.log", b"level=warn msg=sibling\n"),
+        ]);
+        std::fs::write(
+            &outer,
+            zip_bytes(&[
+                ("inner.zip", &inner),
+                ("root.log", b"level=info msg=root\n"),
+            ]),
+        )
+        .unwrap();
+
+        let selected = "inner.zip!/nested/selected.log";
+        let (report, sources) =
+            ingest_one_reviewed_source(&cache, &outer, "direct-nested-selection", selected);
+        assert_eq!(sources, [selected]);
+        assert_eq!(report.stats.files, 1);
+        assert_eq!(report.stats.exclusion_counts.get("not_selected"), Some(&2));
+    }
+
+    #[test]
+    fn reviewed_leaf_in_directory_zip_is_reachable_without_sibling_bleed() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(
+            logs.join("support.zip"),
+            zip_bytes(&[
+                ("selected.log", b"level=error msg=selected\n"),
+                ("sibling.log", b"level=warn msg=sibling\n"),
+            ]),
+        )
+        .unwrap();
+        std::fs::write(logs.join("outside.log"), "level=info msg=outside\n").unwrap();
+
+        let selected = "support.zip!/selected.log";
+        let (report, sources) =
+            ingest_one_reviewed_source(&cache, &logs, "directory-zip-selection", selected);
+        assert_eq!(sources, [selected]);
+        assert_eq!(report.stats.files, 1);
+        assert_eq!(report.stats.exclusion_counts.get("not_selected"), Some(&2));
+    }
+
+    #[test]
+    fn reviewed_leaf_in_signature_only_nested_archive_is_reachable() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let outer = dir.path().join("outer.zip");
+        let inner = zip_bytes(&[
+            ("selected.log", b"level=error msg=selected\n"),
+            ("sibling.log", b"level=warn msg=sibling\n"),
+        ]);
+        std::fs::write(
+            &outer,
+            zip_bytes(&[
+                ("inner.bundle", &inner),
+                ("root.log", b"level=info msg=root\n"),
+            ]),
+        )
+        .unwrap();
+
+        let selected = "inner.bundle!/selected.log";
+        let (report, sources) =
+            ingest_one_reviewed_source(&cache, &outer, "signature-nested-selection", selected);
+        assert_eq!(sources, [selected]);
+        assert_eq!(report.stats.files, 1);
+        assert_eq!(report.stats.exclusion_counts.get("not_selected"), Some(&2));
+    }
+
+    #[test]
     fn nested_zip_success_from_directory_and_archive_preserves_virtual_identities() {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("cache");
@@ -4365,8 +4995,8 @@ mod tests {
         assert_eq!(
             archive_sources,
             [
-                "outer.zip!/host-b.bundle!/deep/app.log",
-                "outer.zip!/host-b.zip!/deep/app.log",
+                "host-b.bundle!/deep/app.log",
+                "host-b.zip!/deep/app.log",
                 "visible.log"
             ]
         );
@@ -4617,12 +5247,12 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         sources.sort();
+        // A directly selected archive uses bare member identities in both
+        // preview and ingest; the nested container paths still distinguish
+        // the two otherwise-identical basenames.
         assert_eq!(
             sources,
-            [
-                "support.zip!/hosts/a.zip!/logs/app.log",
-                "support.zip!/hosts/b.zip!/logs/app.log"
-            ]
+            ["hosts/a.zip!/logs/app.log", "hosts/b.zip!/logs/app.log"]
         );
     }
 
@@ -5068,7 +5698,7 @@ mod tests {
         let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
         assert_eq!(
             corpus.with_events(|events| events[0].source.clone()),
-            "outer.zip!/host.zip!/app.log"
+            "host.zip!/app.log"
         );
     }
 
@@ -5846,6 +6476,7 @@ mod tests {
                 &NoopProcessProgress,
                 None,
                 None,
+                None,
                 Some(&hook),
             )
             .unwrap_err();
@@ -5897,6 +6528,7 @@ mod tests {
             None,
             &observer,
             Some(&cancel),
+            None,
             None,
             Some(&hook),
         )

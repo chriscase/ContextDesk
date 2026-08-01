@@ -78,7 +78,9 @@ pub use governed_citation::{
 pub use ingest::{
     ingest_path, ingest_path_with_observer, ingest_path_with_policy,
     ingest_path_with_policy_and_observer, ingest_path_with_policy_and_observer_managed,
-    IngestPhaseTimings, IngestReport, IngestStats,
+    ingest_path_with_policy_selection_and_observer,
+    ingest_path_with_policy_selection_and_observer_managed, IngestPhaseTimings, IngestReport,
+    IngestSelection, IngestStats,
 };
 pub use ingest_confidence::{
     IngestConfidenceCounts, IngestConfidenceReport, IngestFormatOutcome, SourceIngestConfidence,
@@ -167,8 +169,9 @@ pub use suppression_lens::{
     TrustedSuppressionLens,
 };
 pub use timezone_application::{
-    apply_source_timezone, clear_source_timezone, load_timezone_resolution_state,
-    preview_source_timezone, TimezoneResolutionState, TimezoneSourceStatus,
+    apply_source_timezone, apply_source_timezones, clear_source_timezone,
+    load_timezone_resolution_state, preview_source_timezone, SourceTimezoneApplyRequest,
+    TimezoneResolutionState, TimezoneSourceStatus,
 };
 pub use timezone_resolution::{
     SourceTimezoneDeclaration, SourceTimezoneResolver, TimestampResolution,

@@ -45,7 +45,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::CoreResult;
+use crate::error::{CoreError, CoreResult};
 use crate::process_progress::CancelFlag;
 
 use super::format_profile::{
@@ -259,6 +259,12 @@ pub struct ImportPreviewItem {
     /// Group this item was folded into, when its fingerprint agreed with peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
+    /// Host-only fingerprint of the bounded source evidence used to build
+    /// this row. It is deliberately absent from the renderer DTO: the plan
+    /// token needs change detection, while the webview does not need a raw
+    /// content correlation handle.
+    #[serde(skip)]
+    pub(crate) plan_fingerprint: String,
 }
 
 /// A set of rolled/date-suffixed sources whose content fingerprints agree.
@@ -413,6 +419,10 @@ pub(super) struct BoundedSample {
     binary: bool,
     /// True when the source held no non-whitespace bytes.
     empty: bool,
+    /// SHA-256 over the bytes actually examined. Streaming archive members
+    /// cover the full member; seekable ordinary files cover the bounded
+    /// head/interior/tail windows by design.
+    content_fingerprint: String,
 }
 
 impl BoundedSample {
@@ -474,6 +484,8 @@ pub(super) fn align_to_records(bytes: &[u8], at_source_start: bool, at_source_en
 }
 
 pub(super) fn sample_bounded<R: Read + Seek>(reader: &mut R, total_bytes: u64) -> BoundedSample {
+    use sha2::{Digest, Sha256};
+
     let window = IMPORT_PREVIEW_SAMPLE_WINDOW_BYTES as u64;
     let mut offsets = vec![0u64];
     if total_bytes > window.saturating_mul(2) {
@@ -487,6 +499,7 @@ pub(super) fn sample_bounded<R: Read + Seek>(reader: &mut R, total_bytes: u64) -
         empty: true,
         ..BoundedSample::default()
     };
+    let mut content_hasher = Sha256::new();
     for offset in offsets.into_iter().take(IMPORT_PREVIEW_SAMPLE_WINDOWS) {
         if reader.seek(SeekFrom::Start(offset)).is_err() {
             continue;
@@ -500,12 +513,16 @@ pub(super) fn sample_bounded<R: Read + Seek>(reader: &mut R, total_bytes: u64) -
             continue;
         }
         let bytes = &buf[..read];
+        content_hasher.update(offset.to_le_bytes());
+        content_hasher.update((read as u64).to_le_bytes());
+        content_hasher.update(bytes);
         // Binary detection runs on the RAW window: a binary blob has no
         // newlines to align to, and alignment would otherwise turn it into an
         // empty (and therefore "empty file") sample.
         if is_binary(bytes) {
             sample.binary = true;
             sample.empty = false;
+            sample.content_fingerprint = sha256_digest_hex(content_hasher.finalize());
             return sample;
         }
         let at_source_start = offset == 0;
@@ -522,6 +539,7 @@ pub(super) fn sample_bounded<R: Read + Seek>(reader: &mut R, total_bytes: u64) -
         }
         sample.windows.push(text);
     }
+    sample.content_fingerprint = sha256_digest_hex(content_hasher.finalize());
     sample
 }
 
@@ -562,6 +580,8 @@ pub(super) fn sample_streaming<R: Read>(
     total_bytes: u64,
     cancel: Option<&CancelFlag>,
 ) -> CoreResult<SampleOutcome> {
+    use sha2::{Digest, Sha256};
+
     let window = IMPORT_PREVIEW_SAMPLE_WINDOW_BYTES;
     let mut head: Vec<u8> = Vec::new();
     let mut middle: Vec<u8> = Vec::new();
@@ -571,6 +591,7 @@ pub(super) fn sample_streaming<R: Read>(
     let mut middle_taken = false;
     let mut binary = false;
     let mut chunk = vec![0u8; 8 * 1024];
+    let mut content_hasher = Sha256::new();
 
     loop {
         if cancel.is_some_and(CancelFlag::is_cancelled) {
@@ -587,6 +608,7 @@ pub(super) fn sample_streaming<R: Read>(
             Err(_) => return Ok(SampleOutcome::ReadFailed),
         };
         let bytes = &chunk[..read];
+        content_hasher.update(bytes);
         if !binary && is_binary(bytes) {
             binary = true;
         }
@@ -614,6 +636,7 @@ pub(super) fn sample_streaming<R: Read>(
             windows: Vec::new(),
             binary: true,
             empty: false,
+            content_fingerprint: sha256_digest_hex(content_hasher.finalize()),
         }));
     }
 
@@ -645,7 +668,33 @@ pub(super) fn sample_streaming<R: Read>(
         windows,
         binary: false,
         empty,
+        content_fingerprint: sha256_digest_hex(content_hasher.finalize()),
     }))
+}
+
+fn sha256_digest_hex(digest: impl AsRef<[u8]>) -> String {
+    let bytes = digest.as_ref();
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write;
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+fn bounded_sample_plan_fingerprint(sample: &BoundedSample) -> String {
+    if !sample.content_fingerprint.is_empty() {
+        return sample.content_fingerprint.clone();
+    }
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"contextdesk-import-preview-sample-v1");
+    hasher.update([u8::from(sample.binary), u8::from(sample.empty)]);
+    for window in &sample.windows {
+        hasher.update((window.len() as u64).to_le_bytes());
+        hasher.update(window.as_bytes());
+    }
+    sha256_digest_hex(hasher.finalize())
 }
 
 /// Fill `buf` as far as the reader allows without treating a short read as EOF.
@@ -961,6 +1010,7 @@ pub(super) fn item_for_test(
         reasons: Vec::new(),
         representative: None,
         group_id: None,
+        plan_fingerprint: String::new(),
     }
 }
 
@@ -1188,6 +1238,7 @@ pub(super) fn item_from_sample(
         reasons,
         representative,
         group_id: None,
+        plan_fingerprint: bounded_sample_plan_fingerprint(sample),
     }
 }
 
@@ -1215,6 +1266,7 @@ pub(super) fn excluded_item(
         reasons: vec![reason],
         representative: None,
         group_id: None,
+        plan_fingerprint: String::new(),
     }
 }
 
@@ -1264,6 +1316,169 @@ pub fn preview_import_path(
     super::ingest::preview_import_path_impl(path, cancel)
 }
 
+/// Version of the import-plan binding contract.
+///
+/// Bumped whenever the token derivation or verification semantics change so
+/// a stale client can never present an old-format token as current.
+pub const IMPORT_PLAN_VERSION: u32 = 1;
+
+/// Deterministic token binding a reviewed preview to its exact inventory.
+///
+/// Covers the plan version, preview schema version, source kind, truncation
+/// state, and every itemized entry's identity, byte count, status, and role.
+/// Any inventory change — content resized, entries added or removed, a
+/// classification shift — produces a different token, so a run presenting a
+/// stale token fails closed before any staging.
+pub fn import_plan_token(report: &ImportPreviewReport) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(IMPORT_PLAN_VERSION.to_le_bytes());
+    hasher.update(report.schema_version.to_le_bytes());
+    hasher.update(
+        serde_json::to_string(&report.source_kind)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    hasher.update([u8::from(report.truncated)]);
+    for item in &report.items {
+        hasher.update(item.identity.as_bytes());
+        hasher.update([0x1f]);
+        hasher.update(item.bytes.to_le_bytes());
+        hasher.update(
+            serde_json::to_string(&item.status)
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+        hasher.update(
+            serde_json::to_string(&item.role)
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+        hasher.update(item.plan_fingerprint.as_bytes());
+        hasher.update([0x1e]);
+    }
+    let digest = hasher.finalize();
+    let mut token = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(token, "{byte:02x}");
+    }
+    token
+}
+
+/// A reviewed preview plus the plan binding a run to exactly this inventory.
+///
+/// The transportable wire shape every adapter returns from a preview: the
+/// frozen report, the deterministic [`import_plan_token`], and the plan
+/// contract version a run must present back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImportPreviewPlan {
+    /// The bounded inventory the user reviews.
+    pub report: ImportPreviewReport,
+    /// Token binding a run to this exact inventory.
+    pub plan_token: String,
+    /// Plan contract version ([`IMPORT_PLAN_VERSION`]).
+    pub plan_version: u32,
+}
+
+/// Preview a path and bind the result into a runnable plan.
+pub fn preview_import_plan(
+    path: &Path,
+    cancel: Option<&CancelFlag>,
+) -> CoreResult<ImportPreviewPlan> {
+    let report = preview_import_path(path, cancel)?;
+    let plan_token = import_plan_token(&report);
+    Ok(ImportPreviewPlan {
+        report,
+        plan_token,
+        plan_version: IMPORT_PLAN_VERSION,
+    })
+}
+
+/// Whether one previewed item may import as log events at all.
+///
+/// This is the single trusted routing rule shared by every layer: only
+/// `role == Log` content with a selectable status becomes events. Supporting
+/// material (metrics, attachments, readmes), ignored noise, unsupported
+/// content, and blocked entries never do.
+pub fn event_importable(item: &ImportPreviewItem) -> bool {
+    item.role == ImportItemRole::Log && item.status.is_selectable()
+}
+
+/// Re-enumerate a reviewed root and fail closed on any drift before a run.
+///
+/// Verifies the plan version and token against a fresh bounded preview of
+/// `path`, then checks every selected identity still exists and is
+/// event-importable. Returns the trusted allowlist the ingest honors.
+/// A truncated preview stays importable, but only its itemized identities can
+/// ever be selected — unreviewed tail entries are skipped by the allowlist
+/// and counted, never silently imported.
+pub fn verify_import_plan(
+    path: &Path,
+    plan_version: u32,
+    plan_token: &str,
+    selected: &[String],
+    cancel: Option<&CancelFlag>,
+) -> CoreResult<super::ingest::IngestSelection> {
+    if plan_version != IMPORT_PLAN_VERSION {
+        return Err(CoreError::Policy(format!(
+            "import plan version {plan_version} is not supported by this build (expected {IMPORT_PLAN_VERSION})"
+        )));
+    }
+    if selected.is_empty() {
+        return Err(CoreError::Policy(
+            "import plan selects nothing that would import as log events".into(),
+        ));
+    }
+    if selected.len() > MAX_IMPORT_PREVIEW_ITEMS {
+        return Err(CoreError::Policy(format!(
+            "import plan selects {} identities (limit {MAX_IMPORT_PREVIEW_ITEMS})",
+            selected.len()
+        )));
+    }
+    let current = preview_import_path(path, cancel)?;
+    let current_token = import_plan_token(&current);
+    if current_token != plan_token {
+        return Err(CoreError::Policy(
+            "import plan is stale: the reviewed source state changed on disk since the preview \
+             (files were added, removed, replaced, resized, or reclassified) — review the \
+             selection again"
+                .into(),
+        ));
+    }
+    let by_identity: std::collections::BTreeMap<&str, &ImportPreviewItem> = current
+        .items
+        .iter()
+        .map(|item| (item.identity.as_str(), item))
+        .collect();
+    let mut allow = std::collections::BTreeSet::new();
+    for identity in selected {
+        let Some(item) = by_identity.get(identity.as_str()) else {
+            return Err(CoreError::Policy(format!(
+                "import plan selects an identity the preview does not contain: {identity:?}"
+            )));
+        };
+        if !event_importable(item) {
+            return Err(CoreError::Policy(format!(
+                "import plan selects {identity:?} which cannot import as log events \
+                 (status {:?}, role {:?})",
+                item.status, item.role
+            )));
+        }
+        if !allow.insert(identity.clone()) {
+            return Err(CoreError::Policy(format!(
+                "import plan lists {identity:?} more than once"
+            )));
+        }
+    }
+    Ok(super::ingest::IngestSelection::reviewed(
+        allow,
+        plan_version,
+        plan_token.to_string(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1273,6 +1488,7 @@ mod tests {
             windows: vec![lines.join("\n")],
             binary: false,
             empty: lines.iter().all(|l| l.trim().is_empty()),
+            content_fingerprint: String::new(),
         }
     }
 
@@ -1281,7 +1497,150 @@ mod tests {
             windows: windows.iter().map(|w| (*w).to_string()).collect(),
             binary: false,
             empty: false,
+            content_fingerprint: String::new(),
         }
+    }
+
+    #[test]
+    fn plan_token_binds_inventory_and_fails_closed_on_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("a.log"), "level=info msg=alpha\n").unwrap();
+        std::fs::write(logs.join("b.log"), "level=warn msg=beta\n").unwrap();
+        let report = preview_import_path(&logs, None).unwrap();
+        let token = import_plan_token(&report);
+        let selected = vec!["a.log".to_string(), "b.log".to_string()];
+
+        // Happy path: unchanged inventory verifies and returns the allowlist.
+        let plan = verify_import_plan(&logs, IMPORT_PLAN_VERSION, &token, &selected, None).unwrap();
+        assert_eq!(plan.selected.len(), 2);
+
+        // Unsupported plan version fails closed.
+        let err = verify_import_plan(&logs, IMPORT_PLAN_VERSION + 1, &token, &selected, None)
+            .unwrap_err();
+        assert!(err.to_string().contains("not supported"), "{err}");
+
+        // Same-size, same-format replacement still fails closed: the token is
+        // bound to the bounded content evidence, not only file length/status.
+        std::fs::write(logs.join("a.log"), "level=warn msg=omega\n").unwrap();
+        let err =
+            verify_import_plan(&logs, IMPORT_PLAN_VERSION, &token, &selected, None).unwrap_err();
+        assert!(err.to_string().contains("stale"), "{err}");
+        let same_size_report = preview_import_path(&logs, None).unwrap();
+        let same_size_token = import_plan_token(&same_size_report);
+        assert_ne!(token, same_size_token);
+
+        // Mutation after preview (content resized) fails closed too.
+        std::fs::write(
+            logs.join("a.log"),
+            "level=info msg=alpha rewritten longer\n",
+        )
+        .unwrap();
+        let err = verify_import_plan(
+            &logs,
+            IMPORT_PLAN_VERSION,
+            &same_size_token,
+            &selected,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("stale"), "{err}");
+
+        // Re-preview after the mutation gives a fresh working token…
+        let report2 = preview_import_path(&logs, None).unwrap();
+        let token2 = import_plan_token(&report2);
+        assert_ne!(token, token2);
+        verify_import_plan(&logs, IMPORT_PLAN_VERSION, &token2, &selected, None).unwrap();
+
+        // …and an added unreviewed tail entry breaks that token too.
+        std::fs::write(logs.join("c.log"), "level=info msg=tail\n").unwrap();
+        let err =
+            verify_import_plan(&logs, IMPORT_PLAN_VERSION, &token2, &selected, None).unwrap_err();
+        assert!(err.to_string().contains("stale"), "{err}");
+    }
+
+    #[test]
+    fn verify_import_plan_rejects_role_confusion_unknowns_empty_and_duplicates() {
+        // The trusted routing rule itself: manifest-declared supporting
+        // material can never import as log events. (Live previews wire the
+        // manifest seam in a later slice; the gate is contract-level now.)
+        let declared_metrics = item_from_sample(
+            "metrics/ops.json",
+            256,
+            &sample_of(&[r#"{"series":[]}"#]),
+            Some(ImportItemRole::OperationalMetrics),
+            true,
+        );
+        assert_eq!(declared_metrics.status, ImportItemStatus::Supporting);
+        assert!(!event_importable(&declared_metrics));
+
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("app.log"), "level=info msg=alpha\n").unwrap();
+        // A binary blob previews as Unsupported with role Unknown — the live
+        // path's non-Log rejection case.
+        std::fs::write(logs.join("core.dump"), [0u8, 159, 146, 150, 0, 1, 2]).unwrap();
+        let report = preview_import_path(&logs, None).unwrap();
+        let blob = report
+            .items
+            .iter()
+            .find(|item| item.identity == "core.dump")
+            .expect("binary item present");
+        assert!(!event_importable(blob));
+        let token = import_plan_token(&report);
+
+        // Selecting non-event content fails closed.
+        let err = verify_import_plan(
+            &logs,
+            IMPORT_PLAN_VERSION,
+            &token,
+            &["app.log".to_string(), "core.dump".to_string()],
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("cannot import as log events"),
+            "{err}"
+        );
+
+        // The log source alone verifies.
+        let plan = verify_import_plan(
+            &logs,
+            IMPORT_PLAN_VERSION,
+            &token,
+            &["app.log".to_string()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.selected.len(), 1);
+
+        // Unknown identity fails closed.
+        let err = verify_import_plan(
+            &logs,
+            IMPORT_PLAN_VERSION,
+            &token,
+            &["ghost.log".to_string()],
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("does not contain"), "{err}");
+
+        // Empty selection fails closed before any ingest work.
+        let err = verify_import_plan(&logs, IMPORT_PLAN_VERSION, &token, &[], None).unwrap_err();
+        assert!(err.to_string().contains("selects nothing"), "{err}");
+
+        // Duplicate listing fails closed.
+        let err = verify_import_plan(
+            &logs,
+            IMPORT_PLAN_VERSION,
+            &token,
+            &["app.log".to_string(), "app.log".to_string()],
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("more than once"), "{err}");
     }
 
     #[test]

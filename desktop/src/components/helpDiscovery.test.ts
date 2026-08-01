@@ -30,10 +30,11 @@ describe("Help discovery production wiring (#440)", () => {
     expect(help).toContain('return "first-run"');
   });
 
-  it("enables Learn more in both shipped session wizards", () => {
+  it("enables Learn more in every shipped session wizard", () => {
     const app = source("App.tsx");
     const registry = source("components/wizards/registry.ts");
-    expect(app.match(/helpAvailable/g)).toHaveLength(2);
+    // log-troubleshooting, memory-primer, and log-import (#751) all wire Help.
+    expect(app.match(/helpAvailable/g)).toHaveLength(3);
     expect(registry).toContain('helpPageId: "log-analysis-pipeline"');
     expect(registry).not.toContain('"logs-pipeline"');
   });
