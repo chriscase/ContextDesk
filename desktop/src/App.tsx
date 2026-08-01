@@ -26,6 +26,7 @@ import { useChatSessions } from "./hooks/useChatSessions";
 import { useComposerDrafts } from "./hooks/useComposerDrafts";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useLinkedCorpusAttachment } from "./hooks/useLinkedCorpusAttachment";
+import { useResponsiveSidebar } from "./hooks/useResponsiveSidebar";
 import { useShellState } from "./hooks/useShellState";
 import { useTurnController } from "./hooks/useTurnController";
 import {
@@ -77,6 +78,10 @@ const tauriEngine = createTauriEngineClient();
 
 export function App() {
   const shell = useShellState();
+  const responsiveSidebar = useResponsiveSidebar(
+    shell.sidebarCollapsed,
+    shell.setSidebarCollapsed,
+  );
   const setShellPane = shell.setPane;
 
   // Dev/screenshot: skip splash without setState during render
@@ -790,7 +795,7 @@ export function App() {
             <div
               className="main"
               data-sidebar-collapsed={
-                shell.sidebarCollapsed ? "true" : undefined
+                responsiveSidebar.collapsed ? "true" : undefined
               }
             >
               <SessionSidebar
@@ -798,14 +803,16 @@ export function App() {
                 openChatSessions={openChatSessions}
                 activeSessionId={resolvedSessionId}
                 sidebarW={shell.sidebarW}
-                collapsed={shell.sidebarCollapsed}
+                collapsed={responsiveSidebar.collapsed}
                 onCreate={() => {
                   createSession();
                   shell.setPane("chat");
+                  responsiveSidebar.dismissNarrow();
                 }}
                 onSelect={(id) => {
                   setActiveSessionId(id);
                   shell.setPane("chat");
+                  responsiveSidebar.dismissNarrow();
                 }}
                 onContextMenu={openChatCtxMenu}
                 onResizeStart={(e) => {
@@ -823,10 +830,11 @@ export function App() {
                     shell.setSidebarW((w) => Math.min(420, w + 16));
                   }
                 }}
-                onOpenArchive={() => shell.setPane("archive")}
-                onToggleCollapsed={() =>
-                  shell.setSidebarCollapsed((collapsed) => !collapsed)
-                }
+                onOpenArchive={() => {
+                  shell.setPane("archive");
+                  responsiveSidebar.dismissNarrow();
+                }}
+                onToggleCollapsed={responsiveSidebar.toggle}
                 archiveActive={shell.pane === "archive"}
               />
               <Workspace
