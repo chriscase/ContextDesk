@@ -587,3 +587,18 @@ Config knobs on `AppConfig.memory` (`MemoryConfig`):
 - `ambient_recall_enabled` (default **true**), `ambient_max_chars` (~1500), `ambient_max_memories` (≤5), `ambient_min_score` (~0.35)
 
 Timestamps are unix **seconds**; ids are UUIDv7. Secrets are redacted via `cd_core::redact` before persist and before embed.
+
+## Offline log-import diagnostic
+
+Privacy-safe support evidence for import failures (no user log content):
+
+```bash
+cargo run --locked -p cd-core --bin cd-diagnose-log-import -- \
+  --input path/to/logs-or.zip --output /tmp/import-diagnostic.json
+
+cargo test -p cd-core --lib log_analysis::import_diagnose
+```
+
+Exit codes: `0` success report, `1` fail-closed report written, `2` usage, `3` cancelled.
+The report schema is `contextdesk.import_diagnostic.v1`. Temporary corpora are
+always deleted; attach only the JSON to bug reports.

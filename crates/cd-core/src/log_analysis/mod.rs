@@ -15,6 +15,7 @@ pub mod event_revision;
 pub mod format_profile;
 pub mod frame;
 pub mod governed_citation;
+pub mod import_diagnose;
 pub mod import_preview;
 pub mod import_profile;
 pub mod ingest;
@@ -74,6 +75,15 @@ pub use format_profile::{
 pub use governed_citation::{
     format_governed_log_citation_id, is_governed_log_citation_id, parse_governed_log_citation_id,
     GovernedLogCitationId, GovernedLogCitationKind,
+};
+pub use import_diagnose::{
+    diagnose_log_import, public_report_denylist_patterns, strip_variable_fields,
+    write_import_diagnostic_report, AtomicPublicationOutcome, ImportDiagnoseOptions,
+    ImportDiagnosticBuild, ImportDiagnosticConfidence, ImportDiagnosticDiscrepancy,
+    ImportDiagnosticIngest, ImportDiagnosticInputShape, ImportDiagnosticOutcome,
+    ImportDiagnosticOutcomeKind, ImportDiagnosticPreview, ImportDiagnosticPrivacy,
+    ImportDiagnosticReport, IMPORT_DIAGNOSTIC_REDACTION_MODE, IMPORT_DIAGNOSTIC_SCHEMA_ID,
+    IMPORT_DIAGNOSTIC_SCHEMA_VERSION,
 };
 pub use ingest::{
     ingest_path, ingest_path_with_observer, ingest_path_with_policy,

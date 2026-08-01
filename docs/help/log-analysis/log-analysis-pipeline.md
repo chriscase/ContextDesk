@@ -266,3 +266,22 @@ independently; versioned learned application baselines are not shipped (#690).
 ## Share a corpus package
 
 See [Share a log analysis package](help://log-portable-package) for versioned export/import.
+
+## Privacy-safe import diagnostic {#import-diagnose}
+
+When an import fails or looks wrong, you can generate a **public-safe diagnostic
+report** offline without sharing your logs:
+
+```bash
+cargo run --locked -p cd-core --bin cd-diagnose-log-import -- \
+  --input /path/to/logs-or.zip --output import-diagnostic.json
+```
+
+The report records aggregate counters (how many files were ready, blocked,
+ignored; format and timestamp-quality histograms; phase timings) and an explicit
+privacy policy. It does **not** include log lines, file names, folder paths, or
+secrets. ContextDesk never publishes a corpus into your library for this path;
+any temporary analysis data is deleted when the command finishes.
+
+Use the JSON as an attachment on a bug report so maintainers can see import
+shape and failure class without receiving your production logs.

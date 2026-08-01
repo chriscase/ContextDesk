@@ -307,3 +307,47 @@ Zip (flat entries):
    schema evolution cannot silently rewrite the expected artifact.
 6. Update this section, user-facing unsupported-version copy, and the close
    proof with exact fixtures and supported registry entries.
+
+## Offline import diagnostic (privacy-safe)
+
+For support and bug reports, ContextDesk ships an **offline** trusted-core
+diagnostic that re-runs the real import path without publishing into the user's
+library or contacting providers:
+
+```bash
+cargo run --locked -p cd-core --bin cd-diagnose-log-import -- \
+  --input PATH --output REPORT.json
+```
+
+### Contract
+
+| Property | Behavior |
+|---|---|
+| Pipeline | `preview_import_plan` → `verify_import_plan` → `ingest_path` with `LogEmbedMode::None` |
+| Corpus location | Automatic temp cache root; always deleted before the CLI returns |
+| Network | None (no embed backend, no providers) |
+| Input | Read-only; never mutated |
+| Report schema | `contextdesk.import_diagnostic.v1` (versioned, aggregate-only) |
+
+### Public-safe report contents
+
+- Build identity: version, protocol, channel (no git fingerprint required)
+- Input shape: directory / zip / file classification + entry/byte totals
+- Preview aggregates: status/role/reason/format counts, plan block, selection count
+- Ingest aggregates: file/line/template/byte counters, provenance histograms, exclusion **reason** counts (never basenames)
+- Confidence aggregates: wall/order-only/matched counts + unresolved-time **reason** counts (never samples or source identities)
+- Phase timings / progress terminal state / atomic publication outcome
+- Typed discrepancy codes and an explicit redaction policy summary
+
+The default serialized report **must not** contain log payloads, representative
+or template text, paths, basenames, archive member identities, credentials,
+environment values, hashes/fingerprints, provider data, or raw timestamps.
+Enforcement is automated (`import_diagnose` denylist tests), not review-only.
+
+### Transport-neutral API
+
+Hosts that want a future “Export import diagnostic” button should call
+`cd_core::log_analysis::diagnose_log_import` and
+`write_import_diagnostic_report` — no renderer UI is required by this module.
+
+Synthetic fixtures live under `fixtures/import-diagnose/`.
