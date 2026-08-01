@@ -2168,7 +2168,6 @@ fn archive_member_identity(archive_identity: &str, member_identity: &str) -> Str
 /// Stream ZIP members in-place. Nested archive members alone are copied into
 /// bounded private staging because ZIP readers require `Read + Seek`.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn ingest_from_zip(
     zip_path: &Path,
     private_staging_root: &Path,
