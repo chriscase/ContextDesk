@@ -1,0 +1,27 @@
+{
+  "name": "contextdesk-gui-accept",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Linux release-host GUI integration harness via tauri-driver; not installed-bundle or native-input proof.",
+  "scripts": {
+    "matrix": "node scripts/check-matrix.mjs",
+    "prepare:fixtures": "node scripts/prepare-fixtures.mjs",
+    "harness:self-test": "node --test harness/*.test.mjs scripts/*.test.mjs",
+    "run": "node harness/run.mjs",
+    "test": "npm run matrix && npm run harness:self-test"
+  },
+  "devDependencies": {
+    "@wdio/cli": "^9.12.4",
+    "@wdio/local-runner": "^9.12.4",
+    "@wdio/mocha-framework": "^9.12.3",
+    "@wdio/spec-reporter": "^9.12.3",
+    "webdriverio": "^9.12.4"
+  },
+  "overrides": {
+    "serialize-javascript": "7.0.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -17,6 +17,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# custom-protocol is enabled via the package feature below (tauri build / release).
+# Without it, tauri-build sets cfg(dev) and the WebView loads build.devUrl (Vite).
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
@@ -30,6 +32,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tauri-plugin-updater = "2"
 async-trait = "0.1"
 sha2 = "0.10"
+
+[features]
+# Production / packaged host: embed frontendDist. Keep off of `default` so
+# `tauri dev` still uses the Vite devUrl. Enable with:
+#   cargo build --release --features custom-protocol
+# or via `tauri build` (CLI enables this feature).
+default = []
+custom-protocol = ["tauri/custom-protocol"]
 
 [dev-dependencies]
 tempfile = "3"
