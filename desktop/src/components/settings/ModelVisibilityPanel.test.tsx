@@ -89,6 +89,12 @@ async function openPanel(inventory: ModelOptionDto[] = INVENTORY) {
   await waitFor(() => expect(host.summary).toHaveBeenCalled());
   fireEvent.click(screen.getByRole("button", { name: "Manage…" }));
   await screen.findByRole("dialog", { name: "Model visibility" });
+  await waitFor(() =>
+    expect(host.list).toHaveBeenCalledWith({ includeHidden: true }),
+  );
+  await waitFor(() =>
+    expect(screen.queryByText("Loading models…")).toBeNull(),
+  );
 }
 
 beforeEach(() => {
