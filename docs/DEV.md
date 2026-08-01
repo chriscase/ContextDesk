@@ -599,6 +599,9 @@ cargo run --locked -p cd-core --bin cd-diagnose-log-import -- \
 cargo test -p cd-core --lib log_analysis::import_diagnose
 ```
 
-Exit codes: `0` success report, `1` fail-closed report written, `2` usage, `3` cancelled.
+Exit codes: `0` success report, `1` fail-closed or cancelled report written,
+`2` usage. The reusable API accepts a cancellation flag; the standalone CLI
+does not install an interactive signal handler.
 The report schema is `contextdesk.import_diagnostic.v1`. Temporary corpora are
-always deleted; attach only the JSON to bug reports.
+verified deleted before success is reported; cleanup failure is fail-closed.
+The output path must not already exist. Attach only the JSON to bug reports.

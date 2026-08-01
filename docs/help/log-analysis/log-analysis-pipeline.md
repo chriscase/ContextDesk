@@ -281,7 +281,10 @@ The report records aggregate counters (how many files were ready, blocked,
 ignored; format and timestamp-quality histograms; phase timings) and an explicit
 privacy policy. It does **not** include log lines, file names, folder paths, or
 secrets. ContextDesk never publishes a corpus into your library for this path;
-any temporary analysis data is deleted when the command finishes.
+temporary analysis cleanup is verified when the command finishes. A cleanup
+failure produces an explicit fail-closed outcome rather than claiming deletion.
+The output path must not already exist, so a diagnostic run cannot overwrite a
+log input or an earlier report.
 
 Use the JSON as an attachment on a bug report so maintainers can see import
 shape and failure class without receiving your production logs.

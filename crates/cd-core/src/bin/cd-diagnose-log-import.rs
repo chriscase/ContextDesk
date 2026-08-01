@@ -5,9 +5,10 @@
 //!   --input PATH --output REPORT.json
 //! ```
 //!
-//! Exit codes: 0 success (useful report written); 1 fail-closed report written;
-//! 2 usage error; 3 cancel. Never publishes into the user library; never
-//! contacts a network provider; never mutates the input.
+//! Exit codes: 0 success (useful report written); 1 fail-closed or cancelled
+//! report written; 2 usage error. Never publishes into the user library; never
+//! contacts a network provider; never overwrites the input or an existing
+//! report.
 
 use cd_core::log_analysis::{
     diagnose_log_import, write_import_diagnostic_report, ImportDiagnoseOptions,
@@ -15,7 +16,10 @@ use cd_core::log_analysis::{
 };
 use cd_core::process_progress::CancelFlag;
 use std::env;
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::fs;
+use std::io;
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
 const USAGE: &str = "Usage:\n\
@@ -76,6 +80,10 @@ fn main() -> ExitCode {
         eprintln!("error: input path does not exist");
         return ExitCode::from(2);
     }
+    if let Err(message) = validate_output_boundary(&input, &output) {
+        eprintln!("error: {message}");
+        return ExitCode::from(2);
+    }
 
     let cancel = CancelFlag::new();
     let report = match diagnose_log_import(
@@ -98,7 +106,82 @@ fn main() -> ExitCode {
 
     match report.outcome.kind {
         ImportDiagnosticOutcomeKind::Success => ExitCode::SUCCESS,
-        ImportDiagnosticOutcomeKind::Cancelled => ExitCode::from(3),
+        ImportDiagnosticOutcomeKind::Cancelled => ExitCode::from(1),
         ImportDiagnosticOutcomeKind::FailClosed => ExitCode::from(1),
+    }
+}
+
+fn validate_output_boundary(input: &Path, output: &Path) -> Result<(), String> {
+    if output.components().any(|part| part == Component::ParentDir) {
+        return Err("output path must not contain '..'".into());
+    }
+    if fs::symlink_metadata(output).is_ok() {
+        return Err("output path already exists".into());
+    }
+
+    let input = fs::canonicalize(input).map_err(|_| "input path cannot be resolved")?;
+    let output = resolve_new_path(output).map_err(|_| "output path cannot be resolved")?;
+    if output == input || (input.is_dir() && output.starts_with(&input)) {
+        return Err("output path must be outside the input tree".into());
+    }
+    Ok(())
+}
+
+fn resolve_new_path(path: &Path) -> io::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
+    let mut cursor = absolute.as_path();
+    let mut missing = Vec::<OsString>::new();
+    loop {
+        match fs::canonicalize(cursor) {
+            Ok(mut resolved) => {
+                for part in missing.iter().rev() {
+                    resolved.push(part);
+                }
+                return Ok(resolved);
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                let name = cursor.file_name().ok_or(err)?;
+                missing.push(name.to_os_string());
+                cursor = cursor.parent().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "path has no parent")
+                })?;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_boundary_rejects_input_overwrite_and_nested_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let input_dir = dir.path().join("logs");
+        fs::create_dir(&input_dir).unwrap();
+        let input_file = input_dir.join("app.log");
+        fs::write(&input_file, b"synthetic").unwrap();
+
+        assert!(validate_output_boundary(&input_file, &input_file).is_err());
+        assert!(validate_output_boundary(&input_dir, &input_dir.join("report.json")).is_err());
+        assert!(validate_output_boundary(&input_dir, Path::new("../report.json")).is_err());
+        assert!(validate_output_boundary(&input_dir, &dir.path().join("report.json")).is_ok());
+    }
+
+    #[test]
+    fn output_boundary_rejects_any_existing_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.log");
+        let output = dir.path().join("report.json");
+        fs::write(&input, b"synthetic").unwrap();
+        fs::write(&output, b"keep").unwrap();
+
+        assert!(validate_output_boundary(&input, &output).is_err());
+        assert_eq!(fs::read(&output).unwrap(), b"keep");
     }
 }

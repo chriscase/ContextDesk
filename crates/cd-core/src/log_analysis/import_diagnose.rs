@@ -25,6 +25,7 @@ use crate::process_progress::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -132,6 +133,8 @@ pub enum ImportDiagnosticOutcomeKind {
 pub enum AtomicPublicationOutcome {
     /// Corpus was published into the temp root and then deleted with it.
     PublishedThenDeleted,
+    /// Corpus published, but verified removal of the temporary root failed.
+    PublishedCleanupFailed,
     /// Ingest never reached atomic publication.
     NotPublished,
     /// Publication failed; temp root still cleaned.
@@ -328,36 +331,36 @@ pub fn diagnose_log_import(
     };
     let cache_root = temp.path().to_path_buf();
 
-    let finalize = |mut report: ImportDiagnosticReport| -> ImportDiagnosticReport {
-        report.progress = progress.snapshot();
-        // Prefer terminal phase from outcome when progress never advanced.
-        if report.progress.updates_seen == 0 {
-            report.progress.last_phase = match report.outcome.kind {
-                ImportDiagnosticOutcomeKind::Success => ProcessProgressPhase::Completed,
-                ImportDiagnosticOutcomeKind::Cancelled => ProcessProgressPhase::Cancelled,
-                ImportDiagnosticOutcomeKind::FailClosed => ProcessProgressPhase::Failed,
-            };
-        }
-        report.diagnose_wall_ms = elapsed_ms(wall);
-        // Dropping TempDir deletes the cache root (published corpus included).
-        report.outcome.temporary_corpus_deleted = true;
-        report
-    };
+    let finalize =
+        |mut report: ImportDiagnosticReport, temp: tempfile::TempDir| -> ImportDiagnosticReport {
+            report.progress = progress.snapshot();
+            // Prefer terminal phase from outcome when progress never advanced.
+            if report.progress.updates_seen == 0 {
+                report.progress.last_phase = match report.outcome.kind {
+                    ImportDiagnosticOutcomeKind::Success => ProcessProgressPhase::Completed,
+                    ImportDiagnosticOutcomeKind::Cancelled => ProcessProgressPhase::Cancelled,
+                    ImportDiagnosticOutcomeKind::FailClosed => ProcessProgressPhase::Failed,
+                };
+            }
+            // `TempDir::close` reports cleanup failure; `Drop` cannot. Never claim
+            // that a temporary published corpus was deleted without this proof.
+            apply_cleanup_outcome(&mut report, temp.close().is_ok());
+            report.diagnose_wall_ms = elapsed_ms(wall);
+            report
+        };
 
     if cancel.is_cancelled() {
         report.outcome.kind = ImportDiagnosticOutcomeKind::Cancelled;
         report.outcome.fail_reason = Some(FailedIngestReason::Cancelled);
         report.outcome.atomic_publication = AtomicPublicationOutcome::NotPublished;
-        drop(temp);
-        return Ok(finalize(report));
+        return Ok(finalize(report, temp));
     }
 
     let plan = match preview_import_plan(input, Some(&cancel)) {
         Ok(p) => p,
         Err(err) => {
             apply_error_outcome(&mut report, &err, &cancel);
-            drop(temp);
-            return Ok(finalize(report));
+            return Ok(finalize(report, temp));
         }
     };
 
@@ -367,8 +370,7 @@ pub fn diagnose_log_import(
         report.outcome.kind = ImportDiagnosticOutcomeKind::Cancelled;
         report.outcome.fail_reason = Some(FailedIngestReason::Cancelled);
         report.outcome.atomic_publication = AtomicPublicationOutcome::NotPublished;
-        drop(temp);
-        return Ok(finalize(report));
+        return Ok(finalize(report, temp));
     }
 
     if let Some(block) = plan.report.plan_block() {
@@ -381,8 +383,7 @@ pub fn diagnose_log_import(
             ImportPlanBlock::AllSourcesBlocked => FailedIngestReason::PolicyRejected,
         });
         report.outcome.atomic_publication = AtomicPublicationOutcome::NotPublished;
-        drop(temp);
-        return Ok(finalize(report));
+        return Ok(finalize(report, temp));
     }
 
     let selected: Vec<String> = plan
@@ -398,8 +399,7 @@ pub fn diagnose_log_import(
         report.outcome.kind = ImportDiagnosticOutcomeKind::FailClosed;
         report.outcome.fail_reason = Some(FailedIngestReason::NoImportableFiles);
         report.outcome.atomic_publication = AtomicPublicationOutcome::NotPublished;
-        drop(temp);
-        return Ok(finalize(report));
+        return Ok(finalize(report, temp));
     }
 
     let selection = match verify_import_plan(
@@ -412,8 +412,7 @@ pub fn diagnose_log_import(
         Ok(s) => s,
         Err(err) => {
             apply_error_outcome(&mut report, &err, &cancel);
-            drop(temp);
-            return Ok(finalize(report));
+            return Ok(finalize(report, temp));
         }
     };
 
@@ -454,8 +453,7 @@ pub fn diagnose_log_import(
         }
     }
 
-    drop(temp);
-    Ok(finalize(report))
+    Ok(finalize(report, temp))
 }
 
 /// Write `report` as pretty JSON to `output`.
@@ -471,8 +469,19 @@ pub fn write_import_diagnostic_report(
                 .map_err(|e| CoreError::Message(format!("create diagnostic output parent: {e}")))?;
         }
     }
-    std::fs::write(output, json)
+    let parent = output.parent().filter(|p| !p.as_os_str().is_empty());
+    let temp_parent = parent.unwrap_or_else(|| Path::new("."));
+    let mut staged = tempfile::NamedTempFile::new_in(temp_parent)
+        .map_err(|e| CoreError::Message(format!("stage import diagnostic: {e}")))?;
+    staged
+        .write_all(json.as_bytes())
+        .and_then(|()| staged.as_file().sync_all())
         .map_err(|e| CoreError::Message(format!("write import diagnostic: {e}")))?;
+    staged.persist_noclobber(output).map_err(|_| {
+        CoreError::Message(
+            "publish import diagnostic: output already exists or cannot be created".into(),
+        )
+    })?;
     Ok(())
 }
 
@@ -525,6 +534,19 @@ fn apply_error_outcome(report: &mut ImportDiagnosticReport, err: &CoreError, can
         report.progress.last_phase = ProcessProgressPhase::Failed;
     }
     report.outcome.atomic_publication = AtomicPublicationOutcome::NotPublished;
+}
+
+fn apply_cleanup_outcome(report: &mut ImportDiagnosticReport, deleted: bool) {
+    report.outcome.temporary_corpus_deleted = deleted;
+    if deleted {
+        return;
+    }
+    if report.outcome.atomic_publication == AtomicPublicationOutcome::PublishedThenDeleted {
+        report.outcome.atomic_publication = AtomicPublicationOutcome::PublishedCleanupFailed;
+    }
+    report.outcome.kind = ImportDiagnosticOutcomeKind::FailClosed;
+    report.outcome.fail_reason = Some(FailedIngestReason::WorkerFailed);
+    report.progress.last_phase = ProcessProgressPhase::Failed;
 }
 
 fn current_public_build() -> ImportDiagnosticBuild {
@@ -752,86 +774,33 @@ fn time_quality_key(q: super::query::TimeQuality) -> String {
 mod tests {
     use super::*;
     use std::fs;
-    use std::io::Write;
     use std::path::PathBuf;
     use std::thread;
     use std::time::Duration;
-    use zip::write::SimpleFileOptions;
-    use zip::ZipWriter;
 
     fn fixture_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/import-diagnose")
     }
 
-    fn write_file(path: &Path, body: &str) {
-        if let Some(p) = path.parent() {
-            fs::create_dir_all(p).unwrap();
-        }
-        fs::write(path, body).unwrap();
-    }
-
     fn ensure_fixtures() {
         let root = fixture_root();
-        // Direct multi-format logs
-        write_file(
-            &root.join("direct/app.jsonl"),
-            r#"{"ts":"2024-01-01T00:00:00Z","level":"info","msg":"hello synthetic"}
-{"ts":"2024-01-01T00:00:01Z","level":"warn","msg":"warn synthetic"}
-"#,
-        );
-        write_file(
-            &root.join("direct/plain.log"),
-            "2024-01-01 00:00:00 INFO started synthetic line one\nINFO continuation without time\n",
-        );
-        // Time-less + local unresolved
-        write_file(
-            &root.join("timestamps/local_unresolved.log"),
-            "2024-06-15 14:30:00 INFO local wall without zone synthetic\nno timestamp here just text\n",
-        );
-        write_file(
-            &root.join("timestamps/order_only.log"),
-            "INFO order only synthetic A\nINFO order only synthetic B\n",
-        );
-        // Multiline
-        write_file(
-            &root.join("multiline/stack.log"),
-            "2024-01-02T10:00:00Z ERROR boom synthetic\n  at module.frame (file:1)\n  at module.caller (file:2)\n",
-        );
-        // Zero importable: only empty/binary/hidden noise
-        write_file(&root.join("zero/empty.log"), "");
-        write_file(&root.join("zero/.hidden.log"), "secret hidden synthetic\n");
-        // Binary
-        if let Some(p) = root.join("binary/blob.bin").parent() {
-            fs::create_dir_all(p).unwrap();
+        let required = [
+            "direct/app.jsonl",
+            "direct/plain.log",
+            "timestamps/local_unresolved.log",
+            "timestamps/order_only.log",
+            "multiline/stack.log",
+            "zero/empty.log",
+            "zero/.hidden.log",
+            "binary/blob.bin",
+            "macos_noise/__MACOSX/._junk",
+            "macos_noise/app.log",
+            "archives/not_a_zip.zip",
+            "archives/nested.zip",
+        ];
+        for relative in required {
+            assert!(root.join(relative).is_file(), "missing fixture {relative}");
         }
-        fs::write(root.join("binary/blob.bin"), [0u8, 1, 2, 0, 255, 10]).unwrap();
-        // macOS metadata noise + mixed
-        write_file(
-            &root.join("macos_noise/__MACOSX/._junk"),
-            "mac metadata synthetic\n",
-        );
-        write_file(
-            &root.join("macos_noise/app.log"),
-            r#"{"ts":"2024-03-01T12:00:00Z","msg":"real log among noise"}
-"#,
-        );
-        // Malformed zip placeholder created by test helper
-        // Nested zip created in test
-        let _ = root;
-    }
-
-    fn make_zip(path: &Path, members: &[(&str, &[u8])]) {
-        if let Some(p) = path.parent() {
-            fs::create_dir_all(p).unwrap();
-        }
-        let file = fs::File::create(path).unwrap();
-        let mut zip = ZipWriter::new(file);
-        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-        for (name, bytes) in members {
-            zip.start_file(*name, opts).unwrap();
-            zip.write_all(bytes).unwrap();
-        }
-        zip.finish().unwrap();
     }
 
     fn assert_public_safe(report: &ImportDiagnosticReport, forbidden_substrings: &[&str]) {
@@ -910,26 +879,7 @@ mod tests {
     #[test]
     fn diagnose_zip_and_nested_zip() {
         ensure_fixtures();
-        // Build under tempfile so checked-in fixtures stay unmodified.
-        let tmp = tempfile::tempdir().unwrap();
-        let inner_path = tmp.path().join("inner.zip");
-        make_zip(
-            &inner_path,
-            &[(
-                "nested/app.log",
-                b"2024-01-01T00:00:00Z INFO nested synthetic event\n",
-            )],
-        );
-        let inner_bytes = fs::read(&inner_path).unwrap();
-        let outer = tmp.path().join("nested.zip");
-        make_zip(
-            &outer,
-            &[
-                ("top.log", b"2024-01-01T00:00:00Z INFO top synthetic\n"),
-                ("inner.zip", &inner_bytes),
-            ],
-        );
-
+        let outer = fixture_root().join("archives/nested.zip");
         let report = diagnose_log_import(&outer, ImportDiagnoseOptions::default()).unwrap();
         assert!(
             matches!(
@@ -1015,8 +965,6 @@ mod tests {
     fn diagnose_invalid_archive_fail_closed() {
         ensure_fixtures();
         let path = fixture_root().join("archives/not_a_zip.zip");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, b"this is not a zip file at all").unwrap();
         let report = diagnose_log_import(&path, ImportDiagnoseOptions::default()).unwrap();
         assert_eq!(report.outcome.kind, ImportDiagnosticOutcomeKind::FailClosed);
         assert!(report.outcome.fail_reason.is_some());
@@ -1084,6 +1032,34 @@ mod tests {
     }
 
     #[test]
+    fn write_report_refuses_to_overwrite_existing_input_or_report() {
+        ensure_fixtures();
+        let input = fixture_root().join("direct/plain.log");
+        let original = fs::read(&input).unwrap();
+        let report = diagnose_log_import(&input, ImportDiagnoseOptions::default()).unwrap();
+
+        let err = write_import_diagnostic_report(&report, &input).unwrap_err();
+        assert!(err.to_string().contains("output already exists"));
+        assert_eq!(
+            fs::read(&input).unwrap(),
+            original,
+            "input must be unchanged"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("report.json");
+        write_import_diagnostic_report(&report, &out).unwrap();
+        let first = fs::read(&out).unwrap();
+        let err = write_import_diagnostic_report(&report, &out).unwrap_err();
+        assert!(err.to_string().contains("output already exists"));
+        assert_eq!(
+            fs::read(&out).unwrap(),
+            first,
+            "report must not be clobbered"
+        );
+    }
+
+    #[test]
     fn temp_corpus_gone_after_diagnose() {
         ensure_fixtures();
         // Spy: run diagnose and ensure no leftover under system temp matching our name
@@ -1099,5 +1075,33 @@ mod tests {
             report.outcome.atomic_publication,
             AtomicPublicationOutcome::PublicationFailed
         );
+    }
+
+    #[test]
+    fn cleanup_failure_is_never_reported_as_deleted_success() {
+        let mut report = base_report(
+            ImportDiagnosticBuild {
+                version: "test".into(),
+                protocol: "test".into(),
+                channel: "test".into(),
+            },
+            FailedIngestSourceKind::Directory,
+        );
+        report.outcome.kind = ImportDiagnosticOutcomeKind::Success;
+        report.outcome.atomic_publication = AtomicPublicationOutcome::PublishedThenDeleted;
+
+        apply_cleanup_outcome(&mut report, false);
+
+        assert!(!report.outcome.temporary_corpus_deleted);
+        assert_eq!(report.outcome.kind, ImportDiagnosticOutcomeKind::FailClosed);
+        assert_eq!(
+            report.outcome.atomic_publication,
+            AtomicPublicationOutcome::PublishedCleanupFailed
+        );
+        assert_eq!(
+            report.outcome.fail_reason,
+            Some(FailedIngestReason::WorkerFailed)
+        );
+        assert_eq!(report.progress.last_phase, ProcessProgressPhase::Failed);
     }
 }

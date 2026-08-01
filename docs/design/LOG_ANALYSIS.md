@@ -324,9 +324,10 @@ cargo run --locked -p cd-core --bin cd-diagnose-log-import -- \
 | Property | Behavior |
 |---|---|
 | Pipeline | `preview_import_plan` → `verify_import_plan` → `ingest_path` with `LogEmbedMode::None` |
-| Corpus location | Automatic temp cache root; always deleted before the CLI returns |
+| Corpus location | Automatic temp cache root; verified cleanup before return. Cleanup failure is fail-closed, never a false deletion claim |
 | Network | None (no embed backend, no providers) |
 | Input | Read-only; never mutated |
+| Output | Atomically published only when the requested path does not exist; inputs and prior reports are never overwritten |
 | Report schema | `contextdesk.import_diagnostic.v1` (versioned, aggregate-only) |
 
 ### Public-safe report contents
@@ -349,5 +350,7 @@ Enforcement is automated (`import_diagnose` denylist tests), not review-only.
 Hosts that want a future “Export import diagnostic” button should call
 `cd_core::log_analysis::diagnose_log_import` and
 `write_import_diagnostic_report` — no renderer UI is required by this module.
+The writer refuses an existing output path; choose a new path or remove a
+previously reviewed report before rerunning it.
 
 Synthetic fixtures live under `fixtures/import-diagnose/`.

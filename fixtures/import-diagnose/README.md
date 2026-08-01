@@ -14,4 +14,5 @@ Checked-in **synthetic only** corpora for `cd-diagnose-log-import` and
 | `archives/nested.zip` | ZIP with nested ZIP |
 | `archives/not_a_zip.zip` | Invalid archive bytes |
 
-Tests also rewrite these files idempotently via `ensure_fixtures()`.
+Tests treat these fixtures as immutable inputs and fail if any required file is
+missing. Archive construction never writes into the checked-in fixture tree.
