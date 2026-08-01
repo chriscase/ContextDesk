@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 420" role="img" aria-labelledby="title desc">
+  <title id="title">Investigation report assembly and export flow</title>
+  <desc id="desc">Accepted evidence, findings, notes, and authored sections are assembled into a versioned projection that re-resolves evidence status, rendered as deterministic Markdown with verified, stale, and missing markers, and exported only through a host-confirmed native save panel. Agent-proposed sections enter a review queue and reach the report only after explicit human acceptance.</desc>
+  <!-- Full-bleed canvas: Help renders diagrams through <img> with a base64 data
+       URL, so artwork cannot inherit the page theme (#540). -->
+  <rect width="1020" height="420" fill="#0f172a"/>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0 0 8 4 0 8Z" fill="#38bdf8"/>
+    </marker>
+    <marker id="arrowgreen" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0 0 8 4 0 8Z" fill="#34d399"/>
+    </marker>
+    <marker id="arrowamber" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0 0 8 4 0 8Z" fill="#fbbf24"/>
+    </marker>
+  </defs>
+
+  <rect x="24" y="56" width="200" height="180" rx="18" fill="#111827" stroke="#475569" stroke-width="2"/>
+  <text x="124" y="92" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="19" font-weight="700">Accepted state</text>
+  <text x="124" y="128" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Exact evidence ids</text>
+  <text x="124" y="154" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Findings + notes</text>
+  <text x="124" y="180" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Authored sections</text>
+
+  <path d="M228 146H255" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
+
+  <rect x="264" y="56" width="220" height="180" rx="18" fill="#111827" stroke="#475569" stroke-width="2"/>
+  <text x="374" y="92" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="19" font-weight="700">Assemble</text>
+  <text x="374" y="128" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Versioned projection</text>
+  <text x="374" y="154" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Accepted items only</text>
+  <text x="374" y="180" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Re-resolve evidence</text>
+  <text x="374" y="206" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">No mutation</text>
+
+  <path d="M488 146H515" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
+
+  <rect x="524" y="56" width="220" height="180" rx="18" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
+  <text x="634" y="92" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="19" font-weight="700">Markdown preview</text>
+  <text x="634" y="128" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Deterministic render</text>
+  <text x="634" y="154" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">verified · stale · missing</text>
+  <text x="634" y="180" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Identities, no payloads</text>
+
+  <path d="M748 146H775" stroke="#34d399" stroke-width="4" marker-end="url(#arrowgreen)"/>
+
+  <rect x="784" y="56" width="212" height="180" rx="18" fill="#064e3b" stroke="#34d399" stroke-width="3"/>
+  <text x="890" y="92" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="19" font-weight="700">Confirmed export</text>
+  <text x="890" y="128" text-anchor="middle" fill="#d1fae5" font-family="system-ui, sans-serif" font-size="13">Native save panel</text>
+  <text x="890" y="154" text-anchor="middle" fill="#d1fae5" font-family="system-ui, sans-serif" font-size="13">Atomic, no clobber</text>
+  <text x="890" y="180" text-anchor="middle" fill="#d1fae5" font-family="system-ui, sans-serif" font-size="13">512 KiB bound</text>
+
+  <rect x="24" y="284" width="290" height="76" rx="12" fill="#082f49" stroke="#38bdf8" stroke-width="2"/>
+  <text x="169" y="315" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="14" font-weight="700">Agent proposal (SoftWrite)</text>
+  <text x="169" y="341" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="13">propose_report_section</text>
+
+  <path d="M318 322H345" stroke="#fbbf24" stroke-width="4" marker-end="url(#arrowamber)"/>
+
+  <rect x="354" y="284" width="330" height="76" rx="12" fill="#451a03" stroke="#fbbf24" stroke-width="3"/>
+  <text x="519" y="315" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="14" font-weight="700">Human review</text>
+  <text x="519" y="341" text-anchor="middle" fill="#fef3c7" font-family="system-ui, sans-serif" font-size="13">Accept · Edit and accept · Dismiss</text>
+
+  <path d="M519 284 L519 262 L124 262 L124 244" stroke="#fbbf24" stroke-width="4" fill="none" marker-end="url(#arrowamber)"/>
+
+  <text x="510" y="398" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Open and dismissed proposals never appear in the report.</text>
+</svg>

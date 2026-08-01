@@ -23,13 +23,17 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use cd_core::investigations::{
-    EvidenceItem, EvidenceProvenance, FindingItem, FindingKind, FindingLifecycle,
-    FindingViewFilters, FindingViewFind, FindingViewFindMatchMode, FindingViewLane,
-    FindingViewRecipe, FindingViewTimeLinkMode, FindingViewViewportAnchor, HumanProposalAcceptance,
-    HumanProvenance, InvestigationCorpusLink, InvestigationDocument, InvestigationNoiseLens,
-    InvestigationPolicyBinding, InvestigationStatus, NoteItem, ProposalEvidenceCitation,
-    ProposalEvidenceRole, ProposalProvenance, ProposalRankInputs, ProposalSourceKind,
-    ProposedFindingItem, ProposedFindingStatus,
+    assemble_investigation_report, EvidenceItem, EvidenceProvenance, EvidenceReferenceResolution,
+    EvidenceReferenceStatus, FindingItem, FindingKind, FindingLifecycle, FindingViewFilters,
+    FindingViewFind, FindingViewFindMatchMode, FindingViewLane, FindingViewRecipe,
+    FindingViewTimeLinkMode, FindingViewViewportAnchor, HumanProposalAcceptance, HumanProvenance,
+    InvestigationCorpusLink, InvestigationDocument, InvestigationNoiseLens,
+    InvestigationPolicyBinding, InvestigationPolicyBindingResolution,
+    InvestigationPolicyBindingStatus, InvestigationReport, InvestigationStatus, NoteItem,
+    ProposalEvidenceCitation, ProposalEvidenceRole, ProposalProvenance, ProposalRankInputs,
+    ProposalSourceKind, ProposedFindingItem, ProposedFindingStatus, ProposedReportSectionItem,
+    ReportSectionItem, ReportSectionKind, ResolvedEvidenceItem, ResolvedFindingItem,
+    ResolvedInvestigationDocument, PROPOSE_REPORT_SECTION_TOOL,
 };
 use cd_core::log_analysis::{ActiveTimestampBasis, TimestampProvenance};
 use cd_core::log_analysis::{
@@ -363,7 +367,7 @@ fn investigation_document_sample() -> InvestigationDocument {
     let investigation_id = "0199bbbb-0000-7000-8000-000000000001".to_string();
     let policy_binding = investigation_policy_binding();
     InvestigationDocument {
-        schema_version: 5,
+        schema_version: 6,
         id: investigation_id.clone(),
         revision: 5,
         title: "checkout-cascade".into(),
@@ -513,9 +517,182 @@ fn investigation_document_sample() -> InvestigationDocument {
             created_at: 1_735_992_150,
             updated_at: 1_735_992_200,
         }],
+        // Schema v6 (#532): authored report sections — one with every optional
+        // populated, one with all skipped-empty citation arrays absent.
+        report_sections: vec![
+            ReportSectionItem {
+                id: "0199bbbb-5555-7000-8000-000000000001".into(),
+                kind: ReportSectionKind::ExecutiveSummary,
+                body: "Checkout cascade traced to the db-7 restart; mitigation verified.".into(),
+                evidence_ids: vec!["0199bbbb-1111-7000-8000-000000000001".into()],
+                finding_ids: vec!["0199bbbb-2222-7000-8000-000000000001".into()],
+                note_ids: vec!["0199bbbb-3333-7000-8000-000000000001".into()],
+                provenance: HumanProvenance::Human,
+                accepted_from_proposal_id: Some("0199bbbb-6666-7000-8000-000000000002".into()),
+                created_at: 1_735_992_300,
+                updated_at: 1_735_992_360,
+            },
+            ReportSectionItem {
+                id: "0199bbbb-5555-7000-8000-000000000002".into(),
+                kind: ReportSectionKind::NextActions,
+                body: "Add pool saturation alarms; document the restart runbook.".into(),
+                evidence_ids: vec![],
+                finding_ids: vec![],
+                note_ids: vec![],
+                provenance: HumanProvenance::Human,
+                accepted_from_proposal_id: None,
+                created_at: 1_735_992_400,
+                updated_at: 1_735_992_400,
+            },
+        ],
+        // Schema v6 (#532): proposed report sections in every terminal shape —
+        // open Proposed (optionals absent), Accepted (acceptance + section
+        // link), and Dismissed (required reason).
+        proposed_report_sections: vec![
+            ProposedReportSectionItem {
+                id: "0199bbbb-6666-7000-8000-000000000001".into(),
+                status: ProposedFindingStatus::Proposed,
+                kind: ReportSectionKind::UnresolvedQuestions,
+                body: "Why did the pool not recover after the restart completed?".into(),
+                evidence_ids: vec![],
+                finding_ids: vec![],
+                note_ids: vec![],
+                corpus_id: corpus_id.clone(),
+                investigation_id: "0199bbbb-0000-7000-8000-000000000001".into(),
+                provenance: ProposalProvenance {
+                    source: ProposalSourceKind::Model,
+                    provider: Some("openai_compatible".into()),
+                    model_id: Some("local-investigator".into()),
+                    run_id: Some("run-contract-2".into()),
+                    tool_name: PROPOSE_REPORT_SECTION_TOOL.into(),
+                    detector_id: None,
+                },
+                idempotency_key: "contract-report-proposal-1".into(),
+                acceptance: None,
+                dismiss_reason: None,
+                accepted_section_id: None,
+                created_at: 1_735_992_500,
+                updated_at: 1_735_992_500,
+            },
+            ProposedReportSectionItem {
+                id: "0199bbbb-6666-7000-8000-000000000002".into(),
+                status: ProposedFindingStatus::Accepted,
+                kind: ReportSectionKind::ExecutiveSummary,
+                body: "Checkout cascade traced to the db-7 restart.".into(),
+                evidence_ids: vec!["0199bbbb-1111-7000-8000-000000000001".into()],
+                finding_ids: vec!["0199bbbb-2222-7000-8000-000000000002".into()],
+                note_ids: vec!["0199bbbb-3333-7000-8000-000000000001".into()],
+                corpus_id: corpus_id.clone(),
+                investigation_id: "0199bbbb-0000-7000-8000-000000000001".into(),
+                provenance: ProposalProvenance {
+                    source: ProposalSourceKind::Detector,
+                    provider: None,
+                    model_id: None,
+                    run_id: Some("run-contract-3".into()),
+                    tool_name: PROPOSE_REPORT_SECTION_TOOL.into(),
+                    detector_id: Some("report-detector-v1".into()),
+                },
+                idempotency_key: "contract-report-proposal-2".into(),
+                acceptance: Some(HumanProposalAcceptance {
+                    accepted_at: 1_735_992_360,
+                    edited: true,
+                }),
+                dismiss_reason: None,
+                accepted_section_id: Some("0199bbbb-5555-7000-8000-000000000001".into()),
+                created_at: 1_735_992_310,
+                updated_at: 1_735_992_360,
+            },
+            ProposedReportSectionItem {
+                id: "0199bbbb-6666-7000-8000-000000000003".into(),
+                status: ProposedFindingStatus::Dismissed,
+                kind: ReportSectionKind::NextActions,
+                body: "Restart db-7 weekly as a precaution.".into(),
+                evidence_ids: vec![],
+                finding_ids: vec![],
+                note_ids: vec![],
+                corpus_id,
+                investigation_id: "0199bbbb-0000-7000-8000-000000000001".into(),
+                provenance: ProposalProvenance {
+                    source: ProposalSourceKind::Model,
+                    provider: Some("openai_compatible".into()),
+                    model_id: Some("local-investigator".into()),
+                    run_id: Some("run-contract-4".into()),
+                    tool_name: PROPOSE_REPORT_SECTION_TOOL.into(),
+                    detector_id: None,
+                },
+                idempotency_key: "contract-report-proposal-3".into(),
+                acceptance: None,
+                dismiss_reason: Some(
+                    "Scheduled restarts mask the defect instead of fixing it.".into(),
+                ),
+                accepted_section_id: None,
+                created_at: 1_735_992_520,
+                updated_at: 1_735_992_540,
+            },
+        ],
         created_at: 1_735_991_000,
         updated_at: 1_735_992_100,
     }
+}
+
+/// The versioned report projection, produced by the production assembly path.
+///
+/// Built by ACTUALLY calling [`assemble_investigation_report`] over a
+/// hand-resolved document — never a parallel struct — so this fixture freezes
+/// the real projection: deterministic finding/timeline ordering, per-reference
+/// statuses, authored-vs-absent sections, and the policy-binding vocabulary.
+fn investigation_report_sample() -> InvestigationReport {
+    let document = investigation_document_sample();
+    let current_policy = cd_core::log_analysis::SuppressionPolicyBindingSnapshot {
+        suppression_policy_revision: 7,
+        resolved_template_revision: 11,
+        effective_policy_sha256: "9f9af2c8459f74dc6f21ce3e0a9c7fd5a677d9cc7f60c5ee7f86a8c285e1732f"
+            .into(),
+    };
+    let evidence = vec![ResolvedEvidenceItem {
+        item: document.evidence[0].clone(),
+        references: vec![
+            EvidenceReferenceResolution {
+                event_ref: event_ref(42),
+                status: EvidenceReferenceStatus::Verified,
+                event: None,
+            },
+            EvidenceReferenceResolution {
+                event_ref: event_ref(44),
+                status: EvidenceReferenceStatus::Missing,
+                event: None,
+            },
+        ],
+    }];
+    let statuses = [
+        InvestigationPolicyBindingStatus::Current,
+        InvestigationPolicyBindingStatus::MadeUnderDifferentPolicy,
+        InvestigationPolicyBindingStatus::UnboundLegacy,
+    ];
+    let findings = document
+        .findings
+        .iter()
+        .zip(statuses)
+        .map(|(item, status)| ResolvedFindingItem {
+            item: item.clone(),
+            policy_binding: InvestigationPolicyBindingResolution {
+                binding: item.policy_binding.clone(),
+                current_suppression_policy_revision: current_policy.suppression_policy_revision,
+                current_resolved_template_revision: current_policy.resolved_template_revision,
+                current_effective_policy_sha256: current_policy.effective_policy_sha256.clone(),
+                current_noise_lens: Some(InvestigationNoiseLens::Active),
+                status,
+            },
+        })
+        .collect();
+    let resolved = ResolvedInvestigationDocument {
+        document,
+        evidence,
+        findings,
+        resolution_policy: Some(current_policy),
+        resolution_noise_lens: Some(InvestigationNoiseLens::Active),
+    };
+    assemble_investigation_report(&resolved, 1_735_992_600)
 }
 
 fn resolved_bookmarks_sample() -> Vec<ResolvedBookmark> {
@@ -760,6 +937,10 @@ fn contract_fixtures() -> Vec<(&'static str, Value)> {
             to(&investigation_document_sample()),
         ),
         (
+            "investigation_report.v1.json",
+            to(&investigation_report_sample()),
+        ),
+        (
             "resolved_bookmark.v1.json",
             to(&resolved_bookmarks_sample()),
         ),
@@ -962,6 +1143,7 @@ fn fixtures_round_trip_through_deserialize() {
     assert_round_trip::<SharedTimelineSummary>(&dir, "shared_timeline_summary.v1.json");
     assert_round_trip::<SuppressionDocument>(&dir, "suppression_document.v1.json");
     assert_round_trip::<InvestigationDocument>(&dir, "investigation_document.v1.json");
+    assert_round_trip::<InvestigationReport>(&dir, "investigation_report.v1.json");
     assert_round_trip::<Vec<ProcessProgress>>(&dir, "process_progress.v1.json");
     assert_round_trip::<Vec<ModelOptionDto>>(&dir, "model_options.v1.json");
 }

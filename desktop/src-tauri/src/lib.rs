@@ -2,6 +2,7 @@
 
 mod capability_qualification_host;
 mod handbook;
+mod investigation_report_export;
 mod log_diagnostic_report;
 mod log_diagnostics;
 
@@ -326,6 +327,10 @@ struct AppState {
     /// Bounded host-rendered diagnostic previews keyed by opaque, process-local
     /// report ids. The renderer never supplies export content.
     log_diagnostic_reports: Mutex<log_diagnostic_report::LogDiagnosticReportStore>,
+    /// Bounded host-rendered investigation report previews (#532), same
+    /// authority model as diagnostics: opaque ids, renderer sends no text.
+    investigation_report_exports:
+        Mutex<investigation_report_export::InvestigationReportExportStore>,
     /// Serializes chat-session writes across windows so governed fields cannot
     /// race ordinary transcript saves (#695).
     chat_session_mutation: Mutex<()>,
@@ -10591,6 +10596,255 @@ fn log_dismiss_proposed_finding(
         .map_err(|e| e.to_string())
 }
 
+/// Create or replace one authored report section for its kind (#532).
+#[tauri::command]
+fn log_set_investigation_report_section(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    investigation_id: String,
+    expected_revision: u64,
+    input: cd_core::investigations::SetReportSectionInput,
+) -> Result<cd_core::investigations::ResolvedInvestigationDocument, String> {
+    let _mutation = state
+        .investigation_mutation
+        .lock()
+        .map_err(|_| "Investigation storage is temporarily unavailable".to_string())?;
+    let cache = log_cache_dir(&state)?;
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    investigation_store(&state)?
+        .set_report_section(&investigation_id, expected_revision, &corpus, input)
+        .map_err(|e| e.to_string())
+}
+
+// NOTE (#532 hardening): there is deliberately NO renderer-invocable propose
+// command for report sections. Proposals enter only through the tool host's
+// SoftWrite path, where provenance is host-authored, the target investigation
+// is host-bound, and the permission gate applies. A renderer IPC propose
+// surface would let a compromised webview forge model/detector provenance
+// with none of those guarantees.
+
+/// Human Accept or Edit-and-accept of a Proposed report section (#532).
+#[tauri::command]
+fn log_accept_proposed_report_section(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    investigation_id: String,
+    input: cd_core::investigations::AcceptProposedReportSectionInput,
+) -> Result<cd_core::investigations::ResolvedInvestigationDocument, String> {
+    let _mutation = state
+        .investigation_mutation
+        .lock()
+        .map_err(|_| "Investigation storage is temporarily unavailable".to_string())?;
+    let cache = log_cache_dir(&state)?;
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    investigation_store(&state)?
+        .accept_proposed_report_section(&corpus, &investigation_id, input)
+        .map_err(|e| e.to_string())
+}
+
+/// Human Dismiss-with-reason of a Proposed report section (#532).
+#[tauri::command]
+fn log_dismiss_proposed_report_section(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    investigation_id: String,
+    input: cd_core::investigations::DismissProposedReportSectionInput,
+) -> Result<cd_core::investigations::ResolvedInvestigationDocument, String> {
+    let _mutation = state
+        .investigation_mutation
+        .lock()
+        .map_err(|_| "Investigation storage is temporarily unavailable".to_string())?;
+    let cache = log_cache_dir(&state)?;
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    investigation_store(&state)?
+        .dismiss_proposed_report_section(&corpus, &investigation_id, input)
+        .map_err(|e| e.to_string())
+}
+
+/// Assemble + render one investigation report projection (#532).
+///
+/// Strictly non-mutating: loads through the shared handle cache and the
+/// standard resolution path and projects. The report's current-policy header
+/// comes from the one snapshot the resolution captured — this helper never
+/// performs a second policy read. Nothing durable changes; assembling twice
+/// over the same revision yields identical output for the same
+/// `generated_at`.
+fn assemble_log_investigation_report_at(
+    store: &cd_core::investigations::InvestigationStore,
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+    investigation_id: Option<String>,
+    noise_lens: cd_core::investigations::InvestigationNoiseLens,
+    generated_at: i64,
+) -> Result<(cd_core::investigations::InvestigationReport, String), String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    let investigation_id = match investigation_id {
+        Some(id) => id,
+        None => {
+            active_investigation_for_corpus(store, corpus_id)?
+                .ok_or_else(|| "No active Investigation is linked to this corpus".to_string())?
+                .id
+        }
+    };
+    let resolved = store
+        .load_with_policy_lens(&investigation_id, &corpus, noise_lens)
+        .map_err(|e| e.to_string())?;
+    // One snapshot: the report header reuses the exact policy identity the
+    // finding statuses were resolved under. Deliberately no second policy
+    // sidecar read here — two reads could disagree under a concurrent policy
+    // edit and certify findings against the wrong policy.
+    let report = cd_core::investigations::assemble_investigation_report(&resolved, generated_at);
+    let markdown = cd_core::investigations::render_investigation_report_markdown(&report);
+    Ok((report, markdown))
+}
+
+/// Host-assembled report preview: versioned projection + rendered markdown +
+/// the retained export artifact for exactly these bytes.
+///
+/// One assembly drives everything the user sees and saves: the typed surface,
+/// the exact markdown preview, and Export. `export_id` names the retained
+/// copy of `markdown` in the bounded in-memory export store; when the render
+/// cannot pass the export boundary (empty/oversized/unscrubbed), the preview
+/// still shows and `export_unavailable_reason` says why Export is off.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogInvestigationReportPreview {
+    report: cd_core::investigations::InvestigationReport,
+    markdown: String,
+    export_id: Option<String>,
+    export_bytes: Option<usize>,
+    export_unavailable_reason: Option<String>,
+}
+
+/// Preview the report for the active (or given) Investigation.
+///
+/// Nothing durable changes. The rendered bytes are retained in the bounded
+/// in-memory export store under an opaque id so Export later writes exactly
+/// the previewed bytes — there is no second assembly that could drift from
+/// what the user reviewed.
+#[tauri::command]
+async fn log_assemble_investigation_report(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    investigation_id: Option<String>,
+    noise_lens: cd_core::investigations::InvestigationNoiseLens,
+) -> Result<LogInvestigationReportPreview, String> {
+    let store = investigation_store(&state)?;
+    let cache = log_cache_dir(&state)?;
+    let handles = Arc::clone(&state.log_corpus_handles);
+    let generated_at = cd_core::embed::now_unix_secs();
+    let (report, markdown) = tokio::task::spawn_blocking(move || {
+        assemble_log_investigation_report_at(
+            &store,
+            &handles,
+            &cache,
+            &corpus_id,
+            investigation_id,
+            noise_lens,
+            generated_at,
+        )
+    })
+    .await
+    .map_err(|error| format!("investigation report task join: {error}"))??;
+    let (export_id, export_bytes, export_unavailable_reason) = match state
+        .investigation_report_exports
+        .lock()
+        .map_err(|_| "investigation report export store is unavailable".to_string())?
+        .prepare(markdown.clone())
+    {
+        Ok(prepared) => (Some(prepared.report_id), Some(prepared.bytes), None),
+        // The preview must still render; Export is off with the exact reason.
+        Err(reason) => (None, None, Some(reason)),
+    };
+    Ok(LogInvestigationReportPreview {
+        report,
+        markdown,
+        export_id,
+        export_bytes,
+        export_unavailable_reason,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LogInvestigationReportExportRequest {
+    report_id: String,
+}
+
+// NOTE (#532 hardening): there is deliberately NO separate export-prepare
+// command. A second assembly could drift from the preview the user reviewed
+// (fresh generated_at, or state that moved underneath), so the artifact
+// Export writes is registered by log_assemble_investigation_report itself —
+// preview bytes and saved bytes are the same retained copy.
+
+fn complete_investigation_report_export_content(
+    content: &str,
+    selected_path: Option<PathBuf>,
+) -> Result<LogDiagnosticSaveStatus, String> {
+    let Some(path) = selected_path else {
+        return Ok(LogDiagnosticSaveStatus::Cancelled);
+    };
+    let outcome =
+        investigation_report_export::save_investigation_report_at_host_path(&path, content)?;
+    Ok(log_diagnostic_save_status(outcome))
+}
+
+/// Show the host-owned native Save panel for one investigation report and
+/// atomically write the exact previewed bytes. The renderer has no
+/// destination or overwrite authority.
+#[tauri::command]
+async fn log_save_investigation_report_export(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    request: LogInvestigationReportExportRequest,
+) -> Result<LogDiagnosticSaveStatus, String> {
+    let content = {
+        let reports = state
+            .investigation_report_exports
+            .lock()
+            .map_err(|_| "investigation report export store is unavailable".to_string())?;
+        reports.content(&request.report_id)?.to_string()
+    };
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Save investigation report as Markdown")
+        .set_file_name("contextdesk-investigation-report.md")
+        .add_filter("Markdown", &["md"])
+        .save_file(move |selected| {
+            let _ = sender.send(selected);
+        });
+    let selected = receiver
+        .await
+        .map_err(|_| "native report Save dialog ended unexpectedly".to_string())?
+        .map(|path| {
+            path.into_path()
+                .map_err(|_| "native report Save dialog returned an invalid path".to_string())
+        })
+        .transpose()?;
+    complete_investigation_report_export_content(&content, selected)
+}
+
+/// Release one process-local report preview when the renderer replaces or
+/// closes it. Unknown/expired ids are harmless; malformed ids fail closed.
+#[tauri::command]
+fn log_release_investigation_report_export(
+    state: State<'_, AppState>,
+    request: LogInvestigationReportExportRequest,
+) -> Result<bool, String> {
+    state
+        .investigation_report_exports
+        .lock()
+        .map_err(|_| "investigation report export store is unavailable".to_string())?
+        .release(&request.report_id)
+}
+
 /// List chat sessions linked to a corpus (any chat may link).
 #[tauri::command]
 fn list_chat_sessions_for_corpus(
@@ -11708,6 +11962,9 @@ pub fn run() {
         log_diagnostic_reports: Mutex::new(
             log_diagnostic_report::LogDiagnosticReportStore::default(),
         ),
+        investigation_report_exports: Mutex::new(
+            investigation_report_export::InvestigationReportExportStore::default(),
+        ),
         chat_session_mutation: Mutex::new(()),
         investigation_mutation: Mutex::new(()),
         cancels: Mutex::new(HashMap::new()),
@@ -11933,6 +12190,12 @@ pub fn run() {
             log_propose_investigation_finding,
             log_accept_proposed_finding,
             log_dismiss_proposed_finding,
+            log_set_investigation_report_section,
+            log_accept_proposed_report_section,
+            log_dismiss_proposed_report_section,
+            log_assemble_investigation_report,
+            log_save_investigation_report_export,
+            log_release_investigation_report_export,
             list_chat_sessions_for_corpus,
             set_chat_linked_corpus,
             open_log_explorer,
@@ -12531,6 +12794,69 @@ mod log_noise_candidate_host_tests {
             "run_log_ingest must not open DuckDB on the async host path"
         );
     }
+
+    /// #532 hardening — the report authority model, pinned at the source
+    /// level. Needles are split so this test's own text never satisfies (or
+    /// defeats) an absence assertion.
+    #[test]
+    fn investigation_report_authority_source_contract() {
+        let source = include_str!("lib.rs");
+
+        // Blocker 2: no renderer-invocable propose command exists. Report
+        // proposals enter only through the tool host's SoftWrite path, where
+        // provenance is host-authored and the permission gate applies.
+        let propose_command = format!("{}{}", "fn log_propose_investigation_", "report_section");
+        assert!(
+            !source.contains(&propose_command),
+            "renderer propose command must not exist"
+        );
+
+        // Blocker 3: the host never performs its own policy-sidecar capture —
+        // the report header comes from the resolution's single snapshot.
+        let capture = format!("{}{}", "capture_suppression_", "policy_binding");
+        assert!(
+            !source.contains(&capture),
+            "no second policy capture on the host"
+        );
+
+        // Blocker 5: no second-assembly export prepare command; the assemble
+        // command itself retains the rendered bytes it returns.
+        let prepare_command = format!("{}{}", "log_prepare_investigation_", "report_export");
+        assert!(
+            !source.contains(&prepare_command),
+            "export must reuse the previewed artifact, never a second assembly"
+        );
+        let assemble_start = source
+            .find("async fn log_assemble_investigation_report(")
+            .expect("assemble command");
+        let assemble_end = source[assemble_start..]
+            .find("struct LogInvestigationReportExportRequest")
+            .map(|offset| assemble_start + offset)
+            .expect("assemble boundary");
+        let assemble = &source[assemble_start..assemble_end];
+        assert!(
+            assemble.contains(".prepare(markdown.clone())"),
+            "assemble must retain exactly the markdown it returns"
+        );
+        assert!(
+            assemble.contains("export_unavailable_reason"),
+            "a render refused at the export boundary must still preview, with the reason"
+        );
+
+        // Blocker 5: save writes only the retained bytes — it can never
+        // re-assemble or re-render.
+        let save_start = source
+            .find("async fn log_save_investigation_report_export(")
+            .expect("save command");
+        let save_end = source[save_start..]
+            .find("fn log_release_investigation_report_export(")
+            .map(|offset| save_start + offset)
+            .expect("save boundary");
+        let save = &source[save_start..save_end];
+        assert!(save.contains("reports.content(&request.report_id)"));
+        assert!(!save.contains("assemble_log_investigation_report_at"));
+        assert!(!save.contains("render_investigation_report_markdown"));
+    }
 }
 
 #[cfg(test)]
@@ -12671,6 +12997,11 @@ mod log_explorer_async_query_host_tests {
                 "async fn log_load_active_investigation(",
                 "#[derive(Debug, Deserialize)]",
                 "load_active_log_investigation_at",
+            ),
+            (
+                "async fn log_assemble_investigation_report(",
+                "struct LogInvestigationReportExportRequest",
+                "assemble_log_investigation_report_at",
             ),
         ] {
             assert_async_blocking_command(src, signature, boundary, helper);

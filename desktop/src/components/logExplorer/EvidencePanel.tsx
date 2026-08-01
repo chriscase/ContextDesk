@@ -12,6 +12,16 @@ import type {
   InvestigationViewRecipeDto,
   LogBookmarkEventRefDto,
 } from "../../lib/host";
+import type {
+  LogInvestigationReportPreviewDto,
+  ReportSectionKindDto,
+} from "../../lib/engine/investigationReports";
+import {
+  InvestigationReportSurface,
+  ProposedReportSectionCard,
+  type ProposedReportSectionAcceptInput,
+  type ProposedReportSectionView,
+} from "./InvestigationReport";
 import { IconChevronDown, IconChevronRight } from "../icons";
 
 export type InvestigationRailMode = "investigation" | "chat";
@@ -89,11 +99,18 @@ export type BookmarkItemView = {
   evidenceStatus: "legacy_range" | "verified" | "missing" | "stale";
 };
 
-type MaterialFilter = "all" | "findings" | "evidence" | "notes" | "bookmarks";
+type MaterialFilter =
+  | "all"
+  | "findings"
+  | "evidence"
+  | "notes"
+  | "bookmarks"
+  | "report";
 type MaterialDetail =
   | { type: "finding"; id: string }
   | { type: "note"; id: string }
-  | { type: "bookmark"; id: string };
+  | { type: "bookmark"; id: string }
+  | { type: "report" };
 
 export function InvestigationModeControl({
   mode,
@@ -288,11 +305,15 @@ export function EvidencePanel({
   items,
   findings = [],
   proposedFindings = [],
+  proposedReportSections = [],
   notes = [],
   bookmarks = [],
   preview,
   viewPreview,
   proposalPreview = null,
+  reportPreview = null,
+  reportBusy = false,
+  reportError = null,
   busy,
   error,
   visible = true,
@@ -310,13 +331,23 @@ export function EvidencePanel({
   onAcceptProposedFinding,
   onDismissProposedFinding,
   onPreviewProposedFinding,
+  onAcceptProposedReportSection,
+  onDismissProposedReportSection,
+  onOpenReport,
+  reportUnavailableReason = null,
+  onEditReportSection,
+  onExportReport,
+  onReloadInvestigation,
   onClearPreview,
   onClearViewPreview,
+  onClearReport,
   onToggleCollapsed,
   onRequestClose,
 }: {
   modeControl: ReactNode;
   proposedFindings?: ProposedFindingItemView[];
+  /** Agent/detector-proposed report sections awaiting review (#532). */
+  proposedReportSections?: ProposedReportSectionView[];
   items: EvidenceItemView[];
   findings?: FindingItemView[];
   notes?: NoteItemView[];
@@ -328,6 +359,10 @@ export function EvidencePanel({
     proposalId: string;
     changes: string[];
   } | null;
+  /** Lazily host-assembled report projection; null until Report opens. */
+  reportPreview?: LogInvestigationReportPreviewDto | null;
+  reportBusy?: boolean;
+  reportError?: string | null;
   busy: boolean;
   error: string | null;
   visible?: boolean;
@@ -346,8 +381,25 @@ export function EvidencePanel({
   onAcceptProposedFinding?: (input: ProposedFindingAcceptInput) => void;
   onDismissProposedFinding?: (id: string) => void;
   onPreviewProposedFinding?: (item: ProposedFindingItemView) => void;
+  onAcceptProposedReportSection?: (
+    input: ProposedReportSectionAcceptInput,
+  ) => void;
+  onDismissProposedReportSection?: (proposalId: string, reason: string) => void;
+  /** Assemble-on-demand trigger; fired when the Report detail opens. */
+  onOpenReport?: () => void;
+  /** Disabled-with-cause copy when a report cannot be assembled yet. */
+  reportUnavailableReason?: string | null;
+  onEditReportSection?: (
+    kind: ReportSectionKindDto,
+    trigger: HTMLButtonElement,
+  ) => void;
+  onExportReport?: (trigger: HTMLButtonElement) => void;
+  /** Renders a Reload affordance inside the error alert (stale revisions). */
+  onReloadInvestigation?: () => void;
   onClearPreview: () => void;
   onClearViewPreview?: () => void;
+  /** Close the report lifecycle and release its retained export artifact. */
+  onClearReport?: () => void;
   onToggleCollapsed?: () => void;
   onRequestClose?: () => void;
 }) {
@@ -377,15 +429,20 @@ export function EvidencePanel({
     detail?.type === "bookmark"
       ? (bookmarks.find((item) => item.id === detail.id) ?? null)
       : null;
+  const reportDetailOpen = detail?.type === "report";
   const openProposedCount = proposedFindings.filter(
     (item) => item.status === "proposed",
   ).length;
+  const openProposedReportSections = proposedReportSections.filter(
+    (item) => item.status === "proposed",
+  );
   // Include open Proposed items so agent-propose-only investigations are not
   // treated as an empty rail (Accept/Dismiss must remain reachable).
   const materialCount =
     items.length +
     findings.length +
     openProposedCount +
+    openProposedReportSections.length +
     notes.length +
     bookmarks.length;
   const findingsFilterCount = findings.length + openProposedCount;
@@ -398,7 +455,9 @@ export function EvidencePanel({
           ? items.length
           : filter === "notes"
             ? notes.length
-            : bookmarks.length;
+            : filter === "report"
+              ? openProposedReportSections.length
+              : bookmarks.length;
 
   const openDetail = (next: MaterialDetail) => {
     detailOriginSelectorRef.current =
@@ -406,11 +465,14 @@ export function EvidencePanel({
         ? `[data-testid="finding-item-${next.id}"]`
         : next.type === "note"
           ? `[data-testid="note-item-${next.id}"]`
-          : `[data-testid="investigation-bookmark-${next.id}"]`;
+          : next.type === "bookmark"
+            ? `[data-testid="investigation-bookmark-${next.id}"]`
+            : `[data-testid="open-report"]`;
     setDetail(next);
   };
 
   const closeDetail = () => {
+    if (detail?.type === "report") onClearReport?.();
     setDetail(null);
     onClearViewPreview?.();
     queueMicrotask(() => {
@@ -509,6 +571,33 @@ export function EvidencePanel({
           </div>
         </div>
         <div className="log-explorer__chat-header-actions">
+          {onOpenReport ? (
+            <button
+              type="button"
+              className={`log-explorer__btn${
+                reportDetailOpen ? " log-explorer__btn--active" : ""
+              }`}
+              data-testid="open-report"
+              disabled={reportUnavailableReason != null}
+              title={
+                reportUnavailableReason ??
+                "Open the assembled investigation report"
+              }
+              aria-pressed={reportDetailOpen}
+              onClick={() => {
+                if (reportDetailOpen) {
+                  closeDetail();
+                  return;
+                }
+                onClearPreview();
+                onClearViewPreview?.();
+                openDetail({ type: "report" });
+                onOpenReport();
+              }}
+            >
+              Report
+            </button>
+          ) : null}
           {!compactLayout && onToggleCollapsed ? (
             <button
               ref={collapseToggleRef}
@@ -537,13 +626,25 @@ export function EvidencePanel({
       {error ? (
         <div className="log-explorer__evidence-error" role="alert">
           {error}
+          {onReloadInvestigation ? (
+            <button
+              type="button"
+              className="log-explorer__btn"
+              data-testid="reload-investigation"
+              disabled={busy}
+              onClick={onReloadInvestigation}
+            >
+              Reload investigation
+            </button>
+          ) : null}
         </div>
       ) : null}
 
       {!activePreviewItem &&
       !activeFinding &&
       !activeNote &&
-      !activeBookmark ? (
+      !activeBookmark &&
+      !reportDetailOpen ? (
         <label className="log-explorer__material-filter">
           <span className="sr-only">Show investigation material</span>
           <select
@@ -557,6 +658,9 @@ export function EvidencePanel({
             <option value="evidence">Evidence · {items.length}</option>
             <option value="notes">Notes · {notes.length}</option>
             <option value="bookmarks">Bookmarks · {bookmarks.length}</option>
+            <option value="report">
+              Report sections · {openProposedReportSections.length}
+            </option>
           </select>
           <IconChevronDown />
         </label>
@@ -584,7 +688,9 @@ export function EvidencePanel({
               onClick={() => {
                 onClearPreview();
                 if (previewReturnDetailRef.current) {
-                  setDetail(previewReturnDetailRef.current);
+                  // Route through openDetail so the origin selector is
+                  // re-stamped and a later detail Back still restores focus.
+                  openDetail(previewReturnDetailRef.current);
                   previewReturnDetailRef.current = null;
                   return;
                 }
@@ -641,6 +747,49 @@ export function EvidencePanel({
           >
             Reveal in Explorer
           </button>
+        </section>
+      ) : reportDetailOpen ? (
+        <section
+          className="log-explorer__evidence-preview log-explorer__report-detail"
+          aria-label="Investigation report"
+          data-testid="report-detail"
+        >
+          <div className="log-explorer__evidence-preview-header">
+            <div>
+              <div className="log-explorer__material-kicker">
+                Assembled report
+              </div>
+              <div className="log-explorer__evidence-card-title">
+                Investigation report
+              </div>
+              <div className="log-explorer__chat-header-meta">
+                Accepted state only · preview never mutates the record
+              </div>
+            </div>
+            <button
+              ref={detailBackRef}
+              type="button"
+              className="log-explorer__btn"
+              onClick={closeDetail}
+            >
+              Back
+            </button>
+          </div>
+          <InvestigationReportSurface
+            preview={reportPreview}
+            busy={reportBusy || busy}
+            error={reportError}
+            onPreviewEvidence={(evidenceId) => {
+              const cited = items.find((item) => item.id === evidenceId);
+              if (!cited) return;
+              detailOriginSelectorRef.current = null;
+              previewReturnDetailRef.current = detail;
+              setDetail(null);
+              onPreview(cited);
+            }}
+            onEditSection={onEditReportSection}
+            onExport={onExportReport}
+          />
         </section>
       ) : activeFinding ? (
         <section
@@ -995,7 +1144,8 @@ export function EvidencePanel({
           ) : visibleMaterialCount === 0 ? (
             <div className="log-explorer__evidence-empty">
               <div className="log-explorer__evidence-empty-title">
-                No {filter} saved yet
+                No {filter === "report" ? "proposed report sections" : filter}{" "}
+                saved yet
               </div>
               <p>
                 Choose All material to browse the rest of this investigation
@@ -1004,6 +1154,16 @@ export function EvidencePanel({
             </div>
           ) : (
             <>
+              {(filter === "all" || filter === "report") &&
+                openProposedReportSections.map((item) => (
+                  <ProposedReportSectionCard
+                    key={item.id}
+                    item={item}
+                    busy={busy}
+                    onAccept={onAcceptProposedReportSection}
+                    onDismiss={onDismissProposedReportSection}
+                  />
+                ))}
               {(filter === "all" || filter === "findings") &&
                 proposedFindings
                   .filter((p) => p.status === "proposed")

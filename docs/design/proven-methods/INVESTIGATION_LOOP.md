@@ -2,11 +2,16 @@
 
 **Method status:** **Partial.** ContextDesk has production anchors on `main` for
 exact bookmarks, durable human-authored evidence/findings/notes, append-only
-investigation revisions, bounded authoritative preview, and saved view recipes
-with explicit apply and prior-view restoration. Issue #656 remains open pending
-its complete native acceptance matrix. Model/detector finding proposals,
-accept/dismiss lifecycle history, ranking, walkthroughs, and report assembly
-remain #646/#532.
+investigation revisions, bounded authoritative preview, saved view recipes
+with explicit apply and prior-view restoration, a durable SoftWrite proposal
+review queue (findings and report sections) with explicit Accept /
+Edit-and-accept / Dismiss-with-reason, and a versioned accepted-state report
+projection with deterministic Markdown rendering and confirmation-gated
+export. Issue #656 remains open pending its complete native acceptance matrix.
+Proposal ranking, supersede/resolve history surfacing, and walkthroughs remain
+#646; the fuller report vocabulary, report patches with an undo trail,
+unsupported-claim detection, HTML/PDF export, and an evidence appendix remain
+#532.
 
 ## 1. Problem
 
@@ -34,15 +39,15 @@ view state.
 | ---------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- |
 | Exact single/range/noncontiguous bookmarks           | **Shipped** | [`bookmarks.rs`](../../../crates/cd-core/src/log_analysis/bookmarks.rs)                                                                                                              | Bookmarks are not exported in package v1                 |
 | Duplicate-resistant exact evidence save              | **Partial** | Core/UI path exists in [`investigations.rs`](../../../crates/cd-core/src/investigations/mod.rs) and [`LogExplorer.tsx`](../../../desktop/src/components/logExplorer/LogExplorer.tsx)     | Full packaged matrix keeps #656 open                     |
-| Human Observation/Inference/Hypothesis               | **Partial** | Core/UI path exists in [`CreateInvestigationItemDialog.tsx`](../../../desktop/src/components/logExplorer/CreateInvestigationItemDialog.tsx)                                          | Model proposals are not shipped; packaged matrix remains |
-| Human cited notes                                    | **Partial** | Core/UI path exists in [`investigations.rs`](../../../crates/cd-core/src/investigations/mod.rs) and [`EvidencePanel.tsx`](../../../desktop/src/components/logExplorer/EvidencePanel.tsx) | Report composition and packaged matrix remain            |
+| Human Observation/Inference/Hypothesis               | **Partial** | Core/UI path exists in [`CreateInvestigationItemDialog.tsx`](../../../desktop/src/components/logExplorer/CreateInvestigationItemDialog.tsx)                                          | Packaged matrix remains (#656)                           |
+| Human cited notes                                    | **Partial** | Core/UI path exists in [`investigations.rs`](../../../crates/cd-core/src/investigations/mod.rs) and [`EvidencePanel.tsx`](../../../desktop/src/components/logExplorer/EvidencePanel.tsx) | Packaged matrix remains (#656)                           |
 | Append-only optimistic revisions                     | **Shipped** | [`investigations.rs`](../../../crates/cd-core/src/investigations/mod.rs) `InvestigationStore`                                                                                            | Multi-device sync is not claimed                         |
 | Preview authoritative evidence without view mutation | **Partial** | `preview_evidence` and the Investigation rail exist on `main`                                                                                                                        | Native stale-reference proof remains in #656             |
 | Payload-free saved view recipe                       | **Shipped** | `FindingViewRecipe` and [`investigationView.ts`](../../../desktop/src/lib/logExplorer/investigationView.ts) are on `main` through PR #666                                            | Broader proposal history remains                         |
 | Explicit Apply and Restore prior view                | **Partial** | [`LogExplorer.tsx`](../../../desktop/src/components/logExplorer/LogExplorer.tsx) contains the core/UI path                                                                           | Native responsive/restart matrix remains                 |
 | Linked-chat `log_nav` proposal                       | **Shipped** | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs), [`logNav.ts`](../../../desktop/src/lib/logExplorer/logNav.ts)                                         | It is navigation intent, not a durable finding proposal  |
-| Model/detector finding proposal review queue         | **Planned** | #646                                                                                                                                                                                 | No typed proposal tool/history yet                       |
-| Notes-to-report assembly/export                      | **Planned** | #532                                                                                                                                                                                 | Do not call current rail a report workflow               |
+| Model/detector proposal review queue (findings + report sections) | **Partial** | [`proposed.rs`](../../../crates/cd-core/src/investigations/proposed.rs) and [`report.rs`](../../../crates/cd-core/src/investigations/report.rs)                                       | Ranking, walkthrough, and deeper-analysis requests remain #646 |
+| Accepted-state report projection + Markdown export   | **Partial** | [`report.rs`](../../../crates/cd-core/src/investigations/report.rs) `assemble_investigation_report`                                                                                  | Fuller #532 vocabulary, patches/undo, claim detection, HTML/PDF, evidence appendix |
 
 ## 3. Reusable method
 
@@ -70,7 +75,7 @@ flowchart LR
     P["Preview evidence/view<br/>no mutation"]
     A["Apply view<br/>explicit"]
     R["Restore prior logical view"]
-    O["Report/handoff<br/>planned projection"]
+    O["Report/handoff<br/>versioned accepted-state projection"]
 
     E --> S
     S --> B
@@ -81,8 +86,8 @@ flowchart LR
     F --> P
     N --> P
     P --> A --> R
-    F -.-> O
-    N -.-> O
+    F --> O
+    N --> O
 ```
 
 ### Why references, not snapshots
@@ -254,7 +259,8 @@ Two proposal classes must not be conflated.
 - nothing changes until the user activates it; and
 - the prior view can be restored.
 
-**Finding proposal (planned):**
+**Typed finding/report-section proposal (queue shipped; richer review remains
+#646 design):**
 
 - model or deterministic detector proposes a typed finding;
 - proposal includes provenance, model/detector identity, cited exact evidence,
@@ -265,12 +271,25 @@ Two proposal classes must not be conflated.
 - every transition is append-only and auditable; and
 - only accepted human-controlled material enters reports.
 
-This is a design method for #646, not a claim that ContextDesk ships the second
-class today.
+The confidence/rationale semantics, ranking, and deeper-analysis requests in
+that list remain the #646 design method, not shipped behavior. The durable
+queue and review verbs themselves ship, and the same contract now covers
+**report-section proposals** ([`report.rs`](../../../crates/cd-core/src/investigations/report.rs)):
+`propose_report_section` is SoftWrite-only, status begins `proposed`, identical
+retries are idempotent, every mutation is pinned to the expected investigation
+revision, provenance is host-authored and preserved through Accept, and only an
+explicit human Accept, Edit-and-accept, or Dismiss-with-reason changes state.
+Wrong-corpus, unknown-citation, over-bound, and stale-revision proposals fail
+closed with machine-readable repair codes.
+
+In the diagram below, the Proposed → Accepted and Proposed → Dismissed
+transitions (with Previewed as the transient inspection step) are the shipped
+queue behavior; Superseded and Resolved transitions remain design vocabulary
+for #646.
 
 ```mermaid
 stateDiagram-v2
-%% title: Planned finding proposal review lifecycle
+%% title: Proposal review lifecycle (accept/dismiss shipped; supersede/resolve remain design)
     [*] --> Proposed: model or detector
     Proposed --> Previewed: user inspects evidence
     Previewed --> Accepted: explicit accept/edit
@@ -284,16 +303,39 @@ stateDiagram-v2
 
 ### 6.6 Report/handoff projection
 
-Future report assembly should:
+Report assembly ships as a pure, versioned projection over the resolved
+document ([`report.rs`](../../../crates/cd-core/src/investigations/report.rs)
+`assemble_investigation_report`, report schema v1) with deterministic Markdown
+rendering. Assembly:
 
-1. select accepted findings and cited notes;
-2. resolve current evidence status;
-3. mark observations, inferences, hypotheses, and unresolved questions;
-4. include source identities and time-quality limitations;
-5. exclude dismissed proposals by default;
-6. render stale/missing evidence warnings;
-7. retain links back to saved views; and
-8. export a versioned projection without mutating the investigation record.
+1. selects accepted findings and cited notes;
+2. resolves current evidence status;
+3. marks observations, inferences, hypotheses, and unresolved questions;
+4. includes source identities and time-quality limitations;
+5. excludes dismissed proposals by default (shipped behavior also excludes
+   open proposals — only accepted state renders);
+6. renders stale/missing evidence warnings;
+7. retains links back to saved views (rendered as an explicit saved-view
+   attached flag plus the durable recipe on the finding); and
+8. carries the exact suppression snapshot and noise lens used to resolve
+   finding policy status;
+9. retains privacy-safe accepted-proposal provenance and human acceptance/edit
+   truth for authored sections; and
+10. exports a versioned projection without mutating the investigation record.
+
+The rendered order is fixed: Incident scope & window, Executive summary,
+Accepted findings, Evidence-backed timeline, Hypotheses & alternatives,
+Unresolved questions, Next actions. Authorable kinds are `executive_summary`,
+`unresolved_questions`, and `next_actions`, at most one durable section per
+kind; an un-authored section renders an explicit *Not authored.* marker. The
+timeline is identity-only, deterministically ordered, and bounded with an
+explicit omitted count. Export is host-owned and confirmation-gated: Markdown
+only, through the native save panel, with atomic no-clobber publication, a
+bounded export size, and a secret-scrub fixed-point re-check that fails
+closed. Ignored, replaced, closed, and unmount-time previews release their
+opaque retained export artifacts instead of consuming the bounded host store.
+The fuller section vocabulary, report patches, unsupported-claim
+detection, HTML/PDF, and an evidence appendix remain #532.
 
 ## 7. Performance and bounds
 
@@ -313,6 +355,11 @@ Current ContextDesk bounds illustrate a defendable durable store:
 | Finding rationale                    |  4,096 UTF-8 bytes | Redact then validate       |
 | Note body                            | 16,384 UTF-8 bytes | Redact then validate       |
 | Citations/item                       |                256 | Refuse overflow            |
+| Report section body                  | 16,384 UTF-8 bytes | Redact then validate       |
+| Report section citations (evidence + findings + notes) | 256 | Refuse overflow          |
+| Proposed report sections/document    |                 64 | Refuse overflow            |
+| Rendered report timeline entries     |                512 | Explicit omitted count     |
+| Rendered report export               |            512 KiB | Refuse export              |
 | Revision file                        |             16 MiB | Refuse read/write          |
 | Lanes/view recipe                    |                1–4 | Refuse invalid recipe      |
 | Filter values/view recipe            | 256 per collection | Refuse invalid recipe      |
@@ -336,6 +383,9 @@ payload.
 | View application partly loads     | Normal query errors           | Visible Apply failure                                           | Restore captured prior view                     | Prior logical state retained               |
 | Model proposes unsupported action | Schema/eligibility validation | Proposal unavailable/invalid                                    | Rephrase or use manual workflow                 | No hidden mutation                         |
 | Redaction empties human text      | Post-redaction validation     | Save error                                                      | Rewrite without secret                          | Secret not persisted                       |
+| Stale/missing citation at report assembly | Authoritative re-resolution during assembly | Explicit stale/missing markers stay in the rendered report | Review evidence; save corrected identities explicitly | Report never presents an unverified reference as current |
+| Dismissed or open proposal at report assembly | Accepted-state selection | Absent from report; queue history remains inspectable | Accept explicitly to include | Only accepted human-controlled material renders |
+| Report export boundary failure    | Host re-checks bounds and scrub at save | Visible export error; no partial file | Reduce content or retry | Atomic no-clobber publication; renderer never picks the destination |
 
 ## 9. Observability and auditability
 
@@ -348,8 +398,9 @@ Record:
 - preview status counts (verified/stale/missing);
 - view diff and explicit Apply/Restore action;
 - cancellation/failure without payload leakage;
-- proposal lifecycle transitions when implemented; and
-- report projection version and source revision when implemented.
+- proposal lifecycle transitions (propose, accept, edit-and-accept, dismiss);
+  and
+- report projection schema version and source revision at assembly and export.
 
 Avoid logging event payloads, secret-bearing human text before redaction,
 absolute source paths, or private provider/model inventories.
@@ -405,7 +456,7 @@ wall of enterprise tabs.
 | Component UI         | Contextual selection strip; dialogs; Escape/focus; rail mode preservation; duplicate prevention; stale Apply blocked; errors visible |
 | Linked chat          | `log_nav` wrong-corpus/oversize/malformed rejected; valid proposal waits for click; ordinary chat cannot act on corpus               |
 | Packaged/native      | 25k and 100k corpora; restart; chat deletion; rail collapse; narrow/normal/wide; themes; long labels; competing windows              |
-| Future proposals     | Proposed never equals accepted; preview before accept; dismiss/supersede/resolve history; report excludes dismissed by default       |
+| Proposals/report     | Proved in [`report.rs`](../../../crates/cd-core/src/investigations/report.rs) tests: `report_mutations_fail_closed_on_stale_revision`, `propose_report_section_idempotent_retry_returns_existing_and_conflicts_on_change`, `report_citations_must_exist_fail_closed`, `propose_report_section_wrong_corpus_fails_closed`, `dismissed_report_proposal_cannot_be_accepted_and_never_assembles`, `assemble_and_render_never_mutate_store`, `report_render_deterministic_and_marks_verified_missing_stale`, `legacy_v5_document_loads_and_assembles_with_not_authored_markers`, `future_schema_document_fails_closed`, `report_current_policy_always_matches_the_resolution_snapshot`, `accepting_a_replacement_proposal_supersedes_the_prior_accepted_origin`, `manual_set_supersedes_the_prior_accepted_origin`, `accept_edited_marker_is_derived_from_actual_body_difference`, `stored_accepted_proposal_must_link_back_to_its_section`, `mixed_quality_time_is_never_rendered_as_calendar_time`; host authority pinned in [`lib.rs`](../../../desktop/src-tauri/src/lib.rs) `investigation_report_authority_source_contract` (no renderer propose command, no second policy capture, no second-assembly export) |
 
 Use deterministic source events and known stale-reference mutations. Native
 proof matters because focus, multi-window state, file persistence, and
@@ -416,6 +467,13 @@ responsive rails are not fully represented by DOM tests.
 - [`investigations.rs`](../../../crates/cd-core/src/investigations/mod.rs):
   versioned documents, bounds, exact evidence, findings, notes, view recipes,
   revision publication, preview and revalidation.
+- [`report.rs`](../../../crates/cd-core/src/investigations/report.rs):
+  authored/proposed report sections, the versioned accepted-state report
+  projection, deterministic Markdown rendering, and the SoftWrite
+  `propose_report_section` tool surface.
+- [`proposed.rs`](../../../crates/cd-core/src/investigations/proposed.rs):
+  durable proposed findings and the shared proposal lifecycle, provenance,
+  and idempotency primitives.
 - [`bookmarks.rs`](../../../crates/cd-core/src/log_analysis/bookmarks.rs):
   bookmark identity and sidecar compatibility.
 - [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs):
@@ -444,9 +502,9 @@ responsive rails are not fully represented by DOM tests.
 | Manual evidence/findings/notes | **Partial acceptance; production anchors on main** | Durable human workflow exists                                         | #656 complete packaged matrix                                      |
 | View recipes                   | **Partial**                                        | Production path for Preview, explicit Apply, and Restore is on `main` | Complete #656 packaged acceptance; no pixel-perfect geometry claim |
 | Chat navigation proposals      | **Shipped**                                        | Bounded user-activated `log_nav`                                      | Automatic navigation or accepted finding                           |
-| Model finding proposals        | **Planned**                                        | Design rules only                                                     | Typed proposal tool, lifecycle, ranking                            |
+| Model/detector proposals       | **Partial**                                        | Durable SoftWrite queue with host-authored provenance and explicit Accept / Edit-and-accept / Dismiss-with-reason for findings and report sections | Ranking, confidence semantics, supersede/resolve surfacing, deeper-analysis requests (#646) |
 | Finding walkthrough            | **Planned**                                        | Individual items can be opened                                        | Guided ranked sequence                                             |
-| Report assembly/export         | **Planned**                                        | Durable ingredients exist                                             | #532 report workflow                                               |
+| Report assembly/export         | **Partial**                                        | Versioned accepted-state projection, deterministic Markdown, confirmation-gated bounded export | Fuller #532 vocabulary, report patches/undo, unsupported-claim detection, HTML/PDF, evidence appendix |
 | Multi-corpus investigation     | **Planned/non-goal for current slice**             | Document schema permits bounded links                                 | Complete multi-corpus UI/semantics                                 |
 
 ## 15. Reimplementation notes
@@ -476,10 +534,21 @@ before persisting them.
 ## 16. Open residuals
 
 - #656: complete native proof across corpus sizes, restart, stale references,
-  themes, responsive layouts, duplicate prevention, and accessibility.
-- #646: typed model/detector proposals, review queue, ranking, lifecycle
-  history, supporting/contradicting evidence, and walkthrough.
-- #532: broader Evidence → Notes → Report assembly and export.
+  themes, responsive layouts, duplicate prevention, and accessibility. Native
+  packaged acceptance of the report surface (themes, narrow/normal/wide,
+  restart) belongs to the same discipline and remains open.
+- #646: proposal ranking, confidence semantics, supporting/contradicting
+  evidence links, supersede/resolve lifecycle surfacing, deeper-analysis
+  requests, and walkthrough. The durable propose/accept/dismiss queue itself
+  ships for findings and report sections.
+- #532: the fuller report section vocabulary (impact, causal timeline, primary
+  cause, contributing factors, remediation, and related kinds), reviewable
+  report patches with an undo trail, unsupported-claim detection, HTML/PDF
+  export, an evidence appendix with bounded payload excerpts, and multi-corpus
+  report UI.
+- #826 batch B4: `EngineClient` adapters for the investigation/report wire
+  contracts. The versioned wire types and the host-delegation seam ship; the
+  client adapters do not.
 - Bookmark and investigation package/export compatibility needs a dedicated
   design before being added to corpus package v1.
 - Append-only privacy purge and retention need explicit treatment.

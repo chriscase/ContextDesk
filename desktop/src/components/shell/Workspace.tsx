@@ -6,6 +6,7 @@ import {
 } from "../panes/CompositionPane";
 import { MemoryPane, type MemoryDoc } from "../panes/MemoryPane";
 import { LogPane } from "../panes/LogPane";
+import { InvestigationsPane } from "../panes/InvestigationsPane";
 import { HarvestPane } from "../panes/HarvestPane";
 import { HelpPane } from "../panes/HelpPane";
 import { SourcePreviewPane } from "../panes/SourcePreviewPane";
@@ -114,6 +115,16 @@ export function Workspace({
           className="pane-panel"
         >
           <LogPane onOpenHelp={onOpenHelp} />
+        </div>
+      ) : null}
+      {pane === "investigations" ? (
+        <div
+          role="tabpanel"
+          id="pane-panel-investigations"
+          aria-labelledby="pane-tab-investigations"
+          className="pane-panel"
+        >
+          <InvestigationsPane onOpenHelp={onOpenHelp} />
         </div>
       ) : null}
       {pane === "harvest" ? (

@@ -191,6 +191,20 @@ export const HELP_LINKED_CHAT_CONTEXT: HelpTipContent = {
   helpLocator: "help://log-explorer#agent-context",
 };
 
+/** Versioned accepted-state investigation report projection (#532). */
+export const HELP_INVESTIGATION_REPORT: HelpTipContent = {
+  title: "Investigation report",
+  definition:
+    "A versioned projection assembled from accepted investigation state only: durable evidence identities, findings, cited notes, and human-controlled report sections. Open and dismissed proposals never appear in it.",
+  currentState:
+    "Preview is deterministic host-rendered Markdown and never mutates the investigation or the Explorer. Agent-proposed sections wait in a review queue for explicit Accept, Edit-and-accept, or Dismiss with a reason.",
+  useWhen:
+    "you need a traceable hand-off of an investigation without copying log payloads into prose.",
+  safety:
+    "Every cited reference is re-resolved and marked [verified], [stale], or [missing]; stale and missing citations stay visible. Export is Markdown only through the host-owned native save panel — the renderer cannot choose a destination or overwrite an existing file.",
+  helpLocator: "help://investigation-reports#what-a-report-is",
+};
+
 /** Coverage checklist for audits (#541). */
 export const HELP_COVERAGE_KEYS = [
   "find-vs-filter",
@@ -202,6 +216,7 @@ export const HELP_COVERAGE_KEYS = [
   "bookmarks",
   "linked-chat",
   "first-chat",
+  "investigation-report",
 ] as const;
 
 export type HelpCoverageKey = (typeof HELP_COVERAGE_KEYS)[number];

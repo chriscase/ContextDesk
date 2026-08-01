@@ -158,6 +158,20 @@ import {
   type InvestigationItemDraft,
 } from "./CreateInvestigationItemDialog";
 import { InvestigationAddMenu } from "./InvestigationAddMenu";
+import {
+  InvestigationReportExportDialog,
+  ReportSectionEditorDialog,
+  type ProposedReportSectionView,
+} from "./InvestigationReport";
+import {
+  logAcceptProposedReportSection,
+  logAssembleInvestigationReport,
+  logDismissProposedReportSection,
+  logReleaseInvestigationReportExport,
+  logSetInvestigationReportSection,
+  type LogInvestigationReportPreviewDto,
+  type ReportSectionKindDto,
+} from "../../lib/engine/investigationReports";
 import { SaveEvidenceDialog } from "./SaveEvidenceDialog";
 import { TimelineNavigator } from "./TimelineNavigator";
 import { LogDiagnosticDialog } from "../panes/LogDiagnosticDialog";
@@ -984,6 +998,76 @@ export function LogExplorer({ corpusId }: Props) {
     | { type: "note"; item: NoteItemView }
     | null
   >(null);
+  /** Lazily host-assembled report projection (#532) — null until opened. */
+  const [reportPreview, setReportPreview] =
+    useState<LogInvestigationReportPreviewDto | null>(null);
+  const [reportBusy, setReportBusy] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
+  /** Mirrors reportPreview so policy/document changes refresh only when open. */
+  const reportPreviewOpenRef = useRef(false);
+  const reportAssembleRequestRef = useRef(0);
+  /**
+   * The retained export artifact travels with the preview (#532): release the
+   * prior artifact whenever the preview is replaced or cleared so the bounded
+   * host store never accumulates stale copies, and on unmount.
+   */
+  const reportExportIdRef = useRef<string | null>(null);
+  const adoptReportPreview = useCallback(
+    (next: LogInvestigationReportPreviewDto | null) => {
+      const previous = reportExportIdRef.current;
+      const nextId = next?.exportId ?? null;
+      if (previous && previous !== nextId) {
+        void logReleaseInvestigationReportExport(previous).catch(() => {
+          // Bounded process-local store; an expired id is already released.
+        });
+      }
+      reportExportIdRef.current = nextId;
+      setReportPreview(next);
+    },
+    [],
+  );
+  const releaseUnadoptedReportPreview = useCallback(
+    (preview: LogInvestigationReportPreviewDto) => {
+      const exportId = preview.exportId;
+      if (exportId && exportId !== reportExportIdRef.current) {
+        void logReleaseInvestigationReportExport(exportId).catch(() => {
+          // An evicted id is already released; never retain an ignored result.
+        });
+      }
+    },
+    [],
+  );
+  useEffect(
+    () => () => {
+      reportAssembleRequestRef.current += 1;
+      reportPreviewOpenRef.current = false;
+      const retained = reportExportIdRef.current;
+      reportExportIdRef.current = null;
+      if (retained) {
+        void logReleaseInvestigationReportExport(retained).catch(() => {
+          // Best-effort on teardown; the store is bounded regardless.
+        });
+      }
+    },
+    [],
+  );
+  const [reportSectionEditor, setReportSectionEditor] = useState<{
+    kind: ReportSectionKindDto;
+    initialBody: string | null;
+    /** Existing citations carried through set (create-or-replace) unchanged. */
+    evidenceIds: string[];
+    findingIds: string[];
+    noteIds: string[];
+  } | null>(null);
+  const [reportExportOpen, setReportExportOpen] = useState(false);
+  const invalidateOpenReportPreview = useCallback(() => {
+    if (!reportPreviewOpenRef.current) return;
+    reportAssembleRequestRef.current += 1;
+    adoptReportPreview(null);
+    setReportBusy(false);
+    setReportError(null);
+    setReportExportOpen(false);
+  }, [adoptReportPreview]);
   const [chatDraftRequest, setChatDraftRequest] = useState<{
     id: number;
     text: string;
@@ -1138,6 +1222,8 @@ export function LogExplorer({ corpusId }: Props) {
   const saveEvidenceTriggerRef = useRef<HTMLButtonElement>(null);
   const investigationAddTriggerRef = useRef<HTMLButtonElement>(null);
   const investigationEditTriggerRef = useRef<HTMLButtonElement>(null);
+  const reportSectionTriggerRef = useRef<HTMLButtonElement>(null);
+  const reportExportTriggerRef = useRef<HTMLButtonElement>(null);
   const diagnosticTriggerRef = useRef<HTMLButtonElement>(null);
   const noisePolicyTriggerRef = useRef<HTMLButtonElement>(null);
   const suppressTemplateTriggerRef = useRef<HTMLButtonElement>(null);
@@ -1654,6 +1740,7 @@ export function LogExplorer({ corpusId }: Props) {
     }: {
       refreshing?: boolean;
     } = {}): Promise<SuppressionDocumentDto> => {
+      if (refreshing) invalidateOpenReportPreview();
       const requestId = ++suppressionRequestRef.current;
       setSuppressionLoadState(refreshing ? "refreshing" : "loading");
       setSuppressionLoadError(null);
@@ -1706,7 +1793,7 @@ export function LogExplorer({ corpusId }: Props) {
         throw policyError;
       }
     },
-    [corpusId],
+    [corpusId, invalidateOpenReportPreview],
   );
 
   const refreshSuppressionPolicy = useCallback(async () => {
@@ -2258,14 +2345,23 @@ export function LogExplorer({ corpusId }: Props) {
     setEvidencePreview(null);
     setFindingViewPreview(null);
     setProposalPreview(null);
+    reportPreviewOpenRef.current = false;
+    adoptReportPreview(null);
+    setReportBusy(false);
+    setReportError(null);
+    setReportSectionEditor(null);
+    setReportExportOpen(false);
     return () => {
       bookmarkLifecycleRef.current += 1;
       summaryRequestRef.current += 1;
       suppressionRequestRef.current += 1;
       bookmarkRequestRef.current += 1;
       investigationLoadRequestRef.current += 1;
+      reportAssembleRequestRef.current += 1;
     };
-  }, [corpusId]);
+    // adoptReportPreview is a stable useCallback([]) — listed to satisfy the
+    // exhaustive-deps contract, never re-firing this corpus-scoped reset.
+  }, [adoptReportPreview, corpusId]);
 
   useEffect(() => {
     void refreshSummary();
@@ -4522,6 +4618,7 @@ export function LogExplorer({ corpusId }: Props) {
 
   const setNoiseLensSuspended = useCallback(
     (suspended: boolean) => {
+      invalidateOpenReportPreview();
       writeNoiseLensSuspended(corpusId, suspended);
       setLensSuspended(suspended);
       // loadEvents / facets re-run when activeSuppressionTemplateIds changes.
@@ -4530,7 +4627,7 @@ export function LogExplorer({ corpusId }: Props) {
         void reloadActiveInvestigation(currentNoiseLens(suspended));
       }
     },
-    [corpusId, reloadActiveInvestigation],
+    [corpusId, invalidateOpenReportPreview, reloadActiveInvestigation],
   );
 
   const laneSourceFilter = (laneId: string) => {
@@ -5080,12 +5177,32 @@ export function LogExplorer({ corpusId }: Props) {
         viewRecipe: p.viewRecipe ?? null,
       };
     });
+  const proposedReportSectionItems: ProposedReportSectionView[] = (
+    investigation?.document.proposedReportSections ?? []
+  )
+    .filter((section) => section.status === "proposed")
+    .map((section) => ({
+      id: section.id,
+      kind: section.kind,
+      body: section.body,
+      status: section.status,
+      evidenceIdCount: (section.evidenceIds ?? []).length,
+      findingIdCount: (section.findingIds ?? []).length,
+      noteIdCount: (section.noteIds ?? []).length,
+      provenanceLabel:
+        section.provenance.source === "model"
+          ? "Agent proposed"
+          : section.provenance.source === "detector"
+            ? "Detector proposed"
+            : "Host proposed",
+    }));
   const noteItems = investigationNoteViews(investigation);
   const bookmarkItems = investigationBookmarkViews(bookmarks);
   const investigationMaterialCount =
     evidenceItems.length +
     findingItems.length +
     proposedFindingItems.length +
+    proposedReportSectionItems.length +
     noteItems.length +
     bookmarkItems.length;
 
@@ -5172,6 +5289,182 @@ export function LogExplorer({ corpusId }: Props) {
       setInvestigationBusy(false);
     }
   };
+
+  // ── Investigation report (#532): lazy assembly + section review ──────────
+  /**
+   * Assemble on demand only — never on rail mount. Also used to refresh an
+   * already-open report after a report-affecting mutation.
+   */
+  const assembleReport = useCallback(() => {
+    // Pin the assembly to the investigation the rail is displaying — never
+    // "whatever is active now", which could silently be a different
+    // investigation created since this one loaded (#532 hardening).
+    const pinned = investigation?.document.id ?? null;
+    if (!pinned) {
+      setReportError("Load the investigation before assembling its report.");
+      return Promise.resolve();
+    }
+    const request = ++reportAssembleRequestRef.current;
+    reportPreviewOpenRef.current = true;
+    // A report tied to an older document/policy/lens must stop being
+    // exportable before its replacement begins assembling.
+    adoptReportPreview(null);
+    setReportBusy(true);
+    setReportError(null);
+    return logAssembleInvestigationReport(
+      corpusId,
+      pinned,
+      currentNoiseLens(lensSuspended),
+    )
+      .then((assembled) => {
+        if (request !== reportAssembleRequestRef.current) {
+          releaseUnadoptedReportPreview(assembled);
+          return;
+        }
+        adoptReportPreview(assembled);
+      })
+      .catch((assembleError) => {
+        if (request !== reportAssembleRequestRef.current) return;
+        adoptReportPreview(null);
+        setReportError(String(assembleError));
+      })
+      .finally(() => {
+        if (request !== reportAssembleRequestRef.current) return;
+        setReportBusy(false);
+      });
+  }, [
+    adoptReportPreview,
+    corpusId,
+    investigation,
+    lensSuspended,
+    releaseUnadoptedReportPreview,
+  ]);
+
+  // Keep an open report pinned to the current investigation, policy and lens.
+  // This is the sole refresh trigger after mutations; individual handlers do
+  // not also assemble, avoiding duplicate retained artifacts.
+  useEffect(() => {
+    if (reportPreviewOpenRef.current) void assembleReport();
+  }, [
+    assembleReport,
+    suppressionDocument?.revision,
+    suppressionLens?.policyRevision,
+    suppressionLens?.templateAnalysisRevision,
+  ]);
+
+  const acceptProposedReportSection = async (input: {
+    proposalId: string;
+    body?: string;
+  }) => {
+    if (!investigation) return;
+    setInvestigationBusy(true);
+    setInvestigationError(null);
+    try {
+      const updated = await logAcceptProposedReportSection(
+        corpusId,
+        investigation.document.id,
+        {
+          proposalId: input.proposalId,
+          expectedRevision: investigation.document.revision,
+          body: input.body ?? null,
+        },
+      );
+      investigationLoadRequestRef.current += 1;
+      invalidateOpenReportPreview();
+      setInvestigation(updated);
+      setStatus(
+        input.body != null
+          ? "Accepted proposed report section with edits · now human controlled"
+          : "Accepted proposed report section · now human controlled",
+      );
+    } catch (err) {
+      setInvestigationError(String(err));
+    } finally {
+      setInvestigationBusy(false);
+    }
+  };
+
+  const dismissProposedReportSection = async (
+    proposalId: string,
+    reason: string,
+  ) => {
+    if (!investigation) return;
+    if (!reason.trim()) {
+      setInvestigationError("Dismiss requires a reason");
+      return;
+    }
+    setInvestigationBusy(true);
+    setInvestigationError(null);
+    try {
+      const updated = await logDismissProposedReportSection(
+        corpusId,
+        investigation.document.id,
+        {
+          proposalId,
+          expectedRevision: investigation.document.revision,
+          reason: reason.trim(),
+        },
+      );
+      investigationLoadRequestRef.current += 1;
+      invalidateOpenReportPreview();
+      setInvestigation(updated);
+      setStatus("Dismissed proposed report section");
+    } catch (err) {
+      setInvestigationError(String(err));
+    } finally {
+      setInvestigationBusy(false);
+    }
+  };
+
+  const openReportSectionEditor = (
+    kind: ReportSectionKindDto,
+    trigger: HTMLButtonElement,
+  ) => {
+    reportSectionTriggerRef.current = trigger;
+    const existing = (investigation?.document.reportSections ?? []).find(
+      (section) => section.kind === kind,
+    );
+    setReportSectionEditor({
+      kind,
+      initialBody: existing?.body ?? null,
+      evidenceIds: existing?.evidenceIds ?? [],
+      findingIds: existing?.findingIds ?? [],
+      noteIds: existing?.noteIds ?? [],
+    });
+  };
+
+  const saveReportSection = async (body: string) => {
+    if (!investigation || !reportSectionEditor) return;
+    setInvestigationBusy(true);
+    setInvestigationError(null);
+    try {
+      const updated = await logSetInvestigationReportSection(
+        corpusId,
+        investigation.document.id,
+        investigation.document.revision,
+        {
+          kind: reportSectionEditor.kind,
+          body,
+          // set is create-or-replace: resend the existing citations so a
+          // body edit never silently drops them.
+          evidenceIds: reportSectionEditor.evidenceIds,
+          findingIds: reportSectionEditor.findingIds,
+          noteIds: reportSectionEditor.noteIds,
+        },
+      );
+      investigationLoadRequestRef.current += 1;
+      invalidateOpenReportPreview();
+      setInvestigation(updated);
+      setReportSectionEditor(null);
+      setStatus("Saved report section");
+      queueMicrotask(() => reportSectionTriggerRef.current?.focus());
+    } catch (err) {
+      setInvestigationError(String(err));
+    } finally {
+      setInvestigationBusy(false);
+    }
+  };
+
   const editEvidenceRefs = editInvestigationItem
     ? editInvestigationItem.item.evidenceIds.flatMap(
         (evidenceId) =>
@@ -7439,11 +7732,15 @@ export function LogExplorer({ corpusId }: Props) {
           items={evidenceItems}
           findings={findingItems}
           proposedFindings={proposedFindingItems}
+          proposedReportSections={proposedReportSectionItems}
           notes={noteItems}
           bookmarks={bookmarkItems}
           preview={evidencePreview}
           viewPreview={findingViewPreview}
           proposalPreview={proposalPreview}
+          reportPreview={reportPreview}
+          reportBusy={reportBusy}
+          reportError={reportError}
           busy={investigationBusy || investigationLoadState === "loading"}
           error={investigationError}
           compactLayout={breakpoint === "narrow"}
@@ -7473,10 +7770,36 @@ export function LogExplorer({ corpusId }: Props) {
           }
           onDismissProposedFinding={(id) => void dismissProposedFinding(id)}
           onPreviewProposedFinding={(item) => previewProposedFinding(item)}
+          onAcceptProposedReportSection={(input) =>
+            void acceptProposedReportSection(input)
+          }
+          onDismissProposedReportSection={(proposalId, reason) =>
+            void dismissProposedReportSection(proposalId, reason)
+          }
+          onOpenReport={() => void assembleReport()}
+          reportUnavailableReason={
+            investigation
+              ? null
+              : "No investigation yet — save evidence from selected rows first"
+          }
+          onEditReportSection={openReportSectionEditor}
+          onExportReport={(trigger) => {
+            reportExportTriggerRef.current = trigger;
+            setReportExportOpen(true);
+          }}
+          onReloadInvestigation={() => void reloadActiveInvestigation()}
           onClearPreview={() => setEvidencePreview(null)}
           onClearViewPreview={() => {
             setFindingViewPreview(null);
             setProposalPreview(null);
+          }}
+          onClearReport={() => {
+            reportAssembleRequestRef.current += 1;
+            reportPreviewOpenRef.current = false;
+            adoptReportPreview(null);
+            setReportBusy(false);
+            setReportError(null);
+            setReportExportOpen(false);
           }}
           onToggleCollapsed={() => setChatCollapsed((collapsed) => !collapsed)}
           onRequestClose={() => {
@@ -7555,6 +7878,26 @@ export function LogExplorer({ corpusId }: Props) {
           triggerRef={investigationEditTriggerRef}
           onSave={(draft) => void saveEditedInvestigationItem(draft)}
           onDismiss={() => setEditInvestigationItem(null)}
+        />
+      ) : null}
+
+      {reportSectionEditor ? (
+        <ReportSectionEditorDialog
+          kind={reportSectionEditor.kind}
+          initialBody={reportSectionEditor.initialBody}
+          busy={investigationBusy}
+          error={investigationError}
+          triggerRef={reportSectionTriggerRef}
+          onSave={(body) => void saveReportSection(body)}
+          onDismiss={() => setReportSectionEditor(null)}
+        />
+      ) : null}
+
+      {reportExportOpen && reportPreview ? (
+        <InvestigationReportExportDialog
+          preview={reportPreview}
+          triggerRef={reportExportTriggerRef}
+          onDismiss={() => setReportExportOpen(false)}
         />
       ) : null}
 

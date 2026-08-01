@@ -13,6 +13,8 @@
 
 mod proposed;
 pub use proposed::*;
+mod report;
+pub use report::*;
 
 use crate::error::{CoreError, CoreResult};
 use crate::log_analysis::bookmarks::canonicalize_exact_event_refs;
@@ -34,7 +36,9 @@ use uuid::{Uuid, Version};
 /// Investigation document schema understood by this build.
 ///
 /// Version 5 adds durable agent/detector [`ProposedFindingItem`] review queue (#646).
-pub const INVESTIGATION_SCHEMA_VERSION: u32 = 5;
+/// Version 6 adds durable authored [`ReportSectionItem`] sections and the
+/// [`ProposedReportSectionItem`] review queue for investigation reports.
+pub const INVESTIGATION_SCHEMA_VERSION: u32 = 6;
 const MIN_INVESTIGATION_SCHEMA_VERSION: u32 = 1;
 /// Maximum durable investigation documents under one store root.
 pub const MAX_INVESTIGATION_DOCUMENTS: usize = 256;
@@ -522,6 +526,17 @@ pub struct InvestigationDocument {
     /// Proposed items never equal accepted findings.
     #[serde(default)]
     pub proposed_findings: Vec<ProposedFindingItem>,
+    /// Durable human-authored report sections (at most one per kind).
+    ///
+    /// Additive; defaults empty so schema versions 1–5 remain readable.
+    #[serde(default)]
+    pub report_sections: Vec<ReportSectionItem>,
+    /// Durable agent/detector proposed report sections awaiting human review.
+    ///
+    /// Additive; defaults empty so schema versions 1–5 remain readable.
+    /// Proposed items never equal authored report sections.
+    #[serde(default)]
+    pub proposed_report_sections: Vec<ProposedReportSectionItem>,
     /// Creation time as Unix seconds.
     pub created_at: i64,
     /// Last update time as Unix seconds.
@@ -620,6 +635,19 @@ pub struct ResolvedInvestigationDocument {
     pub evidence: Vec<ResolvedEvidenceItem>,
     /// Findings with an explicit current-vs-durable policy comparison.
     pub findings: Vec<ResolvedFindingItem>,
+    /// The exact suppression-policy snapshot this resolution was computed
+    /// against — the single capture that produced every finding's
+    /// `policy_binding` status above. Report assembly reuses it so the report
+    /// header can never disagree with those statuses. Process-local only,
+    /// never serialized across the IPC boundary.
+    #[serde(skip)]
+    pub resolution_policy: Option<SuppressionPolicyBindingSnapshot>,
+    /// The exact caller-selected noise lens used to resolve every finding's
+    /// policy binding. Process-local only; report assembly projects it next to
+    /// `resolution_policy` so the two cannot be mistaken for a lens-agnostic
+    /// policy identity.
+    #[serde(skip)]
+    pub resolution_noise_lens: Option<InvestigationNoiseLens>,
 }
 
 /// One durable finding plus its machine-readable current policy relationship.
@@ -699,6 +727,8 @@ impl InvestigationStore {
                         evidence: Vec::new(),
                         findings: Vec::new(),
                         proposed_findings: Vec::new(),
+                        report_sections: Vec::new(),
+                        proposed_report_sections: Vec::new(),
                         notes: Vec::new(),
                         created_at: now,
                         updated_at: now,
@@ -2393,6 +2423,13 @@ fn validate_document(
             "investigation schema versions 1 through 4 cannot contain proposed findings".into(),
         ));
     }
+    if document.schema_version < 6
+        && (!document.report_sections.is_empty() || !document.proposed_report_sections.is_empty())
+    {
+        return Err(CoreError::Message(
+            "investigation schema versions 1 through 5 cannot contain report sections".into(),
+        ));
+    }
     if document.proposed_findings.len() > MAX_PROPOSED_FINDINGS {
         return Err(CoreError::Message(format!(
             "investigation exceeds {MAX_PROPOSED_FINDINGS} proposed findings"
@@ -2568,6 +2605,8 @@ fn validate_document(
             validate_citation_ids("note finding", citations, &finding_ids)?;
         }
     }
+
+    validate_stored_report_collections(document, &evidence_ids, &finding_ids, &note_ids)?;
     Ok(())
 }
 
@@ -2742,6 +2781,8 @@ fn resolve_document_with_policy_lens(
         document,
         evidence,
         findings,
+        resolution_policy: Some(current_policy),
+        resolution_noise_lens: current_noise_lens,
     })
 }
 
@@ -3018,9 +3059,9 @@ mod tests {
         SuppressionRuleOrigin, TemplateInfo, TemplateRow, TimeQuality, TimestampProvenance,
     };
 
-    const PAYLOAD_SENTINEL: &str = "INVESTIGATION_PAYLOAD_SENTINEL_MUST_NOT_PERSIST";
+    pub(super) const PAYLOAD_SENTINEL: &str = "INVESTIGATION_PAYLOAD_SENTINEL_MUST_NOT_PERSIST";
 
-    fn evidence_corpus(cache: &tempfile::TempDir) -> LogCorpus {
+    pub(super) fn evidence_corpus(cache: &tempfile::TempDir) -> LogCorpus {
         let corpus = LogCorpus::create(cache.path(), "investigation evidence").unwrap();
         corpus
             .push_events(&[
@@ -3075,7 +3116,12 @@ mod tests {
         corpus
     }
 
-    fn event_ref(corpus: &LogCorpus, seq: u64, source: &str, ts: i64) -> BookmarkEventRef {
+    pub(super) fn event_ref(
+        corpus: &LogCorpus,
+        seq: u64,
+        source: &str,
+        ts: i64,
+    ) -> BookmarkEventRef {
         BookmarkEventRef {
             corpus_id: corpus.id().to_string(),
             seq,
@@ -3085,14 +3131,14 @@ mod tests {
         }
     }
 
-    fn selected_refs(corpus: &LogCorpus) -> Vec<BookmarkEventRef> {
+    pub(super) fn selected_refs(corpus: &LogCorpus) -> Vec<BookmarkEventRef> {
         vec![
             event_ref(corpus, 12, "worker/worker.log", 1_700_000_012),
             event_ref(corpus, 10, "api/app.log", 1_700_000_010),
         ]
     }
 
-    fn finding_input(corpus: &LogCorpus) -> AddFindingInput {
+    pub(super) fn finding_input(corpus: &LogCorpus) -> AddFindingInput {
         AddFindingInput {
             kind: FindingKind::Observation,
             title: "Failure boundary".into(),
@@ -3154,7 +3200,11 @@ mod tests {
         }
     }
 
-    fn note_input(corpus: &LogCorpus, finding_ids: Vec<String>, title: &str) -> AddNoteInput {
+    pub(super) fn note_input(
+        corpus: &LogCorpus,
+        finding_ids: Vec<String>,
+        title: &str,
+    ) -> AddNoteInput {
         AddNoteInput {
             title: title.into(),
             body: "Follow up with the service owner.".into(),
@@ -3163,7 +3213,7 @@ mod tests {
         }
     }
 
-    fn publish_policy_preview(corpus: &LogCorpus) -> u64 {
+    pub(super) fn publish_policy_preview(corpus: &LogCorpus) -> u64 {
         corpus
             .upsert_templates([TemplateRow {
                 info: TemplateInfo {

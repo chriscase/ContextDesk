@@ -2947,7 +2947,7 @@ export type InvestigationPolicyBindingDto = {
   suppressionPolicyRevision: number;
   resolvedTemplateRevision: number;
   effectivePolicySha256: string;
-  noiseLens: InvestigationNoiseLens;
+  noiseLens: InvestigationNoiseLens | null;
 };
 
 export type InvestigationPolicyBindingStatus =
@@ -3043,6 +3043,55 @@ export type ProposedFindingItemDto = {
   updatedAt: number;
 };
 
+/** Authorable report section kind (#532); other sections are derived-only. */
+export type ReportSectionKindDto =
+  | "executive_summary"
+  | "unresolved_questions"
+  | "next_actions";
+
+/** Privacy-safe proposal provenance (shared by proposal families). */
+export type ProposalProvenanceDto = {
+  source: "model" | "detector" | "internal";
+  provider?: string | null;
+  modelId?: string | null;
+  runId?: string | null;
+  toolName: string;
+  detectorId?: string | null;
+};
+
+/** Durable human-authored report section — at most one per kind (#532). */
+export type InvestigationReportSectionItemDto = {
+  id: string;
+  kind: ReportSectionKindDto;
+  body: string;
+  evidenceIds?: string[];
+  findingIds?: string[];
+  noteIds?: string[];
+  provenance: "human";
+  acceptedFromProposalId?: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+/** Durable proposed report section awaiting human review (#532). */
+export type ProposedReportSectionItemDto = {
+  id: string;
+  status: ProposedFindingStatusDto;
+  kind: ReportSectionKindDto;
+  body: string;
+  evidenceIds?: string[];
+  findingIds?: string[];
+  noteIds?: string[];
+  corpusId: string;
+  investigationId: string;
+  provenance: ProposalProvenanceDto;
+  idempotencyKey: string;
+  acceptance?: { acceptedAt: number; edited: boolean } | null;
+  dismissReason?: string | null;
+  acceptedSectionId?: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
 
 export type InvestigationDocumentDto = {
   schemaVersion: number;
@@ -3056,6 +3105,10 @@ export type InvestigationDocumentDto = {
   notes?: InvestigationNoteItemDto[];
   /** Agent/detector proposals awaiting review (#646). */
   proposedFindings?: ProposedFindingItemDto[];
+  /** Durable authored report sections, at most one per kind (#532). */
+  reportSections?: InvestigationReportSectionItemDto[];
+  /** Agent/detector report-section proposals awaiting review (#532). */
+  proposedReportSections?: ProposedReportSectionItemDto[];
   createdAt: number;
   updatedAt: number;
 };
@@ -3810,6 +3863,251 @@ export async function hostLogDismissProposedFinding(
     "log_dismiss_proposed_finding",
     { corpusId, investigationId, input },
   );
+}
+
+// ── Investigation report projection + export (#532) ─────────────────────────
+
+/** Current-policy identity the host captured at assembly time (#532). */
+export type InvestigationReportCurrentPolicyDto = {
+  suppressionPolicyRevision: number;
+  resolvedTemplateRevision: number;
+  effectivePolicySha256: string;
+  noiseLens: InvestigationNoiseLens;
+};
+
+/** Honest evidence time window derived only from durable exact refs. */
+export type InvestigationReportTimeWindowDto = {
+  minTimestampHint: number;
+  maxTimestampHint: number;
+  mixedQuality: boolean;
+};
+
+export type InvestigationReportScopeDto = {
+  corpusIds: string[];
+  evidenceCount: number;
+  findingCount: number;
+  noteCount: number;
+  timeWindow?: InvestigationReportTimeWindowDto | null;
+};
+
+/** One authored section carried into the projection. */
+export type InvestigationReportAuthoredSectionDto = {
+  sectionId: string;
+  body: string;
+  evidenceIds: string[];
+  findingIds: string[];
+  noteIds: string[];
+  acceptedFromProposalId?: string | null;
+  acceptedProposalProvenance?: ProposalProvenanceDto | null;
+  acceptedProposalAcceptance?: {
+    acceptedAt: number;
+    edited: boolean;
+  } | null;
+  updatedAt: number;
+};
+
+/** Authored sections in fixed order; absent slots render "Not authored". */
+export type InvestigationReportSectionsDto = {
+  executiveSummary?: InvestigationReportAuthoredSectionDto | null;
+  unresolvedQuestions?: InvestigationReportAuthoredSectionDto | null;
+  nextActions?: InvestigationReportAuthoredSectionDto | null;
+};
+
+/** One exact event identity plus its current resolution status. */
+export type InvestigationReportEventReferenceDto = {
+  corpusId: string;
+  seq: number;
+  source: string;
+  timestampHint: number;
+  timeQualityHint: TimeQuality;
+  status: "verified" | "missing" | "stale";
+};
+
+export type InvestigationReportFindingCitationDto = {
+  evidenceId: string;
+  evidenceTitle: string;
+  references: InvestigationReportEventReferenceDto[];
+};
+
+export type InvestigationReportFindingEntryDto = {
+  findingId: string;
+  kind: InvestigationFindingKind;
+  lifecycle: InvestigationFindingLifecycle;
+  title: string;
+  whyItMatters: string;
+  policyBindingStatus: InvestigationPolicyBindingStatus;
+  hasSavedView: boolean;
+  citations: InvestigationReportFindingCitationDto[];
+  createdAt: number;
+};
+
+export type InvestigationReportTimelineEntryDto = {
+  corpusId: string;
+  seq: number;
+  source: string;
+  timestampHint: number;
+  timeQualityHint: TimeQuality;
+  evidenceId: string;
+  evidenceTitle: string;
+  status: "verified" | "missing" | "stale";
+};
+
+/** Bounded evidence-backed timeline with an explicit omitted count. */
+export type InvestigationReportTimelineDto = {
+  entries: InvestigationReportTimelineEntryDto[];
+  omittedCount: number;
+};
+
+/**
+ * Versioned, payload-free report projection (#532). Proposals never appear in
+ * this projection; only accepted state is reported.
+ */
+export type InvestigationReportDto = {
+  schemaVersion: number;
+  investigationId: string;
+  title: string;
+  status: "active" | "archived";
+  sourceRevision: number;
+  generatedAt: number;
+  currentPolicy?: InvestigationReportCurrentPolicyDto | null;
+  scope: InvestigationReportScopeDto;
+  sections: InvestigationReportSectionsDto;
+  findings: InvestigationReportFindingEntryDto[];
+  timeline: InvestigationReportTimelineDto;
+};
+
+/**
+ * Host-assembled report preview: typed projection + rendered markdown + the
+ * retained export artifact for exactly these bytes. One assembly drives the
+ * surface, the exact markdown preview, and Export — `exportId` names the
+ * host-retained copy of `markdown`; when the render cannot pass the export
+ * boundary, `exportUnavailableReason` says why Export is off while the
+ * preview still shows.
+ */
+export type LogInvestigationReportPreviewDto = {
+  report: InvestigationReportDto;
+  markdown: string;
+  exportId: string | null;
+  exportBytes: number | null;
+  exportUnavailableReason: string | null;
+};
+
+/**
+ * Assemble + render the report for the active (or given) Investigation.
+ * Strictly non-mutating: preview only, current Explorer unchanged.
+ */
+export async function hostLogAssembleInvestigationReport(
+  corpusId: string,
+  investigationId?: string | null,
+  noiseLens: InvestigationNoiseLens = "active",
+): Promise<LogInvestigationReportPreviewDto> {
+  if (!isTauri()) {
+    throw new Error("Investigation reports require Tauri host");
+  }
+  return invoke<LogInvestigationReportPreviewDto>(
+    "log_assemble_investigation_report",
+    { corpusId, investigationId: investigationId ?? null, noiseLens },
+  );
+}
+
+/** Create or replace the authored report section for one kind (#532). */
+export async function hostLogSetInvestigationReportSection(
+  corpusId: string,
+  investigationId: string,
+  expectedRevision: number,
+  input: {
+    kind: ReportSectionKindDto;
+    body: string;
+    evidenceIds?: string[];
+    findingIds?: string[];
+    noteIds?: string[];
+  },
+): Promise<ResolvedInvestigationDocumentDto> {
+  if (!isTauri()) {
+    throw new Error("Investigation report sections require Tauri host");
+  }
+  return invoke<ResolvedInvestigationDocumentDto>(
+    "log_set_investigation_report_section",
+    {
+      corpusId,
+      investigationId,
+      expectedRevision,
+      input: {
+        kind: input.kind,
+        body: input.body,
+        evidenceIds: input.evidenceIds ?? [],
+        findingIds: input.findingIds ?? [],
+        noteIds: input.noteIds ?? [],
+      },
+    },
+  );
+}
+
+/** Human Accept or Edit-and-accept of a Proposed report section (#532). */
+export async function hostLogAcceptProposedReportSection(
+  corpusId: string,
+  investigationId: string,
+  input: {
+    proposalId: string;
+    expectedRevision: number;
+    /**
+     * Replacement body for Edit-and-accept. Whether the acceptance counts as
+     * an edit is host-derived from the durable body actually differing — the
+     * renderer makes no claim.
+     */
+    body?: string | null;
+  },
+): Promise<ResolvedInvestigationDocumentDto> {
+  if (!isTauri()) {
+    throw new Error("Accept proposed report section requires Tauri host");
+  }
+  return invoke<ResolvedInvestigationDocumentDto>(
+    "log_accept_proposed_report_section",
+    { corpusId, investigationId, input },
+  );
+}
+
+/** Human Dismiss-with-reason of a Proposed report section (#532). */
+export async function hostLogDismissProposedReportSection(
+  corpusId: string,
+  investigationId: string,
+  input: { proposalId: string; expectedRevision: number; reason: string },
+): Promise<ResolvedInvestigationDocumentDto> {
+  if (!isTauri()) {
+    throw new Error("Dismiss proposed report section requires Tauri host");
+  }
+  return invoke<ResolvedInvestigationDocumentDto>(
+    "log_dismiss_proposed_report_section",
+    { corpusId, investigationId, input },
+  );
+}
+
+/**
+ * Ask the trusted host to select a destination (native Save panel) and
+ * atomically write the exact previewed bytes. No renderer path authority.
+ */
+export async function hostLogSaveInvestigationReportExport(
+  reportId: string,
+): Promise<LogDiagnosticSaveStatus> {
+  if (!isTauri()) {
+    throw new Error("Investigation report export requires Tauri host");
+  }
+  return invoke<LogDiagnosticSaveStatus>(
+    "log_save_investigation_report_export",
+    { request: { reportId } },
+  );
+}
+
+/** Release one superseded process-local report export preview. */
+export async function hostLogReleaseInvestigationReportExport(
+  reportId: string,
+): Promise<boolean> {
+  if (!isTauri()) {
+    throw new Error("Investigation report export requires Tauri host");
+  }
+  return invoke<boolean>("log_release_investigation_report_export", {
+    request: { reportId },
+  });
 }
 
 export async function hostListChatSessionsForCorpus(

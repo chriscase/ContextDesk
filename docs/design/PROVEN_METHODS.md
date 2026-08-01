@@ -91,7 +91,7 @@ flowchart LR
     E["Model synthesis<br/>evidence only"]
     F["Human investigation<br/>evidence · findings · notes"]
     G["Reversible views<br/>preview · apply · restore"]
-    H["Report / handoff<br/>planned fuller workflow"]
+    H["Report / handoff<br/>accepted-state projection + export"]
 
     A --> B --> C --> D --> E
     D --> F
@@ -105,7 +105,7 @@ flowchart LR
 | Deterministic context assembly | What evidence is eligible, bounded, and safe to give a model?                          | **Partial**: linked-log isolation, one explicit main-chat corpus attachment, bounded reversible model-picker curation, phase-aware deadlines, and evidence-preserving synthesis retry ship; multi-corpus remains #693 and native slow-provider acceptance remains #649 | [Deterministic context assembly](proven-methods/DETERMINISTIC_CONTEXT_ASSEMBLY.md) |
 | Log evidence pipeline          | How do raw records become honest, searchable, scalable evidence?                       | **Partial**: inventory-bound reviewed import, bounded logical-record framing, deterministic grammar fingerprints, explainable noise review, and a host-authoritative exact-template lens ship; custom format profiles, full timestamp policy, broader suppression lifecycle, and cross-corpus baselines remain #751/#670/#671/#690 | [Log evidence pipeline](proven-methods/LOG_EVIDENCE_PIPELINE.md)                   |
 | Operational metric alignment   | How can unlike time-series signals share log time without implying comparable values?  | **Partial**: schema, shared host validation, bounded renderer, fixtures, durable one-per-corpus attachment, restore/replace/remove, and seek ship; incident-bundle/multiple attachment import and responsive docking remain #763/#667/#707 | [Operational metric tracks](OPERATIONAL_METRIC_TRACKS.md)                         |
-| Investigation loop             | How does an engineer preserve, revisit, and act on discoveries without losing control? | **Partial**: manual evidence/findings/notes and view recipes have production anchors; proposal history and reports remain #646/#532 | [Investigation loop](proven-methods/INVESTIGATION_LOOP.md)                         |
+| Investigation loop             | How does an engineer preserve, revisit, and act on discoveries without losing control? | **Partial**: manual evidence/findings/notes, view recipes, the SoftWrite proposal review queue (findings + report sections), and the versioned accepted-state report projection with deterministic Markdown export have production anchors; proposal ranking/walkthroughs and the fuller #532 report workflow (richer sections, patches/undo, claim detection, HTML/PDF, evidence appendix) remain #646/#532 | [Investigation loop](proven-methods/INVESTIGATION_LOOP.md)                         |
 | Deterministic demo and model evaluation | How can product behavior and provider/model grounding be compared without leaking the answer key? | **Partial**: deterministic fixtures, production evaluation paths, and the bundled/exportable lab chapter ship; live provider quality remains environment-dependent | [Demo and model evaluation lab](proven-methods/DEMO_EVALUATION_LAB.md) |
 | Incident evidence interchange | How can authorized logs and metrics move from a producer into a validated, versioned hand-off? | **Partial**: v1 normative schema, fixtures, offline directory/ZIP validation, deterministic ZIP packing, producer templates, and Help ship (#764/#765); product import/attachment remains #763 | [Incident Evidence Bundle](proven-methods/INCIDENT_EVIDENCE_BUNDLE.md) |
 | Bundled Help truth and delivery | How does shipped in-app documentation stay checkably true instead of silently rotting? | **Partial**: structural validation, bidirectional link/anchor resolution, whole-asset-set safety and theme-independent legibility, packaging assertion, and offline delivery ship; corpus prose accuracy, contextual-Help coverage, and rendered diagram quality remain human review | [Bundled Help truth and delivery](proven-methods/HELP_TRUTH_AND_DELIVERY.md) |
@@ -236,7 +236,10 @@ This first version intentionally leaves several chapters for follow-up:
 - package/import safety and compatibility evolution;
 - provider-specific native acceptance for the phase-aware lifecycle on #649;
 - timestamp policy after the remaining #670 work ships;
-- report/export and proposal lifecycle after #646/#532; and
+- the remaining report/proposal workflow after #646/#532 (ranking,
+  walkthroughs, report patches, richer section vocabulary, HTML/PDF export);
+  the accepted-state report projection, Markdown export, and the
+  propose/accept/dismiss queue themselves ship; and
 - future chapters and diagrams for the remaining methods as their contracts and
   production evidence become stable enough to document without speculation.
 

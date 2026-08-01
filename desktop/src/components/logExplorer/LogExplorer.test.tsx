@@ -222,6 +222,14 @@ vi.mock("../../lib/host", () => ({
   hostLogApplyInvestigationFindingView: vi.fn(),
   hostLogAcceptProposedFinding: vi.fn(),
   hostLogDismissProposedFinding: vi.fn(),
+  // Referenced by lib/engine/investigationReports delegation exports (#532).
+  hostListLogCorpora: vi.fn(async () => []),
+  hostLogAssembleInvestigationReport: vi.fn(),
+  hostLogSetInvestigationReportSection: vi.fn(),
+  hostLogAcceptProposedReportSection: vi.fn(),
+  hostLogDismissProposedReportSection: vi.fn(),
+  hostLogSaveInvestigationReportExport: vi.fn(),
+  hostLogReleaseInvestigationReportExport: vi.fn(async () => true),
   hostPrepareLogDiagnosticReport: vi.fn(async (manifest) => {
     const actual = await vi.importActual<
       typeof import("../../lib/logDiagnosticReport")
@@ -404,6 +412,46 @@ function deferred<T>() {
     resolve = resolvePromise;
   });
   return { promise, resolve };
+}
+
+function reportPreview(
+  exportId: string,
+  noiseLens: host.InvestigationNoiseLens = "active",
+): host.LogInvestigationReportPreviewDto {
+  return {
+    report: {
+      schemaVersion: 1,
+      investigationId: "019fa8d0-0000-7000-8000-000000000001",
+      title: "Investigation · fixture",
+      status: "active",
+      sourceRevision: 2,
+      generatedAt: 1_700_000_400,
+      currentPolicy: {
+        suppressionPolicyRevision: 0,
+        resolvedTemplateRevision: 0,
+        effectivePolicySha256: "abc123",
+        noiseLens,
+      },
+      scope: {
+        corpusIds: ["c1"],
+        evidenceCount: 1,
+        findingCount: 0,
+        noteCount: 0,
+        timeWindow: null,
+      },
+      sections: {
+        executiveSummary: null,
+        unresolvedQuestions: null,
+        nextActions: null,
+      },
+      findings: [],
+      timeline: { entries: [], omittedCount: 0 },
+    },
+    markdown: "# report\n",
+    exportId,
+    exportBytes: 9,
+    exportUnavailableReason: null,
+  };
 }
 
 const exactCountByQuery = new Map<string, number>();
@@ -2062,6 +2110,101 @@ describe("LogExplorer shell", () => {
       ).toHaveLength(0);
     });
     expect(screen.getByText("None yet — select rows + B")).toBeTruthy();
+  });
+
+  it("releases a report artifact that arrives after Back closed its in-flight preview", async () => {
+    const event = defaultEventPage().events[0]!;
+    const item: host.InvestigationEvidenceItemDto = {
+      id: "019fa8d0-1111-7000-8000-000000000001",
+      title: "Pinned evidence",
+      provenance: "human",
+      corpusId: "c1",
+      eventRefs: [
+        {
+          corpusId: "c1",
+          seq: event.seq,
+          source: event.source,
+          timestampHint: event.ts,
+          timeQualityHint: event.timeQuality,
+        },
+      ],
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(
+      resolvedInvestigation(item, event),
+    );
+    const pending = deferred<host.LogInvestigationReportPreviewDto>();
+    vi.mocked(host.hostLogAssembleInvestigationReport).mockReturnValueOnce(
+      pending.promise,
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    await openInvestigationView(1);
+    fireEvent.click(screen.getByTestId("open-report"));
+    await waitFor(() =>
+      expect(host.hostLogAssembleInvestigationReport).toHaveBeenCalledTimes(1),
+    );
+    fireEvent.click(within(screen.getByTestId("report-detail")).getByText("Back"));
+
+    await act(async () => {
+      pending.resolve(reportPreview("late-after-back"));
+      await pending.promise;
+    });
+    await waitFor(() =>
+      expect(host.hostLogReleaseInvestigationReportExport).toHaveBeenCalledWith(
+        "late-after-back",
+      ),
+    );
+    expect(screen.queryByTestId("report-detail")).toBeNull();
+  });
+
+  it("invalidates report assembly on unmount and releases its late artifact", async () => {
+    const event = defaultEventPage().events[0]!;
+    const item: host.InvestigationEvidenceItemDto = {
+      id: "019fa8d0-1111-7000-8000-000000000002",
+      title: "Unmount evidence",
+      provenance: "human",
+      corpusId: "c1",
+      eventRefs: [
+        {
+          corpusId: "c1",
+          seq: event.seq,
+          source: event.source,
+          timestampHint: event.ts,
+          timeQualityHint: event.timeQuality,
+        },
+      ],
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(
+      resolvedInvestigation(item, event),
+    );
+    const pending = deferred<host.LogInvestigationReportPreviewDto>();
+    vi.mocked(host.hostLogAssembleInvestigationReport).mockReturnValueOnce(
+      pending.promise,
+    );
+
+    const view = render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    await openInvestigationView(1);
+    fireEvent.click(screen.getByTestId("open-report"));
+    await waitFor(() =>
+      expect(host.hostLogAssembleInvestigationReport).toHaveBeenCalledTimes(1),
+    );
+    view.unmount();
+
+    await act(async () => {
+      pending.resolve(reportPreview("late-after-explorer-unmount"));
+      await pending.promise;
+    });
+    await waitFor(() =>
+      expect(host.hostLogReleaseInvestigationReportExport).toHaveBeenCalledWith(
+        "late-after-explorer-unmount",
+      ),
+    );
   });
 
   it("keeps metadata scoped to the latest corpus without rewriting host activation", async () => {
@@ -5719,6 +5862,14 @@ describe("LogExplorer shell", () => {
     vi.mocked(host.hostLogRecomputeInvestigationFindingView).mockResolvedValue(
       recomputed,
     );
+    let reportArtifact = 0;
+    vi.mocked(host.hostLogAssembleInvestigationReport).mockImplementation(
+      async (_corpusId, _investigationId, noiseLens) =>
+        reportPreview(
+          `policy-${noiseLens}-${reportArtifact++}`,
+          noiseLens,
+        ),
+    );
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByText("auth failure");
@@ -5727,6 +5878,12 @@ describe("LogExplorer shell", () => {
       expect(host.hostLogLoadActiveInvestigation).toHaveBeenCalledWith(
         "c1",
         "active",
+      ),
+    );
+    fireEvent.click(screen.getByTestId("open-report"));
+    await waitFor(() =>
+      expect(screen.getByTestId("report-current-policy").textContent).toContain(
+        "active lens",
       ),
     );
 
@@ -5739,6 +5896,21 @@ describe("LogExplorer shell", () => {
         "suspended",
       ),
     );
+    await waitFor(() =>
+      expect(host.hostLogAssembleInvestigationReport).toHaveBeenCalledWith(
+        "c1",
+        loaded.document.id,
+        "suspended",
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("report-current-policy").textContent).toContain(
+        "suspended lens",
+      ),
+    );
+    expect(host.hostLogReleaseInvestigationReportExport).toHaveBeenCalledWith(
+      "policy-active-0",
+    );
 
     // Resume while the policy panel is still open (do not toggle it closed).
     fireEvent.click(await screen.findByTestId("noise-lens-resume"));
@@ -5750,6 +5922,10 @@ describe("LogExplorer shell", () => {
       // Initial load + resume reload (at least two active loads).
       expect(activeAfterSuspend.length).toBeGreaterThanOrEqual(2);
     });
+
+    fireEvent.click(
+      within(screen.getByTestId("report-detail")).getByText("Back"),
+    );
 
     fireEvent.click(await screen.findByTestId(`finding-item-${finding.id}`));
     expect(

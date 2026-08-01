@@ -1,0 +1,393 @@
+/* Investigation report surface + Investigations pane (#532).
+   Rendered inside the Log Explorer rail AND the main-window pane, so
+   everything is tokens-only (no raw hex) and width comes from the container.
+   Reference statuses always pair color with text + symbol markers. */
+
+.investigation-report {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.investigation-report__header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.investigation-report__title {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.investigation-report__meta {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.investigation-report__header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.investigation-report__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border-soft);
+  min-width: 0;
+}
+
+.investigation-report__section:last-child {
+  border-bottom: none;
+}
+
+.investigation-report__section-label {
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.investigation-report__body {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.investigation-report__not-authored {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-style: italic;
+  color: var(--text-muted);
+}
+
+.investigation-report__finding {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  min-width: 0;
+}
+
+.investigation-report__finding-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.investigation-report__kicker {
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.investigation-report__policy {
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+}
+
+.investigation-report__finding-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.investigation-report__citations {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.investigation-report__citation {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 100%;
+}
+
+.investigation-report__citation-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 14rem;
+}
+
+.investigation-report__ref-status {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  white-space: nowrap;
+}
+
+.investigation-report__ref-status--verified {
+  color: var(--success);
+}
+
+.investigation-report__ref-status--missing {
+  color: var(--danger);
+}
+
+.investigation-report__ref-status--stale {
+  color: var(--warning);
+}
+
+.investigation-report__timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.investigation-report__timeline-entry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text);
+  border-left: 2px solid var(--border-soft);
+  padding-left: var(--space-2);
+}
+
+.investigation-report__timeline-time {
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.investigation-report__timeline-identity {
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+}
+
+.investigation-report__timeline-evidence {
+  overflow-wrap: anywhere;
+}
+
+/* Exact export preview — host-rendered bytes in a scrollable well. The wide
+   content scrolls inside its own container; the page never scrolls sideways. */
+.investigation-report__markdown {
+  margin: 0;
+  padding: var(--space-2);
+  max-height: 20rem;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg-input);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  white-space: pre;
+}
+
+.investigation-report__proposal-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.investigation-report__export-dialog {
+  max-width: 44rem;
+}
+
+/* ——— Investigations pane (main window) ——— */
+
+.investigations-pane {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.investigations-pane__note {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.investigations-pane__error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  color: var(--danger);
+  font-size: var(--text-xs);
+}
+
+.investigations-pane__split {
+  display: grid;
+  grid-template-columns: minmax(12rem, 15rem) minmax(0, 1fr);
+  gap: var(--space-3);
+  flex: 1;
+  min-height: 0;
+}
+
+.investigations-pane__corpora {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.investigations-pane__corpus-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.investigations-pane__corpus {
+  width: 100%;
+}
+
+.investigations-pane__main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.investigations-pane__summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.investigations-pane__summary .muted {
+  font-weight: 400;
+  font-size: var(--text-xs);
+}
+
+.investigations-pane__rail-label {
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* Normal: report + review side by side. The report column caps at the shared
+   reading measure so an ultrawide workspace never crams one long line. */
+.investigations-pane__content {
+  display: grid;
+  grid-template-columns: minmax(0, var(--chat-measure)) minmax(16rem, 22rem);
+  gap: var(--space-4);
+  align-items: start;
+  min-width: 0;
+}
+
+.investigations-pane__report-column {
+  min-width: 0;
+  max-width: var(--chat-measure);
+}
+
+.investigations-pane__review {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.investigations-pane__evidence-preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.investigations-pane__evidence-refs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+}
+
+.investigations-pane__evidence-identity {
+  display: block;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+}
+
+.investigations-pane__evidence-message {
+  display: block;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+/* Narrow container: everything stacks; the corpus rail becomes a row strip. */
+.investigations-pane[data-breakpoint="narrow"] .investigations-pane__split {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.investigations-pane[data-breakpoint="narrow"]
+  .investigations-pane__corpora {
+  /* The stacked layout must keep the corpus strip at its natural height:
+     the base rule's min-height: 0 + default shrink collapse it to a 0-height
+     box whose overflowing cards paint over the report summary. */
+  flex-shrink: 0;
+  min-height: auto;
+  overflow-y: visible;
+}
+
+.investigations-pane[data-breakpoint="narrow"]
+  .investigations-pane__corpus-list {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+
+.investigations-pane[data-breakpoint="narrow"]
+  .investigations-pane__corpus-list
+  > li {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.investigations-pane[data-breakpoint="narrow"] .investigations-pane__main {
+  overflow-y: visible;
+  min-height: auto;
+}
+
+.investigations-pane[data-breakpoint="narrow"]
+  .investigations-pane__content {
+  display: flex;
+  flex-direction: column;
+}

@@ -145,6 +145,7 @@ export function useShellState() {
       p === "chat" ||
       p === "archive" ||
       p === "logs" ||
+      p === "investigations" ||
       p === "harvest" ||
       p === "help"
     ) {

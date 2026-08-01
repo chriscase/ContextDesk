@@ -230,8 +230,106 @@
       "whyItMatters": "Human review can promote this bounded model proposal."
     }
   ],
+  "proposedReportSections": [
+    {
+      "body": "Why did the pool not recover after the restart completed?",
+      "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+      "createdAt": 1735992500,
+      "id": "0199bbbb-6666-7000-8000-000000000001",
+      "idempotencyKey": "contract-report-proposal-1",
+      "investigationId": "0199bbbb-0000-7000-8000-000000000001",
+      "kind": "unresolved_questions",
+      "provenance": {
+        "modelId": "local-investigator",
+        "provider": "openai_compatible",
+        "runId": "run-contract-2",
+        "source": "model",
+        "toolName": "propose_report_section"
+      },
+      "status": "proposed",
+      "updatedAt": 1735992500
+    },
+    {
+      "acceptance": {
+        "acceptedAt": 1735992360,
+        "edited": true
+      },
+      "acceptedSectionId": "0199bbbb-5555-7000-8000-000000000001",
+      "body": "Checkout cascade traced to the db-7 restart.",
+      "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+      "createdAt": 1735992310,
+      "evidenceIds": [
+        "0199bbbb-1111-7000-8000-000000000001"
+      ],
+      "findingIds": [
+        "0199bbbb-2222-7000-8000-000000000002"
+      ],
+      "id": "0199bbbb-6666-7000-8000-000000000002",
+      "idempotencyKey": "contract-report-proposal-2",
+      "investigationId": "0199bbbb-0000-7000-8000-000000000001",
+      "kind": "executive_summary",
+      "noteIds": [
+        "0199bbbb-3333-7000-8000-000000000001"
+      ],
+      "provenance": {
+        "detectorId": "report-detector-v1",
+        "runId": "run-contract-3",
+        "source": "detector",
+        "toolName": "propose_report_section"
+      },
+      "status": "accepted",
+      "updatedAt": 1735992360
+    },
+    {
+      "body": "Restart db-7 weekly as a precaution.",
+      "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+      "createdAt": 1735992520,
+      "dismissReason": "Scheduled restarts mask the defect instead of fixing it.",
+      "id": "0199bbbb-6666-7000-8000-000000000003",
+      "idempotencyKey": "contract-report-proposal-3",
+      "investigationId": "0199bbbb-0000-7000-8000-000000000001",
+      "kind": "next_actions",
+      "provenance": {
+        "modelId": "local-investigator",
+        "provider": "openai_compatible",
+        "runId": "run-contract-4",
+        "source": "model",
+        "toolName": "propose_report_section"
+      },
+      "status": "dismissed",
+      "updatedAt": 1735992540
+    }
+  ],
+  "reportSections": [
+    {
+      "acceptedFromProposalId": "0199bbbb-6666-7000-8000-000000000002",
+      "body": "Checkout cascade traced to the db-7 restart; mitigation verified.",
+      "createdAt": 1735992300,
+      "evidenceIds": [
+        "0199bbbb-1111-7000-8000-000000000001"
+      ],
+      "findingIds": [
+        "0199bbbb-2222-7000-8000-000000000001"
+      ],
+      "id": "0199bbbb-5555-7000-8000-000000000001",
+      "kind": "executive_summary",
+      "noteIds": [
+        "0199bbbb-3333-7000-8000-000000000001"
+      ],
+      "provenance": "human",
+      "updatedAt": 1735992360
+    },
+    {
+      "body": "Add pool saturation alarms; document the restart runbook.",
+      "createdAt": 1735992400,
+      "id": "0199bbbb-5555-7000-8000-000000000002",
+      "kind": "next_actions",
+      "provenance": "human",
+      "updatedAt": 1735992400
+    }
+  ],
   "revision": 5,
-  "schemaVersion": 5,
+  "schemaVersion": 6,
   "status": "active",
   "title": "checkout-cascade",
   "updatedAt": 1735992100
