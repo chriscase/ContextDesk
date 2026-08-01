@@ -1,0 +1,5 @@
+"2025-06-15 12:10:00.100 UTC","app_user","appdb","5001","192.0.2.15:54321","684e7b10.1389","1","idle","2025-06-15 12:09:00 UTC","3/17",,"LOG","00000","connection authorized: user=app_user database=appdb",,,,,,,,,"worker","client backend",,
+"2025-06-15 12:10:05.250 UTC","app_user","appdb","5001","192.0.2.15:54321","684e7b10.1389","2","INSERT","2025-06-15 12:09:00 UTC","3/18",,"ERROR","23505","duplicate key value violates unique constraint ""orders_pkey""","Key (id)=(42) already exists.",,,,,"INSERT INTO orders (id, label)
+VALUES (42, 'demo')
+RETURNING id","1",,"worker","client backend",,
+"2025-06-15 12:10:09.900 UTC","app_user","appdb","5001","192.0.2.15:54321","684e7b10.1389","3","SELECT","2025-06-15 12:09:00 UTC","3/19",,"WARNING","01000","there is no transaction in progress",,,,,,,,,"worker","client backend",,

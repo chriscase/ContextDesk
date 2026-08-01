@@ -1,0 +1,6 @@
+{"id":"sev-trace","ts":"2025-06-15T12:40:00Z","level":"TRACE","message":"trace level"}
+{"id":"sev-notice","ts":"2025-06-15T12:40:01Z","level":"NOTICE","message":"notice level"}
+{"id":"sev-critical","ts":"2025-06-15T12:40:02Z","level":"CRITICAL","message":"critical level"}
+{"id":"sev-emergency","ts":"2025-06-15T12:40:03Z","level":"EMERGENCY","message":"emergency level"}
+{"id":"sev-numeric-pino","ts":"2025-06-15T12:40:04Z","level":50,"message":"pino numeric level"}
+{"id":"sev-negation","ts":"2025-06-15T12:40:05Z","message":"no errors detected during startup"}

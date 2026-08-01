@@ -1,0 +1,6 @@
+2025-06-15 13:05:00,000 ERROR [com.example.svc.OrderKt] (dispatcher-2) coroutine failed
+kotlinx.coroutines.JobCancellationException: Parent job is Cancelling
+	at com.example.svc.OrderKt$handle$1.invokeSuspend(Order.kt:18)
+	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:33)
+Caused by: java.util.concurrent.TimeoutException: timed out after 30s
+	... 7 more

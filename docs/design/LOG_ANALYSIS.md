@@ -52,7 +52,16 @@ The heavy row count (10–100M) lives in the **columnar event store**; the vecto
 
 **Format fingerprint + parse** per bounded physical record → `{ ts, level,
 service?, host?, trace_id?, message, raw }` plus immutable parser timestamp
-provenance, the active timestamp basis, and bounded unresolved local timestamp
+provenance, the active timestamp basis, and bounded unresolved local timestamp.
+Logical-record framing joins multi-line exception and PostgreSQL continuation
+bodies before this parse step (#788); correlation keeps span/request ids out of
+`trace_id` (#789); severity preserves TRACE/CRITICAL/LOG and numeric Pino bands
+(#790); YYYYMMDD integers are never accepted as epoch seconds; PostgreSQL and
+jsonlog `YYYY-MM-DD HH:MM:SS[.mmm] ZONE` stamps resolve only for
+UTC-equivalent zones and otherwise retain the calendar text as unresolved local
+evidence, as do `ctime` calendar strings (#751); a bounded envelope payload
+(Docker `json-file` `log`, RFC5424-borne CEF) contributes severity only when the
+envelope declared none and never overwrites transport provenance (#791)
 text when the parser can defend that evidence. An immutable versioned built-in
 registry identifies the record grammar from strict content clues and reports
 matched, unknown, or ambiguous without declaration-order tie-breaking. A

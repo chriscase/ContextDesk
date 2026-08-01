@@ -1,0 +1,4 @@
+ts=2025-06-15T12:50:00Z level=info msg="server listening" service=gateway port=8443
+time=2025-06-15T12:50:01Z level=error msg="upstream refused" service=gateway trace_id=4bf92f35
+timestamp=1749988802 level=warn msg="retry scheduled" service=gateway attempt=2
+ts="2025-06-15 12:50:03" level=info msg="offsetless local in logfmt" service=gateway

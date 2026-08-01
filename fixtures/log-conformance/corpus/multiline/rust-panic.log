@@ -1,0 +1,9 @@
+2025-06-15T13:20:00Z ERROR order_worker: task panicked
+thread 'worker-1' panicked at src/order.rs:42:9:
+called `Option::unwrap()` on a `None` value
+stack backtrace:
+   0: rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: order_worker::order::handle
+note: Some details are omitted, run with `RUST_BACKTRACE=full`.
+2025-06-15T13:20:01Z INFO order_worker: supervisor restarting task

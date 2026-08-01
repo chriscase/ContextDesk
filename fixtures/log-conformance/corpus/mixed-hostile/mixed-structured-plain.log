@@ -1,0 +1,5 @@
+=== gateway build 2025.06.15 ===
+{"ts":"2025-06-15T14:00:00Z","level":"info","message":"json record in a mixed file"}
+ts=2025-06-15T14:00:01Z level=warn msg="logfmt record in a mixed file" service=gateway
+<190>1 2025-06-15T14:00:02Z gateway.example app 1234 ID47 - rfc5424 record
+plain trailing banner line with no structure at all

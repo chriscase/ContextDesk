@@ -34,7 +34,7 @@ clustering, and “why” tools.
 | Stage | What happens | Evidence or boundary |
 | --- | --- | --- |
 | Ingest | A file, directory, or bounded ZIP bundle is read into a named disposable corpus | `ingest_logs` is SoftWrite because it materializes local analysis data |
-| Parse | Supported structured formats are parsed defensibly; malformed or unsupported structure falls back to retained redacted plain/order-only evidence rather than being dropped | No claim of perfect parsing or exhaustive per-line parse-error reporting |
+| Parse | Physical newlines are framed into **logical records** before parse (PostgreSQL DETAIL/HINT/STATEMENT and csvlog quoted newlines, JVM/Python/.NET/Go/Rust stacks, CRI `P`/`F` partials, pretty-printed JSON). Structured formats (JSON, logfmt, syslog, PostgreSQL stderr/csvlog/jsonlog) are parsed defensibly; `trace_id` is never filled from `span_id` or request ids; severity vocabulary keeps `trace`/`critical`/`log` distinct; date-shaped integers like `20250615` are rejected as Unix epochs. PostgreSQL `%m`/`%t` and jsonlog stamps of the form `YYYY-MM-DD HH:MM:SS[.mmm] ZONE` are read: `UTC`/`GMT` name one instant and become wall clocks, while ambiguous abbreviations such as `CST` or `IST` keep the calendar text as unresolved local evidence and stay order-only. `Sun Jun 15 12:00:00 2025` calendar strings are retained the same way. A transport envelope's payload contributes severity only when the envelope declared none — Docker `json-file` `log` payloads and RFC5424-borne CEF headers — and never overwrites container time, host, stream, or other transport metadata. Malformed structure falls back to retained redacted plain/order-only evidence rather than being dropped | No claim of perfect parsing or exhaustive per-line parse-error reporting. A timezone abbreviation we do not recognise licenses nothing, and no ambiguous abbreviation is ever resolved to an instant without an explicit source-timezone decision (#751); payload interpretation reads severity only, one layer deep (#791) |
 | Redact | Secret-like values and sensitive parameters are scrubbed | Redaction happens before persistence and embedding |
 | Template | Drain groups variable messages into stable templates | Parameters remain separate from the template pattern |
 | Store | Events and templates are persisted under the app cache | DuckDB serves time/filter/aggregate scans; logs are not durable memory |
@@ -228,9 +228,11 @@ content-leaves-this-machine decision and remains separate from local re-analysis
 Bookmarks are not included in portable package v1. Durable noise/squelch rules
 are not shipped (#671). The bounded per-source IANA workflow handles only
 parser-recognized complete local calendar timestamps. Storage remains
-whole-second; yearless timestamps, timezone abbreviations, subsecond
-persistence, clock-skew correction, arbitrary custom profiles, and seamless
-arbitrary log formats remain incomplete (#670/#751). Corpora are analyzed
+whole-second; yearless timestamps, subsecond persistence, clock-skew
+correction, arbitrary custom profiles, and seamless arbitrary log formats remain
+incomplete (#670/#751). Timezone abbreviations are recognised but only
+`UTC`-equivalent ones are resolved; every other abbreviation is retained as
+unresolved local evidence for the per-source IANA workflow to decide. Corpora are analyzed
 independently; versioned learned application baselines are not shipped (#690).
 
 > Important:

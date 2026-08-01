@@ -1,0 +1,3 @@
+# The corpus IS the fixture: its raw `.log` bytes must be tracked. Without this
+# the repo-wide `*.log` rule silently commits a lab with no corpus in it.
+!/corpus/**/*.log

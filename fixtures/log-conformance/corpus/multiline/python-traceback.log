@@ -1,0 +1,15 @@
+2025-06-15 13:15:00,000 ERROR order.worker Order submission failed
+Traceback (most recent call last):
+  File "/srv/app/worker.py", line 42, in handle
+    submit(order)
+  File "/srv/app/client.py", line 19, in submit
+    raise ConnectionError("connection refused")
+ConnectionError: connection refused
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/srv/app/worker.py", line 45, in handle
+    rollback()
+RuntimeError: rollback failed
+2025-06-15 13:15:01,000 INFO order.worker Retry scheduled

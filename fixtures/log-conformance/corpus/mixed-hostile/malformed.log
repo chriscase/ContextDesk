@@ -1,0 +1,7 @@
+{"ts":"2025-06-15T14:10:00Z","level":"info","message":"well formed"}
+{"ts":"2025-06-15T14:10:01Z","level":"info","message":"truncated"
+{"ts":"2025-06-15T14:10:02Z","ts":"2025-06-15T23:59:59Z","level":"info","message":"duplicate keys"}
+{"ts":{"nested":"object"},"level":"info","message":"timestamp is not scalar"}
+{"ts":"2025-06-15T14:10:04Z","level":["array"],"message":"level is not scalar"}
+{}
+[]

@@ -1,0 +1,2 @@
+<134>1 2025-06-15T16:20:00.000Z gw.example app 1234 ID1 - CEF:0|Example|Gateway|1.0|100|connection blocked|5|src=192.0.2.9 dst=192.0.2.10 spt=443
+<38>Jun 15 16:20:01 gw.example app[1234]: level=warn msg="rfc3164 wrapping logfmt" service=gateway
