@@ -961,8 +961,11 @@ export function InvestigationReportExportDialog({
   const exportId = preview.exportId;
 
   useEffect(() => {
-    closeRef.current?.focus();
-  }, []);
+    // NSSavePanel temporarily owns native focus. AppKit returns focus to the
+    // webview root when the sheet closes, which would otherwise let Tab escape
+    // this still-open modal and make Escape miss its backdrop handler.
+    if (!busy) closeRef.current?.focus();
+  }, [busy, result]);
 
   const dismiss = () => {
     if (busy) return;

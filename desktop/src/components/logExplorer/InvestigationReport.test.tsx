@@ -566,6 +566,28 @@ describe("InvestigationReportExportDialog", () => {
     );
   });
 
+  it("restores modal focus after the native save sheet returns", async () => {
+    const outside = document.createElement("button");
+    document.body.appendChild(outside);
+    saveMock.mockImplementation(async () => {
+      // Model AppKit returning from NSSavePanel with focus at the webview root
+      // rather than on a control inside the still-open renderer dialog.
+      outside.focus();
+      return { status: "cancelled" as const };
+    });
+    const { trigger, onDismiss } = renderDialog();
+    const close = screen.getByTestId("report-export-close");
+
+    fireEvent.click(screen.getByTestId("report-export-save"));
+    await waitFor(() => expect(document.activeElement).toBe(close));
+    fireEvent.keyDown(close, { key: "Escape" });
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+
+    outside.remove();
+    trigger.remove();
+  });
+
   it("reports SavedWithWarning without upgrading it to a clean save", async () => {
     saveMock.mockImplementation(async () => ({
       status: "saved_with_warning" as const,
