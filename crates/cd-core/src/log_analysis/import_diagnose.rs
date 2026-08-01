@@ -292,10 +292,7 @@ impl ProcessProgressObserver for DiagnoseProgress {
 
 impl DiagnoseProgress {
     fn snapshot(&self) -> FailedIngestProgress {
-        self.inner
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default()
+        self.inner.lock().map(|g| g.clone()).unwrap_or_default()
     }
 }
 
@@ -470,9 +467,8 @@ pub fn write_import_diagnostic_report(
         .map_err(|e| CoreError::Message(format!("serialize import diagnostic: {e}")))?;
     if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                CoreError::Message(format!("create diagnostic output parent: {e}"))
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| CoreError::Message(format!("create diagnostic output parent: {e}")))?;
         }
     }
     std::fs::write(output, json)
@@ -518,11 +514,7 @@ pub fn public_report_denylist_patterns() -> &'static [&'static str] {
     ]
 }
 
-fn apply_error_outcome(
-    report: &mut ImportDiagnosticReport,
-    err: &CoreError,
-    cancel: &CancelFlag,
-) {
+fn apply_error_outcome(report: &mut ImportDiagnosticReport, err: &CoreError, cancel: &CancelFlag) {
     if matches!(err, CoreError::Cancelled) || cancel.is_cancelled() {
         report.outcome.kind = ImportDiagnosticOutcomeKind::Cancelled;
         report.outcome.fail_reason = Some(FailedIngestReason::Cancelled);
@@ -554,11 +546,12 @@ fn base_report(
         build,
         privacy: ImportDiagnosticPrivacy {
             redaction_mode: IMPORT_DIAGNOSTIC_REDACTION_MODE.into(),
-            policy_summary: "Default public-safe report: aggregate counts and stable reason/format \
+            policy_summary:
+                "Default public-safe report: aggregate counts and stable reason/format \
 codes only. Strips log payloads, representative/template/event text, paths, basenames, archive \
 member identities, credentials, environment values, hashes/fingerprints, provider data, and raw \
 timestamps."
-                .into(),
+                    .into(),
             inventory_truncated: false,
             counters_capped: false,
         },
@@ -601,7 +594,9 @@ fn fill_preview(report: &mut ImportDiagnosticReport, plan: &ImportPreviewPlan) {
     let mut event_importable_n = 0u64;
 
     for item in &r.items {
-        *status.entry(status_key(item.status).to_string()).or_insert(0) += 1;
+        *status
+            .entry(status_key(item.status).to_string())
+            .or_insert(0) += 1;
         *role.entry(role_key(item.role).to_string()).or_insert(0) += 1;
         for re in &item.reasons {
             *reason.entry(reason_key(*re).to_string()).or_insert(0) += 1;
@@ -831,8 +826,7 @@ mod tests {
         }
         let file = fs::File::create(path).unwrap();
         let mut zip = ZipWriter::new(file);
-        let opts = SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Stored);
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
         for (name, bytes) in members {
             zip.start_file(*name, opts).unwrap();
             zip.write_all(bytes).unwrap();
@@ -852,8 +846,8 @@ mod tests {
         for pat in forbidden_substrings {
             assert!(
                 !lower.contains(&pat.to_ascii_lowercase()),
-                "fixture leak {pat:?} in report: {}",
-                &json[..json.len().min(400)]
+                "fixture leak {pat:?} in report (len={})",
+                json.len()
             );
         }
         // No absolute-looking unix paths
@@ -949,7 +943,12 @@ mod tests {
         assert!(report.outcome.temporary_corpus_deleted);
         assert_public_safe(
             &report,
-            &["nested synthetic", "top synthetic", "nested.zip", "inner.zip"],
+            &[
+                "nested synthetic",
+                "top synthetic",
+                "nested.zip",
+                "inner.zip",
+            ],
         );
     }
 
@@ -1033,9 +1032,7 @@ mod tests {
         flag.cancel();
         let report = diagnose_log_import(
             &fixture_root().join("direct"),
-            ImportDiagnoseOptions {
-                cancel: Some(flag),
-            },
+            ImportDiagnoseOptions { cancel: Some(flag) },
         )
         .unwrap();
         assert_eq!(report.outcome.kind, ImportDiagnosticOutcomeKind::Cancelled);
@@ -1062,9 +1059,7 @@ mod tests {
         });
         let report = diagnose_log_import(
             &fixture_root().join("direct"),
-            ImportDiagnoseOptions {
-                cancel: Some(flag),
-            },
+            ImportDiagnoseOptions { cancel: Some(flag) },
         )
         .unwrap();
         // Either cancelled or completed before cancel landed — both must clean temp.
