@@ -5292,12 +5292,12 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         sources.sort();
+        // A directly selected archive uses bare member identities in both
+        // preview and ingest; the nested container paths still distinguish
+        // the two otherwise-identical basenames.
         assert_eq!(
             sources,
-            [
-                "support.zip!/hosts/a.zip!/logs/app.log",
-                "support.zip!/hosts/b.zip!/logs/app.log"
-            ]
+            ["hosts/a.zip!/logs/app.log", "hosts/b.zip!/logs/app.log"]
         );
     }
 
@@ -5743,7 +5743,7 @@ mod tests {
         let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
         assert_eq!(
             corpus.with_events(|events| events[0].source.clone()),
-            "outer.zip!/host.zip!/app.log"
+            "host.zip!/app.log"
         );
     }
 
