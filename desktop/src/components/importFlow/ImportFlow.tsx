@@ -55,8 +55,17 @@ export function ImportFlow({
     initialState ?? INITIAL_IMPORT_FLOW_STATE,
   );
   const [confirmed, setConfirmed] = useState(false);
+  const [previewExitRequested, setPreviewExitRequested] = useState(false);
+  const [previewCancelError, setPreviewCancelError] = useState<string | null>(null);
   const stateRef = useRef(state);
   stateRef.current = state;
+  const mountedRef = useRef(true);
+  const previewActiveRef = useRef(false);
+  const previewExitRequestedRef = useRef(false);
+  const previewExitAcknowledgedRef = useRef(false);
+  const previewCancelRequestedRef = useRef(false);
+  const onExitRef = useRef(onExit);
+  onExitRef.current = onExit;
 
   useEffect(() => {
     return engine.events.onProcessProgress((progress) => {
@@ -65,13 +74,26 @@ export function ImportFlow({
     });
   }, [engine]);
 
-  // Close requests: outside a run exit immediately; during a run request
-  // cancellation and stay visible until the engine acknowledges. The wizard
-  // must never disappear while publication continues unobserved.
+  // Close requests: outside active engine work exit immediately; during preview
+  // or import request cancellation and stay visible until the operation itself
+  // settles. `cancel()` only acknowledges the request, not worker termination,
+  // so the preview promise is the safe-to-close acknowledgement.
   const lastExitSignal = useRef(exitSignal);
   useEffect(() => {
     if (exitSignal === lastExitSignal.current) return;
     lastExitSignal.current = exitSignal;
+    if (previewActiveRef.current) {
+      previewExitRequestedRef.current = true;
+      setPreviewExitRequested(true);
+      if (!previewCancelRequestedRef.current) {
+        previewCancelRequestedRef.current = true;
+        void engine.import.cancel().catch((error: unknown) => {
+          if (!mountedRef.current || !previewActiveRef.current) return;
+          setPreviewCancelError(error instanceof Error ? error.message : String(error));
+        });
+      }
+      return;
+    }
     if (stateRef.current.stage !== "running") {
       onExit?.();
       return;
@@ -93,11 +115,16 @@ export function ImportFlow({
     }
   }, [state.exitRequested, state.stage, onExit]);
 
-  // Unmount while a run is somehow still live (App-level teardown): request
-  // cancellation as a backstop so an ingest never publishes silently after
-  // its surface is gone.
+  // Unmount while engine work is still live (App-level teardown): request
+  // cancellation as a backstop and suppress every late preview state update.
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
+      if (previewActiveRef.current && !previewCancelRequestedRef.current) {
+        previewCancelRequestedRef.current = true;
+        void engine.import.cancel().catch(() => undefined);
+      }
       if (stateRef.current.stage === "running") {
         void engine.import.cancel();
       }
@@ -113,14 +140,32 @@ export function ImportFlow({
           ]);
     if (!path) return;
     dispatch({ type: "PATH_CHOSEN", path });
+    previewActiveRef.current = true;
+    previewExitRequestedRef.current = false;
+    previewExitAcknowledgedRef.current = false;
+    previewCancelRequestedRef.current = false;
+    setPreviewExitRequested(false);
+    setPreviewCancelError(null);
     try {
       const plan = await engine.import.preview(path);
+      if (!mountedRef.current || previewExitRequestedRef.current) return;
       dispatch({ type: "PREVIEW_OK", plan });
     } catch (error) {
+      if (!mountedRef.current || previewExitRequestedRef.current) return;
       dispatch({
         type: "PREVIEW_FAILED",
         message: error instanceof Error ? error.message : String(error),
       });
+    } finally {
+      previewActiveRef.current = false;
+      if (
+        mountedRef.current &&
+        previewExitRequestedRef.current &&
+        !previewExitAcknowledgedRef.current
+      ) {
+        previewExitAcknowledgedRef.current = true;
+        onExitRef.current?.();
+      }
     }
   };
 
@@ -185,7 +230,11 @@ export function ImportFlow({
 
       {state.stage === "previewing" ? (
         <p className="import-flow__status" role="status">
-          Looking at what&rsquo;s inside… nothing is imported yet.
+          {previewExitRequested
+            ? previewCancelError
+              ? `Could not request preview cancellation (${previewCancelError}). Waiting for the preview to finish safely…`
+              : "Cancelling preview — waiting for the engine to acknowledge…"
+            : "Looking at what’s inside… nothing is imported yet."}
         </p>
       ) : null}
 

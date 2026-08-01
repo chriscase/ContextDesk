@@ -17,6 +17,30 @@ async function toPreflight(client = createMockEngineClient()) {
   return { client, onPublished, ...utils };
 }
 
+async function controlledPreviewClient() {
+  const plan = await createMockEngineClient().import.preview("/fixture");
+  const client = createMockEngineClient();
+  let acknowledge!: () => void;
+  let reject!: (error: Error) => void;
+  const preview = vi
+    .spyOn(client.import, "preview")
+    .mockImplementation(
+      () =>
+        new Promise((resolve, rejectPreview) => {
+          acknowledge = () => resolve(plan);
+          reject = rejectPreview;
+        }),
+    );
+  const cancel = vi.spyOn(client.import, "cancel").mockResolvedValue(true);
+  return {
+    client,
+    preview,
+    cancel,
+    acknowledge: () => acknowledge(),
+    reject: (error: Error) => reject(error),
+  };
+}
+
 describe("ImportFlow ordinary path", () => {
   it("is two deliberate actions: choose input, then Import", async () => {
     const { onPublished } = await toPreflight();
@@ -108,6 +132,76 @@ describe("ImportFlow failure, cancel, and retry", () => {
     await screen.findByText(/Import cancelled\. Nothing was published/);
     fireEvent.click(screen.getByRole("button", { name: "Back to review" }));
     await screen.findByRole("region", { name: "Ready to import" });
+  });
+});
+
+describe("ImportFlow preview cancellation lifecycle", () => {
+  it("keeps close pending until the preview itself acknowledges cancellation", async () => {
+    const { client, cancel, acknowledge } = await controlledPreviewClient();
+    const onExit = vi.fn();
+    const { rerender } = render(
+      <ImportFlow engine={client} variant="guided" exitSignal={0} onExit={onExit} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Choose folder…" }));
+    await screen.findByText(/Looking at what/);
+
+    rerender(
+      <ImportFlow engine={client} variant="guided" exitSignal={1} onExit={onExit} />,
+    );
+    await screen.findByText("Cancelling preview — waiting for the engine to acknowledge…");
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(onExit).not.toHaveBeenCalled();
+    expect(screen.queryByRole("region", { name: "Ready to import" })).toBeNull();
+
+    acknowledge();
+    await waitFor(() => expect(onExit).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("region", { name: "Ready to import" })).toBeNull();
+  });
+
+  it("requests cancellation on unmount and ignores the late preview result", async () => {
+    const { client, cancel, acknowledge } = await controlledPreviewClient();
+    const onExit = vi.fn();
+    const view = render(
+      <ImportFlow engine={client} variant="pane" onExit={onExit} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Choose folder…" }));
+    await screen.findByText(/Looking at what/);
+
+    view.unmount();
+    expect(cancel).toHaveBeenCalledTimes(1);
+    acknowledge();
+    await Promise.resolve();
+    expect(onExit).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Ready to import/)).toBeNull();
+  });
+
+  it("treats a terminal preview error as safe close acknowledgement", async () => {
+    const { client, cancel, reject } = await controlledPreviewClient();
+    const onExit = vi.fn();
+    const { rerender } = render(
+      <ImportFlow engine={client} variant="guided" exitSignal={0} onExit={onExit} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Choose folder…" }));
+    await screen.findByText(/Looking at what/);
+
+    rerender(
+      <ImportFlow engine={client} variant="guided" exitSignal={1} onExit={onExit} />,
+    );
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(onExit).not.toHaveBeenCalled();
+
+    reject(new Error("preview cancelled"));
+    await waitFor(() => expect(onExit).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("completes an ordinary preview without requesting cancellation", async () => {
+    const client = createMockEngineClient();
+    const cancel = vi.spyOn(client.import, "cancel");
+    render(<ImportFlow engine={client} variant="pane" />);
+    fireEvent.click(screen.getByRole("button", { name: "Choose folder…" }));
+    await screen.findByRole("region", { name: "Ready to import" });
+    expect(cancel).not.toHaveBeenCalled();
   });
 });
 

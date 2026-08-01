@@ -40,7 +40,55 @@ async function driveToRunning(client: ReturnType<typeof createMockEngineClient>)
   return { onCancel, onComplete };
 }
 
+async function driveToPreviewing() {
+  const plan = await createMockEngineClient().import.preview("/fixture");
+  const client = createMockEngineClient();
+  let acknowledge!: () => void;
+  vi.spyOn(client.import, "preview").mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        acknowledge = () => resolve(plan);
+      }),
+  );
+  const cancel = vi.spyOn(client.import, "cancel").mockResolvedValue(true);
+  const onCancel = vi.fn();
+  render(
+    <GuidedImportWizard
+      engine={client}
+      onCancel={onCancel}
+      onComplete={vi.fn()}
+      helpAvailable
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Choose folder…" }));
+  await screen.findByText(/Looking at what/);
+  return { cancel, onCancel, acknowledge: () => acknowledge() };
+}
+
 describe("GuidedImportWizard close acknowledgement", () => {
+  it("Cancel during preview waits for preview cancellation acknowledgement", async () => {
+    const { cancel, onCancel, acknowledge } = await driveToPreviewing();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await screen.findByText("Cancelling preview — waiting for the engine to acknowledge…");
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(onCancel).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeTruthy();
+
+    acknowledge();
+    await waitFor(() => expect(onCancel).toHaveBeenCalledTimes(1));
+  });
+
+  it("Escape during preview follows the same acknowledged close path", async () => {
+    const { cancel, onCancel, acknowledge } = await driveToPreviewing();
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    await screen.findByText("Cancelling preview — waiting for the engine to acknowledge…");
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(onCancel).not.toHaveBeenCalled();
+
+    acknowledge();
+    await waitFor(() => expect(onCancel).toHaveBeenCalledTimes(1));
+  });
+
   it("Cancel during a run keeps the wizard visible until cancellation is acknowledged", async () => {
     const client = createMockEngineClient({ manualFlush: true });
     const { onCancel } = await driveToRunning(client);
