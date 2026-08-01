@@ -6,13 +6,12 @@ import {
   type SetStateAction,
 } from "react";
 
-const NARROW_SIDEBAR_QUERY = "(max-width: 760px)";
+const NARROW_SIDEBAR_MAX_WIDTH = 760;
 
 function startsNarrow(): boolean {
   return (
     typeof window !== "undefined" &&
-    typeof window.matchMedia === "function" &&
-    window.matchMedia(NARROW_SIDEBAR_QUERY).matches
+    window.innerWidth <= NARROW_SIDEBAR_MAX_WIDTH
   );
 }
 
@@ -29,17 +28,14 @@ export function useResponsiveSidebar(
   const [narrowOpen, setNarrowOpen] = useState(false);
 
   useEffect(() => {
-    if (typeof window.matchMedia !== "function") return;
-    const query = window.matchMedia(NARROW_SIDEBAR_QUERY);
-    const onChange = (event: MediaQueryListEvent) => {
-      setNarrow(event.matches);
+    const onResize = () => {
+      setNarrow(window.innerWidth <= NARROW_SIDEBAR_MAX_WIDTH);
       setNarrowOpen(false);
     };
 
-    setNarrow(query.matches);
-    setNarrowOpen(false);
-    query.addEventListener("change", onChange);
-    return () => query.removeEventListener("change", onChange);
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
   }, []);
 
   const toggle = useCallback(() => {

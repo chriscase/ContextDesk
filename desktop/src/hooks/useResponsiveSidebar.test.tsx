@@ -1,37 +1,18 @@
 import { act, renderHook } from "@testing-library/react";
 import { useState } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { useResponsiveSidebar } from "./useResponsiveSidebar";
 
-type ChangeListener = (event: MediaQueryListEvent) => void;
-
-let narrow = false;
-let listeners: ChangeListener[] = [];
-
-function emitNarrow(matches: boolean) {
-  narrow = matches;
-  for (const listener of listeners) {
-    listener({ matches } as MediaQueryListEvent);
-  }
+function resizeTo(width: number) {
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    value: width,
+  });
+  window.dispatchEvent(new Event("resize"));
 }
 
 beforeEach(() => {
-  narrow = false;
-  listeners = [];
-  vi.stubGlobal("matchMedia", (query: string) => ({
-    matches: narrow,
-    media: query,
-    onchange: null,
-    addEventListener: (_type: string, listener: ChangeListener) => {
-      listeners.push(listener);
-    },
-    removeEventListener: (_type: string, listener: ChangeListener) => {
-      listeners = listeners.filter((candidate) => candidate !== listener);
-    },
-    addListener: vi.fn(),
-    removeListener: vi.fn(),
-    dispatchEvent: vi.fn(),
-  }));
+  resizeTo(1_100);
 });
 
 function renderSidebar(initialWideCollapsed: boolean) {
@@ -46,7 +27,7 @@ function renderSidebar(initialWideCollapsed: boolean) {
 
 describe("responsive chat sidebar", () => {
   it("starts a narrow window on the safe rail", () => {
-    narrow = true;
+    resizeTo(720);
     const { result } = renderSidebar(false);
     expect(result.current.narrow).toBe(true);
     expect(result.current.collapsed).toBe(true);
@@ -58,7 +39,7 @@ describe("responsive chat sidebar", () => {
     expect(result.current.collapsed).toBe(false);
     expect(result.current.wideCollapsed).toBe(false);
 
-    act(() => emitNarrow(true));
+    act(() => resizeTo(720));
     expect(result.current.narrow).toBe(true);
     expect(result.current.collapsed).toBe(true);
     expect(result.current.wideCollapsed).toBe(false);
@@ -68,7 +49,7 @@ describe("responsive chat sidebar", () => {
     act(() => result.current.dismissNarrow());
     expect(result.current.collapsed).toBe(true);
 
-    act(() => emitNarrow(false));
+    act(() => resizeTo(1_100));
     expect(result.current.narrow).toBe(false);
     expect(result.current.collapsed).toBe(false);
     expect(result.current.wideCollapsed).toBe(false);
@@ -80,7 +61,7 @@ describe("responsive chat sidebar", () => {
     expect(result.current.wideCollapsed).toBe(true);
     expect(result.current.collapsed).toBe(true);
 
-    act(() => emitNarrow(true));
+    act(() => resizeTo(720));
     expect(result.current.collapsed).toBe(true);
     act(() => result.current.toggle());
     expect(result.current.collapsed).toBe(false);
