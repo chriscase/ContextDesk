@@ -57,6 +57,22 @@ jobs:
           CLOSE_PROOF_CUTOFF: "2026-07-18"
         run: sh scripts/check_close_proof.sh
 
+  gui-accept-contracts:
+    name: GUI integration contracts (no WebDriver)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop/gui-accept
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: desktop/gui-accept/package-lock.json
+      - run: npm ci
+      - run: npm test
+
   rust:
     name: rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

@@ -128,6 +128,33 @@ describe("ChatContextMenu", () => {
     });
   });
 
+  it("clamps using min-size floor when first measure is 0×0 (WebKit paint race)", async () => {
+    vi.stubGlobal("innerWidth", 1100);
+    vi.stubGlobal("innerHeight", 800);
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect");
+    // First layouts report empty box; clamp must still keep menu on-screen.
+    rect.mockReturnValue({
+      bottom: 790,
+      height: 0,
+      left: 1088,
+      right: 1088,
+      top: 790,
+      width: 0,
+      x: 1088,
+      y: 790,
+      toJSON: () => ({}),
+    });
+
+    render(<Harness position={{ x: 1088, y: 790 }} />);
+    const { menu } = openMenu();
+
+    await waitFor(() => {
+      // min width 168, min height 120 → left = 1100-168-8 = 924, top = 800-120-8 = 672
+      expect(menu.style.left).toBe("924px");
+      expect(menu.style.top).toBe("672px");
+    });
+  });
+
   it("enters on the first action and supports wrapped arrow, Home, and End navigation", async () => {
     render(<Harness />);
     const { menu } = openMenu();

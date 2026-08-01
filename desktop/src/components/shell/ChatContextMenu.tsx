@@ -65,11 +65,15 @@ export function ChatContextMenu({
     const menu = rootRef.current;
     if (!menu) return;
     const rect = menu.getBoundingClientRect();
+    // First paint can report 0×0 before flex/font layout; use CSS min-width floor
+    // so edge opens still clamp (packaged #837 regression).
+    const menuWidth = Math.max(rect.width, 168);
+    const menuHeight = Math.max(rect.height, 120);
     const next = clampChatContextMenuPosition(
       x,
       y,
-      rect.width,
-      rect.height,
+      menuWidth,
+      menuHeight,
       window.innerWidth,
       window.innerHeight,
     );
@@ -80,8 +84,21 @@ export function ChatContextMenu({
 
   useLayoutEffect(() => {
     updatePosition();
+    // Re-clamp when real dimensions settle (0×0 → laid out size)
+    const menu = rootRef.current;
+    let ro: ResizeObserver | null = null;
+    if (menu && typeof ResizeObserver !== "undefined") {
+      ro = new ResizeObserver(() => updatePosition());
+      ro.observe(menu);
+    }
     window.addEventListener("resize", updatePosition);
-    return () => window.removeEventListener("resize", updatePosition);
+    // Second frame after paint — WebKit often finalizes metrics one tick late
+    const raf = requestAnimationFrame(() => updatePosition());
+    return () => {
+      cancelAnimationFrame(raf);
+      ro?.disconnect();
+      window.removeEventListener("resize", updatePosition);
+    };
   }, [updatePosition]);
 
   const dismiss = useCallback(
