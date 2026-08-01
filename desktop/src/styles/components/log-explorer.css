@@ -13,6 +13,18 @@
   position: relative;
 }
 
+/* #851: inside the in-app embed the Explorer fills the PANE, not the window —
+   the viewport sizing above is load-bearing only for the dedicated window.
+   With pane-truthful geometry the root ResizeObserver classifies the real
+   width, so the #536 narrow drawer composition activates in-app exactly when
+   the pane is actually narrow. */
+.log-pane--explorer-embed .log-explorer {
+  height: auto;
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .log-explorer__titlebar {
   display: flex;
   align-items: center;
@@ -1603,7 +1615,9 @@
   position: absolute;
   inset: 2.4rem 0 auto 0;
   z-index: 20;
-  max-height: 55vh;
+  /* Pane-relative (#851): % resolves against the .log-explorer root —
+     the window in the dedicated Explorer, the pane cell in the embed. */
+  max-height: 55%;
   overflow: auto;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
@@ -1613,7 +1627,9 @@
   position: absolute;
   inset: auto 0 0 0;
   z-index: 20;
-  max-height: 55vh;
+  /* Pane-relative (#851): % resolves against the .log-explorer root —
+     the window in the dedicated Explorer, the pane cell in the embed. */
+  max-height: 55%;
   overflow: hidden;
   box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.45);
 }
