@@ -858,13 +858,33 @@ pub fn validate_event_time(time: &EventTime, line: u64, out: &mut Vec<Normalized
     }
 }
 
-/// Maximum nesting depth of a JSON value.
+/// Nesting depth of a JSON value, **saturating** at [`MAX_JSON_DEPTH`] + 1.
+///
+/// Short-circuits rather than measuring the true depth, so the depth check can
+/// never itself be the denial of service it exists to prevent. Measured
+/// exactly, this recursed once per level and overflowed the stack on
+/// sufficiently nested input — the caller only needs to know "deeper than
+/// allowed", never how much deeper.
+///
+/// `serde_json`'s parser has its own recursion limit, so parsed input cannot
+/// currently reach that depth; this also covers values built in memory, where
+/// no parser limit applies.
 fn json_depth(value: &serde_json::Value) -> usize {
-    match value {
-        serde_json::Value::Object(map) => 1 + map.values().map(json_depth).max().unwrap_or(0),
-        serde_json::Value::Array(items) => 1 + items.iter().map(json_depth).max().unwrap_or(0),
-        _ => 0,
+    fn walk(value: &serde_json::Value, budget: usize) -> usize {
+        if budget == 0 {
+            return 1;
+        }
+        match value {
+            serde_json::Value::Object(map) => {
+                1 + map.values().map(|v| walk(v, budget - 1)).max().unwrap_or(0)
+            }
+            serde_json::Value::Array(items) => {
+                1 + items.iter().map(|v| walk(v, budget - 1)).max().unwrap_or(0)
+            }
+            _ => 0,
+        }
     }
+    walk(value, MAX_JSON_DEPTH + 1)
 }
 
 /// Whether a confidence/provenance pair is coherent.
@@ -1270,9 +1290,13 @@ pub fn canonicalize_stream<R: std::io::BufRead, W: std::io::Write>(
 
 /// Serialize a value with object keys sorted and no insignificant whitespace.
 ///
-/// `serde_json`'s `Map` preserves insertion order unless the `preserve_order`
-/// feature is off; sorting explicitly here means canonical output does not
-/// depend on which feature flags happen to be enabled downstream.
+/// Sorting is explicit even though it is currently redundant: without the
+/// `preserve_order` feature (not enabled here) `serde_json::Map` is a
+/// `BTreeMap` and already iterates in key order. Removing the sort therefore
+/// changes nothing today and no test can detect it — which is exactly why the
+/// line stays. It is insurance against `preserve_order` being switched on
+/// downstream, where canonical output would otherwise start depending on
+/// producer insertion order.
 pub fn canonical_json(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Object(map) => {
@@ -1805,6 +1829,30 @@ mod tests {
         let mut out = Vec::new();
         validate_event(&item, 0, 2, &mut out);
         assert!(codes(&out).contains(&NormalizedLogDiagnosticCode::SeverityProvenanceInconsistent));
+    }
+
+    #[test]
+    fn the_depth_check_saturates_instead_of_measuring_true_depth() {
+        // The guard must be cheaper than the attack: `json_depth` recursed
+        // once per level before, so a sufficiently nested value overflowed the
+        // stack inside the very check meant to reject it. It now stops as soon
+        // as the answer is decided.
+        //
+        // Depth is kept modest here because `serde_json::Value`'s own `Drop`
+        // is recursive, so a test that builds a 50k-deep value cannot even
+        // free it — the property worth asserting is saturation, not survival
+        // of an undroppable value.
+        let deep_enough = MAX_JSON_DEPTH * 4;
+        let mut deep = serde_json::json!("leaf");
+        for _ in 0..deep_enough {
+            deep = serde_json::json!({ "n": deep });
+        }
+        let measured = json_depth(&deep);
+        assert!(measured > MAX_JSON_DEPTH, "must still exceed the bound");
+        assert!(
+            measured <= MAX_JSON_DEPTH + 2,
+            "must saturate rather than walk all {deep_enough} levels, got {measured}"
+        );
     }
 
     #[test]
