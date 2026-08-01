@@ -58,6 +58,8 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::CoreResult;
+
 /// Schema identifier every conforming file declares on its header line.
 pub const NORMALIZED_LOG_EVENTS_SCHEMA_ID: &str = "contextdesk.normalized_log_events.v1";
 
@@ -105,6 +107,19 @@ pub const MAX_ERROR_SAMPLES: usize = 5;
 
 /// Maximum characters of any single re-redacted error sample.
 pub const MAX_ERROR_SAMPLE_CHARS: usize = 256;
+
+/// Maximum nesting depth of any JSON value on a line.
+///
+/// Bounds parser work and stack use on hostile input. A deeply nested
+/// attribute map is the cheap way to make a validator expensive.
+pub const MAX_JSON_DEPTH: usize = 32;
+
+/// Schema identifiers this build knows how to read.
+///
+/// A registry rather than a single constant so a future minor can be added
+/// without the reader silently best-effort parsing an unknown major. Anything
+/// absent here is refused outright.
+pub const SUPPORTED_SCHEMA_IDS: &[&str] = &[NORMALIZED_LOG_EVENTS_SCHEMA_ID];
 
 /// Top-level event keys a conforming file may never carry.
 ///
@@ -211,45 +226,68 @@ pub struct EventTime {
     pub observed: Option<String>,
 }
 
-/// #790's severity representation, kept as the exact four independent fields.
+/// How confident the severity assignment is.
 ///
-/// Quoting #790's acceptance criterion: *"Store independent `severity_number`
-/// (OTel 0–24 or unspecified), exact `severity_text`, exact typed
-/// `source_severity`, and `severity_inferred`/confidence provenance."*
+/// Separate from [`SeverityProvenance`] because *where* a value came from and
+/// *how much to trust it* are different questions: a schema mapping is
+/// high-confidence but not source-declared, while a text inference is
+/// low-confidence by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeverityConfidence {
+    /// The source stated a severity in a field meant for severity.
+    High,
+    /// Derived through a documented schema mapping.
+    Medium,
+    /// Guessed from message text. #790 requires this be treated as
+    /// low-confidence and never presented as source-declared.
+    Low,
+}
+
+/// Where the severity came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeverityProvenance {
+    /// Read directly from the source's own severity field.
+    SourceDeclared,
+    /// Mapped from a known schema's vocabulary (syslog PRI, CEF, Pino, …).
+    SchemaMapped,
+    /// Inferred from message text. #790 names the failure this guards:
+    /// inferring an error from the phrase "no errors detected".
+    TextInferred,
+    /// The source expressed no severity at all.
+    Absent,
+}
+
+/// Severity: raw value, canonical value, confidence, and provenance.
 ///
-/// The four are independent on purpose. `number` is a normalized band for
-/// filtering; `text` and `source` are what the producer actually emitted, in
-/// its own vocabulary and its own type; `inferred` says whether any of it was
-/// guessed from message text. A reader can therefore filter on the normalized
-/// value while still showing the source's own words, which is what #790 means
-/// by "filters and UI can group by normalized bands while details, exports,
-/// tools, and raw view retain source semantics".
+/// The four are independent by design. `raw` is exactly what the source
+/// emitted, in the source's own JSON type — a syslog PRI integer, a CEF 0–10,
+/// a Windows level, a Pino numeric, or a string like `"NOTICE"` or `"D2"`.
+/// `canonical` is the normalized OTel number used for filtering. Keeping both
+/// is #790's requirement that "filters and UI can group by normalized bands
+/// while details, exports, tools, and raw view retain source semantics".
+///
+/// `confidence` and `provenance` are always serialized, so a normalized value
+/// can never be mistaken for a source-declared one — #790: *"never present
+/// inferred severity as source-declared"*.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Severity {
-    /// OTel severity number, 0–24, or absent for unspecified.
+    /// The source's severity exactly as emitted, in its own JSON type.
+    /// Absent only when the source expressed none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<serde_json::Value>,
+    /// Normalized OTel severity number, 0–24.
     ///
-    /// Absent rather than zero: #790 says "0–24 **or unspecified**", and OTel
-    /// already assigns meaning to low numbers, so encoding "unknown" as 0
-    /// would silently claim TRACE.
+    /// Absent rather than zero when unspecified: OTel assigns meaning to 0,
+    /// so encoding "unknown" as 0 would silently claim TRACE.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub number: Option<u8>,
-    /// The source's severity string exactly as emitted (`"WARN"`, `"NOTICE"`,
-    /// `"D2"`, `"EMERGENCY"`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    /// The source's severity in its own type system, retained verbatim —
-    /// a syslog PRI integer, a CEF 0–10, a Windows level, a Pino numeric.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<serde_json::Value>,
-    /// True when any part of this severity was inferred from message text
-    /// rather than declared by the source.
-    ///
-    /// #790: *"never present inferred severity as source-declared"*. A reader
-    /// must surface this; an inferred severity is low-confidence by
-    /// construction, and #790 names the exact failure it guards against —
-    /// inferring an error from the phrase "no errors detected".
-    pub inferred: bool,
+    pub canonical: Option<u8>,
+    /// How much to trust `canonical`.
+    pub confidence: SeverityConfidence,
+    /// Where the severity came from.
+    pub provenance: SeverityProvenance,
 }
 
 /// The eleven typed correlation classes from #789.
@@ -491,6 +529,12 @@ pub enum NormalizedLogDiagnosticCode {
     /// The line carried a top-level key from [`RESERVED_EVENT_KEYS`], which an
     /// older reader would treat as authoritative wall-clock time.
     ReservedKeyPresent,
+    /// A JSON value nested deeper than [`MAX_JSON_DEPTH`].
+    DepthExceeded,
+    /// The line was not valid UTF-8.
+    InvalidUtf8,
+    /// Severity confidence and provenance contradict each other.
+    SeverityProvenanceInconsistent,
 }
 
 /// One validation finding, with a bounded re-redacted sample.
@@ -643,7 +687,7 @@ pub fn validate_header(
             location: Some(location.to_string()),
         });
     };
-    if header.schema_id != NORMALIZED_LOG_EVENTS_SCHEMA_ID {
+    if !SUPPORTED_SCHEMA_IDS.contains(&header.schema_id.as_str()) {
         push(NormalizedLogDiagnosticCode::SchemaIdInvalid, "schemaId");
     }
     if header.min_reader_version == 0 {
@@ -814,6 +858,32 @@ pub fn validate_event_time(time: &EventTime, line: u64, out: &mut Vec<Normalized
     }
 }
 
+/// Maximum nesting depth of a JSON value.
+fn json_depth(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Object(map) => 1 + map.values().map(json_depth).max().unwrap_or(0),
+        serde_json::Value::Array(items) => 1 + items.iter().map(json_depth).max().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// Whether a confidence/provenance pair is coherent.
+///
+/// The pair is the whole point of keeping both: a text inference that claims
+/// high confidence, or a source-declared value that claims low, would let a
+/// guess wear the clothes of source truth.
+fn severity_pair_is_coherent(
+    confidence: SeverityConfidence,
+    provenance: SeverityProvenance,
+) -> bool {
+    match provenance {
+        SeverityProvenance::SourceDeclared => confidence == SeverityConfidence::High,
+        SeverityProvenance::SchemaMapped => confidence != SeverityConfidence::Low,
+        SeverityProvenance::TextInferred => confidence == SeverityConfidence::Low,
+        SeverityProvenance::Absent => true,
+    }
+}
+
 /// Validate one event, including its position in the sequence.
 pub fn validate_event(
     event: &NormalizedLogEvent,
@@ -839,12 +909,33 @@ pub fn validate_event(
         });
     };
 
-    if let Some(number) = event.severity.number {
-        if number > MAX_SEVERITY_NUMBER {
+    if let Some(canonical) = event.severity.canonical {
+        if canonical > MAX_SEVERITY_NUMBER {
             push(
                 NormalizedLogDiagnosticCode::SeverityNumberOutOfRange,
-                "severity.number",
+                "severity.canonical",
             );
+        }
+    }
+    if !severity_pair_is_coherent(event.severity.confidence, event.severity.provenance) {
+        push(
+            NormalizedLogDiagnosticCode::SeverityProvenanceInconsistent,
+            "severity",
+        );
+    }
+    if matches!(event.severity.provenance, SeverityProvenance::Absent)
+        && event.severity.raw.is_some()
+    {
+        // "The source expressed no severity" and "here is the source's
+        // severity" cannot both be true.
+        push(
+            NormalizedLogDiagnosticCode::SeverityProvenanceInconsistent,
+            "severity.raw",
+        );
+    }
+    if let Some(raw) = &event.severity.raw {
+        if json_depth(raw) > MAX_JSON_DEPTH {
+            push(NormalizedLogDiagnosticCode::DepthExceeded, "severity.raw");
         }
     }
 
@@ -887,9 +978,12 @@ pub fn validate_event(
     if event.attributes.len() > MAX_ATTRIBUTES_PER_EVENT {
         push(NormalizedLogDiagnosticCode::BoundsExceeded, "attributes");
     }
-    for key in event.attributes.keys() {
+    for (key, value) in &event.attributes {
         if key.is_empty() || key.chars().count() > MAX_ATTRIBUTE_KEY_CHARS {
             push(NormalizedLogDiagnosticCode::BoundsExceeded, "attributes");
+        }
+        if json_depth(value) > MAX_JSON_DEPTH {
+            push(NormalizedLogDiagnosticCode::DepthExceeded, "attributes");
         }
     }
 
@@ -937,6 +1031,221 @@ fn error_sample(raw: &str) -> String {
     }
     let kept: String = trimmed.chars().take(MAX_ERROR_SAMPLE_CHARS - 1).collect();
     format!("{kept}…")
+}
+
+/// Validate a normalized-log file from a **stream**, without ever holding the
+/// whole file in memory.
+///
+/// [`validate_file`] takes a `&str`, which means the caller already read the
+/// entire file — fine for a fixture, wrong for a multi-gigabyte export. This
+/// reads one line at a time with a bounded buffer and refuses a line longer
+/// than [`MAX_NORMALIZED_LINE_BYTES`] *without* buffering it, so an
+/// unterminated 4 GiB "line" costs the reader a bounded read rather than the
+/// process.
+///
+/// Invalid UTF-8 is a diagnostic, not a panic and not a lossy substitution:
+/// silently replacing bytes would change the content being validated.
+///
+/// Diagnostics carry a record number and a field location, never payload and
+/// never a filesystem path — a validation report is a shareable artifact.
+pub fn validate_stream<R: std::io::BufRead>(reader: R) -> CoreResult<NormalizedLogValidation> {
+    let mut diagnostics = Vec::new();
+    let mut samples: Vec<String> = Vec::new();
+    let mut events_validated = 0u64;
+    let mut expected_seq = 0u64;
+    let mut line_number = 0u64;
+    let mut saw_header = false;
+
+    let mut reader = reader;
+    let mut raw: Vec<u8> = Vec::new();
+
+    loop {
+        raw.clear();
+        // Bounded: read at most one byte past the limit so an over-long line is
+        // detected without being materialized.
+        // Bounded by hand rather than via `Take`, which does not expose
+        // `read_until`: read one byte past the limit so an over-long line is
+        // detected without materializing it.
+        let read = read_bounded_line(&mut reader, &mut raw, MAX_NORMALIZED_LINE_BYTES + 1)
+            .map_err(|error| crate::error::CoreError::Message(format!("read stream: {error}")))?;
+        if read == 0 {
+            break;
+        }
+        line_number += 1;
+
+        if raw.last() == Some(&b'\n') {
+            raw.pop();
+        }
+        if raw.last() == Some(&b'\r') {
+            raw.pop();
+        }
+
+        if raw.len() > MAX_NORMALIZED_LINE_BYTES {
+            diagnostics.push(NormalizedLogDiagnostic {
+                code: NormalizedLogDiagnosticCode::LineTooLong,
+                line: line_number,
+                location: None,
+            });
+            // No drain needed: `read_bounded_line` already consumed through the
+            // newline and merely capped what it STORED, so the stream is
+            // already aligned on the next record. Draining here would eat the
+            // following line instead.
+            continue;
+        }
+
+        let text = match std::str::from_utf8(&raw) {
+            Ok(text) => text,
+            Err(_) => {
+                diagnostics.push(NormalizedLogDiagnostic {
+                    code: NormalizedLogDiagnosticCode::InvalidUtf8,
+                    line: line_number,
+                    location: None,
+                });
+                continue;
+            }
+        };
+
+        if !saw_header {
+            saw_header = true;
+            match serde_json::from_str::<NormalizedLogHeader>(text) {
+                Ok(header) => validate_header(&header, line_number, &mut diagnostics),
+                Err(_) => {
+                    diagnostics.push(NormalizedLogDiagnostic {
+                        code: NormalizedLogDiagnosticCode::HeaderMalformed,
+                        line: line_number,
+                        location: None,
+                    });
+                    if samples.len() < MAX_ERROR_SAMPLES {
+                        samples.push(error_sample(text));
+                    }
+                }
+            }
+            continue;
+        }
+
+        if text.trim().is_empty() {
+            continue;
+        }
+
+        let before = diagnostics.len();
+        validate_line_as_event(text, expected_seq, line_number, &mut diagnostics);
+        match serde_json::from_str::<NormalizedLogEvent>(text) {
+            Ok(event) => {
+                if diagnostics.len() == before {
+                    events_validated += 1;
+                } else if samples.len() < MAX_ERROR_SAMPLES {
+                    samples.push(error_sample(text));
+                }
+                expected_seq = event.source_seq.saturating_add(1);
+            }
+            Err(_) => {
+                if samples.len() < MAX_ERROR_SAMPLES {
+                    samples.push(error_sample(text));
+                }
+                expected_seq = expected_seq.saturating_add(1);
+            }
+        }
+    }
+
+    if !saw_header {
+        diagnostics.push(NormalizedLogDiagnostic {
+            code: NormalizedLogDiagnosticCode::MissingHeader,
+            line: 0,
+            location: None,
+        });
+    }
+
+    diagnostics.sort_by(|left, right| {
+        left.line
+            .cmp(&right.line)
+            .then(left.code.cmp(&right.code))
+            .then(left.location.cmp(&right.location))
+    });
+
+    Ok(NormalizedLogValidation {
+        ok: diagnostics.is_empty(),
+        events_validated,
+        diagnostics,
+        error_samples: samples,
+    })
+}
+
+/// Read one newline-terminated line, never buffering more than `limit` bytes.
+fn read_bounded_line<R: std::io::BufRead>(
+    reader: &mut R,
+    out: &mut Vec<u8>,
+    limit: usize,
+) -> std::io::Result<usize> {
+    let mut total = 0usize;
+    loop {
+        let available = match reader.fill_buf() {
+            Ok(buffer) => buffer,
+            Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if available.is_empty() {
+            return Ok(total);
+        }
+        match available.iter().position(|byte| *byte == b'\n') {
+            Some(index) => {
+                let take = index + 1;
+                if out.len() < limit {
+                    let room = limit - out.len();
+                    out.extend_from_slice(&available[..take.min(room)]);
+                }
+                reader.consume(take);
+                return Ok(total + take);
+            }
+            None => {
+                let len = available.len();
+                if out.len() < limit {
+                    let room = limit - out.len();
+                    out.extend_from_slice(&available[..len.min(room)]);
+                }
+                reader.consume(len);
+                total += len;
+            }
+        }
+    }
+}
+
+/// Shared event-line checking used by both the buffered and streaming paths,
+/// so the two can never drift about what conformance means.
+fn validate_line_as_event(
+    raw: &str,
+    expected_seq: u64,
+    line_number: u64,
+    diagnostics: &mut Vec<NormalizedLogDiagnostic>,
+) {
+    // Reserved keys are checked against the RAW line: serde drops unknown
+    // fields before a typed check could see them.
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(raw) {
+        for reserved in RESERVED_EVENT_KEYS {
+            if map.contains_key(*reserved) {
+                diagnostics.push(NormalizedLogDiagnostic {
+                    code: NormalizedLogDiagnosticCode::ReservedKeyPresent,
+                    line: line_number,
+                    location: Some((*reserved).to_string()),
+                });
+            }
+        }
+        if json_depth(&serde_json::Value::Object(map)) > MAX_JSON_DEPTH {
+            diagnostics.push(NormalizedLogDiagnostic {
+                code: NormalizedLogDiagnosticCode::DepthExceeded,
+                line: line_number,
+                location: None,
+            });
+        }
+    }
+
+    match serde_json::from_str::<NormalizedLogEvent>(raw) {
+        Ok(event) => validate_event(&event, expected_seq, line_number, diagnostics),
+        Err(_) => diagnostics.push(NormalizedLogDiagnostic {
+            code: NormalizedLogDiagnosticCode::EventMalformed,
+            line: line_number,
+            location: None,
+        }),
+    }
 }
 
 /// Validate a complete normalized-log file.
@@ -1008,26 +1317,10 @@ pub fn validate_file(contents: &str) -> NormalizedLogValidation {
             });
             continue;
         }
+        let before = diagnostics.len();
+        validate_line_as_event(raw, expected_seq, line_number, &mut diagnostics);
         match serde_json::from_str::<NormalizedLogEvent>(raw) {
             Ok(event) => {
-                let before = diagnostics.len();
-                // Checked against the RAW line, not the typed struct: serde
-                // silently drops unknown fields, so a reserved key is already
-                // invisible by the time we hold a `NormalizedLogEvent`.
-                if let Ok(serde_json::Value::Object(map)) =
-                    serde_json::from_str::<serde_json::Value>(raw)
-                {
-                    for reserved in RESERVED_EVENT_KEYS {
-                        if map.contains_key(*reserved) {
-                            diagnostics.push(NormalizedLogDiagnostic {
-                                code: NormalizedLogDiagnosticCode::ReservedKeyPresent,
-                                line: line_number,
-                                location: Some((*reserved).to_string()),
-                            });
-                        }
-                    }
-                }
-                validate_event(&event, expected_seq, line_number, &mut diagnostics);
                 if diagnostics.len() == before {
                     events_validated += 1;
                 } else if samples.len() < MAX_ERROR_SAMPLES {
@@ -1036,11 +1329,6 @@ pub fn validate_file(contents: &str) -> NormalizedLogValidation {
                 expected_seq = event.source_seq.saturating_add(1);
             }
             Err(_) => {
-                diagnostics.push(NormalizedLogDiagnostic {
-                    code: NormalizedLogDiagnosticCode::EventMalformed,
-                    line: line_number,
-                    location: None,
-                });
                 if samples.len() < MAX_ERROR_SAMPLES {
                     samples.push(error_sample(raw));
                 }
@@ -1091,10 +1379,10 @@ mod tests {
             source_seq: seq,
             time,
             severity: Severity {
-                number: Some(9),
-                text: Some("INFO".to_string()),
-                source: Some(serde_json::json!(6)),
-                inferred: false,
+                raw: Some(serde_json::json!(6)),
+                canonical: Some(9),
+                confidence: SeverityConfidence::High,
+                provenance: SeverityProvenance::SourceDeclared,
             },
             message: "checkout completed".to_string(),
             trace_id: None,
@@ -1333,35 +1621,184 @@ mod tests {
     #[test]
     fn severity_keeps_four_independent_fields_and_bounds_the_number() {
         let mut item = event(0, explicit());
-        item.severity.number = Some(25);
+        item.severity.canonical = Some(25);
         let mut out = Vec::new();
         validate_event(&item, 0, 2, &mut out);
         assert!(codes(&out).contains(&NormalizedLogDiagnosticCode::SeverityNumberOutOfRange));
 
-        // The source's own typed value survives verbatim alongside the
-        // normalized number and text.
-        let mut item = event(0, explicit());
-        item.severity = Severity {
-            number: Some(13),
-            text: Some("NOTICE".to_string()),
-            source: Some(serde_json::json!("D2")),
-            inferred: true,
+        // The source's own value survives verbatim beside the canonical one.
+        let item_severity = Severity {
+            raw: Some(serde_json::json!("D2")),
+            canonical: Some(13),
+            confidence: SeverityConfidence::Low,
+            provenance: SeverityProvenance::TextInferred,
         };
-        let encoded = serde_json::to_string(&item.severity).unwrap();
-        assert!(encoded.contains("\"number\":13"));
-        assert!(encoded.contains("\"text\":\"NOTICE\""));
-        assert!(encoded.contains("\"source\":\"D2\""));
+        let encoded = serde_json::to_string(&item_severity).unwrap();
+        assert!(encoded.contains("\"raw\":\"D2\""));
+        assert!(encoded.contains("\"canonical\":13"));
         assert!(
-            encoded.contains("\"inferred\":true"),
-            "inferred must always serialize so it can never read as source-declared"
+            encoded.contains("\"confidence\":\"low\"")
+                && encoded.contains("\"provenance\":\"text_inferred\""),
+            "confidence and provenance must always serialize so a guess can \
+             never read as source-declared"
         );
     }
 
     #[test]
-    fn inferred_severity_always_serializes_even_when_false() {
+    fn confidence_and_provenance_always_serialize() {
         let item = event(0, explicit());
         let encoded = serde_json::to_string(&item.severity).unwrap();
-        assert!(encoded.contains("\"inferred\":false"));
+        assert!(encoded.contains("\"confidence\":\"high\""));
+        assert!(encoded.contains("\"provenance\":\"source_declared\""));
+    }
+
+    #[test]
+    fn severity_confidence_and_provenance_must_agree() {
+        // A text inference claiming high confidence would let a guess wear the
+        // clothes of source truth; a source-declared value claiming low would
+        // understate real evidence.
+        for (confidence, provenance, ok) in [
+            (
+                SeverityConfidence::High,
+                SeverityProvenance::SourceDeclared,
+                true,
+            ),
+            (
+                SeverityConfidence::Low,
+                SeverityProvenance::SourceDeclared,
+                false,
+            ),
+            (
+                SeverityConfidence::High,
+                SeverityProvenance::TextInferred,
+                false,
+            ),
+            (
+                SeverityConfidence::Low,
+                SeverityProvenance::TextInferred,
+                true,
+            ),
+            (
+                SeverityConfidence::Medium,
+                SeverityProvenance::SchemaMapped,
+                true,
+            ),
+            (
+                SeverityConfidence::Low,
+                SeverityProvenance::SchemaMapped,
+                false,
+            ),
+        ] {
+            let mut item = event(0, explicit());
+            item.severity = Severity {
+                raw: Some(serde_json::json!("X")),
+                canonical: Some(9),
+                confidence,
+                provenance,
+            };
+            let mut out = Vec::new();
+            validate_event(&item, 0, 2, &mut out);
+            let inconsistent =
+                codes(&out).contains(&NormalizedLogDiagnosticCode::SeverityProvenanceInconsistent);
+            assert_eq!(!inconsistent, ok, "{confidence:?}/{provenance:?}");
+        }
+    }
+
+    #[test]
+    fn absent_provenance_cannot_carry_a_raw_value() {
+        let mut item = event(0, explicit());
+        item.severity = Severity {
+            raw: Some(serde_json::json!("WARN")),
+            canonical: None,
+            confidence: SeverityConfidence::Low,
+            provenance: SeverityProvenance::Absent,
+        };
+        let mut out = Vec::new();
+        validate_event(&item, 0, 2, &mut out);
+        assert!(codes(&out).contains(&NormalizedLogDiagnosticCode::SeverityProvenanceInconsistent));
+    }
+
+    #[test]
+    fn deeply_nested_attributes_are_refused() {
+        let mut item = event(0, explicit());
+        let mut deep = serde_json::json!("leaf");
+        for _ in 0..(MAX_JSON_DEPTH + 2) {
+            deep = serde_json::json!({ "n": deep });
+        }
+        item.attributes.insert("deep".into(), deep);
+        let mut out = Vec::new();
+        validate_event(&item, 0, 2, &mut out);
+        assert!(codes(&out).contains(&NormalizedLogDiagnosticCode::DepthExceeded));
+    }
+
+    #[test]
+    fn the_streaming_and_buffered_validators_agree() {
+        // Two code paths that disagree about conformance would be worse than
+        // one; validate_line_as_event is shared precisely to prevent it.
+        let mut text = serde_json::to_string(&header()).unwrap();
+        for seq in 0..4 {
+            text.push('\n');
+            text.push_str(&serde_json::to_string(&event(seq, explicit())).unwrap());
+        }
+        text.push('\n');
+
+        let buffered = validate_file(&text);
+        let streamed = validate_stream(std::io::Cursor::new(text.as_bytes())).unwrap();
+        assert_eq!(buffered.ok, streamed.ok);
+        assert_eq!(buffered.events_validated, streamed.events_validated);
+        assert_eq!(buffered.diagnostics, streamed.diagnostics);
+
+        // ...and they agree about a broken file too.
+        let broken = text.replace("\"sourceSeq\":2", "\"sourceSeq\":9");
+        let buffered = validate_file(&broken);
+        let streamed = validate_stream(std::io::Cursor::new(broken.as_bytes())).unwrap();
+        assert_eq!(buffered.ok, streamed.ok);
+        assert_eq!(buffered.diagnostics, streamed.diagnostics);
+    }
+
+    #[test]
+    fn the_stream_refuses_an_over_long_line_without_buffering_it() {
+        let mut text = serde_json::to_string(&header()).unwrap();
+        text.push('\n');
+        text.push_str(&"x".repeat(MAX_NORMALIZED_LINE_BYTES + 4096));
+        text.push('\n');
+        text.push_str(&serde_json::to_string(&event(0, explicit())).unwrap());
+        text.push('\n');
+
+        let report = validate_stream(std::io::Cursor::new(text.as_bytes())).unwrap();
+        assert!(!report.ok);
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == NormalizedLogDiagnosticCode::LineTooLong));
+        // Alignment is preserved: the following real event is still seen.
+        assert_eq!(report.events_validated, 1);
+    }
+
+    #[test]
+    fn invalid_utf8_is_a_diagnostic_not_a_panic_or_a_silent_substitution() {
+        let mut bytes = serde_json::to_string(&header()).unwrap().into_bytes();
+        bytes.push(b'\n');
+        bytes.extend_from_slice(&[0xff, 0xfe, 0xfd]);
+        bytes.push(b'\n');
+        let report = validate_stream(std::io::Cursor::new(bytes)).unwrap();
+        assert!(!report.ok);
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == NormalizedLogDiagnosticCode::InvalidUtf8));
+    }
+
+    #[test]
+    fn diagnostics_carry_record_numbers_and_never_payload_or_paths() {
+        let mut text = serde_json::to_string(&header()).unwrap();
+        text.push_str("\n{\"sourceSeq\":0,\"secret\":\"/Users/someone/private.log\"}\n");
+        let report = validate_stream(std::io::Cursor::new(text.as_bytes())).unwrap();
+        assert!(!report.ok);
+        assert!(report.diagnostics.iter().all(|d| d.line > 0));
+        let encoded = serde_json::to_string(&report.diagnostics).unwrap();
+        assert!(!encoded.contains("/Users/"));
+        assert!(!encoded.contains("private.log"));
     }
 
     #[test]

@@ -215,16 +215,34 @@ def validate_event(event, expected_seq, errors, line_no):
     validate_time(event.get("time"), errors, line_no)
 
     severity = event.get("severity")
-    if not isinstance(severity, dict) or not isinstance(
-        severity.get("inferred"), bool
+    if (
+        not isinstance(severity, dict)
+        or severity.get("confidence") not in ("high", "medium", "low")
+        or severity.get("provenance")
+        not in ("source_declared", "schema_mapped", "text_inferred", "absent")
     ):
         errors.append((line_no, "event_malformed", "severity"))
     else:
-        number = severity.get("number")
-        if number is not None and (
-            not _is_int(number) or number < 0 or number > MAX_SEVERITY_NUMBER
+        canonical = severity.get("canonical")
+        if canonical is not None and (
+            not _is_int(canonical) or canonical < 0 or canonical > MAX_SEVERITY_NUMBER
         ):
-            errors.append((line_no, "severity_number_out_of_range", "severity.number"))
+            errors.append(
+                (line_no, "severity_number_out_of_range", "severity.canonical")
+            )
+        # confidence and provenance must agree, or a guess could wear the
+        # clothes of source truth.
+        prov, conf = severity["provenance"], severity["confidence"]
+        coherent = (
+            (prov == "source_declared" and conf == "high")
+            or (prov == "schema_mapped" and conf in ("high", "medium"))
+            or (prov == "text_inferred" and conf == "low")
+            or prov == "absent"
+        )
+        if not coherent:
+            errors.append((line_no, "severity_provenance_inconsistent", "severity"))
+        if prov == "absent" and severity.get("raw") is not None:
+            errors.append((line_no, "severity_provenance_inconsistent", "severity.raw"))
 
     trace = event.get("traceId")
     if trace is not None and (
@@ -347,11 +365,10 @@ def emit_example() -> str:
             "sourceSeq": seq,
             "time": time,
             "severity": {
-                "number": 9,
-                "text": "INFO",
-                "source": 6,
-                # Always present, so it can never read as source-declared.
-                "inferred": False,
+                "raw": 6,
+                "canonical": 9,
+                "confidence": "high",
+                "provenance": "source_declared",
             },
             "message": message,
             "canonical": canonical,

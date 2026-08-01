@@ -203,19 +203,42 @@ function validateEvent(event, expectedSeq, errors, line) {
   validateTime(event.time, errors, line);
 
   const severity = event.severity;
+  const CONFIDENCES = ["high", "medium", "low"];
+  const PROVENANCES = [
+    "source_declared",
+    "schema_mapped",
+    "text_inferred",
+    "absent",
+  ];
   if (
     typeof severity !== "object" ||
     severity === null ||
-    typeof severity.inferred !== "boolean"
+    !CONFIDENCES.includes(severity.confidence) ||
+    !PROVENANCES.includes(severity.provenance)
   ) {
     errors.push([line, "event_malformed", "severity"]);
-  } else if (severity.number !== undefined && severity.number !== null) {
-    if (
-      !isInteger(severity.number) ||
-      severity.number < 0 ||
-      severity.number > MAX_SEVERITY_NUMBER
-    ) {
-      errors.push([line, "severity_number_out_of_range", "severity.number"]);
+  } else {
+    if (severity.canonical !== undefined && severity.canonical !== null) {
+      if (
+        !isInteger(severity.canonical) ||
+        severity.canonical < 0 ||
+        severity.canonical > MAX_SEVERITY_NUMBER
+      ) {
+        errors.push([line, "severity_number_out_of_range", "severity.canonical"]);
+      }
+    }
+    // confidence and provenance must agree.
+    const { provenance: prov, confidence: conf } = severity;
+    const coherent =
+      (prov === "source_declared" && conf === "high") ||
+      (prov === "schema_mapped" && (conf === "high" || conf === "medium")) ||
+      (prov === "text_inferred" && conf === "low") ||
+      prov === "absent";
+    if (!coherent) {
+      errors.push([line, "severity_provenance_inconsistent", "severity"]);
+    }
+    if (prov === "absent" && severity.raw !== undefined) {
+      errors.push([line, "severity_provenance_inconsistent", "severity.raw"]);
     }
   }
 
@@ -359,7 +382,12 @@ export function validateFile(text) {
 
 /** A minimal conforming file showing all four time resolutions. */
 export function emitExample() {
-  const severity = { number: 9, text: "INFO", source: 6, inferred: false };
+  const severity = {
+    raw: 6,
+    canonical: 9,
+    confidence: "high",
+    provenance: "source_declared",
+  };
   const event = (sourceSeq, time, message, canonical) => ({
     sourceSeq,
     time,

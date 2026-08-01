@@ -16,18 +16,20 @@
 
 use cd_core::normalized_log_events::{
     validate_file, EventTime, NormalizedLogEvent, NormalizedLogHeader, ProducerIdentity,
-    ProducerRedactionClaim, Severity, TimeBasis, TimeResolution, NORMALIZED_LOG_EVENTS_SCHEMA_ID,
+    ProducerRedactionClaim, Severity, SeverityConfidence, SeverityProvenance, TimeBasis,
+    TimeResolution, NORMALIZED_LOG_EVENTS_SCHEMA_ID,
 };
 
 fn severity() -> Severity {
     Severity {
-        number: Some(9),
-        text: Some("INFO".into()),
-        // The source's own typed value survives verbatim next to the
-        // normalized number — a syslog PRI here.
-        source: Some(serde_json::json!(6)),
-        // Always emitted, so it can never be mistaken for source-declared.
-        inferred: false,
+        // The source's own value survives verbatim next to the canonical
+        // one — a syslog PRI here.
+        raw: Some(serde_json::json!(6)),
+        canonical: Some(9),
+        // Always emitted, so a normalized value can never be mistaken for a
+        // source-declared one.
+        confidence: SeverityConfidence::High,
+        provenance: SeverityProvenance::SourceDeclared,
     }
 }
 

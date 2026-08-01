@@ -18,8 +18,8 @@ use cd_core::log_analysis::format_profile::{fingerprint_format, FormatFingerprin
 use cd_core::log_analysis::query::TimeQuality;
 use cd_core::normalized_log_events::{
     validate_file, Correlation, CorrelationClass, EventTime, NormalizedLogEvent,
-    NormalizedLogHeader, ProducerIdentity, ProducerRedactionClaim, Severity, TimeBasis,
-    TimeResolution, NORMALIZED_LOG_EVENTS_SCHEMA_ID,
+    NormalizedLogHeader, ProducerIdentity, ProducerRedactionClaim, Severity, SeverityConfidence,
+    SeverityProvenance, TimeBasis, TimeResolution, NORMALIZED_LOG_EVENTS_SCHEMA_ID,
 };
 
 fn header() -> NormalizedLogHeader {
@@ -52,10 +52,10 @@ fn event(seq: u64) -> NormalizedLogEvent {
             observed: None,
         },
         severity: Severity {
-            number: Some(9),
-            text: Some("INFO".to_string()),
-            source: Some(serde_json::json!(6)),
-            inferred: false,
+            raw: Some(serde_json::json!(6)),
+            canonical: Some(9),
+            confidence: SeverityConfidence::High,
+            provenance: SeverityProvenance::SourceDeclared,
         },
         message: format!("checkout step {seq} completed"),
         trace_id: Some("4bf92f3577b34da6a3ce929d0e0e4736".to_string()),
