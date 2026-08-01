@@ -29,9 +29,15 @@ export function GuidedImportWizard({
 }: Props) {
   const [stepIndex, setStepIndex] = useState(0);
   const [publishedCorpusId, setPublishedCorpusId] = useState<string | null>(null);
+  // Cancel/Escape never tears the wizard down directly: the flow receives a
+  // close request, cancels a live run, stays truthfully visible until the
+  // engine acknowledges, and only then calls back to actually close.
+  const [exitSignal, setExitSignal] = useState(0);
   const step = LOG_IMPORT_WIZARD.steps[stepIndex]!;
   const isLast = stepIndex === LOG_IMPORT_WIZARD.steps.length - 1;
   const continueDisabled = step.id === "import" && publishedCorpusId === null;
+
+  const requestClose = () => setExitSignal((signal) => signal + 1);
 
   const body = useMemo(() => {
     if (step.id === "import") {
@@ -40,6 +46,8 @@ export function GuidedImportWizard({
           engine={engine}
           variant="guided"
           onPublished={(corpusId) => setPublishedCorpusId(corpusId)}
+          exitSignal={exitSignal}
+          onExit={onCancel}
         />
       );
     }
@@ -50,7 +58,7 @@ export function GuidedImportWizard({
           : "Nothing was imported."}
       </p>
     );
-  }, [step.id, engine, publishedCorpusId]);
+  }, [step.id, engine, publishedCorpusId, exitSignal, onCancel]);
 
   return (
     <SessionWizardShell
@@ -59,7 +67,7 @@ export function GuidedImportWizard({
       busy={false}
       continueDisabled={continueDisabled}
       continueLabel={isLast ? "Finish" : "Continue"}
-      onCancel={onCancel}
+      onCancel={step.id === "import" ? requestClose : onCancel}
       onBack={() => setStepIndex((index) => Math.max(0, index - 1))}
       onContinue={() => {
         if (isLast) onComplete(publishedCorpusId);

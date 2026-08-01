@@ -32,6 +32,13 @@ export type MockScenario = {
   failNextRun?: string;
   /** Delay resolution until [`MockEngineClient.flush`] is called. */
   manualFlush?: boolean;
+  /**
+   * Park once more between the non-cancellable publish emission and
+   * completion, mirroring the host's deliberately uncancellable atomic
+   * commit window. Cancellation requested inside this window is ignored,
+   * exactly as the real engine ignores it.
+   */
+  parkBeforeCompletion?: boolean;
 };
 
 /** The default deterministic preview: one of every ledger state. */
@@ -187,6 +194,10 @@ export class MockEngineClient implements EngineClient {
 
   #park(): Promise<void> {
     if (!this.#scenario.manualFlush) return Promise.resolve();
+    return this.#parkAlways();
+  }
+
+  #parkAlways(): Promise<void> {
     return new Promise((resolve) => {
       this.#pendingFlush.push(resolve);
     });
@@ -292,8 +303,12 @@ export class MockEngineClient implements EngineClient {
             files_processed: importable.length,
           }),
         );
-        this.#emit(this.#phase("validate", "validating staged corpus before publication", true));
-        this.#emit(this.#phase("publish", "publishing corpus into the library (atomic)", true));
+        this.#emit(this.#phase("validate", "validating staged corpus before publication", false));
+        this.#emit(this.#phase("publish", "publishing corpus into the library (atomic)", false));
+        if (this.#scenario.parkBeforeCompletion) {
+          // The commit window: cancellation requests are ignored here.
+          await this.#parkAlways();
+        }
         this.#emit(this.#phase("completed", "corpus published", false));
       } finally {
         this.#running = false;

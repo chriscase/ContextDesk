@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { defaultMockPreview } from "@contextdesk/client";
+import { defaultMockPreview, mockPlanToken } from "@contextdesk/client";
 import {
   INITIAL_IMPORT_FLOW_STATE,
   containerPrefixes,
   containerState,
-  deselectedForRun,
   importDisabledReason,
   importFlowReducer,
   preselectedIdentities,
+  selectedForRun,
   selectedImportableCount,
   selectorRows,
   timezoneGroups,
@@ -15,13 +15,16 @@ import {
 } from "./importFlowState";
 import type { ImportRunReport } from "@contextdesk/client";
 
+function planOf(report = defaultMockPreview()) {
+  return { report, planToken: mockPlanToken(report), planVersion: 1 };
+}
+
 function previewedState(): ImportFlowState {
-  const report = defaultMockPreview();
   const afterPath = importFlowReducer(INITIAL_IMPORT_FLOW_STATE, {
     type: "PATH_CHOSEN",
     path: "/incidents",
   });
-  return importFlowReducer(afterPath, { type: "PREVIEW_OK", report });
+  return importFlowReducer(afterPath, { type: "PREVIEW_OK", plan: planOf() });
 }
 
 describe("importFlowReducer flow-through", () => {
@@ -39,7 +42,7 @@ describe("importFlowReducer flow-through", () => {
       type: "PATH_CHOSEN",
       path: "/incidents",
     });
-    const state = importFlowReducer(afterPath, { type: "PREVIEW_OK", report });
+    const state = importFlowReducer(afterPath, { type: "PREVIEW_OK", plan: planOf(report) });
     expect(state.stage).toBe("selector");
     expect(importDisabledReason(state)).toBe(
       "Nothing selected would import as log events. Select at least one log source.",
@@ -67,13 +70,21 @@ describe("selection model", () => {
     expect(selected.has("support.zip!/host-a.zip!/inner.zip!/deep.log")).toBe(false);
   });
 
-  it("deselectedForRun always includes blocked and unselected identities", () => {
+  it("selectedForRun is an exact event-importable allowlist", () => {
     const state = previewedState();
-    const deselected = deselectedForRun(state);
-    expect(deselected).toContain("support.zip!/host-a.zip!/inner.zip!/deep.log");
-    expect(deselected).toContain("support.zip!/host-a.zip!/logs/app.log");
-    expect(deselected).toContain(".DS_Store");
-    expect(deselected).not.toContain("api/api-gateway.log");
+    const selected = selectedForRun(state);
+    // Preselected log-role rows only — never supporting, blocked, or tail.
+    expect(selected).toEqual([
+      "api/api-gateway.log",
+      "api/payments.jsonl",
+      "notes/console-notes.txt",
+    ]);
+    // Even a forced selection of a supporting row never reaches the wire.
+    const forced = {
+      ...state,
+      selected: new Set([...state.selected, "metrics/gateway-metrics.json"]),
+    };
+    expect(selectedForRun(forced)).not.toContain("metrics/gateway-metrics.json");
   });
 
   it("blocked leaves are never selectable, even via container or set-all", () => {

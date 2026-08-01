@@ -52,7 +52,15 @@ function renderFlow(stage: "preflight" | "selector") {
 
 async function renderTimeCard() {
   const client = createMockEngineClient();
-  const report = await client.import.run({ path: "/incidents", deselected: [] });
+  const plan = await client.import.preview("/incidents");
+  const report = await client.import.run({
+    path: "/incidents",
+    planToken: plan.planToken,
+    planVersion: plan.planVersion,
+    selected: plan.report.items
+      .filter((item) => item.role === "log" && item.status !== "blocked")
+      .map((item) => item.identity),
+  });
   return renderVisual(<TimeReviewCard engine={client} report={report} />);
 }
 
@@ -61,82 +69,52 @@ describe("import flow visual acceptance", () => {
     await resetVisualState();
   });
 
-  it("preflight panel: normal width, dark and light", async () => {
-    await setViewport("normal");
-    await applyTheme("dark");
-    const { unmount } = renderFlow("preflight");
-    expectNoHorizontalPageOverflow();
-    await expect(page.elementLocator(visualStage())).toMatchScreenshot(
-      "import-preflight-dark",
-    );
-    unmount();
+  const WIDTHS = ["narrow", "normal", "wide"] as const;
+  const THEMES = ["dark", "light"] as const;
 
-    await applyTheme("light");
-    renderFlow("preflight");
-    expectNoHorizontalPageOverflow();
-    await expect(page.elementLocator(visualStage())).toMatchScreenshot(
-      "import-preflight-light",
-    );
-  });
+  // The full claimed matrix: three surfaces × three widths × two themes,
+  // every cell a committed baseline with a page-overflow assertion.
+  for (const width of WIDTHS) {
+    for (const theme of THEMES) {
+      it(`preflight panel: ${width} ${theme}`, async () => {
+        await setViewport(width);
+        await applyTheme(theme);
+        renderFlow("preflight");
+        expectNoHorizontalPageOverflow();
+        await expect(page.elementLocator(visualStage())).toMatchScreenshot(
+          `import-preflight-${theme}-${width}`,
+        );
+      });
 
-  it("evidence selector: wide and normal, dark and light", async () => {
-    await setViewport("wide");
-    await applyTheme("dark");
-    const { unmount } = renderFlow("selector");
-    expectNoHorizontalPageOverflow();
-    await expect(page.elementLocator(visualStage())).toMatchScreenshot(
-      "import-selector-dark-wide",
-    );
-    unmount();
+      it(`evidence selector: ${width} ${theme}`, async () => {
+        await setViewport(width);
+        await applyTheme(theme);
+        renderFlow("selector");
+        expectNoHorizontalPageOverflow();
+        await expect(page.elementLocator(visualStage())).toMatchScreenshot(
+          `import-selector-${theme}-${width}`,
+        );
+      });
 
-    await setViewport("normal");
-    await applyTheme("light");
-    renderFlow("selector");
-    expectNoHorizontalPageOverflow();
-    await expect(page.elementLocator(visualStage())).toMatchScreenshot(
-      "import-selector-light",
-    );
-  });
+      it(`timezone card: ${width} ${theme}`, async () => {
+        await setViewport(width);
+        await applyTheme(theme);
+        await renderTimeCard();
+        expectNoHorizontalPageOverflow();
+        await expect(page.elementLocator(visualStage())).toMatchScreenshot(
+          `import-time-card-${theme}-${width}`,
+        );
+      });
+    }
+  }
 
-  it("evidence selector: narrow sheet keeps its own scroll, page never overflows", async () => {
+  it("evidence selector viewport owns horizontal scroll at narrow", async () => {
     await setViewport("narrow");
     await applyTheme("dark");
     renderFlow("selector");
-    expectNoHorizontalPageOverflow();
-    // The virtualized viewport owns horizontal scroll for wide identities.
     const viewport = document.querySelector(".import-selector__viewport");
     expect(viewport).not.toBeNull();
     expect(getComputedStyle(viewport as Element).overflowX).toBe("auto");
-    await expect(page.elementLocator(visualStage())).toMatchScreenshot(
-      "import-selector-dark-narrow",
-    );
-  });
-
-  it("timezone card: normal dark/light and narrow dark", async () => {
-    await setViewport("normal");
-    await applyTheme("dark");
-    const first = await renderTimeCard();
-    expectNoHorizontalPageOverflow();
-    await expect(page.elementLocator(visualStage())).toMatchScreenshot(
-      "import-time-card-dark",
-    );
-    first.unmount();
-
-    await applyTheme("light");
-    const second = await renderTimeCard();
-    expectNoHorizontalPageOverflow();
-    await expect(page.elementLocator(visualStage())).toMatchScreenshot(
-      "import-time-card-light",
-    );
-    second.unmount();
-
-    await setViewport("narrow");
-    await applyTheme("dark");
-    await renderTimeCard();
-    expectNoHorizontalPageOverflow();
-    await expect(page.elementLocator(visualStage())).toMatchScreenshot(
-      "import-time-card-dark-narrow",
-    );
   });
 
   it("has no axe violations on preflight, selector, and time card", async () => {

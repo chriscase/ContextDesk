@@ -5,7 +5,15 @@ import type { ImportRunReport, MockEngineClient } from "@contextdesk/client";
 import { TimeReviewCard } from "./TimeReviewCard";
 
 async function publishedReport(client: MockEngineClient): Promise<ImportRunReport> {
-  return client.import.run({ path: "/incidents", deselected: [] });
+  const plan = await client.import.preview("/incidents");
+  return client.import.run({
+    path: "/incidents",
+    planToken: plan.planToken,
+    planVersion: plan.planVersion,
+    selected: plan.report.items
+      .filter((item) => item.role === "log" && item.status !== "blocked")
+      .map((item) => item.identity),
+  });
 }
 
 describe("TimeReviewCard", () => {
