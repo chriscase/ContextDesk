@@ -7,16 +7,15 @@ analysis tools, packages, and Log Explorer query APIs. Bounded redacted
 Original records, explicit-offset logfmt/RFC5424 normalization, and the shared
 timeline/metric presentation are present on `main`. Built-in record grammars
 use deterministic versioned fingerprints with content-only tie handling and
-record-level dispatch. Events persist parser timestamp provenance, active time
-basis, and parser-recognized unresolved local timestamp text. A user can
-preview, apply, reopen, and clear an explicit per-source IANA timezone through
-revision-bound event publication. Whole-second storage, yearless policy,
-abbreviation mapping, subsecond precision, and clock-skew review remain #670;
-user-authored profiles and multiline framing remain #751. #671 Slice 1 is a
-partial candidate for governed corpus-scoped exact-template suppression; #671
-remains open for adversarial hardening, broader predicates and lifecycle,
-include-suppressed controls, suppression-specific scale proof, and baseline
-proposals.
+record-level dispatch. Bounded logical-record framing covers common stack,
+PostgreSQL CSV, pretty-JSON, and CRI continuation shapes. Events persist parser
+timestamp provenance, active time basis, and parser-recognized unresolved local
+timestamp text. A user can review an inventory-bound exact import allowlist,
+publish atomically, then preview/apply/undo multi-source IANA declarations
+through revision-bound event publication. Whole-second storage, yearless
+policy, abbreviation mapping, subsecond precision, and clock-skew review remain
+#670; user-authored format profiles remain #751. #671 remains open for the
+broader suppression surface beyond the shipped exact-template lens.
 
 ## 1. Problem
 
@@ -50,6 +49,8 @@ The reusable method is a layered evidence plane:
 | ----------------------------------------------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
 | Streaming batch ingest and omission accounting              | **Shipped**                               | [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs)                                                                              | Live tailing remains later work                             |
 | Bounded nested support-bundle ZIP intake                    | **Shipped**                               | [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs) nested-archive preflight, private staging, virtual identities, and adversarial tests | Three-container depth and fixed safety caps are deliberate  |
+| Inventory-bound reviewed import                             | **Shipped — bounded #751/#763 slice**      | [`import_preview.rs`](../../../crates/cd-core/src/log_analysis/import_preview.rs), exact allowlist enforcement in [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs), `EngineClient`, and `ImportFlow` | Live manifest-role routing, per-source timezone exceptions, and packaged native proof remain |
+| Bounded logical-record framing                              | **Shipped**                               | [`frame.rs`](../../../crates/cd-core/src/log_analysis/frame.rs) and the real-ingest [`log_conformance.rs`](../../../crates/cd-core/tests/log_conformance.rs) laboratory | Loose continuation recognition remains a bounded false-merge surface |
 | Redaction before ordinary event persistence/embedding       | **Shipped**                               | [`redact_log.rs`](../../../crates/cd-core/src/log_analysis/redact_log.rs)                                                                      | Redaction cannot prove all domain-specific PII is removed   |
 | Bounded redacted Original representation                    | **Shipped**                               | `prepare_original_record` and additive store fields in [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs) and [`store.rs`](../../../crates/cd-core/src/log_analysis/store.rs) | Bounded redacted fidelity, not unbounded raw retention      |
 | JSON numeric/RFC3339 timestamp parsing                      | **Shipped**                               | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs)                                                                                | Whole-second storage; no subsecond persistence               |
@@ -57,7 +58,7 @@ The reusable method is a layered evidence plane:
 | Persisted parser timestamp evidence                         | **Shipped**                               | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs), [`store.rs`](../../../crates/cd-core/src/log_analysis/store.rs), and [`query.rs`](../../../crates/cd-core/src/log_analysis/query.rs) | Persists provenance, active basis, and recognized unresolved local text; not byte-exact timestamp tokens or subsecond precision |
 | Per-source IANA timezone preview/apply/clear                | **Shipped — bounded #779/#780 slice**      | [`timezone_resolution.rs`](../../../crates/cd-core/src/log_analysis/timezone_resolution.rs), [`timezone_application.rs`](../../../crates/cd-core/src/log_analysis/timezone_application.rs), and [`event_revision.rs`](../../../crates/cd-core/src/log_analysis/event_revision.rs) | No year inference, abbreviation guessing, custom profiles, or skew correction |
 | Offsetless/yearless timestamps initially remain order-only  | **Shipped**                               | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs)                                                                                | Only parser-recognized complete local calendar timestamps can use an explicit source IANA declaration; yearless forms remain unresolved |
-| Versioned built-in grammar fingerprints                     | **Shipped**                               | [`format_profile.rs`](../../../crates/cd-core/src/log_analysis/format_profile.rs), [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs), and record-level ingest dispatch in [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs) | User-authored profiles, durable grammar/profile provenance, and multiline framing remain #751 |
+| Versioned built-in grammar fingerprints                     | **Shipped**                               | [`format_profile.rs`](../../../crates/cd-core/src/log_analysis/format_profile.rs), [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs), and record-level ingest dispatch in [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs) | User-authored profiles and durable grammar/profile provenance remain #751 |
 | Complete timestamp precision/year/abbreviation/skew policy  | **Planned/partial**                       | #670                                                                                                                                           | No current claim of seamless arbitrary timestamp alignment  |
 | DuckDB event store                                          | **Shipped**                               | [`store.rs`](../../../crates/cd-core/src/log_analysis/store.rs)                                                                                | None for current batch architecture                         |
 | Drain templates and template-only embedding                 | **Shipped**                               | [`drain.rs`](../../../crates/cd-core/src/log_analysis/drain.rs), [`embed_policy.rs`](../../../crates/cd-core/src/log_analysis/embed_policy.rs) | Cloud embedding remains opt-in/follow-up                    |
@@ -72,6 +73,7 @@ The reusable method is a layered evidence plane:
 flowchart LR
 %% title: Bounded log evidence pipeline
     A["Source bytes"]
+    P["Reviewed import plan<br/>trusted inventory + exact allowlist"]
     B["Record framing<br/>streamed + bounded"]
     C["Normalize encoding<br/>and line ending"]
     D["Redact complete record"]
@@ -85,7 +87,7 @@ flowchart LR
     J["Explorer / tools<br/>evidence identities"]
     K["Redacted Original<br/>bounded fidelity view"]
 
-    A --> B --> C --> D
+    A --> P --> B --> C --> D
     D --> E --> F
     D --> K
     E --> G --> H
@@ -313,6 +315,18 @@ surface listed below.
 
 ### 6.1 Discover and frame
 
+The optional reviewed path performs a read-only trusted preview before ingest.
+The preview reports bounded portable identities, byte counts, classifications,
+roles, reasons, and whether its inventory was truncated. A versioned SHA-256
+plan token binds those facts. At run time trusted core re-enumerates the root
+and rejects added, removed, resized, or reclassified entries before staging.
+Only selected previewed `log` identities with an importable status enter the
+exact allowlist; supporting, ignored, unsupported, blocked, duplicate, unknown,
+and unreviewed-tail identities cannot become events. The allowlist applies
+equally to a direct ZIP, directory ZIP, and nested archive chain. Cancellation
+before atomic publication leaves no visible corpus; the UI remains present
+until cancellation or the non-cancellable publication window is acknowledged.
+
 1. Traverse only the selected import scope.
 2. Reject symlinks/path escapes and count excluded, ignored, and failed files.
 3. Treat a directly selected ZIP, a ZIP discovered in a directory, or a ZIP
@@ -476,8 +490,8 @@ timestamp system. A reimplementation should preserve the separation among
 source acquisition, byte decoding, record framing, recursive envelopes,
 record grammar, optional schema/profile mapping, and the normalized event.
 ContextDesk does not yet claim general source adapters, encoding-aware decoder
-coverage, multiline framing, arbitrary envelope handling, or user-authored
-profiles. #670 remains open for subsecond precision, yearless policy,
+coverage, arbitrary continuation/envelope handling, or user-authored profiles.
+#670 remains open for subsecond precision, yearless policy,
 abbreviation mapping, and non-destructive skew review.
 
 ### 6.4 Template and embed
