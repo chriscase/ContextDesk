@@ -60,6 +60,13 @@ vi.mock("../src/lib/host", () => {
   // itself calls. Symbols outside the unit factory's proven set are loud
   // stubs so an unexpected call fails visibly instead of silently.
   const hostExportNames = [
+    // Engine module (investigationReports) host imports — ae2e1a3.
+    "hostLogAssembleInvestigationReport",
+    "hostLogSetInvestigationReportSection",
+    "hostLogAcceptProposedReportSection",
+    "hostLogDismissProposedReportSection",
+    "hostLogSaveInvestigationReportExport",
+    "hostLogReleaseInvestigationReportExport",
     "CapabilityCheckDto",
     "DefaultWorkspaceDto",
     "ExplorerEventDto",

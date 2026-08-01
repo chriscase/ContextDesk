@@ -1,5 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import type { LogInvestigationReportPreviewDto } from "../../lib/engine/investigationReports";
+import type { ProposedReportSectionView } from "./InvestigationReport";
 import {
   EvidencePanel,
   InvestigationModeControl,
@@ -452,5 +454,276 @@ describe("EvidencePanel", () => {
       screen.getByTestId(`finding-recompute-${recipeFinding.id}`),
     );
     expect(recompute).toHaveBeenCalledWith(recipeFinding);
+  });
+});
+
+function railReportPreview(): LogInvestigationReportPreviewDto {
+  return {
+    report: {
+      schemaVersion: 1,
+      investigationId: "inv-1",
+      title: "Checkout latency regression",
+      status: "active",
+      sourceRevision: 4,
+      generatedAt: 1_700_000_400,
+      currentPolicy: null,
+      scope: {
+        corpusIds: ["c1"],
+        evidenceCount: 1,
+        findingCount: 1,
+        noteCount: 0,
+        timeWindow: null,
+      },
+      sections: {
+        executiveSummary: null,
+        unresolvedQuestions: null,
+        nextActions: null,
+      },
+      findings: [
+        {
+          findingId: "finding-1",
+          kind: "inference",
+          lifecycle: "accepted",
+          title: "Retries amplify the database timeout",
+          whyItMatters: "The retry storm increases queue pressure.",
+          policyBindingStatus: "current",
+          hasSavedView: false,
+          citations: [
+            {
+              evidenceId: "ev-1",
+              evidenceTitle: "Checkout timeout cluster",
+              references: [
+                {
+                  corpusId: "c1",
+                  seq: 4,
+                  source: "api/app.jsonl",
+                  timestampHint: 1_700_000_004,
+                  timeQualityHint: "wall",
+                  status: "verified",
+                },
+              ],
+            },
+          ],
+          createdAt: 1_700_000_100,
+        },
+      ],
+      timeline: { entries: [], omittedCount: 0 },
+    },
+    markdown: "# report\n",
+    exportId: "rep-rail-1",
+    exportBytes: 16,
+    exportUnavailableReason: null,
+  };
+}
+
+const proposedReportSection: ProposedReportSectionView = {
+  id: "prop-report-1",
+  kind: "executive_summary",
+  body: "Checkout failed because retries amplified a database timeout.",
+  status: "proposed",
+  evidenceIdCount: 1,
+  findingIdCount: 0,
+  noteIdCount: 0,
+  provenanceLabel: "Agent proposed",
+};
+
+describe("EvidencePanel report integration (#532)", () => {
+  it("opens the Report detail exclusively and restores focus to the entry point", async () => {
+    const openReport = vi.fn();
+    render(
+      <EvidencePanel
+        modeControl={modeControl()}
+        items={[evidence]}
+        findings={[finding]}
+        preview={null}
+        reportPreview={railReportPreview()}
+        busy={false}
+        error={null}
+        onPreview={() => undefined}
+        onReveal={() => undefined}
+        onOpenReport={openReport}
+        onClearPreview={() => undefined}
+      />,
+    );
+
+    // Single-detail exclusivity: a finding detail yields to the report.
+    fireEvent.click(screen.getByTestId("finding-item-finding-1"));
+    expect(screen.getByTestId("finding-detail-finding-1")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("open-report"));
+    expect(openReport).toHaveBeenCalledTimes(1);
+    const detail = screen.getByTestId("report-detail");
+    expect(screen.queryByTestId("finding-detail-finding-1")).toBeNull();
+    expect(screen.queryByLabelText("Show investigation material")).toBeNull();
+    expect(
+      within(detail).getByTestId("investigation-report").textContent,
+    ).toContain("Checkout latency regression");
+
+    const back = within(detail).getByRole("button", { name: "Back" });
+    await vi.waitFor(() => expect(document.activeElement).toBe(back));
+    fireEvent.click(back);
+    expect(screen.queryByTestId("report-detail")).toBeNull();
+    await vi.waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByTestId("open-report")),
+    );
+  });
+
+  it("keeps the Report entry visible but disabled with cause when unavailable", () => {
+    const openReport = vi.fn();
+    render(
+      <EvidencePanel
+        modeControl={modeControl()}
+        items={[]}
+        preview={null}
+        busy={false}
+        error={null}
+        onPreview={() => undefined}
+        onReveal={() => undefined}
+        onOpenReport={openReport}
+        reportUnavailableReason="No investigation yet — save evidence from selected rows first"
+        onClearPreview={() => undefined}
+      />,
+    );
+
+    const button = screen.getByTestId("open-report") as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(button.title).toContain("No investigation yet");
+    fireEvent.click(button);
+    expect(openReport).not.toHaveBeenCalled();
+  });
+
+  it("routes report citation chips through onPreview and returns to the report on Back", async () => {
+    const onPreview = vi.fn();
+    const clearPreview = vi.fn();
+    const view = render(
+      <EvidencePanel
+        modeControl={modeControl()}
+        items={[evidence]}
+        preview={null}
+        reportPreview={railReportPreview()}
+        busy={false}
+        error={null}
+        onPreview={onPreview}
+        onReveal={() => undefined}
+        onOpenReport={() => undefined}
+        onClearPreview={clearPreview}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("open-report"));
+    fireEvent.click(screen.getByTestId("report-citation-finding-1-ev-1"));
+    expect(onPreview).toHaveBeenCalledWith(evidence);
+    expect(screen.queryByTestId("report-detail")).toBeNull();
+
+    // The container answers onPreview by supplying the bounded preview.
+    view.rerender(
+      <EvidencePanel
+        modeControl={modeControl()}
+        items={[evidence]}
+        preview={{
+          evidenceId: evidence.id,
+          events: [],
+          missingCount: 0,
+          staleCount: 0,
+        }}
+        reportPreview={railReportPreview()}
+        busy={false}
+        error={null}
+        onPreview={onPreview}
+        onReveal={() => undefined}
+        onOpenReport={() => undefined}
+        onClearPreview={clearPreview}
+      />,
+    );
+    const preview = screen.getByTestId("evidence-preview");
+    fireEvent.click(within(preview).getByRole("button", { name: "Back" }));
+    expect(clearPreview).toHaveBeenCalled();
+    view.rerender(
+      <EvidencePanel
+        modeControl={modeControl()}
+        items={[evidence]}
+        preview={null}
+        reportPreview={railReportPreview()}
+        busy={false}
+        error={null}
+        onPreview={onPreview}
+        onReveal={() => undefined}
+        onOpenReport={() => undefined}
+        onClearPreview={clearPreview}
+      />,
+    );
+    expect(screen.getByTestId("report-detail")).toBeTruthy();
+  });
+
+  it("reviews proposed report sections in the rail with a required dismiss reason", () => {
+    const accept = vi.fn();
+    const dismiss = vi.fn();
+    render(
+      <EvidencePanel
+        modeControl={modeControl()}
+        items={[]}
+        proposedReportSections={[proposedReportSection]}
+        preview={null}
+        busy={false}
+        error={null}
+        onPreview={() => undefined}
+        onReveal={() => undefined}
+        onAcceptProposedReportSection={accept}
+        onDismissProposedReportSection={dismiss}
+        onClearPreview={() => undefined}
+      />,
+    );
+
+    // Open proposals keep the rail non-empty and count into the filter.
+    const filter = screen.getByLabelText(
+      "Show investigation material",
+    ) as HTMLSelectElement;
+    expect(screen.getByTestId("proposed-report-prop-report-1")).toBeTruthy();
+    fireEvent.change(filter, { target: { value: "report" } });
+    expect(screen.getByTestId("proposed-report-prop-report-1")).toBeTruthy();
+    fireEvent.change(filter, { target: { value: "notes" } });
+    expect(screen.queryByTestId("proposed-report-prop-report-1")).toBeNull();
+    fireEvent.change(filter, { target: { value: "all" } });
+
+    fireEvent.click(screen.getByTestId("accept-proposed-report-prop-report-1"));
+    expect(accept).toHaveBeenCalledWith({ proposalId: "prop-report-1" });
+
+    fireEvent.click(
+      screen.getByTestId("dismiss-proposed-report-prop-report-1"),
+    );
+    const confirm = screen.getByTestId(
+      "confirm-dismiss-proposed-report-prop-report-1",
+    ) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    fireEvent.change(
+      screen.getByTestId("dismiss-reason-proposed-report-prop-report-1"),
+      { target: { value: "Not supported by the evidence" } },
+    );
+    fireEvent.click(confirm);
+    expect(dismiss).toHaveBeenCalledWith(
+      "prop-report-1",
+      "Not supported by the evidence",
+    );
+  });
+
+  it("offers Reload inside the error alert for stale-revision recovery", () => {
+    const reload = vi.fn();
+    render(
+      <EvidencePanel
+        modeControl={modeControl()}
+        items={[evidence]}
+        preview={null}
+        busy={false}
+        error="stale_revision: expected 4, found 6"
+        onPreview={() => undefined}
+        onReveal={() => undefined}
+        onReloadInvestigation={reload}
+        onClearPreview={() => undefined}
+      />,
+    );
+
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toContain("stale_revision");
+    fireEvent.click(within(alert).getByTestId("reload-investigation"));
+    expect(reload).toHaveBeenCalledTimes(1);
   });
 });

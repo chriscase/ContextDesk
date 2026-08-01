@@ -30,4 +30,5 @@ import "../../src/styles/components/composition.css";
 import "../../src/styles/components/panes.css";
 import "../../src/styles/components/session-wizard.css";
 import "../../src/styles/components/log-explorer.css";
+import "../../src/styles/components/investigation-report.css";
 import "../../src/styles/help.css";

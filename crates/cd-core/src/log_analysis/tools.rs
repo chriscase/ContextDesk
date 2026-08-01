@@ -34,6 +34,7 @@ pub const LOG_TOOL_NAMES: &[&str] = &[
     ANOMALIES,
     TRACE,
     crate::investigations::PROPOSE_FINDING_TOOL,
+    crate::investigations::PROPOSE_REPORT_SECTION_TOOL,
 ];
 
 /// True when `name` is a log analysis tool.
@@ -222,6 +223,8 @@ pub fn log_tool_specs() -> Vec<ToolSpec> {
     ];
     // #646: agent/detector proposed findings (SoftWrite → Proposed only).
     specs.push(crate::investigations::propose_finding_tool_spec());
+    // #532: agent/detector proposed report sections (SoftWrite → Proposed only).
+    specs.push(crate::investigations::propose_report_section_tool_spec());
     specs
 }
 
@@ -253,5 +256,27 @@ mod tests {
             .description
             .contains(&MAX_SEARCH_LOG_TIME_WINDOW_SECS.to_string()));
         assert_eq!(spec.parameters["required"], json!([]));
+    }
+
+    #[test]
+    fn propose_report_section_is_registered_as_a_soft_write_log_tool() {
+        let name = crate::investigations::PROPOSE_REPORT_SECTION_TOOL;
+        assert!(is_log_tool(name));
+        let specs = log_tool_specs();
+        let spec = specs
+            .iter()
+            .find(|spec| spec.name == name)
+            .expect("propose_report_section spec registered");
+        assert_eq!(spec.side_effect, ToolSideEffect::SoftWrite);
+        assert!(
+            !crate::tools::may_auto_execute(spec.side_effect),
+            "SoftWrite proposals must always pass through the permission prompt"
+        );
+        // Schema/execution agreement (#532 hardening): expected_revision is
+        // required in the schema because execution hard-requires it.
+        assert_eq!(
+            spec.parameters["required"],
+            json!(["expected_revision", "idempotency_key", "kind", "body"])
+        );
     }
 }

@@ -1,0 +1,191 @@
+{
+  "currentPolicy": {
+    "effectivePolicySha256": "9f9af2c8459f74dc6f21ce3e0a9c7fd5a677d9cc7f60c5ee7f86a8c285e1732f",
+    "noiseLens": "active",
+    "resolvedTemplateRevision": 11,
+    "suppressionPolicyRevision": 7
+  },
+  "findings": [
+    {
+      "citations": [
+        {
+          "evidenceId": "0199bbbb-1111-7000-8000-000000000001",
+          "evidenceTitle": "burst of connection refusals",
+          "references": [
+            {
+              "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+              "seq": 42,
+              "source": "api.log",
+              "status": "verified",
+              "timeQualityHint": "wall",
+              "timestampHint": 1735991449
+            },
+            {
+              "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+              "seq": 44,
+              "source": "api.log",
+              "status": "missing",
+              "timeQualityHint": "wall",
+              "timestampHint": 1735991449
+            }
+          ]
+        }
+      ],
+      "createdAt": 1735991600,
+      "findingId": "0199bbbb-2222-7000-8000-000000000001",
+      "hasSavedView": true,
+      "kind": "observation",
+      "lifecycle": "accepted",
+      "policyBindingStatus": "current",
+      "title": "error burst at 14:02",
+      "whyItMatters": "Marks the incident onset window."
+    },
+    {
+      "citations": [
+        {
+          "evidenceId": "0199bbbb-1111-7000-8000-000000000001",
+          "evidenceTitle": "burst of connection refusals",
+          "references": [
+            {
+              "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+              "seq": 42,
+              "source": "api.log",
+              "status": "verified",
+              "timeQualityHint": "wall",
+              "timestampHint": 1735991449
+            },
+            {
+              "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+              "seq": 44,
+              "source": "api.log",
+              "status": "missing",
+              "timeQualityHint": "wall",
+              "timestampHint": 1735991449
+            }
+          ]
+        }
+      ],
+      "createdAt": 1735991700,
+      "findingId": "0199bbbb-2222-7000-8000-000000000002",
+      "hasSavedView": false,
+      "kind": "inference",
+      "lifecycle": "accepted",
+      "policyBindingStatus": "made_under_different_policy",
+      "title": "pool exhaustion preceded the burst",
+      "whyItMatters": "Connects the warning trail to the failures."
+    },
+    {
+      "citations": [
+        {
+          "evidenceId": "0199bbbb-1111-7000-8000-000000000001",
+          "evidenceTitle": "burst of connection refusals",
+          "references": [
+            {
+              "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+              "seq": 42,
+              "source": "api.log",
+              "status": "verified",
+              "timeQualityHint": "wall",
+              "timestampHint": 1735991449
+            },
+            {
+              "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+              "seq": 44,
+              "source": "api.log",
+              "status": "missing",
+              "timeQualityHint": "wall",
+              "timestampHint": 1735991449
+            }
+          ]
+        }
+      ],
+      "createdAt": 1735991800,
+      "findingId": "0199bbbb-2222-7000-8000-000000000003",
+      "hasSavedView": false,
+      "kind": "hypothesis",
+      "lifecycle": "resolved",
+      "policyBindingStatus": "unbound_legacy",
+      "title": "db-7 restart caused the cascade",
+      "whyItMatters": "Testable root-cause explanation."
+    }
+  ],
+  "generatedAt": 1735992600,
+  "investigationId": "0199bbbb-0000-7000-8000-000000000001",
+  "schemaVersion": 1,
+  "scope": {
+    "corpusIds": [
+      "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001"
+    ],
+    "evidenceCount": 1,
+    "findingCount": 3,
+    "noteCount": 1,
+    "timeWindow": {
+      "maxTimestampHint": 1735991449,
+      "minTimestampHint": 1735991449,
+      "mixedQuality": false
+    }
+  },
+  "sections": {
+    "executiveSummary": {
+      "acceptedFromProposalId": "0199bbbb-6666-7000-8000-000000000002",
+      "acceptedProposalAcceptance": {
+        "acceptedAt": 1735992360,
+        "edited": true
+      },
+      "acceptedProposalProvenance": {
+        "detectorId": "report-detector-v1",
+        "runId": "run-contract-3",
+        "source": "detector",
+        "toolName": "propose_report_section"
+      },
+      "body": "Checkout cascade traced to the db-7 restart; mitigation verified.",
+      "evidenceIds": [
+        "0199bbbb-1111-7000-8000-000000000001"
+      ],
+      "findingIds": [
+        "0199bbbb-2222-7000-8000-000000000001"
+      ],
+      "noteIds": [
+        "0199bbbb-3333-7000-8000-000000000001"
+      ],
+      "sectionId": "0199bbbb-5555-7000-8000-000000000001",
+      "updatedAt": 1735992360
+    },
+    "nextActions": {
+      "body": "Add pool saturation alarms; document the restart runbook.",
+      "evidenceIds": [],
+      "findingIds": [],
+      "noteIds": [],
+      "sectionId": "0199bbbb-5555-7000-8000-000000000002",
+      "updatedAt": 1735992400
+    }
+  },
+  "sourceRevision": 5,
+  "status": "active",
+  "timeline": {
+    "entries": [
+      {
+        "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+        "evidenceId": "0199bbbb-1111-7000-8000-000000000001",
+        "evidenceTitle": "burst of connection refusals",
+        "seq": 42,
+        "source": "api.log",
+        "status": "verified",
+        "timeQualityHint": "wall",
+        "timestampHint": 1735991449
+      },
+      {
+        "corpusId": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+        "evidenceId": "0199bbbb-1111-7000-8000-000000000001",
+        "evidenceTitle": "burst of connection refusals",
+        "seq": 44,
+        "source": "api.log",
+        "status": "missing",
+        "timeQualityHint": "wall",
+        "timestampHint": 1735991449
+      }
+    ],
+    "omittedCount": 0
+  },
+  "title": "checkout-cascade"
+}

@@ -14,6 +14,7 @@ export type PaneId =
   | "source"
   | "todos"
   | "logs"
+  | "investigations"
   | "harvest"
   | "help";
 

@@ -48,6 +48,29 @@ pub fn save_log_diagnostic_report_at_host_path(
 ) -> Result<DiagnosticPublishOutcome, String> {
     let format = DiagnosticFormat::parse(format)?;
     validate_content(format, content)?;
+    publish_reviewed_content_at_host_path(path, format, content)
+}
+
+/// Shared destination validation + atomic no-clobber publication for one
+/// host-reviewed Markdown artefact.
+///
+/// This is the exact diagnostics machinery (#819) — host-selected destination,
+/// symlink/reparse refusal, private sibling temp, no-replace rename, directory
+/// sync warning — reused by the investigation report export (#532) so the two
+/// paths cannot drift. Content validation stays with the caller because each
+/// artefact family owns its own bound and privacy re-check.
+pub(crate) fn publish_reviewed_markdown_at_host_path(
+    path: &Path,
+    content: &str,
+) -> Result<DiagnosticPublishOutcome, String> {
+    publish_reviewed_content_at_host_path(path, DiagnosticFormat::Markdown, content)
+}
+
+fn publish_reviewed_content_at_host_path(
+    path: &Path,
+    format: DiagnosticFormat,
+    content: &str,
+) -> Result<DiagnosticPublishOutcome, String> {
     validate_destination_path(path, format)?;
     let destination_exists = inspect_destination(path)?;
     atomic_publish(path, content, destination_exists)

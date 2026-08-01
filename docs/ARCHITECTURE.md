@@ -41,6 +41,7 @@ Security model, non-goals, and migration path: **[ADR 0001](adr/0001-external-mo
 | `agent` | Plan → tool → observe → answer loop; streaming events |
 | `workspace` | Roots, connectors config, sessions |
 | `object_store` / `workspace_backup` | Bounded object I/O; exclusion-aware, content-addressed backup planning/manifests |
+| `investigations` | Durable evidence/findings/notes/report-section store; append-only revisions; SoftWrite proposal review queue; versioned accepted-state report projection |
 | `memory` | Markdown memory L2 |
 | `skills` | Discover/parse/inject playbooks |
 | `router` | Multi-source fan-out budgets |

@@ -64,6 +64,27 @@ import {
 // activation from reaching the (absent) Tauri bridge.
 vi.mock("../src/lib/host", () => ({
   hostOpenExternalUrl: vi.fn(async () => undefined),
+  // EvidencePanel now pulls src/lib/engine/investigationReports.ts into the
+  // module graph; real-browser ESM validates its named host imports even
+  // though nothing here calls them. Loud stubs keep accidental calls visible.
+  ...Object.fromEntries(
+    [
+      "hostListLogCorpora",
+      "hostLogLoadActiveInvestigation",
+      "hostLogPreviewInvestigationEvidence",
+      "hostLogAssembleInvestigationReport",
+      "hostLogSetInvestigationReportSection",
+      "hostLogAcceptProposedReportSection",
+      "hostLogDismissProposedReportSection",
+      "hostLogSaveInvestigationReportExport",
+      "hostLogReleaseInvestigationReportExport",
+    ].map((name) => [
+      name,
+      vi.fn(async () => {
+        throw new Error(`${name} must not be called by this suite`);
+      }),
+    ]),
+  ),
 }));
 
 type PanelProps = ComponentProps<typeof EvidencePanel>;
@@ -269,6 +290,7 @@ describe("findings rail visual acceptance", () => {
       "Evidence · 13",
       "Notes · 1",
       "Bookmarks · 1",
+      "Report sections · 0",
     ]);
 
     const list = aside.querySelector<HTMLElement>(

@@ -77,6 +77,16 @@ vi.mock("../../lib/host", () => ({
   hostReanalyzeLogCorpus: hostMocks.reanalyze,
   hostSaveLogDiagnosticReport: hostMocks.saveDiagnostic,
   hostSetActiveLogCorpus: hostMocks.setActiveCorpus,
+  // Referenced by lib/engine/investigationReports delegation exports (#532),
+  // pulled into this graph through LogPane's in-app LogExplorer embed.
+  hostLogLoadActiveInvestigation: vi.fn(async () => null),
+  hostLogPreviewInvestigationEvidence: vi.fn(),
+  hostLogAssembleInvestigationReport: vi.fn(),
+  hostLogSetInvestigationReportSection: vi.fn(),
+  hostLogAcceptProposedReportSection: vi.fn(),
+  hostLogDismissProposedReportSection: vi.fn(),
+  hostLogSaveInvestigationReportExport: vi.fn(),
+  hostLogReleaseInvestigationReportExport: vi.fn(async () => true),
 }));
 
 vi.mock("../../lib/dialogs", () => ({

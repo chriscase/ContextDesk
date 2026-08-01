@@ -9,6 +9,7 @@ const PANES: { id: PaneId; label: string }[] = [
   { id: "source", label: "Source" },
   { id: "todos", label: "Todos" },
   { id: "logs", label: "Logs" },
+  { id: "investigations", label: "Investigations" },
   { id: "harvest", label: "Harvest" },
   { id: "help", label: "Help" },
 ];

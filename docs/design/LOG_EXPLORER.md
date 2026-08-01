@@ -23,7 +23,7 @@ A **Log Investigation Workspace**: multi-window, responsively dense, AI-assisted
 | Multi-component causality | 1–4 source-group lanes, optional timestamp-linked scroll + gap visualization |
 | Find similar failures | Keyword + template-semantic → events |
 | AI help without paste floods | Inline chat rail on corpus; tools use corpus + view + selection |
-| Hand off | Existing corpus package; later: view/bookmarks export |
+| Hand off | Existing corpus package; versioned accepted-state investigation report with confirmation-gated Markdown export; later: view/bookmarks export |
 
 ## 2. Locked owner decisions (2026-07-25)
 
@@ -423,9 +423,13 @@ rewriting them:
   non-mutating; Apply revalidates every exact reference at the trusted host and
   offers one-step restoration of the prior logical view.
 
-This foundation intentionally does not claim the remaining Investigation
-workflow: model or detector proposals, ranked review, full proposal lifecycle
-history, finding walkthroughs, or report assembly.
+Model/detector proposals now ship as a durable SoftWrite review queue
+(findings and report sections; explicit Accept / Edit-and-accept /
+Dismiss-with-reason), and report assembly ships as a versioned accepted-state
+projection with deterministic, confirmation-gated Markdown export. This
+foundation still does not claim the remaining Investigation workflow: ranked
+review, supersede/resolve lifecycle surfacing, finding walkthroughs, report
+patches, or the fuller #532 report vocabulary and export formats.
 
 ## 7. Search / filter matrix
 
@@ -478,8 +482,12 @@ Current residuals are tracked explicitly:
   suppression-specific 25k/100k/optional-1M measurements; larger-rule-set
   optimization; and the Slice 1 hardening listed in its design section;
 - #690 versioned cross-corpus application baselines;
-- #646 model finding proposals and review lifecycle;
-- #532 fuller report assembly; and
+- #646 proposal ranking, walkthroughs, and supersede/resolve lifecycle
+  surfacing (the durable propose/accept/dismiss queue ships);
+- #532 fuller report workflow (richer section vocabulary, report patches with
+  an undo trail, unsupported-claim detection, HTML/PDF export, evidence
+  appendix, multi-corpus report UI) — the versioned accepted-state projection
+  and Markdown export ship; and
 - remaining packaged owner acceptance.
 
 ## 12. Security

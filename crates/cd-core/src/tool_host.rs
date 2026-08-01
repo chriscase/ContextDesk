@@ -3369,6 +3369,9 @@ impl ToolHost {
             crate::log_analysis::ANOMALIES => self.tool_anomalies_logs(arguments)?,
             crate::log_analysis::TRACE => self.tool_trace_logs(arguments)?,
             crate::investigations::PROPOSE_FINDING_TOOL => self.tool_propose_finding(arguments)?,
+            crate::investigations::PROPOSE_REPORT_SECTION_TOOL => {
+                self.tool_propose_report_section(arguments)?
+            }
             crate::help::SEARCH_HELP => {
                 let (ok, summary, raw, cites) = self.tool_search_help(arguments).await?;
                 web_cites = cites;
@@ -4189,6 +4192,123 @@ impl ToolHost {
             summary,
             raw,
             Some(format!("investigation_proposal:{}", proposal.id)),
+        ))
+    }
+
+    /// SoftWrite propose_report_section → durable Proposed only (#532).
+    ///
+    /// Host binds investigation + corpus. Model provenance is forced to Model /
+    /// propose_report_section; spoofed provenance in args is ignored. Never
+    /// creates or replaces authored report sections.
+    fn tool_propose_report_section(
+        &self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        use crate::investigations::{
+            find_report_section_proposal_by_idempotency_key, host_model_report_section_provenance,
+            propose_repair_error, propose_report_section_input_from_tool_args,
+            ProposeFindingErrorCode, ProposedFindingStatus, TrustedModelProposeContext,
+            PROPOSE_REPORT_SECTION_TOOL,
+        };
+
+        if !self.log_analysis_enabled {
+            return Err(propose_repair_error(
+                ProposeFindingErrorCode::ToolsDisabled,
+                "log analysis / propose_report_section unavailable",
+            ));
+        }
+        let store_dir = self.investigation_store_dir.as_ref().ok_or_else(|| {
+            propose_repair_error(
+                ProposeFindingErrorCode::ToolsDisabled,
+                "investigation store is not configured on this host",
+            )
+        })?;
+        let host_investigation = self.active_investigation_id.as_deref().ok_or_else(|| {
+            propose_repair_error(
+                ProposeFindingErrorCode::MissingInvestigation,
+                "host has no active Investigation selected for propose_report_section",
+            )
+        })?;
+        // Provider cannot redirect to another investigation (even same corpus).
+        if let Some(arg_inv) = args.get("investigation_id").and_then(|v| v.as_str()) {
+            let arg_inv = arg_inv.trim();
+            if !arg_inv.is_empty() && arg_inv != host_investigation {
+                return Err(propose_repair_error(
+                    ProposeFindingErrorCode::WrongInvestigation,
+                    format!(
+                        "investigation_id {arg_inv} does not match host-selected investigation {host_investigation}"
+                    ),
+                ));
+            }
+        }
+        let expected_revision = args
+            .get("expected_revision")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| {
+                propose_repair_error(
+                    ProposeFindingErrorCode::InvalidInput,
+                    "expected_revision is required",
+                )
+            })?;
+        let cid = self.resolve_log_corpus(args, PROPOSE_REPORT_SECTION_TOOL)?;
+        let corpus = self.open_log_corpus(&cid)?;
+        let provenance = host_model_report_section_provenance(&TrustedModelProposeContext {
+            provider: self.propose_model_provider.clone(),
+            model_id: self.propose_model_id.clone(),
+            run_id: self.propose_run_id.clone(),
+        })?;
+        let input = propose_report_section_input_from_tool_args(
+            args,
+            host_investigation.to_string(),
+            expected_revision,
+            provenance,
+        )?;
+        let idempotency_key = input.idempotency_key.clone();
+        let store = crate::investigations::InvestigationStore::new(store_dir);
+        let resolved = store.propose_report_section(corpus.as_ref(), input)?;
+        // Report the exact proposal matching the idempotency key (not "latest open").
+        let proposal =
+            find_report_section_proposal_by_idempotency_key(&resolved.document, &idempotency_key)
+                .ok_or_else(|| {
+                CoreError::Message(
+                    "propose_report_section succeeded without the keyed proposal row".into(),
+                )
+            })?;
+        if proposal.accepted_section_id.is_some()
+            && proposal.status == ProposedFindingStatus::Proposed
+        {
+            return Err(CoreError::Message(
+                "propose_report_section integrity: Proposed row must not link authored section"
+                    .into(),
+            ));
+        }
+        let status_label = match proposal.status {
+            ProposedFindingStatus::Proposed => "proposed",
+            ProposedFindingStatus::Accepted => "accepted",
+            ProposedFindingStatus::Dismissed => "dismissed",
+            ProposedFindingStatus::Superseded => "superseded",
+        };
+        let summary = format!(
+            "report section proposal {} status={status_label} key={idempotency_key}; investigation revision={}",
+            proposal.id, resolved.document.revision
+        );
+        let raw = serde_json::to_string(&serde_json::json!({
+            "proposalId": proposal.id,
+            "status": status_label,
+            "investigationId": host_investigation,
+            "revision": resolved.document.revision,
+            "idempotencyKey": idempotency_key,
+            "kind": proposal.kind.as_str(),
+            "provenanceSource": "model",
+            "toolName": PROPOSE_REPORT_SECTION_TOOL,
+            "acceptedSectionId": proposal.accepted_section_id,
+        }))
+        .unwrap_or_else(|_| summary.clone());
+        Ok((
+            true,
+            summary,
+            raw,
+            Some(format!("investigation_report_proposal:{}", proposal.id)),
         ))
     }
 
@@ -6164,6 +6284,13 @@ fn resolve_write_target(name: &str, args: &Value, memory_dir: &std::path::Path) 
                 .unwrap_or("unknown");
             format!("investigation://propose/{inv}")
         }
+        crate::investigations::PROPOSE_REPORT_SECTION_TOOL => {
+            let inv = args
+                .get("investigation_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            format!("investigation://propose_report_section/{inv}")
+        }
         names::RECALL_MEMORY => args
             .get("query")
             .and_then(|v| v.as_str())
@@ -6244,6 +6371,14 @@ fn skill_draft_preview(args: &Value) -> String {
 }
 
 fn preview_args(tool_name: &str, args: &Value, host_investigation_id: Option<&str>) -> String {
+    // Dedicated propose_report_section SoftWrite preview (#532) — never the
+    // memory formatter and never the finding preview.
+    if tool_name == crate::investigations::PROPOSE_REPORT_SECTION_TOOL {
+        return crate::investigations::propose_report_section_permission_preview(
+            args,
+            host_investigation_id,
+        );
+    }
     // Dedicated propose_finding SoftWrite preview — never the memory formatter.
     if tool_name == crate::investigations::PROPOSE_FINDING_TOOL
         || (args.get("idempotency_key").is_some()
@@ -11109,5 +11244,260 @@ mod tests {
             .load(&b.id, &LogCorpus::open(&cache, &corpus_id).unwrap())
             .unwrap();
         assert!(loaded_b.document.proposed_findings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn propose_report_section_tool_creates_proposed_only_with_forced_provenance() {
+        use crate::events::StreamEvent;
+        use crate::investigations::{
+            InvestigationStore, ProposalSourceKind, ProposedFindingStatus,
+            PROPOSE_REPORT_SECTION_TOOL,
+        };
+        use crate::log_analysis::{ActiveTimestampBasis, LogCorpus, LogEvent, TimestampProvenance};
+        use crate::permissions::PermissionDecision;
+
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let inv_dir = root.path().join("investigations");
+        let corpus = LogCorpus::create(&cache, "report tool loop").unwrap();
+        corpus
+            .push_events(&[LogEvent {
+                seq: 10,
+                ts: 1_700_000_010,
+                timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                unresolved_local_timestamp: None,
+                level: "error".into(),
+                service: Some("api".into()),
+                host: None,
+                template_id: 1,
+                params: vec![],
+                trace_id: None,
+                message: "checkout failed".into(),
+                source: "api/app.log".into(),
+            }])
+            .unwrap();
+        corpus.flush().unwrap();
+        let corpus_id = corpus.id().to_string();
+        let store = InvestigationStore::new(&inv_dir);
+        let doc = store.create("Report tool loop", &corpus).unwrap();
+        let with_evidence = store
+            .add_exact_evidence(
+                &doc.id,
+                doc.revision,
+                "refusal burst".to_string(),
+                &corpus,
+                vec![crate::log_analysis::BookmarkEventRef {
+                    corpus_id: corpus_id.clone(),
+                    seq: 10,
+                    source: "api/app.log".into(),
+                    timestamp_hint: 1_700_000_010,
+                    time_quality_hint: crate::log_analysis::TimeQuality::Wall,
+                }],
+            )
+            .unwrap();
+        let evidence_id = with_evidence.document.evidence[0].id.clone();
+        let revision = with_evidence.document.revision;
+
+        let workspace = Workspace::new("ws", vec![root.path().to_path_buf()]);
+        let mut host = ToolHost::new(workspace, KeywordIndex::new(), None);
+        host.set_log_analysis(true, Some(cache.clone()));
+        host.set_investigation_store_dir(Some(inv_dir.clone()));
+        host.set_active_log_corpus(Some(corpus_id.clone()));
+        host.set_propose_model_context(
+            Some("fixture-provider".into()),
+            Some("fixture-model".into()),
+            Some("turn-1".into()),
+        );
+        // Drop local handle so DuckDB exclusive open can re-open via host.
+        drop(corpus);
+        let reopened = LogCorpus::open(&cache, &corpus_id).unwrap();
+        host.seed_log_corpus_handle(&corpus_id, std::sync::Arc::new(reopened))
+            .expect("seed corpus handle");
+
+        // Spoof provenance in args — host must ignore and force
+        // Model/propose_report_section.
+        let args = json!({
+            "expected_revision": revision,
+            "idempotency_key": "report-tool-loop-1",
+            "kind": "executive_summary",
+            "body": "Checkout cascade traced to the db restart window.",
+            "evidence_ids": [evidence_id],
+            "provenance": {
+                "source": "detector",
+                "tool_name": "spoofed_tool",
+                "model_id": "attacker-model",
+                "detector_id": "evil-detector"
+            }
+        });
+
+        // MissingInvestigation fails closed before any write.
+        let first = host
+            .execute(PROPOSE_REPORT_SECTION_TOOL, &args, None)
+            .await
+            .unwrap();
+        let (rid, preview) = first
+            .events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::PermissionRequired {
+                    request_id,
+                    preview,
+                    ..
+                } => Some((request_id.clone(), preview.clone())),
+                _ => None,
+            })
+            .expect("PermissionRequired for SoftWrite propose_report_section");
+        assert!(
+            preview.contains("propose_report_section (SoftWrite)")
+                && preview.contains("Proposed report section only")
+                && preview.contains("executive_summary")
+                && !preview.contains("memory draft"),
+            "dedicated permission preview required, got: {preview}"
+        );
+        host.complete_permission(&rid, PermissionDecision::AllowOnce, None)
+            .unwrap();
+        let err = host
+            .execute(PROPOSE_REPORT_SECTION_TOOL, &args, Some(&rid))
+            .await
+            .expect_err("must fail without host investigation");
+        assert!(err.to_string().contains("missing_investigation"), "{err}");
+
+        // Redirect to another investigation fails closed.
+        host.set_active_investigation_id(Some(doc.id.clone()));
+        let redirect = json!({
+            "investigation_id": "0199ffff-0000-7000-8000-000000000009",
+            "expected_revision": revision,
+            "idempotency_key": "report-tool-redirect-1",
+            "kind": "next_actions",
+            "body": "Redirect attempt must fail closed."
+        });
+        let first = host
+            .execute(PROPOSE_REPORT_SECTION_TOOL, &redirect, None)
+            .await
+            .unwrap();
+        let rid_redirect = first
+            .events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::PermissionRequired { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+            .expect("permission");
+        host.complete_permission(&rid_redirect, PermissionDecision::AllowOnce, None)
+            .unwrap();
+        let err = host
+            .execute(PROPOSE_REPORT_SECTION_TOOL, &redirect, Some(&rid_redirect))
+            .await
+            .expect_err("redirect must fail");
+        assert!(err.to_string().contains("wrong_investigation"), "{err}");
+
+        // Schema/execution agreement: the schema declares expected_revision
+        // required and execution enforces exactly that — omitting it fails
+        // closed with the typed invalid_input code and writes nothing.
+        let spec = crate::investigations::propose_report_section_tool_spec();
+        assert!(
+            spec.parameters["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v.as_str() == Some("expected_revision")),
+            "tool schema must declare expected_revision required"
+        );
+        let missing_revision = json!({
+            "idempotency_key": "report-tool-missing-rev-1",
+            "kind": "next_actions",
+            "body": "Missing revision pin must fail closed."
+        });
+        let first = host
+            .execute(PROPOSE_REPORT_SECTION_TOOL, &missing_revision, None)
+            .await
+            .unwrap();
+        let rid_missing = first
+            .events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::PermissionRequired { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+            .expect("permission");
+        host.complete_permission(&rid_missing, PermissionDecision::AllowOnce, None)
+            .unwrap();
+        let err = host
+            .execute(
+                PROPOSE_REPORT_SECTION_TOOL,
+                &missing_revision,
+                Some(&rid_missing),
+            )
+            .await
+            .expect_err("omitted expected_revision must fail closed");
+        let err = err.to_string();
+        assert!(err.contains("invalid_input"), "{err}");
+        assert!(err.contains("expected_revision is required"), "{err}");
+        let unchanged = store
+            .load(&doc.id, &LogCorpus::open(&cache, &corpus_id).unwrap())
+            .unwrap();
+        assert!(
+            unchanged.document.proposed_report_sections.is_empty(),
+            "failed propose must write nothing"
+        );
+
+        // Bound + granted call creates exactly one durable Proposed row.
+        let first = host
+            .execute(PROPOSE_REPORT_SECTION_TOOL, &args, None)
+            .await
+            .unwrap();
+        let rid = first
+            .events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::PermissionRequired { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+            .expect("permission");
+        host.complete_permission(&rid, PermissionDecision::AllowOnce, None)
+            .unwrap();
+        let second = host
+            .execute(PROPOSE_REPORT_SECTION_TOOL, &args, Some(&rid))
+            .await
+            .unwrap();
+        assert!(
+            second.ok,
+            "tool should succeed after grant: {}",
+            second.summary
+        );
+        assert!(
+            second.summary.contains("proposed"),
+            "{} / {}",
+            second.summary,
+            second.detail_raw
+        );
+        assert!(
+            second
+                .citation_path
+                .as_deref()
+                .is_some_and(|path| path.starts_with("investigation_report_proposal:")),
+            "result must cite investigation_report_proposal:{{id}}: {:?}",
+            second.citation_path
+        );
+
+        let loaded = store
+            .load(&doc.id, &LogCorpus::open(&cache, &corpus_id).unwrap())
+            .unwrap();
+        assert_eq!(loaded.document.proposed_report_sections.len(), 1);
+        let p = &loaded.document.proposed_report_sections[0];
+        assert_eq!(p.status, ProposedFindingStatus::Proposed);
+        assert!(
+            loaded.document.report_sections.is_empty(),
+            "tool must never create authored report sections"
+        );
+        assert!(p.accepted_section_id.is_none());
+        assert_eq!(p.evidence_ids, vec![evidence_id]);
+        // Host-authored provenance (spoof ignored).
+        assert_eq!(p.provenance.source, ProposalSourceKind::Model);
+        assert_eq!(p.provenance.tool_name, PROPOSE_REPORT_SECTION_TOOL);
+        assert_eq!(p.provenance.model_id.as_deref(), Some("fixture-model"));
+        assert!(p.provenance.detector_id.is_none());
     }
 }

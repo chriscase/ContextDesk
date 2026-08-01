@@ -723,7 +723,7 @@ impl InvestigationStore {
     }
 }
 
-fn sanitize_idempotency_key(key: String) -> CoreResult<String> {
+pub(super) fn sanitize_idempotency_key(key: String) -> CoreResult<String> {
     let key = key.trim().to_string();
     if key.is_empty() {
         return Err(propose_repair_error(
@@ -777,7 +777,7 @@ fn sanitize_provenance_field(label: &str, value: Option<String>) -> CoreResult<O
     Ok(Some(value))
 }
 
-fn sanitize_provenance(p: ProposalProvenance) -> CoreResult<ProposalProvenance> {
+pub(super) fn sanitize_provenance(p: ProposalProvenance) -> CoreResult<ProposalProvenance> {
     let tool_name = p.tool_name.trim().to_string();
     if tool_name.is_empty() || tool_name.len() > MAX_PROPOSAL_PROVENANCE_FIELD_BYTES {
         return Err(propose_repair_error(

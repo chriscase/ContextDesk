@@ -138,6 +138,22 @@ export type ProposalEvidenceRole = (typeof PROPOSAL_EVIDENCE_ROLE)[number];
 export const PROPOSAL_SOURCE_KIND = ["model", "detector", "internal"] as const;
 export type ProposalSourceKind = (typeof PROPOSAL_SOURCE_KIND)[number];
 
+/** `cd_core::investigations::ReportSectionKind` (snake_case). */
+export const REPORT_SECTION_KIND = [
+  "executive_summary",
+  "unresolved_questions",
+  "next_actions",
+] as const;
+export type ReportSectionKind = (typeof REPORT_SECTION_KIND)[number];
+
+/** `cd_core::investigations::EvidenceReferenceStatus` (snake_case). */
+export const EVIDENCE_REFERENCE_STATUS = [
+  "verified",
+  "missing",
+  "stale",
+] as const;
+export type EvidenceReferenceStatus = (typeof EVIDENCE_REFERENCE_STATUS)[number];
+
 export const FINDING_VIEW_TIME_LINK_MODE = [
   "independent",
   "follow_cursor",
@@ -402,6 +418,49 @@ export type WireInvestigationDocument = {
   findings: WireFindingItem[];
   notes: WireNoteItem[];
   proposedFindings: WireProposedFindingItem[];
+  reportSections: WireReportSectionItem[];
+  proposedReportSections: WireProposedReportSectionItem[];
+  createdAt: number;
+  updatedAt: number;
+};
+
+/** `cd_core::investigations::ReportSectionItem` (schema v6, #532). */
+export type WireReportSectionItem = {
+  id: string;
+  kind: ReportSectionKind;
+  body: string;
+  evidenceIds?: string[];
+  findingIds?: string[];
+  noteIds?: string[];
+  provenance: HumanProvenance;
+  acceptedFromProposalId?: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+/** `cd_core::investigations::ProposedReportSectionItem` (schema v6, #532). */
+export type WireProposedReportSectionItem = {
+  id: string;
+  status: ProposedFindingStatus;
+  kind: ReportSectionKind;
+  body: string;
+  evidenceIds?: string[];
+  findingIds?: string[];
+  noteIds?: string[];
+  corpusId: string;
+  investigationId: string;
+  provenance: {
+    source: ProposalSourceKind;
+    provider?: string;
+    modelId?: string;
+    runId?: string;
+    toolName: string;
+    detectorId?: string;
+  };
+  idempotencyKey: string;
+  acceptance?: { acceptedAt: number; edited: boolean };
+  dismissReason?: string;
+  acceptedSectionId?: string;
   createdAt: number;
   updatedAt: number;
 };
@@ -434,7 +493,21 @@ export type WireInvestigationPolicyBinding = {
   suppressionPolicyRevision: number;
   resolvedTemplateRevision: number;
   effectivePolicySha256: string;
-  noiseLens: InvestigationNoiseLens;
+  noiseLens: InvestigationNoiseLens | null;
+};
+
+export type WireProposalProvenance = {
+  source: ProposalSourceKind;
+  provider?: string;
+  modelId?: string;
+  runId?: string;
+  toolName: string;
+  detectorId?: string;
+};
+
+export type WireHumanProposalAcceptance = {
+  acceptedAt: number;
+  edited: boolean;
 };
 
 export type WireProposedFindingItem = {
@@ -515,6 +588,116 @@ export type WireFindingViewRecipe = {
     semantic: boolean;
   } | null;
   viewportAnchors: { laneId: string; eventRef: WireBookmarkEventRef }[];
+};
+
+/** `cd_core::investigations::ReportCurrentPolicy`. */
+export type WireReportCurrentPolicy = {
+  suppressionPolicyRevision: number;
+  resolvedTemplateRevision: number;
+  effectivePolicySha256: string;
+  noiseLens: InvestigationNoiseLens | null;
+};
+
+/** `cd_core::investigations::ReportTimeWindow`. */
+export type WireReportTimeWindow = {
+  minTimestampHint: number;
+  maxTimestampHint: number;
+  mixedQuality: boolean;
+};
+
+/** `cd_core::investigations::ReportScope`. */
+export type WireReportScope = {
+  corpusIds: string[];
+  evidenceCount: number;
+  findingCount: number;
+  noteCount: number;
+  timeWindow?: WireReportTimeWindow;
+};
+
+/** `cd_core::investigations::ReportAuthoredSection`. */
+export type WireReportAuthoredSection = {
+  sectionId: string;
+  body: string;
+  evidenceIds: string[];
+  findingIds: string[];
+  noteIds: string[];
+  acceptedFromProposalId?: string;
+  acceptedProposalProvenance?: WireProposalProvenance;
+  acceptedProposalAcceptance?: WireHumanProposalAcceptance;
+  updatedAt: number;
+};
+
+/** `cd_core::investigations::ReportSections` — fixed authorable slots. */
+export type WireReportSections = {
+  executiveSummary?: WireReportAuthoredSection;
+  unresolvedQuestions?: WireReportAuthoredSection;
+  nextActions?: WireReportAuthoredSection;
+};
+
+/** `cd_core::investigations::ReportEventReference` — exact identity + status. */
+export type WireReportEventReference = {
+  corpusId: string;
+  seq: number;
+  source: string;
+  timestampHint: number;
+  timeQualityHint: TimeQuality;
+  status: EvidenceReferenceStatus;
+};
+
+/** `cd_core::investigations::ReportFindingCitation`. */
+export type WireReportFindingCitation = {
+  evidenceId: string;
+  evidenceTitle: string;
+  references: WireReportEventReference[];
+};
+
+/** `cd_core::investigations::ReportFindingEntry`. */
+export type WireReportFindingEntry = {
+  findingId: string;
+  kind: FindingKind;
+  lifecycle: FindingLifecycle;
+  title: string;
+  whyItMatters: string;
+  policyBindingStatus: InvestigationPolicyBindingStatus;
+  hasSavedView: boolean;
+  citations: WireReportFindingCitation[];
+  createdAt: number;
+};
+
+/** `cd_core::investigations::ReportTimelineEntry`. */
+export type WireReportTimelineEntry = {
+  corpusId: string;
+  seq: number;
+  source: string;
+  timestampHint: number;
+  timeQualityHint: TimeQuality;
+  evidenceId: string;
+  evidenceTitle: string;
+  status: EvidenceReferenceStatus;
+};
+
+/** `cd_core::investigations::ReportTimeline` — bounded with omitted count. */
+export type WireReportTimeline = {
+  entries: WireReportTimelineEntry[];
+  omittedCount: number;
+};
+
+/**
+ * `cd_core::investigations::InvestigationReport` — the versioned, payload-free
+ * report projection (#532). Proposals never appear in this projection.
+ */
+export type WireInvestigationReport = {
+  schemaVersion: number;
+  investigationId: string;
+  title: string;
+  status: InvestigationStatus;
+  sourceRevision: number;
+  generatedAt: number;
+  currentPolicy?: WireReportCurrentPolicy;
+  scope: WireReportScope;
+  sections: WireReportSections;
+  findings: WireReportFindingEntry[];
+  timeline: WireReportTimeline;
 };
 
 export type WireProcessProgress = {
@@ -831,6 +1014,22 @@ const investigationPolicyBindingShape: ObjectShape = {
   noiseLens: f.req(f.en(...INVESTIGATION_NOISE_LENS)),
 };
 
+/** `cd_core::investigations::ProposalProvenance` (shared by both proposal kinds). */
+const proposalProvenanceShape: ObjectShape = {
+  source: f.req(f.en(...PROPOSAL_SOURCE_KIND)),
+  provider: f.opt(f.str),
+  modelId: f.opt(f.str),
+  runId: f.opt(f.str),
+  toolName: f.req(f.str),
+  detectorId: f.opt(f.str),
+};
+
+/** `cd_core::investigations::HumanProposalAcceptance` (shared). */
+const proposalAcceptanceShape: ObjectShape = {
+  acceptedAt: f.req(f.i64),
+  edited: f.req(f.bool),
+};
+
 const proposedFindingShape: ObjectShape = {
   id: f.req(f.str),
   status: f.req(f.en(...PROPOSED_FINDING_STATUS)),
@@ -860,25 +1059,45 @@ const proposedFindingShape: ObjectShape = {
       levelWeight: f.opt(f.u64),
     }),
   ),
-  provenance: f.req(
-    f.obj({
-      source: f.req(f.en(...PROPOSAL_SOURCE_KIND)),
-      provider: f.opt(f.str),
-      modelId: f.opt(f.str),
-      runId: f.opt(f.str),
-      toolName: f.req(f.str),
-      detectorId: f.opt(f.str),
-    }),
-  ),
+  provenance: f.req(f.obj(proposalProvenanceShape)),
   idempotencyKey: f.req(f.str),
-  acceptance: f.opt(
-    f.obj({
-      acceptedAt: f.req(f.i64),
-      edited: f.req(f.bool),
-    }),
-  ),
+  acceptance: f.opt(f.obj(proposalAcceptanceShape)),
   dismissReason: f.opt(f.str),
   acceptedFindingId: f.opt(f.str),
+  createdAt: f.req(f.i64),
+  updatedAt: f.req(f.i64),
+};
+
+/** Schema v6 (#532): durable authored report section. */
+const reportSectionItemShape: ObjectShape = {
+  id: f.req(f.str),
+  kind: f.req(f.en(...REPORT_SECTION_KIND)),
+  body: f.req(f.str),
+  evidenceIds: f.opt(f.arr(f.str)),
+  findingIds: f.opt(f.arr(f.str)),
+  noteIds: f.opt(f.arr(f.str)),
+  provenance: f.req(f.en(...HUMAN_PROVENANCE)),
+  acceptedFromProposalId: f.opt(f.str),
+  createdAt: f.req(f.i64),
+  updatedAt: f.req(f.i64),
+};
+
+/** Schema v6 (#532): durable proposed report section awaiting human review. */
+const proposedReportSectionItemShape: ObjectShape = {
+  id: f.req(f.str),
+  status: f.req(f.en(...PROPOSED_FINDING_STATUS)),
+  kind: f.req(f.en(...REPORT_SECTION_KIND)),
+  body: f.req(f.str),
+  evidenceIds: f.opt(f.arr(f.str)),
+  findingIds: f.opt(f.arr(f.str)),
+  noteIds: f.opt(f.arr(f.str)),
+  corpusId: f.req(f.str),
+  investigationId: f.req(f.str),
+  provenance: f.req(f.obj(proposalProvenanceShape)),
+  idempotencyKey: f.req(f.str),
+  acceptance: f.opt(f.obj(proposalAcceptanceShape)),
+  dismissReason: f.opt(f.str),
+  acceptedSectionId: f.opt(f.str),
   createdAt: f.req(f.i64),
   updatedAt: f.req(f.i64),
 };
@@ -935,8 +1154,115 @@ const investigationDocumentShape: ObjectShape = {
     ),
   ),
   proposedFindings: f.req(f.arr(f.obj(proposedFindingShape))),
+  reportSections: f.req(f.arr(f.obj(reportSectionItemShape))),
+  proposedReportSections: f.req(f.arr(f.obj(proposedReportSectionItemShape))),
   createdAt: f.req(f.i64),
   updatedAt: f.req(f.i64),
+};
+
+/** `cd_core::investigations::ReportAuthoredSection` (projection). */
+const reportAuthoredSectionShape: ObjectShape = {
+  sectionId: f.req(f.str),
+  body: f.req(f.str),
+  evidenceIds: f.req(f.arr(f.str)),
+  findingIds: f.req(f.arr(f.str)),
+  noteIds: f.req(f.arr(f.str)),
+  acceptedFromProposalId: f.opt(f.str),
+  acceptedProposalProvenance: f.opt(f.obj(proposalProvenanceShape)),
+  acceptedProposalAcceptance: f.opt(f.obj(proposalAcceptanceShape)),
+  updatedAt: f.req(f.i64),
+};
+
+/** `cd_core::investigations::ReportEventReference` (projection). */
+const reportEventReferenceShape: ObjectShape = {
+  corpusId: f.req(f.str),
+  seq: f.req(f.u64),
+  source: f.req(f.str),
+  timestampHint: f.req(f.i64),
+  timeQualityHint: f.req(timeQuality),
+  status: f.req(f.en(...EVIDENCE_REFERENCE_STATUS)),
+};
+
+/** `cd_core::investigations::InvestigationReport` (#532). */
+const investigationReportShape: ObjectShape = {
+  schemaVersion: f.req(f.u64),
+  investigationId: f.req(f.str),
+  title: f.req(f.str),
+  status: f.req(f.en(...INVESTIGATION_STATUS)),
+  sourceRevision: f.req(f.u64),
+  generatedAt: f.req(f.i64),
+  currentPolicy: f.opt(
+    f.obj({
+      suppressionPolicyRevision: f.req(f.u64),
+      resolvedTemplateRevision: f.req(f.u64),
+      effectivePolicySha256: f.req(f.str),
+      noiseLens: f.nul(f.en(...INVESTIGATION_NOISE_LENS)),
+    }),
+  ),
+  scope: f.req(
+    f.obj({
+      corpusIds: f.req(f.arr(f.str)),
+      evidenceCount: f.req(f.u64),
+      findingCount: f.req(f.u64),
+      noteCount: f.req(f.u64),
+      timeWindow: f.opt(
+        f.obj({
+          minTimestampHint: f.req(f.i64),
+          maxTimestampHint: f.req(f.i64),
+          mixedQuality: f.req(f.bool),
+        }),
+      ),
+    }),
+  ),
+  sections: f.req(
+    f.obj({
+      executiveSummary: f.opt(f.obj(reportAuthoredSectionShape)),
+      unresolvedQuestions: f.opt(f.obj(reportAuthoredSectionShape)),
+      nextActions: f.opt(f.obj(reportAuthoredSectionShape)),
+    }),
+  ),
+  findings: f.req(
+    f.arr(
+      f.obj({
+        findingId: f.req(f.str),
+        kind: f.req(f.en(...FINDING_KIND)),
+        lifecycle: f.req(f.en(...FINDING_LIFECYCLE)),
+        title: f.req(f.str),
+        whyItMatters: f.req(f.str),
+        policyBindingStatus: f.req(f.en(...INVESTIGATION_POLICY_BINDING_STATUS)),
+        hasSavedView: f.req(f.bool),
+        citations: f.req(
+          f.arr(
+            f.obj({
+              evidenceId: f.req(f.str),
+              evidenceTitle: f.req(f.str),
+              references: f.req(f.arr(f.obj(reportEventReferenceShape))),
+            }),
+          ),
+        ),
+        createdAt: f.req(f.i64),
+      }),
+    ),
+  ),
+  timeline: f.req(
+    f.obj({
+      entries: f.req(
+        f.arr(
+          f.obj({
+            corpusId: f.req(f.str),
+            seq: f.req(f.u64),
+            source: f.req(f.str),
+            timestampHint: f.req(f.i64),
+            timeQualityHint: f.req(timeQuality),
+            evidenceId: f.req(f.str),
+            evidenceTitle: f.req(f.str),
+            status: f.req(f.en(...EVIDENCE_REFERENCE_STATUS)),
+          }),
+        ),
+      ),
+      omittedCount: f.req(f.u64),
+    }),
+  ),
 };
 
 const processProgressShape: ObjectShape = {
@@ -1011,6 +1337,10 @@ export const parseNoiseCandidateReport = parserFor<WireNoiseCandidateReport>(
 export const parseInvestigationDocument = parserFor<WireInvestigationDocument>(
   "investigationDocument",
   investigationDocumentShape,
+);
+export const parseInvestigationReport = parserFor<WireInvestigationReport>(
+  "investigationReport",
+  investigationReportShape,
 );
 export const parseResolvedBookmarks = listParserFor<WireResolvedBookmark>(
   "resolvedBookmark",
@@ -1419,6 +1749,7 @@ export const FIXTURE_PARSERS: Readonly<
   "suppression_document.v1.json": parseSuppressionDocument,
   "noise_candidate_report.v1.json": parseNoiseCandidateReport,
   "investigation_document.v1.json": parseInvestigationDocument,
+  "investigation_report.v1.json": parseInvestigationReport,
   "resolved_bookmark.v1.json": parseResolvedBookmarks,
   "process_progress.v1.json": parseProcessProgressStream,
   "import_preview_report.v1.json": parseImportPreviewReport,
