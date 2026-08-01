@@ -453,9 +453,13 @@ export const REASON_EXPLANATIONS: Record<string, string> = {
 /** Deterministic timezone group key: format identity + unresolved reasons. */
 export function timezoneGroupKey(source: {
   formatId?: string;
-  unresolvedReasons: string[];
+  unresolvedReasons?: string[];
 }): string {
-  return `${source.formatId ?? "unknown-format"}·${[...source.unresolvedReasons].sort().join("+")}`;
+  return `${source.formatId ?? "unknown-format"}·${[
+    ...(source.unresolvedReasons ?? []),
+  ]
+    .sort()
+    .join("+")}`;
 }
 
 export type TimezoneGroup = {
@@ -469,9 +473,13 @@ export type TimezoneGroup = {
 export function timezoneGroups(report: ImportRunReport): TimezoneGroup[] {
   const groups = new Map<string, TimezoneGroup>();
   for (const source of report.confidence.sources) {
-    if (source.timeQuality === "wall") continue;
+    const unresolvedReasons = source.unresolvedReasons ?? [];
+    // Order-only can also mean that the source has no timestamp at all. Only
+    // sources with a parser-validated local timestamp belong in timezone
+    // review; Rust intentionally omits empty vectors from the wire.
+    if (source.timeQuality === "wall" || unresolvedReasons.length === 0) continue;
     const key = timezoneGroupKey(source);
-    const reasonLabel = source.unresolvedReasons.includes("zone_abbreviation_not_resolved")
+    const reasonLabel = unresolvedReasons.includes("zone_abbreviation_not_resolved")
       ? "zone abbreviation not resolved"
       : "no timezone";
     const formatLabel = source.formatId ?? "unmatched format";
