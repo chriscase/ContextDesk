@@ -568,7 +568,15 @@ describe("Log Explorer visual acceptance", () => {
     expect(root.getAttribute("data-lane-count")).toBe("1");
     expect(root.querySelectorAll("[data-lane-id]")).toHaveLength(1);
     expect(screen.getAllByTestId("virtualized-event-list")).toHaveLength(1);
-    screen.getByLabelText("Log Explorer for fixture");
+    // #641 identity lockup: the group names the surface with the branded
+    // product plus the FULL corpus name (branding arrives async on mount).
+    await waitFor(() =>
+      expect(
+        screen
+          .getByTestId("log-explorer-identity")
+          .getAttribute("aria-label"),
+      ).toBe("ContextDesk Explorer — fixture"),
+    );
 
     // Three-column body (filters | lanes | chat) fits the viewport with both
     // splitters between the columns and no horizontal page overflow.
@@ -644,6 +652,15 @@ describe("Log Explorer visual acceptance", () => {
     }
     expect(screen.queryByTestId("lane-count-picker")).toBeNull();
     expect(root.getAttribute("data-lane-count")).toBe("1");
+    // #641: narrow keeps the corpus identity visible (the pre-redesign header
+    // hid it below 900); only the product prefix drops from the eyebrow.
+    const narrowCorpus = screen.getByTestId("log-explorer-corpus-button");
+    expect(narrowCorpus.textContent?.trim()).toBeTruthy();
+    expect(narrowCorpus.textContent).toContain("fixture");
+    expect(root.querySelector(".log-explorer__eyebrow-product")).toBeNull();
+    expect(
+      root.querySelector(".log-explorer__eyebrow-surface")?.textContent,
+    ).toBe("Log Explorer");
     expectNoHorizontalPageOverflow();
     await expect(page.elementLocator(root)).toMatchScreenshot(
       "log-explorer-ready-dark-narrow",
@@ -660,6 +677,18 @@ describe("Log Explorer visual acceptance", () => {
     screen.getByTestId("lane-count-picker");
     const maxLanes = Number(root.getAttribute("data-max-lane-count"));
     expect(maxLanes).toBeGreaterThanOrEqual(2);
+    // #641 single-row header at ultrawide: Row B is not rendered; the picker
+    // set lives inline in the identity row between vitals and utilities.
+    expect(
+      root.querySelector(".log-explorer__titlebar-row--toolbar"),
+    ).toBeNull();
+    const identityRow = root.querySelector(
+      ".log-explorer__titlebar-row--identity",
+    ) as HTMLElement;
+    within(identityRow).getByTestId("time-link-picker");
+    within(identityRow).getByTestId("lane-count-picker");
+    within(identityRow).getByTestId("density-picker");
+    within(identityRow).getByRole("button", { name: "Export diagnostics…" });
     expectNoHorizontalPageOverflow();
   });
 
@@ -814,6 +843,237 @@ describe("Log Explorer visual acceptance", () => {
         "color-contrast",
       ],
     });
+  });
+});
+
+/**
+ * Explorer header identity (#641) — corpus-first lockup, bounded vitals,
+ * two-row toolbar (single row at ultrawide), grapheme-safe middle truncation.
+ * Header-band screenshots are element-scoped to the titlebar so theme
+ * baselines stay small; full-surface shots cover dark/light at the owner's
+ * 1100×760 window.
+ */
+describe("Log Explorer header identity (#641)", () => {
+  beforeEach(async () => {
+    await resetVisualState();
+    applyBaselineLogExplorerHostMocks();
+  });
+
+  /** 110-char ASCII name whose head and tail both carry signal. */
+  const LONG_NAME =
+    "checkout-cascade-2026-07-31-eu-central-refunds-incident-full-fidelity-forensic-replay-postmortem-triage-evidence-bundle-corpus-rev-B";
+
+  it("ready at 1100x760: two-row header with tight-band vitals, dark and light", async () => {
+    await page.viewport(1100, 760);
+    const root = await renderReadyExplorer();
+    await waitForReadySettled(root);
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("log-explorer-identity").getAttribute("aria-label"),
+      ).toBe("ContextDesk Explorer — fixture"),
+    );
+
+    // Two-row structure below 1600 and the <1280 priority drop: the
+    // corpus-events prefix hides, the matched count never does.
+    expect(root.getAttribute("data-breakpoint")).toBe("normal");
+    expect(root.getAttribute("data-le-band")).toBe("tight");
+    expect(
+      root.querySelector(".log-explorer__titlebar-row--toolbar"),
+    ).toBeTruthy();
+    await nextPaintedFrame();
+    const corpusEvents = root.querySelector(
+      ".log-explorer__vitals-corpus",
+    ) as HTMLElement;
+    expect(getComputedStyle(corpusEvents).display).toBe("none");
+    expect(
+      screen.getByTestId("log-explorer-global-counts").textContent,
+    ).toContain("2 matched");
+
+    await expect(page.elementLocator(root)).toMatchScreenshot(
+      "log-explorer-ready-1100-dark",
+    );
+    await applyTheme("light");
+    await expect(page.elementLocator(root)).toMatchScreenshot(
+      "log-explorer-ready-1100-light",
+    );
+  });
+
+  it("middle-truncates a long corpus name and keeps its distinct tail (1100, dark)", async () => {
+    vi.mocked(host.hostGetLogCorpus).mockResolvedValue({
+      id: "c1",
+      name: LONG_NAME,
+      eventCount: 10,
+      templateCount: 2,
+      engine: "duckdb",
+      createdAt: 0,
+      sourceLabel: null,
+      stats: null,
+      topTemplates: [],
+      embedding: {
+        state: "keyword_only",
+        modelId: null,
+        embeddedTemplates: 0,
+        totalTemplates: 2,
+        reason: "local_model_unavailable",
+        updatedAt: 1,
+      },
+    });
+    await page.viewport(1100, 760);
+    const root = await renderReadyExplorer();
+    await waitForReadySettled(root);
+
+    const button = screen.getByTestId("log-explorer-corpus-button");
+    await waitFor(() => {
+      expect(button.textContent).toContain("…");
+      expect(button.textContent!.endsWith("corpus-rev-B")).toBe(true);
+    });
+    expect(button.textContent).toContain("checkout-cascade");
+    // The full name stays reachable: accessible description + group name.
+    const tooltip = document.getElementById(
+      button.getAttribute("aria-describedby")!,
+    );
+    expect(tooltip?.textContent).toBe(LONG_NAME);
+    expect(
+      screen.getByTestId("log-explorer-identity").getAttribute("aria-label"),
+    ).toBe(`ContextDesk Explorer — ${LONG_NAME}`);
+    // No layout spill from the truncated title.
+    expectNoHorizontalPageOverflow();
+
+    const header = root.querySelector(
+      ".log-explorer__titlebar",
+    ) as HTMLElement;
+    await expect(page.elementLocator(header)).toMatchScreenshot(
+      "log-explorer-header-longname-1100-dark",
+    );
+  });
+
+  it("header bands render across slate, sand, and forest skins (1100)", async () => {
+    await page.viewport(1100, 760);
+    const root = await renderReadyExplorer();
+    await waitForReadySettled(root);
+    const header = root.querySelector(
+      ".log-explorer__titlebar",
+    ) as HTMLElement;
+    for (const skin of ["slate", "sand", "forest"] as const) {
+      await applyTheme(skin);
+      await expect(page.elementLocator(header)).toMatchScreenshot(
+        `log-explorer-header-1100-${skin}`,
+      );
+    }
+  });
+
+  it("ultrawide 1720 renders the single-row header without horizontal overflow", async () => {
+    await page.viewport(1720, 950);
+    const root = await renderReadyExplorer();
+    await waitForReadySettled(root);
+    await waitFor(() =>
+      expect(root.getAttribute("data-breakpoint")).toBe("ultrawide"),
+    );
+
+    expect(
+      root.querySelector(".log-explorer__titlebar-row--toolbar"),
+    ).toBeNull();
+    const identityRow = root.querySelector(
+      ".log-explorer__titlebar-row--identity",
+    ) as HTMLElement;
+    within(identityRow).getByTestId("time-link-picker");
+    within(identityRow).getByTestId("lane-count-picker");
+    within(identityRow).getByTestId("row-mode-picker");
+    within(identityRow).getByTestId("density-picker");
+    within(identityRow).getByRole("button", { name: "Bookmark (B)" });
+    expectNoHorizontalPageOverflow();
+
+    const header = root.querySelector(
+      ".log-explorer__titlebar",
+    ) as HTMLElement;
+    await expect(page.elementLocator(header)).toMatchScreenshot(
+      "log-explorer-header-1720-single-row-dark",
+    );
+  });
+
+  it("110% UI scale keeps the header inside the pane with a >=24px corpus hit target", async () => {
+    await page.viewport(1100, 760);
+    const root = await renderReadyExplorer();
+    await waitForReadySettled(root);
+    try {
+      document.documentElement.dataset.uiScale = "110";
+      await nextPaintedFrame();
+      expectNoHorizontalPageOverflow();
+      const rect = screen
+        .getByTestId("log-explorer-corpus-button")
+        .getBoundingClientRect();
+      expect(rect.height).toBeGreaterThanOrEqual(24);
+      expect(rect.width).toBeGreaterThanOrEqual(24);
+      expect(root.getAttribute("data-breakpoint")).toBe("normal");
+    } finally {
+      delete document.documentElement.dataset.uiScale;
+      await nextPaintedFrame();
+    }
+  });
+
+  it("200% zoom (550px viewport) degrades into the narrow drawer contract", async () => {
+    await page.viewport(550, 760);
+    const root = await renderReadyExplorer();
+    await waitFor(
+      () => expect(root.getAttribute("data-breakpoint")).toBe("narrow"),
+      { timeout: 5000 },
+    );
+    // The drawer workspace governs: narrow tabs render, corpus stays visible.
+    screen.getByTestId("log-explorer-narrow-tabs");
+    expect(
+      screen.getByTestId("log-explorer-corpus-button").textContent,
+    ).toContain("fixture");
+    expectNoHorizontalPageOverflow();
+  });
+
+  it("summary loading -> ready keeps the inline toolbar stable (slot reservation, 1720)", async () => {
+    const summaryGate = deferred<host.LogCorpusSummaryDto>();
+    vi.mocked(host.hostGetLogCorpus).mockReturnValue(summaryGate.promise);
+    await page.viewport(1720, 950);
+    renderVisual(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/, undefined, { timeout: 8000 });
+    const root = screen.getByTestId("log-explorer");
+    await waitFor(() =>
+      expect(root.getAttribute("data-breakpoint")).toBe("ultrawide"),
+    );
+
+    // Held summary: the reserved counts slot shows the loading badge while
+    // evidence and time quality are already settled (wall clock, no Resolve
+    // button), isolating the slot-reservation contract.
+    screen.getByTestId("log-explorer-summary-loading");
+    await waitFor(() =>
+      expect(root.getAttribute("data-time-quality")).toBe("wall"),
+    );
+    await nextPaintedFrame();
+    const before = screen
+      .getByTestId("time-link-picker")
+      .getBoundingClientRect().x;
+
+    await act(async () => {
+      summaryGate.resolve({
+        id: "c1",
+        name: "fixture",
+        eventCount: 10,
+        templateCount: 2,
+        engine: "duckdb",
+        createdAt: 0,
+        sourceLabel: null,
+        stats: null,
+        topTemplates: [],
+        embedding: null,
+      });
+      await summaryGate.promise;
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("log-explorer-global-counts").textContent,
+      ).toContain("2 matched"),
+    );
+    await nextPaintedFrame();
+    const after = screen
+      .getByTestId("time-link-picker")
+      .getBoundingClientRect().x;
+    expect(Math.abs(after - before)).toBeLessThanOrEqual(1);
   });
 });
 
