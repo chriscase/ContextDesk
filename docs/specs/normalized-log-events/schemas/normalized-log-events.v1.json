@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://contextdesk.local/schemas/normalized_log_events/normalized-log-events.v1.json",
   "title": "ContextDesk normalized log events v1",
-  "description": "Line grammar for contextdesk.normalized_log_events.v1. The file is JSONL: line 1 is a header, every later non-blank line is an event. JSON Schema validates one line at a time; it cannot check cross-line rules (sourceSeq contiguity) or the timestamp legality matrix's cross-field requirements, so passing this schema is NOT conformance. Run the offline validator.",
+  "description": "Line grammar for contextdesk.normalized_log_events.v1. The file is JSONL: line 1 is a header, every later non-blank line is an event. JSON Schema validates one line at a time; it cannot check cross-line rules (sourceSeq contiguity), decoded duplicate keys, or the recursive timestamp-alias guard, so passing this schema is NOT conformance. Run the offline validator.",
   "$defs": {
     "header": {
       "type": "object",
@@ -73,10 +73,21 @@
             }
           }
         }
+      },
+      "not": {
+        "anyOf": [
+          { "required": ["ts"] },
+          { "required": ["timestamp"] },
+          { "required": ["time"] },
+          { "required": ["@timestamp"] },
+          { "required": ["@t"] },
+          { "required": ["eventTime"] }
+        ]
       }
     },
     "instant": {
       "type": "string",
+      "format": "date-time",
       "description": "RFC3339 with an EXPLICIT offset. -00:00 is rejected: RFC3339 reserves it for 'offset unknown', which is the same thing as not having one. An instant without an offset is a guessed instant and has no representation in this contract. Hours are bounded 00-23 and minutes 00-59; digit shape alone is not an offset.",
       "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?([Zz]|[+-](0[0-9]|1[0-9]|2[0-3]):[0-5][0-9])$",
       "not": {
@@ -114,6 +125,7 @@
         },
         "localText": {
           "type": "string",
+          "minLength": 1,
           "maxLength": 256
         },
         "resolvedTimezone": {
@@ -348,8 +360,17 @@
           },
           "then": {
             "not": {
-              "required": [
-                "raw"
+              "anyOf": [
+                {
+                  "required": [
+                    "raw"
+                  ]
+                },
+                {
+                  "required": [
+                    "canonical"
+                  ]
+                }
               ]
             }
           }
@@ -398,7 +419,7 @@
         "message",
         "canonical"
       ],
-      "description": "There is deliberately NO uid/eventId field. Identity is derived from (sourceId, sourceSeq) so it is checkable rather than producer-declared. RESERVED KEYS: an event may never carry top-level `ts`, `timestamp`, or `@timestamp`. A reader predating this contract treats those as authoritative wall-clock time, so an event could declare order_only while a sidecar epoch silently placed the corpus on a wall clock.",
+      "description": "There is deliberately NO uid/eventId field. Identity is derived from (sourceId, sourceSeq) so it is checkable rather than producer-declared. The schema catches reserved timestamp aliases at event root; the authoritative validator recursively rejects decoded ts/timestamp/time/@timestamp/@t/eventTime keys at every depth except the required root time object.",
       "properties": {
         "sourceSeq": {
           "type": "integer",
@@ -440,7 +461,11 @@
         },
         "attributes": {
           "type": "object",
-          "maxProperties": 256
+          "maxProperties": 256,
+          "propertyNames": {
+            "minLength": 1,
+            "maxLength": 128
+          }
         },
         "logger": {
           "type": "string",
@@ -480,6 +505,16 @@
           {
             "required": [
               "@timestamp"
+            ]
+          },
+          {
+            "required": [
+              "@t"
+            ]
+          },
+          {
+            "required": [
+              "eventTime"
             ]
           }
         ]

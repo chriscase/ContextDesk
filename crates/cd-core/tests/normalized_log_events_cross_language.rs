@@ -1,5 +1,5 @@
 //! Cross-language conformance: the Node and Python reference producers must
-//! agree with the Rust validator on every fixture, byte for byte.
+//! agree with the Rust validator on every frozen fixture.
 //!
 //! #826 requires that "Rust, TypeScript/Node, and Python examples exercise the
 //! same versioned capability contract". This test is what makes that true
@@ -132,5 +132,75 @@ fn every_reference_producer_emits_a_file_the_rust_validator_accepts() {
             report.diagnostics
         );
         assert!(report.events_validated >= 3);
+    }
+}
+
+#[test]
+fn exact_line_bound_agrees_across_rust_node_and_python() {
+    use cd_core::normalized_log_events::{
+        canonicalize_stream, validate_file, validate_stream, MAX_NORMALIZED_LINE_BYTES,
+    };
+
+    let root = repo_root();
+    let minimal =
+        std::fs::read_to_string(root.join("fixtures/normalized-log-events/valid/minimal.jsonl"))
+            .expect("minimal fixture");
+    let mut lines = minimal.lines();
+    let header = lines.next().expect("header");
+    let mut event: serde_json::Value =
+        serde_json::from_str(lines.next().expect("event")).expect("event json");
+    event
+        .as_object_mut()
+        .unwrap()
+        .insert("futurePadding".into(), serde_json::json!(""));
+    let base = serde_json::to_string(&event).unwrap();
+    event.as_object_mut().unwrap().insert(
+        "futurePadding".into(),
+        serde_json::json!("x".repeat(MAX_NORMALIZED_LINE_BYTES - base.len())),
+    );
+    let line = serde_json::to_string(&event).unwrap();
+    assert_eq!(line.len(), MAX_NORMALIZED_LINE_BYTES);
+    let dir = tempfile::tempdir().expect("tempdir");
+    for (suffix, terminator) in [("lf", "\n"), ("crlf", "\r\n")] {
+        let text = format!("{header}{terminator}{line}{terminator}");
+        assert!(validate_file(&text).ok);
+        assert!(
+            validate_stream(std::io::Cursor::new(text.as_bytes()))
+                .unwrap()
+                .ok
+        );
+        let mut canonical = Vec::new();
+        canonicalize_stream(std::io::Cursor::new(text.as_bytes()), &mut canonical)
+            .expect("canonicalize exact bound");
+
+        let input = dir.path().join(format!("exact-bound-{suffix}.jsonl"));
+        std::fs::write(&input, text).expect("write exact-bound file");
+        for (program, script) in [
+            (
+                "python3",
+                "examples/normalized-log-producers/python/produce_and_validate.py",
+            ),
+            (
+                "node",
+                "examples/normalized-log-producers/node/produce-and-validate.mjs",
+            ),
+        ] {
+            if !interpreter_available(program) {
+                continue;
+            }
+            let output = Command::new(program)
+                .arg(root.join(script))
+                .arg("--validate")
+                .arg(&input)
+                .env("PYTHONDONTWRITEBYTECODE", "1")
+                .output()
+                .unwrap_or_else(|error| panic!("run {program}: {error}"));
+            assert!(
+                output.status.success(),
+                "{program} rejected exact {suffix} bound: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 }

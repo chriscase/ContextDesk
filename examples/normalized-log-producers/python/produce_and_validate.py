@@ -6,6 +6,7 @@ Standard library only — no dependencies, so it can be dropped into any
 producer's build. Run it two ways::
 
     python3 produce_and_validate.py --emit          # write a conforming file
+    python3 produce_and_validate.py --validate FILE # validate one file
     python3 produce_and_validate.py --check <dir>   # validate the fixture corpus
 
 ``--check`` runs against the SAME frozen fixtures the Rust validator uses
@@ -34,17 +35,22 @@ MAX_ID_CHARS = 128
 MAX_SEVERITY_NUMBER = 24
 MAX_CORRELATIONS = 32
 MAX_MESSAGE_CHARS = 64 * 1024
+MAX_LOCAL_TEXT_CHARS = 256
+MAX_ATTRIBUTES = 256
+MAX_ATTRIBUTE_KEY_CHARS = 128
+MAX_REDACTION_NOTE_CHARS = 1024
 # Bounds parser work and stack use: a deeply nested attribute map is the cheap
 # way to make a validator expensive.
 MAX_JSON_DEPTH = 32
 
-# Top-level keys an older ContextDesk reader would treat as authoritative
-# wall-clock time. A conforming event must never carry them: it could declare
-# order_only while a sidecar "ts" epoch silently put the corpus on a wall clock.
+# Keys an older ContextDesk reader would treat as authoritative wall-clock
+# time. A conforming header or event must never carry them outside the event's
+# root "time" object: it could declare order_only while a sidecar "ts" epoch
+# silently put the corpus on a wall clock.
 # Must match cd_core::log_analysis::parse::TIMESTAMP_FIELD_ALIASES exactly.
-# The old reader scans the raw line TEXTUALLY for these, so a nested
-# {"attributes":{"ts":...}} is found too — a top-level-only guard is weaker
-# than the behaviour it guards against.
+# The ordinary reader can promote nested aliases, so a nested
+# {"attributes":{"ts":...}} must be refused too — a top-level-only guard is
+# weaker than the behaviour it guards against.
 RESERVED_EVENT_KEYS = ("ts", "timestamp", "time", "@timestamp", "@t", "eventTime")
 
 # The eleven typed correlation classes (#789). Trace and span are deliberately
@@ -67,7 +73,8 @@ CORRELATION_CLASSES = (
 # RFC3339 with an EXPLICIT offset. A bare local timestamp is a guessed instant
 # and has no representation in this contract.
 INSTANT_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-](0\d|1\d|2[0-3]):[0-5]\d)$"
+    r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?"
+    r"([Zz]|[+-](?:0\d|1\d|2[0-3]):[0-5]\d)$"
 )
 
 # Evaluator-protection markers that must never appear in shipped evidence.
@@ -108,72 +115,75 @@ WALL_RESOLUTIONS = {"source_explicit", "producer_resolved"}
 
 
 def _is_instant(value) -> bool:
+    if not isinstance(value, str) or value.endswith("-00:00"):
+        return False
+    match = INSTANT_RE.match(value)
+    if not match:
+        return False
+    year, month, day, hour, minute, second = map(int, match.groups()[:6])
+    leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+    days = (0, 31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
     return (
-        isinstance(value, str)
-        and bool(INSTANT_RE.match(value))
-        # RFC3339 reserves -00:00 for "offset unknown", which is the same
-        # thing as not having one.
-        and not value.endswith("-00:00")
+        1 <= month <= 12
+        and 1 <= day <= days[month]
+        and hour <= 23
+        and minute <= 59
+        and second <= 60
     )
 
 
-def _has_duplicate_keys(raw: str) -> bool:
-    """Whether any JSON object in `raw` declares the same key twice.
+class DuplicateKeyError(ValueError):
+    """A decoded JSON object key appeared twice in one object."""
 
-    json.loads keeps the LAST write, so parsing cannot see the collision. It
-    matters because the old reader takes the FIRST occurrence when scanning
-    text — producer and reader would disagree about which value is real.
-    """
-    stack: list[set] = []
-    i = 0
-    expecting_key = False
-    n = len(raw)
-    while i < n:
-        ch = raw[i]
-        if ch == "{":
-            stack.append(set())
-            expecting_key = True
-            i += 1
-        elif ch == "}":
-            if stack:
-                stack.pop()
-            expecting_key = False
-            i += 1
-        elif ch in "[]":
-            expecting_key = False
-            i += 1
-        elif ch == ",":
-            expecting_key = bool(stack)
-            i += 1
-        elif ch == ":":
-            expecting_key = False
-            i += 1
-        elif ch == '"':
-            j = i + 1
-            while j < n:
-                if raw[j] == "\\":
-                    j += 2
-                    continue
-                if raw[j] == '"':
-                    break
-                j += 1
-            if expecting_key and stack:
-                key = raw[i + 1 : j]
-                if key in stack[-1]:
-                    return True
-                stack[-1].add(key)
-            i = j + 1
-        else:
-            i += 1
-    return False
+
+def _loads_no_duplicates(raw: str):
+    def object_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise DuplicateKeyError(key)
+            result[key] = value
+        return result
+
+    return json.loads(raw, object_pairs_hook=object_pairs)
 
 
 def _json_depth(value) -> int:
-    if isinstance(value, dict):
-        return 1 + max((_json_depth(v) for v in value.values()), default=0)
+    maximum = 0
+    pending = [(value, 0)]
+    while pending:
+        current, parent_depth = pending.pop()
+        if not isinstance(current, (dict, list)):
+            continue
+        depth = parent_depth + 1
+        if depth > MAX_JSON_DEPTH:
+            return depth
+        maximum = max(maximum, depth)
+        children = current.values() if isinstance(current, dict) else current
+        pending.extend((child, depth) for child in children)
+    return maximum
+
+
+def _contains_reserved_timestamp_key(value, allow_root_time, depth=0) -> bool:
     if isinstance(value, list):
-        return 1 + max((_json_depth(v) for v in value), default=0)
-    return 0
+        return any(
+            _contains_reserved_timestamp_key(child, False, depth + 1)
+            for child in value
+        )
+    if not isinstance(value, dict):
+        return False
+    for key, child in value.items():
+        root_time = (
+            depth == 0
+            and allow_root_time
+            and key == "time"
+            and isinstance(child, dict)
+        )
+        if (key in RESERVED_EVENT_KEYS and not root_time) or _contains_reserved_timestamp_key(
+            child, False, depth + 1
+        ):
+            return True
+    return False
 
 
 def _is_iana_zone(value) -> bool:
@@ -238,6 +248,16 @@ def validate_time(time, errors, line_no):
 
     if want_local == "req" and not have["localText"]:
         errors.append((line_no, "local_text_required", "time.localText"))
+    if want_local == "req" and have["localText"] and (
+        not isinstance(time.get("localText"), str)
+        or not time.get("localText").strip()
+    ):
+        errors.append((line_no, "local_text_required", "time.localText"))
+    if have["localText"] and (
+        not isinstance(time.get("localText"), str)
+        or len(time.get("localText")) > MAX_LOCAL_TEXT_CHARS
+    ):
+        errors.append((line_no, "bounds_exceeded", "time.localText"))
     if want_local == "no" and have["localText"]:
         errors.append((line_no, "time_basis_inconsistent", "time.localText"))
 
@@ -262,21 +282,10 @@ def validate_time(time, errors, line_no):
 
 
 def validate_event(event, expected_seq, errors, line_no, raw=None):
-    if raw is not None and _has_duplicate_keys(raw):
-        errors.append((line_no, "event_malformed", "duplicateKey"))
-    # `time` is this contract's own field and is always an object, which the
-    # reader decodes as unusable rather than an instant, so it is exempt.
-    for reserved in RESERVED_EVENT_KEYS:
-        if reserved == "time":
-            continue
-        if reserved in event:
-            errors.append((line_no, "reserved_key_present", reserved))
-    for value in event.values():
-        if isinstance(value, dict) and any(
-            k in value for k in RESERVED_EVENT_KEYS if k != "time"
-        ):
-            errors.append((line_no, "reserved_key_present", None))
-            break
+    if _json_depth(event) > MAX_JSON_DEPTH:
+        errors.append((line_no, "depth_exceeded", None))
+    if _contains_reserved_timestamp_key(event, True):
+        errors.append((line_no, "reserved_key_present", None))
 
     if not _is_int(event.get("sourceSeq")) or event.get("sourceSeq") != expected_seq:
         errors.append((line_no, "sequence_not_contiguous", "sourceSeq"))
@@ -319,8 +328,12 @@ def validate_event(event, expected_seq, errors, line_no, raw=None):
         )
         if not coherent:
             errors.append((line_no, "severity_provenance_inconsistent", "severity"))
-        if prov == "absent" and severity.get("raw") is not None:
-            errors.append((line_no, "severity_provenance_inconsistent", "severity.raw"))
+        if prov == "absent" and (
+            "raw" in severity or "canonical" in severity
+        ):
+            errors.append((line_no, "severity_provenance_inconsistent", "severity"))
+        if "raw" in severity and _json_depth(severity.get("raw")) > MAX_JSON_DEPTH:
+            errors.append((line_no, "depth_exceeded", "severity.raw"))
 
     trace = event.get("traceId")
     if trace is not None and (
@@ -334,8 +347,14 @@ def validate_event(event, expected_seq, errors, line_no, raw=None):
         errors.append((line_no, "trace_identifier_malformed", "spanId"))
 
     attributes = event.get("attributes")
-    if isinstance(attributes, dict):
-        for value in attributes.values():
+    if "attributes" in event and not isinstance(attributes, dict):
+        errors.append((line_no, "event_malformed", "attributes"))
+    elif isinstance(attributes, dict):
+        if len(attributes) > MAX_ATTRIBUTES:
+            errors.append((line_no, "bounds_exceeded", "attributes"))
+        for key, value in attributes.items():
+            if not key or len(key) > MAX_ATTRIBUTE_KEY_CHARS:
+                errors.append((line_no, "bounds_exceeded", "attributes"))
             if _json_depth(value) > MAX_JSON_DEPTH:
                 errors.append((line_no, "depth_exceeded", "attributes"))
                 break
@@ -370,6 +389,16 @@ def validate_event(event, expected_seq, errors, line_no, raw=None):
         errors.append((line_no, "canonical_invalid", "canonical"))
     elif len(canonical.encode("utf-8")) > MAX_CANONICAL_BYTES:
         errors.append((line_no, "canonical_invalid", "canonical"))
+    if "canonicalTruncated" in event and not isinstance(
+        event.get("canonicalTruncated"), bool
+    ):
+        errors.append((line_no, "event_malformed", "canonicalTruncated"))
+    for field in ("logger", "service", "host"):
+        if field in event and (
+            not isinstance(event.get(field), str)
+            or len(event.get(field)) > MAX_ID_CHARS
+        ):
+            errors.append((line_no, "bounds_exceeded", field))
 
 
 def validate_file(text: str):
@@ -379,18 +408,25 @@ def validate_file(text: str):
     if not text.strip():
         return [(0, "missing_header", None)]
 
-    header_line = lines[0]
+    header_line = lines[0][:-1] if lines[0].endswith("\r") else lines[0]
     if len(header_line.encode("utf-8")) > MAX_LINE_BYTES:
         errors.append((1, "line_too_long", None))
     try:
-        header = json.loads(header_line)
+        header = _loads_no_duplicates(header_line)
         if not isinstance(header, dict):
             raise ValueError
+    except DuplicateKeyError:
+        errors.append((1, "header_malformed", "duplicateKey"))
+        header = json.loads(header_line)
     except Exception:
         errors.append((1, "header_malformed", None))
         header = None
 
     if header is not None:
+        if _json_depth(header) > MAX_JSON_DEPTH:
+            errors.append((1, "depth_exceeded", None))
+        if _contains_reserved_timestamp_key(header, False):
+            errors.append((1, "reserved_key_present", None))
         if header.get("schemaId") != SCHEMA_ID:
             errors.append((1, "schema_id_invalid", "schemaId"))
         version = header.get("minReaderVersion")
@@ -406,23 +442,45 @@ def validate_file(text: str):
             errors.append((1, "forbidden_sentinel", "redaction.note"))
         if not _is_identifier(header.get("sourceId")):
             errors.append((1, "identifier_invalid", "sourceId"))
+        if "sourceLabel" in header and (
+            not isinstance(header.get("sourceLabel"), str)
+            or len(header.get("sourceLabel")) > MAX_ID_CHARS
+        ):
+            errors.append((1, "identifier_invalid", "sourceLabel"))
         producer = header.get("producer")
         if not isinstance(producer, dict) or not _is_identifier(
             producer.get("name")
         ) or not _is_identifier(producer.get("version")):
             errors.append((1, "identifier_invalid", "producer"))
+        if "redaction" in header and (
+            not isinstance(redaction, dict)
+            or not isinstance(redaction.get("credentialsRemoved"), bool)
+            or not isinstance(redaction.get("personalDataRemoved"), bool)
+            or (
+                "note" in redaction
+                and (
+                    not isinstance(redaction.get("note"), str)
+                    or len(redaction.get("note")) > MAX_REDACTION_NOTE_CHARS
+                )
+            )
+        ):
+            errors.append((1, "header_malformed", "redaction"))
 
     expected_seq = 0
-    for index, raw in enumerate(lines[1:], start=2):
+    for index, physical in enumerate(lines[1:], start=2):
+        raw = physical[:-1] if physical.endswith("\r") else physical
         if raw.strip() == "":
             continue
         if len(raw.encode("utf-8")) > MAX_LINE_BYTES:
             errors.append((index, "line_too_long", None))
             continue
         try:
-            event = json.loads(raw)
+            event = _loads_no_duplicates(raw)
             if not isinstance(event, dict):
                 raise ValueError
+        except DuplicateKeyError:
+            errors.append((index, "event_malformed", "duplicateKey"))
+            event = json.loads(raw)
         except Exception:
             errors.append((index, "event_malformed", None))
             expected_seq += 1
@@ -506,6 +564,7 @@ def emit_example() -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--emit", action="store_true", help="print a conforming file")
+    parser.add_argument("--validate", metavar="FILE", help="validate one JSONL file")
     parser.add_argument("--check", metavar="FIXTURE_DIR", help="validate a fixture corpus")
     args = parser.parse_args()
 
@@ -517,6 +576,11 @@ def main() -> int:
             return 2
         sys.stdout.write(text)
         return 0
+
+    if args.validate:
+        errors = validate_file(pathlib.Path(args.validate).read_text())
+        print("conforming" if not errors else f"NOT conforming: {len(errors)} diagnostic(s)")
+        return 0 if not errors else 1
 
     if args.check:
         root = pathlib.Path(args.check)

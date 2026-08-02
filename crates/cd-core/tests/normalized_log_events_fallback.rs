@@ -167,6 +167,68 @@ fn an_old_reader_imports_the_file_as_order_only_and_fabricates_no_instant() {
 }
 
 #[test]
+fn header_timestamp_aliases_are_refused_before_raw_fallback_can_promote_them() {
+    for alias in cd_core::normalized_log_events::RESERVED_EVENT_KEYS {
+        let mut header_value = serde_json::to_value(header()).expect("header value");
+        header_value
+            .as_object_mut()
+            .expect("header object")
+            .insert((*alias).to_string(), serde_json::json!(1_767_225_600i64));
+        let text = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&header_value).unwrap(),
+            serde_json::to_string(&event(0)).unwrap()
+        );
+
+        let validation = validate_file(&text);
+        assert!(!validation.ok, "header alias {alias} must be refused");
+        assert!(validation.diagnostics.iter().any(|finding| {
+            finding.code
+                == cd_core::normalized_log_events::NormalizedLogDiagnosticCode::ReservedKeyPresent
+        }));
+
+        // Prove why the refusal is load-bearing on the real ordinary ingest
+        // path: without it, the header becomes a wall-clock event.
+        let input = tempfile::tempdir().expect("input");
+        let path = input.path().join("normalized.jsonl");
+        std::fs::write(&path, &text).expect("write");
+        let cache = tempfile::tempdir().expect("cache");
+        let report = cd_core::log_analysis::ingest::ingest_path(
+            cache.path(),
+            &path,
+            "unsafe-header-fallback",
+            None,
+            "test-model",
+        )
+        .expect("raw ingest");
+        assert_ne!(
+            report.confidence.corpus_time_quality,
+            TimeQuality::OrderOnly,
+            "the validator must block {alias} because raw ingest promotes it"
+        );
+        assert!(report
+            .stats
+            .ts_max
+            .is_some_and(|value| value >= 1_767_225_600));
+    }
+
+    let mut header_value = serde_json::to_value(header()).expect("header value");
+    header_value.as_object_mut().unwrap().insert(
+        "future".into(),
+        serde_json::json!({"nested": {"ts": 1_767_225_600i64}}),
+    );
+    let text = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&header_value).unwrap(),
+        serde_json::to_string(&event(0)).unwrap()
+    );
+    assert!(
+        !validate_file(&text).ok,
+        "deep header aliases must be refused"
+    );
+}
+
+#[test]
 fn the_old_reader_path_is_the_only_path_that_exists_today() {
     // Guards the goal's explicit instruction not to claim a fast path exists.
     // If someone later adds normalized-aware ingest, this test should be

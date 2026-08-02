@@ -56,6 +56,7 @@
 
 use std::collections::BTreeSet;
 
+use serde::de::{DeserializeSeed, Error as DeError, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 use crate::error::CoreResult;
@@ -90,6 +91,9 @@ pub const MAX_NORMALIZED_ID_CHARS: usize = 128;
 /// Maximum characters in a rendered message.
 pub const MAX_MESSAGE_CHARS: usize = 64 * 1024;
 
+/// Maximum characters retained from an unresolved local timestamp.
+pub const MAX_LOCAL_TEXT_CHARS: usize = 256;
+
 /// Maximum typed correlations on one event.
 pub const MAX_CORRELATIONS_PER_EVENT: usize = 32;
 
@@ -107,6 +111,12 @@ pub const MAX_ERROR_SAMPLES: usize = 5;
 
 /// Maximum characters of any single re-redacted error sample.
 pub const MAX_ERROR_SAMPLE_CHARS: usize = 256;
+
+/// Maximum individual diagnostics retained in a validation result.
+///
+/// The total is counted separately. A hostile file with millions of invalid
+/// rows must not turn the streaming validator into an unbounded report buffer.
+pub const MAX_DIAGNOSTICS: usize = 256;
 
 /// Maximum nesting depth of any JSON value on a line.
 ///
@@ -524,14 +534,16 @@ pub enum NormalizedLogDiagnosticCode {
     DuplicateCorrelationClass,
     /// Too many correlations, attributes, or over-long keys/values.
     BoundsExceeded,
-    /// `canonical` was empty, or truncated without declaring it.
+    /// `canonical` was empty or exceeded the retained-record bound.
     CanonicalInvalid,
     /// A field carried a forbidden evaluator sentinel.
     ForbiddenSentinel,
     /// A trace or span identifier was malformed.
     TraceIdentifierMalformed,
-    /// The line carried a top-level key from [`RESERVED_EVENT_KEYS`], which an
-    /// older reader would treat as authoritative wall-clock time.
+    /// The header or event carried a decoded key from
+    /// [`RESERVED_EVENT_KEYS`] outside the event's required root `time`
+    /// object, which an older reader could treat as authoritative wall-clock
+    /// time.
     ReservedKeyPresent,
     /// A JSON value nested deeper than [`MAX_JSON_DEPTH`].
     DepthExceeded,
@@ -568,7 +580,12 @@ pub struct NormalizedLogValidation {
     /// Reported for transparency about how far validation got. It is **not** a
     /// count of importable events — when `ok` is false, nothing is importable.
     pub events_validated: u64,
-    /// All findings, ordered by line.
+    /// Total findings observed, including findings omitted from the bounded
+    /// `diagnostics` sample.
+    pub diagnostics_total: u64,
+    /// True when `diagnostics` contains only the first bounded findings.
+    pub diagnostics_truncated: bool,
+    /// The first bounded findings, ordered by line.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<NormalizedLogDiagnostic>,
     /// Bounded, re-redacted excerpts of offending lines.
@@ -581,7 +598,27 @@ pub struct NormalizedLogValidation {
     pub error_samples: Vec<String>,
 }
 
-/// Whether a string is a plausible RFC3339 instant with an explicit offset.
+fn push_bounded_diagnostic(
+    diagnostics: &mut Vec<NormalizedLogDiagnostic>,
+    total: &mut u64,
+    diagnostic: NormalizedLogDiagnostic,
+) {
+    *total = total.saturating_add(1);
+    if diagnostics.len() < MAX_DIAGNOSTICS {
+        diagnostics.push(diagnostic);
+    }
+}
+
+fn absorb_generated_diagnostics(
+    diagnostics: &mut Vec<NormalizedLogDiagnostic>,
+    before: usize,
+    total: &mut u64,
+) {
+    *total = total.saturating_add(diagnostics.len().saturating_sub(before) as u64);
+    diagnostics.truncate(MAX_DIAGNOSTICS);
+}
+
+/// Whether a string is a calendar-valid RFC3339 instant with an explicit offset.
 ///
 /// Deliberately strict about the offset: an instant with no offset is exactly
 /// the guessed instant this contract refuses to represent, so it must fail
@@ -635,6 +672,26 @@ fn is_rfc3339_with_offset(value: &str) -> bool {
             }
         }
     };
+    let month = (bytes[5] - b'0') * 10 + (bytes[6] - b'0');
+    let day = (bytes[8] - b'0') * 10 + (bytes[9] - b'0');
+    let hour = (bytes[11] - b'0') * 10 + (bytes[12] - b'0');
+    let minute = (bytes[14] - b'0') * 10 + (bytes[15] - b'0');
+    let second = (bytes[17] - b'0') * 10 + (bytes[18] - b'0');
+    let year = bytes[0..4]
+        .iter()
+        .fold(0u16, |value, digit| value * 10 + u16::from(*digit - b'0'));
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    if day == 0 || day > days_in_month || hour > 23 || minute > 59 || second > 60 {
+        return false;
+    }
+
     if rest == "Z" || rest == "z" {
         return true;
     }
@@ -728,6 +785,17 @@ pub fn validate_header(
             );
         }
     }
+    if header
+        .redaction
+        .as_ref()
+        .and_then(|claim| claim.note.as_ref())
+        .is_some_and(|note| note.chars().count() > 1024)
+    {
+        push(
+            NormalizedLogDiagnosticCode::BoundsExceeded,
+            "redaction.note",
+        );
+    }
     for text in [
         header.source_id.as_str(),
         header.producer.name.as_str(),
@@ -794,9 +862,24 @@ pub fn validate_event_time(time: &EventTime, line: u64, out: &mut Vec<Normalized
         time.resolution,
         TimeResolution::ProducerResolved | TimeResolution::Unresolved
     );
-    if local_required && time.local_text.is_none() {
+    if local_required
+        && time
+            .local_text
+            .as_deref()
+            .is_none_or(|text| text.trim().is_empty())
+    {
         push(
             NormalizedLogDiagnosticCode::LocalTextRequired,
+            "time.localText",
+        );
+    }
+    if time
+        .local_text
+        .as_ref()
+        .is_some_and(|text| text.chars().count() > MAX_LOCAL_TEXT_CHARS)
+    {
+        push(
+            NormalizedLogDiagnosticCode::BoundsExceeded,
             "time.localText",
         );
     }
@@ -948,13 +1031,13 @@ pub fn validate_event(
         );
     }
     if matches!(event.severity.provenance, SeverityProvenance::Absent)
-        && event.severity.raw.is_some()
+        && (event.severity.raw.is_some() || event.severity.canonical.is_some())
     {
-        // "The source expressed no severity" and "here is the source's
-        // severity" cannot both be true.
+        // "No severity exists" cannot coexist with either source semantics or
+        // a canonical number that downstream filters would treat as real.
         push(
             NormalizedLogDiagnosticCode::SeverityProvenanceInconsistent,
-            "severity.raw",
+            "severity",
         );
     }
     if let Some(raw) = &event.severity.raw {
@@ -1013,6 +1096,16 @@ pub fn validate_event(
 
     if event.message.chars().count() > MAX_MESSAGE_CHARS {
         push(NormalizedLogDiagnosticCode::BoundsExceeded, "message");
+    }
+
+    for (location, value) in [
+        ("logger", event.logger.as_deref()),
+        ("service", event.service.as_deref()),
+        ("host", event.host.as_deref()),
+    ] {
+        if value.is_some_and(|text| text.chars().count() > MAX_NORMALIZED_ID_CHARS) {
+            push(NormalizedLogDiagnosticCode::BoundsExceeded, location);
+        }
     }
 
     if event.canonical.is_empty() {
@@ -1074,6 +1167,7 @@ fn error_sample(raw: &str) -> String {
 /// never a filesystem path — a validation report is a shareable artifact.
 pub fn validate_stream<R: std::io::BufRead>(reader: R) -> CoreResult<NormalizedLogValidation> {
     let mut diagnostics = Vec::new();
+    let mut diagnostics_total = 0u64;
     let mut samples: Vec<String> = Vec::new();
     let mut events_validated = 0u64;
     let mut expected_seq = 0u64;
@@ -1090,31 +1184,35 @@ pub fn validate_stream<R: std::io::BufRead>(reader: R) -> CoreResult<NormalizedL
         // Bounded by hand rather than via `Take`, which does not expose
         // `read_until`: read one byte past the limit so an over-long line is
         // detected without materializing it.
-        let read = read_bounded_line(&mut reader, &mut raw, MAX_NORMALIZED_LINE_BYTES + 1)
+        let read = read_bounded_line(&mut reader, &mut raw, MAX_NORMALIZED_LINE_BYTES + 2)
             .map_err(|error| crate::error::CoreError::Message(format!("read stream: {error}")))?;
         if read == 0 {
             break;
         }
         line_number += 1;
 
-        // Decide truncation BEFORE touching the tail: on a truncated prefix the
-        // final byte is arbitrary content, not a terminator.
-        let truncated = raw.len() > MAX_NORMALIZED_LINE_BYTES;
-        if !truncated {
-            if raw.last() == Some(&b'\n') {
-                raw.pop();
-            }
-            if raw.last() == Some(&b'\r') {
-                raw.pop();
-            }
+        // The line bound applies to JSON content, not its LF terminator. An
+        // exact-MAX record plus CRLF therefore occupies MAX+2 buffered bytes
+        // and is legal; an unterminated MAX+1 prefix is not.
+        let had_lf = raw.last() == Some(&b'\n');
+        if had_lf {
+            raw.pop();
         }
+        if had_lf && raw.last() == Some(&b'\r') {
+            raw.pop();
+        }
+        let truncated = raw.len() > MAX_NORMALIZED_LINE_BYTES;
 
         if truncated {
-            diagnostics.push(NormalizedLogDiagnostic {
-                code: NormalizedLogDiagnosticCode::LineTooLong,
-                line: line_number,
-                location: None,
-            });
+            push_bounded_diagnostic(
+                &mut diagnostics,
+                &mut diagnostics_total,
+                NormalizedLogDiagnostic {
+                    code: NormalizedLogDiagnosticCode::LineTooLong,
+                    line: line_number,
+                    location: None,
+                },
+            );
             // No drain needed: `read_bounded_line` already consumed through the
             // newline and merely capped what it STORED, so the stream is
             // already aligned on the next record. Draining here would eat the
@@ -1125,29 +1223,27 @@ pub fn validate_stream<R: std::io::BufRead>(reader: R) -> CoreResult<NormalizedL
         let text = match std::str::from_utf8(&raw) {
             Ok(text) => text,
             Err(_) => {
-                diagnostics.push(NormalizedLogDiagnostic {
-                    code: NormalizedLogDiagnosticCode::InvalidUtf8,
-                    line: line_number,
-                    location: None,
-                });
+                push_bounded_diagnostic(
+                    &mut diagnostics,
+                    &mut diagnostics_total,
+                    NormalizedLogDiagnostic {
+                        code: NormalizedLogDiagnosticCode::InvalidUtf8,
+                        line: line_number,
+                        location: None,
+                    },
+                );
                 continue;
             }
         };
 
         if !saw_header {
             saw_header = true;
-            match serde_json::from_str::<NormalizedLogHeader>(text) {
-                Ok(header) => validate_header(&header, line_number, &mut diagnostics),
-                Err(_) => {
-                    diagnostics.push(NormalizedLogDiagnostic {
-                        code: NormalizedLogDiagnosticCode::HeaderMalformed,
-                        line: line_number,
-                        location: None,
-                    });
-                    if samples.len() < MAX_ERROR_SAMPLES {
-                        samples.push(error_sample(text));
-                    }
-                }
+            let before = diagnostics.len();
+            let total_before = diagnostics_total;
+            validate_line_as_header(text, line_number, &mut diagnostics);
+            absorb_generated_diagnostics(&mut diagnostics, before, &mut diagnostics_total);
+            if diagnostics_total > total_before && samples.len() < MAX_ERROR_SAMPLES {
+                samples.push(error_sample(text));
             }
             continue;
         }
@@ -1157,10 +1253,12 @@ pub fn validate_stream<R: std::io::BufRead>(reader: R) -> CoreResult<NormalizedL
         }
 
         let before = diagnostics.len();
+        let total_before = diagnostics_total;
         validate_line_as_event(text, expected_seq, line_number, &mut diagnostics);
+        absorb_generated_diagnostics(&mut diagnostics, before, &mut diagnostics_total);
         match serde_json::from_str::<NormalizedLogEvent>(text) {
             Ok(event) => {
-                if diagnostics.len() == before {
+                if diagnostics_total == total_before {
                     events_validated += 1;
                 } else if samples.len() < MAX_ERROR_SAMPLES {
                     samples.push(error_sample(text));
@@ -1177,11 +1275,15 @@ pub fn validate_stream<R: std::io::BufRead>(reader: R) -> CoreResult<NormalizedL
     }
 
     if !saw_header {
-        diagnostics.push(NormalizedLogDiagnostic {
-            code: NormalizedLogDiagnosticCode::MissingHeader,
-            line: 0,
-            location: None,
-        });
+        push_bounded_diagnostic(
+            &mut diagnostics,
+            &mut diagnostics_total,
+            NormalizedLogDiagnostic {
+                code: NormalizedLogDiagnosticCode::MissingHeader,
+                line: 0,
+                location: None,
+            },
+        );
     }
 
     diagnostics.sort_by(|left, right| {
@@ -1192,8 +1294,10 @@ pub fn validate_stream<R: std::io::BufRead>(reader: R) -> CoreResult<NormalizedL
     });
 
     Ok(NormalizedLogValidation {
-        ok: diagnostics.is_empty(),
+        ok: diagnostics_total == 0,
         events_validated,
+        diagnostics_total,
+        diagnostics_truncated: diagnostics_total > diagnostics.len() as u64,
         diagnostics,
         error_samples: samples,
     })
@@ -1206,10 +1310,9 @@ fn read_bounded_line<R: std::io::BufRead>(
     limit: usize,
 ) -> std::io::Result<usize> {
     // NOTE: `out` may be a TRUNCATED prefix of the physical line. Callers must
-    // consult `out.len() >= limit` before treating its last byte as a line
-    // terminator — stripping a CR that merely happened to sit at the cut point
-    // silently shrank the prefix back under the bound and let an unbounded
-    // record through.
+    // only strip CR when an LF was actually retained. A CR that merely sits at
+    // the cut point of a truncated prefix is content; stripping it would shrink
+    // an overlong record back under the bound.
     let mut total = 0usize;
     loop {
         let available = match reader.fill_buf() {
@@ -1243,71 +1346,187 @@ fn read_bounded_line<R: std::io::BufRead>(
     }
 }
 
-/// Whether any JSON object in `raw` declares the same key twice.
-///
-/// `serde_json` keeps the last write for a duplicate key, so parsing alone
-/// cannot see the collision. That matters here for two reasons: the old reader
-/// takes the FIRST occurrence when scanning text (see
-/// `log_analysis::parse::first_json_ts_field`), so producer and reader can
-/// disagree about which value is real; and canonicalizing a record with
-/// duplicates would silently REPAIR it, making the output a claim the input
-/// never supported.
-///
-/// Escape-aware: a `"` inside a string literal never opens or closes a key.
-fn has_duplicate_keys(raw: &str) -> bool {
-    let bytes = raw.as_bytes();
-    let mut stack: Vec<std::collections::BTreeSet<String>> = Vec::new();
-    let mut index = 0usize;
-    let mut expecting_key = false;
+const DUPLICATE_KEY_MARKER: &str = "contextdesk_duplicate_json_key";
+const DEPTH_MARKER: &str = "contextdesk_json_depth_exceeded";
 
-    while index < bytes.len() {
-        match bytes[index] {
-            b'{' => {
-                stack.push(std::collections::BTreeSet::new());
-                expecting_key = true;
-                index += 1;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonStructureIssue {
+    DuplicateKey,
+    DepthExceeded,
+    Malformed,
+}
+
+#[derive(Clone, Copy)]
+struct StructureSeed {
+    parent_depth: usize,
+}
+
+struct StructureVisitor {
+    parent_depth: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for StructureSeed {
+    type Value = serde_json::Value;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(StructureVisitor {
+            parent_depth: self.parent_depth,
+        })
+    }
+}
+
+impl<'de> Visitor<'de> for StructureVisitor {
+    type Value = serde_json::Value;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a bounded JSON value without duplicate object keys")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Bool(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Number(value.into()))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Number(value.into()))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    where
+        E: DeError,
+    {
+        serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| E::custom("non-finite JSON number"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::String(value.to_string()))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::String(value))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        StructureSeed {
+            parent_depth: self.parent_depth,
+        }
+        .deserialize(deserializer)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let depth = self.parent_depth + 1;
+        if depth > MAX_JSON_DEPTH {
+            return Err(A::Error::custom(DEPTH_MARKER));
+        }
+        let mut values = Vec::new();
+        while let Some(value) = sequence.next_element_seed(StructureSeed {
+            parent_depth: depth,
+        })? {
+            values.push(value);
+        }
+        Ok(serde_json::Value::Array(values))
+    }
+
+    fn visit_map<A>(self, mut object: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let depth = self.parent_depth + 1;
+        if depth > MAX_JSON_DEPTH {
+            return Err(A::Error::custom(DEPTH_MARKER));
+        }
+        let mut values = serde_json::Map::new();
+        while let Some(key) = object.next_key::<String>()? {
+            if values.contains_key(&key) {
+                return Err(A::Error::custom(DUPLICATE_KEY_MARKER));
             }
-            b'}' => {
-                stack.pop();
-                expecting_key = false;
-                index += 1;
+            let value = object.next_value_seed(StructureSeed {
+                parent_depth: depth,
+            })?;
+            values.insert(key, value);
+        }
+        Ok(serde_json::Value::Object(values))
+    }
+}
+
+/// Parse JSON while rejecting decoded duplicate keys and excessive nesting.
+///
+/// A hand-written quote scanner cannot distinguish an array comma from an
+/// object comma and compares escaped key spellings rather than decoded keys.
+/// Driving Serde's real parser keeps object/array state exact, catches
+/// `"future"` versus `"fut\u0075re"`, and stops at the contract depth before
+/// hostile input can allocate a stack frame for every opening brace.
+fn parse_json_structure(raw: &str) -> Result<serde_json::Value, JsonStructureIssue> {
+    let mut deserializer = serde_json::Deserializer::from_str(raw);
+    let value = StructureSeed { parent_depth: 0 }
+        .deserialize(&mut deserializer)
+        .map_err(|error| {
+            let rendered = error.to_string();
+            if rendered.contains(DUPLICATE_KEY_MARKER) {
+                JsonStructureIssue::DuplicateKey
+            } else if rendered.contains(DEPTH_MARKER) {
+                JsonStructureIssue::DepthExceeded
+            } else {
+                JsonStructureIssue::Malformed
             }
-            b'[' | b']' => {
-                expecting_key = false;
-                index += 1;
+        })?;
+    deserializer
+        .end()
+        .map_err(|_| JsonStructureIssue::Malformed)?;
+    Ok(value)
+}
+
+#[cfg(test)]
+fn has_duplicate_keys(raw: &str) -> bool {
+    matches!(
+        parse_json_structure(raw),
+        Err(JsonStructureIssue::DuplicateKey)
+    )
+}
+
+/// Whether a decoded timestamp alias appears anywhere in a record.
+///
+/// The event's required top-level `time` object is the sole exception. Header
+/// aliases and nested aliases are refused even when their current value is not
+/// parseable; this conservative rule is stable across old readers and all
+/// producer languages.
+fn contains_reserved_timestamp_key(value: &serde_json::Value, allow_root_time: bool) -> bool {
+    fn walk(value: &serde_json::Value, depth: usize, allow_root_time: bool) -> bool {
+        match value {
+            serde_json::Value::Object(map) => map.iter().any(|(key, child)| {
+                let reserved = RESERVED_EVENT_KEYS.contains(&key.as_str());
+                let root_time = depth == 0 && allow_root_time && key == "time" && child.is_object();
+                (reserved && !root_time) || walk(child, depth + 1, false)
+            }),
+            serde_json::Value::Array(items) => {
+                items.iter().any(|child| walk(child, depth + 1, false))
             }
-            b',' => {
-                expecting_key = !stack.is_empty();
-                index += 1;
-            }
-            b':' => {
-                expecting_key = false;
-                index += 1;
-            }
-            b'"' => {
-                let start = index + 1;
-                let mut end = start;
-                while end < bytes.len() {
-                    match bytes[end] {
-                        b'\\' => end += 2,
-                        b'"' => break,
-                        _ => end += 1,
-                    }
-                }
-                if expecting_key {
-                    if let Some(frame) = stack.last_mut() {
-                        let key = raw.get(start..end.min(bytes.len())).unwrap_or_default();
-                        if !frame.insert(key.to_string()) {
-                            return true;
-                        }
-                    }
-                }
-                index = end + 1;
-            }
-            _ => index += 1,
+            _ => false,
         }
     }
-    false
+    walk(value, 0, allow_root_time)
 }
 
 /// Rewrite a file into **canonical form**: one line per record, object keys
@@ -1336,20 +1555,19 @@ pub fn canonicalize_stream<R: std::io::BufRead, W: std::io::Write>(
 
     loop {
         raw.clear();
-        let read = read_bounded_line(&mut reader, &mut raw, MAX_NORMALIZED_LINE_BYTES + 1)
+        let read = read_bounded_line(&mut reader, &mut raw, MAX_NORMALIZED_LINE_BYTES + 2)
             .map_err(|error| crate::error::CoreError::Message(format!("read: {error}")))?;
         if read == 0 {
             break;
         }
-        let truncated = raw.len() > MAX_NORMALIZED_LINE_BYTES;
-        if !truncated {
-            if raw.last() == Some(&b'\n') {
-                raw.pop();
-            }
-            if raw.last() == Some(&b'\r') {
-                raw.pop();
-            }
+        let had_lf = raw.last() == Some(&b'\n');
+        if had_lf {
+            raw.pop();
         }
+        if had_lf && raw.last() == Some(&b'\r') {
+            raw.pop();
+        }
+        let truncated = raw.len() > MAX_NORMALIZED_LINE_BYTES;
         if truncated {
             return Err(crate::error::CoreError::Policy(
                 "record exceeds the maximum line length".into(),
@@ -1360,17 +1578,27 @@ pub fn canonicalize_stream<R: std::io::BufRead, W: std::io::Write>(
         if text.trim().is_empty() {
             continue;
         }
-        // Reject duplicate keys rather than collapsing them: serde_json keeps
-        // the last write, so canonicalizing would REPAIR a non-conforming
-        // record into a conforming one and make the output a claim the input
-        // never supported.
-        let value: serde_json::Value = serde_json::from_str(text)
-            .map_err(|_| crate::error::CoreError::Policy("record is not valid JSON".into()))?;
-        if has_duplicate_keys(text) {
-            return Err(crate::error::CoreError::Policy(
-                "record contains duplicate JSON keys".into(),
-            ));
-        }
+        // Reject duplicate decoded keys rather than collapsing them:
+        // canonicalizing `"future"` and `"fut\u0075re"` into one key would
+        // silently repair evidence the input never supported.
+        let value = match parse_json_structure(text) {
+            Ok(value) => value,
+            Err(JsonStructureIssue::DuplicateKey) => {
+                return Err(crate::error::CoreError::Policy(
+                    "record contains duplicate JSON keys".into(),
+                ));
+            }
+            Err(JsonStructureIssue::DepthExceeded) => {
+                return Err(crate::error::CoreError::Policy(
+                    "record exceeds the maximum JSON depth".into(),
+                ));
+            }
+            Err(JsonStructureIssue::Malformed) => {
+                return Err(crate::error::CoreError::Policy(
+                    "record is not valid JSON".into(),
+                ));
+            }
+        };
         let canonical = canonical_json(&value);
         writer
             .write_all(canonical.as_bytes())
@@ -1422,45 +1650,96 @@ pub fn canonical_json(value: &serde_json::Value) -> String {
 
 /// Shared event-line checking used by both the buffered and streaming paths,
 /// so the two can never drift about what conformance means.
-fn validate_line_as_event(
+fn validate_line_as_header(
     raw: &str,
-    expected_seq: u64,
     line_number: u64,
     diagnostics: &mut Vec<NormalizedLogDiagnostic>,
 ) {
-    // Reserved keys are checked against the RAW line: serde drops unknown
-    // fields before a typed check could see them.
-    // Matches the old reader's ACTUAL behaviour, which scans the raw line
-    // textually rather than looking up top-level keys — so a nested
-    // `{"attributes":{"ts":…}}` is caught too. A top-level-only guard was
-    // weaker than the thing it guards against: that exact shape validated
-    // clean here while the old reader derived a 2026 wall clock from it.
-    if has_duplicate_keys(raw) {
-        // The old reader takes the FIRST occurrence when scanning text while
-        // serde keeps the LAST, so a duplicate key means producer and reader
-        // can disagree about which value is real.
-        diagnostics.push(NormalizedLogDiagnostic {
-            code: NormalizedLogDiagnosticCode::EventMalformed,
-            line: line_number,
-            location: Some("duplicateKey".to_string()),
-        });
-    }
-    if crate::log_analysis::parse::scans_as_timestamp_field(raw) {
+    let parsed = match parse_json_structure(raw) {
+        Ok(value) => Some(value),
+        Err(JsonStructureIssue::DuplicateKey) => {
+            diagnostics.push(NormalizedLogDiagnostic {
+                code: NormalizedLogDiagnosticCode::HeaderMalformed,
+                line: line_number,
+                location: Some("duplicateKey".to_string()),
+            });
+            None
+        }
+        Err(JsonStructureIssue::DepthExceeded) => {
+            diagnostics.push(NormalizedLogDiagnostic {
+                code: NormalizedLogDiagnosticCode::DepthExceeded,
+                line: line_number,
+                location: None,
+            });
+            None
+        }
+        Err(JsonStructureIssue::Malformed) => None,
+    };
+
+    if parsed
+        .as_ref()
+        .is_some_and(|value| contains_reserved_timestamp_key(value, false))
+    {
         diagnostics.push(NormalizedLogDiagnostic {
             code: NormalizedLogDiagnosticCode::ReservedKeyPresent,
             line: line_number,
             location: None,
         });
     }
-    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(raw) {
-        let _ = &map;
-        if json_depth(&serde_json::Value::Object(map)) > MAX_JSON_DEPTH {
+
+    match serde_json::from_str::<NormalizedLogHeader>(raw) {
+        Ok(header) => validate_header(&header, line_number, diagnostics),
+        Err(_)
+            if !diagnostics.iter().any(|diagnostic| {
+                diagnostic.line == line_number
+                    && diagnostic.code == NormalizedLogDiagnosticCode::HeaderMalformed
+            }) =>
+        {
+            diagnostics.push(NormalizedLogDiagnostic {
+                code: NormalizedLogDiagnosticCode::HeaderMalformed,
+                line: line_number,
+                location: None,
+            })
+        }
+        Err(_) => {}
+    }
+}
+
+fn validate_line_as_event(
+    raw: &str,
+    expected_seq: u64,
+    line_number: u64,
+    diagnostics: &mut Vec<NormalizedLogDiagnostic>,
+) {
+    let parsed = match parse_json_structure(raw) {
+        Ok(value) => Some(value),
+        Err(JsonStructureIssue::DuplicateKey) => {
+            diagnostics.push(NormalizedLogDiagnostic {
+                code: NormalizedLogDiagnosticCode::EventMalformed,
+                line: line_number,
+                location: Some("duplicateKey".to_string()),
+            });
+            None
+        }
+        Err(JsonStructureIssue::DepthExceeded) => {
             diagnostics.push(NormalizedLogDiagnostic {
                 code: NormalizedLogDiagnosticCode::DepthExceeded,
                 line: line_number,
                 location: None,
             });
+            None
         }
+        Err(JsonStructureIssue::Malformed) => None,
+    };
+    if parsed
+        .as_ref()
+        .is_some_and(|value| contains_reserved_timestamp_key(value, true))
+    {
+        diagnostics.push(NormalizedLogDiagnostic {
+            code: NormalizedLogDiagnosticCode::ReservedKeyPresent,
+            line: line_number,
+            location: None,
+        });
     }
 
     match serde_json::from_str::<NormalizedLogEvent>(raw) {
@@ -1489,6 +1768,7 @@ fn validate_line_as_event(
 /// never a count of usable events.
 pub fn validate_file(contents: &str) -> NormalizedLogValidation {
     let mut diagnostics = Vec::new();
+    let mut diagnostics_total = 0u64;
     let mut samples = Vec::new();
     let mut events_validated = 0u64;
 
@@ -1498,6 +1778,8 @@ pub fn validate_file(contents: &str) -> NormalizedLogValidation {
         return NormalizedLogValidation {
             ok: false,
             events_validated: 0,
+            diagnostics_total: 1,
+            diagnostics_truncated: false,
             diagnostics: vec![NormalizedLogDiagnostic {
                 code: NormalizedLogDiagnosticCode::MissingHeader,
                 line: 0,
@@ -1508,24 +1790,22 @@ pub fn validate_file(contents: &str) -> NormalizedLogValidation {
     };
 
     if header_line.len() > MAX_NORMALIZED_LINE_BYTES {
-        diagnostics.push(NormalizedLogDiagnostic {
-            code: NormalizedLogDiagnosticCode::LineTooLong,
-            line: 1,
-            location: None,
-        });
-    }
-    match serde_json::from_str::<NormalizedLogHeader>(header_line) {
-        Ok(header) => validate_header(&header, 1, &mut diagnostics),
-        Err(_) => {
-            diagnostics.push(NormalizedLogDiagnostic {
-                code: NormalizedLogDiagnosticCode::HeaderMalformed,
+        push_bounded_diagnostic(
+            &mut diagnostics,
+            &mut diagnostics_total,
+            NormalizedLogDiagnostic {
+                code: NormalizedLogDiagnosticCode::LineTooLong,
                 line: 1,
                 location: None,
-            });
-            if samples.len() < MAX_ERROR_SAMPLES {
-                samples.push(error_sample(header_line));
-            }
-        }
+            },
+        );
+    }
+    let before = diagnostics.len();
+    let total_before = diagnostics_total;
+    validate_line_as_header(header_line, 1, &mut diagnostics);
+    absorb_generated_diagnostics(&mut diagnostics, before, &mut diagnostics_total);
+    if diagnostics_total > total_before && samples.len() < MAX_ERROR_SAMPLES {
+        samples.push(error_sample(header_line));
     }
 
     let mut expected_seq = 0u64;
@@ -1535,18 +1815,24 @@ pub fn validate_file(contents: &str) -> NormalizedLogValidation {
             continue;
         }
         if raw.len() > MAX_NORMALIZED_LINE_BYTES {
-            diagnostics.push(NormalizedLogDiagnostic {
-                code: NormalizedLogDiagnosticCode::LineTooLong,
-                line: line_number,
-                location: None,
-            });
+            push_bounded_diagnostic(
+                &mut diagnostics,
+                &mut diagnostics_total,
+                NormalizedLogDiagnostic {
+                    code: NormalizedLogDiagnosticCode::LineTooLong,
+                    line: line_number,
+                    location: None,
+                },
+            );
             continue;
         }
         let before = diagnostics.len();
+        let total_before = diagnostics_total;
         validate_line_as_event(raw, expected_seq, line_number, &mut diagnostics);
+        absorb_generated_diagnostics(&mut diagnostics, before, &mut diagnostics_total);
         match serde_json::from_str::<NormalizedLogEvent>(raw) {
             Ok(event) => {
-                if diagnostics.len() == before {
+                if diagnostics_total == total_before {
                     events_validated += 1;
                 } else if samples.len() < MAX_ERROR_SAMPLES {
                     samples.push(error_sample(raw));
@@ -1570,8 +1856,10 @@ pub fn validate_file(contents: &str) -> NormalizedLogValidation {
     });
 
     NormalizedLogValidation {
-        ok: diagnostics.is_empty(),
+        ok: diagnostics_total == 0,
         events_validated,
+        diagnostics_total,
+        diagnostics_truncated: diagnostics_total > diagnostics.len() as u64,
         diagnostics,
         error_samples: samples,
     }
@@ -1701,6 +1989,35 @@ mod tests {
     }
 
     #[test]
+    fn impossible_calendar_instants_are_refused() {
+        for bad in [
+            "2026-00-01T00:00:00Z",
+            "2026-13-01T00:00:00Z",
+            "2026-02-29T00:00:00Z",
+            "2024-02-30T00:00:00Z",
+            "2026-01-01T24:00:00Z",
+            "2026-01-01T00:60:00Z",
+            "2026-01-01T00:00:61Z",
+        ] {
+            let mut time = explicit();
+            time.instant = Some(bad.to_string());
+            let mut out = Vec::new();
+            validate_event_time(&time, 2, &mut out);
+            assert!(
+                codes(&out).contains(&NormalizedLogDiagnosticCode::InstantMalformed),
+                "{bad} must be refused"
+            );
+        }
+        for good in ["2024-02-29T23:59:59Z", "2026-12-31T23:59:60Z"] {
+            let mut time = explicit();
+            time.instant = Some(good.to_string());
+            let mut out = Vec::new();
+            validate_event_time(&time, 2, &mut out);
+            assert!(out.is_empty(), "{good} should be legal: {out:?}");
+        }
+    }
+
+    #[test]
     fn producer_resolved_must_declare_its_timezone_and_keep_the_local_text() {
         let mut time = explicit();
         time.resolution = TimeResolution::ProducerResolved;
@@ -1716,6 +2033,11 @@ mod tests {
         let mut out = Vec::new();
         validate_event_time(&time, 2, &mut out);
         assert!(out.is_empty(), "{out:?}");
+
+        time.local_text = Some(String::new());
+        let mut out = Vec::new();
+        validate_event_time(&time, 2, &mut out);
+        assert!(codes(&out).contains(&NormalizedLogDiagnosticCode::LocalTextRequired));
     }
 
     #[test]
@@ -1941,6 +2263,12 @@ mod tests {
         let mut out = Vec::new();
         validate_event(&item, 0, 2, &mut out);
         assert!(codes(&out).contains(&NormalizedLogDiagnosticCode::SeverityProvenanceInconsistent));
+
+        item.severity.raw = None;
+        item.severity.canonical = Some(17);
+        let mut out = Vec::new();
+        validate_event(&item, 0, 2, &mut out);
+        assert!(codes(&out).contains(&NormalizedLogDiagnosticCode::SeverityProvenanceInconsistent));
     }
 
     #[test]
@@ -2005,6 +2333,53 @@ mod tests {
         assert_eq!(buffered.diagnostics, streamed.diagnostics);
     }
 
+    fn event_line_with_exact_bytes(target: usize) -> String {
+        let mut value = serde_json::to_value(event(0, explicit())).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("futurePadding".into(), serde_json::json!(""));
+        let base = serde_json::to_string(&value).unwrap();
+        let padding = target.checked_sub(base.len()).expect("target fits base");
+        value.as_object_mut().unwrap().insert(
+            "futurePadding".into(),
+            serde_json::json!("x".repeat(padding)),
+        );
+        let line = serde_json::to_string(&value).unwrap();
+        assert_eq!(line.len(), target);
+        line
+    }
+
+    #[test]
+    fn exact_line_bound_has_buffer_stream_and_canonicalize_parity() {
+        let header = serde_json::to_string(&header()).unwrap();
+        for target in [MAX_NORMALIZED_LINE_BYTES - 1, MAX_NORMALIZED_LINE_BYTES] {
+            let line = event_line_with_exact_bytes(target);
+            for terminator in ["\n", "\r\n"] {
+                let text = format!("{header}{terminator}{line}{terminator}");
+                let buffered = validate_file(&text);
+                let streamed = validate_stream(std::io::Cursor::new(text.as_bytes())).unwrap();
+                assert!(buffered.ok, "buffered rejected {target} bytes");
+                assert!(streamed.ok, "stream rejected {target} bytes");
+                assert_eq!(buffered, streamed);
+
+                let mut canonical = Vec::new();
+                canonicalize_stream(std::io::Cursor::new(text.as_bytes()), &mut canonical)
+                    .expect("canonicalize exact bound");
+            }
+        }
+
+        let over = event_line_with_exact_bytes(MAX_NORMALIZED_LINE_BYTES + 1);
+        let text = format!("{header}\n{over}\n");
+        for report in [
+            validate_file(&text),
+            validate_stream(std::io::Cursor::new(text.as_bytes())).unwrap(),
+        ] {
+            assert!(!report.ok);
+            assert!(codes(&report.diagnostics).contains(&NormalizedLogDiagnosticCode::LineTooLong));
+        }
+    }
+
     #[test]
     fn the_stream_refuses_an_over_long_line_without_buffering_it() {
         let mut text = serde_json::to_string(&header()).unwrap();
@@ -2048,6 +2423,26 @@ mod tests {
         let encoded = serde_json::to_string(&report.diagnostics).unwrap();
         assert!(!encoded.contains("/Users/"));
         assert!(!encoded.contains("private.log"));
+    }
+
+    #[test]
+    fn invalid_stream_reports_are_bounded_but_keep_the_exact_total() {
+        let mut text = serde_json::to_string(&header()).unwrap();
+        for _ in 0..(MAX_DIAGNOSTICS * 4) {
+            text.push_str("\n{not json}");
+        }
+        text.push('\n');
+
+        let streamed = validate_stream(std::io::Cursor::new(text.as_bytes())).unwrap();
+        let buffered = validate_file(&text);
+        for report in [&streamed, &buffered] {
+            assert!(!report.ok);
+            assert_eq!(report.diagnostics.len(), MAX_DIAGNOSTICS);
+            assert_eq!(report.diagnostics_total, (MAX_DIAGNOSTICS * 4) as u64);
+            assert!(report.diagnostics_truncated);
+            assert!(report.error_samples.len() <= MAX_ERROR_SAMPLES);
+        }
+        assert_eq!(streamed, buffered);
     }
 
     #[test]
@@ -2348,9 +2743,27 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_detection_decodes_keys_and_does_not_confuse_array_values() {
+        assert!(parse_json_structure(r#"{"message":"x","future":["x","message"]}"#).is_ok());
+        assert_eq!(
+            parse_json_structure(r#"{"future":1,"fut\u0075re":2}"#),
+            Err(JsonStructureIssue::DuplicateKey)
+        );
+
+        let mut out = Vec::new();
+        assert!(canonicalize_stream(
+            std::io::Cursor::new(br#"{"future":1,"fut\u0075re":2}"#),
+            &mut out
+        )
+        .is_err());
+        assert!(out.is_empty(), "a duplicate record must not be rewritten");
+    }
+
+    #[test]
     fn a_nested_timestamp_alias_is_refused_like_a_top_level_one() {
-        // The old reader scans textually, so a top-level-only guard was weaker
-        // than the behaviour it guards. Verified against the real reader: this
+        // The ordinary reader can promote nested aliases, so a top-level-only
+        // guard is weaker than the behaviour it guards. Verified against the
+        // real reader: this
         // shape validated clean while ingest derived a 2026 wall clock.
         let mut text = serde_json::to_string(&header()).unwrap();
         let mut value = serde_json::to_value(event(0, explicit())).unwrap();

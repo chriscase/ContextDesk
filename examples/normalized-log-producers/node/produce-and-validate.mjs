@@ -7,6 +7,7 @@
  * producer's build. Two modes:
  *
  *   node produce-and-validate.mjs --emit
+ *   node produce-and-validate.mjs --validate ./out.jsonl
  *   node produce-and-validate.mjs --check ../../../fixtures/normalized-log-events
  *
  * `--check` runs the SAME frozen fixtures the Rust validator uses. Three
@@ -28,18 +29,23 @@ const MAX_ID_CHARS = 128;
 const MAX_SEVERITY_NUMBER = 24;
 const MAX_CORRELATIONS = 32;
 const MAX_MESSAGE_CHARS = 64 * 1024;
+const MAX_LOCAL_TEXT_CHARS = 256;
+const MAX_ATTRIBUTES = 256;
+const MAX_ATTRIBUTE_KEY_CHARS = 128;
+const MAX_REDACTION_NOTE_CHARS = 1024;
 // Bounds parser work and stack use: a deeply nested attribute map is the cheap
 // way to make a validator expensive.
 const MAX_JSON_DEPTH = 32;
 
 /**
- * Top-level keys an older ContextDesk reader treats as authoritative
- * wall-clock time. A conforming event must never carry them: it could declare
- * order_only while a sidecar `ts` epoch silently put the corpus on a wall clock.
+ * Keys an older ContextDesk reader treats as authoritative wall-clock time. A
+ * conforming header or event must never carry them outside the event's root
+ * `time` object: it could declare order_only while a sidecar `ts` epoch
+ * silently put the corpus on a wall clock.
  */
 // Must match cd_core::log_analysis::parse::TIMESTAMP_FIELD_ALIASES exactly.
-// The old reader scans the raw line TEXTUALLY, so a nested
-// {"attributes":{"ts":...}} is found too.
+// The ordinary reader can promote nested aliases, so a nested
+// {"attributes":{"ts":...}} must be refused too.
 const RESERVED_EVENT_KEYS = [
   "ts",
   "timestamp",
@@ -70,7 +76,7 @@ const CORRELATION_CLASSES = new Set([
 
 /** RFC3339 with an EXPLICIT offset. A bare local time is a guessed instant. */
 const INSTANT_RE =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-](0\d|1\d|2[0-3]):[0-5]\d)$/;
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-](?:0\d|1\d|2[0-3]):[0-5]\d)$/;
 const TRACE_RE = /^[0-9a-f]{32}$/;
 const SPAN_RE = /^[0-9a-f]{16}$/;
 
@@ -98,72 +104,154 @@ const hasSentinel = (text) =>
   typeof text === "string" &&
   FORBIDDEN_SENTINELS.some((sentinel) => text.toLowerCase().includes(sentinel));
 
-const isInstant = (value) =>
-  typeof value === "string" &&
-  INSTANT_RE.test(value) &&
-  // RFC3339 reserves -00:00 for "offset unknown" — the same as not having one.
-  !value.endsWith("-00:00");
+const isInstant = (value) => {
+  if (typeof value !== "string" || value.endsWith("-00:00")) return false;
+  const match = INSTANT_RE.exec(value);
+  if (!match) return false;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [0, 31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return (
+    month >= 1 &&
+    month <= 12 &&
+    day >= 1 &&
+    day <= days[month] &&
+    hour <= 23 &&
+    minute <= 59 &&
+    second <= 60
+  );
+};
 
 /**
- * Whether any JSON object in `raw` declares the same key twice.
- * JSON.parse keeps the LAST write, so parsing cannot see the collision, while
- * the old reader takes the FIRST occurrence when scanning text.
+ * Parse object/array structure with decoded keys. JSON.parse itself is called
+ * first by the caller; this second bounded walk exists because JSON.parse
+ * silently keeps the last duplicate key and exposes no object-pairs hook.
  */
-const hasDuplicateKeys = (raw) => {
-  const stack = [];
-  let i = 0;
-  let expectingKey = false;
-  while (i < raw.length) {
-    const ch = raw[i];
-    if (ch === "{") {
-      stack.push(new Set());
-      expectingKey = true;
-      i += 1;
-    } else if (ch === "}") {
-      stack.pop();
-      expectingKey = false;
-      i += 1;
-    } else if (ch === "[" || ch === "]") {
-      expectingKey = false;
-      i += 1;
-    } else if (ch === ",") {
-      expectingKey = stack.length > 0;
-      i += 1;
-    } else if (ch === ":") {
-      expectingKey = false;
-      i += 1;
-    } else if (ch === '"') {
-      let j = i + 1;
-      while (j < raw.length) {
-        if (raw[j] === "\\") {
-          j += 2;
-          continue;
-        }
-        if (raw[j] === '"') break;
-        j += 1;
+const scanJsonStructure = (raw) => {
+  let index = 0;
+  const skipWhitespace = () => {
+    while (/\s/.test(raw[index] ?? "")) index += 1;
+  };
+  const readString = () => {
+    const start = index;
+    index += 1;
+    while (index < raw.length) {
+      if (raw[index] === "\\") {
+        index += 2;
+      } else if (raw[index] === '"') {
+        index += 1;
+        return JSON.parse(raw.slice(start, index));
+      } else {
+        index += 1;
       }
-      if (expectingKey && stack.length > 0) {
-        const key = raw.slice(i + 1, j);
-        const frame = stack[stack.length - 1];
-        if (frame.has(key)) return true;
-        frame.add(key);
-      }
-      i = j + 1;
-    } else {
-      i += 1;
     }
+    return "";
+  };
+  const parseValue = (parentDepth) => {
+    skipWhitespace();
+    if (raw[index] === "{") {
+      const depth = parentDepth + 1;
+      if (depth > MAX_JSON_DEPTH) return "depth";
+      index += 1;
+      skipWhitespace();
+      const keys = new Set();
+      if (raw[index] === "}") {
+        index += 1;
+        return null;
+      }
+      while (index < raw.length) {
+        const key = readString();
+        if (keys.has(key)) return "duplicate";
+        keys.add(key);
+        skipWhitespace();
+        index += 1; // colon; JSON.parse already proved it is present.
+        const issue = parseValue(depth);
+        if (issue) return issue;
+        skipWhitespace();
+        if (raw[index] === "}") {
+          index += 1;
+          return null;
+        }
+        index += 1; // comma
+        skipWhitespace();
+      }
+      return null;
+    }
+    if (raw[index] === "[") {
+      const depth = parentDepth + 1;
+      if (depth > MAX_JSON_DEPTH) return "depth";
+      index += 1;
+      skipWhitespace();
+      if (raw[index] === "]") {
+        index += 1;
+        return null;
+      }
+      while (index < raw.length) {
+        const issue = parseValue(depth);
+        if (issue) return issue;
+        skipWhitespace();
+        if (raw[index] === "]") {
+          index += 1;
+          return null;
+        }
+        index += 1;
+        skipWhitespace();
+      }
+      return null;
+    }
+    if (raw[index] === '"') {
+      readString();
+      return null;
+    }
+    while (index < raw.length && !/[\s,}\]]/.test(raw[index])) index += 1;
+    return null;
+  };
+  return parseValue(0);
+};
+
+const containsReservedTimestampKey = (value, allowRootTime, depth = 0) => {
+  if (Array.isArray(value)) {
+    return value.some((child) =>
+      containsReservedTimestampKey(child, false, depth + 1),
+    );
   }
-  return false;
+  if (typeof value !== "object" || value === null) return false;
+  return Object.entries(value).some(([key, child]) => {
+    const rootTime =
+      depth === 0 &&
+      allowRootTime &&
+      key === "time" &&
+      typeof child === "object" &&
+      child !== null &&
+      !Array.isArray(child);
+    return (
+      (RESERVED_EVENT_KEYS.includes(key) && !rootTime) ||
+      containsReservedTimestampKey(child, false, depth + 1)
+    );
+  });
 };
 
 const jsonDepth = (value) => {
-  if (Array.isArray(value)) {
-    return 1 + Math.max(0, ...value.map(jsonDepth));
+  let maximum = 0;
+  const pending = [[value, 0]];
+  while (pending.length > 0) {
+    const [current, parentDepth] = pending.pop();
+    if (typeof current !== "object" || current === null) continue;
+    const depth = parentDepth + 1;
+    if (depth > MAX_JSON_DEPTH) return depth;
+    maximum = Math.max(maximum, depth);
+    const children = Array.isArray(current)
+      ? current
+      : Object.values(current);
+    for (const child of children) pending.push([child, depth]);
   }
-  if (typeof value === "object" && value !== null) {
-    return 1 + Math.max(0, ...Object.values(value).map(jsonDepth));
-  }
-  return 0;
+  return maximum;
 };
 
 /** A real IANA zone, not merely a plausible-looking string. */
@@ -227,6 +315,20 @@ function validateTime(time, errors, line) {
   if (wantLocal === "req" && !haveLocal) {
     errors.push([line, "local_text_required", "time.localText"]);
   }
+  if (
+    wantLocal === "req" &&
+    haveLocal &&
+    (typeof time.localText !== "string" || time.localText.trim() === "")
+  ) {
+    errors.push([line, "local_text_required", "time.localText"]);
+  }
+  if (
+    haveLocal &&
+    (typeof time.localText !== "string" ||
+      [...time.localText].length > MAX_LOCAL_TEXT_CHARS)
+  ) {
+    errors.push([line, "bounds_exceeded", "time.localText"]);
+  }
   if (wantLocal === "no" && haveLocal) {
     errors.push([line, "time_basis_inconsistent", "time.localText"]);
   }
@@ -255,27 +357,16 @@ function validateTime(time, errors, line) {
 }
 
 function validateEvent(event, expectedSeq, errors, line, raw) {
-  if (raw !== undefined && hasDuplicateKeys(raw)) {
-    errors.push([line, "event_malformed", "duplicateKey"]);
-  }
-  // `time` is this contract's own field and is always an object, which the
-  // reader decodes as unusable rather than an instant, so it is exempt.
-  for (const reserved of RESERVED_EVENT_KEYS) {
-    if (reserved !== "time" && Object.hasOwn(event, reserved)) {
-      errors.push([line, "reserved_key_present", reserved]);
+  if (raw !== undefined) {
+    const structure = scanJsonStructure(raw);
+    if (structure === "duplicate") {
+      errors.push([line, "event_malformed", "duplicateKey"]);
+    } else if (structure === "depth") {
+      errors.push([line, "depth_exceeded", null]);
     }
   }
-  for (const value of Object.values(event)) {
-    if (
-      typeof value === "object" &&
-      value !== null &&
-      RESERVED_EVENT_KEYS.some(
-        (k) => k !== "time" && Object.hasOwn(value, k),
-      )
-    ) {
-      errors.push([line, "reserved_key_present", null]);
-      break;
-    }
+  if (containsReservedTimestampKey(event, true)) {
+    errors.push([line, "reserved_key_present", null]);
   }
 
   if (!isInteger(event.sourceSeq) || event.sourceSeq !== expectedSeq) {
@@ -329,8 +420,14 @@ function validateEvent(event, expectedSeq, errors, line, raw) {
     if (!coherent) {
       errors.push([line, "severity_provenance_inconsistent", "severity"]);
     }
-    if (prov === "absent" && severity.raw !== undefined) {
-      errors.push([line, "severity_provenance_inconsistent", "severity.raw"]);
+    if (
+      prov === "absent" &&
+      (severity.raw !== undefined || severity.canonical !== undefined)
+    ) {
+      errors.push([line, "severity_provenance_inconsistent", "severity"]);
+    }
+    if (severity.raw !== undefined && jsonDepth(severity.raw) > MAX_JSON_DEPTH) {
+      errors.push([line, "depth_exceeded", "severity.raw"]);
     }
   }
 
@@ -353,8 +450,22 @@ function validateEvent(event, expectedSeq, errors, line, raw) {
     }
   }
 
-  if (typeof event.attributes === "object" && event.attributes !== null) {
-    for (const value of Object.values(event.attributes)) {
+  if (
+    event.attributes !== undefined &&
+    (typeof event.attributes !== "object" ||
+      event.attributes === null ||
+      Array.isArray(event.attributes))
+  ) {
+    errors.push([line, "event_malformed", "attributes"]);
+  } else if (event.attributes !== undefined) {
+    const entries = Object.entries(event.attributes);
+    if (entries.length > MAX_ATTRIBUTES) {
+      errors.push([line, "bounds_exceeded", "attributes"]);
+    }
+    for (const [key, value] of entries) {
+      if (key.length === 0 || [...key].length > MAX_ATTRIBUTE_KEY_CHARS) {
+        errors.push([line, "bounds_exceeded", "attributes"]);
+      }
       if (jsonDepth(value) > MAX_JSON_DEPTH) {
         errors.push([line, "depth_exceeded", "attributes"]);
         break;
@@ -401,6 +512,21 @@ function validateEvent(event, expectedSeq, errors, line, raw) {
   } else if (Buffer.byteLength(event.canonical, "utf8") > MAX_CANONICAL_BYTES) {
     errors.push([line, "canonical_invalid", "canonical"]);
   }
+  if (
+    event.canonicalTruncated !== undefined &&
+    typeof event.canonicalTruncated !== "boolean"
+  ) {
+    errors.push([line, "event_malformed", "canonicalTruncated"]);
+  }
+  for (const field of ["logger", "service", "host"]) {
+    if (
+      event[field] !== undefined &&
+      (typeof event[field] !== "string" ||
+        [...event[field]].length > MAX_ID_CHARS)
+    ) {
+      errors.push([line, "bounds_exceeded", field]);
+    }
+  }
 }
 
 /** Returns an array of `[line, code, location]`. Empty means conforming. */
@@ -411,7 +537,7 @@ export function validateFile(text) {
   }
   const lines = text.split("\n");
 
-  const headerLine = lines[0];
+  const headerLine = lines[0].endsWith("\r") ? lines[0].slice(0, -1) : lines[0];
   if (Buffer.byteLength(headerLine, "utf8") > MAX_LINE_BYTES) {
     errors.push([1, "line_too_long", null]);
   }
@@ -427,6 +553,15 @@ export function validateFile(text) {
   }
 
   if (header) {
+    const structure = scanJsonStructure(headerLine);
+    if (structure === "duplicate") {
+      errors.push([1, "header_malformed", "duplicateKey"]);
+    } else if (structure === "depth") {
+      errors.push([1, "depth_exceeded", null]);
+    }
+    if (containsReservedTimestampKey(header, false)) {
+      errors.push([1, "reserved_key_present", null]);
+    }
     if (header.schemaId !== SCHEMA_ID) {
       errors.push([1, "schema_id_invalid", "schemaId"]);
     }
@@ -447,16 +582,38 @@ export function validateFile(text) {
       errors.push([1, "identifier_invalid", "sourceId"]);
     }
     if (
+      header.sourceLabel !== undefined &&
+      (typeof header.sourceLabel !== "string" ||
+        [...header.sourceLabel].length > MAX_ID_CHARS)
+    ) {
+      errors.push([1, "identifier_invalid", "sourceLabel"]);
+    }
+    if (
       !isIdentifier(header.producer?.name) ||
       !isIdentifier(header.producer?.version)
     ) {
       errors.push([1, "identifier_invalid", "producer"]);
     }
+    if (header.redaction !== undefined) {
+      if (
+        typeof header.redaction !== "object" ||
+        header.redaction === null ||
+        Array.isArray(header.redaction) ||
+        typeof header.redaction.credentialsRemoved !== "boolean" ||
+        typeof header.redaction.personalDataRemoved !== "boolean" ||
+        (header.redaction.note !== undefined &&
+          (typeof header.redaction.note !== "string" ||
+            [...header.redaction.note].length > MAX_REDACTION_NOTE_CHARS))
+      ) {
+        errors.push([1, "header_malformed", "redaction"]);
+      }
+    }
   }
 
   let expectedSeq = 0;
   for (let index = 1; index < lines.length; index += 1) {
-    const raw = lines[index];
+    const physical = lines[index];
+    const raw = physical.endsWith("\r") ? physical.slice(0, -1) : physical;
     if (raw.trim() === "") continue;
     const lineNumber = index + 1;
     if (Buffer.byteLength(raw, "utf8") > MAX_LINE_BYTES) {
@@ -552,6 +709,17 @@ function main(argv) {
     return 0;
   }
 
+  const validateIndex = argv.indexOf("--validate");
+  if (validateIndex !== -1 && argv[validateIndex + 1]) {
+    const errors = validateFile(readFileSync(argv[validateIndex + 1], "utf8"));
+    console.log(
+      errors.length === 0
+        ? "conforming"
+        : `NOT conforming: ${errors.length} diagnostic(s)`,
+    );
+    return errors.length === 0 ? 0 : 1;
+  }
+
   const checkIndex = argv.indexOf("--check");
   if (checkIndex !== -1 && argv[checkIndex + 1]) {
     const root = argv[checkIndex + 1];
@@ -577,7 +745,9 @@ function main(argv) {
     return failures > 0 ? 1 : 0;
   }
 
-  console.log("usage: produce-and-validate.mjs --emit | --check <fixtureDir>");
+  console.log(
+    "usage: produce-and-validate.mjs --emit | --validate <file> | --check <fixtureDir>",
+  );
   return 0;
 }
 

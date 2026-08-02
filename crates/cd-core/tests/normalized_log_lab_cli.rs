@@ -8,6 +8,8 @@
 use std::io::Write;
 use std::process::Command;
 
+use cd_core::normalized_log_events::MAX_DIAGNOSTICS;
+
 fn lab() -> Command {
     // Built by the same `cargo test` invocation; resolve the binary next to
     // the test executable rather than shelling out to cargo again.
@@ -68,6 +70,57 @@ fn summarize_is_aggregate_only_and_prints_no_record_content() {
     // The fixture's payload text must not appear anywhere in a summary.
     assert!(!stdout.contains("expected_diagnosis"));
     assert!(!stdout.contains("checkout step"));
+}
+
+#[test]
+fn large_invalid_reports_disclose_exact_totals_but_bound_cli_output() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let input = dir.path().join("private-evidence.jsonl");
+    let mut text = std::fs::read_to_string(fixture("valid/minimal.jsonl"))
+        .expect("read valid header")
+        .lines()
+        .next()
+        .expect("header")
+        .to_string();
+    let invalid_count = MAX_DIAGNOSTICS * 4;
+    for _ in 0..invalid_count {
+        text.push_str("\n{not-json-private-payload}");
+    }
+    text.push('\n');
+    std::fs::write(&input, text).expect("write bounded-report input");
+
+    let validate = lab()
+        .arg("validate")
+        .arg(&input)
+        .output()
+        .expect("validate");
+    assert_eq!(validate.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&validate.stdout);
+    assert!(stdout.contains(&format!("{invalid_count} diagnostic(s)")));
+    assert!(stdout.contains(&format!(
+        "showing first {MAX_DIAGNOSTICS} of {invalid_count} diagnostics"
+    )));
+    assert_eq!(
+        stdout.matches("  record ").count(),
+        MAX_DIAGNOSTICS,
+        "the CLI must not render an unbounded finding list"
+    );
+    assert!(!stdout.contains("private-payload"));
+    assert!(!stdout.contains("private-evidence"));
+
+    let summarize = lab()
+        .arg("summarize")
+        .arg(&input)
+        .output()
+        .expect("summarize");
+    assert_eq!(summarize.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&summarize.stdout);
+    assert!(stdout.contains(&format!("diagnostics: {invalid_count}")));
+    assert!(stdout.contains(&format!(
+        "diagnostic sample: first {MAX_DIAGNOSTICS} of {invalid_count}"
+    )));
+    assert!(!stdout.contains("private-payload"));
+    assert!(!stdout.contains("private-evidence"));
 }
 
 #[test]

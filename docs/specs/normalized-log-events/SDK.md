@@ -27,8 +27,10 @@ confident wrong instant corrupts a corpus in a way nobody can see.
 
 ## Minimal producer
 
-Every kit is dependency-free and under 400 lines. Read one; they are the spec
-in executable form.
+The Node and Python kits use only their standard libraries. The Rust example
+uses `cd-core`, the authoritative implementation. Read one alongside the
+normative specification; the shared fixtures keep all three executable
+interpretations aligned.
 
 | Language | Path | Run |
 | --- | --- | --- |
@@ -36,7 +38,7 @@ in executable form.
 | Node | `examples/normalized-log-producers/node/produce-and-validate.mjs` | `node produce-and-validate.mjs --emit` |
 | Python | `examples/normalized-log-producers/python/produce_and_validate.py` | `python3 produce_and_validate.py --emit` |
 
-All three validate the same 54-fixture corpus, and each emits a file the Rust
+All three validate the same 65-fixture corpus, and each emits a file the Rust
 validator accepts. That is what `normalized_log_events_cross_language.rs`
 enforces, in both directions.
 
@@ -86,13 +88,17 @@ claim. Declare honestly; do not rely on it to exempt anything.
 cargo run -p cd-core --bin cd_normalized_log_lab -- validate  ./out.jsonl
 cargo run -p cd-core --bin cd_normalized_log_lab -- summarize ./out.jsonl
 cargo run -p cd-core --bin cd_normalized_log_lab -- canonicalize ./out.jsonl ./canonical.jsonl
+node examples/normalized-log-producers/node/produce-and-validate.mjs --validate ./out.jsonl
+python3 examples/normalized-log-producers/python/produce_and_validate.py --validate ./out.jsonl
 ```
 
 The lab never contacts a provider, never mutates its input, never overwrites
 its output, and prints no filesystem path or record content — `summarize` is
-aggregate-only. Passing the JSON Schema alone is **not** conformance: the
-schema validates one line at a time and cannot check `sourceSeq` contiguity or
-the cross-field time rules.
+aggregate-only. Findings are bounded to the first 256 while the report retains
+the exact total and a truncation flag. Passing the JSON Schema alone is **not**
+conformance: the schema validates one line at a time and cannot check
+`sourceSeq` contiguity, duplicate decoded keys, the recursive timestamp-alias
+guard, or the cross-field time rules.
 
 ---
 
@@ -101,7 +107,7 @@ the cross-field time rules.
 | Change | v1 reader behavior |
 | --- | --- |
 | Unknown **additive** field | ignored; file still valid |
-| Reserved key `ts` / `timestamp` / `@timestamp` | **rejected** — an older reader would read these as wall-clock time |
+| Reserved timestamp alias at any depth in a header/event | **rejected** — an older reader could read it as wall-clock time; only the event's root `time` object is allowed |
 | `minReaderVersion` above the reader | refused whole, never partly understood |
 | Unrecognized `schemaId` | refused; not best-effort parsed |
 | New `schemaId` major | new file format; v1 readers refuse it |

@@ -63,8 +63,7 @@ fn report(validation: &NormalizedLogValidation) -> i32 {
     }
     println!(
         "NOT conforming: {} diagnostic(s), {} event(s) validated before failure",
-        validation.diagnostics.len(),
-        validation.events_validated
+        validation.diagnostics_total, validation.events_validated
     );
     for diagnostic in &validation.diagnostics {
         let location = diagnostic.location.as_deref().unwrap_or("-");
@@ -75,6 +74,13 @@ fn report(validation: &NormalizedLogValidation) -> i32 {
                 .unwrap_or_default()
                 .trim_matches('"'),
             location
+        );
+    }
+    if validation.diagnostics_truncated {
+        println!(
+            "  showing first {} of {} diagnostics (report bounded)",
+            validation.diagnostics.len(),
+            validation.diagnostics_total
         );
     }
     1
@@ -91,9 +97,16 @@ fn summarize(validation: &NormalizedLogValidation) -> i32 {
         *counts.entry(code).or_default() += 1;
     }
     println!("events validated: {}", validation.events_validated);
-    println!("diagnostics: {}", validation.diagnostics.len());
+    println!("diagnostics: {}", validation.diagnostics_total);
+    if validation.diagnostics_truncated {
+        println!(
+            "diagnostic sample: first {} of {} (bounded)",
+            validation.diagnostics.len(),
+            validation.diagnostics_total
+        );
+    }
     for (code, count) in counts {
-        println!("  {code}: {count}");
+        println!("  {code}: {count} shown");
     }
     i32::from(!validation.ok)
 }

@@ -248,6 +248,46 @@ fn invalid_fixtures_fail_for_the_reason_they_are_named_for() {
             "duplicate-json-key.jsonl",
             NormalizedLogDiagnosticCode::EventMalformed,
         ),
+        (
+            "instant-invalid-calendar.jsonl",
+            NormalizedLogDiagnosticCode::InstantMalformed,
+        ),
+        (
+            "observed-invalid-calendar.jsonl",
+            NormalizedLogDiagnosticCode::InstantMalformed,
+        ),
+        (
+            "header-reserved-timestamp-alias.jsonl",
+            NormalizedLogDiagnosticCode::ReservedKeyPresent,
+        ),
+        (
+            "header-duplicate-json-key.jsonl",
+            NormalizedLogDiagnosticCode::HeaderMalformed,
+        ),
+        (
+            "deep-nested-timestamp-alias.jsonl",
+            NormalizedLogDiagnosticCode::ReservedKeyPresent,
+        ),
+        (
+            "duplicate-json-key-escaped.jsonl",
+            NormalizedLogDiagnosticCode::EventMalformed,
+        ),
+        (
+            "absent-severity-canonical.jsonl",
+            NormalizedLogDiagnosticCode::SeverityProvenanceInconsistent,
+        ),
+        (
+            "producer-resolved-empty-local-text.jsonl",
+            NormalizedLogDiagnosticCode::LocalTextRequired,
+        ),
+        (
+            "attributes-not-object.jsonl",
+            NormalizedLogDiagnosticCode::EventMalformed,
+        ),
+        (
+            "canonical-truncated-wrong-type.jsonl",
+            NormalizedLogDiagnosticCode::EventMalformed,
+        ),
     ];
 
     let on_disk: BTreeSet<String> = read_dir_sorted("invalid")

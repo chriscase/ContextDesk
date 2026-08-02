@@ -532,18 +532,6 @@ fn parse_json(raw: &str, ingest_seq: u64) -> ParsedLine {
 pub(crate) const TIMESTAMP_FIELD_ALIASES: &[&str] =
     &["ts", "timestamp", "time", "@timestamp", "@t", "eventTime"];
 
-/// Whether this parser would find a usable timestamp field anywhere in `raw`.
-///
-/// The scan is TEXTUAL, not a top-level key lookup, so a nested
-/// `{"attributes":{"ts":…}}` is found too. Any guard that only inspects
-/// top-level keys is therefore weaker than the behavior it guards against.
-pub(crate) fn scans_as_timestamp_field(raw: &str) -> bool {
-    !matches!(
-        first_json_ts_field(raw, TIMESTAMP_FIELD_ALIASES),
-        None | Some(ParsedTimestamp::Unusable)
-    )
-}
-
 fn first_json_ts_field(raw: &str, keys: &[&str]) -> Option<ParsedTimestamp> {
     for key in keys {
         let pattern = format!("\"{key}\"");

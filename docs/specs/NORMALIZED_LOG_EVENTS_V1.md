@@ -47,9 +47,11 @@ today.
 ## 3. File shape
 
 JSONL. Line 1 is the **header**; every subsequent non-blank line is one
-**event**. Blank lines are ignored. Lines are LF-terminated and each **MUST**
-be ≤ 1 MiB — deliberately below the raw reader's 16 MiB line cap, so a
-conforming file is always readable by the raw path too.
+**event**. Blank lines are ignored. Each encoded JSON record **MUST** be ≤ 1
+MiB, excluding its LF or CRLF record terminator — deliberately below the raw
+reader's 16 MiB line cap, so a conforming file is always readable by the raw
+path too. Buffered, streaming, and canonicalizing validators use this same
+boundary; an exact-1-MiB record is legal.
 
 ```
 {"schemaId":"contextdesk.normalized_log_events.v1","minReaderVersion":1,"sourceId":"checkout-api","producer":{"name":"acme-exporter","version":"1.0.0"}}
@@ -95,7 +97,9 @@ it has no encoding, so it cannot be emitted, validated, or read.
 No row yields an instant without either an explicit offset in the source or a
 producer-declared timezone.
 
-* **`instant`** is RFC3339 with an **explicit** offset. A bare local timestamp
+* **`instant`** is a calendar-valid RFC3339 timestamp with an **explicit**
+  offset. Impossible dates and times are rejected, not merely strings with the
+  right digit shape. A bare local timestamp
   is rejected — a lenient parser would silently call it UTC, which is the
   guessed instant in disguise. `-00:00` is also rejected: RFC3339 reserves it
   for "offset unknown", which is the same thing as not having one.
@@ -112,10 +116,12 @@ producer-declared timezone.
 
 ### Reserved keys (normative)
 
-An event **MUST NOT** carry a top-level `ts`, `timestamp`, or `@timestamp`.
+A header or event **MUST NOT** carry a decoded key named `ts`, `timestamp`,
+`time`, `@timestamp`, `@t`, or `eventTime` at any depth. The event's required
+root `time` object is the sole exception.
 
 This is not stylistic. A reader predating this contract parses each line as an
-ordinary JSON log record, and that generic parser reads those three keys as
+ordinary JSON log record, and that generic parser reads these aliases as
 **authoritative wall-clock time** — a bare integer epoch in any of them becomes
 an explicit instant. An event could therefore declare `order_only` while a
 convenience `"ts": 1767225600` silently placed the corpus on a 2026 wall clock
@@ -123,19 +129,19 @@ derived from a producer epoch with no offset and no zone, defeating both the
 guessed-instant guard and the order-only fallback at once.
 
 It is reachable without malice: an exporter that spreads its original record
-into the event object produces it naturally. The validator therefore checks the
-**raw line**, because a typed deserializer drops unknown fields before any check
-could see them.
+into the header or event object produces it naturally. The validator therefore
+checks the complete decoded JSON structure before typed deserialization drops
+unknown fields. Escaped-equivalent keys are decoded before comparison.
 
-`time` **is** in the reserved list and is nonetheless legal here. The rule is
-not "this key is absent" but "the old reader would derive nothing from it": the
-reader's scan yields *unusable* for an object value, and `time` is always an
-object. The guard keys off what the reader would actually derive.
+`time` **is** in the reserved list and is nonetheless legal as the event's
+required root object. It is not legal on the header or nested inside another
+value. Keeping that exception structural prevents an additive field from
+smuggling in a timestamp alias.
 
-The scan is **textual over the whole line**, not a top-level key lookup, so a
-nested `{"attributes":{"ts":…}}` is caught too — a top-level-only guard was
-weaker than the behaviour it guards against, and a file of exactly that shape
-validated clean while the reader derived a 2026 wall clock from it.
+The guard is recursive rather than a top-level lookup, so a nested
+`{"attributes":{"ts":…}}` is caught too. The frozen fallback test also sends
+every alias through the real ordinary-ingest path and proves why each must be
+refused: otherwise that path can promote the producer value to wall time.
 
 `wall`, `relative`, and `order` are incompatible axes (#670). Basis is checked
 against resolution: a `wall` basis with no instant, or an `order` basis with
@@ -156,11 +162,11 @@ Four independent fields:
 
 `confidence` and `provenance` are **required** and must agree:
 `source_declared` implies `high`, `text_inferred` implies `low`,
-`schema_mapped` implies `high` or `medium`, and `absent` may not carry a `raw`
-value. A contradictory pair is rejected, so an inferred severity can never be
-mistaken for a source-declared one (#790: "never present inferred severity as
-source-declared"). #790 names the failure this guards: inferring an error from
-the phrase "no errors detected".
+`schema_mapped` implies `high` or `medium`, and `absent` may carry neither
+`raw` nor `canonical`. A contradictory combination is rejected, so an inferred
+severity can never be mistaken for a source-declared one (#790: "never present
+inferred severity as source-declared"). #790 names the failure this guards:
+inferring an error from the phrase "no errors detected".
 
 Readers **MAY** group by the normalized `canonical` while details, exports, and
 raw views retain `raw`.
@@ -218,7 +224,9 @@ that knows the answer.
   claims nothing.
 * Evaluator-protection sentinels are rejected in `sourceId`, `sourceLabel`,
   `redaction.note`, `message`, and `canonical`.
-* Validation **error samples** are bounded (≤5 samples, ≤256 chars) and
+* Validation diagnostics retain at most 256 findings while reporting the exact
+  `diagnosticsTotal` and whether the retained list was truncated. Validation
+  **error samples** are bounded (≤5 samples, ≤256 chars) and
   re-redacted through ContextDesk's own redaction. A validation report is
   exactly the artifact that gets pasted into a ticket; an unredacted "here is
   the line that failed" would make the validator itself the leak.
@@ -269,6 +277,7 @@ The JSON Schema validates **one line at a time**. It cannot check:
 
 * `sourceSeq` contiguity (a cross-line rule),
 * byte-length bounds on the encoded line,
+* decoded duplicate keys or the recursive timestamp-alias guard,
 * forbidden sentinels,
 * that a producer's emitted file round-trips.
 
@@ -282,7 +291,7 @@ offline validator.
 | Resource | Location |
 | --- | --- |
 | JSON Schema | `docs/specs/normalized-log-events/schemas/normalized-log-events.v1.json` |
-| Fixtures | `fixtures/normalized-log-events/` (9 valid, 27 invalid) |
+| Fixtures | `fixtures/normalized-log-events/` (15 valid, 50 invalid) |
 | Validator | `crates/cd-core/src/normalized_log_events.rs` |
 | Rust producer | `crates/cd-core/examples/normalized_log_producer.rs` (compiled by the build) |
 | Node producer | `examples/normalized-log-producers/node/` |
