@@ -26,6 +26,95 @@ describe("mock engine client conformance", () => {
   }
 });
 
+describe("mock formats.apply parity", () => {
+  const sampleFormat = {
+    schemaId: "contextdesk.reviewed_format.v1",
+    formatId: "mock.app-log",
+    version: 1,
+    name: "Mock app log",
+  };
+
+  it("applies revision-bound bindings and fails closed on stale revision", async () => {
+    const client = createMockEngineClient();
+    const saved = await client.formats.save(sampleFormat);
+    const rev = await client.formats.revision();
+    const applied = await client.formats.apply({
+      expectedStoreRevision: rev,
+      bindings: [
+        {
+          sourceIdentity: "api/api-gateway.log",
+          formatId: saved.formatId,
+          version: saved.version,
+          digest: saved.digest,
+        },
+      ],
+    });
+    expect(applied.storeRevision).toBe(rev);
+    expect(applied.bindings).toHaveLength(1);
+    expect(applied.bindings[0].sourceIdentity).toBe("api/api-gateway.log");
+
+    await expect(
+      client.formats.apply({
+        expectedStoreRevision: rev - 1,
+        bindings: [
+          {
+            sourceIdentity: "api/api-gateway.log",
+            formatId: saved.formatId,
+            version: saved.version,
+            digest: saved.digest,
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: "conflict" });
+  });
+
+  it("import.run re-checks formatApply before staging", async () => {
+    const client = createMockEngineClient();
+    const saved = await client.formats.save(sampleFormat);
+    const rev = await client.formats.revision();
+    const plan = await client.import.preview("/incidents");
+    await expect(
+      client.import.run({
+        path: "/incidents",
+        planToken: plan.planToken,
+        planVersion: plan.planVersion,
+        selected: IMPORTABLE_LOG_IDENTITIES,
+        formatApply: {
+          expectedStoreRevision: 0,
+          bindings: [
+            {
+              sourceIdentity: IMPORTABLE_LOG_IDENTITIES[0],
+              formatId: saved.formatId,
+              version: saved.version,
+              digest: saved.digest,
+            },
+          ],
+        },
+      }),
+    ).rejects.toMatchObject({ code: "conflict" });
+
+    // Fresh matching revision succeeds.
+    const report = await client.import.run({
+      path: "/incidents",
+      planToken: plan.planToken,
+      planVersion: plan.planVersion,
+      selected: IMPORTABLE_LOG_IDENTITIES,
+      formatApply: {
+        expectedStoreRevision: rev,
+        bindings: [
+          {
+            sourceIdentity: IMPORTABLE_LOG_IDENTITIES[0],
+            formatId: saved.formatId,
+            version: saved.version,
+            digest: saved.digest,
+          },
+        ],
+      },
+    });
+    expect(report.corpusId).toBeTruthy();
+  });
+});
+
 describe("mock engine client determinism", () => {
   it("returns the same preview plan bytes on every call", async () => {
     const client = createMockEngineClient();

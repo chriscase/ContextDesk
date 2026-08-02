@@ -5,8 +5,12 @@ use super::embed_policy::{LogEmbedMode, LogEmbedPolicy};
 use super::frame::LogicalRecordFramer;
 use super::import_preview::{ImportPreviewItem, ImportPreviewReport};
 use super::ingest_confidence::{IngestConfidenceAggregator, IngestConfidenceReport};
-use super::parse::{parse_line_with_fingerprint, LogFormat};
+use super::parse::{
+    parse_line_with_fingerprint, ActiveTimestampBasis, LogFormat, ParsedLine, TimestampProvenance,
+};
 use super::redact_log::{prepare_original_record, redact_message, redact_params};
+use super::reviewed_format::{assemble_records, ReviewedFormat};
+use super::reviewed_format_store::ReviewedFormatIngestBindings;
 use super::store::{
     template_content_hash, CorpusEmbeddingStatus, EmbeddingState, IngestedLogEvent, LogCorpus,
     LogEvent, TemplateRow, TopTemplateSnapshot,
@@ -329,6 +333,7 @@ pub fn ingest_path_with_observer(
         cancel,
         None,
         None,
+        None,
     )
 }
 
@@ -388,6 +393,7 @@ pub fn ingest_path_with_policy_and_observer(
         cancel,
         None,
         None,
+        None,
     )
 }
 
@@ -429,6 +435,7 @@ pub fn ingest_path_with_policy_and_observer_managed(
         progress,
         cancel,
         Some(managed_identity),
+        None,
         None,
     )
 }
@@ -478,6 +485,60 @@ pub fn ingest_path_with_policy_selection_and_observer(
         cancel,
         None,
         Some(selection),
+        None,
+    )
+}
+
+/// Policy ingest with optional reviewed-format bindings (production profile path).
+///
+/// Bindings are exact source-identity → grammar maps produced by
+/// [`super::reviewed_format_store::apply_reviewed_format_bindings`]. When a
+/// source is bound, lines are assembled with the reviewed grammar rather than
+/// the built-in fingerprint path. Unbound sources keep existing behaviour.
+#[allow(clippy::too_many_arguments)]
+pub fn ingest_path_with_policy_bindings_and_observer(
+    cache_root: &Path,
+    path: &Path,
+    name: &str,
+    policy: &LogEmbedPolicy,
+    embed: Option<Arc<dyn EmbedBackend>>,
+    progress: &dyn ProcessProgressObserver,
+    cancel: Option<&CancelFlag>,
+    selection: Option<&IngestSelection>,
+    reviewed: Option<&ReviewedFormatIngestBindings>,
+) -> CoreResult<IngestReport> {
+    policy.assert_embed_allowed()?;
+    if let Some(sel) = selection {
+        if sel.selected.len() > super::import_preview::MAX_IMPORT_PREVIEW_ITEMS {
+            return Err(CoreError::Policy(format!(
+                "import selection lists {} identities (limit {})",
+                sel.selected.len(),
+                super::import_preview::MAX_IMPORT_PREVIEW_ITEMS
+            )));
+        }
+    }
+    let backend = match policy.mode {
+        LogEmbedMode::None => None,
+        LogEmbedMode::Local | LogEmbedMode::Cloud => embed,
+    };
+    if policy.mode == LogEmbedMode::Cloud && backend.is_none() {
+        return Err(CoreError::Config(
+            "cloud embed mode requires an EmbedBackend (key from keychain)".into(),
+        ));
+    }
+    ingest_path_inner(
+        cache_root,
+        path,
+        name,
+        backend.as_deref(),
+        policy.model_id.as_str(),
+        policy.mode,
+        policy.defer_above_source_bytes,
+        progress,
+        cancel,
+        None,
+        selection,
+        reviewed,
     )
 }
 
@@ -529,6 +590,7 @@ pub fn ingest_path_with_policy_selection_and_observer_managed(
         cancel,
         Some(managed_identity),
         Some(selection),
+        None,
     )
 }
 
@@ -1811,6 +1873,264 @@ fn time_op_result_ms<R, E>(
     result
 }
 
+/// Ingest a bound source with a reviewed grammar (multiline ownership included).
+#[allow(clippy::too_many_arguments)]
+fn ingest_lines_with_reviewed_format(
+    reader: &mut dyn BufRead,
+    source_label: &str,
+    format: &ReviewedFormat,
+    corpus: &LogCorpus,
+    miner: &mut DrainMiner,
+    stats: &mut IngestStats,
+    confidence: &mut IngestConfidenceAggregator,
+    seq: &mut u64,
+    batch: &mut Vec<IngestedLogEvent>,
+    files_done: u64,
+    file_count: u64,
+    progress: &dyn ProcessProgressObserver,
+    cancel: Option<&CancelFlag>,
+    kind: ProcessProgressKind,
+    limits: RawIngestLimits,
+    ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
+) -> CoreResult<bool> {
+    let mut raw = Vec::new();
+    let mut source_bytes_read = 0u64;
+    loop {
+        if cancelled(cancel) {
+            emit(
+                progress,
+                ProcessProgress::phase(
+                    kind,
+                    ProcessProgressPhase::Cancelled,
+                    "ingest cancelled during reviewed-format import",
+                    false,
+                )
+                .with_lines(stats.lines)
+                .with_files(files_done)
+                .with_bytes(stats.source_bytes),
+            );
+            return Err(CoreError::Cancelled);
+        }
+        let mut chunk = [0u8; 8192];
+        let n = time_op_result_ms(ops, IngestOp::DiscoverRead, || reader.read(&mut chunk))
+            .map_err(|e| CoreError::Message(format!("read {source_label}: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        source_bytes_read = source_bytes_read.saturating_add(n as u64);
+        if source_bytes_read > limits.max_file_bytes {
+            return Err(CoreError::Policy(format!(
+                "raw log member actual-byte limit exceeded ({} > {})",
+                source_bytes_read, limits.max_file_bytes
+            )));
+        }
+        stats.source_bytes = stats.source_bytes.saturating_add(n as u64);
+        raw.extend_from_slice(&chunk[..n]);
+        if raw.len() as u64 > limits.max_file_bytes {
+            return Err(CoreError::Policy(format!(
+                "raw log member buffer exceeded ({} > {})",
+                raw.len(),
+                limits.max_file_bytes
+            )));
+        }
+    }
+    let text = String::from_utf8_lossy(&raw);
+    let (records, leading_unmatched) = time_op_ms(ops, IngestOp::ParseFrame, || {
+        assemble_records(format, &text)
+    });
+    // Unattributed leading/unmatched lines are honest raw fallback evidence — counted, not silent.
+    for line in &leading_unmatched {
+        if line.trim().is_empty() {
+            continue;
+        }
+        // Oversized-record honesty: over-long refused lines land here via assemble_records.
+        *stats
+            .exclusion_counts
+            .entry("reviewed_unattributed".into())
+            .or_insert(0) += 1;
+        let _ = line;
+    }
+    for record in records {
+        if cancelled(cancel) {
+            return Err(CoreError::Cancelled);
+        }
+        let mut message = record.fields.message.clone();
+        if !record.continuation.is_empty() {
+            message.push('\n');
+            message.push_str(&record.continuation.join("\n"));
+        }
+        if record.truncated {
+            *stats
+                .exclusion_counts
+                .entry("reviewed_multiline_truncated".into())
+                .or_insert(0) += 1;
+        }
+        if record.lines_dropped > 0 {
+            *stats
+                .exclusion_counts
+                .entry("reviewed_lines_dropped".into())
+                .or_insert(0) += record.lines_dropped;
+        }
+        let parsed = reviewed_fields_to_parsed_line(&record.fields, message, *seq);
+        // Confidence observation uses a synthetic fingerprint path: treat as plain.
+        let fingerprinted = super::parse::FingerprintedParsedLine {
+            parsed: parsed.clone(),
+            fingerprint: super::format_profile::fingerprint_format(
+                &record.fields.timestamp_text,
+                None,
+            ),
+        };
+        confidence.observe(source_label, &fingerprinted);
+        *stats
+            .timestamp_provenance_counts
+            .entry(parsed.timestamp_provenance.as_storage_str().into())
+            .or_insert(0) += 1;
+        *stats
+            .active_timestamp_basis_counts
+            .entry(parsed.active_timestamp_basis.as_storage_str().into())
+            .or_insert(0) += 1;
+        *stats.format_counts.entry("plain".into()).or_insert(0) += 1;
+        let msg = time_op_ms(ops, IngestOp::ParseFrame, || {
+            redact_message(&parsed.message)
+        });
+        let ts = parsed.ts.unwrap_or(*seq as i64);
+        stats.ts_min = Some(stats.ts_min.map_or(ts, |m| m.min(ts)));
+        stats.ts_max = Some(stats.ts_max.map_or(ts, |m| m.max(ts)));
+        let level_key = parsed.level.to_ascii_lowercase();
+        *stats.level_counts.entry(level_key).or_insert(0) += 1;
+        let (tid, params) = time_op_result_ms(ops, IngestOp::Template, || {
+            miner.match_or_create_cancellable(&msg, ts, &parsed.level, cancel)
+        })?;
+        let params = time_op_ms(ops, IngestOp::ParseFrame, || redact_params(&params));
+        let original = prepare_original_record(msg.as_bytes());
+        batch.push(IngestedLogEvent {
+            event: LogEvent {
+                seq: *seq,
+                ts,
+                timestamp_provenance: parsed.timestamp_provenance,
+                active_timestamp_basis: parsed.active_timestamp_basis,
+                unresolved_local_timestamp: parsed.unresolved_local_timestamp,
+                level: parsed.level,
+                service: parsed.service,
+                host: parsed.host,
+                template_id: tid,
+                params,
+                trace_id: parsed.trace_id,
+                message: msg,
+                source: source_label.to_string(),
+            },
+            original: original.stored,
+        });
+        *seq += 1;
+        stats.lines += 1;
+        if batch.len() >= 256 {
+            time_op_result_ms(ops, IngestOp::Persist, || {
+                corpus.push_ingested_events(batch)
+            })?;
+            batch.clear();
+        }
+    }
+    let _ = file_count;
+    Ok(true)
+}
+
+fn reviewed_fields_to_parsed_line(
+    fields: &super::reviewed_format::ExtractedFields,
+    message: String,
+    ingest_seq: u64,
+) -> ParsedLine {
+    let (ts, active, unresolved) = match fields.provenance {
+        TimestampProvenance::ExplicitWallClock => {
+            // Prefer shipped timestamp parser for offset-bearing text.
+            let parsed = super::parse::parse_line(
+                &format!("{} {}", fields.timestamp_text, message),
+                Some(LogFormat::Plain),
+                ingest_seq,
+            );
+            if parsed.timestamp_provenance == TimestampProvenance::ExplicitWallClock {
+                (parsed.ts, ActiveTimestampBasis::ExplicitWall, None)
+            } else if let Some(secs) = try_parse_rfc3339_like(&fields.timestamp_text) {
+                (Some(secs), ActiveTimestampBasis::ExplicitWall, None)
+            } else {
+                // Fail closed: grammar said explicit but we cannot form an instant.
+                (
+                    Some(ingest_seq as i64),
+                    ActiveTimestampBasis::OrderOnly,
+                    Some(fields.timestamp_text.clone()),
+                )
+            }
+        }
+        TimestampProvenance::UnresolvedLocal => (
+            Some(ingest_seq as i64),
+            ActiveTimestampBasis::OrderOnly,
+            Some(fields.timestamp_text.clone()),
+        ),
+        _ => (
+            Some(ingest_seq as i64),
+            ActiveTimestampBasis::OrderOnly,
+            None,
+        ),
+    };
+    let level = fields
+        .level
+        .as_deref()
+        .map(|l| l.to_ascii_lowercase())
+        .filter(|l| {
+            matches!(
+                l.as_str(),
+                "debug" | "info" | "warn" | "error" | "fatal" | "trace"
+            )
+        })
+        .unwrap_or_else(|| "unknown".into());
+    ParsedLine {
+        ts,
+        timestamp_provenance: fields.provenance,
+        active_timestamp_basis: active,
+        unresolved_local_timestamp: unresolved,
+        level,
+        service: fields.logger.clone(),
+        host: None,
+        trace_id: None,
+        message,
+        raw: format!("{} {}", fields.timestamp_text, fields.message),
+        format: LogFormat::Plain,
+    }
+}
+
+fn try_parse_rfc3339_like(text: &str) -> Option<i64> {
+    let t = text.trim();
+    // 2024-05-03 12:24:22,729+02:00 or with T / Z
+    let normalized = t.replace(',', ".");
+    for fmt in [
+        "%Y-%m-%d %H:%M:%S%.f%z",
+        "%Y-%m-%dT%H:%M:%S%.f%z",
+        "%Y-%m-%d %H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S%.fZ",
+        "%Y-%m-%dT%H:%M:%SZ",
+    ] {
+        if let Ok(dt) = chrono::DateTime::parse_from_str(&normalized, fmt) {
+            return Some(dt.timestamp());
+        }
+    }
+    // Z suffix variants
+    if let Some(base) = normalized
+        .strip_suffix('Z')
+        .or_else(|| normalized.strip_suffix('z'))
+    {
+        for fmt in [
+            "%Y-%m-%dT%H:%M:%S%.f",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%d %H:%M:%S%.f",
+        ] {
+            if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(base, fmt) {
+                return Some(naive.and_utc().timestamp());
+            }
+        }
+    }
+    None
+}
+
 /// Parse lines from a streaming reader into the corpus batch (shared by dir + zip).
 #[allow(clippy::too_many_arguments)]
 fn ingest_lines_from_reader(
@@ -1830,7 +2150,28 @@ fn ingest_lines_from_reader(
     kind: ProcessProgressKind,
     limits: RawIngestLimits,
     ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
+    reviewed: Option<&ReviewedFormat>,
 ) -> CoreResult<bool> {
+    if let Some(format) = reviewed {
+        return ingest_lines_with_reviewed_format(
+            reader,
+            source_label,
+            format,
+            corpus,
+            miner,
+            stats,
+            confidence,
+            seq,
+            batch,
+            files_done,
+            file_count,
+            progress,
+            cancel,
+            kind,
+            limits,
+            ops,
+        );
+    }
     let mut raw_line = Vec::new();
     let mut source_bytes_read = 0u64;
     let mut framer = LogicalRecordFramer::new();
@@ -2226,6 +2567,7 @@ fn ingest_from_zip(
     limits: RawIngestLimits,
     ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
     selection: Option<&IngestSelection>,
+    reviewed: Option<&ReviewedFormatIngestBindings>,
 ) -> CoreResult<u64> {
     let file = open_selected_regular_file(zip_path)?;
     let archive_identity = portable_source_identity(Path::new(&progress_basename(zip_path)))?;
@@ -2248,6 +2590,7 @@ fn ingest_from_zip(
         limits,
         ops,
         selection,
+        reviewed,
     )
 }
 
@@ -2271,6 +2614,7 @@ fn ingest_from_zip_file(
     limits: RawIngestLimits,
     ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
     selection: Option<&IngestSelection>,
+    reviewed: Option<&ReviewedFormatIngestBindings>,
 ) -> CoreResult<u64> {
     if cancelled(cancel) {
         emit(
@@ -2537,6 +2881,7 @@ fn ingest_from_zip_file(
                 limits,
                 ops,
                 selection,
+                reviewed,
             )?;
             files_done += 1;
             continue;
@@ -2576,6 +2921,7 @@ fn ingest_from_zip_file(
             kind,
             limits,
             ops,
+            reviewed.and_then(|b| b.get(&source_identity)),
         )?;
         let bounded = reader.into_inner();
         if bounded.member_bytes != plan.expanded_size {
@@ -2642,6 +2988,7 @@ fn ingest_path_inner(
     cancel: Option<&CancelFlag>,
     managed_identity: Option<&str>,
     selection: Option<&IngestSelection>,
+    reviewed: Option<&ReviewedFormatIngestBindings>,
 ) -> CoreResult<IngestReport> {
     ingest_path_inner_with_fault(
         cache_root,
@@ -2655,6 +3002,7 @@ fn ingest_path_inner(
         cancel,
         managed_identity,
         selection,
+        reviewed,
         None,
     )
 }
@@ -2672,6 +3020,7 @@ fn ingest_path_inner_with_fault(
     cancel: Option<&CancelFlag>,
     managed_identity: Option<&str>,
     selection: Option<&IngestSelection>,
+    reviewed: Option<&ReviewedFormatIngestBindings>,
     fault: IngestFaultHook<'_>,
 ) -> CoreResult<IngestReport> {
     ingest_path_inner_with_limits_and_fault(
@@ -2686,6 +3035,7 @@ fn ingest_path_inner_with_fault(
         cancel,
         managed_identity,
         selection,
+        reviewed,
         RawIngestLimits::default(),
         fault,
     )
@@ -2704,6 +3054,7 @@ fn ingest_path_inner_with_limits_and_fault(
     cancel: Option<&CancelFlag>,
     managed_identity: Option<&str>,
     selection: Option<&IngestSelection>,
+    reviewed: Option<&ReviewedFormatIngestBindings>,
     limits: RawIngestLimits,
     fault: IngestFaultHook<'_>,
 ) -> CoreResult<IngestReport> {
@@ -2759,6 +3110,7 @@ fn ingest_path_inner_with_limits_and_fault(
             progress,
             cancel,
             selection,
+            reviewed,
             limits,
             fault,
             &ops,
@@ -2898,6 +3250,7 @@ fn ingest_path_into_cache(
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
     selection: Option<&IngestSelection>,
+    reviewed: Option<&ReviewedFormatIngestBindings>,
     limits: RawIngestLimits,
     fault: IngestFaultHook<'_>,
     ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
@@ -2933,6 +3286,7 @@ fn ingest_path_into_cache(
             limits,
             ops,
             selection,
+            reviewed,
         )?
     } else {
         let inventory = collect_log_files(path, &mut budget, limits, cancel)?;
@@ -3080,6 +3434,7 @@ fn ingest_path_into_cache(
                     limits,
                     ops,
                     selection,
+                    reviewed,
                 )?;
                 files_done += 1;
                 continue;
@@ -3158,6 +3513,7 @@ fn ingest_path_into_cache(
                 kind,
                 limits,
                 ops,
+                reviewed.and_then(|b| b.get(&rel)),
             )?;
             files_done += 1;
             if completely_read {
@@ -4166,6 +4522,7 @@ mod tests {
             cancel,
             None,
             None,
+            None,
             limits,
             None,
         )
@@ -4782,6 +5139,7 @@ mod tests {
             None,
             None,
             Some(&selection),
+            None,
             Some(&hook),
         )
         .unwrap_err();
@@ -6477,6 +6835,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 Some(&hook),
             )
             .unwrap_err();
@@ -6528,6 +6887,7 @@ mod tests {
             None,
             &observer,
             Some(&cancel),
+            None,
             None,
             None,
             Some(&hook),

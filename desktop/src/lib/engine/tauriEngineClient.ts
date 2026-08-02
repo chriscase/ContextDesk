@@ -20,6 +20,7 @@ import {
   type TimezonePreview,
   type TimezoneState,
   type Unsubscribe,
+  type ReviewedFormatStoreEntry,
 } from "@contextdesk/client";
 
 /** Minimal invoke/listen surface, injectable for deterministic tests. */
@@ -76,6 +77,7 @@ export function createTauriEngineClient(
           planToken: request.planToken,
           planVersion: request.planVersion,
           selected: request.selected,
+          formatApply: request.formatApply ?? null,
         });
         return report;
       },
@@ -110,6 +112,36 @@ export function createTauriEngineClient(
         call<EventRevisionReport>(transport, "log_undo_event_revision", {
           corpusId,
           expectedRevision,
+        }),
+    },
+    formats: {
+      list: () =>
+        call<ReviewedFormatStoreEntry[]>(transport, "log_reviewed_format_list"),
+      load: (formatId: string, version: number) =>
+        call<unknown>(transport, "log_reviewed_format_load", { formatId, version }),
+      validate: (format: unknown) =>
+        call<{ valid: boolean; diagnostics: unknown[] }>(
+          transport,
+          "log_reviewed_format_validate",
+          { format },
+        ),
+      preview: (format: unknown, sample: string) =>
+        call<unknown>(transport, "log_reviewed_format_preview", { format, sample }),
+      save: (format: unknown) =>
+        call<ReviewedFormatStoreEntry>(transport, "log_reviewed_format_save", {
+          format,
+        }),
+      update: (format: unknown) =>
+        call<ReviewedFormatStoreEntry>(transport, "log_reviewed_format_update", {
+          format,
+        }),
+      delete: (formatId: string, version: number) =>
+        call<boolean>(transport, "log_reviewed_format_delete", { formatId, version }),
+      revision: () => call<number>(transport, "log_reviewed_format_revision"),
+      apply: (request) =>
+        call(transport, "log_reviewed_format_apply", {
+          expectedStoreRevision: request.expectedStoreRevision,
+          bindings: request.bindings,
         }),
     },
     events: {

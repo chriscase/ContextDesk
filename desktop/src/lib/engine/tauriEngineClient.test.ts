@@ -72,10 +72,40 @@ function createFakeTransport(): TauriTransport {
               planToken: args!.planToken as string,
               planVersion: args!.planVersion as number,
               selected: args!.selected as string[],
+              formatApply: (args!.formatApply as never) ?? undefined,
             }),
           ) as Promise<T>;
         case "cancel_log_ingest":
           return rethrowAsHostString(model.import.cancel()) as Promise<T>;
+        case "log_reviewed_format_list":
+          return rethrowAsHostString(model.formats.list()) as Promise<T>;
+        case "log_reviewed_format_load":
+          return rethrowAsHostString(
+            model.formats.load(args!.formatId as string, args!.version as number),
+          ) as Promise<T>;
+        case "log_reviewed_format_save":
+          return rethrowAsHostString(model.formats.save(args!.format)) as Promise<T>;
+        case "log_reviewed_format_update":
+          return rethrowAsHostString(model.formats.update(args!.format)) as Promise<T>;
+        case "log_reviewed_format_delete":
+          return rethrowAsHostString(
+            model.formats.delete(args!.formatId as string, args!.version as number),
+          ) as Promise<T>;
+        case "log_reviewed_format_revision":
+          return rethrowAsHostString(model.formats.revision()) as Promise<T>;
+        case "log_reviewed_format_validate":
+          return rethrowAsHostString(model.formats.validate(args!.format)) as Promise<T>;
+        case "log_reviewed_format_preview":
+          return rethrowAsHostString(
+            model.formats.preview(args!.format, args!.sample as string),
+          ) as Promise<T>;
+        case "log_reviewed_format_apply":
+          return rethrowAsHostString(
+            model.formats.apply({
+              expectedStoreRevision: args!.expectedStoreRevision as number,
+              bindings: args!.bindings as never,
+            }),
+          ) as Promise<T>;
         case "log_load_timezone_state":
           return rethrowAsHostString(
             model.time.state(args!.corpusId as string),

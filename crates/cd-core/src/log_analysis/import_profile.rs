@@ -38,7 +38,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::import_preview::{ImportItemRole, ImportItemStatus, ImportPreviewReport};
+use super::import_preview::{
+    ImportItemRole, ImportItemStatus, ImportPreviewItem, ImportPreviewReport,
+};
 
 /// Schema identifier carried by every import-profile document.
 pub const IMPORT_PROFILE_SCHEMA_ID: &str = "contextdesk.import_profile.v1";
@@ -625,6 +627,14 @@ pub enum ProfileFindingReason {
     /// The preview was bounded before every entry was inspected, so no match
     /// over it can be called complete.
     PreviewTruncated,
+    /// A reviewed-format ProfileRef is not present in the durable store.
+    ReviewedFormatMissing,
+    /// Store has the format id but not the referenced version.
+    ReviewedFormatVersionDrift,
+    /// Reviewed format is present but content no longer covers the source.
+    ReviewedFormatContentStale,
+    /// Multiple reviewed formats at equal priority match the sample.
+    ReviewedFormatAmbiguous,
 }
 
 /// One explanation about one identity.
@@ -698,26 +708,115 @@ pub struct ProfileMatchReport {
     pub proposed_roles: BTreeMap<String, ImportItemRole>,
 }
 
-/// Match a validated import profile against a preview report.
+/// Resolve one format ProfileRef against built-in fingerprints and/or reviewed grammars.
+fn resolve_format_expectation(
+    expected: &ProfileRef,
+    item: &ImportPreviewItem,
+    sample: &str,
+    reviewed_formats: &[super::reviewed_format::ReviewedFormat],
+) -> (ProfileFindingKind, ProfileFindingReason, Option<String>) {
+    // Prefer reviewed catalog when the id is present there (content-authoritative).
+    let reviewed_for_id: Vec<&super::reviewed_format::ReviewedFormat> = reviewed_formats
+        .iter()
+        .filter(|f| f.format_id == expected.id)
+        .collect();
+    if !reviewed_for_id.is_empty() {
+        let versions: Vec<u16> = reviewed_for_id.iter().map(|f| f.version).collect();
+        let exact = reviewed_for_id
+            .iter()
+            .find(|f| f.version == expected.version)
+            .copied();
+        let Some(format) = exact else {
+            return (
+                ProfileFindingKind::Drift,
+                ProfileFindingReason::ReviewedFormatVersionDrift,
+                versions.first().map(|v| format!("{}@{}", expected.id, v)),
+            );
+        };
+        let owned = [format.clone()];
+        return match super::reviewed_format::select_format(&owned, item.identity.as_str(), sample) {
+            super::reviewed_format::FormatSelection::Selected { format_id, version } => (
+                ProfileFindingKind::Match,
+                ProfileFindingReason::FormatAgrees,
+                Some(format!("{format_id}@{version}")),
+            ),
+            super::reviewed_format::FormatSelection::NoMatch => (
+                ProfileFindingKind::Drift,
+                ProfileFindingReason::ReviewedFormatContentStale,
+                item.format_id.clone(),
+            ),
+            super::reviewed_format::FormatSelection::Conflict { format_ids } => (
+                ProfileFindingKind::Conflict,
+                ProfileFindingReason::ReviewedFormatAmbiguous,
+                Some(format_ids.join(",")),
+            ),
+        };
+    }
+
+    // Not in reviewed catalog: either built-in fingerprint agreement, or missing reviewed ref.
+    match item.format_id.as_deref() {
+        Some(observed)
+            if observed == expected.id && item.format_version == Some(expected.version) =>
+        {
+            (
+                ProfileFindingKind::Match,
+                ProfileFindingReason::FormatAgrees,
+                item.format_id.clone(),
+            )
+        }
+        Some(_) => (
+            ProfileFindingKind::Drift,
+            // Unknown non-built-in id with no store entry is "missing" reviewed grammar.
+            if item.format_id.as_deref() != Some(expected.id.as_str())
+                && !is_known_builtin_format_id(&expected.id)
+            {
+                ProfileFindingReason::ReviewedFormatMissing
+            } else {
+                ProfileFindingReason::FormatDisagrees
+            },
+            item.format_id.clone(),
+        ),
+        None => (
+            ProfileFindingKind::Drift,
+            if is_known_builtin_format_id(&expected.id) {
+                ProfileFindingReason::FormatUnconfirmed
+            } else {
+                ProfileFindingReason::ReviewedFormatMissing
+            },
+            None,
+        ),
+    }
+}
+
+fn is_known_builtin_format_id(id: &str) -> bool {
+    super::format_profile::BUILT_IN_FORMAT_PROFILES
+        .iter()
+        .any(|p| p.id == id)
+}
+
+/// Match a validated import profile against a preview report (built-in fingerprints only).
+///
+/// Prefer [`match_profile_with_reviewed`] when a durable reviewed-format catalog
+/// is available so `ProfileRef` can resolve user grammars by content.
+pub fn match_profile(profile: &ImportProfile, preview: &ImportPreviewReport) -> ProfileMatchReport {
+    match_profile_with_reviewed(profile, preview, &[])
+}
+
+/// Match a validated import profile against a preview, resolving `formatProfile`
+/// references against both built-in fingerprints and a reviewed-format catalog.
 ///
 /// # Guarantees
 ///
-/// * **Never mutates.** Both arguments are shared references and nothing is
-///   written; the return value is a description.
-/// * **Never activates a parser from a path.** A group's `formatProfile` is
-///   reported as [`ProfileFindingKind::Match`] only when the item's own content
-///   fingerprint already produced that format. Otherwise the finding is
-///   [`ProfileFindingKind::Drift`] with
-///   [`ProfileFindingReason::FormatDisagrees`] or
-///   [`ProfileFindingReason::FormatUnconfirmed`], and the item keeps whatever
-///   status the content-based preview gave it.
-/// * **Never applies to blocked items.** A import profile cannot re-enable something
-///   policy refused.
-///
-/// An invalid import profile produces a report whose `clean` is false and whose only
-/// findings describe the validation failure, so a caller that ignores
-/// [`validate_profile`] still cannot apply a malformed document.
-pub fn match_profile(profile: &ImportProfile, preview: &ImportPreviewReport) -> ProfileMatchReport {
+/// * **Never mutates.** Arguments are shared references; nothing is written.
+/// * **Content is authoritative.** Path/producer patterns only nominate; a
+///   reviewed grammar must cover the sample. Missing / version-drift /
+///   content-stale / ambiguous outcomes fail closed as Drift or Conflict.
+/// * **Never applies to blocked items.**
+pub fn match_profile_with_reviewed(
+    profile: &ImportProfile,
+    preview: &ImportPreviewReport,
+    reviewed_formats: &[super::reviewed_format::ReviewedFormat],
+) -> ProfileMatchReport {
     let identity = profile.identity();
     let validation = validate_profile(profile);
     if !validation.valid {
@@ -850,35 +949,16 @@ pub fn match_profile(profile: &ImportProfile, preview: &ImportPreviewReport) -> 
                         (group.group_id.clone(), Some(expected.id.clone())),
                     );
 
-                    let (kind, reason) = match item.format_id.as_deref() {
-                        // Version must agree too: a profile written against
-                        // `json-object-line@1` is not satisfied by `@2`, whose
-                        // grammar may differ.
-                        Some(observed)
-                            if observed == expected.id
-                                && item.format_version == Some(expected.version) =>
-                        {
-                            (
-                                ProfileFindingKind::Match,
-                                ProfileFindingReason::FormatAgrees,
-                            )
-                        }
-                        Some(_) => (
-                            ProfileFindingKind::Drift,
-                            ProfileFindingReason::FormatDisagrees,
-                        ),
-                        None => (
-                            ProfileFindingKind::Drift,
-                            ProfileFindingReason::FormatUnconfirmed,
-                        ),
-                    };
+                    let sample = item.representative.as_deref().unwrap_or("");
+                    let (kind, reason, observed) =
+                        resolve_format_expectation(expected, item, sample, reviewed_formats);
                     findings.push(ProfileFinding {
                         kind,
                         reason,
                         group_id: group.group_id.clone(),
                         identity: Some(item.identity.clone()),
                         expected_format_id: Some(expected.id.clone()),
-                        observed_format_id: item.format_id.clone(),
+                        observed_format_id: observed,
                     });
                 }
             }

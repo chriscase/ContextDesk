@@ -108,6 +108,11 @@ export type ImportRunRequest = {
   planVersion: number;
   /** Exact reviewed identities that may produce log events. */
   selected: string[];
+  /**
+   * Optional revision-bound reviewed-format apply. The host re-checks store
+   * revision + digests immediately before ingest and fails closed on drift.
+   */
+  formatApply?: ReviewedFormatApplyRequest;
 };
 
 /** One saved timezone declaration (host wire shape). */
@@ -213,9 +218,75 @@ export interface EngineEvents {
   onProcessProgress(listener: (progress: WireProcessProgress) => void): Unsubscribe;
 }
 
+
+/** One durable reviewed-format index entry (wire shape). */
+export type ReviewedFormatStoreEntry = {
+  formatId: string;
+  version: number;
+  digest: string;
+  name: string;
+  fileName: string;
+};
+
+/** Revision-bound apply binding for production ingest. */
+export type ReviewedFormatApplyBinding = {
+  sourceIdentity: string;
+  formatId: string;
+  version: number;
+  digest: string;
+};
+
+/** Revision-bound apply request (store revision + per-source bindings). */
+export type ReviewedFormatApplyRequest = {
+  expectedStoreRevision: number;
+  bindings: ReviewedFormatApplyBinding[];
+};
+
+/** One materialised source → format binding after a successful apply. */
+export type ReviewedFormatAppliedBinding = {
+  sourceIdentity: string;
+  formatId: string;
+  version: number;
+  digest: string;
+  format: unknown;
+};
+
+/** Wire result of `formats.apply` (revision re-checked). */
+export type ReviewedFormatApplyResult = {
+  storeRevision: number;
+  bindings: ReviewedFormatAppliedBinding[];
+};
+
+/** Reviewed-format CRUD / validate / preview / apply surface. */
+export interface ReviewedFormatService {
+  /** List durable index entries. */
+  list(): Promise<ReviewedFormatStoreEntry[]>;
+  /** Load one document by id@version. */
+  load(formatId: string, version: number): Promise<unknown>;
+  /** Validate without persisting. */
+  validate(format: unknown): Promise<{ valid: boolean; diagnostics: unknown[] }>;
+  /** Bounded sample preview. */
+  preview(format: unknown, sample: string): Promise<unknown>;
+  /** Save a new document (fails if id@version exists). */
+  save(format: unknown): Promise<ReviewedFormatStoreEntry>;
+  /** Update an existing id@version (or create). */
+  update(format: unknown): Promise<ReviewedFormatStoreEntry>;
+  /** Delete one document. */
+  delete(formatId: string, version: number): Promise<boolean>;
+  /** Current store revision. */
+  revision(): Promise<number>;
+  /**
+   * Revision-bound materialise of source → format bindings. Fails closed on
+   * stale store revision, missing docs, or digest drift. Does not ingest;
+   * pass the same request as `import.run({ formatApply })` for production apply.
+   */
+  apply(request: ReviewedFormatApplyRequest): Promise<ReviewedFormatApplyResult>;
+}
+
 /** The transport-neutral engine client the import flow consumes. */
 export interface EngineClient {
   import: ImportService;
   time: TimeService;
+  formats: ReviewedFormatService;
   events: EngineEvents;
 }
