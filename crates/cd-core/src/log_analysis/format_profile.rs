@@ -5,8 +5,10 @@
 //! never proves which application emitted the record.
 
 use super::parse::{
-    looks_like_classic_syslog, looks_like_elasticsearch, looks_like_json_object, looks_like_logfmt,
-    looks_like_rfc5424, looks_like_wildfly, looks_like_zone_abbreviated_incomplete_time, LogFormat,
+    looks_like_classic_syslog, looks_like_date_context_level_message,
+    looks_like_date_level_message, looks_like_elasticsearch, looks_like_json_object,
+    looks_like_logfmt, looks_like_rfc5424, looks_like_wildfly,
+    looks_like_zone_abbreviated_incomplete_time, LogFormat,
 };
 use std::borrow::Cow;
 use std::path::Path;
@@ -24,6 +26,10 @@ pub enum BuiltInGrammar {
     ClassicSyslog,
     /// Date, level, bracketed logger, parenthesized thread, then payload.
     DateLevelLoggerThread,
+    /// Fractional local calendar timestamp, severity, then payload.
+    DateLevelMessage,
+    /// Fractional local calendar timestamp, one context token, severity, payload.
+    DateContextLevelMessage,
     /// Four bracketed fields: timestamp, level, component, node.
     BracketedTimestampLevelComponentNode,
     /// Local minute/fraction plus an unresolved zone abbreviation.
@@ -41,6 +47,8 @@ impl BuiltInGrammar {
             Self::Rfc5424
             | Self::ClassicSyslog
             | Self::DateLevelLoggerThread
+            | Self::DateLevelMessage
+            | Self::DateContextLevelMessage
             | Self::BracketedTimestampLevelComponentNode
             | Self::LocalMinuteZoneLevel => LogFormat::Syslog,
             Self::PlainLine => LogFormat::Plain,
@@ -194,6 +202,26 @@ pub const BUILT_IN_FORMAT_PROFILES: &[BuiltInFormatProfile] = &[
         score: 100,
         fallback: false,
         matcher: looks_like_wildfly,
+    },
+    BuiltInFormatProfile {
+        id: "date-level-message-record",
+        version: 1,
+        grammar: BuiltInGrammar::DateLevelMessage,
+        producer_hint: None,
+        decisive_clue_codes: &["content.fractional_date_level_message"],
+        score: 82,
+        fallback: false,
+        matcher: looks_like_date_level_message,
+    },
+    BuiltInFormatProfile {
+        id: "date-context-level-message-record",
+        version: 1,
+        grammar: BuiltInGrammar::DateContextLevelMessage,
+        producer_hint: None,
+        decisive_clue_codes: &["content.fractional_date_context_level_message"],
+        score: 78,
+        fallback: false,
+        matcher: looks_like_date_context_level_message,
     },
     BuiltInFormatProfile {
         id: "bracketed-timestamp-level-component-node-record",

@@ -1359,17 +1359,23 @@ fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState)
     host.set_web_research(cfg.web_research_enabled);
     host.set_web_research_sources(&cfg.web_research_sources);
     // Log Phase-1: disposable corpora under app cache (LOG_ANALYSIS.md §10 keep-until-discarded).
-    if let Ok(config_dir) = ensure_config_dir(&state.branding) {
+    let local_model_cache = if let Ok(config_dir) = ensure_config_dir(&state.branding) {
         let log_cache = config_dir.join("cache");
         let _ = std::fs::create_dir_all(&log_cache);
         host.set_log_analysis(true, Some(log_cache));
         let inv = config_dir.join("investigations");
         let _ = std::fs::create_dir_all(&inv);
         host.set_investigation_store_dir(Some(inv));
-    }
+        Some(config_dir.join("model-cache"))
+    } else {
+        None
+    };
     // #359: product default for log templates = local ONNX (fastembed), not Ollama HTTP.
     // May download the small model once; on failure fall back to shared host embed later.
-    match cd_core::embed::default_log_embed_backend() {
+    let local_embed = local_model_cache.as_deref().map_or(Ok(None), |cache| {
+        cd_core::embed::default_log_embed_backend_with_cache_dir(cache)
+    });
+    match local_embed {
         Ok(Some(be)) => {
             host.set_log_embed_backend(Some(be), cd_core::embed::LOCAL_LOG_EMBED_MODEL_ID);
             tracing::info!(
@@ -17282,6 +17288,10 @@ mod chat_session_host_tests {
 mod log_embedding_host_tests {
     use super::*;
 
+    fn product_test_model_cache() -> std::path::PathBuf {
+        std::env::temp_dir().join("contextdesk-desktop-test-model-cache")
+    }
+
     #[test]
     fn desktop_ingest_plan_uses_dedicated_local_backend_and_bulk_threshold() {
         let dir = tempfile::tempdir().unwrap();
@@ -17321,7 +17331,8 @@ mod log_embedding_host_tests {
         let index = cd_core::index::KeywordIndex::build(&workspace).unwrap();
         let mut host = ToolHost::new(workspace, index, None);
         // Mirror production host setup in this file (default_log_embed_backend).
-        let be = cd_core::embed::default_log_embed_backend()
+        let be =
+            cd_core::embed::default_log_embed_backend_with_cache_dir(&product_test_model_cache())
             .expect("default_log_embed_backend must not error on desktop log-fastembed builds")
             .expect(
                 "desktop log-fastembed build must supply a backend; check model cache \
@@ -17397,7 +17408,8 @@ mod log_embedding_host_tests {
         // Product plan only — fail if ONNX backend cannot be constructed.
         let mut policy = cd_core::log_analysis::LogEmbedPolicy::local_default();
         policy.model_id = cd_core::embed::LOCAL_LOG_EMBED_MODEL_ID.into();
-        let embed_backend = cd_core::embed::default_log_embed_backend()
+        let embed_backend =
+            cd_core::embed::default_log_embed_backend_with_cache_dir(&product_test_model_cache())
             .expect("default_log_embed_backend must not error on desktop log-fastembed builds")
             .expect(
                 "product SoftWrite cancel proof requires default_log_embed_backend; \

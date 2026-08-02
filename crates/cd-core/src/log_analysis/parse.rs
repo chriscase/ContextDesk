@@ -361,6 +361,14 @@ pub(super) fn looks_like_wildfly(t: &str) -> bool {
     parse_wildfly_parts(t).is_some()
 }
 
+pub(super) fn looks_like_date_level_message(t: &str) -> bool {
+    parse_date_level_message_parts(t).is_some()
+}
+
+pub(super) fn looks_like_date_context_level_message(t: &str) -> bool {
+    parse_date_context_level_message_parts(t).is_some()
+}
+
 pub(super) fn looks_like_elasticsearch(t: &str) -> bool {
     parse_elasticsearch_parts(t).is_some()
 }
@@ -416,6 +424,12 @@ pub fn parse_line_with_fingerprint(
         }
         Some(BuiltInGrammar::DateLevelLoggerThread) => {
             parse_wildfly(raw, ingest_seq).unwrap_or_else(|| parse_plain(raw, ingest_seq))
+        }
+        Some(BuiltInGrammar::DateLevelMessage) => parse_date_level_message(raw, ingest_seq, false)
+            .unwrap_or_else(|| parse_plain(raw, ingest_seq)),
+        Some(BuiltInGrammar::DateContextLevelMessage) => {
+            parse_date_level_message(raw, ingest_seq, true)
+                .unwrap_or_else(|| parse_plain(raw, ingest_seq))
         }
         Some(BuiltInGrammar::BracketedTimestampLevelComponentNode) => {
             parse_elasticsearch(raw, ingest_seq).unwrap_or_else(|| parse_plain(raw, ingest_seq))
@@ -1138,6 +1152,128 @@ fn split_logfmt_tokens(raw: &str) -> Vec<String> {
         tokens.push(token);
     }
     tokens
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DateLevelMessageParts<'a> {
+    source_timestamp: &'a str,
+    context: Option<&'a str>,
+    level: &'a str,
+    payload: &'a str,
+}
+
+/// Split a strict fractional local calendar prefix from the remainder.
+///
+/// The fraction may contain one through nine digits and may use a dot or
+/// comma. No timezone is inferred: the validated calendar is retained as
+/// unresolved local evidence until an explicit source policy is applied.
+fn take_fractional_local_calendar(raw: &str) -> Option<(&str, &str)> {
+    const FRACTION_START: usize = 20;
+    let bytes = raw.as_bytes();
+    if bytes.len() <= FRACTION_START
+        || bytes.get(4) != Some(&b'-')
+        || bytes.get(7) != Some(&b'-')
+        || !matches!(bytes.get(10), Some(b' ' | b'T'))
+        || bytes.get(13) != Some(&b':')
+        || bytes.get(16) != Some(&b':')
+        || !matches!(bytes.get(19), Some(b',' | b'.'))
+        || !bytes[..19]
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7 | 10 | 13 | 16) || byte.is_ascii_digit())
+    {
+        return None;
+    }
+
+    let mut end = FRACTION_START;
+    while end < bytes.len() && bytes[end].is_ascii_digit() && end - FRACTION_START < 9 {
+        end += 1;
+    }
+    if end == FRACTION_START || bytes.get(end).is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
+    let timestamp = raw.get(..end)?;
+    if !is_complete_local_timestamp(timestamp) {
+        return None;
+    }
+    let rest = raw.get(end..)?;
+    if !rest.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    Some((timestamp, rest.trim_start()))
+}
+
+fn parse_date_level_message_parts(raw: &str) -> Option<DateLevelMessageParts<'_>> {
+    let (source_timestamp, rest) = take_fractional_local_calendar(raw.trim())?;
+    let (level, payload) = take_token(rest)?;
+    // A logger/thread payload belongs to the stricter WildFly grammar. If that
+    // grammar rejected it (bad fraction, offset, or framing), do not silently
+    // downgrade the same line into this generic shape.
+    if !is_wildfly_level(level)
+        || payload.is_empty()
+        || resembles_wildfly_logger_thread_payload(payload)
+    {
+        return None;
+    }
+    Some(DateLevelMessageParts {
+        source_timestamp,
+        context: None,
+        level,
+        payload,
+    })
+}
+
+fn resembles_wildfly_logger_thread_payload(payload: &str) -> bool {
+    payload.split_once(" (").is_some_and(|(logger, thread)| {
+        !logger.is_empty()
+            && !logger.chars().any(char::is_whitespace)
+            && thread.split_once(") ").is_some()
+    })
+}
+
+fn parse_date_context_level_message_parts(raw: &str) -> Option<DateLevelMessageParts<'_>> {
+    let (source_timestamp, rest) = take_fractional_local_calendar(raw.trim())?;
+    let (context, rest) = take_token(rest)?;
+    if context.is_empty() || context.len() > 128 || is_wildfly_level(context) {
+        return None;
+    }
+    let (level, payload) = take_token(rest)?;
+    if !is_wildfly_level(level) || payload.is_empty() {
+        return None;
+    }
+    Some(DateLevelMessageParts {
+        source_timestamp,
+        context: Some(context),
+        level,
+        payload,
+    })
+}
+
+fn parse_date_level_message(raw: &str, ingest_seq: u64, with_context: bool) -> Option<ParsedLine> {
+    let parts = if with_context {
+        parse_date_context_level_message_parts(raw)
+    } else {
+        parse_date_level_message_parts(raw)
+    }?;
+    let mut message = String::new();
+    if let Some(context) = parts.context {
+        message.push_str(context);
+        message.push(' ');
+    }
+    message.push_str(parts.payload);
+    Some(ParsedLine {
+        ts: Some(ingest_seq as i64),
+        timestamp_provenance: TimestampProvenance::UnresolvedLocal,
+        active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
+        unresolved_local_timestamp: Some(parts.source_timestamp.to_string()),
+        level: normalize_level(parts.level),
+        service: None,
+        host: None,
+        trace_id: None,
+        message,
+        raw: raw.to_string(),
+        format: LogFormat::Syslog,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2121,6 +2257,74 @@ mod tests {
             );
             assert_eq!(result.parsed.raw, record);
             assert!(!result.parsed.message.is_empty());
+        }
+    }
+
+    #[test]
+    fn generic_fractional_date_level_records_retain_local_time_and_payload() {
+        let direct = "2017-05-04 17:22:19,42 ERROR connection attempt failed";
+        let parsed = parse_line_with_fingerprint(direct, None, 81);
+        assert_eq!(
+            parsed.fingerprint.format_id,
+            Some("date-level-message-record")
+        );
+        assert_eq!(parsed.parsed.ts, Some(81));
+        assert_eq!(
+            parsed.parsed.timestamp_provenance,
+            TimestampProvenance::UnresolvedLocal
+        );
+        assert_eq!(
+            parsed.parsed.unresolved_local_timestamp.as_deref(),
+            Some("2017-05-04 17:22:19,42")
+        );
+        assert_eq!(parsed.parsed.level, "error");
+        assert_eq!(parsed.parsed.message, "connection attempt failed");
+        assert_eq!(parsed.parsed.raw, direct);
+
+        let contextual = "2017-05-04T17:22:20.123 worker-7 WARN retry delayed";
+        let parsed = parse_line_with_fingerprint(contextual, None, 82);
+        assert_eq!(
+            parsed.fingerprint.format_id,
+            Some("date-context-level-message-record")
+        );
+        assert_eq!(parsed.parsed.level, "warn");
+        assert_eq!(parsed.parsed.message, "worker-7 retry delayed");
+        assert_eq!(parsed.parsed.raw, contextual);
+
+        for timestamp in ["2017-05-04 17:22:21,1", "2017-05-04 17:22:21.123456789"] {
+            let line = format!("{timestamp} SEVERE bounded fraction");
+            let parsed = parse_line_with_fingerprint(&line, None, 83);
+            assert_eq!(
+                parsed.fingerprint.format_id,
+                Some("date-level-message-record")
+            );
+            assert_eq!(
+                parsed.parsed.unresolved_local_timestamp.as_deref(),
+                Some(timestamp)
+            );
+        }
+    }
+
+    #[test]
+    fn generic_fractional_date_profiles_do_not_weaken_strict_or_plain_fallbacks() {
+        let strict = "2026-07-29 09:14:05,123 INFO [com.example.Logger] (worker) shaped";
+        let parsed = parse_line_with_fingerprint(strict, None, 1);
+        assert_eq!(
+            parsed.fingerprint.format_id,
+            Some("date-level-logger-thread-record")
+        );
+        assert_eq!(parsed.fingerprint.runner_up_margin, None);
+
+        for malformed in [
+            "2017-13-04 17:22:19,42 ERROR invalid calendar",
+            "2017-05-04 17:22:19,42 UNKNOWN not a recognized severity",
+            "2017-05-04 17:22:19,42 ERROR",
+            "2017-05-04 17:22:19,1234567890 ERROR fraction is too long",
+            "ordinary ERROR payload",
+        ] {
+            let parsed = parse_line_with_fingerprint(malformed, None, 2);
+            assert_eq!(parsed.fingerprint.format_id, Some("plain-line"));
+            assert_eq!(parsed.parsed.message, malformed);
         }
     }
 

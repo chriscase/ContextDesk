@@ -1931,7 +1931,7 @@ fn log_lab_ui_medium_100k_product_path_is_bounded_and_bidirectional() {
 #[ignore = "explicit real-ONNX 25k product-path proof; requires log-fastembed + model cache"]
 fn log_lab_product_25k_real_onnx_embed() {
     use cd_core::embed::{
-        default_log_embed_backend, log_fastembed_enabled, LOCAL_LOG_EMBED_MODEL_ID,
+        default_log_embed_backend_with_cache_dir, log_fastembed_enabled, LOCAL_LOG_EMBED_MODEL_ID,
     };
     use cd_core::log_analysis::EmbeddingState;
 
@@ -1943,7 +1943,8 @@ fn log_lab_product_25k_real_onnx_embed() {
         fixture_root().join("acceptance/seven-day-25k/scenarios/behavior-scale/import");
     assert!(import_root.is_dir(), "missing {}", import_root.display());
 
-    let backend = match default_log_embed_backend() {
+    let model_cache = std::env::temp_dir().join("contextdesk-log-lab-model-cache");
+    let backend = match default_log_embed_backend_with_cache_dir(&model_cache) {
         Ok(Some(be)) => be,
         Ok(None) => panic!("log-fastembed enabled but factory returned None"),
         Err(e) => panic!("default_log_embed_backend failed (model/cache unavailable?): {e}"),
