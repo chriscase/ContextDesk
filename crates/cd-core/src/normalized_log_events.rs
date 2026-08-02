@@ -1529,6 +1529,89 @@ fn contains_reserved_timestamp_key(value: &serde_json::Value, allow_root_time: b
     walk(value, 0, allow_root_time)
 }
 
+/// Whether every JSON number survives Serde's parser without a spelling change.
+///
+/// `serde_json::Value` does not retain the source token for floating-point
+/// numbers. That means canonicalizing an extreme exponent such as `1e-400`
+/// would otherwise write `0.0`, silently changing evidence. Refuse any number
+/// the parser would rewrite instead of trying to guess whether the rewrite is
+/// merely cosmetic (`1e2` -> `100.0`) or lossy (`1e-400` -> `0.0`).
+///
+/// The input has already passed the real JSON parser, so this scanner only has
+/// to skip quoted strings and identify valid JSON number tokens.
+fn numbers_have_stable_spelling(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    let mut index = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+
+        if byte == b'"' {
+            in_string = true;
+            index += 1;
+            continue;
+        }
+        if byte != b'-' && !byte.is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        if bytes[index] == b'-' {
+            index += 1;
+            if index == bytes.len() {
+                return false;
+            }
+        }
+        if bytes[index] == b'0' {
+            index += 1;
+        } else {
+            while index < bytes.len() && bytes[index].is_ascii_digit() {
+                index += 1;
+            }
+        }
+        if index < bytes.len() && bytes[index] == b'.' {
+            index += 1;
+            while index < bytes.len() && bytes[index].is_ascii_digit() {
+                index += 1;
+            }
+        }
+        if index < bytes.len() && matches!(bytes[index], b'e' | b'E') {
+            index += 1;
+            if index < bytes.len() && matches!(bytes[index], b'+' | b'-') {
+                index += 1;
+            }
+            while index < bytes.len() && bytes[index].is_ascii_digit() {
+                index += 1;
+            }
+        }
+
+        let Ok(token) = std::str::from_utf8(&bytes[start..index]) else {
+            return false;
+        };
+        let Ok(number) = serde_json::from_str::<serde_json::Number>(token) else {
+            return false;
+        };
+        if number.to_string() != token {
+            return false;
+        }
+    }
+    true
+}
+
 /// Rewrite a file into **canonical form**: one line per record, object keys
 /// sorted, no insignificant whitespace, LF endings.
 ///
@@ -1599,6 +1682,11 @@ pub fn canonicalize_stream<R: std::io::BufRead, W: std::io::Write>(
                 ));
             }
         };
+        if !numbers_have_stable_spelling(text) {
+            return Err(crate::error::CoreError::Policy(
+                "record contains a number that cannot be canonicalized losslessly".into(),
+            ));
+        }
         let canonical = canonical_json(&value);
         writer
             .write_all(canonical.as_bytes())
@@ -1609,7 +1697,12 @@ pub fn canonicalize_stream<R: std::io::BufRead, W: std::io::Write>(
     Ok(written)
 }
 
-/// Serialize a value with object keys sorted and no insignificant whitespace.
+/// Serialize a parsed value with object keys sorted and no insignificant
+/// whitespace.
+///
+/// This helper has no access to the original numeric tokens. Callers must run
+/// `numbers_have_stable_spelling` on the source JSON first; keep the helper
+/// private so evidence-sensitive code cannot accidentally bypass that check.
 ///
 /// Sorting is explicit even though it is currently redundant: without the
 /// `preserve_order` feature (not enabled here) `serde_json::Map` is a
@@ -1618,7 +1711,7 @@ pub fn canonicalize_stream<R: std::io::BufRead, W: std::io::Write>(
 /// line stays. It is insurance against `preserve_order` being switched on
 /// downstream, where canonical output would otherwise start depending on
 /// producer insertion order.
-pub fn canonical_json(value: &serde_json::Value) -> String {
+fn canonical_json(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
@@ -1639,10 +1732,9 @@ pub fn canonical_json(value: &serde_json::Value) -> String {
             let body: Vec<String> = items.iter().map(canonical_json).collect();
             format!("[{}]", body.join(","))
         }
-        // Numbers are emitted from their ORIGINAL token, never reformatted.
-        // `Value::to_string` round-trips through f64, so `1.0` became `1.0`
-        // but `12345678901234567890` lost precision and `1e400` became
-        // `null` — silently altering evidence and breaking idempotence.
+        // `canonicalize_stream` has already refused any source token this
+        // representation would rewrite. Integers therefore retain every
+        // digit, and floating-point underflow cannot silently become zero.
         serde_json::Value::Number(number) => number.to_string(),
         other => other.to_string(),
     }
@@ -2697,12 +2789,12 @@ mod tests {
     }
 
     #[test]
-    fn canonicalizing_preserves_a_numbers_value_and_precision() {
-        // Canonical form may normalize a number's SPELLING (`1e2` -> `100.0`,
-        // `-0` -> `-0.0`) because `serde_json::Number` has already discarded
-        // the source token by the time we see it. What it must never do is
-        // change the VALUE — an earlier version round-tripped through f64 via
-        // `Value::to_string`, losing precision on large integers.
+    fn canonical_json_preserves_a_parsed_numbers_value_and_precision() {
+        // The private value serializer may normalize spelling (`1e2` ->
+        // `100.0`, `-0` -> `-0.0`) because the source token is already gone.
+        // The stream entry point refuses those spellings before calling it.
+        // Within the parsed representation, this helper must never change the
+        // value or lose precision on large integers.
         for token in ["1.0", "12345678901234567890", "1e2", "-0", "0.1", "0"] {
             let raw = format!("{{\"a\":{token}}}");
             let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -2722,11 +2814,45 @@ mod tests {
     }
 
     #[test]
-    fn canonicalizing_is_idempotent_over_numbers() {
+    fn canonical_json_is_idempotent_over_numbers() {
         let raw = "{\"a\":1.0,\"b\":12345678901234567890,\"c\":1e2}";
         let once = canonical_json(&serde_json::from_str(raw).unwrap());
         let twice = canonical_json(&serde_json::from_str(&once).unwrap());
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn stream_canonicalization_refuses_numbers_the_parser_would_rewrite() {
+        for raw in [r#"{"value":1e2}"#, r#"{"value":1e-400}"#, r#"{"value":-0}"#] {
+            assert!(!numbers_have_stable_spelling(raw), "{raw}");
+            let mut output = Vec::new();
+            let error = canonicalize_stream(std::io::Cursor::new(raw), &mut output)
+                .expect_err("rewritten numeric evidence must fail closed");
+            assert!(
+                error.to_string().contains("canonicalized losslessly"),
+                "unexpected error for {raw}: {error}"
+            );
+            assert!(
+                output.is_empty(),
+                "a rejected first record must write nothing"
+            );
+        }
+
+        for raw in [
+            r#"{"value":1.0}"#,
+            r#"{"value":0.1}"#,
+            r#"{"value":12345678901234567890}"#,
+        ] {
+            assert!(numbers_have_stable_spelling(raw), "{raw}");
+            let mut output = Vec::new();
+            canonicalize_stream(std::io::Cursor::new(raw), &mut output)
+                .expect("stable numeric spelling should canonicalize");
+            assert_eq!(String::from_utf8(output).unwrap(), format!("{raw}\n"));
+        }
+
+        assert!(numbers_have_stable_spelling(
+            r#"{"message":"1e-400 is text","value":1}"#
+        ));
     }
 
     #[test]

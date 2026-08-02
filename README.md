@@ -75,6 +75,25 @@ To delegate an exporter to a coding agent, give it this repository and prompt:
 > validation commands. Do not inspect ContextDesk implementation code or invent
 > fields outside the published contract.
 
+### Normalize producer logs without guessing
+
+Applications that already understand their own log structure can optionally
+emit the versioned `contextdesk.normalized_log_events.v1` JSONL contract. It
+preserves source ordering, timestamp provenance, raw and canonical severity,
+typed correlation identifiers, bounded attributes, and the original logical
+record while making guessed instants unrepresentable. Rust, Node, and Python
+producer examples share one conformance fixture corpus.
+
+Start with the [normalized-log producer SDK guide](docs/specs/normalized-log-events/SDK.md),
+then use the [normative specification](docs/specs/NORMALIZED_LOG_EVENTS_V1.md),
+[JSON Schema](docs/specs/normalized-log-events/schemas/normalized-log-events.v1.json),
+and [reference producers](examples/normalized-log-producers/).
+
+This contract is optional and raw logs remain first-class. ContextDesk does
+not yet have a normalized-log fast import path; conforming files currently use
+the ordinary raw JSON-lines path. The SDK is useful today for portable,
+deterministically validated handoff—not as a performance claim.
+
 **Start with repeatable evidence.** Install the bundled synthetic corpus during
 first-run setup, inspect its import summary, and open it directly in Log
 Explorer.

@@ -284,6 +284,12 @@ The JSON Schema validates **one line at a time**. It cannot check:
 **Passing JSON Schema alone is not conformance.** Producers **MUST** run the
 offline validator.
 
+The optional canonicalizer is stricter than validation about number spelling:
+it refuses a record when the Rust JSON representation would rewrite a numeric
+token, including exponent notation. This prevents an extreme value such as
+`1e-400` from silently becoming `0.0` in canonical output. Producers that need
+byte-comparable canonical output should emit stable decimal/integer spellings.
+
 ---
 
 ## 13. Conformance resources

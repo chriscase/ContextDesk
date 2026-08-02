@@ -100,6 +100,12 @@ conformance: the schema validates one line at a time and cannot check
 `sourceSeq` contiguity, duplicate decoded keys, the recursive timestamp-alias
 guard, or the cross-field time rules.
 
+Canonicalization also fails closed when Rust's JSON representation would
+rewrite a numeric token. For example, exponent spellings such as `1e2` and
+underflowing values such as `1e-400` are refused instead of being silently
+rewritten to `100.0` or `0.0`. Emit the ordinary decimal/integer spelling you
+intend to preserve before using canonical output for byte comparison.
+
 ---
 
 ## Compatibility
