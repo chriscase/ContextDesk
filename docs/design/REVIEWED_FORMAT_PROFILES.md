@@ -4,10 +4,9 @@
 own log shape parses correctly, without ContextDesk shipping a regex for every
 vendor.
 
-> **Status.** The trusted core contract, validator, matcher, preview, and
-> selection are implemented and tested through the production path. **No UI is
-> wired yet** — there is no authoring screen and no ImportFlow step. See
-> Residuals.
+> **Status.** Core contract, durable store, ProfileRef resolution, production
+> ingest bindings, and EngineClient (Tauri/HTTP/mock) operations are wired.
+> **No React UI** — no authoring screen and no ImportFlow step. See Residuals.
 
 ---
 
@@ -19,13 +18,10 @@ vendor.
 | **`reviewed_format`** | **a declarative grammar for one log shape** | **the user, reviewed** |
 | `import_profile` | the plan binding sources to grammars | the user |
 
-`SourceGroupRule.formatProfile` is a `ProfileRef` and is the *intended* seam,
-but it is **not wired yet**, and pointing one at a reviewed format today would
-be actively misleading: `match_profile` compares a reference against the
-content fingerprint from `import_preview`, which only knows built-in format
-ids, so a reviewed-format id can only ever report **Drift**. Wiring that
-comparison is residual work. This slice adds the grammar layer beside the
-existing ones, not a parallel import system — but it does not yet join them.
+`SourceGroupRule.formatProfile` is a `ProfileRef`. Use
+`match_profile_with_reviewed` with a catalog loaded from the durable store so
+content decides; path patterns only nominate. Built-in fingerprints still apply
+when the id is a built-in profile.
 
 ---
 
@@ -115,19 +111,8 @@ same result.
 
 ## Residuals
 
-* **No UI.** No authoring screen, no ImportFlow step, no preview surface. The
-  contract is transport-neutral and ready for one; nothing renders it today.
-  There is consequently **no visual proof** in this slice, because no pixels
-  changed.
-* **`ProfileRef` linkage is not wired.** Referencing a reviewed format from an
-  `ImportProfile` today yields Drift, because profile matching resolves
-  references against built-in content fingerprints only.
-* **Not wired into ingest.** `parse.rs` does not consult reviewed formats yet,
-  so defining one does not change what a corpus contains. The production-path
-  tests prove the grammar's behaviour and the shipped pipeline's behaviour
-  separately, and that they agree about a rolled family — not that ingest
-  applies the grammar.
-* **No persistence.** Formats are values; there is no store, no reuse across
-  sessions, and no `EngineClient` method yet.
-* **Not exposed over `EngineClient`.** The contracts are versioned and
-  transport-neutral, but no adapter method exists.
+* **No UI.** No authoring screen, no ImportFlow step, no React preview surface.
+  EngineClient/Tauri/HTTP/mock expose validate/preview/list/load/save/update/
+  delete/revision; nothing in the desktop UI consumes them yet.
+* **Timezone suggestions remain inert.** `suggestedTimezone` still never
+  satisfies review; resolution remains the reviewed-declaration path only.

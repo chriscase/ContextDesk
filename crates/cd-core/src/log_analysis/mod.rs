@@ -30,6 +30,7 @@ pub mod query;
 pub mod reanalyze;
 pub mod redact_log;
 pub mod reviewed_format;
+pub mod reviewed_format_store;
 pub mod search;
 pub mod store;
 pub mod suppression;
@@ -93,10 +94,20 @@ pub use import_diagnose::{
     ImportDiagnosticReport, IMPORT_DIAGNOSTIC_REDACTION_MODE, IMPORT_DIAGNOSTIC_SCHEMA_ID,
     IMPORT_DIAGNOSTIC_SCHEMA_VERSION,
 };
+pub use import_profile::{
+    match_profile, match_profile_with_reviewed, validate_profile, ImportProfile,
+    ImportProfileIdentity, ProfileApplicability, ProfileDiagnostic, ProfileDiagnosticCode,
+    ProfileFinding, ProfileFindingKind, ProfileFindingReason, ProfileMatchReport, ProfileRef,
+    ProfileScope, SafePattern, SourceGroupRule, IMPORT_PROFILE_READER_VERSION,
+    IMPORT_PROFILE_SCHEMA_ID, MAX_IMPORT_PROFILE_BYTES, MAX_IMPORT_PROFILE_GROUPS,
+    MAX_IMPORT_PROFILE_ID_CHARS, MAX_IMPORT_PROFILE_PATTERNS, MAX_IMPORT_PROFILE_PATTERN_CHARS,
+    MAX_IMPORT_PROFILE_PATTERN_SEGMENTS, MAX_IMPORT_PROFILE_PATTERN_WILDCARDS,
+};
+
 pub use ingest::{
     ingest_path, ingest_path_with_observer, ingest_path_with_policy,
     ingest_path_with_policy_and_observer, ingest_path_with_policy_and_observer_managed,
-    ingest_path_with_policy_selection_and_observer,
+    ingest_path_with_policy_bindings_and_observer, ingest_path_with_policy_selection_and_observer,
     ingest_path_with_policy_selection_and_observer_managed, IngestPhaseTimings, IngestReport,
     IngestSelection, IngestStats,
 };
@@ -157,6 +168,23 @@ pub use query::{
 };
 pub use reanalyze::{
     reanalyze_corpus_embeddings, reanalyze_corpus_embeddings_quiet, LOCAL_REANALYZE_TEMPLATE_CAP,
+};
+pub use reviewed_format::{
+    assemble_records, is_candidate_for, match_line, match_line_outcome, preview_reviewed_format,
+    select_format, validate_reviewed_format, AssembledRecord, ExtractedFields, FieldSlot,
+    FormatSelection, LineOutcome, MultilineRule, ReviewedFormat, ReviewedFormatDiagnostic,
+    ReviewedFormatDiagnosticCode, ReviewedFormatPreview, ReviewedFormatValidation, TimeToken,
+    TimestampGrammar, MAX_FORMAT_ID_CHARS, MAX_FORMAT_PATH_PATTERNS, MAX_LAYOUT_SLOTS,
+    MAX_MATCHABLE_LINE_BYTES, MAX_MULTILINE_LINES, MAX_PREVIEW_SAMPLES, MAX_TIMESTAMP_TOKENS,
+    REVIEWED_FORMAT_READER_VERSION, REVIEWED_FORMAT_SCHEMA_ID,
+};
+pub use reviewed_format_store::{
+    apply_reviewed_format_bindings, resolve_profile_ref, ReviewedFormatApplyBinding,
+    ReviewedFormatApplyRequest, ReviewedFormatIdentity, ReviewedFormatIngestBindings,
+    ReviewedFormatResolveOutcome, ReviewedFormatStore, ReviewedFormatStoreEntry,
+    ReviewedFormatStoreIndex, MAX_REVIEWED_FORMAT_DOCUMENT_BYTES,
+    MAX_REVIEWED_FORMAT_STORE_ENTRIES, REVIEWED_FORMAT_STORE_READER_VERSION,
+    REVIEWED_FORMAT_STORE_SCHEMA_ID,
 };
 pub use search::{
     search_logs, search_logs_with_excluded_templates, SearchEvidenceIdentity, SearchHit,
