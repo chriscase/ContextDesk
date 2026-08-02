@@ -223,13 +223,23 @@ async fn local_archive_reaches_timezone_and_explorer_evidence() {
     assert!(input.is_file(), "private input must be an existing file");
 
     let plan = preview_import_plan(&input, None).expect("preview private archive");
-    let selected: Vec<String> = plan
+    let importable: Vec<String> = plan
         .report
         .items
         .iter()
         .filter(|item| event_importable(item))
         .map(|item| item.identity.clone())
         .collect();
+    let selected: Vec<String> = plan
+        .report
+        .selected_identities()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        selected, importable,
+        "ordinary reviewed import must retain every event-importable log source by default"
+    );
     let selection =
         verify_import_plan(&input, plan.plan_version, &plan.plan_token, &selected, None)
             .expect("verify reviewed selection");

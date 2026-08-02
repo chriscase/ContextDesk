@@ -522,6 +522,9 @@ abbreviation mapping, and non-destructive skew review.
   time range, formats, and embedding state.
 - Import/package publication uses staging, bounded expansion, hashes, and a
   final atomic visibility step.
+- Reviewed import preselects every log-role source that can publish events,
+  including uncertain structured matches and raw text fallback; supporting,
+  ignored, unsupported, and blocked material stays visible but unselected.
 - Legacy metadata remains readable; missing derived stats are recomputed rather
   than passively rewriting the corpus.
 
