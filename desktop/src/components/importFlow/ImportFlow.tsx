@@ -30,6 +30,8 @@ type Props = {
   variant: "pane" | "guided";
   /** Called after atomic publication with the new corpus id. */
   onPublished?: (corpusId: string) => void;
+  /** Called after the summary card applies or undoes source timezones. */
+  onTimezoneChanged?: (corpusId: string) => void;
   /**
    * Monotonic close-request signal from the hosting surface (wizard Cancel,
    * Escape). Outside a run the flow exits immediately; during a run it
@@ -46,6 +48,7 @@ export function ImportFlow({
   engine,
   variant,
   onPublished,
+  onTimezoneChanged,
   exitSignal = 0,
   onExit,
   initialState,
@@ -396,7 +399,11 @@ export function ImportFlow({
               : ""}
           </p>
           {unresolvedTime > 0 ? (
-            <TimeReviewCard engine={engine} report={state.runReport} />
+            <TimeReviewCard
+              engine={engine}
+              report={state.runReport}
+              onChanged={onTimezoneChanged}
+            />
           ) : null}
           <div className="import-flow__row">
             <span className="import-flow__spacer" />

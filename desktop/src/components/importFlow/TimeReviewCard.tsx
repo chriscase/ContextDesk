@@ -19,6 +19,8 @@ const AUTO_PREVIEW_DEBOUNCE_MS = 300;
 type Props = {
   engine: EngineClient;
   report: ImportRunReport;
+  /** Refresh host-backed corpus summaries after apply or undo. */
+  onChanged?: (corpusId: string) => void;
 };
 
 type AppliedScope = {
@@ -45,7 +47,7 @@ function zoneCatalog(): string[] {
   }
 }
 
-export function TimeReviewCard({ engine, report }: Props) {
+export function TimeReviewCard({ engine, report, onChanged }: Props) {
   const headingId = useId();
   const listId = useId();
   const groups = useMemo(() => timezoneGroups(report), [report]);
@@ -176,6 +178,7 @@ export function TimeReviewCard({ engine, report }: Props) {
         requests,
       );
       setApplied({ zone: zone.trim(), sourceCount: requests.length, revision: revision.revision });
+      onChanged?.(report.corpusId);
     } catch (error) {
       setApplyError(error instanceof Error ? error.message : String(error));
       // A conflict means the corpus moved; recompute the preview automatically.
@@ -194,6 +197,7 @@ export function TimeReviewCard({ engine, report }: Props) {
       await engine.time.undo(report.corpusId, applied.revision);
       setApplied(null);
       setZone("");
+      onChanged?.(report.corpusId);
     } catch (error) {
       setApplyError(error instanceof Error ? error.message : String(error));
     } finally {
