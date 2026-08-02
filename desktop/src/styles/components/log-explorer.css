@@ -80,6 +80,10 @@
   color: var(--accent, #5b9fd4);
 }
 
+/* No `overflow: hidden` here: the tooltip and identity popover are positioned
+   descendants of this box, and clipping it hides them entirely (#641 native
+   N3 — they opened in the accessibility tree but painted nothing). Each text
+   line owns the clipping it needs instead. */
 .log-explorer__lockup {
   display: flex;
   flex: 1 1 auto;
@@ -87,7 +91,6 @@
   gap: 0.05rem;
   justify-content: center;
   min-width: 6rem;
-  overflow: hidden;
 }
 
 .log-explorer__eyebrow {
@@ -96,6 +99,8 @@
   font-weight: 650;
   letter-spacing: var(--tracking-wide, 0.08em);
   line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
   text-transform: uppercase;
   white-space: nowrap;
 }
