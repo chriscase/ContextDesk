@@ -1,6 +1,9 @@
 /**
  * Structural tests for Logs list|detail chrome (no Tauri).
  */
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   act,
@@ -351,6 +354,39 @@ describe("LogPane", () => {
         name: /more logs actions/i,
       }),
     ).toBeNull();
+  });
+
+  it("layout truth (#641): every .log-pane__toolbar rule stays wrappable — no max-content tracks", () => {
+    // happy-dom performs no layout and loads no stylesheets, so the real
+    // clipping contract lives in visual/logs-library.test.tsx (real Chromium,
+    // pane widths 592/900/1240). This source-level tripwire pins the exact
+    // inversion that caused #641: a media tier turned the toolbar into a
+    // repeat(4, max-content) grid — max-content tracks cannot wrap or shrink,
+    // the base flex-wrap became inert, and the right-side actions clipped
+    // into .pane-panel's overflow:hidden across the 864-1248px window band.
+    const panesCss = readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        "..",
+        "..",
+        "styles",
+        "components",
+        "panes.css",
+      ),
+      "utf8",
+    );
+    const toolbarBlocks = panesCss.match(/\.log-pane__toolbar\s*\{[^}]*\}/g);
+    expect(toolbarBlocks?.length).toBeGreaterThanOrEqual(1);
+    // The base rule must keep wrapping enabled.
+    expect(toolbarBlocks![0]).toContain("flex-wrap: wrap");
+    for (const block of toolbarBlocks!) {
+      // Grid overrides are allowed only with shrinkable tracks: max-content
+      // (and fixed px tracks) overflow instead of wrapping.
+      expect(block).not.toMatch(/max-content/);
+      expect(block).not.toMatch(/grid-template-columns:[^;]*\dpx/);
+      // Nothing may disable wrapping outright.
+      expect(block).not.toMatch(/flex-wrap:\s*nowrap/);
+    }
   });
 
   it("explains unavailable corpus actions and completed re-analysis", async () => {

@@ -80,9 +80,19 @@ A **Log Investigation Workspace**: multi-window, responsively dense, AI-assisted
 
 ### Ultrawide default
 
+The identity area is corpus-first (#641): the contained-spark family mark,
+a small "{branding.name} · LOG EXPLORER" eyebrow, and the corpus name as
+the title — a real button whose grapheme-safe middle truncation keeps the
+distinctive suffix, with the full name on hover, on keyboard focus, and in
+an identity popover (selectable name plus source/engine/created/count/
+time-basis). Status is one bounded vitals group (time-basis pill,
+plain-text counts, noise disclosure); warning states never collapse. At
+≥1600px the grouped pickers (Time · Lanes · Rows · Display · Noise) share
+the identity row; below 1600px they form a second non-wrapping row.
+
 ```text
-┌─ Log Explorer / corpus · time quality · counts ─────────────────────┐
-│ Time · Lanes · Rows · Density · Columns · Bookmark                 │
+┌─ ▣ corpus-name (eyebrow: product · LOG EXPLORER) · vitals ──────────┐
+│ Time · Lanes · Rows · Display · Noise · Bookmark · Export…         │
 ├─────────┬─────────────────────────────────────────┬─────────────────┤
 │ Filters │ Full-width investigation timeline       │ Investigation / │
 │         ├─────────────────────────────────────────┤ Chat rail       │

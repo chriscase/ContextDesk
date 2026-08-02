@@ -2222,7 +2222,9 @@ describe("LinkedChatRail", () => {
     fireEvent.click(screen.getByTestId("send-linked-chat"));
 
     const status = await screen.findByRole("status");
-    expect(status.textContent).toContain("Bounded evidence is preserved");
+    await waitFor(() =>
+      expect(status.textContent).toContain("Bounded evidence is preserved"),
+    );
     expect(status.textContent).not.toContain("completed with governed");
     expect(
       screen.getByTestId("linked-chat-msg-assistant").textContent,

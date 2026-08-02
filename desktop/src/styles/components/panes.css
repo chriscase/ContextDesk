@@ -748,16 +748,21 @@
     gap: var(--space-2);
   }
 
+  /* #641 hotfix: keep the base flex-wrap toolbar and only left-align it.
+     The previous repeat(4, max-content) grid could not wrap — max-content
+     tracks made the base flex-wrap inert and pushed the right-side actions
+     into .pane-panel's overflow:hidden across the whole 864-1248px window
+     band (including the default 1100x760 window). Flex keeps every control
+     visible: groups wrap to additional rows when the pane runs out of
+     width, and each group's inner controls still wrap on their own. */
   .log-pane__toolbar {
-    display: grid;
-    grid-template-columns: repeat(4, max-content);
     justify-content: flex-start;
-    gap: var(--space-1);
   }
 }
 
 @media (max-width: 54rem) {
   .log-pane__toolbar {
+    display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--space-2);
   }

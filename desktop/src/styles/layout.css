@@ -58,6 +58,26 @@ html[data-platform="macos"] .titlebar {
   flex-shrink: 1;
 }
 
+/* Family chip behind the brand spark — same treatment as the Explorer's
+   surface mark, so product and surface marks read as one family (#641). */
+.titlebar__brand-chip {
+  align-items: center;
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, transparent);
+  border-radius: 7px;
+  color: var(--accent);
+  display: inline-flex;
+  flex: 0 0 auto;
+  height: var(--icon-chip);
+  justify-content: center;
+  width: var(--icon-chip);
+}
+
+.titlebar__brand-chip svg {
+  height: 1rem;
+  width: 1rem;
+}
+
 /* Empty flex space always available for window drag (chips/buttons eat brand width). */
 .titlebar__drag {
   flex: 1 1 auto;

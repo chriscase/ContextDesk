@@ -68,6 +68,7 @@ import {
   type SuppressionMutationResultDto,
   type SuppressionRuleMutation,
   type TimeQuality,
+  type BrandingDto,
 } from "../../lib/host";
 import {
   diagnosticEnvironmentFromBranding,
@@ -134,6 +135,7 @@ import { buildAlignedLaneRows } from "../../lib/logExplorer/alignment";
 import { createLinkedScrollCoordinator } from "../../lib/logExplorer/linkedScrollCoordinator";
 import { HelpTip } from "../HelpTip";
 import { IconChevronDown, IconChevronLeft, IconLogExplorer } from "../icons";
+import { CorpusIdentity } from "./CorpusIdentity";
 import {
   HELP_COUNTS,
   HELP_FIND_VS_FILTER,
@@ -252,6 +254,21 @@ type ToolbarPickerOption<T extends string> = {
   visual?: ReactNode;
 };
 
+/** Separated action item under a picker's radio section (merged pickers, #641). */
+type ToolbarPickerAction = {
+  id: string;
+  label: string;
+  description: string;
+  testId?: string;
+  disabled?: boolean;
+  ariaControls?: string;
+  ariaExpanded?: boolean;
+  /** The action moves focus itself (e.g. opens a dialog) — skip trigger restore. */
+  movesFocus?: boolean;
+  buttonRef?: React.RefObject<HTMLButtonElement | null>;
+  run: () => void;
+};
+
 const TOOLBAR_DISMISSIBLE_GROUP = "log-explorer-toolbar";
 
 function ToolbarPicker<T extends string>({
@@ -259,17 +276,21 @@ function ToolbarPicker<T extends string>({
   value,
   valueLabel,
   options,
+  actions,
   onChange,
   testId,
   footer,
+  triggerRef: externalTriggerRef,
 }: {
   label: string;
   value: T;
   valueLabel?: string;
   options: ToolbarPickerOption<T>[];
+  actions?: ToolbarPickerAction[];
   onChange: (value: T) => void;
   testId: string;
   footer?: ReactNode;
+  triggerRef?: React.RefObject<HTMLButtonElement | null>;
 }) {
   const [open, setOpen] = useState(false);
   const id = useId();
@@ -321,7 +342,7 @@ function ToolbarPicker<T extends string>({
     event.preventDefault();
     const buttons = Array.from(
       rootRef.current?.querySelectorAll<HTMLButtonElement>(
-        '[role="menuitemradio"]:not(:disabled)',
+        '[role="menuitemradio"]:not(:disabled), [role="menuitem"]:not(:disabled)',
       ) ?? [],
     );
     if (buttons.length === 0) return;
@@ -339,7 +360,10 @@ function ToolbarPicker<T extends string>({
   return (
     <div className="log-explorer__toolbar-picker" ref={rootRef}>
       <button
-        ref={triggerRef}
+        ref={(node) => {
+          triggerRef.current = node;
+          if (externalTriggerRef) externalTriggerRef.current = node;
+        }}
         type="button"
         className={`log-explorer__picker-trigger ${open ? "log-explorer__picker-trigger--open" : ""}`}
         data-testid={testId}
@@ -396,137 +420,46 @@ function ToolbarPicker<T extends string>({
                 </span>
               </button>
             ))}
+            {actions && actions.length > 0 ? (
+              <>
+                <div
+                  className="log-explorer__picker-separator"
+                  role="presentation"
+                />
+                {actions.map((action) => (
+                  <button
+                    key={action.id}
+                    ref={action.buttonRef}
+                    type="button"
+                    className="log-explorer__picker-option"
+                    role="menuitem"
+                    data-testid={action.testId}
+                    disabled={action.disabled}
+                    aria-controls={action.ariaControls}
+                    aria-expanded={action.ariaExpanded}
+                    onKeyDown={moveOptionFocus}
+                    onClick={() => {
+                      action.run();
+                      close(!action.movesFocus);
+                    }}
+                  >
+                    <span className="log-explorer__picker-copy">
+                      <span className="log-explorer__picker-option-title">
+                        {action.label}
+                      </span>
+                      <span className="log-explorer__picker-description">
+                        {action.description}
+                      </span>
+                    </span>
+                  </button>
+                ))}
+              </>
+            ) : null}
             {footer ? (
               <div className="log-explorer__picker-footer">{footer}</div>
             ) : null}
           </div>
         </DismissibleLayerContext.Provider>
-      ) : null}
-    </div>
-  );
-}
-
-function ToolbarActionMenu({
-  label,
-  testId,
-  actions,
-}: {
-  label: string;
-  testId: string;
-  actions: {
-    id: string;
-    label: string;
-    description: string;
-    testId?: string;
-    run: () => void;
-  }[];
-}) {
-  const [open, setOpen] = useState(false);
-  const id = useId();
-  const rootRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-
-  const close = useCallback((restoreFocus = true) => {
-    setOpen(false);
-    if (!restoreFocus) return;
-    if (
-      document.activeElement == null ||
-      document.activeElement === document.body ||
-      rootRef.current?.contains(document.activeElement)
-    ) {
-      triggerRef.current?.focus();
-    }
-  }, []);
-
-  useDismissibleLayer({
-    open,
-    layerId: id,
-    peerGroup: TOOLBAR_DISMISSIBLE_GROUP,
-    rootRef,
-    triggerRef,
-    onDismiss: close,
-  });
-
-  useEffect(() => {
-    if (!open) return;
-    queueMicrotask(() =>
-      rootRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus(),
-    );
-  }, [open]);
-
-  const moveFocus = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
-    if (
-      event.key !== "ArrowDown" &&
-      event.key !== "ArrowUp" &&
-      event.key !== "Home" &&
-      event.key !== "End"
-    ) {
-      return;
-    }
-    event.preventDefault();
-    const items = Array.from(
-      rootRef.current?.querySelectorAll<HTMLButtonElement>(
-        '[role="menuitem"]',
-      ) ?? [],
-    );
-    if (items.length === 0) return;
-    const current = items.indexOf(event.currentTarget);
-    const next =
-      event.key === "Home"
-        ? 0
-        : event.key === "End"
-          ? items.length - 1
-          : (current + (event.key === "ArrowDown" ? 1 : -1) + items.length) %
-            items.length;
-    items[next]?.focus();
-  };
-
-  return (
-    <div className="log-explorer__toolbar-picker" ref={rootRef}>
-      <button
-        ref={triggerRef}
-        type="button"
-        className={`log-explorer__picker-trigger ${open ? "log-explorer__picker-trigger--open" : ""}`}
-        data-testid={testId}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-controls={open ? id : undefined}
-        onClick={() => setOpen((current) => !current)}
-      >
-        <span className="log-explorer__picker-value">{label}</span>
-        <IconChevronDown />
-      </button>
-      {open ? (
-        <div
-          id={id}
-          className="log-explorer__picker-menu log-explorer__picker-menu--actions"
-          role="menu"
-          aria-label={`${label} actions`}
-        >
-          {actions.map((action) => (
-            <button
-              key={action.id}
-              type="button"
-              className="log-explorer__picker-option"
-              role="menuitem"
-              data-testid={action.testId}
-              onKeyDown={moveFocus}
-              onClick={() => {
-                action.run();
-                close();
-              }}
-            >
-              <span className="log-explorer__picker-copy">
-                <span className="log-explorer__picker-option-title">
-                  {action.label}
-                </span>
-                <span className="log-explorer__picker-description">
-                  {action.description}
-                </span>
-              </span>
-            </button>
-          ))}
-        </div>
       ) : null}
     </div>
   );
@@ -807,6 +740,26 @@ export function LogExplorer({ corpusId }: Props) {
     "loading" | "ready" | "error"
   >("loading");
   const [summaryLoadError, setSummaryLoadError] = useState<string | null>(null);
+  /**
+   * Product identity for the header eyebrow (#641). Until it loads — or when
+   * the host cannot provide it — the eyebrow renders just "Log Explorer"; the
+   * product name is never hard-coded here (AGENTS.md branding rule).
+   */
+  const [branding, setBranding] = useState<BrandingDto | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const dto = await hostGetBranding();
+        if (!cancelled) setBranding(dto ?? null);
+      } catch {
+        if (!cancelled) setBranding(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [suppressionDocument, setSuppressionDocument] =
     useState<SuppressionDocumentDto | null>(null);
   const [suppressionLoadState, setSuppressionLoadState] = useState<
@@ -924,7 +877,18 @@ export function LogExplorer({ corpusId }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [density, setDensity] = useState<Density>("comfortable");
-  const [breakpoint, setBreakpoint] = useState<Breakpoint>("normal");
+  /**
+   * Initialized from the same provisional width as explorerWidth below so the
+   * first paint classifies consistently (#641): starting at a hard-coded
+   * "normal" made the first ResizeObserver tick restructure the header
+   * (ultrawide renders a single-row header), remounting every toolbar control
+   * on mount. The observer still corrects both values from the MEASURED width
+   * — the #851 pane-truthful contract (rail defaults key off measured widths
+   * only) is unchanged.
+   */
+  const [breakpoint, setBreakpoint] = useState<Breakpoint>(() =>
+    classifyBreakpoint(window.innerWidth),
+  );
   const [explorerWidth, setExplorerWidth] = useState(() => window.innerWidth);
   const [linkMode, setLinkMode] = useState<TimeLinkMode>(() =>
     loadLinkMode(corpusId),
@@ -1221,6 +1185,13 @@ export function LogExplorer({ corpusId }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const laneEditorRef = useRef<HTMLDivElement>(null);
   const laneEditorToggleRef = useRef<HTMLButtonElement>(null);
+  /**
+   * Merged Lanes picker trigger (#641): the durable focus home when the lane
+   * editor closes after its "Compose lanes…" menu item has unmounted.
+   */
+  const laneCountTriggerRef = useRef<HTMLButtonElement>(null);
+  /** Identity lockup — the stable-width measure target for name truncation. */
+  const identityLockupRef = useRef<HTMLDivElement>(null);
   const laneEditorLayerId = useId();
   const findInputRef = useRef<HTMLInputElement>(null);
   const narrowFiltersToggleRef = useRef<HTMLButtonElement>(null);
@@ -1389,7 +1360,14 @@ export function LogExplorer({ corpusId }: Props) {
     setLaneSourceQuery("");
     if (restoreFocus) {
       // Return focus after the activating or dismissal click has completed.
-      window.setTimeout(() => laneEditorToggleRef.current?.focus(), 0);
+      // Narrow keeps a standalone Lanes… toggle; on wider layouts the toggle
+      // is a menu item that unmounts with the Lanes picker menu, so focus
+      // falls back to the picker trigger itself (#641).
+      window.setTimeout(
+        () =>
+          (laneEditorToggleRef.current ?? laneCountTriggerRef.current)?.focus(),
+        0,
+      );
     }
   }, []);
   useDismissibleLayer({
@@ -5552,6 +5530,316 @@ export function LogExplorer({ corpusId }: Props) {
     </>
   );
 
+  /**
+   * Row B picker set (#641), in reading order Time / Lanes / Rows / Display /
+   * Noise. Rendered inline in Row A at ultrawide (single-row header) and as
+   * the dedicated toolbar row below 1600.
+   */
+  const toolbarControls = (
+    <>
+      <ToolbarPicker
+        label="Time"
+        value={linkMode}
+        testId="time-link-picker"
+        options={[
+          {
+            value: "independent",
+            label: "Independent",
+            description: "Each lane pages and scrolls on its own.",
+            visual: <TimeLinkVisual mode="independent" />,
+          },
+          {
+            value: "follow_cursor",
+            label: "Follow selection",
+            description:
+              "Selecting an event seeks each lane to its nearest time.",
+            disabled:
+              !visibleLanesHaveEvents || timeQuality === "order_only",
+            disabledReason: !visibleLanesHaveEvents
+              ? "Every visible lane needs matching events."
+              : timeQuality === "order_only"
+                ? "Order-only events cannot support time seeking."
+                : undefined,
+            visual: <TimeLinkVisual mode="follow_cursor" />,
+          },
+          {
+            value: "align_time",
+            label: "Align exact time",
+            description:
+              "Share a vertical wall-clock axis and show explicit gaps.",
+            disabled: !visibleLanesHaveEvents || timeQuality !== "wall",
+            disabledReason: !visibleLanesHaveEvents
+              ? "Every visible lane needs matching events."
+              : timeQuality !== "wall"
+                ? `${timeQualityLabel(timeQuality)} time is not a reliable shared wall clock.`
+                : undefined,
+            visual: <TimeLinkVisual mode="align_time" />,
+          },
+        ]}
+        onChange={(mode) => {
+          if (mode === "follow_cursor" && timeQuality === "mixed") {
+            setStatus(
+              "Follow uses mixed time quality only for approximate peer seeking; Align remains unavailable",
+            );
+          }
+          setTimeLinkMode(mode);
+        }}
+        footer={
+          <HelpTip
+            label="Time-link modes"
+            title="Time-link modes"
+            content={HELP_TIME_LINK}
+          />
+        }
+      />
+      {breakpoint !== "narrow" ? (
+        <ToolbarPicker
+          label="Lanes"
+          value={String(laneCount)}
+          testId="lane-count-picker"
+          triggerRef={laneCountTriggerRef}
+          options={[1, 2, 3, 4].map((count) => {
+            const unavailable = count > maxLaneCount;
+            const requiredWidth = count * MIN_EVIDENCE_LANE_WIDTH_PX;
+            return {
+              value: String(count),
+              label: `${count} ${count === 1 ? "lane" : "lanes"}`,
+              description:
+                count === 1
+                  ? "Use the full evidence canvas for one stream."
+                  : `Compare ${count} evidence streams side by side.`,
+              disabled: unavailable,
+              disabledReason: unavailable
+                ? `Needs ${requiredWidth}px of usable evidence width; ${Math.floor(usableEvidenceWidth)}px available.`
+                : undefined,
+            };
+          })}
+          onChange={(count) => configureLanes(Number(count))}
+          actions={[
+            {
+              id: "compose-lanes",
+              label: "Compose lanes…",
+              description: "Compose which sources belong to each lane",
+              testId: "lane-editor-toggle",
+              ariaControls: "lane-editor",
+              ariaExpanded: laneEditorOpen,
+              movesFocus: true,
+              buttonRef: laneEditorToggleRef,
+              run: () =>
+                laneEditorOpen ? closeLaneEditor() : setLaneEditorOpen(true),
+            },
+          ]}
+        />
+      ) : (
+        <button
+          ref={laneEditorToggleRef}
+          type="button"
+          className={`log-explorer__btn ${laneEditorOpen ? "log-explorer__btn--active" : ""}`}
+          data-testid="lane-editor-toggle"
+          aria-expanded={laneEditorOpen}
+          aria-controls="lane-editor"
+          onClick={() =>
+            laneEditorOpen ? closeLaneEditor() : setLaneEditorOpen(true)
+          }
+          title="Compose which sources belong to each lane"
+        >
+          Lanes…
+        </button>
+      )}
+      <ToolbarPicker
+        label="Rows"
+        value={lineMode}
+        valueLabel={`${
+          lineMode === "compact"
+            ? "Single line"
+            : lineMode === "wrap"
+              ? "Preview"
+              : "Deep"
+        } · ${
+          fieldEmphasis === "payload"
+            ? "Payload"
+            : fieldEmphasis === "metadata"
+              ? "Metadata"
+              : "Balanced"
+        }`}
+        testId="row-mode-picker"
+        options={[
+          {
+            value: "compact",
+            label: "Single line",
+            description:
+              "Maximum scan density; expand individual events as needed.",
+          },
+          {
+            value: "wrap",
+            label: "Preview",
+            description: `Show up to ${previewLines} lines in each row.`,
+          },
+          {
+            value: "full",
+            label: "Deep",
+            description: `Show up to ${Math.min(24, previewLines * 2)} lines; the inspector remains complete.`,
+          },
+        ]}
+        onChange={setLineMode}
+        footer={
+          <>
+            <label className="log-explorer__picker-setting">
+              Metadata
+              <select
+                value={metadataPresentation}
+                aria-label="Row metadata presentation"
+                data-testid="row-metadata-presentation"
+                onChange={(event) =>
+                  setMetadataPresentation(
+                    event.target.value as RowMetadataPresentation,
+                  )
+                }
+              >
+                <option value="standard">Full labels</option>
+                <option value="compact">Compact tokens</option>
+              </select>
+            </label>
+            <label className="log-explorer__picker-setting">
+              Focus
+              <select
+                value={fieldEmphasis}
+                aria-label="Row field emphasis"
+                data-testid="row-field-emphasis"
+                onChange={(event) =>
+                  setFieldEmphasis(event.target.value as RowFieldEmphasis)
+                }
+              >
+                <option value="balanced">Balanced</option>
+                <option value="payload">Payload</option>
+                <option value="metadata">Metadata</option>
+              </select>
+            </label>
+            <p className="log-explorer__picker-note">
+              Tokens change presentation only. Focus a token for its
+              complete level and provenance.
+            </p>
+            <label className="log-explorer__picker-setting">
+              Preview depth
+              <select
+                value={previewLines}
+                aria-label="Preview lines per event"
+                data-testid="preview-lines"
+                onChange={(event) =>
+                  setPreviewLines(Number(event.target.value))
+                }
+              >
+                {[2, 4, 8, 12].map((lines) => (
+                  <option key={lines} value={lines}>
+                    {lines} lines
+                  </option>
+                ))}
+              </select>
+            </label>
+            <HelpTip
+              label="Long-line reading help"
+              title="Reading long events"
+              content={HELP_LONG_LINES}
+            />
+          </>
+        }
+      />
+      <ToolbarPicker
+        label="Display"
+        value={density}
+        testId="density-picker"
+        options={[
+          {
+            value: "comfortable",
+            label: "Comfortable",
+            description: "More breathing room for focused reading.",
+          },
+          {
+            value: "compact",
+            label: "Compact",
+            description: "Fit more evidence on screen for rapid scanning.",
+          },
+        ]}
+        onChange={setDensity}
+        actions={[
+          {
+            id: "auto-fit",
+            label: "Auto-fit columns",
+            description:
+              "Fit source and message widths to the resident evidence.",
+            testId: "col-autofit",
+            run: () => {
+              const sources = Object.keys(facets?.sources ?? {});
+              const messages = Object.values(laneEvents)
+                .flat()
+                .slice(0, 200)
+                .map((event) => event.message);
+              setColWidths(autoFitColWidths(sources, messages));
+              setStatus("Columns auto-fitted");
+            },
+          },
+          {
+            id: "reset",
+            label: "Reset columns",
+            description: "Restore the payload-first default column widths.",
+            testId: "col-reset",
+            run: () => {
+              setColWidths([...DEFAULT_COL_WIDTHS]);
+              setStatus("Column widths reset");
+            },
+          },
+        ]}
+      />
+      <NoisePolicyControl
+        corpusId={corpusId}
+        document={suppressionDocument}
+        hiddenCount={suppressedEventCount}
+        state={suppressionLoadState}
+        error={suppressionLoadError}
+        narrow={breakpoint === "narrow"}
+        lensSuspended={lensSuspended}
+        triggerRef={noisePolicyTriggerRef}
+        onRetry={() => {
+          void loadSuppressionPolicy().catch(() => {
+            // The visible policy error remains until retry succeeds.
+          });
+        }}
+        onMutate={mutateSuppressionRule}
+        onSuspendAll={() => setNoiseLensSuspended(true)}
+        onResume={() => setNoiseLensSuspended(false)}
+        onReloadPolicy={async () =>
+          (await loadSuppressionPolicy({ refreshing: true })).revision
+        }
+        onCandidateActivated={async () => {
+          await refreshSuppressionPolicy();
+        }}
+      />
+    </>
+  );
+
+  /** Header utilities (#641): Row A right on desktop, Row B tail at narrow. */
+  const headerUtilities = (
+    <div className="log-explorer__utilities">
+      <button
+        type="button"
+        className="log-explorer__btn"
+        onClick={() => void bookmarkSelection()}
+      >
+        Bookmark (B)
+      </button>
+      <button
+        ref={diagnosticTriggerRef}
+        type="button"
+        className="log-explorer__btn"
+        disabled={!summary}
+        onClick={() => void openDiagnostics()}
+      >
+        Export diagnostics…
+      </button>
+    </div>
+  );
+
+
   return (
     <div
       ref={rootRef}
@@ -5560,6 +5848,7 @@ export function LogExplorer({ corpusId }: Props) {
         .join(" ")}
       data-testid="log-explorer"
       data-breakpoint={breakpoint}
+      data-le-band={explorerWidth < 1280 ? "tight" : "wide"}
       data-density={density}
       data-line-mode={lineMode}
       data-metadata-presentation={metadataPresentation}
@@ -5576,378 +5865,125 @@ export function LogExplorer({ corpusId }: Props) {
       onKeyDown={onKeyDown}
     >
       <header className="log-explorer__titlebar">
-        <div
-          className="log-explorer__identity"
-          data-testid="log-explorer-identity"
-          aria-label={`Log Explorer for ${corpusLabel}`}
-        >
+        <div className="log-explorer__titlebar-row log-explorer__titlebar-row--identity">
           <span className="log-explorer__mark" aria-hidden="true">
             <IconLogExplorer />
           </span>
-          <span className="log-explorer__title">Log Explorer</span>
-          <span className="log-explorer__identity-separator" aria-hidden="true">
-            /
-          </span>
-          <span className="log-explorer__corpus" title={corpusLabel}>
-            {corpusLabel}
-          </span>
-        </div>
-        <div
-          className="log-explorer__meta"
-          data-testid="log-explorer-global-counts"
-        >
-          {summaryLoadState === "loading" ? (
-            <span
-              className="log-explorer__badge"
-              data-testid="log-explorer-summary-loading"
-              aria-live="polite"
-            >
-              Loading corpus details…
-            </span>
-          ) : summaryLoadState === "error" ? (
-            <span
-              className="log-explorer__badge log-explorer__badge--warn"
-              data-testid="log-explorer-summary-load-error"
-              role="alert"
-              title={summaryLoadError ?? undefined}
-            >
-              Corpus details unavailable
-            </span>
-          ) : null}
-          <span
-            className={
-              timeQuality === "order_only"
-                ? "log-explorer__badge log-explorer__badge--warn"
-                : "log-explorer__badge"
-            }
-            title={timeQualityLabel(timeQuality)}
+          <div
+            ref={identityLockupRef}
+            role="group"
+            className="log-explorer__lockup"
+            data-testid="log-explorer-identity"
+            aria-label={`${branding?.name ?? "Log"} Explorer — ${corpusLabel}`}
           >
-            {timeQualityLabel(timeQuality)}
-          </span>
-          {timeQuality !== "wall" ? (
-            <button
-              ref={timeResolutionTriggerRef}
-              type="button"
-              className="log-explorer__badge log-explorer__badge-action"
-              aria-haspopup="dialog"
-              onClick={() => setTimeResolutionOpen(true)}
-            >
-              Resolve time…
-            </button>
-          ) : null}
-          <span className="log-explorer__badge">
-            {corpusTotal.toLocaleString()} corpus events
-          </span>
-          {laneCount === 1 && (
-            <span className="log-explorer__badge">
-              {laneMatched["lane-0"] == null
-                ? busy
-                  ? "Evidence loading…"
-                  : laneCountStates["lane-0"] === "error"
-                    ? "Match count unavailable"
-                    : "Counting matches…"
-                : `${totalMatched.toLocaleString()} matched`}
+            <span className="log-explorer__eyebrow">
+              {branding && breakpoint !== "narrow" ? (
+                <span className="log-explorer__eyebrow-product">
+                  {branding.name}
+                  {" · "}
+                </span>
+              ) : null}
+              <span className="log-explorer__eyebrow-surface">
+                Log Explorer
+              </span>
             </span>
-          )}
-          {laneCount > 1 && (
-            <span className="log-explorer__badge">
-              {laneCount} lane queries
-            </span>
-          )}
-          {enabledSuppressionTemplateIds.length > 0 || lensSuspended ? (
-            <span
-              className="log-explorer__badge"
-              data-testid="noise-lens-disclosure-header"
-              role="note"
-              title={noiseLensDisclosureText}
-            >
-              {noiseLensDisclosureText}
-            </span>
-          ) : null}
-        </div>
-        <div className="log-explorer__toolbar">
-          <ToolbarPicker
-            label="Time"
-            value={linkMode}
-            testId="time-link-picker"
-            options={[
-              {
-                value: "independent",
-                label: "Independent",
-                description: "Each lane pages and scrolls on its own.",
-                visual: <TimeLinkVisual mode="independent" />,
-              },
-              {
-                value: "follow_cursor",
-                label: "Follow selection",
-                description:
-                  "Selecting an event seeks each lane to its nearest time.",
-                disabled:
-                  !visibleLanesHaveEvents || timeQuality === "order_only",
-                disabledReason: !visibleLanesHaveEvents
-                  ? "Every visible lane needs matching events."
-                  : timeQuality === "order_only"
-                    ? "Order-only events cannot support time seeking."
-                    : undefined,
-                visual: <TimeLinkVisual mode="follow_cursor" />,
-              },
-              {
-                value: "align_time",
-                label: "Align exact time",
-                description:
-                  "Share a vertical wall-clock axis and show explicit gaps.",
-                disabled: !visibleLanesHaveEvents || timeQuality !== "wall",
-                disabledReason: !visibleLanesHaveEvents
-                  ? "Every visible lane needs matching events."
-                  : timeQuality !== "wall"
-                    ? `${timeQualityLabel(timeQuality)} time is not a reliable shared wall clock.`
-                    : undefined,
-                visual: <TimeLinkVisual mode="align_time" />,
-              },
-            ]}
-            onChange={(mode) => {
-              if (mode === "follow_cursor" && timeQuality === "mixed") {
-                setStatus(
-                  "Follow uses mixed time quality only for approximate peer seeking; Align remains unavailable",
-                );
-              }
-              setTimeLinkMode(mode);
-            }}
-            footer={
-              <HelpTip
-                label="Time-link modes"
-                title="Time-link modes"
-                content={HELP_TIME_LINK}
-              />
-            }
-          />
-          <button
-            ref={laneEditorToggleRef}
-            type="button"
-            className={`log-explorer__btn ${laneEditorOpen ? "log-explorer__btn--active" : ""}`}
-            data-testid="lane-editor-toggle"
-            aria-expanded={laneEditorOpen}
-            aria-controls="lane-editor"
-            onClick={() =>
-              laneEditorOpen ? closeLaneEditor() : setLaneEditorOpen(true)
-            }
-            title="Compose which sources belong to each lane"
-          >
-            Lanes…
-          </button>
-          <NoisePolicyControl
-            corpusId={corpusId}
-            document={suppressionDocument}
-            hiddenCount={suppressedEventCount}
-            state={suppressionLoadState}
-            error={suppressionLoadError}
-            narrow={breakpoint === "narrow"}
-            lensSuspended={lensSuspended}
-            triggerRef={noisePolicyTriggerRef}
-            onRetry={() => {
-              void loadSuppressionPolicy().catch(() => {
-                // The visible policy error remains until retry succeeds.
-              });
-            }}
-            onMutate={mutateSuppressionRule}
-            onSuspendAll={() => setNoiseLensSuspended(true)}
-            onResume={() => setNoiseLensSuspended(false)}
-            onReloadPolicy={async () =>
-              (await loadSuppressionPolicy({ refreshing: true })).revision
-            }
-            onCandidateActivated={async () => {
-              await refreshSuppressionPolicy();
-            }}
-          />
-          {breakpoint !== "narrow" ? (
-            <ToolbarPicker
-              label="Lanes"
-              value={String(laneCount)}
-              testId="lane-count-picker"
-              options={[1, 2, 3, 4].map((count) => {
-                const unavailable = count > maxLaneCount;
-                const requiredWidth = count * MIN_EVIDENCE_LANE_WIDTH_PX;
-                return {
-                  value: String(count),
-                  label: `${count} ${count === 1 ? "lane" : "lanes"}`,
-                  description:
-                    count === 1
-                      ? "Use the full evidence canvas for one stream."
-                      : `Compare ${count} evidence streams side by side.`,
-                  disabled: unavailable,
-                  disabledReason: unavailable
-                    ? `Needs ${requiredWidth}px of usable evidence width; ${Math.floor(usableEvidenceWidth)}px available.`
-                    : undefined,
-                };
-              })}
-              onChange={(count) => configureLanes(Number(count))}
+            <CorpusIdentity
+              corpusLabel={corpusLabel}
+              summary={summary}
+              summaryLoadState={summaryLoadState}
+              summaryLoadError={summaryLoadError}
+              timeQuality={timeQuality}
+              corpusTotal={corpusTotal}
+              measureRef={identityLockupRef}
+              dismissPeerGroup={TOOLBAR_DISMISSIBLE_GROUP}
             />
+          </div>
+          <div
+            className="log-explorer__vitals"
+            data-testid="log-explorer-global-counts"
+          >
+            <span
+              className={
+                timeQuality === "order_only"
+                  ? "log-explorer__badge log-explorer__badge--warn"
+                  : "log-explorer__badge"
+              }
+              title={timeQualityLabel(timeQuality)}
+            >
+              {timeQualityLabel(timeQuality)}
+            </span>
+            {timeQuality !== "wall" ? (
+              <button
+                ref={timeResolutionTriggerRef}
+                type="button"
+                className="log-explorer__badge log-explorer__badge-action"
+                aria-haspopup="dialog"
+                onClick={() => setTimeResolutionOpen(true)}
+              >
+                Resolve time…
+              </button>
+            ) : null}
+            <span className="log-explorer__vitals-counts">
+              {summaryLoadState === "loading" ? (
+                <span
+                  className="log-explorer__badge"
+                  data-testid="log-explorer-summary-loading"
+                  aria-live="polite"
+                >
+                  Loading corpus details…
+                </span>
+              ) : summaryLoadState === "error" ? (
+                <span
+                  className="log-explorer__badge log-explorer__badge--warn"
+                  data-testid="log-explorer-summary-load-error"
+                  role="alert"
+                  title={summaryLoadError ?? undefined}
+                >
+                  Corpus details unavailable
+                </span>
+              ) : (
+                <>
+                  <span className="log-explorer__vitals-corpus">
+                    {corpusTotal.toLocaleString()} corpus events{" · "}
+                  </span>
+                  {laneCount === 1
+                    ? laneMatched["lane-0"] == null
+                      ? busy
+                        ? "Evidence loading…"
+                        : laneCountStates["lane-0"] === "error"
+                          ? "Match count unavailable"
+                          : "Counting matches…"
+                      : `${totalMatched.toLocaleString()} matched`
+                    : `${laneCount} lane queries`}
+                </>
+              )}
+            </span>
+            {enabledSuppressionTemplateIds.length > 0 || lensSuspended ? (
+              <span
+                className="log-explorer__badge"
+                data-testid="noise-lens-disclosure-header"
+                role="note"
+                title={noiseLensDisclosureText}
+              >
+                {noiseLensDisclosureText}
+              </span>
+            ) : null}
+          </div>
+          {breakpoint === "ultrawide" ? (
+            <div className="log-explorer__toolbar log-explorer__toolbar--inline">
+              {toolbarControls}
+            </div>
           ) : null}
-          <ToolbarPicker
-            label="Rows"
-            value={lineMode}
-            valueLabel={`${
-              lineMode === "compact"
-                ? "Single line"
-                : lineMode === "wrap"
-                  ? "Preview"
-                  : "Deep"
-            } · ${
-              fieldEmphasis === "payload"
-                ? "Payload"
-                : fieldEmphasis === "metadata"
-                  ? "Metadata"
-                  : "Balanced"
-            }`}
-            testId="row-mode-picker"
-            options={[
-              {
-                value: "compact",
-                label: "Single line",
-                description:
-                  "Maximum scan density; expand individual events as needed.",
-              },
-              {
-                value: "wrap",
-                label: "Preview",
-                description: `Show up to ${previewLines} lines in each row.`,
-              },
-              {
-                value: "full",
-                label: "Deep",
-                description: `Show up to ${Math.min(24, previewLines * 2)} lines; the inspector remains complete.`,
-              },
-            ]}
-            onChange={setLineMode}
-            footer={
-              <>
-                <label className="log-explorer__picker-setting">
-                  Metadata
-                  <select
-                    value={metadataPresentation}
-                    aria-label="Row metadata presentation"
-                    data-testid="row-metadata-presentation"
-                    onChange={(event) =>
-                      setMetadataPresentation(
-                        event.target.value as RowMetadataPresentation,
-                      )
-                    }
-                  >
-                    <option value="standard">Full labels</option>
-                    <option value="compact">Compact tokens</option>
-                  </select>
-                </label>
-                <label className="log-explorer__picker-setting">
-                  Focus
-                  <select
-                    value={fieldEmphasis}
-                    aria-label="Row field emphasis"
-                    data-testid="row-field-emphasis"
-                    onChange={(event) =>
-                      setFieldEmphasis(event.target.value as RowFieldEmphasis)
-                    }
-                  >
-                    <option value="balanced">Balanced</option>
-                    <option value="payload">Payload</option>
-                    <option value="metadata">Metadata</option>
-                  </select>
-                </label>
-                <p className="log-explorer__picker-note">
-                  Tokens change presentation only. Focus a token for its
-                  complete level and provenance.
-                </p>
-                <label className="log-explorer__picker-setting">
-                  Preview depth
-                  <select
-                    value={previewLines}
-                    aria-label="Preview lines per event"
-                    data-testid="preview-lines"
-                    onChange={(event) =>
-                      setPreviewLines(Number(event.target.value))
-                    }
-                  >
-                    {[2, 4, 8, 12].map((lines) => (
-                      <option key={lines} value={lines}>
-                        {lines} lines
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <HelpTip
-                  label="Long-line reading help"
-                  title="Reading long events"
-                  content={HELP_LONG_LINES}
-                />
-              </>
-            }
-          />
-          <ToolbarPicker
-            label="Density"
-            value={density}
-            testId="density-picker"
-            options={[
-              {
-                value: "comfortable",
-                label: "Comfortable",
-                description: "More breathing room for focused reading.",
-              },
-              {
-                value: "compact",
-                label: "Compact",
-                description: "Fit more evidence on screen for rapid scanning.",
-              },
-            ]}
-            onChange={setDensity}
-          />
-          <ToolbarActionMenu
-            label="Columns"
-            testId="columns-menu"
-            actions={[
-              {
-                id: "auto-fit",
-                label: "Auto-fit columns",
-                description:
-                  "Fit source and message widths to the resident evidence.",
-                testId: "col-autofit",
-                run: () => {
-                  const sources = Object.keys(facets?.sources ?? {});
-                  const messages = Object.values(laneEvents)
-                    .flat()
-                    .slice(0, 200)
-                    .map((event) => event.message);
-                  setColWidths(autoFitColWidths(sources, messages));
-                  setStatus("Columns auto-fitted");
-                },
-              },
-              {
-                id: "reset",
-                label: "Reset columns",
-                description: "Restore the payload-first default column widths.",
-                testId: "col-reset",
-                run: () => {
-                  setColWidths([...DEFAULT_COL_WIDTHS]);
-                  setStatus("Column widths reset");
-                },
-              },
-            ]}
-          />
-          <button
-            type="button"
-            className="log-explorer__btn"
-            onClick={() => void bookmarkSelection()}
-          >
-            Bookmark (B)
-          </button>
-          <button
-            ref={diagnosticTriggerRef}
-            type="button"
-            className="log-explorer__btn"
-            disabled={!summary}
-            onClick={() => void openDiagnostics()}
-          >
-            Export diagnostics…
-          </button>
+          {breakpoint !== "narrow" ? headerUtilities : null}
         </div>
+        {breakpoint !== "ultrawide" ? (
+          <div className="log-explorer__titlebar-row log-explorer__titlebar-row--toolbar">
+            <div className="log-explorer__toolbar">
+              {toolbarControls}
+              {breakpoint === "narrow" ? headerUtilities : null}
+            </div>
+          </div>
+        ) : null}
       </header>
 
       {suppressionLoadState !== "ready" ? (

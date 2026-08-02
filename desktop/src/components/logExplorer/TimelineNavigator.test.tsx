@@ -476,6 +476,181 @@ describe("TimelineNavigator", () => {
     ).toHaveLength(2);
   });
 
+  it("keeps the timeline error state clear of the interval label (#641)", async () => {
+    const style = document.createElement("style");
+    style.textContent = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/logExplorer/TimelineNavigator.css",
+      ),
+      "utf8",
+    );
+    document.head.appendChild(style);
+    try {
+      render(
+        <TimelineNavigator
+          corpusId="c1"
+          filter={{}}
+          residentEvents={[]}
+          onSeekSeq={vi.fn()}
+        />,
+      );
+      const track = await screen.findByTestId("timeline-navigator-track");
+      const topline = track.querySelector<HTMLElement>(
+        ".timeline-navigator__topline",
+      );
+      expect(topline).toBeTruthy();
+      const errorKey = screen.getByTestId("timeline-error-present-key");
+      const current = screen.getByTestId("timeline-current-summary");
+      const legend = (topline as HTMLElement).querySelector<HTMLElement>(
+        ".timeline-navigator__legend",
+      ) as HTMLElement;
+      const actions = (topline as HTMLElement).querySelector<HTMLElement>(
+        ".timeline-navigator__actions",
+      ) as HTMLElement;
+      expect(legend).toBeTruthy();
+      expect(actions).toBeTruthy();
+
+      // DOM order: [error chip] [interval label] [legend] [actions] — the
+      // chip sits immediately after the Timeline title, never beside the
+      // shrinking label.
+      const children = Array.from((topline as HTMLElement).children);
+      expect(children.indexOf(errorKey)).toBe(0);
+      expect(children.indexOf(errorKey)).toBeLessThan(
+        children.indexOf(current),
+      );
+      expect(children.indexOf(current)).toBeLessThan(children.indexOf(legend));
+      expect(children.indexOf(legend)).toBeLessThan(children.indexOf(actions));
+
+      // The interval label is the ONLY shrinkable topline item.
+      const currentStyle = getComputedStyle(current);
+      expect(currentStyle.flexShrink).toBe("1");
+      expect(currentStyle.minWidth).toMatch(/^0(px)?$/);
+      expect(currentStyle.overflow).toBe("hidden");
+      expect(currentStyle.textOverflow).toBe("ellipsis");
+      expect(currentStyle.whiteSpace).toBe("nowrap");
+      expect(getComputedStyle(errorKey).flexShrink).toBe("0");
+      expect(getComputedStyle(legend).flexShrink).toBe("0");
+      // The legend carries the spacer, pushing itself and the actions to the
+      // trailing edge.
+      expect(getComputedStyle(legend).marginLeft).toBe("auto");
+      // State honesty: the error chip is rendered and visible.
+      expect(getComputedStyle(errorKey).display).not.toBe("none");
+      expect(errorKey.textContent).toContain("Error present");
+    } finally {
+      style.remove();
+    }
+  });
+
+  it("compresses legend words below 1280px while never hiding the error chip (#641)", async () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    const callbacks: ResizeObserverCallback[] = [];
+    globalThis.ResizeObserver = class {
+      constructor(callback: ResizeObserverCallback) {
+        callbacks.push(callback);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+    const style = document.createElement("style");
+    style.textContent = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/logExplorer/TimelineNavigator.css",
+      ),
+      "utf8",
+    );
+    document.head.appendChild(style);
+    try {
+      render(
+        <TimelineNavigator
+          corpusId="c1"
+          filter={{}}
+          residentEvents={[]}
+          onSeekSeq={vi.fn()}
+        />,
+      );
+      const track = await screen.findByTestId("timeline-navigator-track");
+      const topline = track.querySelector<HTMLElement>(
+        ".timeline-navigator__topline",
+      ) as HTMLElement;
+      expect(topline).toBeTruthy();
+      // Unmeasured (0px) containers keep the full legend.
+      expect(topline.getAttribute("data-legend-density")).toBe("full");
+      expect(callbacks.length).toBeGreaterThan(0);
+
+      const setToplineWidth = (width: number) =>
+        Object.defineProperty(topline, "getBoundingClientRect", {
+          configurable: true,
+          value: () => ({
+            bottom: 20,
+            height: 20,
+            left: 0,
+            right: width,
+            top: 0,
+            width,
+            x: 0,
+            y: 0,
+            toJSON: () => ({}),
+          }),
+        });
+
+      // Simulated tight width (the verified ~1100px collision case).
+      setToplineWidth(1100);
+      act(() => {
+        for (const callback of callbacks) {
+          callback([], {} as ResizeObserver);
+        }
+      });
+      expect(topline.getAttribute("data-legend-density")).toBe("compact");
+      const words = topline.querySelectorAll<HTMLElement>(
+        ".timeline-navigator__legend-word",
+      );
+      expect(words).toHaveLength(5);
+      for (const word of words) {
+        expect(getComputedStyle(word).display).toBe("none");
+      }
+      // Letter glyphs and title attributes stay for every severity.
+      const legendEntries = topline.querySelectorAll<HTMLElement>(
+        ".timeline-navigator__legend > span",
+      );
+      expect(
+        [...legendEntries].map((entry) => entry.getAttribute("title")),
+      ).toEqual(["Error", "Warning", "Info", "Debug", "Other"]);
+      expect(
+        [...legendEntries].map((entry) => entry.querySelector("b")?.textContent),
+      ).toEqual(["E", "W", "I", "D", "O"]);
+      // State honesty at tight width: the error chip is neither hidden nor
+      // collapsed and still cannot shrink.
+      const errorKey = screen.getByTestId("timeline-error-present-key");
+      expect(getComputedStyle(errorKey).display).not.toBe("none");
+      expect(getComputedStyle(errorKey).flexShrink).toBe("0");
+      expect(errorKey.textContent).toContain("Error present");
+
+      // Wide again: the density signal reverts. (happy-dom caches an
+      // element's computed style across ancestor attribute flips, so the
+      // visual reversal is proven by the attribute plus the stylesheet
+      // scoping word-hiding exclusively under the compact density.)
+      setToplineWidth(1600);
+      act(() => {
+        for (const callback of callbacks) {
+          callback([], {} as ResizeObserver);
+        }
+      });
+      expect(topline.getAttribute("data-legend-density")).toBe("full");
+      const wordRules = (style.textContent ?? "")
+        .split("}")
+        .filter((rule) => rule.includes(".timeline-navigator__legend-word"));
+      expect(wordRules).toHaveLength(1);
+      expect(wordRules[0]).toContain('[data-legend-density="compact"]');
+      expect(wordRules[0]).toContain("display: none");
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+      style.remove();
+    }
+  });
+
   it("loads bounded session metrics and shares their committed cursor with log seeking", async () => {
     render(
       <TimelineNavigator

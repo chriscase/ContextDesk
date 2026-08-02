@@ -418,6 +418,38 @@ fn log_explorer_window_label(corpus_id: &str) -> String {
     )
 }
 
+/// Native title for a dedicated Log Explorer window (#641).
+///
+/// Corpus name FIRST so macOS end-truncation eats the fixed suffix, never the
+/// name the user is looking for. Em dash (U+2014) separator by design.
+fn log_explorer_window_title(corpus_name: &str) -> String {
+    format!("{corpus_name} — Log Explorer")
+}
+
+#[cfg(test)]
+mod log_explorer_window_title_tests {
+    use super::log_explorer_window_title;
+
+    #[test]
+    fn log_explorer_window_title_puts_corpus_first_with_em_dash() {
+        assert_eq!(
+            log_explorer_window_title("prod-incident-42"),
+            "prod-incident-42 — Log Explorer"
+        );
+        // Separator is an em dash (U+2014), not a hyphen.
+        assert!(log_explorer_window_title("x").contains('\u{2014}'));
+    }
+
+    #[test]
+    fn log_explorer_window_title_passes_unicode_names_through() {
+        assert_eq!(
+            log_explorer_window_title("ログ検証 — Ünïcode"),
+            "ログ検証 — Ünïcode — Log Explorer"
+        );
+        assert_eq!(log_explorer_window_title(""), " — Log Explorer");
+    }
+}
+
 /// Tauri event name delivered to an Explorer window when a new exact target is staged.
 const LOG_EXPLORER_NAV_TARGET_EVENT: &str = "log-explorer-nav-target";
 
@@ -10955,10 +10987,14 @@ fn set_chat_linked_corpus(
 fn log_explorer_webview_url(
     app: &tauri::AppHandle,
     corpus_id: &str,
+    corpus_name: &str,
 ) -> Result<tauri::WebviewUrl, String> {
-    // Encode corpus id for query (UUIDs are safe; keep general).
+    // Encode corpus id for query (UUIDs are safe; keep general). The display
+    // name rides along so the renderer can set document.title without a host
+    // round-trip (#641 boundary ratchet: main.tsx must not import lib/host).
     let corpus_q = urlencoding_encode(corpus_id);
-    let query = format!("window=log-explorer&corpus={corpus_q}");
+    let name_q = urlencoding_encode(corpus_name);
+    let query = format!("window=log-explorer&corpus={corpus_q}&name={name_q}");
 
     // Only use Vite devUrl while running `tauri dev`. In release builds the same
     // conf still lists devUrl — using it would open a blank localhost window.
@@ -11009,7 +11045,7 @@ async fn open_log_explorer(
         .map_err(|error| format!("open log explorer corpus task join: {error}"))??
         .name()
         .to_string();
-    let title = format!("Log Explorer · {corpus_name}");
+    let title = log_explorer_window_title(&corpus_name);
     // Set active corpus so agent tools resolve without id.
     set_active_log_corpus_state_nonblocking(&state, Some(corpus_id.clone()));
     let label = log_explorer_window_label(&corpus_id);
@@ -11020,7 +11056,7 @@ async fn open_log_explorer(
         return Ok(label);
     }
 
-    let url = log_explorer_webview_url(&app, &corpus_id)?;
+    let url = log_explorer_webview_url(&app, &corpus_id, &corpus_name)?;
     // Build on the main runtime — async command is the supported path.
     tauri::WebviewWindowBuilder::new(&app, &label, url)
         .title(title)
@@ -11079,7 +11115,7 @@ async fn open_log_explorer_target(
     .await
     .map_err(|error| format!("open log explorer target task join: {error}"))??;
 
-    let title = format!("Log Explorer · {corpus_name}");
+    let title = log_explorer_window_title(&corpus_name);
     set_active_log_corpus_state_nonblocking(&state, Some(corpus_id.clone()));
     let label = log_explorer_window_label(&corpus_id);
     use tauri::Emitter;
@@ -11101,7 +11137,7 @@ async fn open_log_explorer_target(
 
     // New window: resolve URL *before* staging so a URL failure never leaves a
     // pending target for a later generic open to take (stale replay).
-    let url = log_explorer_webview_url(&app, &corpus_id)?;
+    let url = log_explorer_webview_url(&app, &corpus_id, &corpus_name)?;
     stage_log_explorer_nav_target(&state, &corpus_id, staged.clone())?;
     if let Err(error) = tauri::WebviewWindowBuilder::new(&app, &label, url)
         .title(title)

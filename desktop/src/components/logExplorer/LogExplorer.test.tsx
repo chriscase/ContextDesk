@@ -647,6 +647,22 @@ function chooseLaneCount(count: number) {
   );
 }
 
+/**
+ * #641: on non-narrow layouts the lane composer entry is the "Compose
+ * lanes…" menu item inside the merged Lanes picker. Opening it closes the
+ * picker menu, so the item unmounts and closing the editor returns focus to
+ * the durable picker trigger (laneComposerHome). Narrow keeps the standalone
+ * Lanes… button with the old testid.
+ */
+function openLaneComposer() {
+  openToolbarPicker("lane-count-picker");
+  fireEvent.click(screen.getByTestId("lane-editor-toggle"));
+}
+
+function laneComposerHome() {
+  return screen.getByTestId("lane-count-picker");
+}
+
 function chooseRowMode(mode: "Single line" | "Preview" | "Deep") {
   chooseToolbarOption("row-mode-picker", new RegExp(`^${mode}\\b`));
 }
@@ -879,9 +895,21 @@ describe("LogExplorer shell", () => {
     const root = await screen.findByTestId("log-explorer");
     expect(root).toBeTruthy();
     expect(root.getAttribute("data-resizable")).toBe("true");
-    const identity = await screen.findByLabelText("Log Explorer for fixture");
+    // #641 lockup: branded group name carries the FULL corpus name; the
+    // corpus title is a real button and the surface label keeps its text.
+    const identity = await screen.findByLabelText(
+      "ContextDesk Explorer — fixture",
+    );
     expect(within(identity).getByText("Log Explorer")).toBeTruthy();
-    expect(within(identity).getByTitle("fixture")).toBeTruthy();
+    const corpusButton = within(identity).getByTestId(
+      "log-explorer-corpus-button",
+    );
+    expect(corpusButton.textContent).toContain("fixture");
+    expect(corpusButton.getAttribute("aria-haspopup")).toBe("dialog");
+    // The full untruncated name is the button's description (role=tooltip).
+    const describedBy = corpusButton.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    expect(document.getElementById(describedBy!)?.textContent).toBe("fixture");
     expect(
       screen.getByTestId("log-explorer-global-counts").textContent,
     ).not.toContain("normal");
@@ -2320,7 +2348,7 @@ describe("LogExplorer shell", () => {
     });
 
     expect(
-      await screen.findByLabelText("Log Explorer for new corpus"),
+      await screen.findByLabelText("ContextDesk Explorer — new corpus"),
     ).toBeTruthy();
     expect(await screen.findByTestId("bookmark-activate-bm-c2")).toBeTruthy();
     await openInvestigationView(2);
@@ -2349,12 +2377,46 @@ describe("LogExplorer shell", () => {
       ]);
     });
 
-    expect(screen.getByLabelText("Log Explorer for new corpus")).toBeTruthy();
+    expect(
+      screen.getByLabelText("ContextDesk Explorer — new corpus"),
+    ).toBeTruthy();
     expect(screen.getByTestId("bookmark-activate-bm-c2")).toBeTruthy();
     expect(screen.getByText("new investigation evidence")).toBeTruthy();
     expect(screen.queryByTestId("bookmark-activate-bm-c1")).toBeNull();
     expect(screen.queryByText("stale investigation evidence")).toBeNull();
     expect(host.hostSetActiveLogCorpus).not.toHaveBeenCalled();
+  });
+
+  it("announces the pending corpus summary politely in the vitals slot (#641)", async () => {
+    type SummaryResult = Awaited<ReturnType<typeof host.hostGetLogCorpus>>;
+    let resolveSummary: (value: SummaryResult) => void = () => {};
+    vi.mocked(host.hostGetLogCorpus).mockImplementation(
+      () =>
+        new Promise<SummaryResult>((resolve) => {
+          resolveSummary = resolve;
+        }),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+
+    const loading = await screen.findByTestId("log-explorer-summary-loading");
+    expect(loading.textContent).toContain("Loading corpus details…");
+    // Progress is announced without stealing focus (#641 vitals contract).
+    expect(loading.getAttribute("aria-live")).toBe("polite");
+    resolveSummary({
+      id: "c1",
+      name: "fixture",
+      eventCount: 10,
+      templateCount: 2,
+      engine: "duckdb",
+      createdAt: 0,
+      sourceLabel: "fixture.log",
+      stats: null,
+      topTemplates: [],
+    });
+    await waitFor(() =>
+      expect(screen.queryByTestId("log-explorer-summary-loading")).toBeNull(),
+    );
   });
 
   it("keeps summary, bookmark, and Investigation load failures independent from evidence rows", async () => {
@@ -2371,10 +2433,12 @@ describe("LogExplorer shell", () => {
     render(<LogExplorer corpusId="c1" />);
 
     expect(await screen.findByText(/auth failure/)).toBeTruthy();
-    expect(
-      (await screen.findByTestId("log-explorer-summary-load-error"))
-        .textContent,
-    ).toContain("Corpus details unavailable");
+    const summaryError = await screen.findByTestId(
+      "log-explorer-summary-load-error",
+    );
+    expect(summaryError.textContent).toContain("Corpus details unavailable");
+    // The failure badge must interrupt assistive tech (#641 vitals contract).
+    expect(summaryError.getAttribute("role")).toBe("alert");
     expect(
       (await screen.findByTestId("log-explorer-bookmarks-load-error"))
         .textContent,
@@ -2536,32 +2600,38 @@ describe("LogExplorer shell", () => {
     chooseRowMode("Deep");
     expect(screen.getByTestId("row-mode-picker").textContent).toContain("Deep");
 
-    const columnsTrigger = screen.getByTestId("columns-menu");
-    fireEvent.click(columnsTrigger);
+    // #641 Display merge: density radios plus the Columns actions live in one
+    // menu; roving arrows traverse radios and action items as one list.
+    const displayTrigger = screen.getByTestId("density-picker");
+    fireEvent.click(displayTrigger);
+    const comfortable = screen.getByRole("menuitemradio", {
+      name: /^Comfortable\b/,
+    });
     const autoFit = screen.getByRole("menuitem", {
       name: /^Auto-fit columns\b/,
     });
     const reset = screen.getByRole("menuitem", {
       name: /^Reset columns\b/,
     });
-    await waitFor(() => expect(document.activeElement).toBe(autoFit));
-    fireEvent.keyDown(autoFit, { key: "ArrowDown" });
+    await waitFor(() => expect(document.activeElement).toBe(comfortable));
+    fireEvent.keyDown(comfortable, { key: "End" });
     expect(document.activeElement).toBe(reset);
-    fireEvent.keyDown(reset, { key: "Escape" });
-    await waitFor(() => expect(document.activeElement).toBe(columnsTrigger));
+    fireEvent.keyDown(reset, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(autoFit);
+    fireEvent.keyDown(autoFit, { key: "Escape" });
+    await waitFor(() => expect(document.activeElement).toBe(displayTrigger));
   });
 
   it("dismisses toolbar peers in capture while preserving portaled help branches", async () => {
     render(<LogExplorer corpusId="c1" />);
     await screen.findByText(/auth failure/);
 
-    const lanesTrigger = screen.getByTestId("lane-editor-toggle");
+    const bookmarkButton = screen.getByRole("button", { name: "Bookmark (B)" });
     for (const [testId, menuName] of [
       ["time-link-picker", "Time options"],
       ["lane-count-picker", "Lanes options"],
       ["row-mode-picker", "Rows options"],
-      ["density-picker", "Density options"],
-      ["columns-menu", "Columns actions"],
+      ["density-picker", "Display options"],
     ] as const) {
       const trigger = openToolbarPicker(testId);
       const menu = screen.getByRole("menu", { name: menuName });
@@ -2575,36 +2645,36 @@ describe("LogExplorer shell", () => {
 
     openToolbarPicker("time-link-picker");
     const stopOutsidePointer = (event: Event) => event.stopPropagation();
-    lanesTrigger.addEventListener("pointerdown", stopOutsidePointer);
-    fireEvent.pointerDown(lanesTrigger);
-    lanesTrigger.removeEventListener("pointerdown", stopOutsidePointer);
-    lanesTrigger.focus();
+    bookmarkButton.addEventListener("pointerdown", stopOutsidePointer);
+    fireEvent.pointerDown(bookmarkButton);
+    bookmarkButton.removeEventListener("pointerdown", stopOutsidePointer);
+    bookmarkButton.focus();
     expect(screen.queryByRole("menu", { name: "Time options" })).toBeNull();
-    expect(document.activeElement).toBe(lanesTrigger);
+    expect(document.activeElement).toBe(bookmarkButton);
 
     openToolbarPicker("density-picker");
-    const densityMenu = screen.getByRole("menu", {
-      name: "Density options",
+    const displayMenu = screen.getByRole("menu", {
+      name: "Display options",
     });
     await waitFor(() =>
-      expect(densityMenu.contains(document.activeElement)).toBe(true),
+      expect(displayMenu.contains(document.activeElement)).toBe(true),
     );
-    act(() => lanesTrigger.focus());
+    act(() => bookmarkButton.focus());
     await waitFor(() =>
       expect(
-        screen.queryByRole("menu", { name: "Density options" }),
+        screen.queryByRole("menu", { name: "Display options" }),
       ).toBeNull(),
     );
-    expect(document.activeElement).toBe(lanesTrigger);
+    expect(document.activeElement).toBe(bookmarkButton);
 
-    const columnsTrigger = openToolbarPicker("columns-menu");
+    const displayTrigger = openToolbarPicker("density-picker");
     await waitFor(() =>
       expect(document.activeElement).toBe(
-        screen.getByRole("menuitem", { name: /^Auto-fit columns\b/ }),
+        screen.getByRole("menuitemradio", { name: /^Comfortable\b/ }),
       ),
     );
     fireEvent.pointerDown(screen.getByTestId("log-explorer"));
-    await waitFor(() => expect(document.activeElement).toBe(columnsTrigger));
+    await waitFor(() => expect(document.activeElement).toBe(displayTrigger));
 
     openToolbarPicker("time-link-picker");
     fireEvent.click(screen.getByTestId("row-mode-picker"));
@@ -2807,7 +2877,7 @@ describe("LogExplorer shell", () => {
       expect(root.getAttribute("data-max-lane-count")).toBe("1");
     });
 
-    const lanePicker = openToolbarPicker("lane-count-picker");
+    openToolbarPicker("lane-count-picker");
     const twoLUnavailable = screen.getByRole("menuitemradio", {
       name: /^2 lanes\b/,
     });
@@ -2836,7 +2906,7 @@ describe("LogExplorer shell", () => {
     fireEvent.click(twoL);
     await waitFor(() => expect(root.getAttribute("data-lane-count")).toBe("2"));
 
-    fireEvent.click(screen.getByTestId("lane-editor-toggle"));
+    openLaneComposer();
     const editor = await screen.findByTestId("lane-editor");
     expect(
       (
@@ -2878,7 +2948,14 @@ describe("LogExplorer shell", () => {
     fourL.focus();
     fireEvent.click(fourL);
     await waitFor(() => expect(root.getAttribute("data-lane-count")).toBe("4"));
-    await waitFor(() => expect(document.activeElement).toBe(lanePicker));
+    // #641: crossing the 1600 ultrawide boundary restructures the header into
+    // its single-row form, remounting the toolbar controls — so the trigger is
+    // re-queried; focus still lands on the Lanes picker trigger.
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByTestId("lane-count-picker"),
+      ),
+    );
   });
 
   it("focuses Find with the platform find shortcut", async () => {
@@ -2934,12 +3011,12 @@ describe("LogExplorer shell", () => {
       expect(headers.style.gridTemplateColumns).toContain("9.25rem"),
     );
 
-    fireEvent.click(screen.getByTestId("columns-menu"));
+    openToolbarPicker("density-picker");
     fireEvent.click(screen.getByTestId("col-autofit"));
     await waitFor(() =>
       expect(headers.style.gridTemplateColumns).toContain("40rem"),
     );
-    fireEvent.click(screen.getByTestId("columns-menu"));
+    openToolbarPicker("density-picker");
     fireEvent.click(screen.getByTestId("col-reset"));
     await waitFor(() =>
       expect(headers.style.gridTemplateColumns).toContain("16rem"),
@@ -4070,7 +4147,9 @@ describe("LogExplorer shell", () => {
     expect(screen.getByRole("status").textContent).not.toContain(
       "Selection cleared",
     );
-    expect(screen.queryByTestId("bookmark-restore-view")).toBeNull();
+    await waitFor(() =>
+      expect(screen.queryByTestId("bookmark-restore-view")).toBeNull(),
+    );
   });
 
   it("does not let an active Find refresh overwrite a temporary bookmark reveal", async () => {
@@ -4173,7 +4252,9 @@ describe("LogExplorer shell", () => {
         }) as HTMLInputElement
       ).checked,
     ).toBe(true);
-    expect(screen.queryByTestId("bookmark-restore-view")).toBeNull();
+    await waitFor(() =>
+      expect(screen.queryByTestId("bookmark-restore-view")).toBeNull(),
+    );
   });
 
   it("reports a missing bookmark target without claiming navigation success", async () => {
@@ -6182,7 +6263,7 @@ describe("LogExplorer shell", () => {
     render(<LogExplorer corpusId="c1" />);
     await screen.findAllByTitle("worker.log");
     chooseLaneCount(2);
-    fireEvent.click(screen.getByTestId("lane-editor-toggle"));
+    openLaneComposer();
     const editor = screen.getByTestId("lane-editor");
     const laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
     expect(laneRows.length).toBe(2);
@@ -6887,7 +6968,7 @@ describe("LogExplorer shell", () => {
     await screen.findByTitle("worker.log");
     chooseLaneCount(2);
     // New behavior: both lanes start as All sources — not auto-split by first-N.
-    fireEvent.click(screen.getByTestId("lane-editor-toggle"));
+    openLaneComposer();
     const editor = await screen.findByTestId("lane-editor");
     expect(editor.textContent).toMatch(/All sources/);
     // Compose lane-0 → api only, lane-1 → worker only.
@@ -6979,9 +7060,9 @@ describe("LogExplorer shell", () => {
 
   it("opens the compact lane composer, assigns sources independently, and restores focus on Done", async () => {
     render(<LogExplorer corpusId="c1" />);
-    const toggle = await screen.findByTestId("lane-editor-toggle");
+    await screen.findByTestId("lane-count-picker");
     chooseLaneCount(2);
-    fireEvent.click(toggle);
+    openLaneComposer();
 
     const editor = await screen.findByTestId("lane-editor");
     expect(editor.getAttribute("role")).toBe("dialog");
@@ -7022,9 +7103,11 @@ describe("LogExplorer shell", () => {
       "1 source",
     );
     fireEvent.click(screen.getByTestId("lane-editor-close"));
-    await waitFor(() => expect(document.activeElement).toBe(toggle));
+    // #641: the Compose lanes… item unmounts with the picker menu, so Done
+    // returns focus to the merged Lanes picker trigger.
+    await waitFor(() => expect(document.activeElement).toBe(laneComposerHome()));
     expect(screen.queryByTestId("lane-editor")).toBeNull();
-    fireEvent.click(toggle);
+    openLaneComposer();
     expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
       "2 sources",
     );
@@ -7036,10 +7119,10 @@ describe("LogExplorer shell", () => {
 
   it("preserves hidden lane memberships across visible lane-count changes", async () => {
     render(<LogExplorer corpusId="c1" />);
-    const toggle = await screen.findByTestId("lane-editor-toggle");
+    await screen.findByTestId("lane-count-picker");
 
     chooseLaneCount(2);
-    fireEvent.click(toggle);
+    openLaneComposer();
     let editor = await screen.findByTestId("lane-editor");
     let laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
     fireEvent.click(
@@ -7055,10 +7138,13 @@ describe("LogExplorer shell", () => {
       "1 source",
     );
     fireEvent.click(screen.getByTestId("lane-editor-close"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("lane-editor")).toBeNull(),
+    );
 
     chooseLaneCount(1);
     chooseLaneCount(2);
-    fireEvent.click(toggle);
+    openLaneComposer();
     editor = await screen.findByTestId("lane-editor");
     laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
 
@@ -7077,8 +7163,8 @@ describe("LogExplorer shell", () => {
 
   it("dismisses the lane composer in capture with predictable focus without losing composed lanes", async () => {
     render(<LogExplorer corpusId="c1" />);
-    const toggle = await screen.findByTestId("lane-editor-toggle");
-    fireEvent.click(toggle);
+    await screen.findByTestId("lane-count-picker");
+    openLaneComposer();
     const editor = await screen.findByTestId("lane-editor");
     fireEvent.click(
       await within(editor).findByRole("checkbox", { name: /worker\.log/i }),
@@ -7086,9 +7172,11 @@ describe("LogExplorer shell", () => {
     fireEvent.keyDown(screen.getByTestId("lane-editor-close"), {
       key: "Escape",
     });
-    await waitFor(() => expect(document.activeElement).toBe(toggle));
+    await waitFor(() =>
+      expect(document.activeElement).toBe(laneComposerHome()),
+    );
 
-    fireEvent.click(toggle);
+    openLaneComposer();
     await screen.findByTestId("lane-editor");
     const outsideTarget = screen.getByTestId("log-explorer-find");
     const stopOutsidePointer = (event: Event) => event.stopPropagation();
@@ -7099,19 +7187,21 @@ describe("LogExplorer shell", () => {
     await waitFor(() => expect(screen.queryByTestId("lane-editor")).toBeNull());
     expect(document.activeElement).toBe(outsideTarget);
 
-    fireEvent.click(toggle);
+    openLaneComposer();
     expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
       "1 source",
     );
     fireEvent.pointerDown(screen.getByTestId("log-explorer"));
     await waitFor(() => expect(screen.queryByTestId("lane-editor")).toBeNull());
-    await waitFor(() => expect(document.activeElement).toBe(toggle));
+    await waitFor(() =>
+      expect(document.activeElement).toBe(laneComposerHome()),
+    );
   });
 
   it("treats portaled lane-composition help as part of the lane popover", async () => {
     render(<LogExplorer corpusId="c1" />);
-    const toggle = await screen.findByTestId("lane-editor-toggle");
-    fireEvent.click(toggle);
+    await screen.findByTestId("lane-count-picker");
+    openLaneComposer();
     const editor = await screen.findByTestId("lane-editor");
     const helpTrigger = within(editor).getByRole("button", {
       name: "Help: Lane composition",
@@ -7135,7 +7225,9 @@ describe("LogExplorer shell", () => {
 
     fireEvent.keyDown(helpTrigger, { key: "Escape" });
     await waitFor(() => expect(screen.queryByTestId("lane-editor")).toBeNull());
-    await waitFor(() => expect(document.activeElement).toBe(toggle));
+    await waitFor(() =>
+      expect(document.activeElement).toBe(laneComposerHome()),
+    );
   });
 
   it("keeps the full lane source catalog editable under a conflicting source filter", async () => {
@@ -7156,8 +7248,8 @@ describe("LogExplorer shell", () => {
     );
 
     render(<LogExplorer corpusId="c1" />);
-    const toggle = await screen.findByTestId("lane-editor-toggle");
-    fireEvent.click(toggle);
+    await screen.findByTestId("lane-count-picker");
+    openLaneComposer();
     let editor = await screen.findByTestId("lane-editor");
     fireEvent.click(
       await within(editor).findByRole("checkbox", { name: /api\.log/i }),
@@ -7180,7 +7272,7 @@ describe("LogExplorer shell", () => {
       ).toBeNull(),
     );
 
-    fireEvent.click(toggle);
+    openLaneComposer();
     editor = await screen.findByTestId("lane-editor");
     expect(editor.textContent).toContain("2 available sources");
     const apiSource = within(editor).getByRole("checkbox", {
@@ -7229,9 +7321,9 @@ describe("LogExplorer shell", () => {
     );
 
     render(<LogExplorer corpusId="c1" />);
-    const toggle = await screen.findByTestId("lane-editor-toggle");
+    await screen.findByTestId("lane-count-picker");
     expect(host.hostLogSourceCatalog).not.toHaveBeenCalled();
-    fireEvent.click(toggle);
+    openLaneComposer();
     const editor = await screen.findByTestId("lane-editor");
     const lane = editor.querySelector(
       ".log-explorer__lane-editor-row",
@@ -7356,7 +7448,8 @@ describe("LogExplorer shell", () => {
     );
 
     const view = render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(await screen.findByTestId("lane-editor-toggle"));
+    await screen.findByTestId("lane-count-picker");
+    openLaneComposer();
     await waitFor(() =>
       expect(host.hostLogSourceCatalog).toHaveBeenCalledWith(
         "c1",
@@ -9469,4 +9562,98 @@ describe("LogExplorer shell", () => {
       expect(stored?.messages.some((m) => m.role === "assistant")).toBe(true);
     });
   });
+
+  describe("corpus identity control (#641)", () => {
+    async function renderIdentityButton() {
+      render(<LogExplorer corpusId="c1" />);
+      await screen.findByText(/auth failure/);
+      return screen.getByTestId("log-explorer-corpus-button");
+    }
+
+    function tooltipFor(button: HTMLElement) {
+      const id = button.getAttribute("aria-describedby");
+      expect(id).toBeTruthy();
+      return document.getElementById(id!)!;
+    }
+
+    it("shows the full-name tooltip immediately on focus and hides on blur and Escape", async () => {
+      const button = await renderIdentityButton();
+      const tooltip = tooltipFor(button);
+      expect(tooltip.getAttribute("role")).toBe("tooltip");
+      expect(tooltip.getAttribute("data-state")).toBe("closed");
+      await waitFor(() => expect(tooltip.textContent).toBe("fixture"));
+
+      fireEvent.focus(button);
+      expect(tooltip.getAttribute("data-state")).toBe("open");
+      fireEvent.keyDown(button, { key: "Escape" });
+      expect(tooltip.getAttribute("data-state")).toBe("closed");
+
+      fireEvent.focus(button);
+      expect(tooltip.getAttribute("data-state")).toBe("open");
+      fireEvent.blur(button);
+      expect(tooltip.getAttribute("data-state")).toBe("closed");
+    });
+
+    it("shows the tooltip on hover after the intent delay and hides on leave", async () => {
+      const button = await renderIdentityButton();
+      const tooltip = tooltipFor(button);
+
+      fireEvent.mouseEnter(button);
+      // Hover intent: not shown synchronously (focus is the immediate path).
+      expect(tooltip.getAttribute("data-state")).toBe("closed");
+      await waitFor(
+        () => expect(tooltip.getAttribute("data-state")).toBe("open"),
+        { timeout: 3000 },
+      );
+      fireEvent.mouseLeave(button);
+      expect(tooltip.getAttribute("data-state")).toBe("closed");
+    });
+
+    it("opens the bounded identity popover and Escape restores focus to the button", async () => {
+      const button = await renderIdentityButton();
+      expect(button.getAttribute("aria-haspopup")).toBe("dialog");
+      expect(button.getAttribute("aria-expanded")).toBe("false");
+
+      fireEvent.click(button);
+      expect(button.getAttribute("aria-expanded")).toBe("true");
+      const popover = screen.getByRole("dialog", { name: "Corpus identity" });
+      // Full selectable name + bounded facts: engine, created (UTC,
+      // deterministic), events, time basis. No model/provider details.
+      expect(within(popover).getByText("fixture")).toBeTruthy();
+      expect(within(popover).getByText("Engine")).toBeTruthy();
+      expect(within(popover).getByText("duckdb")).toBeTruthy();
+      expect(
+        within(popover).getByText("1970-01-01 00:00:00.000Z"),
+      ).toBeTruthy();
+      expect(within(popover).getByText("Events")).toBeTruthy();
+      expect(within(popover).getByText("10")).toBeTruthy();
+      expect(within(popover).getByText("wall clock")).toBeTruthy();
+      expect(popover.textContent).not.toContain("triage-1");
+      expect(popover.textContent).not.toContain("Tools Provider");
+
+      fireEvent.keyDown(popover, { key: "Escape" });
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("dialog", { name: "Corpus identity" }),
+        ).toBeNull(),
+      );
+      await waitFor(() => expect(document.activeElement).toBe(button));
+      expect(button.getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("closes the identity popover on outside click with focus restored", async () => {
+      const button = await renderIdentityButton();
+      fireEvent.click(button);
+      screen.getByRole("dialog", { name: "Corpus identity" });
+
+      fireEvent.pointerDown(screen.getByTestId("log-explorer"));
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("dialog", { name: "Corpus identity" }),
+        ).toBeNull(),
+      );
+      await waitFor(() => expect(document.activeElement).toBe(button));
+    });
+  });
+
 });

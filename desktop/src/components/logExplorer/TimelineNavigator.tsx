@@ -40,6 +40,12 @@ import {
 import "./TimelineNavigator.css";
 
 const NAVIGATOR_BUCKETS = 96;
+/**
+ * Below this measured topline width the severity legend drops its words and
+ * keeps letter glyphs only, so the error-present chip and the interval label
+ * can never collide (#641).
+ */
+const LEGEND_WORDS_MIN_TOPLINE_WIDTH_PX = 1280;
 const MAX_SESSION_METRIC_BYTES = 8 * 1_048_576;
 const MAX_SESSION_METRIC_SERIES = 32;
 const MAX_SESSION_METRIC_POINTS = 250_000;
@@ -286,6 +292,29 @@ export function TimelineNavigator({
     summary.spanTo != null &&
     (metricRange.from < summary.spanFrom || metricRange.to > summary.spanTo);
   const [status, setStatus] = useState("Loading bounded timeline summary…");
+  const [legendDensity, setLegendDensity] = useState<"full" | "compact">(
+    "full",
+  );
+  const legendResizeObserver = useRef<ResizeObserver | null>(null);
+  const observeTopline = useCallback((node: HTMLDivElement | null) => {
+    legendResizeObserver.current?.disconnect();
+    legendResizeObserver.current = null;
+    if (!node) return;
+    const applyDensity = () => {
+      const width = node.getBoundingClientRect().width;
+      setLegendDensity(
+        width > 0 && width < LEGEND_WORDS_MIN_TOPLINE_WIDTH_PX
+          ? "compact"
+          : "full",
+      );
+    };
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(applyDensity);
+      observer.observe(node);
+      legendResizeObserver.current = observer;
+    }
+    applyDensity();
+  }, []);
   const toggleRef = useRef<HTMLButtonElement>(null);
   const metricInputRef = useRef<HTMLInputElement>(null);
   const metricRestoreRequest = useRef(0);
@@ -884,22 +913,18 @@ export function TimelineNavigator({
                 className="timeline-navigator__track"
                 data-testid="timeline-navigator-track"
               >
-                <div className="timeline-navigator__topline">
-                  <div
-                    className="timeline-navigator__legend"
-                    aria-label="Timeline severity legend"
+                <div
+                  className="timeline-navigator__topline"
+                  data-legend-density={legendDensity}
+                  ref={observeTopline}
+                >
+                  <span
+                    className="timeline-navigator__error-key"
+                    data-testid="timeline-error-present-key"
                   >
-                    {LEVELS.map(({ key, label, glyph }) => (
-                      <span key={key} data-level={key}>
-                        <b aria-hidden="true">{glyph}</b>
-                        {label}
-                      </span>
-                    ))}
-                    <span className="timeline-navigator__error-key">
-                      <b aria-hidden="true">◆</b>
-                      Error present
-                    </span>
-                  </div>
+                    <b aria-hidden="true">◆</b>
+                    Error present
+                  </span>
                   <span
                     className="timeline-navigator__current"
                     data-testid="timeline-current-summary"
@@ -910,6 +935,19 @@ export function TimelineNavigator({
                     )}{" "}
                     · {counts[previewIndex] ?? 0} events
                   </span>
+                  <div
+                    className="timeline-navigator__legend"
+                    aria-label="Timeline severity legend"
+                  >
+                    {LEVELS.map(({ key, label, glyph }) => (
+                      <span key={key} data-level={key} title={label}>
+                        <b aria-hidden="true">{glyph}</b>
+                        <span className="timeline-navigator__legend-word">
+                          {label}
+                        </span>
+                      </span>
+                    ))}
+                  </div>
                   <div className="timeline-navigator__actions">
                     <input
                       ref={metricInputRef}

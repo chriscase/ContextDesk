@@ -161,14 +161,24 @@ export function IconChevronDown({ className }: IconProps) {
   );
 }
 
-/** Log Explorer — event traces under a focused inspection lens. */
+/**
+ * Log Explorer — contained spark (v2, #641): three left-aligned lane traces
+ * with a lens lower-right whose center holds a 4-point spark. The spark
+ * sub-paths carry .icon-spark so CSS can keep them accent-colored wherever
+ * the glyph otherwise inherits plain text color.
+ */
 export function IconLogExplorer({ className, title }: IconProps) {
   return (
     <Svg className={className} title={title}>
-      <path d="M3 6h8M3 10h5M3 14h6M3 18h5" />
-      <circle cx="15" cy="12" r="5" />
-      <path d="m18.5 15.5 3 3" />
-      <path d="M12 12h1.5l1.25-2.25L16.5 14l1-2H18" />
+      <path d="M3 5h8M3 9.5h5.5M3 14h4.5" />
+      <circle cx="14.5" cy="13.5" r="5.5" />
+      <path d="m18.4 17.4 2.6 2.6" />
+      <path
+        className="icon-spark"
+        d="M14.5 10.4l0.82 2.28 2.28 0.82-2.28 0.82-0.82 2.28-0.82-2.28-2.28-0.82 2.28-0.82z"
+        fill="currentColor"
+        stroke="none"
+      />
     </Svg>
   );
 }

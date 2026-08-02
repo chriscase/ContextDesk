@@ -82,4 +82,8 @@ export const TAURI_IMPORT_BASELINE: readonly string[] = [
   "src/lib/dialogs.ts",
   "src/lib/host.ts",
   "src/lib/themeBridge.ts",
+  // Review decision (#641, 2026-08-02): cross-window UI-scale sync mirrors
+  // themeBridge (grandfathered above) — the Tauri event bus is the only
+  // cross-webview channel; the engine boundary does not cover window events.
+  "src/lib/uiScaleBridge.ts",
 ];

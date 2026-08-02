@@ -70,6 +70,14 @@
   --motion-fast: 120ms;
   --motion-med: 220ms;
 
+  /* Letterspacing for uppercase micro-labels (Explorer eyebrow, #641). */
+  --tracking-wide: 0.08em;
+  /* Explorer header row heights (#641): identity lockup row / toolbar row. */
+  --le-row-identity: 2.75rem;
+  --le-row-toolbar: 2.25rem;
+  /* Square chip behind family marks (titlebar brand, Explorer mark, #641). */
+  --icon-chip: 1.75rem;
+
   --composer-min-h: 44px;
   --composer-max-h: 220px;
   --titlebar-h: 40px;

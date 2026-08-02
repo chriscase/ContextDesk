@@ -56,7 +56,9 @@ export function Titlebar({
       onMouseDown={startWindowDrag}
     >
       <div className="titlebar__brand" data-tauri-drag-region>
-        <IconSpark title={productName} />
+        <span className="titlebar__brand-chip" data-tauri-drag-region>
+          <IconSpark title={productName} />
+        </span>
         <span data-tauri-drag-region>{productName}</span>
         <button
           type="button"

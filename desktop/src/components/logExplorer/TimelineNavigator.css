@@ -84,13 +84,19 @@
   padding-left: 4.25rem;
 }
 
+/*
+ * Topline reflow (#641): [error chip] [interval label] [spacer via
+ * margin-left:auto] [legend] [actions]. The interval label is the only
+ * shrinkable item, so the always-visible error chip can never collide
+ * with it.
+ */
 .timeline-navigator__legend {
   display: flex;
-  flex: 1;
-  justify-content: flex-start;
+  flex-grow: 0;
+  flex-shrink: 0;
   gap: 0.45rem;
   min-height: 0.8rem;
-  min-width: 0;
+  margin-left: auto;
   color: var(--fg-muted, #9aa0a6);
   font-size: 0.58rem;
 }
@@ -176,7 +182,10 @@
   min-width: 0;
 }
 
+/* The ONLY shrinkable topline item: it ellipsizes before anything overlaps. */
 .timeline-navigator__current {
+  flex-grow: 0;
+  flex-shrink: 1;
   min-width: 0;
   overflow: hidden;
   color: color-mix(in srgb, var(--fg, #e8eaed) 86%, var(--fg-muted, #9aa0a6));
@@ -186,13 +195,24 @@
   white-space: nowrap;
 }
 
-.timeline-navigator__legend span {
+.timeline-navigator__legend > span,
+.timeline-navigator__error-key {
   display: inline-flex;
   align-items: center;
   gap: 0.16rem;
+  white-space: nowrap;
 }
 
-.timeline-navigator__legend b {
+/* State honesty: the error chip never shrinks, wraps, or hides. */
+.timeline-navigator__error-key {
+  flex-grow: 0;
+  flex-shrink: 0;
+  color: var(--fg-muted, #9aa0a6);
+  font-size: 0.58rem;
+}
+
+.timeline-navigator__legend b,
+.timeline-navigator__error-key b {
   display: inline-grid;
   place-items: center;
   width: 0.8rem;
@@ -205,6 +225,16 @@
 .timeline-navigator__error-key b {
   border-color: var(--danger, #e06c75);
   color: var(--danger, #e06c75);
+}
+
+/*
+ * Compact legend below 1280px of measured topline width: letter glyphs and
+ * title attributes stay (the letters also appear in evidence rows, so no
+ * color-only information remains); only the words are dropped.
+ */
+.timeline-navigator__topline[data-legend-density="compact"]
+  .timeline-navigator__legend-word {
+  display: none;
 }
 
 .timeline-navigator__chart {
@@ -576,7 +606,10 @@
     align-items: flex-start;
   }
 
+  /* Narrow embeds keep the legend reachable by scrolling it, never the chip. */
   .timeline-navigator__legend {
+    flex-shrink: 1;
+    min-width: 0;
     overflow-x: auto;
   }
 }
