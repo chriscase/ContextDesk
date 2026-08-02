@@ -39,6 +39,12 @@ export type FieldType =
   | { kind: "enum"; values: readonly string[] }
   /** Any JSON value (e.g. `serde_json::Value` payloads). */
   | { kind: "json" }
+  /**
+   * A closed vocabulary too shaped for `enum` — an externally-tagged Rust enum
+   * whose variants mix bare strings and single-key objects. `json` would accept
+   * anything, which is exactly what a closed vocabulary must not do.
+   */
+  | { kind: "predicate"; name: string; test: (value: unknown) => boolean }
   | { kind: "array"; of: FieldType }
   /** Object with arbitrary string keys and uniformly typed values. */
   | { kind: "map"; value: FieldType }
@@ -98,6 +104,10 @@ export function checkValue(path: string, type: FieldType, v: unknown): void {
     case "json":
       if (v === undefined)
         throw new ContractViolation(path, "expected a JSON value, got undefined");
+      return;
+    case "predicate":
+      if (!type.test(v))
+        throw new ContractViolation(path, `expected ${type.name}, got ${describe(v)}`);
       return;
     case "array": {
       if (!Array.isArray(v))
@@ -170,6 +180,11 @@ export const f = {
   i64: { kind: "i64" } as FieldType,
   unit: { kind: "unitFraction" } as FieldType,
   json: { kind: "json" } as FieldType,
+  pred: (name: string, test: (value: unknown) => boolean): FieldType => ({
+    kind: "predicate",
+    name,
+    test,
+  }),
   en: (...values: string[]): FieldType => ({ kind: "enum", values }),
   arr: (of: FieldType): FieldType => ({ kind: "array", of }),
   map: (value: FieldType): FieldType => ({ kind: "map", value }),

@@ -1,0 +1,65 @@
+{
+  "formatId": "example.app-log",
+  "layout": [
+    "whitespace",
+    "level",
+    "whitespace",
+    {
+      "thread": {
+        "close": "]",
+        "open": "["
+      }
+    },
+    "whitespace",
+    {
+      "logger": {
+        "close": null,
+        "open": null
+      }
+    },
+    "whitespace",
+    {
+      "literal": "- "
+    },
+    "message"
+  ],
+  "minReaderVersion": 1,
+  "multiline": "continuation_until_next_timestamp",
+  "name": "Example app log",
+  "pathPatterns": [
+    "**/app.log*"
+  ],
+  "priority": 10,
+  "schemaId": "contextdesk.reviewed_format.v1",
+  "suggestedTimezone": "America/Chicago",
+  "timestamp": {
+    "tokens": [
+      "year4",
+      {
+        "literal": "-"
+      },
+      "month2",
+      {
+        "literal": "-"
+      },
+      "day2",
+      {
+        "literal": " "
+      },
+      "hour24",
+      {
+        "literal": ":"
+      },
+      "minute2",
+      {
+        "literal": ":"
+      },
+      "second2",
+      {
+        "literal": ","
+      },
+      "millis3"
+    ]
+  },
+  "version": 1
+}

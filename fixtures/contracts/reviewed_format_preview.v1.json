@@ -1,0 +1,39 @@
+{
+  "formatId": "example.app-log",
+  "formatValid": true,
+  "linesDropped": 0,
+  "linesInspected": 4,
+  "linesUnattributed": 0,
+  "needsTimezoneReview": true,
+  "provenance": "unresolved_local",
+  "recordsMatched": 2,
+  "samples": [
+    {
+      "continuation": [
+        "java.lang.IllegalStateException: boom",
+        "\tat com.example.Svc.run(Svc.java:42)"
+      ],
+      "fields": {
+        "level": "ERROR",
+        "logger": "com.example.Svc",
+        "message": "boom",
+        "provenance": "unresolved_local",
+        "thread": "pool-1-thread-2",
+        "timestampText": "2024-05-03 12:24:22,729"
+      },
+      "startLine": 1
+    },
+    {
+      "fields": {
+        "level": "INFO",
+        "logger": "com.example.App",
+        "message": "recovered",
+        "provenance": "unresolved_local",
+        "thread": "main",
+        "timestampText": "2024-05-03 12:24:23,000"
+      },
+      "startLine": 4
+    }
+  ],
+  "version": 1
+}

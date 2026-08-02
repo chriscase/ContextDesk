@@ -1730,6 +1730,190 @@ export const parseProfileMatchReport = parserFor<WireProfileMatchReport>(
   profileMatchReportShape,
 );
 
+/* ------------------------------------------------------------------ *
+ * Reviewed format profiles (contextdesk.reviewed_format.v1)
+ *
+ * Mirrors `cd_core::log_analysis::reviewed_format`. A reviewed format is a
+ * bounded grammar a user confirms for their own log shape; there is no user
+ * regex, only this closed token vocabulary.
+ * ------------------------------------------------------------------ */
+
+/** Timestamp grammar tokens. `literal` carries its own character. */
+export const TIME_TOKEN_SIMPLE = [
+  "year4",
+  "month2",
+  "day2",
+  "hour24",
+  "minute2",
+  "second2",
+  "millis3",
+  "micros6",
+  "offset",
+] as const;
+export type TimeTokenSimple = (typeof TIME_TOKEN_SIMPLE)[number];
+export type TimeToken = TimeTokenSimple | { literal: string };
+
+/** Field slots applied left to right after the timestamp. */
+export const FIELD_SLOT_SIMPLE = ["whitespace", "level", "message"] as const;
+export type FieldSlotSimple = (typeof FIELD_SLOT_SIMPLE)[number];
+export type FieldSlot =
+  | FieldSlotSimple
+  | { literal: string }
+  | { logger: { open: string | null; close: string | null } }
+  | { thread: { open: string | null; close: string | null } };
+
+/** How continuation lines are attributed. */
+export const MULTILINE_RULE = [
+  "none",
+  "continuation_until_next_timestamp",
+] as const;
+export type MultilineRule = (typeof MULTILINE_RULE)[number];
+
+/**
+ * Timestamp provenance. `unresolved_local` means calendar text only — a
+ * reviewed format never converts it; the reviewed-declaration path does.
+ */
+export const REVIEWED_TIMESTAMP_PROVENANCE = [
+  "explicit_wall_clock",
+  "unresolved_local",
+  "order_only",
+  "legacy_unknown",
+] as const;
+export type ReviewedTimestampProvenance =
+  (typeof REVIEWED_TIMESTAMP_PROVENANCE)[number];
+
+/** A simple token string, or `{ literal: "<char>" }`. */
+const isTimeToken = (value: unknown): boolean =>
+  (typeof value === "string" &&
+    (TIME_TOKEN_SIMPLE as readonly string[]).includes(value)) ||
+  (typeof value === "object" &&
+    value !== null &&
+    Object.keys(value).length === 1 &&
+    typeof (value as { literal?: unknown }).literal === "string");
+
+/** A simple slot string, or a single-key object for literal/logger/thread. */
+const isFieldSlot = (value: unknown): boolean => {
+  if (typeof value === "string") {
+    return (FIELD_SLOT_SIMPLE as readonly string[]).includes(value);
+  }
+  if (typeof value !== "object" || value === null) return false;
+  const keys = Object.keys(value);
+  if (keys.length !== 1) return false;
+  const [key] = keys;
+  const inner = (value as Record<string, unknown>)[key];
+  if (key === "literal") return typeof inner === "string";
+  if (key !== "logger" && key !== "thread") return false;
+  if (typeof inner !== "object" || inner === null) return false;
+  const delims = inner as { open?: unknown; close?: unknown };
+  const ok = (d: unknown) => d === null || typeof d === "string";
+  return ok(delims.open) && ok(delims.close);
+};
+
+const reviewedFormatShape: ObjectShape = {
+  schemaId: f.req(f.str),
+  minReaderVersion: f.req(f.u64),
+  formatId: f.req(f.str),
+  version: f.req(f.u64),
+  name: f.req(f.str),
+  pathPatterns: f.opt(f.arr(f.str)),
+  // The closed vocabulary is enforced here, not merely advertised: a token or
+  // slot outside it must fail at the boundary, because "a reviewed format is
+  // not code" is only true if the wire refuses anything the grammar cannot
+  // express. `f.json` accepted arbitrary values.
+  timestamp: f.req(f.obj({ tokens: f.req(f.arr(f.pred("timeToken", isTimeToken))) })),
+  layout: f.req(f.arr(f.pred("fieldSlot", isFieldSlot))),
+  multiline: f.req(f.en(...MULTILINE_RULE)),
+  priority: f.req(f.u64),
+  suggestedTimezone: f.opt(f.str),
+};
+
+const reviewedFormatPreviewShape: ObjectShape = {
+  formatId: f.req(f.str),
+  version: f.req(f.u64),
+  linesInspected: f.req(f.u64),
+  recordsMatched: f.req(f.u64),
+  linesUnattributed: f.req(f.u64),
+  linesDropped: f.req(f.u64),
+  formatValid: f.req(f.bool),
+  provenance: f.req(f.en(...REVIEWED_TIMESTAMP_PROVENANCE)),
+  needsTimezoneReview: f.req(f.bool),
+  samples: f.opt(
+    f.arr(
+      f.obj({
+        fields: f.req(
+          f.obj({
+            timestampText: f.req(f.str),
+            provenance: f.req(f.en(...REVIEWED_TIMESTAMP_PROVENANCE)),
+            level: f.opt(f.str),
+            logger: f.opt(f.str),
+            thread: f.opt(f.str),
+            message: f.req(f.str),
+          }),
+        ),
+        continuation: f.opt(f.arr(f.str)),
+        startLine: f.req(f.u64),
+        truncated: f.opt(f.bool),
+        linesDropped: f.opt(f.u64),
+      }),
+    ),
+  ),
+};
+
+/** A bounded, user-confirmable line grammar. */
+export type WireReviewedFormat = {
+  schemaId: string;
+  minReaderVersion: number;
+  formatId: string;
+  version: number;
+  name: string;
+  pathPatterns?: string[];
+  timestamp: { tokens: TimeToken[] };
+  layout: FieldSlot[];
+  multiline: MultilineRule;
+  priority: number;
+  /** Inert. Recorded, never applied. */
+  suggestedTimezone?: string;
+};
+
+/** What a grammar would do to a sample. Nothing is applied. */
+export type WireReviewedFormatPreview = {
+  formatId: string;
+  version: number;
+  linesInspected: number;
+  recordsMatched: number;
+  linesUnattributed: number;
+  /** Continuation lines dropped at the cap, across ALL records. */
+  linesDropped: number;
+  /** False when the format failed validation. */
+  formatValid: boolean;
+  provenance: ReviewedTimestampProvenance;
+  /** True when a reviewed IANA declaration is still required. */
+  needsTimezoneReview: boolean;
+  samples?: {
+    fields: {
+      timestampText: string;
+      provenance: ReviewedTimestampProvenance;
+      level?: string;
+      logger?: string;
+      thread?: string;
+      message: string;
+    };
+    continuation?: string[];
+    startLine: number;
+    truncated?: boolean;
+    linesDropped?: number;
+  }[];
+};
+
+export const parseReviewedFormat = parserFor<WireReviewedFormat>(
+  "reviewedFormat",
+  reviewedFormatShape,
+);
+export const parseReviewedFormatPreview = parserFor<WireReviewedFormatPreview>(
+  "reviewedFormatPreview",
+  reviewedFormatPreviewShape,
+);
+
 /**
  * Committed fixture manifest: exact file set under `fixtures/contracts/` and
  * the strict parser proving each. Tests fail when the directory and this
@@ -1752,6 +1936,8 @@ export const FIXTURE_PARSERS: Readonly<
   "investigation_report.v1.json": parseInvestigationReport,
   "resolved_bookmark.v1.json": parseResolvedBookmarks,
   "process_progress.v1.json": parseProcessProgressStream,
+  "reviewed_format.v1.json": parseReviewedFormat,
+  "reviewed_format_preview.v1.json": parseReviewedFormatPreview,
   "import_preview_report.v1.json": parseImportPreviewReport,
   "import_preview_plan.v1.json": parseImportPreviewPlan,
   "import_profile.v1.json": parseImportProfile,

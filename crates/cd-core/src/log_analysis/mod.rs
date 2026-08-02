@@ -28,6 +28,7 @@ pub mod parse;
 pub mod query;
 pub mod reanalyze;
 pub mod redact_log;
+pub mod reviewed_format;
 pub mod search;
 pub mod store;
 pub mod suppression;
