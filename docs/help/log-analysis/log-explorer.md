@@ -28,6 +28,14 @@ import/export, and open investigation. It is not a million-row browser.
 2. Choose **Open Explorer…** (new window) or **Open in app** (full Logs pane).
 3. If the multi-window path fails, ContextDesk falls back to the in-app explorer.
 
+In-app, a slim chrome row above the Explorer keeps **Close Explorer** and
+**Open in window…** visible and keyboard reachable at every size. The Explorer
+itself sizes to the Logs pane — not the window — so its narrow drawer layout
+activates exactly when the pane is actually narrow, and in tighter panes the
+Filters and Investigation rails start as their labeled collapsed strips so
+event rows keep their full readable width (one click reopens either rail,
+state intact).
+
 ## What you can do
 
 | Feature                | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                |

@@ -60,6 +60,22 @@ A **Log Investigation Workspace**: multi-window, responsively dense, AI-assisted
 - Responsive breakpoints (narrow / normal / ultrawide) + **user-resizable splitters** + density (comfortable / compact).
 - No artificial max content width that wastes ultrawide glass.
 
+### In-app embed — same Explorer, pane-truthful (#851)
+
+- **Open in app** (and the multi-window failure fallback, #503) runs the SAME
+  Explorer inside the Logs pane under a slim chrome row (identity ·
+  **Open in window…** · **Close Explorer** — in flow, keyboard reachable,
+  never floated over the Explorer's toolbar).
+- The embedded root sizes to the **pane**, not the window
+  (`.log-pane--explorer-embed .log-explorer` in `log-explorer.css`), so the
+  container breakpoints classify the true pane width and the §4 narrow drawer
+  workspace activates in-app exactly when the pane is narrow.
+- Tight-normal posture: below the width where fully-open rails cannot leave
+  one minimum-width evidence lane (220 + 6 + 420 + 6 + 300 px), both rails
+  START as their 42px strips; the first measured width decides once, and the
+  user's toggles own the state afterwards. Never simultaneous compression of
+  every rail.
+
 ## 4. Layout
 
 ### Ultrawide default

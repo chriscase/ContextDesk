@@ -607,6 +607,65 @@
   gap: var(--space-2);
 }
 
+/* In-app Explorer embed (#851). The pane, not the window, is the Explorer's
+   world here: a bounded chrome row keeps identity and the Close / open-in-
+   window actions permanently reachable and out of the Explorer's own toolbar,
+   and the remaining pane area is handed to the Explorer, whose container-
+   driven breakpoints then see the true pane width. */
+.log-pane--explorer-embed {
+  position: relative;
+  /* Fill the pane cell outright: the base .log-pane min-height:0 (declared
+     later in this file) beats .pane--fill's min-height:100% on specificity
+     order, so the embed states its height explicitly — the Explorer below
+     then stretches to the true pane height. */
+  height: 100%;
+  gap: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.log-pane__explorer-chrome {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-elevated);
+}
+
+.log-pane__explorer-chrome-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+}
+
+.log-pane__explorer-chrome-mode {
+  margin-left: var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.log-pane__explorer-chrome-note {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.log-pane__explorer-chrome-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 .log-pane__chrome {
   display: grid;
   grid-template-columns: minmax(7rem, auto) minmax(0, 1fr);

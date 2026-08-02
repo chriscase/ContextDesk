@@ -27,9 +27,10 @@
 import "./support/styles";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { page } from "vitest/browser";
-import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import * as host from "../src/lib/host";
 import { LogExplorer } from "../src/components/logExplorer/LogExplorer";
+import { LogPane } from "../src/components/panes/LogPane";
 import {
   applyBaselineLogExplorerHostMocks,
   defaultEventPage,
@@ -41,6 +42,7 @@ import {
   expectNoAxeViolations,
   expectNoHorizontalPageOverflow,
   expectWithinViewport,
+  nextPaintedFrame,
   renderVisual,
   resetVisualState,
   setViewport,
@@ -812,5 +814,221 @@ describe("Log Explorer visual acceptance", () => {
         "color-contrast",
       ],
     });
+  });
+});
+
+/**
+ * In-app embed (#851) — the "Open in app" Explorer inside the Logs pane.
+ *
+ * Production geometry, reproduced faithfully: the viewport is the real WINDOW
+ * size and the pane cell is the workspace grid cell the shell actually gives
+ * LogPane (window minus the 200px sidebar — 48px when the <=760px media query
+ * collapses it — and minus titlebar + pane tabs, layout.css:211/506). The
+ * Explorer must live inside that cell: its container breakpoints must see the
+ * pane width (not the window), nothing may clip at the pane edge, and Close
+ * Explorer must stay visible, reachable, and clear of the Explorer's own
+ * toolbar at every size.
+ */
+async function renderInAppEmbed(
+  cellWidth: number,
+  cellHeight: number,
+): Promise<{ cell: HTMLElement; explorer: HTMLElement }> {
+  vi.mocked(host.hostListLogCorpora).mockResolvedValue([
+    {
+      id: "c1",
+      name: "fixture",
+      eventCount: 12,
+      templateCount: 3,
+      engine: "duckdb",
+      createdAt: 1_700_000_000,
+      sourceLabel: "c1.log",
+      stats: null,
+      topTemplates: [],
+      embedding: {
+        state: "keyword_only",
+        modelId: null,
+        embeddedTemplates: 0,
+        totalTemplates: 3,
+        reason: "local_model_unavailable",
+        updatedAt: 1,
+      },
+    },
+  ]);
+  vi.mocked(host.hostListenProcessProgress).mockResolvedValue(() => undefined);
+  vi.mocked(host.hostGetFailedLogIngestDiagnostic).mockResolvedValue(null);
+
+  const stage = visualStage();
+  const cell = document.createElement("div");
+  cell.className = "pane-panel";
+  cell.setAttribute("data-testid", "embed-pane-cell");
+  cell.style.width = `${cellWidth}px`;
+  cell.style.height = `${cellHeight}px`;
+  stage.appendChild(cell);
+  render(<LogPane />, { container: cell });
+
+  // Select the corpus row first — the Explorer entry points require an
+  // active corpus (same flow the unit suite drives, LogPane.test.tsx).
+  const corpusRow = await screen.findByRole(
+    "button",
+    { name: /^fixture(\s|$)/ },
+    { timeout: 8000 },
+  );
+  fireEvent.click(corpusRow);
+  const openInApp = screen.getByTestId(
+    "open-log-explorer-in-app",
+  ) as HTMLButtonElement;
+  await waitFor(() => expect(openInApp.disabled).toBe(false));
+  fireEvent.click(openInApp);
+  await screen.findByText(/auth failure/, undefined, { timeout: 8000 });
+  const explorer = screen.getByTestId("log-explorer");
+  return { cell, explorer };
+}
+
+/** Rect intersection with a 1px tolerance (copies the suite's edge idiom). */
+function rectsOverlap(a: DOMRect, b: DOMRect): boolean {
+  return (
+    a.left < b.right - 1 &&
+    b.left < a.right - 1 &&
+    a.top < b.bottom - 1 &&
+    b.top < a.bottom - 1
+  );
+}
+
+describe("Log Explorer in-app embed (#851)", () => {
+  beforeEach(async () => {
+    await resetVisualState();
+    applyBaselineLogExplorerHostMocks();
+  });
+
+  it("owner reproduction 1100x760: pane-truthful geometry, clear Close, no clipping", async () => {
+    // Exact owner window; default 200px sidebar + titlebar/tab rows leave a
+    // 900x680 pane cell (layout.css:211, App chrome rows).
+    await page.viewport(1100, 760);
+    const { cell, explorer } = await renderInAppEmbed(900, 680);
+
+    // The Explorer sizes to the PANE, never the window: at a 900px cell the
+    // root must not extend past the cell (the pre-repair 100vw root rendered
+    // 1100px wide here and .pane-panel clipped the right 200px — the chat
+    // rail and the toolbar's right end).
+    const cellRect = cell.getBoundingClientRect();
+    const explorerRect = explorer.getBoundingClientRect();
+    expect(explorerRect.width).toBeLessThanOrEqual(cellRect.width + 1);
+    expect(explorerRect.right).toBeLessThanOrEqual(cellRect.right + 1);
+    expect(explorerRect.bottom).toBeLessThanOrEqual(cellRect.bottom + 1);
+
+    // Breakpoints classify the pane width (900 => normal), not the window.
+    expect(explorer.getAttribute("data-breakpoint")).toBe("normal");
+
+    // Tight-normal posture: below the width where open rails leave a full
+    // minimum lane (220+6+420+6+300), both rails START as their 42px strips —
+    // the lane keeps its readable hierarchy instead of every rail being
+    // compressed at once. One click reopens either rail, state intact. The
+    // posture lands via an inline-grid flip on an existing element, so wait a
+    // painted frame before reading geometry (harness stale-computed-style
+    // rule).
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("log-explorer-filters").getAttribute(
+          "data-collapsed",
+        ),
+      ).toBe("true"),
+    );
+    await nextPaintedFrame();
+    const lanes = screen.getByTestId("log-explorer-lanes");
+    await waitFor(() =>
+      expect(lanes.getBoundingClientRect().width).toBeGreaterThanOrEqual(420),
+    );
+
+    // Close Explorer: visible, inside the pane, keyboard reachable, and clear
+    // of every Explorer toolbar control (the pre-repair floating button sat
+    // on top of the toolbar's right end).
+    const close = screen.getByTestId("close-in-app-explorer");
+    const closeRect = close.getBoundingClientRect();
+    expect(closeRect.width).toBeGreaterThan(0);
+    expect(closeRect.right).toBeLessThanOrEqual(cellRect.right + 1);
+    close.focus();
+    expect(document.activeElement).toBe(close);
+    const toolbar = explorer.querySelector(".log-explorer__toolbar");
+    for (const control of Array.from(toolbar?.children ?? [])) {
+      expect(
+        rectsOverlap(closeRect, control.getBoundingClientRect()),
+      ).toBe(false);
+    }
+
+    await expectNoHorizontalPageOverflow();
+    await applyTheme("dark");
+    await expect(
+      page.elementLocator(cell),
+    ).toMatchScreenshot("log-explorer-embed-1100x760-dark");
+    await applyTheme("light");
+    await expect(
+      page.elementLocator(cell),
+    ).toMatchScreenshot("log-explorer-embed-1100x760-light");
+    await applyTheme("dark");
+  });
+
+  it("640x800 window: the pane cell drives the narrow drawer workspace", async () => {
+    // <=760px windows overlay the sidebar at 48px (layout.css:506-517).
+    await page.viewport(640, 800);
+    const { cell, explorer } = await renderInAppEmbed(592, 720);
+
+    await waitFor(() =>
+      expect(explorer.getAttribute("data-breakpoint")).toBe("narrow"),
+    );
+    const explorerRect = explorer.getBoundingClientRect();
+    const cellRect = cell.getBoundingClientRect();
+    expect(explorerRect.right).toBeLessThanOrEqual(cellRect.right + 1);
+    const close = screen.getByTestId("close-in-app-explorer");
+    expect(close.getBoundingClientRect().width).toBeGreaterThan(0);
+    await expectNoHorizontalPageOverflow();
+    await expect(
+      page.elementLocator(cell),
+    ).toMatchScreenshot("log-explorer-embed-640x800-dark");
+  });
+
+  it("wide 1600x950 opens rails, and resizing down to the owner size never clips", async () => {
+    await page.viewport(1600, 950);
+    const { cell, explorer } = await renderInAppEmbed(1400, 870);
+
+    // Roomy pane: rails open by default, chat rail fully inside the cell.
+    expect(explorer.getAttribute("data-breakpoint")).toBe("normal");
+    expect(explorer.querySelector(".log-explorer__filters-reopen")).toBeNull();
+    const chat = explorer.querySelector(".log-explorer__chat");
+    expect(chat).toBeTruthy();
+    expect(
+      chat!.getBoundingClientRect().right,
+    ).toBeLessThanOrEqual(cell.getBoundingClientRect().right + 1);
+    await expect(
+      page.elementLocator(cell),
+    ).toMatchScreenshot("log-explorer-embed-1400-wide-dark");
+
+    // Fullscreen -> resize-down: shrink the window and the pane cell to the
+    // owner geometry. The Explorer tracks the pane and crossing into the
+    // tight-normal band returns both untouched default rails to compact strips,
+    // preserving the evidence lane's declared minimum. A user may reopen a
+    // rail after the resize settles.
+    await page.viewport(1100, 760);
+    cell.style.width = "900px";
+    cell.style.height = "680px";
+    await waitFor(() => {
+      const r = explorer.getBoundingClientRect();
+      expect(r.width).toBeLessThanOrEqual(
+        cell.getBoundingClientRect().width + 1,
+      );
+    });
+    expect(explorer.getAttribute("data-breakpoint")).toBe("normal");
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("log-explorer-filters").getAttribute(
+          "data-collapsed",
+        ),
+      ).toBe("true"),
+    );
+    await nextPaintedFrame();
+    expect(explorer.querySelector(".log-explorer__filters-reopen")).toBeTruthy();
+    expect(
+      screen.getByTestId("log-explorer-lanes").getBoundingClientRect().width,
+    ).toBeGreaterThanOrEqual(420);
+    await expectNoHorizontalPageOverflow();
   });
 });

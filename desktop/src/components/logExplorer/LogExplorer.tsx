@@ -218,6 +218,14 @@ const MIN_EVIDENCE_LANE_WIDTH_PX = 420;
 const SPLITTER_WIDTH_PX = 6;
 const COLLAPSED_FILTER_WIDTH_PX = 42;
 const COLLAPSED_CHAT_WIDTH_PX = 42;
+/**
+ * #851: below this width, fully-open rails cannot leave even one
+ * minimum-width evidence lane (220 filters + 6 + 420 lane + 6 + 300 chat),
+ * so the rails START as their 42px strips there — never compressing the
+ * evidence below its own declared minimum. A user toggle always wins; this
+ * only decides the first-measured posture.
+ */
+const TIGHT_RAIL_DEFAULT_WIDTH_PX = 952;
 const EVENT_COLUMNS = [
   { label: "Time", index: 0 as const },
   { label: "Lvl", index: 1 as const },
@@ -1229,6 +1237,12 @@ export function LogExplorer({ corpusId }: Props) {
   const suppressTemplateTriggerRef = useRef<HTMLButtonElement>(null);
   const chatDraftRequestIdRef = useRef(0);
   const previousFiltersCollapsedRef = useRef(filtersCollapsed);
+  /** One-shot: the first real width decides the rails' starting posture. */
+  const railDefaultsResolvedRef = useRef(false);
+  /** Tracks crossings into the tight-normal band after the first measurement. */
+  const previousRailTightRef = useRef<boolean | null>(null);
+  /** Consumed by the collapse focus effect so the posture default never steals focus. */
+  const railAutoDefaultRef = useRef(false);
   const dragRef = useRef<"filters" | "chat" | null>(null);
   const facetRequestRef = useRef(0);
   const facetAfterPaintFrameRef = useRef<number | null>(null);
@@ -1538,6 +1552,12 @@ export function LogExplorer({ corpusId }: Props) {
     const previous = previousFiltersCollapsedRef.current;
     previousFiltersCollapsedRef.current = filtersCollapsed;
     if (breakpoint === "narrow" || previous === filtersCollapsed) return;
+    // The #851 first-measure posture is not a user action — moving focus for
+    // it would hijack the keyboard on mount.
+    if (railAutoDefaultRef.current) {
+      railAutoDefaultRef.current = false;
+      return;
+    }
     queueMicrotask(() => {
       if (filtersCollapsed) filtersReopenRef.current?.focus();
       else filtersCollapseRef.current?.focus();
@@ -1591,7 +1611,7 @@ export function LogExplorer({ corpusId }: Props) {
   useEffect(() => {
     const el = rootRef.current;
     if (!el) return;
-    const applyWidth = (width: number) => {
+    const applyWidth = (width: number, measured: boolean) => {
       setExplorerWidth(width);
       const bp = classifyBreakpoint(width);
       setBreakpoint(bp);
@@ -1599,15 +1619,43 @@ export function LogExplorer({ corpusId }: Props) {
       if (bp === "narrow") {
         setTimeLinkMode("independent");
       }
+      // #851: a MEASURED width decides the rails' safe posture — never the
+      // window-width fallback, which is exactly the poisoned value an embedded
+      // Explorer must ignore. Entering the tight-normal band collapses both
+      // rails so a fullscreen-to-window resize cannot squeeze the evidence
+      // below its declared minimum. Once the resize settles, a user may reopen
+      // either rail without this effect immediately undoing that choice.
+      if (measured && !railDefaultsResolvedRef.current && width > 0) {
+        railDefaultsResolvedRef.current = true;
+        const tight = bp !== "narrow" && width < TIGHT_RAIL_DEFAULT_WIDTH_PX;
+        previousRailTightRef.current = tight;
+        if (tight) {
+          // Suppress focus only when this transition actually changes the
+          // filter rail. If it was already collapsed by the user, leaving the
+          // flag armed would swallow focus when they later reopen it.
+          railAutoDefaultRef.current = !previousFiltersCollapsedRef.current;
+          setFiltersCollapsed(true);
+          setChatCollapsed(true);
+        }
+      } else if (measured && width > 0) {
+        const tight = bp !== "narrow" && width < TIGHT_RAIL_DEFAULT_WIDTH_PX;
+        const enteredTight = tight && previousRailTightRef.current === false;
+        previousRailTightRef.current = tight;
+        if (enteredTight) {
+          railAutoDefaultRef.current = !previousFiltersCollapsedRef.current;
+          setFiltersCollapsed(true);
+          setChatCollapsed(true);
+        }
+      }
     };
     const ro = new ResizeObserver((entries) => {
-      const w = entries[0]?.contentRect.width ?? window.innerWidth;
-      applyWidth(w);
+      const rect = entries[0]?.contentRect;
+      applyWidth(rect?.width ?? window.innerWidth, rect != null);
     });
     const onWindowResize = () =>
-      applyWidth(el.clientWidth || window.innerWidth);
+      applyWidth(el.clientWidth || window.innerWidth, el.clientWidth > 0);
     ro.observe(el);
-    applyWidth(el.clientWidth || window.innerWidth);
+    applyWidth(el.clientWidth || window.innerWidth, el.clientWidth > 0);
     window.addEventListener("resize", onWindowResize);
     return () => {
       ro.disconnect();

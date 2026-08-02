@@ -16,6 +16,7 @@ import type {
   LogIngestReportDto,
   LogTemplateRowDto,
 } from "../../lib/host";
+import { hostOpenLogExplorer } from "../../lib/host";
 import {
   renderLogDiagnosticMarkdown,
   type LogDiagnosticManifest,
@@ -49,6 +50,15 @@ const hostMocks = vi.hoisted(() => ({
   previewTimezone: vi.fn(),
   applyTimezone: vi.fn(),
   clearTimezone: vi.fn(),
+}));
+
+// #851: the in-app embed tests exercise LogPane's chrome, not the Explorer
+// internals (covered by LogExplorer.test.tsx and the visual suite) — the
+// full Explorer cannot mount against this file's partial host mock anyway.
+vi.mock("../logExplorer/LogExplorer", () => ({
+  LogExplorer: ({ corpusId }: { corpusId: string }) => (
+    <div data-testid="stub-log-explorer">{corpusId}</div>
+  ),
 }));
 
 vi.mock("../../lib/host", () => ({
@@ -2664,5 +2674,68 @@ describe("LogPane", () => {
         ([corpusId]) => corpusId === first.id,
       ),
     ).toHaveLength(1);
+  });
+});
+
+describe("in-app Explorer embed chrome (#851)", () => {
+  async function enterEmbed() {
+    hostMocks.listCorpora.mockResolvedValue([corpus("c-embed", "Embed corpus")]);
+    render(<LogPane />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: corpusButtonName("Embed corpus"),
+      }),
+    );
+    const open = (await screen.findByTestId(
+      "open-log-explorer-in-app",
+    )) as HTMLButtonElement;
+    await waitFor(() => expect(open.disabled).toBe(false));
+    fireEvent.click(open);
+    await screen.findByTestId("log-pane-in-app-explorer");
+  }
+
+  it("opens with a bounded chrome row — reachable Close, no floating overlay", async () => {
+    await enterEmbed();
+    expect(screen.getByTestId("stub-log-explorer").textContent).toBe("c-embed");
+
+    const chrome = screen.getByRole("group", {
+      name: "In-app Explorer controls",
+    });
+    const close = within(chrome).getByRole("button", {
+      name: "Close Explorer",
+    });
+    // In-flow chrome button: keyboard reachable, never absolutely floated
+    // over the Explorer's own toolbar (the pre-repair inline-styled overlay).
+    expect(close.getAttribute("style")).toBeNull();
+    close.focus();
+    expect(document.activeElement).toBe(close);
+
+    fireEvent.click(close);
+    await waitFor(() =>
+      expect(screen.queryByTestId("log-pane-in-app-explorer")).toBeNull(),
+    );
+    expect(await screen.findByTestId("open-log-explorer-in-app")).toBeTruthy();
+  });
+
+  it("moves to a dedicated window on success and closes the embed", async () => {
+    vi.mocked(hostOpenLogExplorer).mockResolvedValue(undefined as never);
+    await enterEmbed();
+    fireEvent.click(screen.getByTestId("embed-open-window"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("log-pane-in-app-explorer")).toBeNull(),
+    );
+    expect(hostOpenLogExplorer).toHaveBeenCalledWith("c-embed");
+    expect(screen.getByText("Opened Log Explorer window")).toBeTruthy();
+  });
+
+  it("stays in the fallback embed when the window open fails, and says why", async () => {
+    vi.mocked(hostOpenLogExplorer).mockRejectedValue(new Error("no display"));
+    await enterEmbed();
+    fireEvent.click(screen.getByTestId("embed-open-window"));
+    const note = await screen.findByTestId("embed-note");
+    expect(note.getAttribute("role")).toBe("status");
+    expect(note.textContent).toContain("Multi-window open failed");
+    expect(screen.getByTestId("log-pane-in-app-explorer")).toBeTruthy();
+    expect(screen.getByTestId("stub-log-explorer")).toBeTruthy();
   });
 });

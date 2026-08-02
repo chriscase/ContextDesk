@@ -177,6 +177,8 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     useState<FailedLogIngestDiagnosticDto | null>(null);
   /** In-app Explorer escape hatch when multi-window fails (#503). */
   const [inAppExplorerId, setInAppExplorerId] = useState<string | null>(null);
+  /** Chrome-row status for the embed (window-open failures stay visible). */
+  const [embedNote, setEmbedNote] = useState<string | null>(null);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [importMenuTriggerKey, setImportMenuTriggerKey] = useState<
     "toolbar" | "empty" | null
@@ -1081,22 +1083,69 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   }
 
   if (inAppExplorerId) {
+    // #851: a bounded chrome row (identity + always-reachable actions) above
+    // the Explorer, never an overlay floating on its toolbar. The Explorer
+    // itself fills the remaining pane area, so its container breakpoints see
+    // the true pane width and the narrow drawer composition can activate.
+    const embedId = inAppExplorerId;
     return (
       <div
         className="log-pane pane--fill log-pane--explorer-embed"
         data-testid="log-pane-in-app-explorer"
-        style={{ position: "relative", minHeight: "100%" }}
       >
-        <button
-          type="button"
-          className="btn btn--ghost"
-          style={{ position: "absolute", top: 8, right: 8, zIndex: 20 }}
-          data-testid="close-in-app-explorer"
-          onClick={() => setInAppExplorerId(null)}
-        >
-          Close Explorer
-        </button>
-        <LogExplorer corpusId={inAppExplorerId} />
+        <div className="log-pane__explorer-chrome">
+          <span className="log-pane__explorer-chrome-title">
+            Log Explorer
+            <span className="log-pane__explorer-chrome-mode">in-app</span>
+          </span>
+          {embedNote ? (
+            <span
+              className="log-pane__explorer-chrome-note"
+              role="status"
+              data-testid="embed-note"
+            >
+              {embedNote}
+            </span>
+          ) : null}
+          <div
+            className="log-pane__explorer-chrome-actions"
+            role="group"
+            aria-label="In-app Explorer controls"
+          >
+            <button
+              type="button"
+              className="btn btn--ghost"
+              data-testid="embed-open-window"
+              title="Move this Explorer to its own window"
+              onClick={() => {
+                setEmbedNote(null);
+                void hostOpenLogExplorer(embedId)
+                  .then(() => {
+                    setInAppExplorerId(null);
+                    setNote("Opened Log Explorer window");
+                  })
+                  .catch((e) => {
+                    // The embed IS the fallback surface — stay in it and say why.
+                    setEmbedNote(`Multi-window open failed (${String(e)})`);
+                  });
+              }}
+            >
+              Open in window…
+            </button>
+            <button
+              type="button"
+              className="btn btn--ghost"
+              data-testid="close-in-app-explorer"
+              onClick={() => {
+                setEmbedNote(null);
+                setInAppExplorerId(null);
+              }}
+            >
+              Close Explorer
+            </button>
+          </div>
+        </div>
+        <LogExplorer corpusId={embedId} />
       </div>
     );
   }
