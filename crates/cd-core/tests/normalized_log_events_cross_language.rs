@@ -90,6 +90,35 @@ fn the_python_reference_agrees_with_the_rust_validator() {
 }
 
 #[test]
+fn the_python_reference_uses_the_rust_timezone_registry() {
+    if !interpreter_available("python3") {
+        eprintln!("skipping timezone registry parity: python3 is unavailable");
+        return;
+    }
+    let root = repo_root();
+    let output = Command::new("python3")
+        .arg(root.join("examples/normalized-log-producers/python/produce_and_validate.py"))
+        .arg("--list-timezones")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .expect("run python timezone registry");
+    assert!(
+        output.status.success(),
+        "python timezone registry failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("timezone registry is UTF-8");
+    let mut lines = stdout.lines();
+    assert_eq!(lines.next(), Some(chrono_tz::IANA_TZDB_VERSION));
+    let python_zones: std::collections::BTreeSet<_> = lines.map(str::to_owned).collect();
+    let rust_zones: std::collections::BTreeSet<_> = chrono_tz::TZ_VARIANTS
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(python_zones, rust_zones);
+}
+
+#[test]
 fn the_node_reference_agrees_with_the_rust_validator() {
     run_conformance(
         "node",
