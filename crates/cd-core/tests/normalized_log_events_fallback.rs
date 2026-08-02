@@ -256,3 +256,60 @@ fn a_producer_resolved_event_is_visibly_marked_for_any_reader() {
         "the original local text must survive alongside the computed instant"
     );
 }
+
+#[test]
+fn every_valid_fixture_also_degrades_to_order_only_for_an_old_reader() {
+    // The universal claim ("a conforming file imports order-only") was
+    // previously proven from ONE hand-built event shape, which cannot cover
+    // the corpus. Run the whole valid corpus through the real ingest path.
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/normalized-log-events/valid");
+    let mut checked = 0usize;
+
+    for entry in std::fs::read_dir(&root).expect("read valid fixtures") {
+        let path = entry.expect("entry").path();
+        if path.extension().is_none_or(|ext| ext != "jsonl") {
+            continue;
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staged = dir.path().join("normalized.jsonl");
+        std::fs::copy(&path, &staged).expect("copy");
+
+        let cache = tempfile::tempdir().expect("cache");
+        let report = cd_core::log_analysis::ingest::ingest_path(
+            cache.path(),
+            &staged,
+            "corpus-fallback",
+            None,
+            "test-model",
+        )
+        .expect("an old reader must be able to import every conforming file");
+
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        assert_eq!(
+            report.confidence.corpus_time_quality,
+            TimeQuality::OrderOnly,
+            "{name} must degrade to order-only for a reader that predates this contract"
+        );
+
+        // And no producer instant may leak into the corpus span. Every fixture
+        // uses 2026 timestamps; an order-only ordinal cannot reach 2001.
+        const EPOCH_2001: i64 = 978_307_200;
+        for value in [report.stats.ts_min, report.stats.ts_max]
+            .into_iter()
+            .flatten()
+        {
+            assert!(
+                value < EPOCH_2001,
+                "{name} leaked a wall-clock instant to an old reader: {value}"
+            );
+        }
+        checked += 1;
+    }
+
+    assert!(
+        checked >= 9,
+        "expected the whole valid corpus, saw {checked}"
+    );
+}

@@ -36,9 +36,14 @@ in executable form.
 | Node | `examples/normalized-log-producers/node/produce-and-validate.mjs` | `node produce-and-validate.mjs --emit` |
 | Python | `examples/normalized-log-producers/python/produce_and_validate.py` | `python3 produce_and_validate.py --emit` |
 
-All three emit byte-identical canonical output and validate the same 50-fixture
-corpus. That is enforced by `normalized_log_events_cross_language.rs`, in both
-directions: what each accepts, and what each emits.
+All three validate the same 54-fixture corpus, and each emits a file the Rust
+validator accepts. That is what `normalized_log_events_cross_language.rs`
+enforces, in both directions.
+
+**Not yet enforced:** that the three emit *byte-identical* output. The test
+checks that each producer's file validates, not that the bytes match. Run them
+through `canonicalize` and compare if you need that guarantee today; a test
+that compares emitted bytes is residual work.
 
 ```jsonl
 {"minReaderVersion":1,"producer":{"name":"my-exporter","version":"1.0.0"},"schemaId":"contextdesk.normalized_log_events.v1","sourceId":"checkout-api"}
@@ -100,7 +105,13 @@ the cross-field time rules.
 | `minReaderVersion` above the reader | refused whole, never partly understood |
 | Unrecognized `schemaId` | refused; not best-effort parsed |
 | New `schemaId` major | new file format; v1 readers refuse it |
-| A build with no knowledge of this format | reads the file as plain JSON lines, **order-only**, upgrading no producer claim |
+| A build with no knowledge of this format | reads the file as plain JSON lines, **order-only** |
+
+The last row holds *because* the reserved-key rule above it exists. A
+conforming file carries no key the old reader treats as a timestamp, so it has
+nothing to upgrade from. Those two rows are one mechanism, not two independent
+guarantees — remove the reserved-key rule and the order-only row stops being
+true.
 
 ### Bundle carriage
 

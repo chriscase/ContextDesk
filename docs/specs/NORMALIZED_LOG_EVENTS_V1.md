@@ -127,8 +127,15 @@ into the event object produces it naturally. The validator therefore checks the
 **raw line**, because a typed deserializer drops unknown fields before any check
 could see them.
 
-`time` is not reserved: it is this contract's own field and is always an object,
-which the generic parser decodes as unusable rather than as an instant.
+`time` **is** in the reserved list and is nonetheless legal here. The rule is
+not "this key is absent" but "the old reader would derive nothing from it": the
+reader's scan yields *unusable* for an object value, and `time` is always an
+object. The guard keys off what the reader would actually derive.
+
+The scan is **textual over the whole line**, not a top-level key lookup, so a
+nested `{"attributes":{"ts":…}}` is caught too — a top-level-only guard was
+weaker than the behaviour it guards against, and a file of exactly that shape
+validated clean while the reader derived a 2026 wall clock from it.
 
 `wall`, `relative`, and `order` are incompatible axes (#670). Basis is checked
 against resolution: a `wall` basis with no instant, or an `order` basis with
@@ -138,24 +145,25 @@ one, are both contradictions.
 
 ## 6. Severity
 
-Exactly #790's four independent fields:
+Four independent fields:
 
 | Field | Meaning |
 | --- | --- |
-| `number` | OTel severity number, 0–24. **Absent** when unspecified — never `0`, because OTel assigns meaning to 0. |
-| `text` | The source's severity string, verbatim (`WARN`, `NOTICE`, `D2`, `EMERGENCY`). |
-| `source` | The source's severity in its **own type system** — a syslog PRI integer, a CEF 0–10, a Windows level, a Pino numeric. |
-| `inferred` | **Required, always serialized**, even when `false`. |
+| `raw` | The source's severity exactly as emitted, in its own JSON type — a syslog PRI integer, a CEF 0–10, a Windows level, a Pino numeric, or a string like `NOTICE` / `D2`. |
+| `canonical` | Normalized OTel severity number, 0–24. **Absent** when unspecified — never `0`, because OTel assigns meaning to 0. |
+| `confidence` | `high` \| `medium` \| `low`. |
+| `provenance` | `source_declared` \| `schema_mapped` \| `text_inferred` \| `absent`. |
 
-`inferred` is mandatory precisely so an inferred severity can never be mistaken
-for a source-declared one (#790: "never present inferred severity as
+`confidence` and `provenance` are **required** and must agree:
+`source_declared` implies `high`, `text_inferred` implies `low`,
+`schema_mapped` implies `high` or `medium`, and `absent` may not carry a `raw`
+value. A contradictory pair is rejected, so an inferred severity can never be
+mistaken for a source-declared one (#790: "never present inferred severity as
 source-declared"). #790 names the failure this guards: inferring an error from
-"no errors detected".
+the phrase "no errors detected".
 
-Readers **MAY** group by the normalized `number` while details, exports, and
-raw views retain `text` and `source`.
-
----
+Readers **MAY** group by the normalized `canonical` while details, exports, and
+raw views retain `raw`.
 
 ## 7. Trace, span, and the eleven correlations
 
