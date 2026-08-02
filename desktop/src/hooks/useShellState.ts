@@ -30,6 +30,10 @@ import type { MemoryDoc } from "../components/panes/MemoryPane";
 import type { PaneId, UiScale } from "../lib/session";
 import { parseSkinId, type SkinId } from "../lib/skins";
 import { broadcastThemeChange } from "../lib/themeBridge";
+import {
+  applyUiScaleToDocument,
+  broadcastUiScaleChange,
+} from "../lib/uiScaleBridge";
 
 function loadTheme(): SkinId {
   return parseSkinId(localStorage.getItem("cd-theme"));
@@ -290,8 +294,10 @@ export function useShellState() {
     void broadcastThemeChange(theme);
   }, [theme]);
   useEffect(() => {
-    document.documentElement.setAttribute("data-ui-scale", uiScale);
-    localStorage.setItem("cd-ui-scale", uiScale);
+    // Bridge applies html[data-ui-scale] + persists "cd-ui-scale", then the
+    // broadcast propagates to dedicated Explorer/handbook windows (#641).
+    applyUiScaleToDocument(uiScale);
+    void broadcastUiScaleChange(uiScale);
   }, [uiScale]);
   useEffect(() => {
     document.documentElement.style.setProperty("--sidebar-w", `${sidebarW}px`);
