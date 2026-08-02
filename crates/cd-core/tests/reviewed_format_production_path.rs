@@ -1,11 +1,15 @@
 //! Production-path acceptance for reviewed format profiles:
 //! preview → plan → ingest → query, against the real pipeline.
 //!
-//! Unit tests prove the grammar in isolation. These prove the claims that
-//! only the whole path can settle — that a profile's structure survives into
-//! a queryable corpus, that unresolved local time reaches the shipped
-//! reviewed-declaration path rather than becoming an instant on its own, and
-//! that a profile does not claim sources it was never meant to.
+//! Unit tests prove the grammar in isolation. These exercise the grammar and
+//! the shipped pipeline over the SAME synthetic corpus.
+//!
+//! **Scope, stated plainly:** ingest does not consult reviewed formats yet, so
+//! nothing here proves the grammar's output reaches a corpus. What these prove
+//! is that the grammar behaves correctly on realistic input, that the shipped
+//! pipeline independently keeps such a corpus order-only, and that the two
+//! agree about a rolled family. Read "preview -> plan -> ingest -> query" as
+//! four stages exercised over one corpus, not as one wired pipeline.
 //!
 //! **Synthetic fixtures only.** Every line here is written in this file. No
 //! private or company archive is read, referenced, or shipped.
@@ -237,7 +241,7 @@ fn structured_json_with_ts_still_imports_through_the_shipped_path() {
 }
 
 #[test]
-fn preview_plan_ingest_query_over_a_rolled_family() {
+fn grammar_and_pipeline_agree_over_a_rolled_family() {
     // The whole path on a synthetic rolled family: preview the directory,
     // confirm the profile selects every member, then ingest and query.
     let dir = tempfile::tempdir().expect("tempdir");
@@ -300,10 +304,12 @@ fn preview_plan_ingest_query_over_a_rolled_family() {
 }
 
 #[test]
-fn unresolved_local_time_reaches_the_reviewed_declaration_path_not_an_instant() {
-    // The load-bearing timezone claim: a reviewed profile exposes local
-    // calendar text, and the corpus stays order-only until a human declares a
-    // zone through the shipped path. The profile never resolves anything.
+fn unresolved_local_time_stays_order_only_and_no_suggestion_resolves_it() {
+    // The load-bearing timezone claim, stated exactly: the grammar yields
+    // UnresolvedLocal, the shipped pipeline independently keeps such a corpus
+    // order-only, and a suggestion resolves nothing. This does NOT call
+    // apply_source_timezones — that path is shipped and separately tested;
+    // wiring the grammar into it is residual.
     let format = app_log_format();
     assert_eq!(
         format.timestamp.provenance(),

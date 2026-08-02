@@ -1,5 +1,7 @@
 {
   "formatId": "example.app-log",
+  "formatValid": true,
+  "linesDropped": 0,
   "linesInspected": 4,
   "linesUnattributed": 0,
   "needsTimezoneReview": true,

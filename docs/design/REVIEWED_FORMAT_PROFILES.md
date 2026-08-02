@@ -19,9 +19,13 @@ vendor.
 | **`reviewed_format`** | **a declarative grammar for one log shape** | **the user, reviewed** |
 | `import_profile` | the plan binding sources to grammars | the user |
 
-This fills a seam the shipped contract already left: `SourceGroupRule`'s
-`formatProfile` is a `ProfileRef`, and a reviewed format is addressed by
-exactly that reference. It is not a parallel import system.
+`SourceGroupRule.formatProfile` is a `ProfileRef` and is the *intended* seam,
+but it is **not wired yet**, and pointing one at a reviewed format today would
+be actively misleading: `match_profile` compares a reference against the
+content fingerprint from `import_preview`, which only knows built-in format
+ids, so a reviewed-format id can only ever report **Drift**. Wiring that
+comparison is residual work. This slice adds the grammar layer beside the
+existing ones, not a parallel import system — but it does not yet join them.
 
 ---
 
@@ -108,6 +112,9 @@ same result.
   contract is transport-neutral and ready for one; nothing renders it today.
   There is consequently **no visual proof** in this slice, because no pixels
   changed.
+* **`ProfileRef` linkage is not wired.** Referencing a reviewed format from an
+  `ImportProfile` today yields Drift, because profile matching resolves
+  references against built-in content fingerprints only.
 * **Not wired into ingest.** `parse.rs` does not consult reviewed formats yet,
   so defining one does not change what a corpus contains. The production-path
   tests prove the grammar's behaviour and the shipped pipeline's behaviour

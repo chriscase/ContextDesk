@@ -184,6 +184,15 @@ impl TimestampGrammar {
                     {
                         return None;
                     }
+                    // Digit shape is not an offset. Without these bounds
+                    // `+99:99` matched and the grammar reported
+                    // ExplicitWallClock — an impossible offset presented as a
+                    // resolved instant.
+                    let hours = (bytes[at + 1] - b'0') * 10 + (bytes[at + 2] - b'0');
+                    let minutes = (bytes[at + 4] - b'0') * 10 + (bytes[at + 5] - b'0');
+                    if hours > 23 || minutes > 59 {
+                        return None;
+                    }
                     at += 6;
                 }
                 numeric => {
@@ -517,9 +526,42 @@ fn take_token(rest: &str, open: Option<char>, close: Option<char>) -> Option<(St
 /// Refuses a line over [`MAX_MATCHABLE_LINE_BYTES`] before matching, so a
 /// pathological line costs a length check rather than a scan.
 pub fn match_line(format: &ReviewedFormat, line: &str) -> Option<ExtractedFields> {
-    if line.len() > MAX_MATCHABLE_LINE_BYTES {
-        return None;
+    match match_line_outcome(format, line) {
+        LineOutcome::Record(fields) => Some(*fields),
+        LineOutcome::NotARecordStart | LineOutcome::TooLong => None,
     }
+}
+
+/// Why a line did or did not begin a record.
+///
+/// [`match_line`] collapses both failure modes to `None`, which suits a caller
+/// that only wants fields. [`assemble_records`] must NOT collapse them: an
+/// over-long line that would otherwise have started a record is not a
+/// continuation of the record above, and treating it as one silently moved a
+/// real record's text into an unrelated record's body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LineOutcome {
+    /// The line begins a record.
+    Record(Box<ExtractedFields>),
+    /// The line does not begin a record under this grammar.
+    NotARecordStart,
+    /// The line exceeds [`MAX_MATCHABLE_LINE_BYTES`] and was refused before
+    /// matching. Its record status is UNKNOWN, not "continuation".
+    TooLong,
+}
+
+/// Apply a grammar to one physical line, distinguishing the failure modes.
+pub fn match_line_outcome(format: &ReviewedFormat, line: &str) -> LineOutcome {
+    if line.len() > MAX_MATCHABLE_LINE_BYTES {
+        return LineOutcome::TooLong;
+    }
+    match match_line_inner(format, line) {
+        Some(fields) => LineOutcome::Record(Box::new(fields)),
+        None => LineOutcome::NotARecordStart,
+    }
+}
+
+fn match_line_inner(format: &ReviewedFormat, line: &str) -> Option<ExtractedFields> {
     let consumed = format.timestamp.match_prefix(line)?;
     let timestamp_text = line.get(..consumed)?.to_string();
     let mut rest = line.get(consumed..)?;
@@ -584,6 +626,17 @@ pub struct AssembledRecord {
     /// True when the record hit [`MAX_MULTILINE_LINES`] and stopped absorbing.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
+    /// Continuation lines dropped after the cap.
+    ///
+    /// The cap bounds memory, so dropping is correct — reporting nothing was
+    /// not. Without this, lines vanished from every count and a preview of a
+    /// half-discarded record read as a perfect parse.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub lines_dropped: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 /// Assemble logical records from raw text under a grammar.
@@ -601,14 +654,20 @@ pub fn assemble_records(
 
     for (index, line) in text.lines().enumerate() {
         let line_number = (index + 1) as u64;
-        match match_line(format, line) {
-            Some(fields) => records.push(AssembledRecord {
-                fields,
+        match match_line_outcome(format, line) {
+            LineOutcome::Record(fields) => records.push(AssembledRecord {
+                fields: *fields,
                 continuation: Vec::new(),
                 start_line: line_number,
                 truncated: false,
+                lines_dropped: 0,
             }),
-            None => {
+            // An over-long line was refused BEFORE matching, so its record
+            // status is unknown. Attributing it to the record above would move
+            // a real record's text into an unrelated record's body — it is
+            // reported unattributed instead.
+            LineOutcome::TooLong => leading_unmatched.push(line.to_string()),
+            LineOutcome::NotARecordStart => {
                 if matches!(
                     format.multiline,
                     MultilineRule::ContinuationUntilNextTimestamp
@@ -616,19 +675,16 @@ pub fn assemble_records(
                     if let Some(current) = records.last_mut() {
                         if current.continuation.len() >= MAX_MULTILINE_LINES {
                             current.truncated = true;
+                            current.lines_dropped += 1;
                         } else {
                             current.continuation.push(line.to_string());
                         }
                         continue;
                     }
                 }
-                if records.is_empty() {
-                    leading_unmatched.push(line.to_string());
-                } else {
-                    // MultilineRule::None: an unmatched line is its own
-                    // unattributed line, never folded into a neighbour.
-                    leading_unmatched.push(line.to_string());
-                }
+                // Before the first record, or under MultilineRule::None, an
+                // unmatched line is its own unattributed line.
+                leading_unmatched.push(line.to_string());
             }
         }
     }
@@ -649,6 +705,18 @@ pub struct ReviewedFormatPreview {
     pub records_matched: u64,
     /// Lines that matched no record start and were not attributed.
     pub lines_unattributed: u64,
+    /// Continuation lines dropped at [`MAX_MULTILINE_LINES`], across ALL
+    /// records — including records past the sample window.
+    ///
+    /// Without this the loss was invisible: `truncated` lives on a sampled
+    /// record, so a heavily-truncated record outside the first
+    /// [`MAX_PREVIEW_SAMPLES`] left no trace in the preview at all.
+    pub lines_dropped: u64,
+    /// False when the format failed validation.
+    ///
+    /// A preview of an invalid format reports zero matches; without this it
+    /// looked identical to a valid grammar that simply matched nothing.
+    pub format_valid: bool,
     /// Provenance every matched record carries.
     pub provenance: TimestampProvenance,
     /// True when the grammar produces local calendar text needing a reviewed
@@ -676,10 +744,22 @@ pub fn preview_reviewed_format(format: &ReviewedFormat, sample: &str) -> Reviewe
     };
 
     let provenance = format.timestamp.provenance();
+    let lines_dropped: u64 = records.iter().map(|record| record.lines_dropped).sum();
     let mut samples: Vec<AssembledRecord> =
         records.iter().take(MAX_PREVIEW_SAMPLES).cloned().collect();
     for record in &mut samples {
-        record.fields.message = super::redact_log::redact_message(&record.fields.message);
+        // EVERY captured field, not only the message. The grammar decides what
+        // lands in level/logger/thread, and a source that puts a token there
+        // puts it into a preview that gets screenshotted into tickets.
+        let fields = &mut record.fields;
+        fields.message = super::redact_log::redact_message(&fields.message);
+        fields.timestamp_text = super::redact_log::redact_message(&fields.timestamp_text);
+        for value in [&mut fields.level, &mut fields.logger, &mut fields.thread]
+            .into_iter()
+            .flatten()
+        {
+            *value = super::redact_log::redact_message(value);
+        }
         for line in &mut record.continuation {
             *line = super::redact_log::redact_message(line);
         }
@@ -691,6 +771,8 @@ pub fn preview_reviewed_format(format: &ReviewedFormat, sample: &str) -> Reviewe
         lines_inspected: sample.lines().count() as u64,
         records_matched: records.len() as u64,
         lines_unattributed: unattributed.len() as u64,
+        lines_dropped,
+        format_valid: validation.valid,
         provenance,
         needs_timezone_review: !format.timestamp.has_offset(),
         samples,
@@ -749,8 +831,17 @@ pub fn select_format(
         if !is_candidate_for(format, source_identity) {
             continue;
         }
-        let (records, _) = assemble_records(format, sample);
-        if !records.is_empty() {
+        let (records, unattributed) = assemble_records(format, sample);
+        // Fail-closed staleness: a single incidental matching line is not
+        // evidence that this grammar still describes the source. A source that
+        // changed shape leaves most lines unattributed, and selecting on
+        // `records >= 1` let one stray old line re-select a stale grammar over
+        // a wholly changed file.
+        let attributed: usize =
+            records.len() + records.iter().map(|r| r.continuation.len()).sum::<usize>();
+        let total = attributed + unattributed.len();
+        let covers_source = total > 0 && attributed.saturating_mul(2) >= total;
+        if !records.is_empty() && covers_source {
             matched.push((format, records.len() as u64));
         }
     }
@@ -1128,6 +1219,178 @@ mod tests {
             preview.records_matched, 20,
             "counts stay exact while samples are bounded"
         );
+    }
+
+    #[test]
+    fn dropped_continuation_lines_are_counted_not_silently_destroyed() {
+        // The cap bounds memory, so dropping is right; reporting nothing was
+        // not. Every physical line must still be accounted for.
+        let format = common_format();
+        let mut text = String::from("2024-05-03 12:24:22,729 INFO - a\n");
+        for index in 0..1000 {
+            text.push_str(&format!("continuation {index}\n"));
+        }
+        let (records, unattributed) = assemble_records(&format, &text);
+        assert_eq!(records[0].continuation.len(), MAX_MULTILINE_LINES);
+        assert!(records[0].truncated);
+        assert_eq!(records[0].lines_dropped, 1000 - MAX_MULTILINE_LINES as u64);
+
+        let accounted = records.len()
+            + records.iter().map(|r| r.continuation.len()).sum::<usize>()
+            + records
+                .iter()
+                .map(|r| r.lines_dropped as usize)
+                .sum::<usize>()
+            + unattributed.len();
+        assert_eq!(accounted, 1001, "every physical line must be accounted for");
+
+        let preview = preview_reviewed_format(&format, &text);
+        assert_eq!(preview.lines_dropped, 1000 - MAX_MULTILINE_LINES as u64);
+    }
+
+    #[test]
+    fn truncation_is_visible_even_when_the_record_is_past_the_sample_window() {
+        // `truncated` lives on a sampled record, so a fat record beyond the
+        // sample cap used to leave no trace in the preview at all.
+        let format = common_format();
+        let mut text = String::new();
+        for index in 0..(MAX_PREVIEW_SAMPLES + 10) {
+            text.push_str(&format!(
+                "2024-05-03 12:24:2{},000 INFO - r{index}\n",
+                index % 10
+            ));
+        }
+        for index in 0..900 {
+            text.push_str(&format!("tail continuation {index}\n"));
+        }
+        let preview = preview_reviewed_format(&format, &text);
+        assert!(
+            preview.lines_dropped > 0,
+            "a truncated record outside the sample window must still be disclosed"
+        );
+        assert!(preview.samples.iter().all(|s| !s.truncated));
+    }
+
+    #[test]
+    fn an_over_long_line_is_unattributed_not_swallowed_as_a_continuation() {
+        // An over-long line is refused BEFORE matching, so its record status is
+        // unknown. Treating it as a continuation moved a real record's text
+        // into an unrelated record's body.
+        let format = common_format();
+        let long = format!(
+            "2024-05-03 12:24:23,000 ERROR - {}",
+            "x".repeat(MAX_MATCHABLE_LINE_BYTES)
+        );
+        let text = format!(
+            "2024-05-03 12:24:22,729 INFO - first\n{long}\n2024-05-03 12:24:24,000 INFO - third\n"
+        );
+        let (records, unattributed) = assemble_records(&format, &text);
+        assert!(
+            records[0].continuation.is_empty(),
+            "a record start must never end up inside another record's body"
+        );
+        assert_eq!(unattributed.len(), 1, "the over-long line is reported");
+        assert_eq!(
+            match_line_outcome(&format, &long),
+            LineOutcome::TooLong,
+            "the two failure modes must stay distinguishable"
+        );
+    }
+
+    #[test]
+    fn an_impossible_offset_is_refused_rather_than_stamped_explicit() {
+        let mut format = common_format();
+        format.timestamp.tokens.push(TimeToken::Offset);
+        for bad in ["+99:99", "+24:00", "-30:00", "+05:60"] {
+            assert!(
+                format
+                    .timestamp
+                    .match_prefix(&format!("2024-05-03 12:24:22,729{bad}"))
+                    .is_none(),
+                "{bad} must not match"
+            );
+        }
+        for good in ["+23:59", "-23:59", "Z", "+00:00"] {
+            assert!(
+                format
+                    .timestamp
+                    .match_prefix(&format!("2024-05-03 12:24:22,729{good}"))
+                    .is_some(),
+                "{good} must match"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stale_grammar_is_not_reselected_by_one_incidental_line() {
+        // Fail-closed staleness: selecting on "at least one record" let a
+        // single stray old line re-select a grammar over a wholly changed file.
+        let format = common_format();
+        let mut changed = String::new();
+        for index in 0..200 {
+            changed.push_str(&format!(
+                "May  3 12:24:{:02} host app: syslog now\n",
+                index % 60
+            ));
+        }
+        changed.push_str("2024-05-03 12:24:22,729 INFO - one stray old line\n");
+        assert_eq!(
+            select_format(std::slice::from_ref(&format), "logs/app.log", &changed),
+            FormatSelection::NoMatch,
+            "one incidental line is not evidence the grammar still fits"
+        );
+        // A source the grammar genuinely covers still selects.
+        assert!(matches!(
+            select_format(
+                std::slice::from_ref(&format),
+                "logs/app.log",
+                "2024-05-03 12:24:22,729 INFO - a\n2024-05-03 12:24:23,000 INFO - b\n"
+            ),
+            FormatSelection::Selected { .. }
+        ));
+    }
+
+    #[test]
+    fn preview_redacts_every_captured_field_not_only_the_message() {
+        // A grammar decides what lands in level/logger/thread, and a preview
+        // is exactly what gets screenshotted into a ticket.
+        let secret = "AKIAIOSFODNN7EXAMPLE";
+        let mut format = common_format();
+        format.layout = vec![
+            FieldSlot::Whitespace,
+            FieldSlot::Level,
+            FieldSlot::Whitespace,
+            FieldSlot::Logger {
+                open: None,
+                close: None,
+            },
+            FieldSlot::Whitespace,
+            FieldSlot::Literal("- ".to_string()),
+            FieldSlot::Message,
+        ];
+        let body = format!("2024-05-03 12:24:22,729 INFO {secret} - hello\n");
+        let preview = preview_reviewed_format(&format, &body);
+        let encoded = serde_json::to_string(&preview).expect("serialize");
+        assert!(
+            !encoded.contains(secret),
+            "a secret captured into logger must not survive the preview"
+        );
+    }
+
+    #[test]
+    fn an_invalid_format_preview_says_so_instead_of_looking_like_no_match() {
+        let mut format = common_format();
+        format.schema_id = "wrong".to_string();
+        let preview = preview_reviewed_format(&format, "2024-05-03 12:24:22,729 INFO - x\n");
+        assert!(!preview.format_valid);
+        assert_eq!(preview.records_matched, 0);
+
+        let valid = preview_reviewed_format(&common_format(), "nothing matches here\n");
+        assert!(
+            valid.format_valid,
+            "a valid grammar that matched nothing is different"
+        );
+        assert_eq!(valid.records_matched, 0);
     }
 
     #[test]

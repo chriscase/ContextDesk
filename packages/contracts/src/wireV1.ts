@@ -1782,6 +1782,33 @@ export const REVIEWED_TIMESTAMP_PROVENANCE = [
 export type ReviewedTimestampProvenance =
   (typeof REVIEWED_TIMESTAMP_PROVENANCE)[number];
 
+/** A simple token string, or `{ literal: "<char>" }`. */
+const isTimeToken = (value: unknown): boolean =>
+  (typeof value === "string" &&
+    (TIME_TOKEN_SIMPLE as readonly string[]).includes(value)) ||
+  (typeof value === "object" &&
+    value !== null &&
+    Object.keys(value).length === 1 &&
+    typeof (value as { literal?: unknown }).literal === "string");
+
+/** A simple slot string, or a single-key object for literal/logger/thread. */
+const isFieldSlot = (value: unknown): boolean => {
+  if (typeof value === "string") {
+    return (FIELD_SLOT_SIMPLE as readonly string[]).includes(value);
+  }
+  if (typeof value !== "object" || value === null) return false;
+  const keys = Object.keys(value);
+  if (keys.length !== 1) return false;
+  const [key] = keys;
+  const inner = (value as Record<string, unknown>)[key];
+  if (key === "literal") return typeof inner === "string";
+  if (key !== "logger" && key !== "thread") return false;
+  if (typeof inner !== "object" || inner === null) return false;
+  const delims = inner as { open?: unknown; close?: unknown };
+  const ok = (d: unknown) => d === null || typeof d === "string";
+  return ok(delims.open) && ok(delims.close);
+};
+
 const reviewedFormatShape: ObjectShape = {
   schemaId: f.req(f.str),
   minReaderVersion: f.req(f.u64),
@@ -1789,8 +1816,12 @@ const reviewedFormatShape: ObjectShape = {
   version: f.req(f.u64),
   name: f.req(f.str),
   pathPatterns: f.opt(f.arr(f.str)),
-  timestamp: f.req(f.obj({ tokens: f.req(f.arr(f.json)) })),
-  layout: f.req(f.arr(f.json)),
+  // The closed vocabulary is enforced here, not merely advertised: a token or
+  // slot outside it must fail at the boundary, because "a reviewed format is
+  // not code" is only true if the wire refuses anything the grammar cannot
+  // express. `f.json` accepted arbitrary values.
+  timestamp: f.req(f.obj({ tokens: f.req(f.arr(f.pred("timeToken", isTimeToken))) })),
+  layout: f.req(f.arr(f.pred("fieldSlot", isFieldSlot))),
   multiline: f.req(f.en(...MULTILINE_RULE)),
   priority: f.req(f.u64),
   suggestedTimezone: f.opt(f.str),
@@ -1802,6 +1833,8 @@ const reviewedFormatPreviewShape: ObjectShape = {
   linesInspected: f.req(f.u64),
   recordsMatched: f.req(f.u64),
   linesUnattributed: f.req(f.u64),
+  linesDropped: f.req(f.u64),
+  formatValid: f.req(f.bool),
   provenance: f.req(f.en(...REVIEWED_TIMESTAMP_PROVENANCE)),
   needsTimezoneReview: f.req(f.bool),
   samples: f.opt(
@@ -1820,6 +1853,7 @@ const reviewedFormatPreviewShape: ObjectShape = {
         continuation: f.opt(f.arr(f.str)),
         startLine: f.req(f.u64),
         truncated: f.opt(f.bool),
+        linesDropped: f.opt(f.u64),
       }),
     ),
   ),
@@ -1848,6 +1882,10 @@ export type WireReviewedFormatPreview = {
   linesInspected: number;
   recordsMatched: number;
   linesUnattributed: number;
+  /** Continuation lines dropped at the cap, across ALL records. */
+  linesDropped: number;
+  /** False when the format failed validation. */
+  formatValid: boolean;
   provenance: ReviewedTimestampProvenance;
   /** True when a reviewed IANA declaration is still required. */
   needsTimezoneReview: boolean;
@@ -1863,6 +1901,7 @@ export type WireReviewedFormatPreview = {
     continuation?: string[];
     startLine: number;
     truncated?: boolean;
+    linesDropped?: number;
   }[];
 };
 
