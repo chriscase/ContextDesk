@@ -1011,6 +1011,77 @@ describe("Log Explorer header identity (#641)", () => {
     }
   });
 
+  /**
+   * Packaged-native N3 regression (#641). The tooltip and identity popover are
+   * absolutely positioned inside `.log-explorer__corpus-identity`, which lives
+   * inside `.log-explorer__lockup`. An `overflow: hidden` on that lockup clips
+   * every positioned descendant, so both surfaces open in the accessibility
+   * tree with real geometry yet paint nothing — invisible in the packaged app
+   * and in any real-layout browser. happy-dom performs no layout and cannot
+   * observe this, so the contract is pinned here with hit-testing: the point at
+   * the centre of each surface must actually resolve to that surface.
+   */
+  function expectPainted(el: HTMLElement, what: string): void {
+    const rect = el.getBoundingClientRect();
+    expect(rect.width, `${what} has zero width`).toBeGreaterThan(0);
+    expect(rect.height, `${what} has zero height`).toBeGreaterThan(0);
+    const x = Math.round(rect.left + rect.width / 2);
+    const y = Math.round(rect.top + rect.height / 2);
+    const hit = document.elementFromPoint(x, y);
+    expect(
+      hit && (hit === el || el.contains(hit)),
+      `${what} is not painted at its own centre (${x},${y}): hit ` +
+        `${hit ? `${hit.tagName}.${(hit as HTMLElement).className}` : "null"}`,
+    ).toBe(true);
+  }
+
+  it("tooltip and identity popover are actually visible, not clipped (#641 N3)", async () => {
+    vi.mocked(host.hostGetLogCorpus).mockResolvedValue({
+      id: "c1",
+      name: LONG_NAME,
+      eventCount: 10,
+      templateCount: 2,
+      engine: "duckdb",
+      createdAt: 0,
+      sourceLabel: null,
+      stats: null,
+      topTemplates: [],
+      embedding: {
+        state: "keyword_only",
+        modelId: null,
+        embeddedTemplates: 0,
+        totalTemplates: 2,
+        reason: "local_model_unavailable",
+        updatedAt: 1,
+      },
+    });
+    await page.viewport(1100, 760);
+    const root = await renderReadyExplorer();
+    await waitForReadySettled(root);
+
+    const button = screen.getByTestId(
+      "log-explorer-corpus-button",
+    ) as HTMLButtonElement;
+
+    // Keyboard focus opens the tooltip immediately (#641: hover AND focus).
+    button.focus();
+    const tooltip = document.getElementById(
+      button.getAttribute("aria-describedby")!,
+    ) as HTMLElement;
+    await waitFor(() =>
+      expect(tooltip.getAttribute("data-state")).toBe("open"),
+    );
+    await nextPaintedFrame();
+    expectPainted(tooltip, "corpus tooltip");
+
+    // Pressing the control opens the bounded identity popover.
+    fireEvent.click(button);
+    const popover = await screen.findByTestId("log-explorer-corpus-popover");
+    await nextPaintedFrame();
+    expectPainted(popover as HTMLElement, "corpus identity popover");
+    expect(popover.textContent).toContain(LONG_NAME);
+  });
+
   it("200% zoom (550px viewport) degrades into the narrow drawer contract", async () => {
     await page.viewport(550, 760);
     const root = await renderReadyExplorer();
