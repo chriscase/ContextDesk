@@ -9124,8 +9124,8 @@ async fn log_reviewed_format_list(
 ) -> Result<Vec<cd_core::log_analysis::ReviewedFormatStoreEntry>, String> {
     let root = reviewed_format_store_dir(&state)?;
     tokio::task::spawn_blocking(move || {
-        let store = cd_core::log_analysis::ReviewedFormatStore::open(root)
-            .map_err(|e| e.to_string())?;
+        let store =
+            cd_core::log_analysis::ReviewedFormatStore::open(root).map_err(|e| e.to_string())?;
         store.list().map_err(|e| e.to_string())
     })
     .await
@@ -9140,8 +9140,8 @@ async fn log_reviewed_format_load(
 ) -> Result<cd_core::log_analysis::ReviewedFormat, String> {
     let root = reviewed_format_store_dir(&state)?;
     tokio::task::spawn_blocking(move || {
-        let store = cd_core::log_analysis::ReviewedFormatStore::open(root)
-            .map_err(|e| e.to_string())?;
+        let store =
+            cd_core::log_analysis::ReviewedFormatStore::open(root).map_err(|e| e.to_string())?;
         store.load(&format_id, version).map_err(|e| e.to_string())
     })
     .await
@@ -9155,8 +9155,8 @@ async fn log_reviewed_format_save(
 ) -> Result<cd_core::log_analysis::ReviewedFormatStoreEntry, String> {
     let root = reviewed_format_store_dir(&state)?;
     tokio::task::spawn_blocking(move || {
-        let store = cd_core::log_analysis::ReviewedFormatStore::open(root)
-            .map_err(|e| e.to_string())?;
+        let store =
+            cd_core::log_analysis::ReviewedFormatStore::open(root).map_err(|e| e.to_string())?;
         store.save(&format).map_err(|e| e.to_string())
     })
     .await
@@ -9170,8 +9170,8 @@ async fn log_reviewed_format_update(
 ) -> Result<cd_core::log_analysis::ReviewedFormatStoreEntry, String> {
     let root = reviewed_format_store_dir(&state)?;
     tokio::task::spawn_blocking(move || {
-        let store = cd_core::log_analysis::ReviewedFormatStore::open(root)
-            .map_err(|e| e.to_string())?;
+        let store =
+            cd_core::log_analysis::ReviewedFormatStore::open(root).map_err(|e| e.to_string())?;
         store.update(&format).map_err(|e| e.to_string())
     })
     .await
@@ -9186,8 +9186,8 @@ async fn log_reviewed_format_delete(
 ) -> Result<bool, String> {
     let root = reviewed_format_store_dir(&state)?;
     tokio::task::spawn_blocking(move || {
-        let store = cd_core::log_analysis::ReviewedFormatStore::open(root)
-            .map_err(|e| e.to_string())?;
+        let store =
+            cd_core::log_analysis::ReviewedFormatStore::open(root).map_err(|e| e.to_string())?;
         store.delete(&format_id, version).map_err(|e| e.to_string())
     })
     .await
@@ -9198,8 +9198,8 @@ async fn log_reviewed_format_delete(
 async fn log_reviewed_format_revision(state: State<'_, AppState>) -> Result<u64, String> {
     let root = reviewed_format_store_dir(&state)?;
     tokio::task::spawn_blocking(move || {
-        let store = cd_core::log_analysis::ReviewedFormatStore::open(root)
-            .map_err(|e| e.to_string())?;
+        let store =
+            cd_core::log_analysis::ReviewedFormatStore::open(root).map_err(|e| e.to_string())?;
         store.revision().map_err(|e| e.to_string())
     })
     .await
@@ -9218,7 +9218,9 @@ async fn log_reviewed_format_preview(
     format: cd_core::log_analysis::ReviewedFormat,
     sample: String,
 ) -> Result<cd_core::log_analysis::ReviewedFormatPreview, String> {
-    Ok(cd_core::log_analysis::preview_reviewed_format(&format, &sample))
+    Ok(cd_core::log_analysis::preview_reviewed_format(
+        &format, &sample,
+    ))
 }
 
 fn save_log_operational_metrics_attachment_at(
