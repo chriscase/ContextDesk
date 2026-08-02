@@ -354,3 +354,13 @@ The writer refuses an existing output path; choose a new path or remove a
 previously reviewed report before rerunning it.
 
 Synthetic fixtures live under `fixtures/import-diagnose/`.
+
+## Reviewed format profiles
+
+`contextdesk.reviewed_format.v1` lets a user define a bounded grammar for a log
+shape the built-in registry does not recognize — timestamp, level, message,
+optional logger/thread, multiline ownership, and timestamp provenance — with no
+user regex and no way to express a guessed instant.
+
+See [`REVIEWED_FORMAT_PROFILES.md`](REVIEWED_FORMAT_PROFILES.md). The trusted
+core is implemented; **no UI is wired and ingest does not consult it yet.**
