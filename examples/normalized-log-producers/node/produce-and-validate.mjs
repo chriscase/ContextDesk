@@ -37,7 +37,17 @@ const MAX_JSON_DEPTH = 32;
  * wall-clock time. A conforming event must never carry them: it could declare
  * order_only while a sidecar `ts` epoch silently put the corpus on a wall clock.
  */
-const RESERVED_EVENT_KEYS = ["ts", "timestamp", "@timestamp"];
+// Must match cd_core::log_analysis::parse::TIMESTAMP_FIELD_ALIASES exactly.
+// The old reader scans the raw line TEXTUALLY, so a nested
+// {"attributes":{"ts":...}} is found too.
+const RESERVED_EVENT_KEYS = [
+  "ts",
+  "timestamp",
+  "time",
+  "@timestamp",
+  "@t",
+  "eventTime",
+];
 
 /**
  * The eleven typed correlation classes (#789). Trace and span are deliberately
@@ -93,6 +103,58 @@ const isInstant = (value) =>
   INSTANT_RE.test(value) &&
   // RFC3339 reserves -00:00 for "offset unknown" — the same as not having one.
   !value.endsWith("-00:00");
+
+/**
+ * Whether any JSON object in `raw` declares the same key twice.
+ * JSON.parse keeps the LAST write, so parsing cannot see the collision, while
+ * the old reader takes the FIRST occurrence when scanning text.
+ */
+const hasDuplicateKeys = (raw) => {
+  const stack = [];
+  let i = 0;
+  let expectingKey = false;
+  while (i < raw.length) {
+    const ch = raw[i];
+    if (ch === "{") {
+      stack.push(new Set());
+      expectingKey = true;
+      i += 1;
+    } else if (ch === "}") {
+      stack.pop();
+      expectingKey = false;
+      i += 1;
+    } else if (ch === "[" || ch === "]") {
+      expectingKey = false;
+      i += 1;
+    } else if (ch === ",") {
+      expectingKey = stack.length > 0;
+      i += 1;
+    } else if (ch === ":") {
+      expectingKey = false;
+      i += 1;
+    } else if (ch === '"') {
+      let j = i + 1;
+      while (j < raw.length) {
+        if (raw[j] === "\\") {
+          j += 2;
+          continue;
+        }
+        if (raw[j] === '"') break;
+        j += 1;
+      }
+      if (expectingKey && stack.length > 0) {
+        const key = raw.slice(i + 1, j);
+        const frame = stack[stack.length - 1];
+        if (frame.has(key)) return true;
+        frame.add(key);
+      }
+      i = j + 1;
+    } else {
+      i += 1;
+    }
+  }
+  return false;
+};
 
 const jsonDepth = (value) => {
   if (Array.isArray(value)) {
@@ -192,10 +254,27 @@ function validateTime(time, errors, line) {
   }
 }
 
-function validateEvent(event, expectedSeq, errors, line) {
+function validateEvent(event, expectedSeq, errors, line, raw) {
+  if (raw !== undefined && hasDuplicateKeys(raw)) {
+    errors.push([line, "event_malformed", "duplicateKey"]);
+  }
+  // `time` is this contract's own field and is always an object, which the
+  // reader decodes as unusable rather than an instant, so it is exempt.
   for (const reserved of RESERVED_EVENT_KEYS) {
-    if (Object.hasOwn(event, reserved)) {
+    if (reserved !== "time" && Object.hasOwn(event, reserved)) {
       errors.push([line, "reserved_key_present", reserved]);
+    }
+  }
+  for (const value of Object.values(event)) {
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      RESERVED_EVENT_KEYS.some(
+        (k) => k !== "time" && Object.hasOwn(value, k),
+      )
+    ) {
+      errors.push([line, "reserved_key_present", null]);
+      break;
     }
   }
 
@@ -395,7 +474,7 @@ export function validateFile(text) {
       expectedSeq += 1;
       continue;
     }
-    validateEvent(event, expectedSeq, errors, lineNumber);
+    validateEvent(event, expectedSeq, errors, lineNumber, raw);
     expectedSeq = isInteger(event.sourceSeq) ? event.sourceSeq + 1 : expectedSeq + 1;
   }
 

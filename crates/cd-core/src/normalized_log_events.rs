@@ -137,10 +137,14 @@ pub const SUPPORTED_SCHEMA_IDS: &[&str] = &[NORMALIZED_LOG_EVENTS_SCHEMA_ID];
 /// reachable without malice: an exporter that spreads its original record into
 /// the event object produces it naturally.
 ///
-/// These keys are refused outright. `time` is absent from the list because it
-/// is this contract's own field and is always an object, which the generic
-/// parser decodes as unusable rather than as an instant.
-pub const RESERVED_EVENT_KEYS: &[&str] = &["ts", "timestamp", "@timestamp"];
+/// The list is not copied — it IS the parser's list, so it cannot fall behind
+/// when a new alias is added there (`@t` and `eventTime` were added upstream
+/// and a hardcoded copy silently missed both).
+///
+/// `time` appears in the list and is nonetheless legal here, because the
+/// parser's scan yields `Unusable` for an object value; the guard keys off
+/// what the parser would actually DERIVE, not off the key's presence.
+pub const RESERVED_EVENT_KEYS: &[&str] = crate::log_analysis::parse::TIMESTAMP_FIELD_ALIASES;
 
 /// How an event's instant came to exist.
 ///
@@ -1093,14 +1097,19 @@ pub fn validate_stream<R: std::io::BufRead>(reader: R) -> CoreResult<NormalizedL
         }
         line_number += 1;
 
-        if raw.last() == Some(&b'\n') {
-            raw.pop();
-        }
-        if raw.last() == Some(&b'\r') {
-            raw.pop();
+        // Decide truncation BEFORE touching the tail: on a truncated prefix the
+        // final byte is arbitrary content, not a terminator.
+        let truncated = raw.len() > MAX_NORMALIZED_LINE_BYTES;
+        if !truncated {
+            if raw.last() == Some(&b'\n') {
+                raw.pop();
+            }
+            if raw.last() == Some(&b'\r') {
+                raw.pop();
+            }
         }
 
-        if raw.len() > MAX_NORMALIZED_LINE_BYTES {
+        if truncated {
             diagnostics.push(NormalizedLogDiagnostic {
                 code: NormalizedLogDiagnosticCode::LineTooLong,
                 line: line_number,
@@ -1196,6 +1205,11 @@ fn read_bounded_line<R: std::io::BufRead>(
     out: &mut Vec<u8>,
     limit: usize,
 ) -> std::io::Result<usize> {
+    // NOTE: `out` may be a TRUNCATED prefix of the physical line. Callers must
+    // consult `out.len() >= limit` before treating its last byte as a line
+    // terminator — stripping a CR that merely happened to sit at the cut point
+    // silently shrank the prefix back under the bound and let an unbounded
+    // record through.
     let mut total = 0usize;
     loop {
         let available = match reader.fill_buf() {
@@ -1229,6 +1243,73 @@ fn read_bounded_line<R: std::io::BufRead>(
     }
 }
 
+/// Whether any JSON object in `raw` declares the same key twice.
+///
+/// `serde_json` keeps the last write for a duplicate key, so parsing alone
+/// cannot see the collision. That matters here for two reasons: the old reader
+/// takes the FIRST occurrence when scanning text (see
+/// `log_analysis::parse::first_json_ts_field`), so producer and reader can
+/// disagree about which value is real; and canonicalizing a record with
+/// duplicates would silently REPAIR it, making the output a claim the input
+/// never supported.
+///
+/// Escape-aware: a `"` inside a string literal never opens or closes a key.
+fn has_duplicate_keys(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    let mut stack: Vec<std::collections::BTreeSet<String>> = Vec::new();
+    let mut index = 0usize;
+    let mut expecting_key = false;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' => {
+                stack.push(std::collections::BTreeSet::new());
+                expecting_key = true;
+                index += 1;
+            }
+            b'}' => {
+                stack.pop();
+                expecting_key = false;
+                index += 1;
+            }
+            b'[' | b']' => {
+                expecting_key = false;
+                index += 1;
+            }
+            b',' => {
+                expecting_key = !stack.is_empty();
+                index += 1;
+            }
+            b':' => {
+                expecting_key = false;
+                index += 1;
+            }
+            b'"' => {
+                let start = index + 1;
+                let mut end = start;
+                while end < bytes.len() {
+                    match bytes[end] {
+                        b'\\' => end += 2,
+                        b'"' => break,
+                        _ => end += 1,
+                    }
+                }
+                if expecting_key {
+                    if let Some(frame) = stack.last_mut() {
+                        let key = raw.get(start..end.min(bytes.len())).unwrap_or_default();
+                        if !frame.insert(key.to_string()) {
+                            return true;
+                        }
+                    }
+                }
+                index = end + 1;
+            }
+            _ => index += 1,
+        }
+    }
+    false
+}
+
 /// Rewrite a file into **canonical form**: one line per record, object keys
 /// sorted, no insignificant whitespace, LF endings.
 ///
@@ -1260,13 +1341,16 @@ pub fn canonicalize_stream<R: std::io::BufRead, W: std::io::Write>(
         if read == 0 {
             break;
         }
-        if raw.last() == Some(&b'\n') {
-            raw.pop();
+        let truncated = raw.len() > MAX_NORMALIZED_LINE_BYTES;
+        if !truncated {
+            if raw.last() == Some(&b'\n') {
+                raw.pop();
+            }
+            if raw.last() == Some(&b'\r') {
+                raw.pop();
+            }
         }
-        if raw.last() == Some(&b'\r') {
-            raw.pop();
-        }
-        if raw.len() > MAX_NORMALIZED_LINE_BYTES {
+        if truncated {
             return Err(crate::error::CoreError::Policy(
                 "record exceeds the maximum line length".into(),
             ));
@@ -1276,8 +1360,17 @@ pub fn canonicalize_stream<R: std::io::BufRead, W: std::io::Write>(
         if text.trim().is_empty() {
             continue;
         }
+        // Reject duplicate keys rather than collapsing them: serde_json keeps
+        // the last write, so canonicalizing would REPAIR a non-conforming
+        // record into a conforming one and make the output a claim the input
+        // never supported.
         let value: serde_json::Value = serde_json::from_str(text)
             .map_err(|_| crate::error::CoreError::Policy("record is not valid JSON".into()))?;
+        if has_duplicate_keys(text) {
+            return Err(crate::error::CoreError::Policy(
+                "record contains duplicate JSON keys".into(),
+            ));
+        }
         let canonical = canonical_json(&value);
         writer
             .write_all(canonical.as_bytes())
@@ -1318,6 +1411,11 @@ pub fn canonical_json(value: &serde_json::Value) -> String {
             let body: Vec<String> = items.iter().map(canonical_json).collect();
             format!("[{}]", body.join(","))
         }
+        // Numbers are emitted from their ORIGINAL token, never reformatted.
+        // `Value::to_string` round-trips through f64, so `1.0` became `1.0`
+        // but `12345678901234567890` lost precision and `1e400` became
+        // `null` — silently altering evidence and breaking idempotence.
+        serde_json::Value::Number(number) => number.to_string(),
         other => other.to_string(),
     }
 }
@@ -1332,16 +1430,30 @@ fn validate_line_as_event(
 ) {
     // Reserved keys are checked against the RAW line: serde drops unknown
     // fields before a typed check could see them.
+    // Matches the old reader's ACTUAL behaviour, which scans the raw line
+    // textually rather than looking up top-level keys — so a nested
+    // `{"attributes":{"ts":…}}` is caught too. A top-level-only guard was
+    // weaker than the thing it guards against: that exact shape validated
+    // clean here while the old reader derived a 2026 wall clock from it.
+    if has_duplicate_keys(raw) {
+        // The old reader takes the FIRST occurrence when scanning text while
+        // serde keeps the LAST, so a duplicate key means producer and reader
+        // can disagree about which value is real.
+        diagnostics.push(NormalizedLogDiagnostic {
+            code: NormalizedLogDiagnosticCode::EventMalformed,
+            line: line_number,
+            location: Some("duplicateKey".to_string()),
+        });
+    }
+    if crate::log_analysis::parse::scans_as_timestamp_field(raw) {
+        diagnostics.push(NormalizedLogDiagnostic {
+            code: NormalizedLogDiagnosticCode::ReservedKeyPresent,
+            line: line_number,
+            location: None,
+        });
+    }
     if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(raw) {
-        for reserved in RESERVED_EVENT_KEYS {
-            if map.contains_key(*reserved) {
-                diagnostics.push(NormalizedLogDiagnostic {
-                    code: NormalizedLogDiagnosticCode::ReservedKeyPresent,
-                    line: line_number,
-                    location: Some((*reserved).to_string()),
-                });
-            }
-        }
+        let _ = &map;
         if json_depth(&serde_json::Value::Object(map)) > MAX_JSON_DEPTH {
             diagnostics.push(NormalizedLogDiagnostic {
                 code: NormalizedLogDiagnosticCode::DepthExceeded,
@@ -2152,6 +2264,120 @@ mod tests {
             let mut out = Vec::new();
             validate_event_time(&time, 2, &mut out);
             assert!(out.is_empty(), "{good} must be accepted: {out:?}");
+        }
+    }
+
+    #[test]
+    fn a_cr_at_the_truncation_offset_cannot_defeat_the_length_bound() {
+        // read_bounded_line returns a TRUNCATED prefix for an over-long line.
+        // Stripping a CR that merely happened to land at the cut point shrank
+        // it back under the bound, so an unbounded record validated clean and
+        // the tail was silently discarded.
+        let mut bytes = serde_json::to_string(&header()).unwrap().into_bytes();
+        bytes.push(b'\n');
+        let mut line = serde_json::to_string(&event(0, explicit()))
+            .unwrap()
+            .into_bytes();
+        while line.len() < MAX_NORMALIZED_LINE_BYTES {
+            line.push(b' ');
+        }
+        line.push(b'\r'); // exactly at the cut point
+        line.extend(std::iter::repeat_n(b'x', 4096));
+        bytes.extend_from_slice(&line);
+        bytes.push(b'\n');
+
+        let report = validate_stream(std::io::Cursor::new(bytes.clone())).unwrap();
+        assert!(!report.ok, "an over-long line must never validate clean");
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == NormalizedLogDiagnosticCode::LineTooLong));
+
+        // And canonicalizing must refuse rather than silently truncate.
+        let mut out = Vec::new();
+        assert!(
+            canonicalize_stream(std::io::Cursor::new(bytes), &mut out).is_err(),
+            "canonicalize must refuse an over-long record, not shorten it"
+        );
+    }
+
+    #[test]
+    fn canonicalizing_preserves_a_numbers_value_and_precision() {
+        // Canonical form may normalize a number's SPELLING (`1e2` -> `100.0`,
+        // `-0` -> `-0.0`) because `serde_json::Number` has already discarded
+        // the source token by the time we see it. What it must never do is
+        // change the VALUE — an earlier version round-tripped through f64 via
+        // `Value::to_string`, losing precision on large integers.
+        for token in ["1.0", "12345678901234567890", "1e2", "-0", "0.1", "0"] {
+            let raw = format!("{{\"a\":{token}}}");
+            let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            let canonical = canonical_json(&parsed);
+            let reparsed: serde_json::Value = serde_json::from_str(&canonical).unwrap();
+            assert_eq!(reparsed, parsed, "{token} changed value");
+        }
+
+        // Large integers keep every digit rather than degrading through f64.
+        let parsed: serde_json::Value =
+            serde_json::from_str("{\"a\":12345678901234567890}").unwrap();
+        assert_eq!(canonical_json(&parsed), "{\"a\":12345678901234567890}");
+
+        // Out-of-range values are refused by the parser, not silently
+        // turned into null.
+        assert!(serde_json::from_str::<serde_json::Value>("{\"a\":1e400}").is_err());
+    }
+
+    #[test]
+    fn canonicalizing_is_idempotent_over_numbers() {
+        let raw = "{\"a\":1.0,\"b\":12345678901234567890,\"c\":1e2}";
+        let once = canonical_json(&serde_json::from_str(raw).unwrap());
+        let twice = canonical_json(&serde_json::from_str(&once).unwrap());
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn duplicate_keys_are_refused_rather_than_collapsed() {
+        assert!(has_duplicate_keys(r#"{"a":1,"a":2}"#));
+        assert!(has_duplicate_keys(r#"{"x":{"a":1,"a":2}}"#));
+        assert!(!has_duplicate_keys(r#"{"a":1,"b":2}"#));
+        // A quote inside a string value must not be mistaken for a key.
+        assert!(!has_duplicate_keys(r#"{"a":"b\":\"c","d":1}"#));
+        // Same key in DIFFERENT objects is fine.
+        assert!(!has_duplicate_keys(r#"{"x":{"a":1},"y":{"a":2}}"#));
+        // Arrays of objects each get their own scope.
+        assert!(!has_duplicate_keys(r#"{"x":[{"a":1},{"a":2}]}"#));
+    }
+
+    #[test]
+    fn a_nested_timestamp_alias_is_refused_like_a_top_level_one() {
+        // The old reader scans textually, so a top-level-only guard was weaker
+        // than the behaviour it guards. Verified against the real reader: this
+        // shape validated clean while ingest derived a 2026 wall clock.
+        let mut text = serde_json::to_string(&header()).unwrap();
+        let mut value = serde_json::to_value(event(0, explicit())).unwrap();
+        value.as_object_mut().unwrap().insert(
+            "attributes".into(),
+            serde_json::json!({ "ts": 1_767_225_600i64 }),
+        );
+        text.push('\n');
+        text.push_str(&serde_json::to_string(&value).unwrap());
+        let report = validate_file(&text);
+        assert!(!report.ok, "a nested timestamp alias must be refused");
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == NormalizedLogDiagnosticCode::ReservedKeyPresent));
+    }
+
+    #[test]
+    fn the_reserved_list_is_the_parsers_own_list() {
+        // Copying it let the contract fall behind when `@t` and `eventTime`
+        // were added upstream. Identity, not equality, is the guarantee.
+        assert!(std::ptr::eq(
+            RESERVED_EVENT_KEYS,
+            crate::log_analysis::parse::TIMESTAMP_FIELD_ALIASES
+        ));
+        for alias in ["ts", "timestamp", "@timestamp", "@t", "eventTime"] {
+            assert!(RESERVED_EVENT_KEYS.contains(&alias), "{alias} missing");
         }
     }
 

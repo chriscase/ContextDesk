@@ -232,6 +232,22 @@ fn invalid_fixtures_fail_for_the_reason_they_are_named_for() {
             "canary-forbidden-sentinel-in-canonical.jsonl",
             NormalizedLogDiagnosticCode::ForbiddenSentinel,
         ),
+        (
+            "reserved-key-at-t.jsonl",
+            NormalizedLogDiagnosticCode::ReservedKeyPresent,
+        ),
+        (
+            "reserved-key-event-time.jsonl",
+            NormalizedLogDiagnosticCode::ReservedKeyPresent,
+        ),
+        (
+            "nested-timestamp-alias.jsonl",
+            NormalizedLogDiagnosticCode::ReservedKeyPresent,
+        ),
+        (
+            "duplicate-json-key.jsonl",
+            NormalizedLogDiagnosticCode::EventMalformed,
+        ),
     ];
 
     let on_disk: BTreeSet<String> = read_dir_sorted("invalid")

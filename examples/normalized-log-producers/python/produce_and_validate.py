@@ -41,7 +41,11 @@ MAX_JSON_DEPTH = 32
 # Top-level keys an older ContextDesk reader would treat as authoritative
 # wall-clock time. A conforming event must never carry them: it could declare
 # order_only while a sidecar "ts" epoch silently put the corpus on a wall clock.
-RESERVED_EVENT_KEYS = ("ts", "timestamp", "@timestamp")
+# Must match cd_core::log_analysis::parse::TIMESTAMP_FIELD_ALIASES exactly.
+# The old reader scans the raw line TEXTUALLY for these, so a nested
+# {"attributes":{"ts":...}} is found too — a top-level-only guard is weaker
+# than the behaviour it guards against.
+RESERVED_EVENT_KEYS = ("ts", "timestamp", "time", "@timestamp", "@t", "eventTime")
 
 # The eleven typed correlation classes (#789). Trace and span are deliberately
 # NOT here: they are their own event fields, so a span id cannot be routed into
@@ -111,6 +115,57 @@ def _is_instant(value) -> bool:
         # thing as not having one.
         and not value.endswith("-00:00")
     )
+
+
+def _has_duplicate_keys(raw: str) -> bool:
+    """Whether any JSON object in `raw` declares the same key twice.
+
+    json.loads keeps the LAST write, so parsing cannot see the collision. It
+    matters because the old reader takes the FIRST occurrence when scanning
+    text — producer and reader would disagree about which value is real.
+    """
+    stack: list[set] = []
+    i = 0
+    expecting_key = False
+    n = len(raw)
+    while i < n:
+        ch = raw[i]
+        if ch == "{":
+            stack.append(set())
+            expecting_key = True
+            i += 1
+        elif ch == "}":
+            if stack:
+                stack.pop()
+            expecting_key = False
+            i += 1
+        elif ch in "[]":
+            expecting_key = False
+            i += 1
+        elif ch == ",":
+            expecting_key = bool(stack)
+            i += 1
+        elif ch == ":":
+            expecting_key = False
+            i += 1
+        elif ch == '"':
+            j = i + 1
+            while j < n:
+                if raw[j] == "\\":
+                    j += 2
+                    continue
+                if raw[j] == '"':
+                    break
+                j += 1
+            if expecting_key and stack:
+                key = raw[i + 1 : j]
+                if key in stack[-1]:
+                    return True
+                stack[-1].add(key)
+            i = j + 1
+        else:
+            i += 1
+    return False
 
 
 def _json_depth(value) -> int:
@@ -206,10 +261,22 @@ def validate_time(time, errors, line_no):
         errors.append((line_no, "instant_malformed", "time.observed"))
 
 
-def validate_event(event, expected_seq, errors, line_no):
+def validate_event(event, expected_seq, errors, line_no, raw=None):
+    if raw is not None and _has_duplicate_keys(raw):
+        errors.append((line_no, "event_malformed", "duplicateKey"))
+    # `time` is this contract's own field and is always an object, which the
+    # reader decodes as unusable rather than an instant, so it is exempt.
     for reserved in RESERVED_EVENT_KEYS:
+        if reserved == "time":
+            continue
         if reserved in event:
             errors.append((line_no, "reserved_key_present", reserved))
+    for value in event.values():
+        if isinstance(value, dict) and any(
+            k in value for k in RESERVED_EVENT_KEYS if k != "time"
+        ):
+            errors.append((line_no, "reserved_key_present", None))
+            break
 
     if not _is_int(event.get("sourceSeq")) or event.get("sourceSeq") != expected_seq:
         errors.append((line_no, "sequence_not_contiguous", "sourceSeq"))
@@ -360,7 +427,7 @@ def validate_file(text: str):
             errors.append((index, "event_malformed", None))
             expected_seq += 1
             continue
-        validate_event(event, expected_seq, errors, index)
+        validate_event(event, expected_seq, errors, index, raw)
         seq = event.get("sourceSeq")
         expected_seq = (seq + 1) if _is_int(seq) else expected_seq + 1
 
