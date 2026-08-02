@@ -45,7 +45,7 @@ describe("ImportFlow ordinary path", () => {
   it("is two deliberate actions: choose input, then Import", async () => {
     const { onPublished } = await toPreflight();
     expect(
-      screen.getByText(/Ready to import — 3 sources/),
+      screen.getByText(/Ready to import — 4 sources/),
     ).toBeTruthy();
     // Import stays disabled until SoftWrite confirmation, with the reason inline.
     const importButton = screen.getByRole("button", { name: "Import" });

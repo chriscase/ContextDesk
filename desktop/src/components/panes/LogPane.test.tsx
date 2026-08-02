@@ -2948,7 +2948,7 @@ describe("LogPane time-revision refresh signalling (#875)", () => {
     expect(runSpy).toHaveBeenCalledTimes(1);
 
     const applyButton = await screen.findByRole("button", {
-      name: /Apply to 1 source/,
+      name: /Apply to 2 sources/,
     });
 
     // TimeReviewCard's auto-preview is debounced; fake timers only while
@@ -2970,7 +2970,7 @@ describe("LogPane time-revision refresh signalling (#875)", () => {
       vi.useRealTimers();
     }
 
-    expect(screen.getByText("America/Chicago · 1 source")).toBeTruthy();
+    expect(screen.getByText("America/Chicago · 2 sources")).toBeTruthy();
     expect(revisionBridgeMocks.broadcast).toHaveBeenCalledTimes(1);
     expect(revisionBridgeMocks.broadcast).toHaveBeenLastCalledWith(
       "mock-corpus-0001",

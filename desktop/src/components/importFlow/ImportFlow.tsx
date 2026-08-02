@@ -281,7 +281,7 @@ export function ImportFlow({
             <dd>
               {importableSelected} source{importableSelected === 1 ? "" : "s"}
               {needReviewCount > 0
-                ? ` (${needReviewCount} with uncertain formats — reviewable after import)`
+                ? ` (${needReviewCount} with uncertain formats — review or deselect before importing)`
                 : ""}
             </dd>
             <dt>Kept out</dt>

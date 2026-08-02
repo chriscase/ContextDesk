@@ -31,7 +31,7 @@ describe("importFlowReducer flow-through", () => {
   it("lands on preflight when the preview preselects importable sources", () => {
     const state = previewedState();
     expect(state.stage).toBe("preflight");
-    expect(selectedImportableCount(state)).toBe(3);
+    expect(selectedImportableCount(state)).toBe(4);
     expect(importDisabledReason(state)).toBeNull();
   });
 
@@ -66,17 +66,19 @@ describe("selection model", () => {
     const report = defaultMockPreview();
     const selected = preselectedIdentities(report);
     expect(selected.has("api/api-gateway.log")).toBe(true);
-    expect(selected.has("support.zip!/host-a.zip!/logs/app.log")).toBe(false);
+    expect(selected.has("support.zip!/host-a.zip!/logs/app.log")).toBe(true);
     expect(selected.has("support.zip!/host-a.zip!/inner.zip!/deep.log")).toBe(false);
   });
 
   it("selectedForRun is an exact event-importable allowlist", () => {
     const state = previewedState();
     const selected = selectedForRun(state);
-    // Preselected log-role rows only — never supporting, blocked, or tail.
+    // Every importable log-role row is preselected — never supporting,
+    // blocked, or unreviewed tail.
     expect(selected).toEqual([
       "api/api-gateway.log",
       "api/payments.jsonl",
+      "support.zip!/host-a.zip!/logs/app.log",
       "notes/console-notes.txt",
     ]);
     // Even a forced selection of a supporting row never reaches the wire.
@@ -108,7 +110,7 @@ describe("selection model", () => {
   it("shift-range paints leaf rows only, with the anchor's value", () => {
     const state = previewedState();
     const visibleLeaves = state.report!.items.map((item) => item.identity);
-    // Anchor on a selected row, extend across the review row (unselected).
+    // Anchor on a selected row, then extend across the preselected review row.
     const anchored = importFlowReducer(state, {
       type: "TOGGLE_LEAF",
       identity: "api/payments.jsonl",

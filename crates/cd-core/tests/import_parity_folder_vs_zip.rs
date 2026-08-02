@@ -446,12 +446,21 @@ fn reviewed_import_preserves_folder_and_zip_parity() {
         "deflated",
     );
 
+    let folder_preview = preview_facts(&folder);
+    let zip_preview = preview_facts(&zip);
     assert_eq!(
-        preview_facts(&folder),
-        preview_facts(&zip),
+        folder_preview, zip_preview,
         "discovered / selectable / selected identities and declared bytes \
          must not depend on transport"
     );
+    for (label, facts) in [("folder", &folder_preview), ("zip", &zip_preview)] {
+        assert_eq!(
+            facts.selected,
+            vec![SECONDARY.to_string(), PRIMARY.to_string()],
+            "{label}: every honest rotated text source must be preselected, \
+             while the binary control remains excluded"
+        );
+    }
 
     let folder_cache = tmp.path().join("cache_folder");
     let zip_cache = tmp.path().join("cache_zip");

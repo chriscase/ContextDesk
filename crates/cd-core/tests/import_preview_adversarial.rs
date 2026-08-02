@@ -267,7 +267,10 @@ fn mixed_format_file_is_not_locked_in_by_its_first_window() {
         ImportItemStatus::Ready,
         "first-window lock-in: a mostly-plain file must not be reported as a strong match"
     );
-    assert!(!item.selected);
+    assert!(
+        item.selected,
+        "a reviewable event-bearing text source must remain selected even when it is not a strong structured match"
+    );
 }
 
 #[test]
@@ -457,7 +460,10 @@ fn archive_members_are_sampled_across_head_interior_and_tail() {
         ImportItemStatus::Ready,
         "a mostly-plain archive member must not be reported as a strong match"
     );
-    assert!(!item.selected);
+    assert!(
+        item.selected,
+        "archive transport must not deselect a reviewable event-bearing text source"
+    );
 }
 
 #[test]
