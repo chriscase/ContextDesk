@@ -9,10 +9,12 @@
 //!   user cannot add one.
 //! * **This module** — a declarative grammar a user can define, preview, and
 //!   confirm for their own log shape.
-//! * [`super::import_profile`] — the plan that binds sources to grammars.
-//!   Its `SourceGroupRule::format_profile` is a [`ProfileRef`], and a reviewed
-//!   format is addressed by exactly that reference. No parallel import system
-//!   is introduced; this populates a seam the shipped contract already left.
+//! * [`super::import_profile`] — the plan that will bind sources to grammars.
+//!   Its `SourceGroupRule::format_profile` is the intended [`ProfileRef`] seam,
+//!   but that linkage is not wired yet: today it resolves only built-in content
+//!   fingerprints and a reviewed-format reference reports drift. This module
+//!   defines the grammar beside that seam; it does not create a parallel import
+//!   system or claim the existing one already consumes it.
 //!
 //! # Why not regexes
 //!
@@ -155,6 +157,9 @@ impl TimestampGrammar {
     pub fn match_prefix(&self, line: &str) -> Option<usize> {
         let bytes = line.as_bytes();
         let mut at = 0usize;
+        let mut year = None;
+        let mut month = None;
+        let mut day = None;
         for token in &self.tokens {
             match token {
                 TimeToken::Literal(expected) => {
@@ -202,9 +207,27 @@ impl TimestampGrammar {
                     {
                         return None;
                     }
+                    let value = bytes[at..at + width]
+                        .iter()
+                        .fold(0u32, |value, digit| value * 10 + u32::from(*digit - b'0'));
+                    match numeric {
+                        TimeToken::Year4 => year = Some(value as i32),
+                        TimeToken::Month2 if (1..=12).contains(&value) => month = Some(value),
+                        TimeToken::Day2 if (1..=31).contains(&value) => day = Some(value),
+                        TimeToken::Hour24 if value <= 23 => {}
+                        TimeToken::Minute2 if value <= 59 => {}
+                        // Permit the leap-second spelling accepted by the
+                        // shipped timestamp parser; ordinary seconds stop at 59.
+                        TimeToken::Second2 if value <= 60 => {}
+                        TimeToken::Millis3 | TimeToken::Micros6 => {}
+                        _ => return None,
+                    }
                     at += width;
                 }
             }
+        }
+        if let (Some(year), Some(month), Some(day)) = (year, month, day) {
+            chrono::NaiveDate::from_ymd_opt(year, month, day)?;
         }
         Some(at)
     }
@@ -404,22 +427,45 @@ pub fn validate_reviewed_format(format: &ReviewedFormat) -> ReviewedFormatValida
             "timestamp.tokens",
         );
     } else {
-        // A grammar with only a time-of-day cannot place an event on a
-        // calendar, and one with only a date cannot order events within a day.
-        let has_date = format
-            .timestamp
-            .tokens
-            .iter()
-            .any(|t| matches!(t, TimeToken::Year4 | TimeToken::Month2 | TimeToken::Day2));
-        let has_time = format.timestamp.tokens.iter().any(|t| {
-            matches!(
-                t,
-                TimeToken::Hour24 | TimeToken::Minute2 | TimeToken::Second2
-            )
-        });
-        if !has_date || !has_time {
+        let count = |wanted: TimeToken| {
+            format
+                .timestamp
+                .tokens
+                .iter()
+                .filter(|token| **token == wanted)
+                .count()
+        };
+        // These five components are the minimum complete local calendar time.
+        // An Offset token may prove where that complete value sits, but cannot
+        // turn a partial `year + hour` grammar into an instant.
+        if [
+            TimeToken::Year4,
+            TimeToken::Month2,
+            TimeToken::Day2,
+            TimeToken::Hour24,
+            TimeToken::Minute2,
+        ]
+        .iter()
+        .any(|token| count(*token) != 1)
+        {
             push(
                 ReviewedFormatDiagnosticCode::TimestampGrammarIncomplete,
+                "timestamp.tokens",
+            );
+        }
+        let seconds = count(TimeToken::Second2);
+        let millis = count(TimeToken::Millis3);
+        let micros = count(TimeToken::Micros6);
+        let offsets = count(TimeToken::Offset);
+        if seconds > 1
+            || millis > 1
+            || micros > 1
+            || offsets > 1
+            || (millis > 0 && micros > 0)
+            || ((millis > 0 || micros > 0) && seconds != 1)
+        {
+            push(
+                ReviewedFormatDiagnosticCode::TimestampGrammarInvalid,
                 "timestamp.tokens",
             );
         }
@@ -453,6 +499,21 @@ pub fn validate_reviewed_format(format: &ReviewedFormat) -> ReviewedFormatValida
                 .count();
             if count > 1 {
                 push(ReviewedFormatDiagnosticCode::DuplicateFieldSlot, "layout");
+            }
+        }
+        for (index, slot) in format.layout.iter().enumerate() {
+            let invalid = match slot {
+                FieldSlot::Literal(value) => value.is_empty(),
+                FieldSlot::Logger { open, close } | FieldSlot::Thread { open, close } => {
+                    open.is_some() != close.is_some()
+                }
+                _ => false,
+            };
+            if invalid {
+                push(
+                    ReviewedFormatDiagnosticCode::LayoutInvalid,
+                    &format!("layout[{index}]"),
+                );
             }
         }
     }
@@ -1142,6 +1203,54 @@ mod tests {
             .map(|d| d.code)
             .collect();
         assert!(codes.contains(&ReviewedFormatDiagnosticCode::TimestampGrammarIncomplete));
+
+        let mut partial_with_offset = common_format();
+        partial_with_offset.timestamp.tokens = vec![
+            TimeToken::Year4,
+            TimeToken::Literal(' '),
+            TimeToken::Hour24,
+            TimeToken::Offset,
+        ];
+        let validation = validate_reviewed_format(&partial_with_offset);
+        assert!(!validation.valid);
+        assert!(validation.diagnostics.iter().any(
+            |finding| finding.code == ReviewedFormatDiagnosticCode::TimestampGrammarIncomplete
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_ambiguous_time_tokens_and_half_delimiters() {
+        let mut duplicate_year = common_format();
+        duplicate_year.timestamp.tokens.insert(0, TimeToken::Year4);
+        assert!(validate_reviewed_format(&duplicate_year)
+            .diagnostics
+            .iter()
+            .any(
+                |finding| finding.code == ReviewedFormatDiagnosticCode::TimestampGrammarIncomplete
+            ));
+
+        let mut competing_fractions = common_format();
+        competing_fractions
+            .timestamp
+            .tokens
+            .push(TimeToken::Micros6);
+        assert!(validate_reviewed_format(&competing_fractions)
+            .diagnostics
+            .iter()
+            .any(|finding| finding.code == ReviewedFormatDiagnosticCode::TimestampGrammarInvalid));
+
+        let mut half_delimiter = common_format();
+        half_delimiter.layout.insert(
+            half_delimiter.layout.len() - 1,
+            FieldSlot::Logger {
+                open: Some('['),
+                close: None,
+            },
+        );
+        assert!(validate_reviewed_format(&half_delimiter)
+            .diagnostics
+            .iter()
+            .any(|finding| finding.code == ReviewedFormatDiagnosticCode::LayoutInvalid));
     }
 
     #[test]
@@ -1319,6 +1428,29 @@ mod tests {
                 "{good} must match"
             );
         }
+    }
+
+    #[test]
+    fn impossible_calendar_and_clock_values_never_match() {
+        let format = common_format();
+        for bad in [
+            "2024-00-03 12:24:22,729",
+            "2024-13-03 12:24:22,729",
+            "2024-02-30 12:24:22,729",
+            "2023-02-29 12:24:22,729",
+            "2024-05-03 24:24:22,729",
+            "2024-05-03 12:60:22,729",
+            "2024-05-03 12:24:61,729",
+        ] {
+            assert!(
+                format.timestamp.match_prefix(bad).is_none(),
+                "{bad} must not match as calendar evidence"
+            );
+        }
+        assert!(format
+            .timestamp
+            .match_prefix("2024-02-29 23:59:60,999")
+            .is_some());
     }
 
     #[test]

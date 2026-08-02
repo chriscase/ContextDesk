@@ -45,6 +45,13 @@ Matching is one left-to-right pass with no backtracking, and a line over
 by line length rather than by the grammar. Path matching reuses the shipped
 `SafePattern`, already proven linear.
 
+A valid timestamp grammar contains exactly one year, month, day, hour, and
+minute token. Seconds are optional; fractions require seconds and only one
+fraction width may be present. Calendar and clock values are range-checked,
+including real month/day combinations, before a line can match. An offset token
+therefore cannot upgrade a partial or impossible calendar spelling into an
+explicit instant.
+
 ---
 
 ## The timezone rule is structural
