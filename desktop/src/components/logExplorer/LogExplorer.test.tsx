@@ -2387,6 +2387,38 @@ describe("LogExplorer shell", () => {
     expect(host.hostSetActiveLogCorpus).not.toHaveBeenCalled();
   });
 
+  it("announces the pending corpus summary politely in the vitals slot (#641)", async () => {
+    type SummaryResult = Awaited<ReturnType<typeof host.hostGetLogCorpus>>;
+    let resolveSummary: (value: SummaryResult) => void = () => {};
+    vi.mocked(host.hostGetLogCorpus).mockImplementation(
+      () =>
+        new Promise<SummaryResult>((resolve) => {
+          resolveSummary = resolve;
+        }),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+
+    const loading = await screen.findByTestId("log-explorer-summary-loading");
+    expect(loading.textContent).toContain("Loading corpus details…");
+    // Progress is announced without stealing focus (#641 vitals contract).
+    expect(loading.getAttribute("aria-live")).toBe("polite");
+    resolveSummary({
+      id: "c1",
+      name: "fixture",
+      eventCount: 10,
+      templateCount: 2,
+      engine: "duckdb",
+      createdAt: 0,
+      sourceLabel: "fixture.log",
+      stats: null,
+      topTemplates: [],
+    });
+    await waitFor(() =>
+      expect(screen.queryByTestId("log-explorer-summary-loading")).toBeNull(),
+    );
+  });
+
   it("keeps summary, bookmark, and Investigation load failures independent from evidence rows", async () => {
     vi.mocked(host.hostGetLogCorpus).mockRejectedValue(
       new Error("summary unavailable"),
@@ -2401,10 +2433,12 @@ describe("LogExplorer shell", () => {
     render(<LogExplorer corpusId="c1" />);
 
     expect(await screen.findByText(/auth failure/)).toBeTruthy();
-    expect(
-      (await screen.findByTestId("log-explorer-summary-load-error"))
-        .textContent,
-    ).toContain("Corpus details unavailable");
+    const summaryError = await screen.findByTestId(
+      "log-explorer-summary-load-error",
+    );
+    expect(summaryError.textContent).toContain("Corpus details unavailable");
+    // The failure badge must interrupt assistive tech (#641 vitals contract).
+    expect(summaryError.getAttribute("role")).toBe("alert");
     expect(
       (await screen.findByTestId("log-explorer-bookmarks-load-error"))
         .textContent,
