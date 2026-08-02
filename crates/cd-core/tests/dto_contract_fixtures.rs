@@ -945,6 +945,11 @@ fn contract_fixtures() -> Vec<(&'static str, Value)> {
             to(&resolved_bookmarks_sample()),
         ),
         ("process_progress.v1.json", to(&process_progress_sample())),
+        ("reviewed_format.v1.json", to(&reviewed_format_sample())),
+        (
+            "reviewed_format_preview.v1.json",
+            to(&reviewed_format_preview_sample()),
+        ),
         (
             "import_preview_report.v1.json",
             to(&import_preview_report_sample()),
@@ -1051,6 +1056,70 @@ fn profile_match_report_sample() -> cd_core::log_analysis::import_profile::Profi
     cd_core::log_analysis::import_profile::match_profile(
         &import_profile_sample(),
         &import_preview_report_sample(),
+    )
+}
+
+/// A reviewed format covering every slot kind the grammar supports.
+fn reviewed_format_sample() -> cd_core::log_analysis::reviewed_format::ReviewedFormat {
+    use cd_core::log_analysis::import_profile::SafePattern;
+    use cd_core::log_analysis::reviewed_format::*;
+    ReviewedFormat {
+        schema_id: REVIEWED_FORMAT_SCHEMA_ID.to_string(),
+        min_reader_version: 1,
+        format_id: "example.app-log".to_string(),
+        version: 1,
+        name: "Example app log".to_string(),
+        path_patterns: vec![SafePattern::new("**/app.log*")],
+        timestamp: TimestampGrammar {
+            tokens: vec![
+                TimeToken::Year4,
+                TimeToken::Literal('-'),
+                TimeToken::Month2,
+                TimeToken::Literal('-'),
+                TimeToken::Day2,
+                TimeToken::Literal(' '),
+                TimeToken::Hour24,
+                TimeToken::Literal(':'),
+                TimeToken::Minute2,
+                TimeToken::Literal(':'),
+                TimeToken::Second2,
+                TimeToken::Literal(','),
+                TimeToken::Millis3,
+            ],
+        },
+        layout: vec![
+            FieldSlot::Whitespace,
+            FieldSlot::Level,
+            FieldSlot::Whitespace,
+            FieldSlot::Thread {
+                open: Some('['),
+                close: Some(']'),
+            },
+            FieldSlot::Whitespace,
+            FieldSlot::Logger {
+                open: None,
+                close: None,
+            },
+            FieldSlot::Whitespace,
+            FieldSlot::Literal("- ".to_string()),
+            FieldSlot::Message,
+        ],
+        multiline: MultilineRule::ContinuationUntilNextTimestamp,
+        priority: 10,
+        suggested_timezone: Some("America/Chicago".to_string()),
+    }
+}
+
+/// A preview of that format over a synthetic sample, including a multiline
+/// record so the continuation shape is pinned on the wire too.
+fn reviewed_format_preview_sample() -> cd_core::log_analysis::reviewed_format::ReviewedFormatPreview
+{
+    cd_core::log_analysis::reviewed_format::preview_reviewed_format(
+        &reviewed_format_sample(),
+        "2024-05-03 12:24:22,729 ERROR [pool-1-thread-2] com.example.Svc - boom\n\
+         java.lang.IllegalStateException: boom\n\
+         \tat com.example.Svc.run(Svc.java:42)\n\
+         2024-05-03 12:24:23,000 INFO [main] com.example.App - recovered\n",
     )
 }
 
