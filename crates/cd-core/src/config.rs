@@ -102,9 +102,22 @@ impl ConfluenceSettings {
     }
 }
 
+/// Schema version written by this build.
+///
+/// v1 is the first explicitly stamped version; every field predating it
+/// already tolerated absence via `#[serde(default)]`, so v1 simply names the
+/// schema as of this change. Loading never downgrades a newer file's stamp
+/// (mirrors [`crate::model_curation::CURATION_VERSION`]'s migration rule).
+pub const APP_CONFIG_SCHEMA_VERSION: u32 = 1;
+
 /// On-disk application configuration (no raw API keys / PATs).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
+    /// Explicit schema version. Absent on files written before this field
+    /// existed; [`AppConfig::migrate`] stamps it on load and never downgrades
+    /// a value a newer build already wrote.
+    #[serde(default)]
+    pub schema_version: u32,
     /// Provider profiles (keychain refs only).
     pub providers: ProviderConfig,
     /// Last workspace metadata (roots as strings).
@@ -188,6 +201,28 @@ pub struct AppConfig {
     /// never a security or redaction boundary.
     #[serde(default)]
     pub model_curation: crate::model_curation::ModelCuration,
+    /// Configured default timezone for source-local timestamps with no
+    /// resolvable zone evidence of their own (IANA identifier, e.g.
+    /// `"America/Chicago"`). Applied with clear provenance during import
+    /// aggregation; never guessed, never applied silently to wall-clock or
+    /// order-only records that carry their own resolvable evidence.
+    #[serde(default)]
+    pub default_timezone: Option<String>,
+}
+
+impl AppConfig {
+    /// Normalize a freshly loaded config in place.
+    ///
+    /// A config written by a *newer* build keeps its stamped version; this
+    /// build never downgrades it (mirrors
+    /// [`crate::model_curation::ModelCuration::migrate`]'s rule). Additive
+    /// fields already round-trip via `#[serde(default)]`; this hook exists so
+    /// future structural migrations have one place to live.
+    pub fn migrate(&mut self) {
+        if self.schema_version < APP_CONFIG_SCHEMA_VERSION {
+            self.schema_version = APP_CONFIG_SCHEMA_VERSION;
+        }
+    }
 }
 
 fn default_index_max_files() -> usize {
@@ -300,8 +335,9 @@ pub fn load_config(path: &Path) -> CoreResult<AppConfig> {
     }
     let raw = fs::read_to_string(path)?;
     let mut cfg: AppConfig = serde_json::from_str(&raw)?;
-    // Stamp the curation schema version and drop blank/duplicate keys. Entries
-    // written by a newer build are preserved verbatim (#678).
+    // Stamp the top-level and curation schema versions and drop blank/duplicate
+    // keys. Entries written by a newer build are preserved verbatim (#678).
+    cfg.migrate();
     cfg.model_curation
         .migrate_for_profiles(&cfg.providers.profiles);
     refuse_raw_secret_refs(&cfg)?;
@@ -309,12 +345,18 @@ pub fn load_config(path: &Path) -> CoreResult<AppConfig> {
 }
 
 /// Atomic-ish write of config.
+///
+/// Always saves with the current build's `schema_version` stamped — saving
+/// upgrades the on-disk file, consistent with [`AppConfig::migrate`]'s
+/// never-downgrade rule.
 pub fn save_config(path: &Path, cfg: &AppConfig) -> CoreResult<()> {
     refuse_raw_secret_refs(cfg)?;
+    let mut cfg = cfg.clone();
+    cfg.migrate();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let raw = serde_json::to_string_pretty(cfg)?;
+    let raw = serde_json::to_string_pretty(&cfg)?;
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, raw)?;
     fs::rename(&tmp, path)?;
@@ -362,6 +404,86 @@ mod tests {
 
         // Provider configuration itself is untouched by curation.
         assert_eq!(loaded.providers.profiles, cfg.providers.profiles);
+    }
+
+    /// A config predating the explicit schema version must load and get
+    /// stamped, never fail or silently stay unversioned.
+    #[test]
+    fn a_config_without_schema_version_loads_and_is_stamped() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "providers": ProviderConfig::with_local_ollama(),
+                "workspace": null,
+                "theme": "dark",
+            })
+            .to_string(),
+        )
+        .expect("write pre-schema-version config");
+
+        let loaded = load_config(&path).expect("config predating schema_version must load");
+        assert_eq!(loaded.schema_version, APP_CONFIG_SCHEMA_VERSION);
+    }
+
+    /// A config a newer build already stamped keeps its version on both load
+    /// and save — this build must never downgrade it.
+    #[test]
+    fn a_config_from_a_newer_build_is_never_downgraded() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let future_version = APP_CONFIG_SCHEMA_VERSION + 41;
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "schema_version": future_version,
+                "providers": ProviderConfig::with_local_ollama(),
+                "workspace": null,
+                "theme": "dark",
+            })
+            .to_string(),
+        )
+        .expect("write future config");
+
+        let loaded = load_config(&path).expect("a newer config must still load");
+        assert_eq!(
+            loaded.schema_version, future_version,
+            "load must never downgrade a newer build's stamp"
+        );
+
+        save_config(&path, &loaded).expect("save");
+        let reloaded = load_config(&path).expect("reload");
+        assert_eq!(
+            reloaded.schema_version, future_version,
+            "save must never downgrade a newer build's stamp either"
+        );
+    }
+
+    /// The default timezone is absent by default and round-trips exactly
+    /// when configured — never guessed, never silently populated.
+    #[test]
+    fn default_timezone_is_absent_by_default_and_round_trips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let cfg = AppConfig {
+            providers: ProviderConfig::with_local_ollama(),
+            ..AppConfig::default()
+        };
+        assert_eq!(cfg.default_timezone, None);
+
+        save_config(&path, &cfg).expect("save");
+        let loaded = load_config(&path).expect("load");
+        assert_eq!(loaded.default_timezone, None);
+
+        let mut with_zone = loaded;
+        with_zone.default_timezone = Some("America/Chicago".to_string());
+        save_config(&path, &with_zone).expect("save with zone");
+        let reloaded = load_config(&path).expect("reload with zone");
+        assert_eq!(
+            reloaded.default_timezone.as_deref(),
+            Some("America/Chicago")
+        );
     }
 
     /// A config written before #678 must load, not fail or lose settings.
