@@ -4,7 +4,6 @@ import { App } from "./App";
 import { EngineeringHandbook } from "./components/handbook";
 import { LogExplorer } from "./components/logExplorer/LogExplorer";
 import { parseExplorerBoot } from "./lib/logExplorer/boot";
-import { hostGetLogCorpus } from "./lib/host";
 import {
   applyUiScaleToDocument,
   subscribeUiScaleChanges,
@@ -77,19 +76,13 @@ function bootDedicatedWindowUiScale() {
 
 /**
  * Corpus-first document title mirroring the native window title (#641).
- * The corpus id stands in until the summary resolves the display name.
+ * The display name arrives in the boot URL (set by the Rust window opener,
+ * which owns the authoritative name) so no host round-trip is needed here —
+ * the boundary ratchet keeps main.tsx off `lib/host`. Corpus id stands in
+ * when the name param is absent (hash-fallback boots).
  */
-function applyExplorerWindowTitle(corpusId: string) {
-  document.title = `${corpusId} — Log Explorer`;
-  void hostGetLogCorpus(corpusId)
-    .then((summary) => {
-      if (summary?.name) {
-        document.title = `${summary.name} — Log Explorer`;
-      }
-    })
-    .catch(() => {
-      // Keep the corpus-id title when the summary is unavailable.
-    });
+function applyExplorerWindowTitle(corpusId: string, corpusName: string | null) {
+  document.title = `${corpusName ?? corpusId} — Log Explorer`;
 }
 
 function bootRoot() {
@@ -101,7 +94,7 @@ function bootRoot() {
         <ExplorerBootError reason="Missing corpus id in window URL (expected ?window=log-explorer&corpus=…)." />
       );
     }
-    applyExplorerWindowTitle(boot.corpusId);
+    applyExplorerWindowTitle(boot.corpusId, boot.corpusName);
     return <LogExplorer corpusId={boot.corpusId} />;
   }
   if (boot.mode === "handbook") {

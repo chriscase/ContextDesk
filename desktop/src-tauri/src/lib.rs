@@ -10987,10 +10987,14 @@ fn set_chat_linked_corpus(
 fn log_explorer_webview_url(
     app: &tauri::AppHandle,
     corpus_id: &str,
+    corpus_name: &str,
 ) -> Result<tauri::WebviewUrl, String> {
-    // Encode corpus id for query (UUIDs are safe; keep general).
+    // Encode corpus id for query (UUIDs are safe; keep general). The display
+    // name rides along so the renderer can set document.title without a host
+    // round-trip (#641 boundary ratchet: main.tsx must not import lib/host).
     let corpus_q = urlencoding_encode(corpus_id);
-    let query = format!("window=log-explorer&corpus={corpus_q}");
+    let name_q = urlencoding_encode(corpus_name);
+    let query = format!("window=log-explorer&corpus={corpus_q}&name={name_q}");
 
     // Only use Vite devUrl while running `tauri dev`. In release builds the same
     // conf still lists devUrl — using it would open a blank localhost window.
@@ -11052,7 +11056,7 @@ async fn open_log_explorer(
         return Ok(label);
     }
 
-    let url = log_explorer_webview_url(&app, &corpus_id)?;
+    let url = log_explorer_webview_url(&app, &corpus_id, &corpus_name)?;
     // Build on the main runtime — async command is the supported path.
     tauri::WebviewWindowBuilder::new(&app, &label, url)
         .title(title)
@@ -11133,7 +11137,7 @@ async fn open_log_explorer_target(
 
     // New window: resolve URL *before* staging so a URL failure never leaves a
     // pending target for a later generic open to take (stale replay).
-    let url = log_explorer_webview_url(&app, &corpus_id)?;
+    let url = log_explorer_webview_url(&app, &corpus_id, &corpus_name)?;
     stage_log_explorer_nav_target(&state, &corpus_id, staged.clone())?;
     if let Err(error) = tauri::WebviewWindowBuilder::new(&app, &label, url)
         .title(title)

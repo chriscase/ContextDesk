@@ -1,7 +1,7 @@
 /** Parse Log Explorer secondary-window boot params. */
 
 export type ExplorerBoot =
-  | { mode: "explorer"; corpusId: string }
+  | { mode: "explorer"; corpusId: string; corpusName: string | null }
   | { mode: "handbook" }
   | { mode: "app" };
 
@@ -16,7 +16,8 @@ export function parseExplorerBoot(search: string, hash: string): ExplorerBoot {
   );
   if (params.get("window") === "log-explorer") {
     const corpus = (params.get("corpus") ?? "").trim();
-    return { mode: "explorer", corpusId: corpus };
+    const name = (params.get("name") ?? "").trim();
+    return { mode: "explorer", corpusId: corpus, corpusName: name || null };
   }
   if (params.get("window") === "engineering-handbook") {
     return { mode: "handbook" };
@@ -26,7 +27,8 @@ export function parseExplorerBoot(search: string, hash: string): ExplorerBoot {
     const hp = new URLSearchParams(h.includes("=") ? h : `window=${h}`);
     if (hp.get("window") === "log-explorer" || h.startsWith("log-explorer")) {
       const corpus = (hp.get("corpus") ?? "").trim();
-      return { mode: "explorer", corpusId: corpus };
+      const name = (hp.get("name") ?? "").trim();
+      return { mode: "explorer", corpusId: corpus, corpusName: name || null };
     }
   }
   return { mode: "app" };
