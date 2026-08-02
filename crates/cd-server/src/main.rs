@@ -3109,7 +3109,9 @@ fn build_app(state: AppState) -> Router {
         .route("/v1/watchers/{watcher_id}/run", post(watchers_run))
         .route(
             "/v1/reviewed_formats",
-            get(reviewed_formats_list).post(reviewed_formats_save),
+            get(reviewed_formats_list)
+                .post(reviewed_formats_save)
+                .put(reviewed_formats_update),
         )
         .route(
             "/v1/reviewed_formats/{format_id}/{version}",
@@ -3127,6 +3129,7 @@ fn build_app(state: AppState) -> Router {
             "/v1/reviewed_formats/preview",
             post(reviewed_formats_preview),
         )
+        .route("/v1/reviewed_formats/apply", post(reviewed_formats_apply))
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .with_state(state)
 }
@@ -3206,6 +3209,23 @@ async fn reviewed_formats_save(
     Ok(Json(entry))
 }
 
+async fn reviewed_formats_update(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(format): Json<cd_core::log_analysis::ReviewedFormat>,
+) -> Result<Json<cd_core::log_analysis::ReviewedFormatStoreEntry>, StatusCode> {
+    authorize_any(&headers, &state)?;
+    let root = state.formats_root.clone();
+    let entry = tokio::task::spawn_blocking(move || {
+        let store = cd_core::log_analysis::ReviewedFormatStore::open(root)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        store.update(&format).map_err(|_| StatusCode::BAD_REQUEST)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+    Ok(Json(entry))
+}
+
 async fn reviewed_formats_delete(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -3270,6 +3290,26 @@ async fn reviewed_formats_preview(
         &body.format,
         &body.sample,
     )))
+}
+
+async fn reviewed_formats_apply(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<cd_core::log_analysis::ReviewedFormatApplyRequest>,
+) -> Result<Json<cd_core::log_analysis::ReviewedFormatApplyResult>, StatusCode> {
+    authorize_any(&headers, &state)?;
+    let root = state.formats_root.clone();
+    let report = tokio::task::spawn_blocking(move || {
+        let store = cd_core::log_analysis::ReviewedFormatStore::open(root)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let (_, report) =
+            cd_core::log_analysis::apply_reviewed_format_bindings_with_report(&store, &request)
+                .map_err(|_| StatusCode::CONFLICT)?;
+        Ok::<_, StatusCode>(report)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+    Ok(Json(report))
 }
 
 #[tokio::main]

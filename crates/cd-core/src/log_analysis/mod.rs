@@ -179,10 +179,11 @@ pub use reviewed_format::{
     REVIEWED_FORMAT_READER_VERSION, REVIEWED_FORMAT_SCHEMA_ID,
 };
 pub use reviewed_format_store::{
-    apply_reviewed_format_bindings, resolve_profile_ref, ReviewedFormatApplyBinding,
-    ReviewedFormatApplyRequest, ReviewedFormatIdentity, ReviewedFormatIngestBindings,
-    ReviewedFormatResolveOutcome, ReviewedFormatStore, ReviewedFormatStoreEntry,
-    ReviewedFormatStoreIndex, MAX_REVIEWED_FORMAT_DOCUMENT_BYTES,
+    apply_reviewed_format_bindings, apply_reviewed_format_bindings_with_report,
+    resolve_profile_ref, ReviewedFormatAppliedBinding, ReviewedFormatApplyBinding,
+    ReviewedFormatApplyRequest, ReviewedFormatApplyResult, ReviewedFormatIdentity,
+    ReviewedFormatIngestBindings, ReviewedFormatResolveOutcome, ReviewedFormatStore,
+    ReviewedFormatStoreEntry, ReviewedFormatStoreIndex, MAX_REVIEWED_FORMAT_DOCUMENT_BYTES,
     MAX_REVIEWED_FORMAT_STORE_ENTRIES, REVIEWED_FORMAT_STORE_READER_VERSION,
     REVIEWED_FORMAT_STORE_SCHEMA_ID,
 };

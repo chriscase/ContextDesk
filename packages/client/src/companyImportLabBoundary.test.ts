@@ -11,11 +11,13 @@ import { describe, expect, it } from "vitest";
 const LAB_ENGINE_CLIENT_SURFACE = {
   "import.preview": "preview_import_plan / log_preview_import",
   "import.run":
-    "verify_import_plan + ingest_path_with_policy_selection_and_observer / log_run_import",
+    "verify_import_plan + selection + ingest_path_with_policy_bindings_and_observer / log_run_import (optional formatApply)",
   "import.cancel": "CancelFlag → CoreError::Cancelled (cancel_log_ingest)",
   "time.state": "load_timezone_resolution_state / log_load_timezone_state",
   "time.preview": "preview_source_timezone / log_preview_source_timezone",
   "time.applyMany": "apply_source_timezones / log_apply_source_timezones",
+  "formats.apply":
+    "apply_reviewed_format_bindings_with_report / log_reviewed_format_apply / POST /v1/reviewed_formats/apply",
   diagnose: "diagnose_log_import",
 } as const;
 

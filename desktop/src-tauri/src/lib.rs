@@ -8007,6 +8007,11 @@ fn desktop_log_ingest_embed_plan_nonblocking(
 /// Runs on a blocking thread pool so the UI event loop is not starved. Both
 /// callers use the same exclusive admission, diagnostics, cancellation,
 /// progress, bounded core ingest policy, and active-corpus handoff.
+///
+/// When `format_apply` is present, the host re-opens the durable reviewed-format
+/// store, revision-binds digests via [`apply_reviewed_format_bindings`], and
+/// passes the materialised bindings into production ingest. Packaged-demo
+/// managed identity paths ignore format apply (demo corpora do not use profiles).
 #[allow(clippy::too_many_arguments)]
 async fn run_log_ingest(
     app: tauri::AppHandle,
@@ -8015,6 +8020,7 @@ async fn run_log_ingest(
     name: Option<String>,
     managed_identity: Option<String>,
     selection: Option<cd_core::log_analysis::IngestSelection>,
+    format_apply: Option<cd_core::log_analysis::ReviewedFormatApplyRequest>,
     cancel: cd_core::process_progress::CancelFlag,
 ) -> Result<LogIngestReportDto, LogIngestRunError> {
     let selected_path = path;
@@ -8040,6 +8046,7 @@ async fn run_log_ingest(
             return Err(LogIngestRunError::Failed(error));
         }
     };
+    let formats_root = cache.join("reviewed_formats");
     let (policy, embed_backend) = desktop_log_ingest_embed_plan_nonblocking(&state.host);
     let progress = TauriLogIngestProgress {
         app: app.clone(),
@@ -8048,8 +8055,19 @@ async fn run_log_ingest(
     let name_owned = name.unwrap_or_else(|| "corpus".into());
     let cancel_for_job = cancel.clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        let result = match (managed_identity, selection) {
-            (Some(identity), Some(selection)) => {
+        let reviewed_bindings = if format_apply.is_some() && managed_identity.is_none() {
+            let request = format_apply.as_ref().expect("checked");
+            let store = cd_core::log_analysis::ReviewedFormatStore::open(&formats_root)
+                .map_err(|e| LogIngestRunError::Failed(e.to_string()))?;
+            Some(
+                cd_core::log_analysis::apply_reviewed_format_bindings(&store, request)
+                    .map_err(|e| LogIngestRunError::Failed(e.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let result = match (managed_identity, selection, reviewed_bindings.as_ref()) {
+            (Some(identity), Some(selection), _) => {
                 cd_core::log_analysis::ingest_path_with_policy_selection_and_observer_managed(
                     &cache,
                     &selected_path,
@@ -8062,7 +8080,7 @@ async fn run_log_ingest(
                     &selection,
                 )
             }
-            (Some(identity), None) => {
+            (Some(identity), None, _) => {
                 cd_core::log_analysis::ingest_path_with_policy_and_observer_managed(
                     &cache,
                     &selected_path,
@@ -8074,8 +8092,9 @@ async fn run_log_ingest(
                     &identity,
                 )
             }
-            (None, Some(selection)) => {
-                cd_core::log_analysis::ingest_path_with_policy_selection_and_observer(
+            // Production host import path: selection and/or reviewed-format bindings.
+            (None, selection, reviewed) => {
+                cd_core::log_analysis::ingest_path_with_policy_bindings_and_observer(
                     &cache,
                     &selected_path,
                     &name_owned,
@@ -8083,18 +8102,10 @@ async fn run_log_ingest(
                     embed_backend,
                     &progress,
                     Some(&cancel_for_job),
-                    &selection,
+                    selection.as_ref(),
+                    reviewed,
                 )
             }
-            (None, None) => cd_core::log_analysis::ingest_path_with_policy_and_observer(
-                &cache,
-                &selected_path,
-                &name_owned,
-                &policy,
-                embed_backend,
-                &progress,
-                Some(&cancel_for_job),
-            ),
         };
         result.map_err(|error| match error {
             cd_core::error::CoreError::Cancelled => LogIngestRunError::Cancelled,
@@ -8198,7 +8209,17 @@ async fn ingest_log_path(
             "a log import is already running",
         )?;
     }
-    let result = run_log_ingest(app, &state, PathBuf::from(path), name, None, None, cancel).await;
+    let result = run_log_ingest(
+        app,
+        &state,
+        PathBuf::from(path),
+        name,
+        None,
+        None,
+        None,
+        cancel,
+    )
+    .await;
     remove_cancel_if_owned(
         &mut state.cancels.lock().expect("cancels"),
         LOG_INGEST_CANCEL_KEY,
@@ -8307,6 +8328,7 @@ impl DemoLogInstallBackend for TauriDemoLogInstallBackend<'_> {
             resource,
             Some(DEMO_LOG_NAME.into()),
             Some(DEMO_LOG_IDENTITY.into()),
+            None,
             None,
             cancel.clone(),
         )
@@ -8931,6 +8953,7 @@ async fn log_run_import(
     plan_token: String,
     plan_version: u32,
     selected: Vec<String>,
+    format_apply: Option<cd_core::log_analysis::ReviewedFormatApplyRequest>,
 ) -> Result<LogIngestReportDto, String> {
     let cancel = cd_core::process_progress::CancelFlag::new();
     let cancel_registration = cancel.inner_arc();
@@ -8975,6 +8998,7 @@ async fn log_run_import(
         name,
         None,
         Some(selection),
+        format_apply,
         cancel,
     )
     .await;
@@ -9221,6 +9245,33 @@ async fn log_reviewed_format_preview(
     Ok(cd_core::log_analysis::preview_reviewed_format(
         &format, &sample,
     ))
+}
+
+/// Revision-bound materialise of reviewed-format bindings (EngineClient.formats.apply).
+///
+/// Re-checks store revision and digests; does not ingest. Pass the same request
+/// as `format_apply` on `log_run_import` so production ingest re-applies fail-closed.
+#[tauri::command]
+async fn log_reviewed_format_apply(
+    state: State<'_, AppState>,
+    expected_store_revision: u64,
+    bindings: Vec<cd_core::log_analysis::ReviewedFormatApplyBinding>,
+) -> Result<cd_core::log_analysis::ReviewedFormatApplyResult, String> {
+    let root = reviewed_format_store_dir(&state)?;
+    let request = cd_core::log_analysis::ReviewedFormatApplyRequest {
+        expected_store_revision,
+        bindings,
+    };
+    tokio::task::spawn_blocking(move || {
+        let store =
+            cd_core::log_analysis::ReviewedFormatStore::open(root).map_err(|e| e.to_string())?;
+        let (_, report) =
+            cd_core::log_analysis::apply_reviewed_format_bindings_with_report(&store, &request)
+                .map_err(|e| e.to_string())?;
+        Ok(report)
+    })
+    .await
+    .map_err(|e| format!("reviewed format apply join: {e}"))?
 }
 
 fn save_log_operational_metrics_attachment_at(
@@ -12305,6 +12356,7 @@ pub fn run() {
             log_reviewed_format_revision,
             log_reviewed_format_validate,
             log_reviewed_format_preview,
+            log_reviewed_format_apply,
             log_save_operational_metrics_attachment,
             log_load_operational_metrics_attachment,
             log_remove_operational_metrics_attachment,
@@ -12896,6 +12948,36 @@ mod log_noise_candidate_host_tests {
             body.contains("selected: Vec<String>"),
             "the run request carries the exact reviewed selection"
         );
+        assert!(
+            body.contains("format_apply: Option"),
+            "the run request accepts optional revision-bound format apply"
+        );
+        assert!(
+            body.contains("format_apply"),
+            "format_apply must be forwarded into run_log_ingest"
+        );
+    }
+
+    #[test]
+    fn log_reviewed_format_apply_is_revision_bound_core() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("async fn log_reviewed_format_apply(")
+            .expect("log_reviewed_format_apply");
+        let end = source[start..]
+            .find("\n#[tauri::command]")
+            .or_else(|| source[start..].find("\nfn save_log_operational"))
+            .map(|offset| start + offset)
+            .expect("log_reviewed_format_apply boundary");
+        let body = &source[start..end];
+        assert!(
+            body.contains("apply_reviewed_format_bindings_with_report"),
+            "formats.apply must call revision-bound core apply"
+        );
+        assert!(
+            body.contains("expected_store_revision"),
+            "formats.apply must take the store revision the client observed"
+        );
     }
 
     #[test]
@@ -12940,8 +13022,13 @@ mod log_noise_candidate_host_tests {
             "run_log_ingest must use spawn_blocking for trusted-core ingest"
         );
         assert!(
-            body.contains("ingest_path_with_policy_and_observer"),
-            "run_log_ingest must call the shipped core ingest path"
+            body.contains("ingest_path_with_policy_bindings_and_observer"),
+            "run_log_ingest must call the shipped core ingest path that accepts \
+             reviewed-format bindings"
+        );
+        assert!(
+            body.contains("apply_reviewed_format_bindings"),
+            "run_log_ingest must revision-bind reviewed formats before production ingest"
         );
         assert!(
             !body.contains("LogCorpus::open("),

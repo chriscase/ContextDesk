@@ -113,6 +113,8 @@ same result.
 
 * **No UI.** No authoring screen, no ImportFlow step, no React preview surface.
   EngineClient/Tauri/HTTP/mock expose validate/preview/list/load/save/update/
-  delete/revision; nothing in the desktop UI consumes them yet.
+  delete/revision/apply; `import.run` accepts optional `formatApply` and the
+  host re-binds digests into production ingest. Nothing in the desktop UI
+  consumes these surfaces yet.
 * **Timezone suggestions remain inert.** `suggestedTimezone` still never
   satisfies review; resolution remains the reviewed-declaration path only.

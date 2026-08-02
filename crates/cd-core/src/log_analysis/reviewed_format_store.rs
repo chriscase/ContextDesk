@@ -564,11 +564,49 @@ pub struct ReviewedFormatApplyRequest {
     pub bindings: Vec<ReviewedFormatApplyBinding>,
 }
 
+/// One successfully materialised source → format binding (host wire shape).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReviewedFormatAppliedBinding {
+    /// Exact portable source identity.
+    pub source_identity: String,
+    /// Reviewed format id.
+    pub format_id: String,
+    /// Reviewed format version.
+    pub version: u16,
+    /// Content digest verified at apply time.
+    pub digest: String,
+    /// Loaded document (already digest-checked).
+    pub format: ReviewedFormat,
+}
+
+/// Result of a revision-bound apply (listable confirmation for host/UI).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReviewedFormatApplyResult {
+    /// Store revision that was verified (echo of the request).
+    pub store_revision: u64,
+    /// Materialised per-source bindings in request order.
+    pub bindings: Vec<ReviewedFormatAppliedBinding>,
+}
+
 /// Materialize ingest bindings after re-checking store revision and digests.
 pub fn apply_reviewed_format_bindings(
     store: &ReviewedFormatStore,
     request: &ReviewedFormatApplyRequest,
 ) -> CoreResult<ReviewedFormatIngestBindings> {
+    Ok(apply_reviewed_format_bindings_with_report(store, request)?.0)
+}
+
+/// Materialize ingest bindings **and** a wire-facing apply report.
+///
+/// Host surfaces (`EngineClient.formats.apply`, Tauri, HTTP) return the report.
+/// Production ingest re-calls this (or [`apply_reviewed_format_bindings`]) at
+/// run time so a stale store between UI apply and import still fails closed.
+pub fn apply_reviewed_format_bindings_with_report(
+    store: &ReviewedFormatStore,
+    request: &ReviewedFormatApplyRequest,
+) -> CoreResult<(ReviewedFormatIngestBindings, ReviewedFormatApplyResult)> {
     let current = store.revision()?;
     if current != request.expected_store_revision {
         return Err(CoreError::Message(format!(
@@ -577,6 +615,7 @@ pub fn apply_reviewed_format_bindings(
         )));
     }
     let mut out = ReviewedFormatIngestBindings::new();
+    let mut report_bindings = Vec::with_capacity(request.bindings.len());
     let mut seen = std::collections::BTreeSet::new();
     for binding in &request.bindings {
         if !seen.insert(binding.source_identity.clone()) {
@@ -591,9 +630,22 @@ pub fn apply_reviewed_format_bindings(
             digest: binding.digest.clone(),
         };
         let format = store.load_identity(&identity)?;
+        report_bindings.push(ReviewedFormatAppliedBinding {
+            source_identity: binding.source_identity.clone(),
+            format_id: binding.format_id.clone(),
+            version: binding.version,
+            digest: binding.digest.clone(),
+            format: format.clone(),
+        });
         out.insert(binding.source_identity.clone(), format);
     }
-    Ok(out)
+    Ok((
+        out,
+        ReviewedFormatApplyResult {
+            store_revision: current,
+            bindings: report_bindings,
+        },
+    ))
 }
 
 #[cfg(test)]

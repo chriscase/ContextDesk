@@ -258,6 +258,10 @@ export class MockEngineClient implements EngineClient {
           "import plan is stale: the reviewed content changed on disk since the preview — review the selection again",
         );
       }
+      // Revision-bound format apply is re-checked at run time (same as host).
+      if (request.formatApply) {
+        await this.formats.apply(request.formatApply);
+      }
       if (request.selected.length === 0) {
         throw new EngineError(
           "invalid",
@@ -581,6 +585,53 @@ export class MockEngineClient implements EngineClient {
       return had;
     },
     revision: async () => this.formatsRev,
+    apply: async (request) => {
+      if (request.expectedStoreRevision !== this.formatsRev) {
+        throw new EngineError(
+          "conflict",
+          `reviewed format store revision stale: expected ${request.expectedStoreRevision}, current ${this.formatsRev}`,
+        );
+      }
+      const seen = new Set<string>();
+      const bindings: Array<{
+        sourceIdentity: string;
+        formatId: string;
+        version: number;
+        digest: string;
+        format: unknown;
+      }> = [];
+      for (const b of request.bindings) {
+        if (seen.has(b.sourceIdentity)) {
+          throw new EngineError(
+            "invalid",
+            `duplicate reviewed format binding for source ${b.sourceIdentity}`,
+          );
+        }
+        seen.add(b.sourceIdentity);
+        const key = `${b.formatId}@${b.version}`;
+        const doc = this.formatsDocs.get(key);
+        if (!doc) {
+          throw new EngineError("invalid", `reviewed format not found: ${key}`);
+        }
+        const entry = this.formatsEntries.find(
+          (e) => e.formatId === b.formatId && e.version === b.version,
+        );
+        if (!entry || entry.digest !== b.digest) {
+          throw new EngineError(
+            "conflict",
+            `reviewed format digest mismatch for ${key}`,
+          );
+        }
+        bindings.push({
+          sourceIdentity: b.sourceIdentity,
+          formatId: b.formatId,
+          version: b.version,
+          digest: b.digest,
+          format: doc,
+        });
+      }
+      return { storeRevision: this.formatsRev, bindings };
+    },
   };
 }
 

@@ -77,6 +77,7 @@ export function createTauriEngineClient(
           planToken: request.planToken,
           planVersion: request.planVersion,
           selected: request.selected,
+          formatApply: request.formatApply ?? null,
         });
         return report;
       },
@@ -137,6 +138,11 @@ export function createTauriEngineClient(
       delete: (formatId: string, version: number) =>
         call<boolean>(transport, "log_reviewed_format_delete", { formatId, version }),
       revision: () => call<number>(transport, "log_reviewed_format_revision"),
+      apply: (request) =>
+        call(transport, "log_reviewed_format_apply", {
+          expectedStoreRevision: request.expectedStoreRevision,
+          bindings: request.bindings,
+        }),
     },
     events: {
       onProcessProgress: (

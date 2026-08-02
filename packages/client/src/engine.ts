@@ -108,6 +108,11 @@ export type ImportRunRequest = {
   planVersion: number;
   /** Exact reviewed identities that may produce log events. */
   selected: string[];
+  /**
+   * Optional revision-bound reviewed-format apply. The host re-checks store
+   * revision + digests immediately before ingest and fails closed on drift.
+   */
+  formatApply?: ReviewedFormatApplyRequest;
 };
 
 /** One saved timezone declaration (host wire shape). */
@@ -231,6 +236,27 @@ export type ReviewedFormatApplyBinding = {
   digest: string;
 };
 
+/** Revision-bound apply request (store revision + per-source bindings). */
+export type ReviewedFormatApplyRequest = {
+  expectedStoreRevision: number;
+  bindings: ReviewedFormatApplyBinding[];
+};
+
+/** One materialised source → format binding after a successful apply. */
+export type ReviewedFormatAppliedBinding = {
+  sourceIdentity: string;
+  formatId: string;
+  version: number;
+  digest: string;
+  format: unknown;
+};
+
+/** Wire result of `formats.apply` (revision re-checked). */
+export type ReviewedFormatApplyResult = {
+  storeRevision: number;
+  bindings: ReviewedFormatAppliedBinding[];
+};
+
 /** Reviewed-format CRUD / validate / preview / apply surface. */
 export interface ReviewedFormatService {
   /** List durable index entries. */
@@ -249,6 +275,12 @@ export interface ReviewedFormatService {
   delete(formatId: string, version: number): Promise<boolean>;
   /** Current store revision. */
   revision(): Promise<number>;
+  /**
+   * Revision-bound materialise of source → format bindings. Fails closed on
+   * stale store revision, missing docs, or digest drift. Does not ingest;
+   * pass the same request as `import.run({ formatApply })` for production apply.
+   */
+  apply(request: ReviewedFormatApplyRequest): Promise<ReviewedFormatApplyResult>;
 }
 
 /** The transport-neutral engine client the import flow consumes. */

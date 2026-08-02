@@ -5,13 +5,14 @@
 
 use cd_core::log_analysis::import_preview::{preview_import_plan, ImportItemRole};
 use cd_core::log_analysis::{
-    apply_reviewed_format_bindings, ingest_path_with_policy_bindings_and_observer,
-    match_profile_with_reviewed, resolve_profile_ref, select_format, validate_reviewed_format,
-    FieldSlot, FormatSelection, ImportProfile, LogEmbedMode, LogEmbedPolicy, MultilineRule,
-    ProfileFindingReason, ProfileRef, ProfileScope, ReviewedFormat, ReviewedFormatApplyBinding,
-    ReviewedFormatApplyRequest, ReviewedFormatIngestBindings, ReviewedFormatResolveOutcome,
-    ReviewedFormatStore, SafePattern, SourceGroupRule, TimeToken, TimestampGrammar,
-    IMPORT_PROFILE_SCHEMA_ID, REVIEWED_FORMAT_SCHEMA_ID,
+    apply_reviewed_format_bindings, apply_reviewed_format_bindings_with_report,
+    ingest_path_with_policy_bindings_and_observer, match_profile_with_reviewed,
+    resolve_profile_ref, select_format, validate_reviewed_format, FieldSlot, FormatSelection,
+    ImportProfile, LogEmbedMode, LogEmbedPolicy, MultilineRule, ProfileFindingReason, ProfileRef,
+    ProfileScope, ReviewedFormat, ReviewedFormatApplyBinding, ReviewedFormatApplyRequest,
+    ReviewedFormatIngestBindings, ReviewedFormatResolveOutcome, ReviewedFormatStore, SafePattern,
+    SourceGroupRule, TimeToken, TimestampGrammar, IMPORT_PROFILE_SCHEMA_ID,
+    REVIEWED_FORMAT_SCHEMA_ID,
 };
 use cd_core::process_progress::{CancelFlag, NoopProcessProgress};
 use std::fs;
@@ -402,4 +403,83 @@ fn apply_fails_closed_on_stale_store_revision() {
     )
     .unwrap_err();
     assert!(err.to_string().contains("revision stale"), "{err}");
+}
+
+/// Host production path shape: store under `cache/reviewed_formats`, revision-bound
+/// apply report, then `ingest_path_with_policy_bindings_and_observer` (what
+/// `run_log_ingest` / `log_run_import` call after plan verification).
+#[test]
+fn host_style_apply_report_then_ingest_bindings() {
+    let root = tempfile::tempdir().unwrap();
+    let cache = root.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    let formats_root = cache.join("reviewed_formats");
+    let store = ReviewedFormatStore::open(&formats_root).unwrap();
+    let f = app_log_format("host.app-log", 1);
+    let entry = store.save(&f).unwrap();
+    let rev = store.revision().unwrap();
+    assert_eq!(entry.digest, f.digest());
+
+    let source = root.path().join("import");
+    fs::create_dir_all(&source).unwrap();
+    let app = source.join("app.log");
+    fs::write(&app, sample_line()).unwrap();
+    let plan = preview_import_plan(&source, None).unwrap();
+    let identity = plan
+        .report
+        .items
+        .iter()
+        .find(|i| i.role == ImportItemRole::Log)
+        .map(|i| i.identity.clone())
+        .expect("event source");
+
+    let request = ReviewedFormatApplyRequest {
+        expected_store_revision: rev,
+        bindings: vec![ReviewedFormatApplyBinding {
+            source_identity: identity.clone(),
+            format_id: "host.app-log".into(),
+            version: 1,
+            digest: entry.digest.clone(),
+        }],
+    };
+    // formats.apply surface
+    let store2 = ReviewedFormatStore::open(&formats_root).unwrap();
+    let (bindings, report) = apply_reviewed_format_bindings_with_report(&store2, &request).unwrap();
+    assert_eq!(report.store_revision, rev);
+    assert_eq!(report.bindings.len(), 1);
+    assert_eq!(report.bindings[0].source_identity, identity);
+    assert_eq!(report.bindings[0].digest, entry.digest);
+
+    // import.run re-applies at ingest time (same request, fail-closed)
+    let store3 = ReviewedFormatStore::open(&formats_root).unwrap();
+    let bindings_at_run = apply_reviewed_format_bindings(&store3, &request).unwrap();
+    assert_eq!(bindings.len(), bindings_at_run.len());
+
+    let report = ingest_path_with_policy_bindings_and_observer(
+        &cache.join("corpus"),
+        &source,
+        "host-apply",
+        &none_policy(),
+        None,
+        &NoopProcessProgress,
+        None,
+        None,
+        Some(&bindings_at_run),
+    )
+    .unwrap();
+    assert!(
+        report.stats.lines >= 1,
+        "host-style bindings ingest events={}",
+        report.stats.lines
+    );
+
+    // Stale revision after update fails closed at re-apply (import race).
+    let mut f2 = f.clone();
+    f2.name = "renamed".into();
+    store3.update(&f2).unwrap();
+    let err = apply_reviewed_format_bindings(&store3, &request).unwrap_err();
+    assert!(
+        err.to_string().contains("revision stale") || err.to_string().contains("digest"),
+        "{err}"
+    );
 }
