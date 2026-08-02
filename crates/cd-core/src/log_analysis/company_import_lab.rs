@@ -859,7 +859,7 @@ pub fn verify_company_import_lab(package_root: &Path) -> CoreResult<CompanyImpor
     // Common group: require near-complete resolution of *all* local sources
     // (not merely resolved_after > 0, which greenwashes a single-source apply).
     if timezone_apply_revision.is_some() && local_group_unresolved_before > 0 {
-        let min_resolved = local_group_unresolved_before.saturating_mul(90) / 100;
+        let min_resolved = percent_ceil(local_group_unresolved_before, 90);
         if local_group_resolved_after < min_resolved {
             failures.push(format!(
                 "common-group partial apply: resolved_after={local_group_resolved_after} < 90% of unresolved_before={local_group_unresolved_before} (min {min_resolved}); both region-a and region-b must be applied"
@@ -1035,6 +1035,17 @@ fn assert_mins(
     }
 }
 
+/// Integer percentage threshold rounded upward, without intermediate overflow.
+///
+/// A floor would let small corpora pass below the stated percentage (for
+/// example, 9 of 11 is only 81.8% but `11 * 90 / 100` yields 9).
+fn percent_ceil(value: u64, percent: u64) -> u64 {
+    debug_assert!(percent <= 100);
+    let whole = value / 100;
+    let remainder = value % 100;
+    whole * percent + (remainder * percent).div_ceil(100)
+}
+
 /// Match a durable corpus source identity to an oracle path **without**
 /// collapsing distinct parents that share a basename.
 ///
@@ -1048,16 +1059,10 @@ fn source_path_matches(observed: &str, need: &str) -> bool {
     if observed == need {
         return true;
     }
-    // Full need path as suffix with a path boundary (archive member or nested path).
+    // Full need path as suffix with a real path boundary. Archive identities
+    // use `!/`, whose final slash is covered here; bare `!` is not a boundary.
     if let Some(prefix) = observed.strip_suffix(need) {
-        return prefix.is_empty()
-            || prefix.ends_with('/')
-            || prefix.ends_with("!/")
-            || prefix.ends_with('!');
-    }
-    // Embedded full path after archive separator.
-    if observed.contains(&format!("!/{need}")) {
-        return true;
+        return prefix.is_empty() || prefix.ends_with('/');
     }
     false
 }
@@ -1583,6 +1588,18 @@ mod tests {
         assert!(!source_path_matches(a, "region-b/app.log"));
         assert!(!source_path_matches(b, "region-a/app.log"));
         assert!(source_path_matches("region-a/app.log", "region-a/app.log"));
+        assert!(source_path_matches(
+            "outer.zip!/inner.zip!/region-a/app.log",
+            "region-a/app.log"
+        ));
+        assert!(!source_path_matches(
+            "company-import.zip!region-a/app.log",
+            "region-a/app.log"
+        ));
+        assert!(!source_path_matches(
+            "company-import.zip!/region-a/app.log/extra",
+            "region-a/app.log"
+        ));
         // resolve_source_keys must yield two identities for the two needs.
         let needs = ["region-a/app.log", "region-b/app.log"];
         let mut resolved = Vec::new();
@@ -1596,6 +1613,17 @@ mod tests {
         }
         assert_eq!(resolved.len(), 2);
         assert_ne!(resolved[0], resolved[1]);
+    }
+
+    #[test]
+    fn ninety_percent_threshold_rounds_up() {
+        assert_eq!(percent_ceil(0, 90), 0);
+        assert_eq!(percent_ceil(1, 90), 1);
+        assert_eq!(percent_ceil(10, 90), 9);
+        assert_eq!(percent_ceil(11, 90), 10);
+        assert_eq!(percent_ceil(99, 90), 90);
+        assert_eq!(percent_ceil(100, 90), 90);
+        assert_eq!(percent_ceil(u64::MAX, 90), 16_602_069_666_338_596_454);
     }
 
     #[test]
@@ -1665,7 +1693,7 @@ mod tests {
             report.local_group_unresolved_before > 0,
             "expected unresolved local before apply"
         );
-        let min_resolved = report.local_group_unresolved_before * 90 / 100;
+        let min_resolved = percent_ceil(report.local_group_unresolved_before, 90);
         assert!(
             report.local_group_resolved_after >= min_resolved,
             "common-group partial apply: resolved {} < 90% of unresolved {} — both local sources must be applied",
