@@ -115,6 +115,6 @@ describe("EvidenceSelector keyboard and focus", () => {
 
   it("summary announces discovered and selected counts", () => {
     render(<Harness />);
-    expect(screen.getByText(/8 discovered · 3 selected/)).toBeTruthy();
+    expect(screen.getByText(/8 discovered · 4 selected/)).toBeTruthy();
   });
 });

@@ -17333,11 +17333,11 @@ mod log_embedding_host_tests {
         // Mirror production host setup in this file (default_log_embed_backend).
         let be =
             cd_core::embed::default_log_embed_backend_with_cache_dir(&product_test_model_cache())
-            .expect("default_log_embed_backend must not error on desktop log-fastembed builds")
-            .expect(
-                "desktop log-fastembed build must supply a backend; check model cache \
+                .expect("default_log_embed_backend must not error on desktop log-fastembed builds")
+                .expect(
+                    "desktop log-fastembed build must supply a backend; check model cache \
                  (e.g. .fastembed_cache / HF hub AllMiniLML6V2)",
-            );
+                );
         host.set_log_embed_backend(Some(be), cd_core::embed::LOCAL_LOG_EMBED_MODEL_ID);
         let (policy, backend) = desktop_local_log_embed_plan(&host);
         assert_eq!(policy.mode, cd_core::log_analysis::LogEmbedMode::Local);
@@ -17410,11 +17410,11 @@ mod log_embedding_host_tests {
         policy.model_id = cd_core::embed::LOCAL_LOG_EMBED_MODEL_ID.into();
         let embed_backend =
             cd_core::embed::default_log_embed_backend_with_cache_dir(&product_test_model_cache())
-            .expect("default_log_embed_backend must not error on desktop log-fastembed builds")
-            .expect(
-                "product SoftWrite cancel proof requires default_log_embed_backend; \
+                .expect("default_log_embed_backend must not error on desktop log-fastembed builds")
+                .expect(
+                    "product SoftWrite cancel proof requires default_log_embed_backend; \
                  model cache missing or ONNX init failed",
-            );
+                );
 
         let flag = CancelFlag::new();
         let cancelled_mid_stream = std::sync::Arc::new(AtomicBool::new(false));
