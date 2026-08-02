@@ -588,6 +588,36 @@ Config knobs on `AppConfig.memory` (`MemoryConfig`):
 
 Timestamps are unix **seconds**; ids are UUIDv7. Secrets are redacted via `cd_core::redact` before persist and before embed.
 
+## Company import acceptance laboratory
+
+Public-safe synthetic ZIP lab for import/parser/timezone acceptance (no private
+company logs). Sizes `25k` / `75k` / `250k`.
+
+```bash
+cargo run --locked -p cd-core --bin cd-company-import-lab -- \
+  release --size 75k --out ./company-import-lab-out
+
+cargo test -p cd-core --lib company_import_lab
+```
+
+Contract: `fixtures/company-import-lab/README.md`.
+Oracle schema: `contextdesk.company_import_lab.oracle.v1`.
+
+## Company import acceptance laboratory
+
+Public-safe synthetic ZIP lab for import/parser/timezone acceptance (no private
+company logs). Sizes `25k` / `75k` / `250k`.
+
+```bash
+cargo run --locked -p cd-core --bin cd-company-import-lab -- \
+  release --size 75k --out ./company-import-lab-out
+
+cargo test -p cd-core --lib company_import_lab
+```
+
+Contract: `fixtures/company-import-lab/README.md`.
+Oracle schema: `contextdesk.company_import_lab.oracle.v1`.
+
 ## Offline log-import diagnostic
 
 Privacy-safe support evidence for import failures (no user log content):
