@@ -1,0 +1,5 @@
+{"minReaderVersion":1,"producer":{"name":"example-exporter","version":"1.0.0"},"redaction":{"credentialsRemoved":true,"personalDataRemoved":false},"schemaId":"contextdesk.normalized_log_events.v1","sourceId":"checkout-api","sourceLabel":"checkout api"}
+{"canonical":"line 0","message":"step 0","severity":{"canonical":13,"confidence":"high","provenance":"source_declared","raw":"WARN"},"sourceSeq":0,"time":{"basis":"wall","instant":"2026-01-01T00:00:00Z","resolution":"source_explicit"}}
+{"canonical":"line 1","message":"step 1","severity":{"canonical":17,"confidence":"medium","provenance":"schema_mapped","raw":3},"sourceSeq":1,"time":{"basis":"wall","instant":"2026-01-01T00:00:00Z","resolution":"source_explicit"}}
+{"canonical":"line 2","message":"step 2","severity":{"canonical":17,"confidence":"low","provenance":"text_inferred","raw":"looks bad"},"sourceSeq":2,"time":{"basis":"wall","instant":"2026-01-01T00:00:00Z","resolution":"source_explicit"}}
+{"canonical":"line 3","message":"step 3","severity":{"confidence":"low","provenance":"absent"},"sourceSeq":3,"time":{"basis":"wall","instant":"2026-01-01T00:00:00Z","resolution":"source_explicit"}}

@@ -1,0 +1,2 @@
+{"minReaderVersion":1,"producer":{"name":"example-exporter","version":"1.0.0"},"redaction":{"credentialsRemoved":true,"personalDataRemoved":false},"schemaId":"contextdesk.normalized_log_events.v1","sourceId":"checkout-api","sourceLabel":"checkout api"}
+{"attributes":{"ts":1767225600},"canonical":"line 0","message":"step 0","severity":{"confidence":"low","provenance":"absent"},"sourceSeq":0,"time":{"basis":"order","resolution":"order_only"}}

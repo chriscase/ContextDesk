@@ -439,10 +439,7 @@ fn parse_json(raw: &str, ingest_seq: u64) -> ParsedLine {
     let obj = v.as_object();
     // First-wins for duplicate JSON keys: serde_json keeps the last write, so
     // scan the raw text for the first occurrence of known timestamp keys (#789).
-    let first_ts_hint = first_json_ts_field(
-        raw,
-        &["ts", "timestamp", "time", "@timestamp", "@t", "eventTime"],
-    );
+    let first_ts_hint = first_json_ts_field(raw, TIMESTAMP_FIELD_ALIASES);
     let get_str = |keys: &[&str]| -> Option<String> {
         let o = obj?;
         for k in keys {
@@ -525,6 +522,16 @@ fn parse_json(raw: &str, ingest_seq: u64) -> ParsedLine {
 
 /// Best-effort first scalar timestamp value for a JSON key (duplicate first-wins).
 /// Returns either a numeric epoch or a parseable RFC3339/offset string as epoch.
+/// JSON keys this parser treats as authoritative wall-clock time.
+///
+/// Public within the crate because
+/// [`crate::normalized_log_events::RESERVED_EVENT_KEYS`] must refuse exactly
+/// these: a normalized event carrying one would make an older reader derive an
+/// instant the event never claimed. Copying the list into that module let it
+/// silently fall behind when `@t` and `eventTime` were added here.
+pub(crate) const TIMESTAMP_FIELD_ALIASES: &[&str] =
+    &["ts", "timestamp", "time", "@timestamp", "@t", "eventTime"];
+
 fn first_json_ts_field(raw: &str, keys: &[&str]) -> Option<ParsedTimestamp> {
     for key in keys {
         let pattern = format!("\"{key}\"");

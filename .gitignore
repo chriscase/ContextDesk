@@ -99,3 +99,7 @@ logs/
 !fixtures/incident-evidence/**/logs/
 !fixtures/incident-evidence/**/logs/**
 !fixtures/incident-evidence/**/*.log
+
+# Python bytecode from the reference producer examples.
+__pycache__/
+*.pyc

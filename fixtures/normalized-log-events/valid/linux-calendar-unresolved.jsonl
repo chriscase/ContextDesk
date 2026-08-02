@@ -1,0 +1,2 @@
+{"minReaderVersion":1,"producer":{"name":"example-exporter","version":"1.0.0"},"redaction":{"credentialsRemoved":true,"personalDataRemoved":false},"schemaId":"contextdesk.normalized_log_events.v1","sourceId":"checkout-api","sourceLabel":"checkout api"}
+{"canonical":"Jan  1 00:00:00 host sshd[1]: Server listening on 0.0.0.0 port 22.","logger":"sshd","message":"step 0","severity":{"canonical":13,"confidence":"medium","provenance":"schema_mapped","raw":"notice"},"sourceSeq":0,"time":{"basis":"order","localText":"Jan  1 00:00:00","resolution":"unresolved"}}
