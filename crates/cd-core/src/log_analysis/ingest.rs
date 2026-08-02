@@ -2114,8 +2114,10 @@ fn try_parse_rfc3339_like(text: &str) -> Option<i64> {
         }
     }
     // Z suffix variants
-    if normalized.ends_with('Z') || normalized.ends_with('z') {
-        let base = &normalized[..normalized.len() - 1];
+    if let Some(base) = normalized
+        .strip_suffix('Z')
+        .or_else(|| normalized.strip_suffix('z'))
+    {
         for fmt in [
             "%Y-%m-%dT%H:%M:%S%.f",
             "%Y-%m-%dT%H:%M:%S",
