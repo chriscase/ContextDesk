@@ -71,7 +71,7 @@ export function defaultMockPreview(): WireImportPreviewReport {
       basename: "app.log",
       status: "review" as const,
       role: "log" as const,
-      selected: false,
+      selected: true,
       bytes: 9_437_184,
       reasons: ["ambiguous_format_match" as const],
     },

@@ -406,6 +406,8 @@ transient `FormatFingerprint`. The immutable built-in registry is:
 | `rfc5424-record` | 1 | valid numeric PRI plus RFC5424 header/structured-data framing | none |
 | `classic-syslog-record` | 1 | exact month, day, time, host, and message framing | none |
 | `date-level-logger-thread-record` | 1 | date/level/bracketed logger/parenthesized thread grammar | possibly WildFly/JBoss family |
+| `date-level-message-record` | 1 | fractional local calendar timestamp, recognized severity, and payload | none |
+| `date-context-level-message-record` | 1 | fractional local calendar timestamp, one bounded context token, recognized severity, and payload | none |
 | `bracketed-timestamp-level-component-node-record` | 1 | four strict timestamp/level/component/node bracket groups | possibly Elasticsearch classic family |
 | `local-minute-zone-level-record` | 1 | strict local minute/fraction, uppercase zone, level, and payload grammar | none |
 | `plain-line` | 1 | no defensible structured match | none |
@@ -442,6 +444,14 @@ ingest-order time. The event persists that validated source text as
 `unresolved_local_timestamp` with unresolved-local parser provenance. A user
 may preview and confirm an IANA timezone for that exact portable source; the
 parser does not choose one.
+
+Two lower-scored producer-neutral grammars cover the common variants
+`YYYY-MM-DD HH:mm:ss[,|.]fraction LEVEL message` and
+`YYYY-MM-DD HH:mm:ss[,|.]fraction CONTEXT LEVEL message`. They accept one to
+nine fractional digits, require a valid local calendar and a recognized
+severity, retain the full redacted Original, and keep the timestamp unresolved
+until a source timezone is explicitly reviewed. The stricter
+logger/thread grammar remains authoritative when both shapes match.
 
 The #749 parser slice recognizes the classic Elasticsearch bracketed shape
 `[YYYY-MM-DD HH:mm:ss,SSS][LEVEL][component][node] message` by content, even
@@ -512,6 +522,9 @@ abbreviation mapping, and non-destructive skew review.
   time range, formats, and embedding state.
 - Import/package publication uses staging, bounded expansion, hashes, and a
   final atomic visibility step.
+- Reviewed import preselects every log-role source that can publish events,
+  including uncertain structured matches and raw text fallback; supporting,
+  ignored, unsupported, and blocked material stays visible but unselected.
 - Legacy metadata remains readable; missing derived stats are recomputed rather
   than passively rewriting the corpus.
 
@@ -719,6 +732,8 @@ revision responsible for resolved-local active time.
   confirmation.
 - Store corpora in application cache as disposable incident data; keep durable
   investigations elsewhere.
+- Store local ONNX model artifacts in an application-owned model cache, never
+  relative to the desktop process working directory.
 - Do not expose home paths through IPC or public diagnostics.
 - Treat filenames and log messages as untrusted content.
 - Validate package paths, sizes, entry counts, hashes, and versions before

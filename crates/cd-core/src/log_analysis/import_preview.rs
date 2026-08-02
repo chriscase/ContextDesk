@@ -955,13 +955,17 @@ fn name_hints_log(identity: &str) -> bool {
 
 /// Deterministic preselection.
 ///
-/// Exactly two things are preselected: components a **validated** manifest
-/// declared as logs, and sources whose **content** matched a structured format
-/// outright. Everything else — uncertainty, raw text, supporting documents —
-/// is visible and unselected, because #751 makes "keep raw" the honest default
-/// and forbids silent decisions. Blocked items are never selectable.
+/// Every source that can honestly produce log events is preselected: strong
+/// structured matches, reviewable uncertain matches, and raw text fallback.
+/// Supporting documents, ignored noise, unsupported content, and blocked
+/// entries remain visible and unselected. This keeps broad log input by default
+/// without silently treating non-log material as events.
 pub(super) fn preselect(status: ImportItemStatus, role: ImportItemRole) -> bool {
-    matches!(status, ImportItemStatus::Ready) && matches!(role, ImportItemRole::Log)
+    matches!(role, ImportItemRole::Log)
+        && matches!(
+            status,
+            ImportItemStatus::Ready | ImportItemStatus::Review | ImportItemStatus::RawFallback
+        )
 }
 
 /// Strip a rotation suffix, returning the shared stem when one is present.
@@ -1670,13 +1674,13 @@ mod tests {
     }
 
     #[test]
-    fn plain_text_is_raw_fallback_and_never_preselected() {
+    fn plain_text_is_raw_fallback_and_preselected() {
         let sample = sample_of(&["just some prose with no structure at all"]);
         let item = item_from_sample("notes.txt", 64, &sample, None, false);
         assert_eq!(item.status, ImportItemStatus::RawFallback);
         assert!(
-            !item.selected,
-            "raw fallback must stay opt-in; keep-raw is offered, never assumed"
+            item.selected,
+            "raw fallback is honest retained log evidence"
         );
     }
 
@@ -1695,7 +1699,7 @@ mod tests {
         assert!(item
             .reasons
             .contains(&ImportPreviewReason::MixedFormatRecords));
-        assert!(!item.selected);
+        assert!(item.selected, "reviewable log evidence remains included");
     }
 
     #[test]
@@ -1837,8 +1841,8 @@ mod tests {
         assert_eq!(report.counts.ready, 1);
         assert_eq!(report.counts.raw_fallback, 1);
         assert_eq!(report.counts.blocked, 1);
-        assert_eq!(report.counts.selected, 1);
-        assert_eq!(report.selected_identities(), vec!["z.jsonl"]);
+        assert_eq!(report.counts.selected, 2);
+        assert_eq!(report.selected_identities(), vec!["a.txt", "z.jsonl"]);
     }
 
     #[test]
@@ -1926,15 +1930,15 @@ mod tests {
             assert_eq!(report.plan_block(), None);
             assert_eq!(report.importable_count(), 1);
         }
-        // Raw fallback counts as importable even though it is not preselected:
-        // the user may still choose to keep it raw.
+        // Raw fallback is both importable and preselected so the ordinary path
+        // does not silently discard valid text evidence.
         let raw = finish_report(
             ImportSourceKind::Directory,
             vec![item_from_sample("a.txt", 4, &text, None, false)],
             false,
             None,
         );
-        assert_eq!(raw.counts.selected, 0);
+        assert_eq!(raw.counts.selected, 1);
         assert_eq!(raw.plan_block(), None);
     }
 
@@ -2056,7 +2060,7 @@ mod tests {
             ImportItemStatus::Ready,
             "real mixing must still be caught"
         );
-        assert!(!item.selected);
+        assert!(item.selected, "mixed review evidence remains included");
     }
 
     #[test]

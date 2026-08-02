@@ -1350,6 +1350,13 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                 void refresh();
                 void selectCorpus(corpusId);
               }}
+              onTimezoneChanged={(corpusId) => {
+                if (activeIdRef.current !== corpusId) return;
+                void Promise.all([
+                  refresh(),
+                  refreshTimezoneState(corpusId),
+                ]);
+              }}
             />
           </section>
         ) : null}

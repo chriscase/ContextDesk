@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Async embedding provider (mirrors the chat backend pattern).
@@ -323,11 +324,24 @@ pub struct FastembedEmbedBackend {
 impl FastembedEmbedBackend {
     /// Create with the default small local model (may download once).
     pub fn try_new() -> CoreResult<Self> {
+        Self::try_new_with_options(None)
+    }
+
+    /// Create with the default small local model in an application-owned cache.
+    pub fn try_new_with_cache_dir(cache_dir: &Path) -> CoreResult<Self> {
+        Self::try_new_with_options(Some(cache_dir))
+    }
+
+    fn try_new_with_options(cache_dir: Option<&Path>) -> CoreResult<Self> {
         use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-        let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::AllMiniLML6V2).with_show_download_progress(false),
-        )
-        .map_err(|e| crate::error::CoreError::Message(format!("fastembed init: {e}")))?;
+        let mut options =
+            InitOptions::new(EmbeddingModel::AllMiniLML6V2).with_show_download_progress(false);
+        if let Some(cache_dir) = cache_dir {
+            std::fs::create_dir_all(cache_dir)?;
+            options = options.with_cache_dir(cache_dir.to_path_buf());
+        }
+        let model = TextEmbedding::try_new(options)
+            .map_err(|e| crate::error::CoreError::Message(format!("fastembed init: {e}")))?;
         Ok(Self {
             inner: std::sync::Mutex::new(model),
         })
@@ -372,6 +386,23 @@ pub fn default_log_embed_backend() -> CoreResult<Option<std::sync::Arc<dyn Embed
     }
     #[cfg(not(feature = "log-fastembed"))]
     {
+        Ok(None)
+    }
+}
+
+/// Product log embedder with model artifacts rooted in an application-owned
+/// cache rather than the process working directory.
+pub fn default_log_embed_backend_with_cache_dir(
+    cache_dir: &Path,
+) -> CoreResult<Option<std::sync::Arc<dyn EmbedBackend>>> {
+    #[cfg(feature = "log-fastembed")]
+    {
+        let b = FastembedEmbedBackend::try_new_with_cache_dir(cache_dir)?;
+        Ok(Some(std::sync::Arc::new(b)))
+    }
+    #[cfg(not(feature = "log-fastembed"))]
+    {
+        let _ = cache_dir;
         Ok(None)
     }
 }

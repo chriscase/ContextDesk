@@ -5,7 +5,7 @@
     "rawFallback": 1,
     "ready": 2,
     "review": 0,
-    "selected": 2,
+    "selected": 3,
     "supporting": 0,
     "total": 4,
     "unsupported": 1
@@ -92,7 +92,7 @@
       "representative": "plain prose, no structure",
       "role": "log",
       "score": 0,
-      "selected": false,
+      "selected": true,
       "status": "raw_fallback"
     }
   ],

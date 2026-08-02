@@ -7,9 +7,10 @@ use cd_core::agent::LogExplorerTurnContext;
 use cd_core::chat::{ChatMessage, Role};
 use cd_core::events::{StreamEvent, ToolPhase};
 use cd_core::log_analysis::ingest_path;
+use cd_core::providers::ProviderCapabilities;
 use cd_core::research::{build_host, research_turn_with_cancel_and_context};
 use cd_core::workspace::Workspace;
-use cd_core::ProviderProfile;
+use cd_core::{ProviderDeadlinePreference, ProviderKind, ProviderProfile};
 use std::fs;
 use std::io::Write;
 use std::time::Instant;
@@ -17,6 +18,8 @@ use std::time::Instant;
 const ENABLE_ENV: &str = "CONTEXTDESK_LIVE_OLLAMA";
 const URL_ENV: &str = "CONTEXTDESK_LIVE_OLLAMA_URL";
 const MODEL_ENV: &str = "CONTEXTDESK_LIVE_OLLAMA_MODEL";
+const GROK_ENABLE_ENV: &str = "CONTEXTDESK_LIVE_GROK_BUILD";
+const GROK_MODEL_ENV: &str = "CONTEXTDESK_LIVE_GROK_BUILD_MODEL";
 const DEFAULT_URL: &str = "http://127.0.0.1:11434";
 const DEFAULT_MODEL: &str = "mistral";
 const LOG_MARKER: &str = "LIVE_OLLAMA_LOG_MARKER";
@@ -53,6 +56,28 @@ fn explicit_loopback_url() -> String {
         "live acceptance refuses non-loopback provider URL: {raw}"
     );
     raw.trim_end_matches('/').to_string()
+}
+
+fn explicit_grok_build_profile() -> ProviderProfile {
+    assert_eq!(
+        std::env::var(GROK_ENABLE_ENV).as_deref(),
+        Ok("1"),
+        "live Grok Build test is opt-in; set {GROK_ENABLE_ENV}=1"
+    );
+    let model = std::env::var(GROK_MODEL_ENV).unwrap_or_else(|_| "grok-4.5".into());
+    ProviderProfile {
+        id: "live-grok-build".into(),
+        label: format!("Live Grok Build {model}"),
+        kind: ProviderKind::XaiGrokBuild,
+        base_url: "https://api.x.ai/v1".into(),
+        api_key_ref: None,
+        chat_model: model,
+        embedding_model: None,
+        embedding_base_url: None,
+        capabilities: ProviderCapabilities::chat_remote(),
+        local_only: false,
+        deadline_preference: ProviderDeadlinePreference::Standard,
+    }
 }
 
 /// Real, credentials-free linked turn against an explicitly selected local
@@ -232,6 +257,125 @@ async fn live_ollama_linked_turn_uses_logs_and_workspace() {
         citations.join(","),
         completion.unwrap_or("missing"),
         answer.chars().count()
+    );
+}
+
+/// Real linked-log broad triage through the explicitly authorized local Grok
+/// Build session. The fixture is synthetic, the session credential remains in
+/// Rust, and ordinary CI never opts in.
+#[tokio::test]
+#[ignore = "explicit live Grok Build acceptance; never part of deterministic CI"]
+async fn live_grok_build_linked_broad_triage_is_grounded() {
+    let profile = explicit_grok_build_profile();
+    let fixture = tempfile::tempdir().expect("fixture root");
+    let logs = fixture.path().join("logs");
+    fs::create_dir_all(&logs).expect("create logs");
+    let mut log = fs::File::create(logs.join("service.log")).expect("create log");
+    writeln!(
+        log,
+        r#"{{"ts":1700000100,"level":"error","service":"api","message":"SYNTHETIC_GROK_ACCEPT connection pool exhausted"}}"#
+    )
+    .expect("write error");
+    writeln!(
+        log,
+        r#"{{"ts":1700000101,"level":"warn","service":"api","message":"SYNTHETIC_GROK_ACCEPT retry delayed"}}"#
+    )
+    .expect("write warning");
+
+    let cache = tempfile::tempdir().expect("log cache");
+    let report =
+        ingest_path(cache.path(), &logs, "live-grok", None, "none").expect("ingest synthetic logs");
+    let workspace = Workspace::new("live-grok", vec![fixture.path().to_path_buf()]);
+    let mut host = build_host(workspace, None).expect("build production tool host");
+    host.set_log_analysis(true, Some(cache.path().to_path_buf()));
+    host.set_active_log_corpus(Some(report.corpus_id.clone()));
+
+    let context = LogExplorerTurnContext::new(
+        "live-grok-window",
+        report.corpus_id.as_str(),
+        format!("corpusId={}; timeQuality=wall", report.corpus_id),
+    )
+    .expect("linked context");
+    let mut history = Vec::new();
+    let started = Instant::now();
+    let events = research_turn_with_cancel_and_context(
+        &mut host,
+        &profile,
+        None,
+        "What problems do you see in these logs? Use bounded evidence and separate observation from inference.",
+        &mut history,
+        "live-grok-session",
+        false,
+        None,
+        Some(context),
+        None,
+    )
+    .await
+    .expect("live Grok Build linked turn");
+
+    let successful_log_reads = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                StreamEvent::Tool {
+                    name,
+                    phase: ToolPhase::Finished,
+                    ok: Some(true),
+                    ..
+                } if name == "broad_log_triage" || name == "search_logs"
+            )
+        })
+        .count();
+    let answer_chars = events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::TextDelta { text } => Some(text.chars().count()),
+            _ => None,
+        })
+        .sum::<usize>();
+    let citations = events
+        .iter()
+        .filter(|event| matches!(event, StreamEvent::Citation { .. }))
+        .count();
+    let completion = events.iter().find_map(|event| match event {
+        StreamEvent::TurnCompleted { reason } => Some(reason.as_str()),
+        _ => None,
+    });
+    let error_codes = events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Error { code, .. } => Some(code.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    eprintln!(
+        "LIVE_GROK_BUILD_ACCEPTANCE RESULT model={} elapsed_ms={} log_reads={} citations={} answer_chars={} completion={} errors={}",
+        profile.chat_model,
+        started.elapsed().as_millis(),
+        successful_log_reads,
+        citations,
+        answer_chars,
+        completion.unwrap_or("missing"),
+        error_codes.join(",")
+    );
+
+    assert!(successful_log_reads > 0, "no successful bounded log read");
+    assert!(answer_chars > 0, "provider returned no answer text");
+    assert!(
+        completion.is_some_and(|reason| {
+            reason != "linked_invalid_grounded_answer" && reason != "linked_no_tool"
+        }),
+        "linked turn did not complete with a grounded answer"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            StreamEvent::Error { code, .. }
+                if code == "linked_invalid_grounded_answer" || code == "linked_no_tool"
+        )),
+        "linked turn failed its grounding contract"
     );
 }
 
