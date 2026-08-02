@@ -7134,6 +7134,9 @@ describe("LogExplorer shell", () => {
       "1 source",
     );
     fireEvent.click(screen.getByTestId("lane-editor-close"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("lane-editor")).toBeNull(),
+    );
 
     chooseLaneCount(1);
     chooseLaneCount(2);
