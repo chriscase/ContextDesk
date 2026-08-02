@@ -267,7 +267,17 @@ fn mixed_format_file_is_not_locked_in_by_its_first_window() {
         ImportItemStatus::Ready,
         "first-window lock-in: a mostly-plain file must not be reported as a strong match"
     );
-    assert!(!item.selected);
+    assert!(
+        matches!(
+            item.status,
+            ImportItemStatus::Review | ImportItemStatus::RawFallback
+        ),
+        "mixed text must stay importable without being promoted to ready"
+    );
+    assert!(
+        item.selected,
+        "importable review/raw logs are honest defaults"
+    );
 }
 
 #[test]
@@ -457,7 +467,17 @@ fn archive_members_are_sampled_across_head_interior_and_tail() {
         ImportItemStatus::Ready,
         "a mostly-plain archive member must not be reported as a strong match"
     );
-    assert!(!item.selected);
+    assert!(
+        matches!(
+            item.status,
+            ImportItemStatus::Review | ImportItemStatus::RawFallback
+        ),
+        "mixed archive text must stay importable without being promoted to ready"
+    );
+    assert!(
+        item.selected,
+        "importable review/raw logs are honest defaults"
+    );
 }
 
 #[test]
