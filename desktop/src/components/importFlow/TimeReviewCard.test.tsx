@@ -24,10 +24,19 @@ describe("TimeReviewCard", () => {
     vi.useRealTimers();
   });
 
-  async function renderCard(client = createMockEngineClient()) {
+  async function renderCard(
+    client = createMockEngineClient(),
+    onChanged = vi.fn(),
+  ) {
     const report = await publishedReport(client);
-    render(<TimeReviewCard engine={client} report={report} />);
-    return { client, report };
+    render(
+      <TimeReviewCard
+        engine={client}
+        report={report}
+        onChanged={onChanged}
+      />,
+    );
+    return { client, report, onChanged };
   }
 
   it("states the honest lead and never enables Apply without a valid zone", async () => {
@@ -59,7 +68,7 @@ describe("TimeReviewCard", () => {
   });
 
   it("applies atomically, shows the scope chip, and undo returns to order-only", async () => {
-    await renderCard();
+    const { report, onChanged } = await renderCard();
     fireEvent.change(screen.getByLabelText("IANA timezone"), {
       target: { value: "America/Chicago" },
     });
@@ -72,12 +81,15 @@ describe("TimeReviewCard", () => {
       await vi.advanceTimersByTimeAsync(10);
     });
     expect(screen.getByText("America/Chicago · 2 sources")).toBeTruthy();
+    expect(onChanged).toHaveBeenCalledWith(report.corpusId);
+    expect(onChanged).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: "Undo / return to order-only" })).toBeTruthy();
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Undo / return to order-only" }));
       await vi.advanceTimersByTimeAsync(10);
     });
     expect(screen.queryByText("America/Chicago · 2 sources")).toBeNull();
+    expect(onChanged).toHaveBeenCalledTimes(2);
   });
 
   it("excluding a group scopes Apply to the remaining sources", async () => {
