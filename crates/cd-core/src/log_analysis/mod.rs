@@ -8,6 +8,7 @@
 
 pub mod analysis;
 pub mod bookmarks;
+pub mod company_import_lab;
 pub mod diagnostics;
 pub mod drain;
 pub mod embed_policy;
@@ -49,6 +50,12 @@ pub use bookmarks::{
     delete_bookmark, list_bookmarks, list_resolved_bookmarks, resolve_bookmark, update_bookmark,
     Bookmark, BookmarkEventRef, BookmarkEvidenceStatus, BookmarkSummary, NewBookmark,
     NewEvidenceBookmark, ResolvedBookmark, MAX_BOOKMARK_EVENT_REFS,
+};
+pub use company_import_lab::{
+    generate_company_import_lab, verify_company_import_lab, CompanyImportLabOracle,
+    CompanyImportLabPackage, CompanyImportLabSize, CompanyImportLabVerifyReport, PhaseTimingBudget,
+    COMPANY_IMPORT_LAB_BASE_TS, COMPANY_IMPORT_LAB_GENERATOR, COMPANY_IMPORT_LAB_ORACLE_SCHEMA,
+    COMPANY_IMPORT_LAB_SEED,
 };
 pub use diagnostics::{
     classify_failed_ingest, FailedIngestDiagnostic, FailedIngestDiagnosticRecorder,
