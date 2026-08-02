@@ -6,6 +6,8 @@
 //!
 //! Schema id: `contextdesk.company_import_lab.oracle.v1`
 
+#![allow(missing_docs)] // lab surface is aggregate/SDK-stable; docs live in README
+
 use super::embed_policy::{LogEmbedMode, LogEmbedPolicy};
 use super::import_diagnose::{
     diagnose_log_import, public_report_denylist_patterns, ImportDiagnoseOptions,
@@ -32,26 +34,20 @@ use zip::CompressionMethod;
 use zip::ZipWriter;
 
 /// Oracle / lab schema id (stable for SDK ports).
-#[allow(missing_docs)]
 pub const COMPANY_IMPORT_LAB_ORACLE_SCHEMA: &str = "contextdesk.company_import_lab.oracle.v1";
 /// Generator identity.
-#[allow(missing_docs)]
 pub const COMPANY_IMPORT_LAB_GENERATOR: &str = "contextdesk.company_import_lab.generator.v1";
 /// Fixed seed — no wall clock in content.
-#[allow(missing_docs)]
 pub const COMPANY_IMPORT_LAB_SEED: u64 = 0xC0_4D_50_4E_59_4C_41_42;
 /// Base synthetic epoch: 2025-06-01T12:00:00Z
-#[allow(missing_docs)]
 pub const COMPANY_IMPORT_LAB_BASE_TS: i64 = 1_748_779_200;
 
 const FIXED_SEED: u64 = COMPANY_IMPORT_LAB_SEED;
 const BASE_TS: i64 = COMPANY_IMPORT_LAB_BASE_TS;
 
-#[allow(missing_docs)]
 /// Size mode for the lab corpus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[allow(missing_docs)]
 pub enum CompanyImportLabSize {
     /// ~25_000 logical events.
     Small,
@@ -63,7 +59,6 @@ pub enum CompanyImportLabSize {
 
 impl CompanyImportLabSize {
     /// Parse from CLI token.
-    #[allow(missing_docs)]
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "25k" | "small" | "25" => Some(Self::Small),
@@ -74,7 +69,6 @@ impl CompanyImportLabSize {
     }
 
     /// Target logical event count (generation plan).
-    #[allow(missing_docs)]
     pub fn target_events(self) -> u64 {
         match self {
             Self::Small => 25_000,
@@ -84,7 +78,6 @@ impl CompanyImportLabSize {
     }
 
     /// Wire token.
-    #[allow(missing_docs)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Small => "25k",
@@ -94,11 +87,9 @@ impl CompanyImportLabSize {
     }
 }
 
-#[allow(missing_docs)]
 /// Aggregate-only external truth + production-path expectations.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[allow(missing_docs)]
 pub struct CompanyImportLabOracle {
     pub schema_id: String,
     pub schema_version: u32,
@@ -126,21 +117,17 @@ pub struct CompanyImportLabOracle {
     pub package_sha256: String,
 }
 
-#[allow(missing_docs)]
 /// Soft wall-time budgets (one-machine; not SLAs).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[allow(missing_docs)]
 pub struct PhaseTimingBudget {
     pub max_ingest_total_ms: u64,
     pub max_diagnose_wall_ms: u64,
 }
 
-#[allow(missing_docs)]
 /// Public-safe verification report (aggregate only).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(missing_docs)]
 pub struct CompanyImportLabVerifyReport {
     pub schema_id: String,
     pub size: String,
@@ -166,10 +153,8 @@ pub struct CompanyImportLabVerifyReport {
     pub wall_ms: u64,
 }
 
-#[allow(missing_docs)]
 /// Result of generating a lab package on disk.
 #[derive(Debug, Clone)]
-#[allow(missing_docs)]
 pub struct CompanyImportLabPackage {
     pub root: PathBuf,
     pub zip_path: PathBuf,
@@ -178,7 +163,6 @@ pub struct CompanyImportLabPackage {
 }
 
 /// Generate corpus + oracle under `out_dir` for `size`.
-#[allow(missing_docs)]
 pub fn generate_company_import_lab(
     out_dir: &Path,
     size: CompanyImportLabSize,
@@ -355,7 +339,6 @@ pub fn generate_company_import_lab(
 }
 
 /// Run production-path verification against an existing package directory.
-#[allow(missing_docs)]
 pub fn verify_company_import_lab(package_root: &Path) -> CoreResult<CompanyImportLabVerifyReport> {
     let wall = Instant::now();
     let oracle_path = package_root.join("truth/oracle.v1.json");
