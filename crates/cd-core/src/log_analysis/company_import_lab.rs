@@ -723,16 +723,25 @@ pub fn verify_company_import_lab(package_root: &Path) -> CoreResult<CompanyImpor
     }
 
     if current_revision > 0 {
-        for source in resolve_source_keys(
+        let resolved_keys = resolve_source_keys(
             ingest_cache.path(),
             &corpus_id,
             &oracle.local_timestamp_sources,
-        ) {
+        );
+        if resolved_keys.len() != oracle.local_timestamp_sources.len() {
+            failures.push(format!(
+                "common-group source resolution collapsed {} local sources into {} durable identities ({resolved_keys:?}; need {:?})",
+                oracle.local_timestamp_sources.len(),
+                resolved_keys.len(),
+                oracle.local_timestamp_sources
+            ));
+        }
+        for source in &resolved_keys {
             match preview_source_timezone(
                 ingest_cache.path(),
                 &corpus_id,
                 current_revision,
-                &source,
+                source,
                 &oracle.common_timezone_iana,
             ) {
                 Ok(preview) => apply_reqs.push(SourceTimezoneApplyRequest {
@@ -745,6 +754,12 @@ pub fn verify_company_import_lab(package_root: &Path) -> CoreResult<CompanyImpor
         }
         if apply_reqs.is_empty() {
             failures.push("no timezone apply requests built for local group".into());
+        } else if apply_reqs.len() < oracle.local_timestamp_sources.len() {
+            failures.push(format!(
+                "timezone apply built {} requests for {} local sources (partial common-group apply)",
+                apply_reqs.len(),
+                oracle.local_timestamp_sources.len()
+            ));
         } else {
             match apply_source_timezones(
                 ingest_cache.path(),
@@ -786,16 +801,23 @@ pub fn verify_company_import_lab(package_root: &Path) -> CoreResult<CompanyImpor
                 timezone_exception_explicit_wall_after += s.explicit_wall_clock_records;
             }
         }
-        // Declarations for local group after apply.
+        // Every common-group source must be applied (declaration and/or resolved rows).
         for need in &oracle.local_timestamp_sources {
             let declared = state
                 .declarations
                 .keys()
-                .any(|k| source_key_matches(k, std::slice::from_ref(need)));
-            if !declared && local_group_resolved_after == 0 {
-                // may still resolve via source list
+                .any(|k| source_path_matches(k, need));
+            let resolved_here = state
+                .sources
+                .iter()
+                .filter(|s| source_path_matches(&s.source, need))
+                .map(|s| s.resolved_local_records)
+                .sum::<u64>();
+            if !declared && resolved_here == 0 {
+                failures.push(format!(
+                    "common-group source not applied after TZ apply: {need} (no declaration and resolved=0)"
+                ));
             }
-            let _ = declared;
         }
     }
     // Catalog fallback for exception identity when timezone state omits explicit-only sources.
@@ -834,14 +856,15 @@ pub fn verify_company_import_lab(package_root: &Path) -> CoreResult<CompanyImpor
             oracle.explicit_timezone_source
         ));
     }
-    // Common group: resolved should appear after apply when previews succeeded.
-    if timezone_apply_revision.is_some()
-        && local_group_resolved_after == 0
-        && local_group_unresolved_before > 0
-    {
-        failures.push(format!(
-            "local group unresolved_before={local_group_unresolved_before} but resolved_after=0 (apply did not resolve common group)"
-        ));
+    // Common group: require near-complete resolution of *all* local sources
+    // (not merely resolved_after > 0, which greenwashes a single-source apply).
+    if timezone_apply_revision.is_some() && local_group_unresolved_before > 0 {
+        let min_resolved = local_group_unresolved_before.saturating_mul(90) / 100;
+        if local_group_resolved_after < min_resolved {
+            failures.push(format!(
+                "common-group partial apply: resolved_after={local_group_resolved_after} < 90% of unresolved_before={local_group_unresolved_before} (min {min_resolved}); both region-a and region-b must be applied"
+            ));
+        }
     }
     // Exception must not be force-applied as local-only: keep explicit_wall >= before for exception.
     if exception_explicit_before > 0
@@ -1012,17 +1035,40 @@ fn assert_mins(
     }
 }
 
-fn source_key_matches(observed: &str, needs: &[String]) -> bool {
-    needs.iter().any(|need| {
-        let needle = need.rsplit('/').next().unwrap_or(need);
-        observed == need
-            || observed.ends_with(need)
-            || observed.ends_with(needle)
-            || observed.contains(need)
-            || observed.contains(needle)
-    })
+/// Match a durable corpus source identity to an oracle path **without**
+/// collapsing distinct parents that share a basename.
+///
+/// `region-a/app.log` and `region-b/app.log` must never both match the same
+/// observed identity via bare `app.log`. Prefer exact / full-relative-path
+/// suffix matches with a path boundary (`/`, `!/`).
+fn source_path_matches(observed: &str, need: &str) -> bool {
+    if need.is_empty() {
+        return false;
+    }
+    if observed == need {
+        return true;
+    }
+    // Full need path as suffix with a path boundary (archive member or nested path).
+    if let Some(prefix) = observed.strip_suffix(need) {
+        return prefix.is_empty()
+            || prefix.ends_with('/')
+            || prefix.ends_with("!/")
+            || prefix.ends_with('!');
+    }
+    // Embedded full path after archive separator.
+    if observed.contains(&format!("!/{need}")) {
+        return true;
+    }
+    false
 }
 
+fn source_key_matches(observed: &str, needs: &[String]) -> bool {
+    needs.iter().any(|need| source_path_matches(observed, need))
+}
+
+/// Resolve each oracle local-source path to the durable corpus identity.
+/// Returns one identity **per** need (order preserved); fails closed callers
+/// should check `out.len() == needs.len()` for collapse.
 fn resolve_source_keys(cache: &Path, corpus_id: &str, needs: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -1031,18 +1077,43 @@ fn resolve_source_keys(cache: &Path, corpus_id: &str, needs: &[String]) -> Vec<S
             let resolved = state
                 .sources
                 .iter()
-                .find(|s| source_key_matches(&s.source, std::slice::from_ref(need)))
+                .find(|s| source_path_matches(&s.source, need))
                 .map(|s| s.source.clone())
                 .or_else(|| {
                     state
                         .declarations
                         .keys()
-                        .find(|k| source_key_matches(k, std::slice::from_ref(need)))
+                        .find(|k| source_path_matches(k, need))
                         .cloned()
+                })
+                .or_else(|| {
+                    // Catalog may surface identities not listed in timezone state.
+                    LogCorpus::open(cache, corpus_id)
+                        .ok()
+                        .and_then(|corpus| {
+                            query_source_catalog(
+                                &corpus,
+                                &LogSourceCatalogQuery {
+                                    search: Some(need.clone()),
+                                    cursor: None,
+                                    limit: 100,
+                                },
+                            )
+                            .ok()
+                        })
+                        .and_then(|cat| {
+                            cat.sources
+                                .into_iter()
+                                .find(|s| source_path_matches(&s.source, need))
+                                .map(|s| s.source)
+                        })
                 })
                 .unwrap_or_else(|| need.clone());
             if seen.insert(resolved.clone()) {
                 out.push(resolved);
+            } else {
+                // Collapse: same durable identity claimed by two needs — keep
+                // first only; verify will fail apply_reqs.len() check.
             }
         }
     } else {
@@ -1503,6 +1574,31 @@ mod tests {
     }
 
     #[test]
+    fn source_path_matches_does_not_collapse_same_basename() {
+        let a = "company-import.zip!/region-a/app.log";
+        let b = "company-import.zip!/region-b/app.log";
+        assert!(source_path_matches(a, "region-a/app.log"));
+        assert!(source_path_matches(b, "region-b/app.log"));
+        // Critical: distinct parents that share basename must not cross-match.
+        assert!(!source_path_matches(a, "region-b/app.log"));
+        assert!(!source_path_matches(b, "region-a/app.log"));
+        assert!(source_path_matches("region-a/app.log", "region-a/app.log"));
+        // resolve_source_keys must yield two identities for the two needs.
+        let needs = ["region-a/app.log", "region-b/app.log"];
+        let mut resolved = Vec::new();
+        for need in needs {
+            for candidate in [a, b] {
+                if source_path_matches(candidate, need) {
+                    resolved.push(candidate);
+                    break;
+                }
+            }
+        }
+        assert_eq!(resolved.len(), 2);
+        assert_ne!(resolved[0], resolved[1]);
+    }
+
+    #[test]
     fn generate_small_is_deterministic_and_public_safe() {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
@@ -1563,6 +1659,18 @@ mod tests {
         assert!(
             report.timezone_exception_explicit_wall_after > 0,
             "exception explicit_wall after apply"
+        );
+        // Full common group: both region-a and region-b must resolve (~100%, ≥90%).
+        assert!(
+            report.local_group_unresolved_before > 0,
+            "expected unresolved local before apply"
+        );
+        let min_resolved = report.local_group_unresolved_before * 90 / 100;
+        assert!(
+            report.local_group_resolved_after >= min_resolved,
+            "common-group partial apply: resolved {} < 90% of unresolved {} — both local sources must be applied",
+            report.local_group_resolved_after,
+            report.local_group_unresolved_before
         );
         assert!(report.template_count >= 8);
         assert!(report.repetitive_template_count >= 2);
