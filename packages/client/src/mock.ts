@@ -19,6 +19,8 @@ import {
   type TimezonePreview,
   type TimezoneState,
   type Unsubscribe,
+  type ReviewedFormatService,
+  type ReviewedFormatStoreEntry,
 } from "./engine";
 
 /** Fixed declaration timestamp the mock stamps (2026-07-01T00:00:00Z). */
@@ -166,6 +168,10 @@ export function mockPlanToken(preview: WireImportPreviewReport): string {
 
 /** Deterministic mock engine client. */
 export class MockEngineClient implements EngineClient {
+  private formatsEntries: ReviewedFormatStoreEntry[] = [];
+  private formatsDocs = new Map<string, unknown>();
+  private formatsRev = 0;
+
   readonly #scenario: MockScenario;
   #preview: WireImportPreviewReport;
   #listeners = new Set<(progress: WireProcessProgress) => void>();
@@ -500,6 +506,82 @@ export class MockEngineClient implements EngineClient {
     }
     return corpus;
   }
+
+  formats: ReviewedFormatService = {
+    list: async () => [...this.formatsEntries],
+    load: async (formatId, version) => {
+      const key = `${formatId}@${version}`;
+      const doc = this.formatsDocs.get(key);
+      if (!doc) throw new EngineError("invalid", `reviewed format not found: ${key}`);
+      return doc;
+    },
+    validate: async (format) => {
+      const f = format as { schemaId?: string; formatId?: string; version?: number };
+      if (!f || f.schemaId !== "contextdesk.reviewed_format.v1" || !f.formatId || !f.version) {
+        return { valid: false, diagnostics: [{ code: "schema_id_invalid", location: "schemaId" }] };
+      }
+      return { valid: true, diagnostics: [] };
+    },
+    preview: async (format, _sample) => {
+      const f = format as { formatId?: string; version?: number };
+      return {
+        formatId: f.formatId ?? "unknown",
+        version: f.version ?? 0,
+        linesInspected: 0,
+        recordsMatched: 0,
+        linesUnattributed: 0,
+        linesDropped: 0,
+        valid: true,
+      };
+    },
+    save: async (format) => {
+      const f = format as { formatId: string; version: number; name?: string };
+      const key = `${f.formatId}@${f.version}`;
+      if (this.formatsDocs.has(key)) {
+        throw new EngineError("conflict", `reviewed format already exists: ${key}`);
+      }
+      this.formatsDocs.set(key, format);
+      this.formatsRev += 1;
+      const entry: ReviewedFormatStoreEntry = {
+        formatId: f.formatId,
+        version: f.version,
+        digest: `mock-${key}`,
+        name: f.name ?? f.formatId,
+        fileName: `${f.formatId}__v${f.version}.json`,
+      };
+      this.formatsEntries.push(entry);
+      return entry;
+    },
+    update: async (format) => {
+      const f = format as { formatId: string; version: number; name?: string };
+      const key = `${f.formatId}@${f.version}`;
+      this.formatsDocs.set(key, format);
+      this.formatsRev += 1;
+      const entry: ReviewedFormatStoreEntry = {
+        formatId: f.formatId,
+        version: f.version,
+        digest: `mock-${key}-u`,
+        name: f.name ?? f.formatId,
+        fileName: `${f.formatId}__v${f.version}.json`,
+      };
+      const i = this.formatsEntries.findIndex(
+        (e) => e.formatId === f.formatId && e.version === f.version,
+      );
+      if (i >= 0) this.formatsEntries[i] = entry;
+      else this.formatsEntries.push(entry);
+      return entry;
+    },
+    delete: async (formatId, version) => {
+      const key = `${formatId}@${version}`;
+      const had = this.formatsDocs.delete(key);
+      this.formatsEntries = this.formatsEntries.filter(
+        (e) => !(e.formatId === formatId && e.version === version),
+      );
+      if (had) this.formatsRev += 1;
+      return had;
+    },
+    revision: async () => this.formatsRev,
+  };
 }
 
 /** Create a deterministic mock engine client. */

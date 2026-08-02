@@ -213,9 +213,48 @@ export interface EngineEvents {
   onProcessProgress(listener: (progress: WireProcessProgress) => void): Unsubscribe;
 }
 
+
+/** One durable reviewed-format index entry (wire shape). */
+export type ReviewedFormatStoreEntry = {
+  formatId: string;
+  version: number;
+  digest: string;
+  name: string;
+  fileName: string;
+};
+
+/** Revision-bound apply binding for production ingest. */
+export type ReviewedFormatApplyBinding = {
+  sourceIdentity: string;
+  formatId: string;
+  version: number;
+  digest: string;
+};
+
+/** Reviewed-format CRUD / validate / preview / apply surface. */
+export interface ReviewedFormatService {
+  /** List durable index entries. */
+  list(): Promise<ReviewedFormatStoreEntry[]>;
+  /** Load one document by id@version. */
+  load(formatId: string, version: number): Promise<unknown>;
+  /** Validate without persisting. */
+  validate(format: unknown): Promise<{ valid: boolean; diagnostics: unknown[] }>;
+  /** Bounded sample preview. */
+  preview(format: unknown, sample: string): Promise<unknown>;
+  /** Save a new document (fails if id@version exists). */
+  save(format: unknown): Promise<ReviewedFormatStoreEntry>;
+  /** Update an existing id@version (or create). */
+  update(format: unknown): Promise<ReviewedFormatStoreEntry>;
+  /** Delete one document. */
+  delete(formatId: string, version: number): Promise<boolean>;
+  /** Current store revision. */
+  revision(): Promise<number>;
+}
+
 /** The transport-neutral engine client the import flow consumes. */
 export interface EngineClient {
   import: ImportService;
   time: TimeService;
+  formats: ReviewedFormatService;
   events: EngineEvents;
 }

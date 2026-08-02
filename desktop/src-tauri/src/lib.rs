@@ -9113,6 +9113,114 @@ async fn log_clear_source_timezone(
     .map_err(|error| format!("timezone clear task join: {error}"))?
 }
 
+fn reviewed_format_store_dir(state: &AppState) -> Result<std::path::PathBuf, String> {
+    let cache = log_cache_dir(state)?;
+    Ok(cache.join("reviewed_formats"))
+}
+
+#[tauri::command]
+async fn log_reviewed_format_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<cd_core::log_analysis::ReviewedFormatStoreEntry>, String> {
+    let root = reviewed_format_store_dir(&state)?;
+    tokio::task::spawn_blocking(move || {
+        let store = cd_core::log_analysis::ReviewedFormatStore::open(root)
+            .map_err(|e| e.to_string())?;
+        store.list().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("reviewed format list join: {e}"))?
+}
+
+#[tauri::command]
+async fn log_reviewed_format_load(
+    state: State<'_, AppState>,
+    format_id: String,
+    version: u16,
+) -> Result<cd_core::log_analysis::ReviewedFormat, String> {
+    let root = reviewed_format_store_dir(&state)?;
+    tokio::task::spawn_blocking(move || {
+        let store = cd_core::log_analysis::ReviewedFormatStore::open(root)
+            .map_err(|e| e.to_string())?;
+        store.load(&format_id, version).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("reviewed format load join: {e}"))?
+}
+
+#[tauri::command]
+async fn log_reviewed_format_save(
+    state: State<'_, AppState>,
+    format: cd_core::log_analysis::ReviewedFormat,
+) -> Result<cd_core::log_analysis::ReviewedFormatStoreEntry, String> {
+    let root = reviewed_format_store_dir(&state)?;
+    tokio::task::spawn_blocking(move || {
+        let store = cd_core::log_analysis::ReviewedFormatStore::open(root)
+            .map_err(|e| e.to_string())?;
+        store.save(&format).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("reviewed format save join: {e}"))?
+}
+
+#[tauri::command]
+async fn log_reviewed_format_update(
+    state: State<'_, AppState>,
+    format: cd_core::log_analysis::ReviewedFormat,
+) -> Result<cd_core::log_analysis::ReviewedFormatStoreEntry, String> {
+    let root = reviewed_format_store_dir(&state)?;
+    tokio::task::spawn_blocking(move || {
+        let store = cd_core::log_analysis::ReviewedFormatStore::open(root)
+            .map_err(|e| e.to_string())?;
+        store.update(&format).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("reviewed format update join: {e}"))?
+}
+
+#[tauri::command]
+async fn log_reviewed_format_delete(
+    state: State<'_, AppState>,
+    format_id: String,
+    version: u16,
+) -> Result<bool, String> {
+    let root = reviewed_format_store_dir(&state)?;
+    tokio::task::spawn_blocking(move || {
+        let store = cd_core::log_analysis::ReviewedFormatStore::open(root)
+            .map_err(|e| e.to_string())?;
+        store.delete(&format_id, version).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("reviewed format delete join: {e}"))?
+}
+
+#[tauri::command]
+async fn log_reviewed_format_revision(state: State<'_, AppState>) -> Result<u64, String> {
+    let root = reviewed_format_store_dir(&state)?;
+    tokio::task::spawn_blocking(move || {
+        let store = cd_core::log_analysis::ReviewedFormatStore::open(root)
+            .map_err(|e| e.to_string())?;
+        store.revision().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("reviewed format revision join: {e}"))?
+}
+
+#[tauri::command]
+async fn log_reviewed_format_validate(
+    format: cd_core::log_analysis::ReviewedFormat,
+) -> Result<cd_core::log_analysis::ReviewedFormatValidation, String> {
+    Ok(cd_core::log_analysis::validate_reviewed_format(&format))
+}
+
+#[tauri::command]
+async fn log_reviewed_format_preview(
+    format: cd_core::log_analysis::ReviewedFormat,
+    sample: String,
+) -> Result<cd_core::log_analysis::ReviewedFormatPreview, String> {
+    Ok(cd_core::log_analysis::preview_reviewed_format(&format, &sample))
+}
+
 fn save_log_operational_metrics_attachment_at(
     cache: &std::path::Path,
     corpus_id: &str,
@@ -12187,6 +12295,14 @@ pub fn run() {
             log_preview_source_timezone,
             log_apply_source_timezone,
             log_clear_source_timezone,
+            log_reviewed_format_list,
+            log_reviewed_format_load,
+            log_reviewed_format_save,
+            log_reviewed_format_update,
+            log_reviewed_format_delete,
+            log_reviewed_format_revision,
+            log_reviewed_format_validate,
+            log_reviewed_format_preview,
             log_save_operational_metrics_attachment,
             log_load_operational_metrics_attachment,
             log_remove_operational_metrics_attachment,
