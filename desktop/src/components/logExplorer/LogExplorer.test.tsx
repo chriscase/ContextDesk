@@ -4147,7 +4147,9 @@ describe("LogExplorer shell", () => {
     expect(screen.getByRole("status").textContent).not.toContain(
       "Selection cleared",
     );
-    expect(screen.queryByTestId("bookmark-restore-view")).toBeNull();
+    await waitFor(() =>
+      expect(screen.queryByTestId("bookmark-restore-view")).toBeNull(),
+    );
   });
 
   it("does not let an active Find refresh overwrite a temporary bookmark reveal", async () => {
@@ -4250,7 +4252,9 @@ describe("LogExplorer shell", () => {
         }) as HTMLInputElement
       ).checked,
     ).toBe(true);
-    expect(screen.queryByTestId("bookmark-restore-view")).toBeNull();
+    await waitFor(() =>
+      expect(screen.queryByTestId("bookmark-restore-view")).toBeNull(),
+    );
   });
 
   it("reports a missing bookmark target without claiming navigation success", async () => {
