@@ -1003,9 +1003,10 @@ describe("Log Explorer in-app embed (#851)", () => {
     ).toMatchScreenshot("log-explorer-embed-1400-wide-dark");
 
     // Fullscreen -> resize-down: shrink the window and the pane cell to the
-    // owner geometry. The Explorer tracks the pane; the user's open rails are
-    // respected (no forced collapse mid-session) and nothing clips or
-    // overflows.
+    // owner geometry. The Explorer tracks the pane and crossing into the
+    // tight-normal band returns both untouched default rails to compact strips,
+    // preserving the evidence lane's declared minimum. A user may reopen a
+    // rail after the resize settles.
     await page.viewport(1100, 760);
     cell.style.width = "900px";
     cell.style.height = "680px";
@@ -1016,7 +1017,18 @@ describe("Log Explorer in-app embed (#851)", () => {
       );
     });
     expect(explorer.getAttribute("data-breakpoint")).toBe("normal");
-    expect(explorer.querySelector(".log-explorer__filters-reopen")).toBeNull();
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("log-explorer-filters").getAttribute(
+          "data-collapsed",
+        ),
+      ).toBe("true"),
+    );
+    await nextPaintedFrame();
+    expect(explorer.querySelector(".log-explorer__filters-reopen")).toBeTruthy();
+    expect(
+      screen.getByTestId("log-explorer-lanes").getBoundingClientRect().width,
+    ).toBeGreaterThanOrEqual(420);
     await expectNoHorizontalPageOverflow();
   });
 });

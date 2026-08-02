@@ -1239,6 +1239,8 @@ export function LogExplorer({ corpusId }: Props) {
   const previousFiltersCollapsedRef = useRef(filtersCollapsed);
   /** One-shot: the first real width decides the rails' starting posture. */
   const railDefaultsResolvedRef = useRef(false);
+  /** Tracks crossings into the tight-normal band after the first measurement. */
+  const previousRailTightRef = useRef<boolean | null>(null);
   /** Consumed by the collapse focus effect so the posture default never steals focus. */
   const railAutoDefaultRef = useRef(false);
   const dragRef = useRef<"filters" | "chat" | null>(null);
@@ -1617,15 +1619,30 @@ export function LogExplorer({ corpusId }: Props) {
       if (bp === "narrow") {
         setTimeLinkMode("independent");
       }
-      // #851: the first MEASURED width decides the rails' starting posture —
-      // never the window-width fallback, which is exactly the poisoned value
-      // an embedded Explorer must ignore. In the tight-normal band both rails
-      // begin as strips so the evidence lane keeps its minimum; afterwards
-      // the user's toggles own the state.
+      // #851: a MEASURED width decides the rails' safe posture — never the
+      // window-width fallback, which is exactly the poisoned value an embedded
+      // Explorer must ignore. Entering the tight-normal band collapses both
+      // rails so a fullscreen-to-window resize cannot squeeze the evidence
+      // below its declared minimum. Once the resize settles, a user may reopen
+      // either rail without this effect immediately undoing that choice.
       if (measured && !railDefaultsResolvedRef.current && width > 0) {
         railDefaultsResolvedRef.current = true;
-        if (bp !== "narrow" && width < TIGHT_RAIL_DEFAULT_WIDTH_PX) {
-          railAutoDefaultRef.current = true;
+        const tight = bp !== "narrow" && width < TIGHT_RAIL_DEFAULT_WIDTH_PX;
+        previousRailTightRef.current = tight;
+        if (tight) {
+          // Suppress focus only when this transition actually changes the
+          // filter rail. If it was already collapsed by the user, leaving the
+          // flag armed would swallow focus when they later reopen it.
+          railAutoDefaultRef.current = !previousFiltersCollapsedRef.current;
+          setFiltersCollapsed(true);
+          setChatCollapsed(true);
+        }
+      } else if (measured && width > 0) {
+        const tight = bp !== "narrow" && width < TIGHT_RAIL_DEFAULT_WIDTH_PX;
+        const enteredTight = tight && previousRailTightRef.current === false;
+        previousRailTightRef.current = tight;
+        if (enteredTight) {
+          railAutoDefaultRef.current = !previousFiltersCollapsedRef.current;
           setFiltersCollapsed(true);
           setChatCollapsed(true);
         }
