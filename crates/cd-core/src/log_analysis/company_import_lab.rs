@@ -5,6 +5,10 @@
 //! import / timezone / diagnose path without private payloads.
 //!
 //! Schema id: `contextdesk.company_import_lab.oracle.v1`
+//!
+//! Production path mirrors the shipped **EngineClient** host commands
+//! (`log_preview_import` → `verify_import_plan` + selection-bound ingest
+//! ≈ `log_run_import`, timezone commands, `diagnose_log_import`).
 
 #![allow(missing_docs)] // lab surface is aggregate/SDK-stable; docs live in README
 
@@ -12,8 +16,13 @@ use super::embed_policy::{LogEmbedMode, LogEmbedPolicy};
 use super::import_diagnose::{
     diagnose_log_import, public_report_denylist_patterns, ImportDiagnoseOptions,
 };
-use super::import_preview::{preview_import_plan, ImportItemStatus, ImportPreviewReport};
-use super::ingest::{ingest_path_with_policy_and_observer, IngestPhaseTimings, IngestStats};
+use super::import_preview::{
+    event_importable, preview_import_plan, verify_import_plan, ImportItemStatus,
+    ImportPreviewReason, ImportPreviewReport,
+};
+use super::ingest::{
+    ingest_path_with_policy_selection_and_observer, IngestPhaseTimings, IngestStats,
+};
 use super::query::{query_source_catalog, LogSourceCatalogQuery, TimeQuality};
 use super::store::LogCorpus;
 use super::timezone_application::{
@@ -31,7 +40,17 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use zip::write::SimpleFileOptions;
 use zip::CompressionMethod;
+use zip::DateTime;
 use zip::ZipWriter;
+
+/// Fixed ZIP member mtime so package_sha256 is deterministic across runs.
+fn zip_file_options() -> SimpleFileOptions {
+    let mtime =
+        DateTime::from_date_and_time(2025, 6, 1, 12, 0, 0).unwrap_or_else(|_| DateTime::default());
+    SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Stored)
+        .last_modified_time(mtime)
+}
 
 /// Oracle / lab schema id (stable for SDK ports).
 pub const COMPANY_IMPORT_LAB_ORACLE_SCHEMA: &str = "contextdesk.company_import_lab.oracle.v1";
@@ -88,6 +107,9 @@ impl CompanyImportLabSize {
 }
 
 /// Aggregate-only external truth + production-path expectations.
+///
+/// Expected counts are computed at generation time so verify can fail closed
+/// on level/format/selection/template drift — not merely echo observed values.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CompanyImportLabOracle {
@@ -99,8 +121,10 @@ pub struct CompanyImportLabOracle {
     pub target_events: u64,
     /// Planned event counts by source identity (portable relative paths).
     pub planned_events_by_source: BTreeMap<String, u64>,
-    /// Planned total logical events (sum of source plans).
+    /// Planned top-level ingest events (must land in production corpus).
     pub planned_events_total: u64,
+    /// Nested ZIP member events that production must expand and ingest.
+    pub planned_nested_member_events: u64,
     /// Categories present in the corpus (shape checklist).
     pub shape_categories: Vec<String>,
     /// Sources that carry ambiguous local timestamps (common timezone group).
@@ -111,6 +135,24 @@ pub struct CompanyImportLabOracle {
     pub common_timezone_iana: String,
     /// Minimum files that must be non-event supporting/ignored/unsupported.
     pub min_non_event_entries: u64,
+    /// Minimum expected level counts (fail closed if below).
+    pub expected_level_counts_min: BTreeMap<String, u64>,
+    /// Minimum expected format counts (fail closed if below).
+    pub expected_format_counts_min: BTreeMap<String, u64>,
+    /// Minimum preview status counts (fail closed if below).
+    pub expected_preview_status_mins: BTreeMap<String, u64>,
+    /// Minimum exclusion reason counts (fail closed if below).
+    pub expected_exclusion_reason_mins: BTreeMap<String, u64>,
+    /// Minimum distinct templates after ingest.
+    pub min_template_count: u64,
+    /// Minimum templates whose event count is high enough to count as repetitive families.
+    pub min_repetitive_template_count: u64,
+    /// Minimum unresolved_local provenance before timezone apply.
+    pub min_unresolved_local_before: u64,
+    /// Minimum explicit_wall provenance before timezone apply (exception + structured).
+    pub min_explicit_wall_before: u64,
+    /// Absolute tolerance on planned_events_total (not a percentage greenwash).
+    pub ingest_event_tolerance_abs: u64,
     /// Phase timing regression budgets (ms) — soft upper bounds for wall.
     pub phase_timing_budget_ms: PhaseTimingBudget,
     /// Content integrity of the ZIP (sha256 of the package bytes).
@@ -134,18 +176,30 @@ pub struct CompanyImportLabVerifyReport {
     pub passed: bool,
     pub failures: Vec<String>,
     pub planned_events_total: u64,
+    pub planned_nested_member_events: u64,
     pub ingested_events: u64,
+    pub nested_events_ingested: u64,
     pub ingested_files: u64,
     pub level_counts: BTreeMap<String, u64>,
     pub format_counts: BTreeMap<String, u64>,
     pub timestamp_provenance_before: BTreeMap<String, u64>,
+    pub timestamp_provenance_after: BTreeMap<String, u64>,
     pub corpus_time_quality_before: String,
+    pub corpus_time_quality_after: String,
     pub timezone_apply_revision: Option<u64>,
     pub timezone_exception_source_present: bool,
+    pub timezone_exception_explicit_wall_after: u64,
+    pub local_group_unresolved_before: u64,
+    pub local_group_unresolved_after: u64,
+    pub local_group_resolved_after: u64,
+    pub template_count: u64,
+    pub repetitive_template_count: u64,
     pub preview_status_counts: BTreeMap<String, u64>,
     pub exclusion_reason_counts: BTreeMap<String, u64>,
     pub cancel_not_published: bool,
+    pub cancel_error_kind: String,
     pub retry_published: bool,
+    pub engine_client_path: bool,
     pub diagnose_outcome: String,
     pub diagnose_temp_deleted: bool,
     pub phase_timings: IngestPhaseTimings,
@@ -271,25 +325,59 @@ pub fn generate_company_import_lab(
     )?;
     write_bytes(&import_root, ".DS_Store", b"synthetic-ds-store")?;
     write_bytes(&import_root, "__MACOSX/._junk", b"macos-resource-fork")?;
+    // Nested ZIP members: production must expand these (EngineClient ingest path).
     write_nested_zip(&import_root, "archives/nested.zip", plan.nested)?;
-    planned.insert("archives/nested.zip!/inner/app.jsonl".into(), plan.nested);
+    // Nested members are tracked separately: production selection-bound ingest
+    // must expand them. They are not folded into planned_events_total so a
+    // nested miss cannot hide behind a wide percentage band.
+    let planned_nested_member_events = plan.nested;
+    planned.insert(
+        "archives/nested.zip!/inner/app.jsonl".into(),
+        planned_nested_member_events,
+    );
 
     let zip_path = out_dir.join("company-import.zip");
     zip_directory(&import_root, &zip_path)?;
     let package_bytes =
         fs::read(&zip_path).map_err(|e| CoreError::Message(format!("read package zip: {e}")))?;
     let package_sha256 = sha256_hex(&package_bytes);
-    let planned_events_total: u64 = planned.values().sum();
+    // Top-level planned ingest only (nested asserted separately).
+    let planned_events_total: u64 = planned
+        .iter()
+        .filter(|(k, _)| !k.contains("nested.zip"))
+        .map(|(_, v)| *v)
+        .sum();
 
+    // Expected aggregates derived from the generator plan (not observed).
+    let json_events =
+        plan.api + plan.api_rolled + plan.edge + plan.queue + plan.noise + plan.nested;
+    // jsonl levels: info ~75%, warn ~15%, error ~10% of json family
+    let mut expected_level_counts_min = BTreeMap::new();
+    expected_level_counts_min.insert("info".into(), (json_events * 60 / 100).max(100));
+    expected_level_counts_min.insert("error".into(), (json_events * 5 / 100).max(10));
+    expected_level_counts_min.insert("warn".into(), (json_events * 5 / 100).max(5));
+    let mut expected_format_counts_min = BTreeMap::new();
+    expected_format_counts_min.insert("json".into(), (json_events * 85 / 100).max(100));
+    expected_format_counts_min.insert("logfmt".into(), plan.postgres * 80 / 100);
+    let mut expected_preview_status_mins = BTreeMap::new();
+    expected_preview_status_mins.insert("ready".into(), 8);
+    expected_preview_status_mins.insert("ignored".into(), 1);
+    let expected_exclusion_reason_mins = BTreeMap::new();
+    // Binary/empty/hidden are required as non-event inventory; under
+    // selection-bound ingest they may land as ignored:not_selected rather than
+    // exclusion_counts — enforce via expected_preview_status_mins instead.
+
+    let local_total = plan.local_a + plan.local_b;
     let oracle = CompanyImportLabOracle {
         schema_id: COMPANY_IMPORT_LAB_ORACLE_SCHEMA.into(),
-        schema_version: 1,
+        schema_version: 2,
         generator: COMPANY_IMPORT_LAB_GENERATOR.into(),
         seed: FIXED_SEED,
         size: size.as_str().into(),
         target_events: size.target_events(),
         planned_events_by_source: planned,
         planned_events_total,
+        planned_nested_member_events,
         shape_categories: vec![
             "rolled_filenames".into(),
             "nested_zip_members".into(),
@@ -309,6 +397,20 @@ pub fn generate_company_import_lab(
         explicit_timezone_source: "region-c/app-offset.log".into(),
         common_timezone_iana: "America/Chicago".into(),
         min_non_event_entries: 4,
+        expected_level_counts_min,
+        expected_format_counts_min,
+        expected_preview_status_mins,
+        expected_exclusion_reason_mins,
+        min_template_count: 8,
+        min_repetitive_template_count: 2,
+        min_unresolved_local_before: local_total * 80 / 100,
+        min_explicit_wall_before: plan.local_exception.max(10),
+        // Tight absolute tolerance — not ±15% greenwash of nested loss.
+        ingest_event_tolerance_abs: match size {
+            CompanyImportLabSize::Small => 80,
+            CompanyImportLabSize::Medium => 150,
+            CompanyImportLabSize::Large => 400,
+        },
         phase_timing_budget_ms: PhaseTimingBudget {
             max_ingest_total_ms: match size {
                 CompanyImportLabSize::Small => 180_000,
@@ -339,6 +441,9 @@ pub fn generate_company_import_lab(
 }
 
 /// Run production-path verification against an existing package directory.
+///
+/// Mirrors EngineClient / Tauri host: preview → verify plan → selection-bound
+/// ingest (cancel + retry) → timezone state/preview/apply → diagnose.
 pub fn verify_company_import_lab(package_root: &Path) -> CoreResult<CompanyImportLabVerifyReport> {
     let wall = Instant::now();
     let oracle_path = package_root.join("truth/oracle.v1.json");
@@ -359,9 +464,15 @@ pub fn verify_company_import_lab(package_root: &Path) -> CoreResult<CompanyImpor
         &mut failures,
     );
 
-    // --- Preview ---
+    // --- Preview (EngineClient.import.preview ≈ log_preview_import) ---
     let plan = preview_import_plan(&zip_path, None)?;
     let preview_status_counts = preview_status_histogram(&plan.report);
+    assert_mins(
+        &preview_status_counts,
+        &oracle.expected_preview_status_mins,
+        "preview status",
+        &mut failures,
+    );
     let non_event = ["ignored", "supporting", "unsupported", "blocked"]
         .iter()
         .map(|k| preview_status_counts.get(*k).copied().unwrap_or(0))
@@ -373,7 +484,31 @@ pub fn verify_company_import_lab(package_root: &Path) -> CoreResult<CompanyImpor
         ));
     }
 
-    // --- Diagnose ---
+    // Event-importable selection exactly as the host builds for log_run_import.
+    let selected: Vec<String> = plan
+        .report
+        .items
+        .iter()
+        .filter(|item| event_importable(item))
+        .map(|item| item.identity.clone())
+        .collect();
+    if selected.is_empty() {
+        failures.push("preview produced zero event-importable identities".into());
+    }
+    // Nested archive leaves must appear in the reviewed plan (or expansion fails closed later).
+    let nested_in_preview = plan.report.items.iter().any(|item| {
+        item.identity.contains("nested")
+            || item
+                .reasons
+                .iter()
+                .any(|r| matches!(r, ImportPreviewReason::NestedArchiveNotInventoried))
+    });
+    if !nested_in_preview && oracle.planned_nested_member_events > 0 {
+        // Not fatal alone — expansion is proven at ingest — but note for diagnostics.
+        let _ = nested_in_preview;
+    }
+
+    // --- Diagnose (shipped diagnose_log_import boundary) ---
     let diagnose = diagnose_log_import(&zip_path, ImportDiagnoseOptions { cancel: None })?;
     let diagnose_outcome = format!("{:?}", diagnose.outcome.kind).to_ascii_lowercase();
     if !diagnose.outcome.temporary_corpus_deleted {
@@ -383,78 +518,184 @@ pub fn verify_company_import_lab(package_root: &Path) -> CoreResult<CompanyImpor
         .map_err(|e| CoreError::Message(format!("serialize diagnose: {e}")))?;
     scan_public_safe_text(&diag_json, &mut failures);
 
-    // --- Cancel path (pre-cancelled flag) ---
+    // --- Cancel path: pre-cancelled flag must yield Cancelled and publish nothing ---
     let cancel_cache =
         tempfile::tempdir().map_err(|e| CoreError::Message(format!("cancel cache: {e}")))?;
-    let cancel = CancelFlag::new();
-    cancel.cancel();
-    let cancel_result = ingest_path_with_policy_and_observer(
-        cancel_cache.path(),
+    // Fresh plan verification without cancel for a valid selection (EngineClient.import.run).
+    let selection = verify_import_plan(
         &zip_path,
-        "company-lab-cancel",
-        &embed_none(),
+        plan.plan_version,
+        &plan.plan_token,
+        &selected,
         None,
-        &NoopProcessProgress,
-        Some(&cancel),
     );
-    let cancel_not_published = matches!(cancel_result, Err(CoreError::Cancelled) | Err(_))
-        || cancel_result
-            .as_ref()
-            .map(|r| r.stats.lines == 0)
-            .unwrap_or(false);
-    if cancel_result.is_ok() {
-        // Cancelled-before-start should not publish a full corpus of lab size.
-        if let Ok(r) = &cancel_result {
-            if r.stats.lines > oracle.planned_events_total / 10 {
+    let (cancel_not_published, cancel_error_kind) = match &selection {
+        Err(e) => {
+            failures.push(format!("verify_import_plan failed: {e}"));
+            (false, format!("plan_verify:{e}"))
+        }
+        Ok(sel) => {
+            let cancel_flag = CancelFlag::new();
+            cancel_flag.cancel();
+            let cancel_result = ingest_path_with_policy_selection_and_observer(
+                cancel_cache.path(),
+                &zip_path,
+                "company-lab-cancel",
+                &embed_none(),
+                None,
+                &NoopProcessProgress,
+                Some(&cancel_flag),
+                sel,
+            );
+            let kind = match &cancel_result {
+                Err(CoreError::Cancelled) => "cancelled".to_string(),
+                Err(e) => format!("other_err:{e}"),
+                Ok(r) => format!("ok_lines:{}", r.stats.lines),
+            };
+            // Only CoreError::Cancelled counts as a successful cancel observation.
+            let cancelled_ok = matches!(cancel_result, Err(CoreError::Cancelled));
+            // No published corpus directory with events under cancel cache.
+            let published = published_corpus_event_count(cancel_cache.path()).unwrap_or(0);
+            let not_published = cancelled_ok && published == 0;
+            if !cancelled_ok {
                 failures.push(format!(
-                    "cancel ingest published too many events ({})",
-                    r.stats.lines
+                    "cancel path must return CoreError::Cancelled (got {kind})"
                 ));
             }
+            if published > 0 {
+                failures.push(format!(
+                    "cancel path published {published} events (must be zero)"
+                ));
+            }
+            (not_published, kind)
         }
-    }
+    };
 
-    // --- Full ingest (retry after cancel) ---
+    // --- Retry: selection-bound production ingest (EngineClient.import.run) ---
     let ingest_cache =
         tempfile::tempdir().map_err(|e| CoreError::Message(format!("ingest cache: {e}")))?;
-    let report = ingest_path_with_policy_and_observer(
-        ingest_cache.path(),
-        &zip_path,
-        "company-lab",
-        &embed_none(),
-        None,
-        &NoopProcessProgress,
-        None,
-    )
-    .map_err(|e| CoreError::Message(format!("production ingest: {e}")))?;
+    let report = match &selection {
+        Ok(sel) => ingest_path_with_policy_selection_and_observer(
+            ingest_cache.path(),
+            &zip_path,
+            "company-lab",
+            &embed_none(),
+            None,
+            &NoopProcessProgress,
+            None,
+            sel,
+        )
+        .map_err(|e| CoreError::Message(format!("production ingest (selection-bound): {e}")))?,
+        Err(_) => {
+            // Fall through already failed plan verify.
+            return Ok(empty_failed_report(
+                &oracle,
+                failures,
+                cancel_not_published,
+                cancel_error_kind,
+                wall,
+            ));
+        }
+    };
 
     let stats: &IngestStats = &report.stats;
     let ingested_events = stats.lines;
     let planned = oracle.planned_events_total;
-    let lower = planned.saturating_mul(85) / 100;
-    let upper = planned.saturating_mul(115) / 100 + 200;
+    let tol = oracle.ingest_event_tolerance_abs;
+    let lower = planned.saturating_sub(tol);
+    let upper = planned.saturating_add(tol);
     if ingested_events < lower || ingested_events > upper {
         failures.push(format!(
-            "ingested events {ingested_events} outside tolerance of planned {planned} (bounds {lower}..{upper})"
+            "ingested events {ingested_events} outside absolute tolerance of planned {planned} (±{tol} → {lower}..{upper})"
         ));
     }
-    if ingested_events > planned.saturating_mul(3) / 2 + 500 {
+    if ingested_events > planned.saturating_add(tol.max(200)) {
         failures.push(format!(
             "possible line bleed: ingested {ingested_events} >> planned {planned}"
         ));
     }
-    if stats.level_counts.get("error").copied().unwrap_or(0) == 0 {
-        failures.push("expected some error-level events".into());
-    }
-    if stats.level_counts.get("info").copied().unwrap_or(0) == 0 {
-        failures.push("expected some info-level events".into());
-    }
+    assert_mins(
+        &stats.level_counts,
+        &oracle.expected_level_counts_min,
+        "level",
+        &mut failures,
+    );
+    assert_mins(
+        &stats.format_counts,
+        &oracle.expected_format_counts_min,
+        "format",
+        &mut failures,
+    );
+    assert_mins(
+        &stats.exclusion_counts,
+        &oracle.expected_exclusion_reason_mins,
+        "exclusion reason",
+        &mut failures,
+    );
 
     let provenance_before = stats.timestamp_provenance_counts.clone();
     let quality_before = time_quality_key(report.confidence.corpus_time_quality);
+    let unresolved_before = provenance_before
+        .get("unresolved_local")
+        .copied()
+        .unwrap_or(0);
+    let explicit_before = provenance_before.get("explicit_wall").copied().unwrap_or(0);
+    if unresolved_before < oracle.min_unresolved_local_before {
+        failures.push(format!(
+            "unresolved_local before apply {unresolved_before} < min {}",
+            oracle.min_unresolved_local_before
+        ));
+    }
+    if explicit_before < oracle.min_explicit_wall_before {
+        failures.push(format!(
+            "explicit_wall before apply {explicit_before} < min {}",
+            oracle.min_explicit_wall_before
+        ));
+    }
 
-    // --- Timezone application ---
+    // Nested expansion: count events whose source identity mentions nested.zip
     let corpus_id = report.corpus_id.clone();
+    let corpus = LogCorpus::open(ingest_cache.path(), &corpus_id)
+        .map_err(|e| CoreError::Message(format!("open published corpus: {e}")))?;
+    let nested_events_ingested = count_events_matching_source(&corpus, "nested.zip")?;
+    if nested_events_ingested + 5 < oracle.planned_nested_member_events {
+        failures.push(format!(
+            "PRODUCT BLOCKER: nested ZIP members not expanded — planned {} nested events, ingested {nested_events_ingested} (source identity must include nested.zip). Manager/format-profile lane: archive expansion under selection-bound EngineClient path.",
+            oracle.planned_nested_member_events
+        ));
+    }
+
+    // Templates / repetitive error families (observed vs oracle mins).
+    let templates = corpus.list_template_infos();
+    let template_count = templates.len() as u64;
+    let repetitive_template_count = templates.iter().filter(|t| t.count >= 20).count() as u64;
+    if template_count < oracle.min_template_count {
+        failures.push(format!(
+            "template count {template_count} < min {}",
+            oracle.min_template_count
+        ));
+    }
+    if repetitive_template_count < oracle.min_repetitive_template_count {
+        failures.push(format!(
+            "repetitive template families {repetitive_template_count} < min {}",
+            oracle.min_repetitive_template_count
+        ));
+    }
+
+    // retry_published: observed published corpus with events, not a constant.
+    let published_count = LogCorpus::open(ingest_cache.path(), &corpus_id)
+        .map(|c| c.event_count() as u64)
+        .unwrap_or(0);
+    let retry_published =
+        ingested_events > 0 && published_count > 0 && published_count == ingested_events;
+
+    if !retry_published {
+        failures.push(format!(
+            "retry ingest did not publish durable corpus matching stats (stats={ingested_events} published={published_count})"
+        ));
+    }
+
+    // --- Timezone application (EngineClient.time.*) ---
     let mut apply_reqs = Vec::new();
     let mut timezone_apply_revision = None;
     let current_revision = match load_timezone_resolution_state(ingest_cache.path(), &corpus_id) {
@@ -464,13 +705,34 @@ pub fn verify_company_import_lab(package_root: &Path) -> CoreResult<CompanyImpor
             0
         }
     };
+    let tz_before = load_timezone_resolution_state(ingest_cache.path(), &corpus_id).ok();
+    let mut local_group_unresolved_before = 0u64;
+    let mut exception_explicit_before = 0u64;
+    if let Some(state) = &tz_before {
+        for s in &state.sources {
+            if source_key_matches(&s.source, &oracle.local_timestamp_sources) {
+                local_group_unresolved_before += s.unresolved_local_records;
+            }
+            if source_key_matches(
+                &s.source,
+                std::slice::from_ref(&oracle.explicit_timezone_source),
+            ) {
+                exception_explicit_before += s.explicit_wall_clock_records;
+            }
+        }
+    }
+
     if current_revision > 0 {
-        for source in &oracle.local_timestamp_sources {
+        for source in resolve_source_keys(
+            ingest_cache.path(),
+            &corpus_id,
+            &oracle.local_timestamp_sources,
+        ) {
             match preview_source_timezone(
                 ingest_cache.path(),
                 &corpus_id,
                 current_revision,
-                source,
+                &source,
                 &oracle.common_timezone_iana,
             ) {
                 Ok(preview) => apply_reqs.push(SourceTimezoneApplyRequest {
@@ -481,7 +743,9 @@ pub fn verify_company_import_lab(package_root: &Path) -> CoreResult<CompanyImpor
                 Err(e) => failures.push(format!("timezone preview {source}: {e}")),
             }
         }
-        if !apply_reqs.is_empty() {
+        if apply_reqs.is_empty() {
+            failures.push("no timezone apply requests built for local group".into());
+        } else {
             match apply_source_timezones(
                 ingest_cache.path(),
                 &corpus_id,
@@ -493,72 +757,98 @@ pub fn verify_company_import_lab(package_root: &Path) -> CoreResult<CompanyImpor
                 Err(e) => failures.push(format!("timezone apply: {e}")),
             }
         }
+    } else {
+        failures.push("timezone event_revision was zero before apply".into());
     }
 
-    // Local group + explicit-offset exception preservation.
-    // Timezone state lists sources with unresolved/resolved local activity (or
-    // declarations). Explicit-offset lines land as explicit_wall and may not
-    // appear in that short list — so we prove exception preservation via
-    // provenance counts (explicit_wall remains after common-group apply) and
-    // full source catalog identity match when available.
+    // --- Provenance AFTER apply (re-query corpus + timezone state) ---
+    let corpus_after = LogCorpus::open(ingest_cache.path(), &corpus_id)
+        .map_err(|e| CoreError::Message(format!("re-open corpus after TZ apply: {e}")))?;
+    let provenance_after = query_provenance_histogram(&corpus_after)?;
+    let quality_after = time_quality_key(super::query::corpus_time_quality(&corpus_after));
+
+    let tz_after = load_timezone_resolution_state(ingest_cache.path(), &corpus_id).ok();
+    let mut local_group_unresolved_after = 0u64;
+    let mut local_group_resolved_after = 0u64;
+    let mut timezone_exception_explicit_wall_after = 0u64;
     let mut timezone_exception_source_present = false;
-    fn source_matches(catalog: &[&str], need: &str) -> bool {
-        let needle = need.rsplit('/').next().unwrap_or(need);
-        catalog.iter().any(|s| {
-            *s == need
-                || s.ends_with(need)
-                || s.ends_with(needle)
-                || s.contains(need)
-                || s.contains(needle)
-        })
-    }
-    let mut known_sources: Vec<String> = Vec::new();
-    if let Ok(state) = load_timezone_resolution_state(ingest_cache.path(), &corpus_id) {
-        known_sources.extend(state.sources.iter().map(|s| s.source.clone()));
-        known_sources.extend(state.declarations.keys().cloned());
-        // Local group must still be visible post-apply (resolved or declared).
-        let refs: Vec<&str> = known_sources.iter().map(|s| s.as_str()).collect();
-        for need in &oracle.local_timestamp_sources {
-            if !source_matches(&refs, need) {
-                failures.push(format!(
-                    "local timestamp source missing after apply: {need} (have {:?})",
-                    known_sources
-                ));
+    if let Some(state) = &tz_after {
+        for s in &state.sources {
+            if source_key_matches(&s.source, &oracle.local_timestamp_sources) {
+                local_group_unresolved_after += s.unresolved_local_records;
+                local_group_resolved_after += s.resolved_local_records;
+            }
+            if source_key_matches(
+                &s.source,
+                std::slice::from_ref(&oracle.explicit_timezone_source),
+            ) {
+                timezone_exception_source_present = true;
+                timezone_exception_explicit_wall_after += s.explicit_wall_clock_records;
             }
         }
+        // Declarations for local group after apply.
+        for need in &oracle.local_timestamp_sources {
+            let declared = state
+                .declarations
+                .keys()
+                .any(|k| source_key_matches(k, std::slice::from_ref(need)));
+            if !declared && local_group_resolved_after == 0 {
+                // may still resolve via source list
+            }
+            let _ = declared;
+        }
     }
-    if let Ok(corpus) = LogCorpus::open(ingest_cache.path(), &corpus_id) {
+    // Catalog fallback for exception identity when timezone state omits explicit-only sources.
+    if !timezone_exception_source_present {
         if let Ok(cat) = query_source_catalog(
-            &corpus,
+            &corpus_after,
             &LogSourceCatalogQuery {
                 search: Some("region-c".into()),
                 cursor: None,
                 limit: 50,
             },
         ) {
-            let refs: Vec<&str> = cat.sources.iter().map(|s| s.source.as_str()).collect();
-            timezone_exception_source_present =
-                source_matches(&refs, &oracle.explicit_timezone_source);
-            known_sources.extend(cat.sources.iter().map(|s| s.source.clone()));
+            timezone_exception_source_present = cat.sources.iter().any(|s| {
+                source_key_matches(
+                    &s.source,
+                    std::slice::from_ref(&oracle.explicit_timezone_source),
+                )
+            });
         }
     }
-    // Provenance-based exception preservation: explicit wall-clock events existed
-    // before apply and must not be wiped by applying a zone to the common group.
-    let explicit_before = provenance_before.get("explicit_wall").copied().unwrap_or(0);
-    if explicit_before == 0 {
+    // Exception must retain explicit wall after common-group apply (not soft-passed from before only).
+    if timezone_exception_explicit_wall_after == 0 {
+        // Count explicit_wall events on exception source via DB.
+        timezone_exception_explicit_wall_after =
+            count_provenance_for_source(&corpus_after, "region-c", "explicit_wall")?;
+    }
+    if timezone_exception_explicit_wall_after == 0 {
         failures.push(
-            "expected explicit_wall provenance from timezone-exception source before apply".into(),
+            "timezone exception source lost explicit_wall after common-group apply (exception not preserved)"
+                .into(),
         );
     }
-    if !timezone_exception_source_present && explicit_before > 0 {
-        // Soft pass: exception events were ingested (explicit_wall) even if the
-        // catalog search path did not surface the identity string.
-        timezone_exception_source_present = true;
-    }
-    if !timezone_exception_source_present {
+    if !timezone_exception_source_present && timezone_exception_explicit_wall_after == 0 {
         failures.push(format!(
-            "explicit timezone exception source missing after apply: {} (have {:?})",
-            oracle.explicit_timezone_source, known_sources
+            "explicit timezone exception source missing after apply: {}",
+            oracle.explicit_timezone_source
+        ));
+    }
+    // Common group: resolved should appear after apply when previews succeeded.
+    if timezone_apply_revision.is_some()
+        && local_group_resolved_after == 0
+        && local_group_unresolved_before > 0
+    {
+        failures.push(format!(
+            "local group unresolved_before={local_group_unresolved_before} but resolved_after=0 (apply did not resolve common group)"
+        ));
+    }
+    // Exception must not be force-applied as local-only: keep explicit_wall >= before for exception.
+    if exception_explicit_before > 0
+        && timezone_exception_explicit_wall_after + 5 < exception_explicit_before
+    {
+        failures.push(format!(
+            "exception explicit_wall dropped after apply: before={exception_explicit_before} after={timezone_exception_explicit_wall_after}"
         ));
     }
 
@@ -583,18 +873,30 @@ pub fn verify_company_import_lab(package_root: &Path) -> CoreResult<CompanyImpor
         passed,
         failures,
         planned_events_total: oracle.planned_events_total,
+        planned_nested_member_events: oracle.planned_nested_member_events,
         ingested_events,
+        nested_events_ingested,
         ingested_files: stats.files as u64,
         level_counts: stats.level_counts.clone(),
         format_counts: stats.format_counts.clone(),
         timestamp_provenance_before: provenance_before,
+        timestamp_provenance_after: provenance_after,
         corpus_time_quality_before: quality_before,
+        corpus_time_quality_after: quality_after,
         timezone_apply_revision,
         timezone_exception_source_present,
+        timezone_exception_explicit_wall_after,
+        local_group_unresolved_before,
+        local_group_unresolved_after,
+        local_group_resolved_after,
+        template_count,
+        repetitive_template_count,
         preview_status_counts,
         exclusion_reason_counts: stats.exclusion_counts.clone(),
         cancel_not_published,
-        retry_published: true,
+        cancel_error_kind,
+        retry_published,
+        engine_client_path: true,
         diagnose_outcome,
         diagnose_temp_deleted: diagnose.outcome.temporary_corpus_deleted,
         phase_timings: phase,
@@ -694,6 +996,188 @@ fn preview_status_histogram(report: &ImportPreviewReport) -> BTreeMap<String, u6
         *m.entry(key.into()).or_insert(0) += 1;
     }
     m
+}
+
+fn assert_mins(
+    observed: &BTreeMap<String, u64>,
+    mins: &BTreeMap<String, u64>,
+    label: &str,
+    failures: &mut Vec<String>,
+) {
+    for (k, min_v) in mins {
+        let got = observed.get(k).copied().unwrap_or(0);
+        if got < *min_v {
+            failures.push(format!("{label} `{k}` count {got} < expected min {min_v}"));
+        }
+    }
+}
+
+fn source_key_matches(observed: &str, needs: &[String]) -> bool {
+    needs.iter().any(|need| {
+        let needle = need.rsplit('/').next().unwrap_or(need);
+        observed == need
+            || observed.ends_with(need)
+            || observed.ends_with(needle)
+            || observed.contains(need)
+            || observed.contains(needle)
+    })
+}
+
+fn resolve_source_keys(cache: &Path, corpus_id: &str, needs: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    if let Ok(state) = load_timezone_resolution_state(cache, corpus_id) {
+        for need in needs {
+            let resolved = state
+                .sources
+                .iter()
+                .find(|s| source_key_matches(&s.source, std::slice::from_ref(need)))
+                .map(|s| s.source.clone())
+                .or_else(|| {
+                    state
+                        .declarations
+                        .keys()
+                        .find(|k| source_key_matches(k, std::slice::from_ref(need)))
+                        .cloned()
+                })
+                .unwrap_or_else(|| need.clone());
+            if seen.insert(resolved.clone()) {
+                out.push(resolved);
+            }
+        }
+    } else {
+        for need in needs {
+            if seen.insert(need.clone()) {
+                out.push(need.clone());
+            }
+        }
+    }
+    out
+}
+
+fn published_corpus_event_count(cache_root: &Path) -> CoreResult<u64> {
+    let mut total = 0u64;
+    if !cache_root.exists() {
+        return Ok(0);
+    }
+    for entry in fs::read_dir(cache_root).map_err(|e| CoreError::Message(e.to_string()))? {
+        let entry = entry.map_err(|e| CoreError::Message(e.to_string()))?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if let Ok(corpus) = LogCorpus::open(cache_root, &name) {
+            total = total.saturating_add(corpus.event_count() as u64);
+        }
+    }
+    Ok(total)
+}
+
+fn count_events_matching_source(corpus: &LogCorpus, needle: &str) -> CoreResult<u64> {
+    // Use facets/source catalog + count query when available.
+    let cat = query_source_catalog(
+        corpus,
+        &LogSourceCatalogQuery {
+            search: Some(needle.to_string()),
+            cursor: None,
+            limit: 100,
+        },
+    )?;
+    let mut total = 0u64;
+    for s in cat.sources {
+        if s.source.contains(needle) {
+            total = total.saturating_add(s.event_count);
+        }
+    }
+    Ok(total)
+}
+
+fn query_provenance_histogram(corpus: &LogCorpus) -> CoreResult<BTreeMap<String, u64>> {
+    corpus.with_connection(|conn| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT COALESCE(timestamp_provenance, 'unknown'), COUNT(*) FROM events GROUP BY 1",
+            )
+            .map_err(|e| CoreError::Message(format!("provenance hist prepare: {e}")))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
+            })
+            .map_err(|e| CoreError::Message(format!("provenance hist query: {e}")))?;
+        let mut m = BTreeMap::new();
+        for row in rows {
+            let (k, v) = row.map_err(|e| CoreError::Message(format!("provenance row: {e}")))?;
+            m.insert(k, v);
+        }
+        Ok(m)
+    })
+}
+
+fn count_provenance_for_source(
+    corpus: &LogCorpus,
+    source_needle: &str,
+    provenance: &str,
+) -> CoreResult<u64> {
+    let like = format!("%{source_needle}%");
+    corpus.with_connection(|conn| {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE source LIKE ?1 AND timestamp_provenance = ?2",
+                duckdb::params![like, provenance],
+                |r| r.get(0),
+            )
+            .map_err(|e| CoreError::Message(format!("provenance source count: {e}")))?;
+        Ok(count as u64)
+    })
+}
+
+fn empty_failed_report(
+    oracle: &CompanyImportLabOracle,
+    failures: Vec<String>,
+    cancel_not_published: bool,
+    cancel_error_kind: String,
+    wall: Instant,
+) -> CompanyImportLabVerifyReport {
+    CompanyImportLabVerifyReport {
+        schema_id: COMPANY_IMPORT_LAB_ORACLE_SCHEMA.into(),
+        size: oracle.size.clone(),
+        passed: false,
+        failures,
+        planned_events_total: oracle.planned_events_total,
+        planned_nested_member_events: oracle.planned_nested_member_events,
+        ingested_events: 0,
+        nested_events_ingested: 0,
+        ingested_files: 0,
+        level_counts: BTreeMap::new(),
+        format_counts: BTreeMap::new(),
+        timestamp_provenance_before: BTreeMap::new(),
+        timestamp_provenance_after: BTreeMap::new(),
+        corpus_time_quality_before: "unknown".into(),
+        corpus_time_quality_after: "unknown".into(),
+        timezone_apply_revision: None,
+        timezone_exception_source_present: false,
+        timezone_exception_explicit_wall_after: 0,
+        local_group_unresolved_before: 0,
+        local_group_unresolved_after: 0,
+        local_group_resolved_after: 0,
+        template_count: 0,
+        repetitive_template_count: 0,
+        preview_status_counts: BTreeMap::new(),
+        exclusion_reason_counts: BTreeMap::new(),
+        cancel_not_published,
+        cancel_error_kind,
+        retry_published: false,
+        engine_client_path: true,
+        diagnose_outcome: "skipped".into(),
+        diagnose_temp_deleted: false,
+        phase_timings: IngestPhaseTimings::default(),
+        diagnose_wall_ms: 0,
+        wall_ms: wall.elapsed().as_millis() as u64,
+    }
 }
 
 fn write_oracle(path: &Path, oracle: &CompanyImportLabOracle) -> CoreResult<()> {
@@ -914,7 +1398,7 @@ fn write_nested_zip(root: &Path, rel: &str, events: u64) -> CoreResult<()> {
     ensure_parent(&path)?;
     let file = File::create(&path).map_err(|e| CoreError::Message(format!("create {rel}: {e}")))?;
     let mut zip = ZipWriter::new(file);
-    let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    let opts = zip_file_options();
     zip.start_file("inner/app.jsonl", opts)
         .map_err(|e| CoreError::Message(format!("nested zip start: {e}")))?;
     for i in 0..events {
@@ -933,35 +1417,39 @@ fn write_nested_zip(root: &Path, rel: &str, events: u64) -> CoreResult<()> {
 fn zip_directory(src: &Path, dest: &Path) -> CoreResult<()> {
     let file = File::create(dest).map_err(|e| CoreError::Message(format!("create zip: {e}")))?;
     let mut zip = ZipWriter::new(file);
-    let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
-    fn walk(
-        zip: &mut ZipWriter<File>,
-        opts: SimpleFileOptions,
-        base: &Path,
-        dir: &Path,
-    ) -> CoreResult<()> {
-        for entry in fs::read_dir(dir).map_err(|e| CoreError::Message(format!("read_dir: {e}")))? {
-            let entry = entry.map_err(|e| CoreError::Message(format!("dir entry: {e}")))?;
+    let opts = zip_file_options();
+    // Deterministic member order (sorted paths) for stable package_sha256.
+    let mut files: Vec<PathBuf> = Vec::new();
+    fn collect(dir: &Path, files: &mut Vec<PathBuf>) -> CoreResult<()> {
+        let mut entries: Vec<_> = fs::read_dir(dir)
+            .map_err(|e| CoreError::Message(format!("read_dir: {e}")))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| CoreError::Message(format!("dir entry: {e}")))?;
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
             let path = entry.path();
-            let rel = path
-                .strip_prefix(base)
-                .map_err(|e| CoreError::Message(format!("strip prefix: {e}")))?
-                .to_string_lossy()
-                .replace('\\', "/");
             if path.is_dir() {
-                walk(zip, opts, base, &path)?;
+                collect(&path, files)?;
             } else {
-                zip.start_file(&rel, opts)
-                    .map_err(|e| CoreError::Message(format!("zip start {rel}: {e}")))?;
-                let bytes =
-                    fs::read(&path).map_err(|e| CoreError::Message(format!("read {rel}: {e}")))?;
-                zip.write_all(&bytes)
-                    .map_err(|e| CoreError::Message(format!("zip write {rel}: {e}")))?;
+                files.push(path);
             }
         }
         Ok(())
     }
-    walk(&mut zip, opts, src, src)?;
+    collect(src, &mut files)?;
+    files.sort();
+    for path in files {
+        let rel = path
+            .strip_prefix(src)
+            .map_err(|e| CoreError::Message(format!("strip prefix: {e}")))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        zip.start_file(&rel, opts)
+            .map_err(|e| CoreError::Message(format!("zip start {rel}: {e}")))?;
+        let bytes = fs::read(&path).map_err(|e| CoreError::Message(format!("read {rel}: {e}")))?;
+        zip.write_all(&bytes)
+            .map_err(|e| CoreError::Message(format!("zip write {rel}: {e}")))?;
+    }
     zip.finish()
         .map_err(|e| CoreError::Message(format!("zip finish: {e}")))?;
     Ok(())
@@ -1026,6 +1514,8 @@ mod tests {
             pb.oracle.planned_events_total
         );
         assert!(pa.oracle.planned_events_total >= 20_000);
+        assert!(pa.oracle.planned_nested_member_events > 0);
+        assert!(!pa.oracle.expected_level_counts_min.is_empty());
         assert!(pa
             .oracle
             .shape_categories
@@ -1048,10 +1538,34 @@ mod tests {
         if !report.passed {
             panic!("company import lab verify failed: {:?}", report.failures);
         }
-        assert!(report.cancel_not_published || report.ingested_events > 0);
-        assert!(report.retry_published);
+        assert!(
+            report.cancel_not_published,
+            "cancel must be observed as Cancelled + zero publish: {}",
+            report.cancel_error_kind
+        );
+        assert!(
+            report.retry_published,
+            "retry_published must be observed from published corpus"
+        );
+        assert!(report.engine_client_path);
         assert!(report.diagnose_temp_deleted);
         assert!(report.ingested_events > 0);
+        assert!(
+            report.nested_events_ingested + 5 >= report.planned_nested_member_events,
+            "nested expansion required: got {} planned {}",
+            report.nested_events_ingested,
+            report.planned_nested_member_events
+        );
+        assert!(
+            !report.timestamp_provenance_after.is_empty(),
+            "must re-query provenance after TZ apply"
+        );
+        assert!(
+            report.timezone_exception_explicit_wall_after > 0,
+            "exception explicit_wall after apply"
+        );
+        assert!(report.template_count >= 8);
+        assert!(report.repetitive_template_count >= 2);
     }
 
     #[test]
@@ -1059,6 +1573,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut pkg = generate_company_import_lab(dir.path(), CompanyImportLabSize::Small).unwrap();
         pkg.oracle.planned_events_total = 1;
+        pkg.oracle.ingest_event_tolerance_abs = 0;
         write_oracle(&pkg.oracle_path, &pkg.oracle).unwrap();
         let report = verify_company_import_lab(dir.path()).unwrap();
         assert!(!report.passed);
@@ -1066,5 +1581,21 @@ mod tests {
             .failures
             .iter()
             .any(|f| f.contains("ingested events") || f.contains("planned")));
+    }
+
+    #[test]
+    fn oracle_level_min_mutation_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pkg = generate_company_import_lab(dir.path(), CompanyImportLabSize::Small).unwrap();
+        pkg.oracle
+            .expected_level_counts_min
+            .insert("error".into(), 9_999_999);
+        write_oracle(&pkg.oracle_path, &pkg.oracle).unwrap();
+        let report = verify_company_import_lab(dir.path()).unwrap();
+        assert!(!report.passed);
+        assert!(report
+            .failures
+            .iter()
+            .any(|f| f.contains("level") && f.contains("error")));
     }
 }
