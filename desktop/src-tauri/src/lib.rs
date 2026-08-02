@@ -8055,16 +8055,16 @@ async fn run_log_ingest(
     let name_owned = name.unwrap_or_else(|| "corpus".into());
     let cancel_for_job = cancel.clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        let reviewed_bindings = if format_apply.is_some() && managed_identity.is_none() {
-            let request = format_apply.as_ref().expect("checked");
-            let store = cd_core::log_analysis::ReviewedFormatStore::open(&formats_root)
-                .map_err(|e| LogIngestRunError::Failed(e.to_string()))?;
-            Some(
-                cd_core::log_analysis::apply_reviewed_format_bindings(&store, request)
-                    .map_err(|e| LogIngestRunError::Failed(e.to_string()))?,
-            )
-        } else {
-            None
+        let reviewed_bindings = match (format_apply.as_ref(), managed_identity.is_none()) {
+            (Some(request), true) => {
+                let store = cd_core::log_analysis::ReviewedFormatStore::open(&formats_root)
+                    .map_err(|e| LogIngestRunError::Failed(e.to_string()))?;
+                Some(
+                    cd_core::log_analysis::apply_reviewed_format_bindings(&store, request)
+                        .map_err(|e| LogIngestRunError::Failed(e.to_string()))?,
+                )
+            }
+            _ => None,
         };
         let result = match (managed_identity, selection, reviewed_bindings.as_ref()) {
             (Some(identity), Some(selection), _) => {
@@ -8945,6 +8945,7 @@ async fn log_preview_import(
 /// before staging. The UI's disabled state is a courtesy, never the
 /// enforcement.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn log_run_import(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
