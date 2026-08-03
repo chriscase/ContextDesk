@@ -51,6 +51,7 @@ const CATEGORIES: &[ExitCategory] = &[
     ExitCategory::PermissionDenied,
     ExitCategory::ProviderError,
     ExitCategory::NotImplemented,
+    ExitCategory::Cancelled,
     ExitCategory::Internal,
 ];
 
@@ -64,6 +65,7 @@ const COMMANDS: &[&str] = &[
     "timezone status",
     "timezone apply",
     "timezone clear",
+    "timezone apply-all",
     "explore",
     "context",
     "session list",

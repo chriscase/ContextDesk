@@ -166,6 +166,20 @@ pub enum TimezoneAction {
         #[arg(long)]
         corpus: Option<String>,
     },
+    /// Resolve EVERY source in a corpus that still has ambiguous local
+    /// timestamps with one IANA zone, in a single atomic revision bump —
+    /// the grouped escape hatch for when a configured default timezone
+    /// wasn't set before import, so ambiguity doesn't need one `apply` per
+    /// file.
+    ApplyAll {
+        /// IANA zone id, e.g. `America/Chicago`.
+        iana_timezone: String,
+        #[arg(long)]
+        corpus: Option<String>,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, clap::Args)]

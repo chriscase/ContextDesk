@@ -10,6 +10,8 @@ use cd_core::log_analysis::timezone_application::{
     apply_source_timezone, clear_source_timezone, load_timezone_resolution_state,
     preview_source_timezone,
 };
+use cd_core::log_analysis::timezone_resolution::TimezoneDeclarationBasis;
+use cd_workflow::timezone::apply_timezone_to_all_unresolved;
 use serde::Serialize;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -84,6 +86,36 @@ impl Render for ApplyOutput {
 
     fn render_json(&self) -> serde_json::Value {
         serde_json::to_value(self).expect("ApplyOutput is always serializable")
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ApplyAllOutput {
+    pub corpus_id: String,
+    pub iana_timezone: String,
+    pub applied_sources: Vec<String>,
+    pub already_resolved: bool,
+}
+
+impl Render for ApplyAllOutput {
+    fn render_text(&self) -> String {
+        if self.already_resolved {
+            return format!(
+                "{}: no sources had ambiguous local timestamps — nothing to apply",
+                self.corpus_id
+            );
+        }
+        format!(
+            "{}: applied {} to {} source(s) in one revision — {}",
+            self.corpus_id,
+            self.iana_timezone,
+            self.applied_sources.len(),
+            self.applied_sources.join(", ")
+        )
+    }
+
+    fn render_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("ApplyAllOutput is always serializable")
     }
 }
 
@@ -208,6 +240,44 @@ pub fn run(
                 corpus_id: corpus_id.to_string(),
                 source: source.clone(),
                 applied_revision: report.revision,
+            }))
+        }
+        TimezoneAction::ApplyAll {
+            iana_timezone,
+            corpus,
+            yes,
+        } => {
+            let corpus_id = require_corpus(corpus, current_corpus)?;
+            if !*yes {
+                let unresolved = load_state(cache_root, corpus_id)?
+                    .sources
+                    .iter()
+                    .filter(|s| s.unresolved_local_records > 0)
+                    .count();
+                if unresolved == 0 {
+                    return Ok(Box::new(ApplyAllOutput {
+                        corpus_id: corpus_id.to_string(),
+                        iana_timezone: iana_timezone.clone(),
+                        applied_sources: Vec::new(),
+                        already_resolved: true,
+                    }));
+                }
+                return Err(CliError::user(format!(
+                    "refusing to apply {iana_timezone} to {unresolved} unresolved source(s) without --yes"
+                )));
+            }
+            let outcome = apply_timezone_to_all_unresolved(
+                cache_root,
+                corpus_id,
+                iana_timezone,
+                TimezoneDeclarationBasis::UserDeclared,
+            )
+            .map_err(map_apply_error)?;
+            Ok(Box::new(ApplyAllOutput {
+                corpus_id: corpus_id.to_string(),
+                iana_timezone: iana_timezone.clone(),
+                applied_sources: outcome.applied_sources,
+                already_resolved: outcome.already_resolved,
             }))
         }
     }
