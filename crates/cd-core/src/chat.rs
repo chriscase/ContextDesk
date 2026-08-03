@@ -196,15 +196,26 @@ impl StreamAccumulator {
     }
 }
 
-/// Parse a single SSE `data:` payload (JSON object or `[DONE]`).
-/// Returns at most one primary delta; use [`parse_openai_sse_stream`] for finish+delta pairs.
-pub fn parse_openai_sse_data(data: &str) -> CoreResult<Option<StreamDelta>> {
+/// Parse a single SSE `data:` payload (JSON object or `[DONE]`) into every
+/// delta it carries, in wire order (content, then tool calls, then a
+/// co-occurring finish reason).
+///
+/// A conformant OpenAI stream never combines these in one event — the final
+/// content/tool-call delta and the terminal `finish_reason` normally arrive
+/// as separate events. Several standards-adjacent gateways (GPT-OSS, vLLM,
+/// Ollama-compatible servers) are not that strict and send the last content
+/// fragment, a tool call, and `finish_reason` together in a single choice
+/// object. Returning only the Vec's first element (the old contract) would
+/// silently drop whichever of those arrived second — content lost behind a
+/// tool call, or a `finish_reason` (e.g. `"length"`, `"content_filter"`)
+/// lost behind either — so every caller must consume the whole Vec.
+pub fn parse_openai_sse_data(data: &str) -> CoreResult<Vec<StreamDelta>> {
     let data = data.trim();
     if data.is_empty() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     if data == "[DONE]" {
-        return Ok(Some(StreamDelta::Done));
+        return Ok(vec![StreamDelta::Done]);
     }
     let v: Value =
         serde_json::from_str(data).map_err(|e| CoreError::Message(format!("sse json: {e}")))?;
@@ -220,21 +231,20 @@ pub fn parse_openai_sse_data(data: &str) -> CoreResult<Option<StreamDelta>> {
         .and_then(|c| c.as_array())
         .and_then(|a| a.first());
     let Some(choice) = choice else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
+    let mut out = Vec::new();
     if let Some(delta) = choice.get("delta") {
-        if let Some(d) = delta_from_json(delta)? {
-            return Ok(Some(d));
-        }
+        out.extend(deltas_from_json(delta)?);
     }
     if let Some(fr) = choice
         .get("finish_reason")
         .and_then(|f| f.as_str())
         .filter(|s| !s.is_empty() && *s != "null")
     {
-        return Ok(Some(StreamDelta::Finish(fr.to_string())));
+        out.push(StreamDelta::Finish(fr.to_string()));
     }
-    Ok(None)
+    Ok(out)
 }
 
 fn tool_call_from_json(tc: &Value) -> StreamDelta {
@@ -245,11 +255,7 @@ fn tool_call_from_json(tc: &Value) -> StreamDelta {
         .get("name")
         .and_then(|x| x.as_str())
         .map(str::to_string);
-    let arguments = func
-        .get("arguments")
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string();
+    let arguments = function_arguments_as_string(func.get("arguments"), "");
     StreamDelta::ToolCall {
         index,
         id,
@@ -258,26 +264,45 @@ fn tool_call_from_json(tc: &Value) -> StreamDelta {
     }
 }
 
-fn delta_from_json(delta: &Value) -> CoreResult<Option<StreamDelta>> {
-    // Prefer tool_calls when present (even alongside empty content).
-    if let Some(arr) = delta.get("tool_calls").and_then(|t| t.as_array()) {
-        if arr.len() == 1 {
-            return Ok(Some(tool_call_from_json(&arr[0])));
-        }
-        if arr.len() > 1 {
-            let parts: Vec<StreamDelta> = arr.iter().map(tool_call_from_json).collect();
-            return Ok(Some(StreamDelta::ToolCalls(parts)));
-        }
+/// Normalize the two argument shapes seen across OpenAI-compatible servers.
+/// The OpenAI wire contract uses a JSON-encoded string, while several local
+/// model gateways return the decoded JSON object directly. Internally the
+/// agent loop intentionally keeps one representation: a JSON string.
+fn function_arguments_as_string(arguments: Option<&Value>, missing: &str) -> String {
+    match arguments {
+        Some(Value::String(value)) => value.clone(),
+        Some(Value::Null) | None => missing.to_string(),
+        Some(value) => serde_json::to_string(value).unwrap_or_else(|_| missing.to_string()),
     }
-    if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
-        if !content.is_empty() {
-            return Ok(Some(StreamDelta::Text(content.to_string())));
-        }
-    }
-    Ok(None)
 }
 
-/// Parse a full SSE body (recorded fixture or live) into deltas, applying finish reasons.
+/// Every delta one `delta` object carries, content first then tool calls —
+/// a conformant provider only ever sets one of the two, but this must not
+/// assume that: some gateways narrate ("checking the logs...") in the same
+/// chunk as the tool call it introduces, and silently keeping only
+/// whichever field this function checked first would lose the other.
+fn deltas_from_json(delta: &Value) -> CoreResult<Vec<StreamDelta>> {
+    let mut out = Vec::new();
+    if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+        if !content.is_empty() {
+            out.push(StreamDelta::Text(content.to_string()));
+        }
+    }
+    if let Some(arr) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+        if arr.len() == 1 {
+            out.push(tool_call_from_json(&arr[0]));
+        } else if arr.len() > 1 {
+            let parts: Vec<StreamDelta> = arr.iter().map(tool_call_from_json).collect();
+            out.push(StreamDelta::ToolCalls(parts));
+        }
+    }
+    Ok(out)
+}
+
+/// Parse a full SSE body (recorded fixture or live) into deltas, applying
+/// finish reasons. Delegates to [`parse_openai_sse_data`] per line — kept
+/// as ONE parser rather than two, so a buffered fixture replay and a live
+/// stream of the identical bytes can never silently disagree.
 pub fn parse_openai_sse_stream(body: &str) -> CoreResult<Vec<StreamDelta>> {
     let mut out = Vec::new();
     for raw_line in body.lines() {
@@ -289,36 +314,30 @@ pub fn parse_openai_sse_stream(body: &str) -> CoreResult<Vec<StreamDelta>> {
         let Some(data) = line.strip_prefix("data:") else {
             continue;
         };
-        let data = data.trim_start();
-        // Peek finish_reason on same payload as delta
-        if data != "[DONE]" {
-            if let Ok(v) = serde_json::from_str::<Value>(data) {
-                if let Some(choice) = v
-                    .get("choices")
-                    .and_then(|c| c.as_array())
-                    .and_then(|a| a.first())
-                {
-                    if let Some(delta) = choice.get("delta") {
-                        if let Some(d) = delta_from_json(delta)? {
-                            out.push(d);
-                        }
-                    }
-                    if let Some(fr) = choice
-                        .get("finish_reason")
-                        .and_then(|f| f.as_str())
-                        .filter(|s| !s.is_empty() && *s != "null")
-                    {
-                        out.push(StreamDelta::Finish(fr.to_string()));
-                    }
-                    continue;
-                }
-            }
-        }
-        if let Some(d) = parse_openai_sse_data(data)? {
-            out.push(d);
-        }
+        out.extend(parse_openai_sse_data(data.trim_start())?);
     }
     Ok(out)
+}
+
+/// Feed every delta from one parsed SSE line to both the live callback and
+/// the accumulator, in order — shared by the main read loop and the final
+/// flush in [`OpenAiCompatibleClient::complete_stream_cb`] so the two paths
+/// can't drift into surfacing different delta kinds to `on_delta`.
+fn apply_sse_deltas<F: FnMut(StreamDelta)>(
+    acc: &mut StreamAccumulator,
+    on_delta: &mut F,
+    deltas: Vec<StreamDelta>,
+) {
+    for delta in deltas {
+        if let StreamDelta::Text(ref t) = delta {
+            if !t.is_empty() {
+                on_delta(StreamDelta::Text(t.clone()));
+            }
+        } else {
+            on_delta(delta.clone());
+        }
+        acc.push(delta);
+    }
 }
 
 /// Accumulate a full SSE body into [`ChatCompletion`] (offline fixture path).
@@ -501,12 +520,14 @@ impl OpenAiCompatibleClient {
         accumulate_openai_sse(&text)
     }
 
-    /// Streaming chat: invoke `on_delta` for each text fragment as SSE arrives.
+    /// Streaming chat: invoke `on_delta` for each delta as SSE arrives.
     ///
-    /// Reads `bytes_stream()` and splits on newlines; call with a multi-chunk
-    /// fixture in tests. Returns the same accumulated [`ChatCompletion`] as the
-    /// buffered path. When `cancel` is set, aborts mid-stream.
-    #[allow(clippy::string_slice)] // line buffer split on ASCII '\n'
+    /// Reads `bytes_stream()` through a [`crate::sse::SseLineDecoder`] — safe
+    /// across arbitrary chunk boundaries (including mid-character UTF-8
+    /// splits) and bounded against an oversized or unterminated line; call
+    /// with a multi-chunk fixture in tests. Returns the same accumulated
+    /// [`ChatCompletion`] as the buffered path. When `cancel` is set, aborts
+    /// mid-stream.
     pub async fn complete_stream_cb<F>(
         &self,
         messages: &[ChatMessage],
@@ -517,6 +538,7 @@ impl OpenAiCompatibleClient {
     where
         F: FnMut(StreamDelta),
     {
+        use crate::sse::SseLineDecoder;
         use futures_util::StreamExt;
         use std::sync::atomic::Ordering;
 
@@ -579,63 +601,55 @@ impl OpenAiCompatibleClient {
         }
 
         let mut acc = StreamAccumulator::new();
-        let mut line_buf = String::new();
+        let mut full_body = String::new();
+        let mut saw_sse_data = false;
+        let mut decoder = SseLineDecoder::new();
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             if cancel.map(|c| c.load(Ordering::SeqCst)).unwrap_or(false) {
                 return Err(CoreError::Message("cancelled".into()));
             }
             let bytes = chunk.map_err(|e| CoreError::Message(format!("stream chunk: {e}")))?;
-            let s = String::from_utf8_lossy(&bytes);
-            line_buf.push_str(&s);
-            while let Some(nl) = line_buf.find('\n') {
-                let line = line_buf[..nl].trim_end_matches('\r').to_string();
-                line_buf = line_buf[nl + 1..].to_string();
-                let data = line.strip_prefix("data:").map(str::trim).unwrap_or("");
+            // Only needed for the non-SSE-gateway fallback below; stop
+            // growing it once real SSE framing is confirmed.
+            if !saw_sse_data {
+                full_body.push_str(&String::from_utf8_lossy(&bytes));
+            }
+            for line in decoder.push(&bytes)? {
+                let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+                    continue;
+                };
+                saw_sse_data = true;
                 if data.is_empty() {
                     continue;
                 }
-                // Full JSON object fallback (gateway ignored stream)
-                if data.starts_with('{') && !data.contains("\"choices\"") && line_buf.is_empty() {
-                    // keep scanning
-                }
-                match parse_openai_sse_data(data) {
-                    Ok(Some(delta)) => {
-                        if let StreamDelta::Text(ref t) = delta {
-                            if !t.is_empty() {
-                                on_delta(StreamDelta::Text(t.clone()));
-                            }
-                        } else {
-                            on_delta(delta.clone());
-                        }
-                        acc.push(delta);
-                    }
-                    Ok(None) => {}
-                    Err(_) => {
-                        // Non-SSE full body
-                        if data.starts_with('{') {
-                            return parse_openai_completion(data);
-                        }
-                    }
-                }
+                apply_sse_deltas(&mut acc, &mut on_delta, parse_openai_sse_data(data)?);
             }
         }
-        // Flush remaining buffer
-        if !line_buf.trim().is_empty() {
-            let data = line_buf
-                .trim()
-                .strip_prefix("data:")
-                .map(str::trim)
-                .unwrap_or(line_buf.trim());
-            if let Ok(Some(delta)) = parse_openai_sse_data(data) {
-                if let StreamDelta::Text(ref t) = delta {
-                    if !t.is_empty() {
-                        on_delta(StreamDelta::Text(t.clone()));
-                    }
+        // Some OpenAI-compatible gateways accept `stream=true` but return a
+        // normal completion object (often with `application/json`). Parsing
+        // that object as an SSE delta sees only `finish_reason` and loses the
+        // assistant message/tool calls. Detect the absence of any SSE data
+        // lines and route the complete body through the non-stream parser.
+        if !saw_sse_data {
+            let completion = parse_openai_completion(full_body.trim())?;
+            if !completion.content.is_empty() {
+                on_delta(StreamDelta::Text(completion.content.clone()));
+            }
+            return Ok(completion);
+        }
+        // A provider that closes the connection without a trailing newline
+        // after its last event — flush whatever line was still pending.
+        if let Some(trailing) = decoder.finish() {
+            if !trailing.trim().is_empty() {
+                let data = trailing
+                    .trim()
+                    .strip_prefix("data:")
+                    .map(str::trim)
+                    .unwrap_or("");
+                if !data.is_empty() {
+                    apply_sse_deltas(&mut acc, &mut on_delta, parse_openai_sse_data(data)?);
                 }
-                acc.push(delta);
-            } else if data.starts_with('{') {
-                return parse_openai_completion(data);
             }
         }
         Ok(acc.into_completion())
@@ -1519,8 +1533,10 @@ impl AnthropicClient {
         parse_anthropic_models_list(&text)
     }
 
-    /// Streaming with live text callbacks (bytes_stream line buffer).
-    #[allow(clippy::string_slice)]
+    /// Streaming with live text callbacks, read through a
+    /// [`crate::sse::SseLineDecoder`] for the same reasons
+    /// [`OpenAiCompatibleClient::complete_stream_cb`] uses one — safe across
+    /// arbitrary chunk boundaries (including mid-character UTF-8 splits).
     pub async fn complete_stream_cb<F>(
         &self,
         messages: &[ChatMessage],
@@ -1531,6 +1547,7 @@ impl AnthropicClient {
     where
         F: FnMut(StreamDelta),
     {
+        use crate::sse::SseLineDecoder;
         use futures_util::StreamExt;
         use std::sync::atomic::Ordering;
 
@@ -1549,34 +1566,39 @@ impl AnthropicClient {
             )));
         }
 
-        let mut full_body = String::new();
-        let mut line_buf = String::new();
+        // Anthropic's final tool-call reconstruction re-parses the whole
+        // accumulated body (unlike the OpenAI-compatible path, which can
+        // stop retaining it once real SSE framing is confirmed), so this
+        // buffer's size is inherent to that design, not bounded here. Built
+        // from the decoder's already-UTF-8-safe lines — never from
+        // re-decoding a raw chunk in isolation, which would reintroduce the
+        // exact corruption this decoder exists to prevent.
+        let mut full_body_lines: Vec<String> = Vec::new();
+        let mut decoder = SseLineDecoder::new();
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             if cancel.map(|c| c.load(Ordering::SeqCst)).unwrap_or(false) {
                 return Err(CoreError::Message("cancelled".into()));
             }
             let bytes = chunk.map_err(|e| CoreError::Message(format!("stream chunk: {e}")))?;
-            let s = String::from_utf8_lossy(&bytes);
-            full_body.push_str(&s);
-            line_buf.push_str(&s);
-            while let Some(pos) = line_buf.find('\n') {
-                let line = line_buf[..pos].trim_end_matches('\r').to_string();
-                line_buf = line_buf[pos + 1..].to_string();
-                if let Some(data) = line.strip_prefix("data:") {
-                    let data = data.trim();
-                    if data.is_empty() || data == "[DONE]" {
-                        continue;
-                    }
-                    if let Ok(v) = serde_json::from_str::<Value>(data) {
-                        let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                        if ty == "content_block_delta" {
-                            let delta = v.get("delta").cloned().unwrap_or(json!({}));
-                            if delta.get("type").and_then(|t| t.as_str()) == Some("text_delta") {
-                                if let Some(t) = delta.get("text").and_then(|t| t.as_str()) {
-                                    if !t.is_empty() {
-                                        on_delta(StreamDelta::Text(t.to_string()));
-                                    }
+            for line in decoder.push(&bytes)? {
+                let Some(data) = line.strip_prefix("data:") else {
+                    full_body_lines.push(line);
+                    continue;
+                };
+                let data = data.trim();
+                full_body_lines.push(line.clone());
+                if data.is_empty() || data == "[DONE]" {
+                    continue;
+                }
+                if let Ok(v) = serde_json::from_str::<Value>(data) {
+                    let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    if ty == "content_block_delta" {
+                        let delta = v.get("delta").cloned().unwrap_or(json!({}));
+                        if delta.get("type").and_then(|t| t.as_str()) == Some("text_delta") {
+                            if let Some(t) = delta.get("text").and_then(|t| t.as_str()) {
+                                if !t.is_empty() {
+                                    on_delta(StreamDelta::Text(t.to_string()));
                                 }
                             }
                         }
@@ -1584,7 +1606,10 @@ impl AnthropicClient {
                 }
             }
         }
-        accumulate_anthropic_sse(&full_body)
+        if let Some(trailing) = decoder.finish() {
+            full_body_lines.push(trailing);
+        }
+        accumulate_anthropic_sse(&full_body_lines.join("\n"))
     }
 }
 
@@ -1917,26 +1942,28 @@ data: [DONE]
         assert_eq!(c.finish_reason, "stop");
     }
 
-    /// Feed fixture in awkward byte slices (mid-line) and rebuild via same
-    /// line-buffer logic as complete_stream_cb.
+    /// Feed the fixture through the REAL production line decoder
+    /// ([`crate::sse::SseLineDecoder`]) in awkward byte slices (mid-line,
+    /// not aligned to JSON) and confirm it reaches the same
+    /// [`ChatCompletion`] as the single-shot buffered parse — proving the
+    /// live and buffered paths agree on identical bytes, not just that a
+    /// hand-copied test-local buffer happens to.
     #[test]
-    #[allow(clippy::string_slice)] // ASCII '\n' split of fixture
     fn sse_multi_chunk_byte_boundaries_match_buffered() {
         let full = SSE_TEXT_FIXTURE.as_bytes();
-        let mut line_buf = String::new();
+        let mut decoder = crate::sse::SseLineDecoder::new();
         let mut acc = StreamAccumulator::new();
         let mut texts = Vec::new();
         // Split every 17 bytes — not aligned to lines or JSON.
         for chunk in full.chunks(17) {
-            line_buf.push_str(&String::from_utf8_lossy(chunk));
-            while let Some(nl) = line_buf.find('\n') {
-                let line = line_buf[..nl].trim_end_matches('\r').to_string();
-                line_buf = line_buf[nl + 1..].to_string();
-                let data = line.strip_prefix("data:").map(str::trim).unwrap_or("");
+            for line in decoder.push(chunk).unwrap() {
+                let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+                    continue;
+                };
                 if data.is_empty() {
                     continue;
                 }
-                if let Ok(Some(delta)) = parse_openai_sse_data(data) {
+                for delta in parse_openai_sse_data(data).unwrap() {
                     if let StreamDelta::Text(ref t) = delta {
                         texts.push(t.clone());
                     }
@@ -1950,6 +1977,113 @@ data: [DONE]
         assert_eq!(c.tool_calls.len(), buffered.tool_calls.len());
         assert!(!texts.is_empty(), "expected live text deltas across chunks");
         assert_eq!(texts.join(""), buffered.content);
+    }
+
+    /// A multi-byte UTF-8 character split exactly across a `bytes_stream()`
+    /// chunk boundary must decode intact through the real production path
+    /// used by `complete_stream_cb`, not corrupt into replacement
+    /// characters — the adversarial case a naive per-chunk
+    /// `String::from_utf8_lossy` (the pre-fix behavior) silently mangles.
+    #[test]
+    fn sse_text_delta_survives_utf8_character_split_across_chunks() {
+        let line =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"café 🎉 done\"}}]}\n\ndata: [DONE]\n\n";
+        let bytes = line.as_bytes();
+        let split_at = line.find('🎉').unwrap() + 1; // land inside the 4-byte emoji
+        let mut decoder = crate::sse::SseLineDecoder::new();
+        let mut acc = StreamAccumulator::new();
+        for chunk in [&bytes[..split_at], &bytes[split_at..]] {
+            for parsed_line in decoder.push(chunk).unwrap() {
+                let Some(data) = parsed_line.strip_prefix("data:").map(str::trim) else {
+                    continue;
+                };
+                if data.is_empty() {
+                    continue;
+                }
+                for delta in parse_openai_sse_data(data).unwrap() {
+                    acc.push(delta);
+                }
+            }
+        }
+        assert_eq!(acc.into_completion().content, "café 🎉 done");
+    }
+
+    /// A delta that carries both `content` (narration) and `tool_calls` in
+    /// the SAME object — seen from gateways that describe what they're
+    /// about to do in the same chunk as the call — must surface both, not
+    /// silently drop the content behind the tool call.
+    #[test]
+    fn sse_delta_with_content_and_tool_calls_together_keeps_both() {
+        let body = r#"data: {"choices":[{"delta":{"content":"checking the logs","tool_calls":[{"index":0,"id":"call_1","function":{"name":"search_logs","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+"#;
+        let completion = accumulate_openai_sse(body).unwrap();
+        assert_eq!(completion.content, "checking the logs");
+        assert_eq!(completion.tool_calls.len(), 1);
+        assert_eq!(completion.tool_calls[0].function.name, "search_logs");
+        assert_eq!(completion.finish_reason, "tool_calls");
+    }
+
+    /// The same combined-fields event, this time driven through the LIVE
+    /// per-line parser [`parse_openai_sse_data`] exactly as
+    /// `complete_stream_cb` calls it, proving the live path no longer
+    /// diverges from the buffered path proven above.
+    #[test]
+    fn parse_openai_sse_data_returns_content_tool_call_and_finish_reason_together() {
+        let data = r#"{"choices":[{"delta":{"content":"checking the logs","tool_calls":[{"index":0,"id":"call_1","function":{"name":"search_logs","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#;
+        let deltas = parse_openai_sse_data(data).unwrap();
+        assert_eq!(
+            deltas,
+            vec![
+                StreamDelta::Text("checking the logs".into()),
+                StreamDelta::ToolCall {
+                    index: 0,
+                    id: Some("call_1".into()),
+                    name: Some("search_logs".into()),
+                    arguments: "{}".into(),
+                },
+                StreamDelta::Finish("tool_calls".into()),
+            ]
+        );
+    }
+
+    /// A `finish_reason` that co-occurs with a plain text delta (no tool
+    /// call) in the same object — the class of event a conformant OpenAI
+    /// stream sends as two separate events, but some gateways combine —
+    /// must not be dropped either.
+    #[test]
+    fn sse_finish_reason_survives_when_combined_with_a_final_text_delta() {
+        let body = r#"data: {"choices":[{"delta":{"content":" done."},"finish_reason":"length"}]}
+
+data: [DONE]
+"#;
+        let completion = accumulate_openai_sse(body).unwrap();
+        assert_eq!(completion.content, " done.");
+        assert_eq!(
+            completion.finish_reason, "length",
+            "a finish_reason combined with content must not be lost or defaulted"
+        );
+    }
+
+    /// A single SSE line with no terminator that grows past the configured
+    /// bound must fail the whole read closed rather than buffer forever —
+    /// verified against the real decoder `complete_stream_cb` uses.
+    #[test]
+    fn an_unterminated_oversized_line_fails_closed_instead_of_growing_forever() {
+        let mut decoder = crate::sse::SseLineDecoder::with_max_buffered_line_bytes(4096);
+        let chunk = vec![b'x'; 8192];
+        let error = decoder.push(&chunk).unwrap_err();
+        assert!(error.to_string().to_ascii_lowercase().contains("exceed"));
+    }
+
+    /// A malformed (non-JSON) `data:` payload mid-stream must fail the
+    /// whole turn — never silently skipped, which would let a corrupted or
+    /// truncated event pass as if nothing happened.
+    #[test]
+    fn a_malformed_data_line_is_a_hard_error_not_silently_skipped() {
+        let error = parse_openai_sse_data("{not json}").unwrap_err();
+        assert!(error.to_string().contains("sse json"));
     }
 
     #[test]
