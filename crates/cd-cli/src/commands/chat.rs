@@ -51,11 +51,17 @@ pub async fn run(
     // `full` exposes bounded, redacted conversation and tool-call content —
     // still never a secret or pre-redaction value, but real turn content
     // nonetheless. Refuse rather than let a script accidentally capture it.
+    // Under `--jsonl` the streaming contract still applies: emit Error then
+    // Done{ok:false} before returning (never empty stdout).
     if matches!(args.trace, Some(TraceLevel::Full)) && !args.trace_ack {
-        return Err(CliError::user(
+        let err = CliError::user(
             "refusing --trace full without --trace-ack — full trace exposes bounded, \
              redacted conversation and tool-call content; re-run with --trace-ack to confirm",
-        ));
+        );
+        if matches!(format, OutputFormat::Jsonl) {
+            print_jsonl_failure(&err);
+        }
+        return Err(err);
     }
     // A dry run with no explicit --trace would print nothing useful at all
     // (the dry-run backend never produces text) — default it to summary

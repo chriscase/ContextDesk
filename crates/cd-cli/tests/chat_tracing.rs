@@ -356,6 +356,36 @@ async fn trace_full_without_ack_is_refused_before_any_provider_contact() {
         requests.is_empty(),
         "the refusal must happen before any provider contact: {requests:?}"
     );
+
+    // JSONL streaming contract still holds on this early refusal: every
+    // stdout line is StreamLine-shaped, last is Done{ok:false}. Empty
+    // stdout would break machine consumers that always expect Error+Done.
+    let lines = assert_pure_jsonl(&output.stdout);
+    assert!(
+        !output.stdout.is_empty(),
+        "jsonl refusal must not leave empty stdout"
+    );
+    assert_eq!(
+        lines.first().and_then(|l| l["type"].as_str()),
+        Some("error"),
+        "first line must be error: {lines:#?}"
+    );
+    assert_eq!(
+        lines.last().and_then(|l| l["type"].as_str()),
+        Some("done"),
+        "last line must be done: {lines:#?}"
+    );
+    assert_eq!(
+        lines.last().and_then(|l| l["ok"].as_bool()),
+        Some(false),
+        "done.ok must be false: {lines:#?}"
+    );
+    let err = &lines[0];
+    let msg = err["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("trace-ack") || msg.contains("trace full"),
+        "error message should name the ack requirement: {msg}"
+    );
 }
 
 #[tokio::test]
