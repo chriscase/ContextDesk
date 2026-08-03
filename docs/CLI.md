@@ -76,9 +76,17 @@ On failure, `ok` is `false`, `data` is `null`, and `error` is
 
 ### Streaming lines (`--jsonl`, currently `chat`)
 
-One JSON object per line, tagged by `type`: `session`, `text_delta`,
-`tool`, `permission_required`, `turn_completed`, `error`, `done`. `done` is
-always last.
+One JSON object per line, tagged by `type`: `text_delta`, `tool`,
+`permission_required`, `turn_completed`, `error`, `trace_summary`,
+`trace_context`, `trace_tool`, `done`. Every line parses independently; a
+reader must not assume line count or ordering beyond "the line tagged `done`
+is last, and appears exactly once" — that holds on a successful turn and on a
+failed one alike. On failure, the last two lines are always `error` (the
+failure, `code`/`message`) then `done` with `ok:false`; nothing else on
+stdout is ever a bare, untagged JSON object under `--jsonl`.
+
+`trace_summary`/`trace_context`/`trace_tool` only appear when `chat` was run
+with `--dry-run` and/or `--trace` — see below.
 
 ### Exit codes
 
@@ -113,6 +121,7 @@ contextdesk context <query> [--corpus <id>] [--k N]
 contextdesk session list
 contextdesk session show <id>
 contextdesk chat <question> [--corpus <id>] [--session <id>] [--new] [--auto-approve]
+                  [--dry-run] [--trace summary|context|full] [--trace-ack]
 contextdesk config init|validate|show|path
 contextdesk capabilities
 ```
@@ -120,6 +129,64 @@ contextdesk capabilities
 Global flags (available on every subcommand): `--format`, `--json`,
 `--jsonl`, `--color`, `--config <path>`, `--app-config <path>`, `--profile
 <id>`, `--model <id>`.
+
+## `chat --dry-run` / `--trace` (inspecting a turn without sending it, or alongside sending it)
+
+`--dry-run` constructs the exact same bounded, redacted conversation and
+grounded log context a real turn would — the same profile resolution, session
+load, corpus binding, system prompt, and tool-schema assembly — but
+guarantees no provider request occurs: no chat completion, no Ollama health
+probe, and no credential refresh (`ProviderKind::XaiGrokBuild` would otherwise
+refresh an OIDC token over the network before a client even exists). This is
+a property of the backend used under the hood
+(`cd_core::turn_trace::DryRunBackend`, which holds no HTTP client, base URL,
+or credential), not a flag checked at the last moment. A dry run never writes
+anything: it never creates a session, and if `--session` names an existing
+one, that session's saved file is left byte-for-byte untouched.
+
+`--dry-run` implies `--trace summary` when `--trace` is not also given —
+otherwise it would produce no output at all, since the dry-run backend never
+produces real text.
+
+`--trace {summary,context,full}` captures what a turn actually sent a
+provider and renders it at the named level; each level includes everything
+the level below it shows. Works with or without `--dry-run` — on a real turn
+it captures the real request(s) alongside sending them.
+
+- **`summary`** (`trace_summary`, one line): provider/model identity, corpus
+  id + revision, history/retrieval message counts, evidence ids (deduped
+  citation source ids), this model's context budget vs. characters actually
+  sent, distinct tool names offered or called, elapsed time, and a grounding
+  status — `not_applicable` for an ordinary (unlinked) turn, `ungrounded` if
+  the turn ended with one of the `linked_*` evidence-validation error codes,
+  `grounded` otherwise.
+- **`context`** (adds `trace_context`, one line per provider call — one for a
+  dry run, one per round for a real multi-round turn): the exact bounded,
+  redacted messages and tool names that call sent. Reading consecutive
+  `trace_context` lines shows context added between rounds — round *N+1*'s
+  messages include round *N*'s tool results, already folded into history the
+  same way a real turn folds them.
+- **`full`** (adds `trace_tool`, one line per tool call the turn actually
+  made): id/name/ok/summary/detail — the same bounded data a UI's tool
+  lifecycle display already has, correlated by round rather than dropped.
+  Requires `--trace-ack`: refused otherwise with a `user_error` naming what
+  full trace exposes. Raw JSON tool-call *arguments* are not part of any
+  trace level — only the outcome (summary/detail) already surfaced to a UI.
+
+No trace level, at any depth, ever includes a credential, an HTTP
+authorization header, or pre-redaction content. Every captured message is
+passed through the same secret-scrubbing pass memory writes use
+(`crate::redact::scrub_secrets`) and length-bounded (4,000 characters per
+message, 50 messages, 64 tool names per call) before it is captured at all —
+structurally true regardless of trace level, not something a renderer has to
+remember to apply. Provider API keys and HTTP headers cannot reach this
+capture point in the first place: the traced boundary
+(`ChatBackend::complete`) takes only `(&[ChatMessage], &[ToolSpec])`, never a
+credential.
+
+```json
+{"type":"trace_summary","provider_profile_id":"ollama-local","chat_model":"mistral","corpus_id":null,"corpus_revision":null,"dry_run":true,"history_messages":3,"retrieved_evidence":0,"evidence_ids":[],"context_budget_chars":120000,"context_used_chars":828,"tool_names":["search_kb"],"elapsed_ms":2,"grounding":"not_applicable"}
+```
 
 ## Permission prompts (`chat`)
 
@@ -145,6 +212,22 @@ grants every request; it is never the interactive default.
   `cd_workflow::chat::run_chat_workflow`; it does not yet expose the
   desktop app's fuller tool surface (clustering, timeline, anomalies) as
   CLI subcommands of their own.
+- `chat --dry-run` forces ambient-memory recall off even when the profile
+  would otherwise use it — durable-memory injection embeds the query, and an
+  `EmbedBackend` (e.g. `OllamaEmbedBackend`) can itself be a remote provider,
+  which the "no provider request occurs" guarantee cannot assume is safe to
+  call. A dry run's traced context can therefore omit ambient-memory content
+  a real turn with the same profile would include.
+- `chat --trace full` does not capture raw JSON tool-call *arguments* — only
+  the same id/name/ok/summary/detail a UI's tool lifecycle display already
+  has. Adding argument capture would mean growing the `StreamEvent` protocol
+  itself (`docs/PROTOCOL.md`), which this trace feature deliberately did not
+  do.
+- `chat --trace`'s round/call model is per backend call, not a labeled
+  "round vs. retry" distinction — a capability-driven retry (e.g. a
+  tools-unsupported fallback) and a genuine next round both appear as their
+  own `trace_context` line, in call order, without a field claiming to know
+  which is which.
 
 ## Architecture
 
