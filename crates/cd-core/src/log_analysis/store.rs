@@ -1451,6 +1451,24 @@ impl LogCorpus {
         Ok(())
     }
 
+    /// Rename a corpus in place (cosmetic only — never touched by ingest
+    /// identity, retrieval, or citations, all of which key on `id`).
+    ///
+    /// Rejects a blank name rather than silently keeping the old one, so a
+    /// caller passing empty input by mistake gets an honest error instead of
+    /// a no-op that looks like it worked.
+    pub fn rename(cache_root: &Path, id: &str, new_name: &str) -> CoreResult<()> {
+        validate_corpus_id(id)?;
+        let new_name = new_name.trim();
+        if new_name.is_empty() {
+            return Err(CoreError::Message("corpus name cannot be empty".into()));
+        }
+        let root = cache_root.join("log_corpora").join(id);
+        let mut meta = read_meta_file(&root)?;
+        meta.name = new_name.to_string();
+        write_meta_file(&root, &meta)
+    }
+
     /// List corpus ids under cache root.
     pub fn list_ids(cache_root: &Path) -> CoreResult<Vec<String>> {
         let dir = cache_root.join("log_corpora");
@@ -1960,6 +1978,32 @@ mod tests {
         .unwrap();
         let error = read_meta_file(corpus.root()).unwrap_err();
         assert!(error.to_string().contains("bounded regular"));
+    }
+
+    #[test]
+    fn rename_updates_only_the_cosmetic_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "original name").unwrap();
+        let id = corpus.id().to_string();
+
+        LogCorpus::rename(dir.path(), &id, "  renamed corpus  ").unwrap();
+
+        let reopened = LogCorpus::open(dir.path(), &id).unwrap();
+        assert_eq!(reopened.meta().unwrap().name, "renamed corpus");
+        assert_eq!(reopened.id(), id, "rename must never touch identity");
+    }
+
+    #[test]
+    fn rename_rejects_a_blank_name_rather_than_silently_keeping_the_old_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "kept name").unwrap();
+        let id = corpus.id().to_string();
+
+        let error = LogCorpus::rename(dir.path(), &id, "   ").unwrap_err();
+        assert!(error.to_string().contains("empty"));
+
+        let reopened = LogCorpus::open(dir.path(), &id).unwrap();
+        assert_eq!(reopened.meta().unwrap().name, "kept name");
     }
 
     #[cfg(unix)]
