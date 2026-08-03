@@ -20,6 +20,19 @@ pub enum Role {
     Tool,
 }
 
+impl Role {
+    /// Stable lowercase wire/trace representation, matching the `serde`
+    /// spelling above without requiring a serializer round-trip.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+        }
+    }
+}
+
 /// One chat message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
