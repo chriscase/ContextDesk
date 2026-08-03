@@ -18,7 +18,10 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> i32 {
-    let paths = match adapters::Paths::resolve(cli.global.app_config.as_deref()) {
+    let paths = match adapters::Paths::resolve(
+        cli.global.data_dir.as_deref(),
+        cli.global.app_config.as_deref(),
+    ) {
         Ok(p) => p,
         Err(e) => return emit_bare_error(&e),
     };
@@ -151,13 +154,17 @@ async fn dispatch(
             }
         }
         Command::Config { action } => {
+            let secrets = adapters::secret_store();
             let result = commands::config_cmd::run(
                 action,
-                &paths.config_dir,
+                paths,
                 &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
                 Some(project_path),
                 resolved,
-            );
+                app_cfg,
+                &secrets,
+            )
+            .await;
             emit(format, "config", result)
         }
         Command::Capabilities => emit(

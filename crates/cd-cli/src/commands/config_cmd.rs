@@ -1,12 +1,42 @@
-//! `contextdesk config` — init / validate / show / path for the CLI's own
-//! TOML config (see [`crate::config`] for the schema and precedence rules).
+//! `contextdesk config` — init / validate / show / path.
+//!
+//! `init` writes to two SEPARATE files, and this module is the only place
+//! that ever writes either of them from a wizard:
+//! - `cli.toml` (this crate's own [`crate::config`] schema) — CLI-only
+//!   behavior preferences (output format, color, the CLI's profile pointer).
+//! - the shared `AppConfig` (`cd_core::config`, same file the desktop app
+//!   reads/writes) — provider profiles (keychain refs only, never a raw
+//!   secret) and the configured default timezone.
+//!
+//! Data-location configuration is report-only here: `--data-dir` /
+//! `--profile-dir` is a global flag resolved once in `main.rs` before any
+//! command runs (see [`crate::adapters::Paths`]), so by the time this
+//! wizard runs the location is already fixed — it can only tell the user
+//! what was chosen, never choose it itself (there is nothing to read a
+//! saved choice from until a config file exists at that location).
+//!
+//! A configured credential is committed to the OS keychain as the single
+//! last fallible step of the whole command — after both config files are
+//! written, not before — so a failure anywhere in the run can never orphan
+//! a stored secret that nothing references (see `run_init`'s doc comment).
+//! Every wizard prompt writes to stderr, never stdout, so an interactive
+//! run under `--json`/`--jsonl` still emits one clean, parseable envelope
+//! on stdout.
 
-use crate::cli::{ConfigAction, ConfigInitArgs};
+use crate::adapters::{save_app_config, Paths};
+use crate::cli::{ConfigAction, ConfigInitArgs, ProviderKindArg};
 use crate::config::{
     global_config_path, load_layer, project_config_path, save_layer, CliConfigFile, ImportSection,
     OutputSection, ResolvedConfig, WorkflowSection,
 };
 use crate::envelope::{CliError, CliResult, Render};
+use cd_core::config::{is_valid_iana_timezone, AppConfig};
+use cd_core::discovery::{self, ProbeOutcome};
+use cd_core::keychain_store::{key_ref_for_profile, SecretStore};
+use cd_core::providers::{
+    descriptor_for, ProviderDeadlinePreference, ProviderKind, ProviderProfile,
+};
+use cd_core::ssrf::{validate_provider_url, SsrfPolicy};
 use serde::Serialize;
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
@@ -15,15 +45,66 @@ use std::path::Path;
 pub struct InitOutput {
     pub path: String,
     pub created: bool,
+    /// Where every piece of state this process touches lives — the same
+    /// value `contextdesk config path` and `capabilities` would report.
+    pub data_dir: String,
+    /// True when `data_dir` came from `--data-dir` / `--profile-dir`
+    /// rather than the default, desktop-shared `~/.contextdesk`.
+    pub isolated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_profile_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_configured: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_timezone: Option<String>,
+    /// Human-readable outcome of the optional connectivity check — never
+    /// present unless `--check-connection` (or its interactive prompt) was
+    /// accepted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connectivity_check: Option<String>,
 }
 
 impl Render for InitOutput {
     fn render_text(&self) -> String {
-        format!(
-            "{} {}",
-            if self.created { "wrote" } else { "updated" },
-            self.path
-        )
+        let mut lines = vec![
+            format!(
+                "{} {}",
+                if self.created { "wrote" } else { "updated" },
+                self.path
+            ),
+            format!(
+                "data location: {}{}",
+                self.data_dir,
+                if self.isolated {
+                    " (isolated)"
+                } else {
+                    " (shared with desktop app)"
+                }
+            ),
+        ];
+        if let Some(id) = &self.provider_profile_id {
+            lines.push(format!(
+                "provider: {id} ({})",
+                self.provider_kind.as_deref().unwrap_or("unknown kind")
+            ));
+            lines.push(format!(
+                "credential: {}",
+                if self.credential_configured.unwrap_or(false) {
+                    "configured (keychain reference only)"
+                } else {
+                    "not configured"
+                }
+            ));
+        }
+        if let Some(tz) = &self.default_timezone {
+            lines.push(format!("default timezone: {tz}"));
+        }
+        if let Some(check) = &self.connectivity_check {
+            lines.push(format!("connectivity check: {check}"));
+        }
+        lines.join("\n")
     }
 
     fn render_json(&self) -> serde_json::Value {
@@ -95,15 +176,18 @@ impl Render for PathOutput {
     }
 }
 
-pub fn run(
+#[allow(clippy::too_many_arguments)]
+pub async fn run(
     action: &ConfigAction,
-    config_dir: &Path,
+    paths: &Paths,
     cwd: &Path,
     explicit_project_path: Option<&Path>,
     resolved: &ResolvedConfig,
+    app_cfg: &AppConfig,
+    secrets: &dyn SecretStore,
 ) -> CliResult<Box<dyn Render>> {
     match action {
-        ConfigAction::Init(args) => run_init(args, config_dir, cwd),
+        ConfigAction::Init(args) => run_init(args, paths, cwd, app_cfg, secrets).await,
         ConfigAction::Validate { path } => {
             let target = path
                 .clone()
@@ -126,7 +210,7 @@ pub fn run(
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| project_config_path(cwd));
             Ok(Box::new(PathOutput {
-                global: global_config_path(config_dir).display().to_string(),
+                global: global_config_path(&paths.config_dir).display().to_string(),
                 project_exists: project.exists(),
                 project: project.display().to_string(),
             }))
@@ -134,11 +218,29 @@ pub fn run(
     }
 }
 
-fn run_init(args: &ConfigInitArgs, config_dir: &Path, cwd: &Path) -> CliResult<Box<dyn Render>> {
+/// Writes cli.toml, then (if a provider was configured) the shared
+/// `AppConfig`, then — as the single LAST fallible step of the entire
+/// command — commits any resolved credential to the OS keychain.
+///
+/// That ordering is deliberate: every prompt and every validation runs
+/// first (a rejected timezone or URL never leaves a half-written cli.toml
+/// behind), then both config files are written, and only once they have
+/// both landed does the credential itself get stored. A failure at the
+/// keychain step therefore never orphans a stored secret that nothing
+/// references — worst case, `cfg`'s profile references a keychain entry
+/// that doesn't exist yet, which is self-healing: re-running `config init
+/// --force` with the same (or an explicit `--profile-id`) fills it in.
+async fn run_init(
+    args: &ConfigInitArgs,
+    paths: &Paths,
+    cwd: &Path,
+    app_cfg: &AppConfig,
+    secrets: &dyn SecretStore,
+) -> CliResult<Box<dyn Render>> {
     let path = if args.project {
         project_config_path(cwd)
     } else {
-        global_config_path(config_dir)
+        global_config_path(&paths.config_dir)
     };
     if path.exists() && !args.force {
         return Err(CliError::user(format!(
@@ -148,9 +250,16 @@ fn run_init(args: &ConfigInitArgs, config_dir: &Path, cwd: &Path) -> CliResult<B
     }
 
     let interactive = args.interactive || (!args.non_interactive && io::stdin().is_terminal());
+    let stdin = io::stdin();
+    // Prompts go to stderr, never stdout: stdout is reserved for the final
+    // JSON/JSONL envelope under --json/--jsonl, and an interactive wizard
+    // is fully reachable in that mode (auto-detection only decides
+    // interactive-vs-not from whether stdin is a tty, independent of
+    // --format) — prompt text on stdout would otherwise corrupt it.
+    let mut stderr = io::stderr();
 
-    let cfg = if interactive {
-        prompt_wizard(args)?
+    let cli_cfg = if interactive {
+        prompt_wizard(args, paths, &stdin, &mut stderr)?
     } else {
         CliConfigFile {
             schema_version: crate::config::CLI_CONFIG_SCHEMA_VERSION,
@@ -166,22 +275,81 @@ fn run_init(args: &ConfigInitArgs, config_dir: &Path, cwd: &Path) -> CliResult<B
         }
     };
 
+    let configure_provider = if args.skip_provider {
+        false
+    } else if interactive {
+        ask_yes_no(&stdin, &mut stderr, "Configure an AI provider now?", true)?
+    } else {
+        args.provider_kind.is_some()
+    };
+
+    let provider_setup = if configure_provider {
+        Some(
+            configure_provider_profile(args, interactive, paths, app_cfg, &stdin, &mut stderr)
+                .await?,
+        )
+    } else {
+        None
+    };
+
+    // Both layers are fully built (and every validation has already run)
+    // before either write happens — a rejected timezone or URL never
+    // leaves a half-written cli.toml behind.
     let created = !path.exists();
-    save_layer(&path, &cfg)?;
+    save_layer(&path, &cli_cfg)?;
+    if let Some(setup) = &provider_setup {
+        save_app_config(paths, &setup.cfg)?;
+    }
+
+    // The one remaining fallible step, deliberately last: see this
+    // function's doc comment for why the credential is stored here and not
+    // inside `configure_provider_profile`.
+    if let Some(setup) = &provider_setup {
+        if let Some(secret) = &setup.secret {
+            let key_ref = key_ref_for_profile(&setup.profile_id);
+            secrets
+                .set(&key_ref, secret)
+                .map_err(|e| CliError::internal(format!("store credential: {e}")))?;
+        }
+    }
+
     Ok(Box::new(InitOutput {
         path: path.display().to_string(),
         created,
+        data_dir: paths.config_dir.display().to_string(),
+        isolated: paths.isolated,
+        provider_profile_id: provider_setup.as_ref().map(|s| s.profile_id.clone()),
+        provider_kind: provider_setup.as_ref().map(|s| s.kind_label.to_string()),
+        credential_configured: provider_setup.as_ref().map(|s| s.credential_configured),
+        default_timezone: provider_setup.as_ref().and_then(|s| s.timezone.clone()),
+        connectivity_check: provider_setup
+            .as_ref()
+            .and_then(|s| s.probe_summary.clone()),
     }))
 }
 
-fn prompt_wizard(args: &ConfigInitArgs) -> CliResult<CliConfigFile> {
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
+fn prompt_wizard(
+    args: &ConfigInitArgs,
+    paths: &Paths,
+    stdin: &io::Stdin,
+    stderr: &mut io::Stderr,
+) -> CliResult<CliConfigFile> {
+    writeln!(
+        stderr,
+        "Data location: {}{}",
+        paths.config_dir.display(),
+        if paths.isolated {
+            " (isolated — pass the same --data-dir to reuse this profile)"
+        } else {
+            " (shared with the desktop app)"
+        }
+    )
+    .map_err(|e| CliError::internal(e.to_string()))?;
 
     let format = args.format.unwrap_or(
         ask_enum(
-            &stdin,
-            &mut stdout,
+            stdin,
+            stderr,
             "Output format",
             &["text", "json", "jsonl"],
             "text",
@@ -189,21 +357,14 @@ fn prompt_wizard(args: &ConfigInitArgs) -> CliResult<CliConfigFile> {
         .parse_output_format(),
     );
     let color = args.color.unwrap_or(
-        ask_enum(
-            &stdin,
-            &mut stdout,
-            "Color",
-            &["auto", "always", "never"],
-            "auto",
-        )?
-        .parse_color_mode(),
+        ask_enum(stdin, stderr, "Color", &["auto", "always", "never"], "auto")?.parse_color_mode(),
     );
     let profile = if args.default_provider_profile.is_some() {
         args.default_provider_profile.clone()
     } else {
         let raw = ask_line(
-            &stdin,
-            &mut stdout,
+            stdin,
+            stderr,
             "Default provider profile id (blank = use the shared AppConfig's active profile)",
         )?;
         (!raw.trim().is_empty()).then(|| raw.trim().to_string())
@@ -223,9 +384,382 @@ fn prompt_wizard(args: &ConfigInitArgs) -> CliResult<CliConfigFile> {
     })
 }
 
-fn ask_line(stdin: &io::Stdin, stdout: &mut io::Stdout, prompt: &str) -> CliResult<String> {
-    write!(stdout, "{prompt}: ").map_err(|e| CliError::internal(e.to_string()))?;
-    stdout
+/// Everything `run_init` needs from a provider-configuration pass: the
+/// `AppConfig` with the new/updated profile merged in (not yet saved), plus
+/// the bits `InitOutput` reports back to the caller.
+///
+/// `secret`, if present, has NOT been stored anywhere yet — `cfg`'s profile
+/// already carries the `api_key_ref` it *will* be stored under, but the
+/// actual `secrets.set` call is deferred to `run_init`, after both config
+/// files are written successfully (see `run_init`'s doc comment). Never log
+/// or print this field outside a test assertion.
+#[derive(Debug)]
+struct ProviderSetupResult {
+    cfg: AppConfig,
+    profile_id: String,
+    kind_label: &'static str,
+    credential_configured: bool,
+    secret: Option<String>,
+    timezone: Option<String>,
+    probe_summary: Option<String>,
+}
+
+async fn configure_provider_profile(
+    args: &ConfigInitArgs,
+    interactive: bool,
+    paths: &Paths,
+    app_cfg: &AppConfig,
+    stdin: &io::Stdin,
+    stderr: &mut io::Stderr,
+) -> CliResult<ProviderSetupResult> {
+    let kind = match args.provider_kind {
+        Some(k) => provider_kind_from_arg(k),
+        None if interactive => parse_provider_kind(&ask_enum(
+            stdin,
+            stderr,
+            "Provider kind",
+            &["ollama", "openai-compatible", "anthropic", "xai-grok-build"],
+            "ollama",
+        )?)?,
+        None => ProviderKind::Ollama,
+    };
+    let descriptor = descriptor_for(kind);
+
+    let base_url = if let Some(u) = &args.base_url {
+        u.clone()
+    } else if interactive {
+        let default = descriptor.default_base_url.unwrap_or_default();
+        let prompt = if default.is_empty() {
+            "Base URL".to_string()
+        } else {
+            format!("Base URL (default {default})")
+        };
+        let raw = ask_line(stdin, stderr, &prompt)?;
+        if raw.is_empty() {
+            default.to_string()
+        } else {
+            raw
+        }
+    } else {
+        descriptor
+            .default_base_url
+            .map(str::to_string)
+            .ok_or_else(|| {
+                CliError::user(
+                    "--base-url is required for this provider kind in --non-interactive mode",
+                )
+            })?
+    };
+    if base_url.trim().is_empty() {
+        return Err(CliError::user("a base URL is required"));
+    }
+    let policy = if descriptor.is_local {
+        SsrfPolicy::local_only()
+    } else {
+        SsrfPolicy::allow_private_networks()
+    };
+    validate_provider_url(&base_url, &policy)
+        .map_err(|e| CliError::user(format!("invalid base URL: {e}")))?;
+
+    let chat_model = if let Some(m) = &args.chat_model {
+        m.clone()
+    } else if interactive {
+        let default = if matches!(kind, ProviderKind::Ollama) {
+            "mistral"
+        } else {
+            ""
+        };
+        let prompt = if default.is_empty() {
+            "Chat model".to_string()
+        } else {
+            format!("Chat model (default {default})")
+        };
+        let raw = ask_line(stdin, stderr, &prompt)?;
+        if raw.is_empty() {
+            default.to_string()
+        } else {
+            raw
+        }
+    } else if matches!(kind, ProviderKind::Ollama) {
+        "mistral".to_string()
+    } else {
+        return Err(CliError::user(
+            "--chat-model is required for this provider kind in --non-interactive mode",
+        ));
+    };
+    if chat_model.trim().is_empty() {
+        return Err(CliError::user("a chat model id is required"));
+    }
+
+    // An isolated profile must never collide with the desktop-shared
+    // keychain entry for the same provider kind: the default id, unlike an
+    // explicit --profile-id, is scoped by the data dir itself when
+    // isolated, so the single most common invocation shape (no
+    // --profile-id) can never silently read/overwrite the shared profile's
+    // credential. Deterministic (same --data-dir -> same id across runs),
+    // so `config init --force` against the same isolated profile still
+    // targets the same keychain entry.
+    let profile_id = args.profile_id.clone().unwrap_or_else(|| {
+        if paths.isolated {
+            isolated_profile_id(descriptor.profile_id_slug, &paths.config_dir)
+        } else {
+            descriptor.profile_id_slug.to_string()
+        }
+    });
+    let profile_label = args
+        .profile_label
+        .clone()
+        .unwrap_or_else(|| descriptor.default_label.to_string());
+
+    // Resolved (read into memory) here so a missing env var / unreadable
+    // file fails before anything else runs, but NOT stored anywhere yet —
+    // see this module's `run_init` doc comment for why storing is deferred
+    // to the very end of the whole command.
+    let secret = resolve_credential(args, descriptor.needs_api_key, interactive, stdin, stderr)?;
+    let credential_configured = secret.is_some();
+
+    let timezone = if let Some(tz) = &args.default_timezone {
+        if !is_valid_iana_timezone(tz) {
+            return Err(CliError::user(format!(
+                "{tz:?} is not a recognized IANA timezone"
+            )));
+        }
+        Some(tz.clone())
+    } else if interactive {
+        let raw = ask_line(
+            stdin,
+            stderr,
+            "Default timezone for ambiguous local timestamps (blank = leave unset, IANA id e.g. America/Chicago)",
+        )?;
+        if raw.is_empty() {
+            None
+        } else if is_valid_iana_timezone(&raw) {
+            Some(raw)
+        } else {
+            return Err(CliError::user(format!(
+                "{raw:?} is not a recognized IANA timezone"
+            )));
+        }
+    } else {
+        None
+    };
+
+    let want_check = if args.check_connection {
+        true
+    } else if interactive {
+        ask_yes_no(
+            stdin,
+            stderr,
+            "Test connection now? (sends only the base URL and, if configured, the key — never corpus content)",
+            false,
+        )?
+    } else {
+        false
+    };
+
+    // The keychain ref this profile WILL be stored under — computed here,
+    // deterministically, from the profile id alone. Nothing is written to
+    // the keychain yet (see `run_init`); the profile can already carry the
+    // reference it will resolve to once it lands.
+    let api_key_ref = secret.as_ref().map(|_| key_ref_for_profile(&profile_id));
+
+    let profile = ProviderProfile {
+        id: profile_id.clone(),
+        label: profile_label,
+        kind,
+        base_url,
+        api_key_ref,
+        chat_model,
+        embedding_model: None,
+        embedding_base_url: None,
+        capabilities: descriptor.default_capabilities,
+        local_only: descriptor.is_local,
+        deadline_preference: ProviderDeadlinePreference::Auto,
+    };
+
+    let mut cfg = app_cfg.clone();
+    cfg.providers.profiles.retain(|p| p.id != profile.id);
+    cfg.providers.profiles.push(profile.clone());
+    cfg.providers.active_id = Some(profile.id.clone());
+    if let Some(tz) = &timezone {
+        cfg.default_timezone = Some(tz.clone());
+    }
+
+    let probe_summary = if want_check {
+        Some(probe_provider_for_wizard(&profile, secret.clone(), paths.isolated).await)
+    } else {
+        None
+    };
+
+    Ok(ProviderSetupResult {
+        cfg,
+        profile_id,
+        kind_label: descriptor.default_label,
+        credential_configured,
+        secret,
+        timezone,
+        probe_summary,
+    })
+}
+
+/// A deterministic id suffix scoped to `config_dir`, so an isolated
+/// profile's default (no explicit `--profile-id`) keychain entry can never
+/// collide with the desktop-shared default for the same provider kind, and
+/// two isolated profiles at different `--data-dir` values never collide
+/// with each other either. Not a cryptographic hash — collision-worthy
+/// only if two different data dirs happened to hash identically, which is
+/// not a security boundary here (the keychain entry itself is), only a
+/// convenience default a caller can always override with `--profile-id`.
+fn isolated_profile_id(slug: &str, config_dir: &Path) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let canonical = std::fs::canonicalize(config_dir).unwrap_or_else(|_| config_dir.to_path_buf());
+    let mut hasher = DefaultHasher::new();
+    canonical.hash(&mut hasher);
+    format!("{slug}-{:08x}", hasher.finish() as u32)
+}
+
+/// Run the safe connectivity check `--check-connection` promises: base URL
+/// and, if configured, the given key — never corpus content, never a
+/// second read from the secret store.
+///
+/// `ProviderKind::XaiGrokBuild` is a deliberate exception:
+/// `cd_core::discovery::probe_provider` does not use the key passed to it
+/// for this kind at all — it reads the real `~/.grok/auth.json` session via
+/// `cd_core::grok_auth`, unconditionally, regardless of `--data-dir` (the
+/// same behavior the desktop app relies on, since a Grok Build session is
+/// inherently one real, machine-wide login, not a per-profile credential).
+/// That is correct for an ordinary run but would silently violate an
+/// isolated profile's "never touches `$HOME`" guarantee, so an isolated
+/// profile refuses the check instead of running it.
+async fn probe_provider_for_wizard(
+    profile: &ProviderProfile,
+    secret: Option<String>,
+    isolated: bool,
+) -> String {
+    if isolated && matches!(profile.kind, ProviderKind::XaiGrokBuild) {
+        return "skipped: a Grok Build session is read from the real ~/.grok/auth.json, \
+            which an isolated --data-dir profile cannot probe without breaking isolation — \
+            rerun this check outside an isolated profile"
+            .to_string();
+    }
+    summarize_probe(discovery::probe_provider(profile, secret).await)
+}
+
+fn summarize_probe(outcome: ProbeOutcome) -> String {
+    match outcome {
+        ProbeOutcome::Reachable { reason } => format!("reachable ({reason})"),
+        ProbeOutcome::KeyRejected { reason } => format!("key rejected ({reason})"),
+        ProbeOutcome::Unreachable { reason } => format!("unreachable ({reason})"),
+    }
+}
+
+/// Collect an API key without ever accepting it as a literal CLI flag value
+/// (which would leak via shell history / `ps`): an environment variable
+/// name, a file path, or a single stdin line — read exactly once, handed
+/// back to the caller to store in the keychain, then dropped.
+fn resolve_credential(
+    args: &ConfigInitArgs,
+    needs_api_key: bool,
+    interactive: bool,
+    stdin: &io::Stdin,
+    stderr: &mut io::Stderr,
+) -> CliResult<Option<String>> {
+    if let Some(name) = &args.api_key_env {
+        let v = std::env::var(name)
+            .map_err(|_| CliError::user(format!("environment variable {name} is not set")))?;
+        return Ok(non_empty(v));
+    }
+    if let Some(path) = &args.api_key_file {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| CliError::user(format!("reading {}: {e}", path.display())))?;
+        return Ok(non_empty(raw));
+    }
+    if args.api_key_stdin {
+        return Ok(non_empty(read_stdin_line(stdin)?));
+    }
+    if !needs_api_key || !interactive {
+        return Ok(None);
+    }
+
+    let choice = ask_enum(
+        stdin,
+        stderr,
+        "Credential source",
+        &["env", "file", "stdin", "skip"],
+        "skip",
+    )?;
+    match choice.as_str() {
+        "env" => {
+            let name = ask_line(stdin, stderr, "Environment variable name")?;
+            if name.is_empty() {
+                return Err(CliError::user("environment variable name required"));
+            }
+            let v = std::env::var(&name)
+                .map_err(|_| CliError::user(format!("environment variable {name} is not set")))?;
+            Ok(non_empty(v))
+        }
+        "file" => {
+            let path = ask_line(stdin, stderr, "Path to file containing the key")?;
+            if path.is_empty() {
+                return Err(CliError::user("file path required"));
+            }
+            let raw = std::fs::read_to_string(&path)
+                .map_err(|e| CliError::user(format!("reading {path}: {e}")))?;
+            Ok(non_empty(raw))
+        }
+        "stdin" => Ok(non_empty(read_stdin_line(stdin)?)),
+        _ => Ok(None),
+    }
+}
+
+fn read_stdin_line(stdin: &io::Stdin) -> CliResult<String> {
+    let mut line = String::new();
+    stdin
+        .read_line(&mut line)
+        .map_err(|e| CliError::internal(e.to_string()))?;
+    Ok(line.trim().to_string())
+}
+
+/// `None` for blank/whitespace-only input; otherwise the value with
+/// incidental leading/trailing whitespace stripped — applied uniformly
+/// regardless of source (env var, file, stdin) so a credential set via a
+/// wrapper script or a sourced `.env` file isn't silently stored padded
+/// while the same value via `--api-key-file`/`--api-key-stdin` would not
+/// have been.
+fn non_empty(s: String) -> Option<String> {
+    let trimmed = s.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn provider_kind_from_arg(arg: ProviderKindArg) -> ProviderKind {
+    match arg {
+        ProviderKindArg::Ollama => ProviderKind::Ollama,
+        ProviderKindArg::OpenAiCompatible => ProviderKind::OpenAiCompatible,
+        ProviderKindArg::Anthropic => ProviderKind::Anthropic,
+        ProviderKindArg::XaiGrokBuild => ProviderKind::XaiGrokBuild,
+    }
+}
+
+fn parse_provider_kind(s: &str) -> CliResult<ProviderKind> {
+    match s {
+        "ollama" => Ok(ProviderKind::Ollama),
+        "openai-compatible" => Ok(ProviderKind::OpenAiCompatible),
+        "anthropic" => Ok(ProviderKind::Anthropic),
+        "xai-grok-build" => Ok(ProviderKind::XaiGrokBuild),
+        _ => Err(CliError::user(format!(
+            "{s:?} is not a known provider kind"
+        ))),
+    }
+}
+
+/// Every wizard prompt writes here, never to stdout: stdout is reserved for
+/// the final `--json`/`--jsonl` envelope, and interactive mode is reachable
+/// in that output mode too (auto-detected from whether stdin is a tty,
+/// independent of `--format`).
+fn ask_line(stdin: &io::Stdin, stderr: &mut io::Stderr, prompt: &str) -> CliResult<String> {
+    write!(stderr, "{prompt}: ").map_err(|e| CliError::internal(e.to_string()))?;
+    stderr
         .flush()
         .map_err(|e| CliError::internal(e.to_string()))?;
     let mut line = String::new();
@@ -237,14 +771,14 @@ fn ask_line(stdin: &io::Stdin, stdout: &mut io::Stdout, prompt: &str) -> CliResu
 
 fn ask_enum(
     stdin: &io::Stdin,
-    stdout: &mut io::Stdout,
+    stderr: &mut io::Stderr,
     prompt: &str,
     options: &[&str],
     default: &str,
 ) -> CliResult<String> {
     let answer = ask_line(
         stdin,
-        stdout,
+        stderr,
         &format!("{prompt} [{}] (default {default})", options.join("/")),
     )?;
     if answer.is_empty() {
@@ -256,6 +790,24 @@ fn ask_enum(
         Err(CliError::user(format!(
             "{answer:?} is not one of {options:?}"
         )))
+    }
+}
+
+fn ask_yes_no(
+    stdin: &io::Stdin,
+    stderr: &mut io::Stderr,
+    prompt: &str,
+    default: bool,
+) -> CliResult<bool> {
+    let default_str = if default { "Y/n" } else { "y/N" };
+    let raw = ask_line(stdin, stderr, &format!("{prompt} [{default_str}]"))?;
+    if raw.is_empty() {
+        return Ok(default);
+    }
+    match raw.to_lowercase().as_str() {
+        "y" | "yes" => Ok(true),
+        "n" | "no" => Ok(false),
+        _ => Err(CliError::user(format!("{raw:?} is not y/n"))),
     }
 }
 
@@ -279,5 +831,347 @@ impl ParseChoice for str {
             "never" => crate::config::ColorMode::Never,
             _ => crate::config::ColorMode::Auto,
         }
+    }
+}
+
+/// In-process unit tests for `configure_provider_profile` and `run_init` —
+/// deliberately NOT exercised through the compiled binary (see
+/// `crates/cd-cli/tests/cli_isolation.rs`'s module doc comment): calling
+/// the production functions directly with an injected `MemorySecretStore`
+/// proves the exact same credential-handling code path as a real
+/// `--api-key-env` run, without ever touching the real OS keychain (which
+/// can block a headless run on a GUI authorization prompt).
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::ProviderKindArg;
+    use cd_core::keychain_store::MemorySecretStore;
+
+    /// Every field explicit, defaulted to "do nothing beyond the base
+    /// wizard" — each test overrides only what it needs, so a field added
+    /// to `ConfigInitArgs` later has to be given an explicit inert default
+    /// here rather than silently inheriting one.
+    fn base_args() -> ConfigInitArgs {
+        ConfigInitArgs {
+            project: false,
+            interactive: false,
+            non_interactive: true,
+            force: false,
+            format: None,
+            color: None,
+            default_provider_profile: None,
+            skip_provider: false,
+            provider_kind: None,
+            base_url: None,
+            chat_model: None,
+            default_timezone: None,
+            profile_id: None,
+            profile_label: None,
+            api_key_env: None,
+            api_key_file: None,
+            api_key_stdin: false,
+            check_connection: false,
+        }
+    }
+
+    fn isolated_paths() -> (tempfile::TempDir, Paths) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::resolve(Some(dir.path()), None).unwrap();
+        assert!(paths.isolated);
+        (dir, paths)
+    }
+
+    /// `configure_provider_profile` resolves and returns the credential but
+    /// must never store it itself — storing is `run_init`'s job, deferred
+    /// until after both config files are written (see this module's
+    /// `run_init` doc comment). The keychain reference it computes must
+    /// still be deterministic and already embedded in the returned
+    /// `AppConfig`, even though nothing has landed in the secret store yet.
+    #[tokio::test]
+    async fn configure_provider_profile_resolves_the_credential_but_defers_storing_it() {
+        let env_var = "CD_CONFIG_CMD_TEST_KEY_DEFERRED";
+        std::env::set_var(env_var, "sk-in-process-test-secret");
+        let (_dir, paths) = isolated_paths();
+        let mut args = base_args();
+        args.provider_kind = Some(ProviderKindArg::OpenAiCompatible);
+        args.base_url = Some("http://127.0.0.1:1/v1".into());
+        args.chat_model = Some("test-model".into());
+        args.profile_id = Some("test-profile-deferred".into());
+        args.api_key_env = Some(env_var.into());
+
+        let secrets = MemorySecretStore::new();
+        let stdin = io::stdin();
+        let mut stderr = io::stderr();
+        let result = configure_provider_profile(
+            &args,
+            false,
+            &paths,
+            &AppConfig::default(),
+            &stdin,
+            &mut stderr,
+        )
+        .await
+        .expect("provider setup must succeed");
+        std::env::remove_var(env_var);
+
+        assert!(result.credential_configured);
+        assert_eq!(result.secret.as_deref(), Some("sk-in-process-test-secret"));
+        let serialized = serde_json::to_string(&result.cfg).expect("AppConfig serializes");
+        assert!(
+            !serialized.contains("sk-in-process-test-secret"),
+            "the secret must never appear in the serialized AppConfig, deferred or not"
+        );
+        let key_ref = key_ref_for_profile("test-profile-deferred");
+        assert!(
+            serialized.contains(&key_ref),
+            "the keychain reference must already be recorded in AppConfig"
+        );
+        assert_eq!(
+            secrets.get(&key_ref).unwrap(),
+            None,
+            "configure_provider_profile must not itself write to the secret store"
+        );
+    }
+
+    /// The end-to-end guarantee: after a full successful `run_init`, the
+    /// credential really has landed in the secret store, and neither
+    /// on-disk config file contains it.
+    #[tokio::test]
+    async fn run_init_stores_the_credential_only_after_both_config_files_are_written() {
+        let env_var = "CD_CONFIG_CMD_TEST_KEY_LANDS";
+        std::env::set_var(env_var, "sk-should-land-in-keychain");
+        let (dir, paths) = isolated_paths();
+        let mut args = base_args();
+        args.provider_kind = Some(ProviderKindArg::OpenAiCompatible);
+        args.base_url = Some("http://127.0.0.1:1/v1".into());
+        args.chat_model = Some("test-model".into());
+        args.profile_id = Some("test-profile-lands".into());
+        args.api_key_env = Some(env_var.into());
+
+        let secrets = MemorySecretStore::new();
+        run_init(&args, &paths, dir.path(), &AppConfig::default(), &secrets)
+            .await
+            .expect("run_init must succeed");
+        std::env::remove_var(env_var);
+
+        let key_ref = key_ref_for_profile("test-profile-lands");
+        assert_eq!(
+            secrets.get(&key_ref).unwrap().as_deref(),
+            Some("sk-should-land-in-keychain"),
+            "the credential must actually reach the secret store by the end of run_init"
+        );
+        let app_config_text = std::fs::read_to_string(&paths.app_config_path).unwrap();
+        assert!(!app_config_text.contains("sk-should-land-in-keychain"));
+        assert!(app_config_text.contains(&key_ref));
+    }
+
+    /// A rejected value (invalid timezone) must abort `run_init` before
+    /// either config file is written AND before the credential is stored —
+    /// proving the full command, not just one function inside it, can never
+    /// leave an orphaned secret in the keychain for a run that produced no
+    /// saved config.
+    #[tokio::test]
+    async fn a_rejected_timezone_leaves_no_config_and_no_stored_credential() {
+        let env_var = "CD_CONFIG_CMD_TEST_KEY_REJECTED";
+        std::env::set_var(env_var, "sk-should-never-be-stored");
+        let (dir, paths) = isolated_paths();
+        let mut args = base_args();
+        args.provider_kind = Some(ProviderKindArg::OpenAiCompatible);
+        args.base_url = Some("http://127.0.0.1:1/v1".into());
+        args.chat_model = Some("test-model".into());
+        args.profile_id = Some("test-profile-rejected".into());
+        args.api_key_env = Some(env_var.into());
+        args.default_timezone = Some("Not/A_Real_Zone".into());
+
+        let secrets = MemorySecretStore::new();
+        // `Box<dyn Render>` isn't `Debug`, so `expect_err` (which requires
+        // the Ok type to be Debug) can't be used here.
+        let err = match run_init(&args, &paths, dir.path(), &AppConfig::default(), &secrets).await {
+            Err(e) => e,
+            Ok(_) => panic!("an invalid IANA timezone must be rejected"),
+        };
+        std::env::remove_var(env_var);
+
+        assert_eq!(err.category, crate::envelope::ExitCategory::UserError);
+        assert!(!err.message.contains("sk-should-never-be-stored"));
+        let key_ref = key_ref_for_profile("test-profile-rejected");
+        assert_eq!(
+            secrets.get(&key_ref).unwrap(),
+            None,
+            "a rejected run must never leave the credential in the secret store"
+        );
+        assert!(!paths.app_config_path.exists());
+        assert!(!global_config_path(&paths.config_dir).exists());
+    }
+
+    /// A provider kind that doesn't need a key (Ollama) must never touch
+    /// the secret store at all, even when `configure_provider_profile` runs
+    /// to completion.
+    #[tokio::test]
+    async fn a_provider_needing_no_key_never_touches_the_secret_store() {
+        let (_dir, paths) = isolated_paths();
+        let mut args = base_args();
+        args.provider_kind = Some(ProviderKindArg::Ollama);
+        args.chat_model = Some("llama3".into());
+        args.profile_id = Some("test-profile-no-key".into());
+
+        let stdin = io::stdin();
+        let mut stderr = io::stderr();
+        let result = configure_provider_profile(
+            &args,
+            false,
+            &paths,
+            &AppConfig::default(),
+            &stdin,
+            &mut stderr,
+        )
+        .await
+        .expect("ollama with no credential flags must succeed");
+
+        assert!(!result.credential_configured);
+        assert!(result.secret.is_none());
+        let profile = result
+            .cfg
+            .providers
+            .active()
+            .expect("an active profile must be set");
+        assert!(profile.api_key_ref.is_none());
+    }
+
+    /// The isolation-collision fix: an isolated profile with no explicit
+    /// `--profile-id` must never default to the same id (and therefore the
+    /// same keychain entry) the desktop-shared profile would use — and two
+    /// isolated profiles at two different `--data-dir` values must not
+    /// collide with each other either. Re-running against the SAME
+    /// `--data-dir` must still be deterministic (same id every time), so a
+    /// repeat `config init` targets the same keychain entry it created
+    /// before.
+    #[tokio::test]
+    async fn isolated_default_profile_ids_are_scoped_by_data_dir_and_deterministic() {
+        let (_dir_a, paths_a) = isolated_paths();
+        let (_dir_b, paths_b) = isolated_paths();
+
+        let mut args = base_args();
+        args.provider_kind = Some(ProviderKindArg::Anthropic);
+        args.chat_model = Some("claude".into());
+
+        let stdin = io::stdin();
+        let mut stderr = io::stderr();
+        let result_a = configure_provider_profile(
+            &args,
+            false,
+            &paths_a,
+            &AppConfig::default(),
+            &stdin,
+            &mut stderr,
+        )
+        .await
+        .expect("isolated profile A must succeed");
+        let result_a_again = configure_provider_profile(
+            &args,
+            false,
+            &paths_a,
+            &AppConfig::default(),
+            &stdin,
+            &mut stderr,
+        )
+        .await
+        .expect("re-running against the same data dir must succeed");
+        let result_b = configure_provider_profile(
+            &args,
+            false,
+            &paths_b,
+            &AppConfig::default(),
+            &stdin,
+            &mut stderr,
+        )
+        .await
+        .expect("isolated profile B must succeed");
+
+        assert_ne!(
+            result_a.profile_id, "anthropic",
+            "an isolated profile must never default to the shared profile's id"
+        );
+        assert_eq!(
+            result_a.profile_id, result_a_again.profile_id,
+            "the same --data-dir must deterministically produce the same default id"
+        );
+        assert_ne!(
+            result_a.profile_id, result_b.profile_id,
+            "two different --data-dir values must never default to the same id"
+        );
+    }
+
+    /// The xai-grok-build isolation fix: `--check-connection` for this kind
+    /// must be refused (not silently run) when the profile is isolated,
+    /// since `cd_core::discovery::probe_provider` reads the real
+    /// `~/.grok/auth.json` for this kind regardless of any key passed to
+    /// it. This test never touches that file — the guard must short-circuit
+    /// before `discovery::probe_provider` is ever called.
+    #[tokio::test]
+    async fn xai_grok_build_check_connection_is_refused_when_isolated() {
+        let (_dir, paths) = isolated_paths();
+        let mut args = base_args();
+        args.provider_kind = Some(ProviderKindArg::XaiGrokBuild);
+        args.chat_model = Some("grok-4".into());
+        args.check_connection = true;
+
+        let stdin = io::stdin();
+        let mut stderr = io::stderr();
+        let result = configure_provider_profile(
+            &args,
+            false,
+            &paths,
+            &AppConfig::default(),
+            &stdin,
+            &mut stderr,
+        )
+        .await
+        .expect("must still succeed — the check is skipped, not an error");
+
+        let check = result
+            .probe_summary
+            .expect("--check-connection must still populate a summary");
+        assert!(
+            check.contains("skipped"),
+            "an isolated profile must refuse to probe a Grok Build session: {check}"
+        );
+    }
+
+    /// A credential sourced via `--api-key-env` must be trimmed exactly
+    /// like `--api-key-file`/`--api-key-stdin` already are — incidental
+    /// whitespace from a wrapper script or a sourced `.env` file must not
+    /// be silently stored as part of the key.
+    #[tokio::test]
+    async fn env_var_credential_is_trimmed_like_file_and_stdin_credentials() {
+        let env_var = "CD_CONFIG_CMD_TEST_KEY_PADDED";
+        std::env::set_var(env_var, "  sk-padded-value  ");
+        let (_dir, paths) = isolated_paths();
+        let mut args = base_args();
+        args.provider_kind = Some(ProviderKindArg::OpenAiCompatible);
+        args.base_url = Some("http://127.0.0.1:1/v1".into());
+        args.chat_model = Some("test-model".into());
+        args.profile_id = Some("test-profile-padded".into());
+        args.api_key_env = Some(env_var.into());
+
+        let stdin = io::stdin();
+        let mut stderr = io::stderr();
+        let result = configure_provider_profile(
+            &args,
+            false,
+            &paths,
+            &AppConfig::default(),
+            &stdin,
+            &mut stderr,
+        )
+        .await
+        .expect("provider setup must succeed");
+        std::env::remove_var(env_var);
+
+        assert_eq!(
+            result.secret.as_deref(),
+            Some("sk-padded-value"),
+            "leading/trailing whitespace from the environment variable must be trimmed"
+        );
     }
 }

@@ -5,7 +5,7 @@
 
 use crate::envelope::{CliError, CliResult};
 use cd_core::branding::Branding;
-use cd_core::config::{config_path, ensure_config_dir, load_config, AppConfig};
+use cd_core::config::{config_path, ensure_config_dir, load_config, save_config, AppConfig};
 use cd_core::index::KeywordIndex;
 use cd_core::keychain_store::KeychainSecretStore;
 use cd_core::sessions::SessionStore;
@@ -34,15 +34,50 @@ pub struct Paths {
     /// legitimately CLI-only, since a GUI window already has its own live
     /// notion of "what's open."
     pub cli_state_dir: PathBuf,
+    /// True when `config_dir` came from an explicit `--data-dir` /
+    /// `--profile-dir` override rather than the default, desktop-shared
+    /// `~/.contextdesk`. Isolated state never touches `$HOME` — a broken or
+    /// absent `$HOME` cannot affect an isolated profile.
+    pub isolated: bool,
 }
 
 impl Paths {
-    pub fn resolve(app_config_override: Option<&std::path::Path>) -> CliResult<Self> {
+    /// Resolve every state location for this process.
+    ///
+    /// `data_dir_override` (`--data-dir` / `--profile-dir`), when given,
+    /// bypasses `dirs::home_dir()` entirely — `config_dir` becomes exactly
+    /// this directory (created if absent), and every derived path is a
+    /// plain join under it. This is what makes isolation deterministic,
+    /// cross-platform, and testable without ever overriding `HOME`: two
+    /// processes given two different `--data-dir` values cannot observe or
+    /// mutate each other's state no matter what `$HOME` resolves to.
+    ///
+    /// `app_config_override` (`--app-config`) still wins over either
+    /// default when given, isolated or not.
+    pub fn resolve(
+        data_dir_override: Option<&std::path::Path>,
+        app_config_override: Option<&std::path::Path>,
+    ) -> CliResult<Self> {
         let branding = Branding::embedded();
-        let config_dir = ensure_config_dir(&branding)
-            .map_err(|e| CliError::internal(format!("resolve config dir: {e}")))?;
+        let (config_dir, isolated) = match data_dir_override {
+            Some(dir) => {
+                std::fs::create_dir_all(dir).map_err(|e| {
+                    CliError::internal(format!("create data dir {}: {e}", dir.display()))
+                })?;
+                (dir.to_path_buf(), true)
+            }
+            None => {
+                let dir = ensure_config_dir(&branding)
+                    .map_err(|e| CliError::internal(format!("resolve config dir: {e}")))?;
+                (dir, false)
+            }
+        };
         let app_config_path = app_config_override.map(PathBuf::from).unwrap_or_else(|| {
-            config_path(&branding).unwrap_or_else(|_| config_dir.join("config.json"))
+            if isolated {
+                config_dir.join("config.json")
+            } else {
+                config_path(&branding).unwrap_or_else(|_| config_dir.join("config.json"))
+            }
         });
         Ok(Self {
             cache_root: config_dir.join("cache"),
@@ -51,6 +86,7 @@ impl Paths {
             app_config_path,
             config_dir,
             branding,
+            isolated,
         })
     }
 }
@@ -60,6 +96,13 @@ impl Paths {
 /// uses, including its schema migration and raw-secret refusal.
 pub fn load_app_config(paths: &Paths) -> CliResult<AppConfig> {
     load_config(&paths.app_config_path).map_err(|e| CliError::internal(format!("load config: {e}")))
+}
+
+/// Save the shared `AppConfig`, atomically (temp-file + rename), to the
+/// exact path this process resolved — isolated or not.
+pub fn save_app_config(paths: &Paths, cfg: &AppConfig) -> CliResult<()> {
+    save_config(&paths.app_config_path, cfg)
+        .map_err(|e| CliError::internal(format!("save config: {e}")))
 }
 
 pub fn session_store(paths: &Paths) -> SessionStore {
