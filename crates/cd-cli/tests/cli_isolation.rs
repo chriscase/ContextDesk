@@ -434,9 +434,12 @@ fn non_tty_invocation_defaults_to_non_interactive_and_never_hangs() {
 /// An explicit `--interactive` wizard, fed answers over piped (non-TTY)
 /// stdin, must consume exactly the expected number of lines and terminate
 /// — proving the wizard is drivable by a script even when the developer
-/// wants the guided prompts rather than flags.
+/// wants the guided prompts rather than flags. Combined with `--json`, this
+/// also proves the interactive prompts land on stderr, not stdout: stdout
+/// must be nothing but the one parseable JSON envelope, never prompt text
+/// prepended to (or interleaved with) it.
 #[test]
-fn interactive_wizard_completes_over_piped_stdin() {
+fn interactive_wizard_completes_over_piped_stdin_and_keeps_stdout_pure_json() {
     let data_dir = tempfile::tempdir().unwrap();
     // Answers, one per prompt: format, color, profile pointer (blank),
     // "configure a provider?" -> no.
@@ -458,6 +461,19 @@ fn interactive_wizard_completes_over_piped_stdin() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+
+    // The whole point: stdout must parse as exactly one JSON envelope, with
+    // no prompt text prepended — a prior version of this wizard wrote
+    // prompts to stdout, corrupting the --json contract whenever
+    // interactive mode combined with --json (including the plain
+    // tty-auto-detected case).
+    let envelope = parse_envelope(&output.stdout);
+    assert!(envelope["ok"].as_bool().unwrap());
+
+    // The prompts must still have gone somewhere the user can see them.
+    let stderr_text = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr_text.contains("Output format"));
+    assert!(stderr_text.contains("Configure an AI provider now?"));
 
     let cli_toml = std::fs::read_to_string(data_dir.path().join("cli.toml")).unwrap();
     assert!(cli_toml.contains("json"));
@@ -569,4 +585,88 @@ fn connectivity_check_is_never_run_unless_requested() {
     assert!(output.status.success());
     let envelope = parse_envelope(&output.stdout);
     assert!(envelope["data"]["connectivity_check"].is_null());
+}
+
+/// An isolated profile's default (no explicit `--profile-id`) provider
+/// profile id must never equal the plain, provider-kind-derived slug the
+/// desktop-shared default uses — that slug is also the keychain ref
+/// `provider/<slug>/api_key`, so an equal id would mean an isolated,
+/// supposedly-throwaway `config init` silently reads and overwrites the
+/// same real OS keychain entry a prior non-isolated run (or the desktop
+/// app) already used for the same provider kind.
+#[test]
+fn isolated_default_profile_id_never_equals_the_shared_slug() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let output = cli()
+        .args([
+            "--data-dir",
+            data_dir.path().to_str().unwrap(),
+            "--json",
+            "config",
+            "init",
+            "--non-interactive",
+            "--provider-kind",
+            "anthropic",
+            "--chat-model",
+            "claude-3",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_envelope(&output.stdout);
+    let id = envelope["data"]["provider_profile_id"]
+        .as_str()
+        .expect("provider_profile_id must be populated");
+    assert_ne!(
+        id, "anthropic",
+        "an isolated profile must never default to the shared profile's id/keychain entry"
+    );
+    assert!(
+        id.starts_with("anthropic-"),
+        "expected a data-dir-scoped suffix on the default id, got {id:?}"
+    );
+}
+
+/// `--check-connection` for `xai-grok-build` must be refused, not silently
+/// run, when the profile is isolated: `cd_core::discovery::probe_provider`
+/// reads the real `~/.grok/auth.json` for this kind regardless of any key
+/// resolved for the profile, which would otherwise transmit a real, shared
+/// session credential from a process the user believed touched nothing but
+/// the given `--data-dir`.
+#[test]
+fn xai_grok_build_check_connection_is_refused_when_isolated() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let output = cli()
+        .args([
+            "--data-dir",
+            data_dir.path().to_str().unwrap(),
+            "--json",
+            "config",
+            "init",
+            "--non-interactive",
+            "--provider-kind",
+            "xai-grok-build",
+            "--chat-model",
+            "grok-4",
+            "--check-connection",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "must still succeed — the check is skipped, not an error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_envelope(&output.stdout);
+    let check = envelope["data"]["connectivity_check"]
+        .as_str()
+        .expect("connectivity_check must still be populated with a skip explanation");
+    assert!(
+        check.contains("skipped"),
+        "an isolated profile must refuse to probe a Grok Build session: {check}"
+    );
 }

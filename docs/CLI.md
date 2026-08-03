@@ -41,12 +41,29 @@ and CLI state (`<data-dir>/{config.json,cli.toml,cache,sessions,cli}`) —
 under exactly the directory given, created if absent. Omit it to keep the
 default: state shared with the desktop app under `~/.contextdesk`.
 
-This is a filesystem-only boundary. Credentials never live on disk at all
-— they stay in the OS keychain (see [Configuration](#configuration)) —
-so an isolated profile's provider credentials are still keychain entries
-scoped by profile id, not by `--data-dir`; two isolated profiles that reuse
-the same profile id share a keychain entry the same way two desktop
-installs would.
+This is a filesystem-only boundary — credentials never live on disk at all,
+they stay in the OS keychain (see [Configuration](#configuration)) — so a
+provider credential is always a keychain entry scoped by *profile id*, not
+by `--data-dir`. `config init` accounts for that: an isolated profile's
+*default* id (no explicit `--profile-id`) is itself derived from the data
+dir, so the single most common invocation (no `--profile-id`) can never
+silently read or overwrite the desktop-shared profile's keychain entry for
+the same provider kind, and two isolated profiles at two different
+`--data-dir` values never collide with each other either — same `--data-dir`
+always yields the same default id, so a repeat `config init --force`
+targets the same entry it created before. Passing an explicit
+`--profile-id` opts back out of that scoping (a deliberate escape hatch,
+e.g. to intentionally share one credential across profiles); two profiles
+that are given the same explicit id share that keychain entry the same way
+two desktop installs would.
+
+One provider kind cannot be isolated at all: a `xai-grok-build` profile's
+session lives in `~/.grok/auth.json`, a real, single, machine-wide login —
+not a per-profile credential — so `--check-connection` refuses to probe it
+under an isolated `--data-dir` rather than silently reading and
+transmitting the real session from outside the isolated directory. Every
+other provider kind's connectivity check only ever uses the profile's own
+resolved key.
 
 Setting `--data-dir` skips the `$HOME` lookup entirely (no `dirs::home_dir()`
 call happens at all), which is what makes an isolated profile deterministic,
@@ -101,7 +118,11 @@ contextdesk config path
 Beyond CLI behavior preferences, `config init` also configures the *shared*
 `AppConfig` — a provider profile and the default timezone — in one pass.
 Interactively it prompts for each step; every step also has a flag for
-scripted/CI use:
+scripted/CI use. Every prompt (and any human-readable error) goes to
+**stderr**, never stdout — stdout stays reserved for the final
+`--json`/`--jsonl` envelope even when the interactive wizard runs under
+`--json` (auto-detected purely from whether stdin is a tty, independent of
+`--format`).
 
 ```bash
 contextdesk config init --non-interactive \
@@ -129,20 +150,27 @@ contextdesk config init --non-interactive \
   configured value untouched.
 - **Credential**: never accepted as a literal flag value (that would leak
   via shell history / `ps`). Pick exactly one of `--api-key-env <VAR>`
-  (read the named environment variable's current value),
+  (read the named environment variable's current value, trimmed),
   `--api-key-file <path>` (read and trim the file's contents), or
-  `--api-key-stdin` (read one line from stdin) — read once, stored as an OS
-  keychain reference, then dropped from memory. Omit all three to leave the
-  profile without a credential (configurable later). A rejected value later
-  in the same run (e.g. an invalid timezone) is guaranteed to happen
-  *before* the credential is stored — a failed `config init` never leaves
-  an orphaned keychain entry.
+  `--api-key-stdin` (read and trim one line from stdin) — read once, held
+  in memory, then committed to the OS keychain only as the single last
+  fallible step of the whole command, strictly after both config files
+  (`cli.toml` and the shared `AppConfig`) have already been written
+  successfully. Omit all three to leave the profile without a credential
+  (configurable later). This ordering means a rejected value anywhere in
+  the run (a bad URL, an invalid timezone, a mistyped interactive y/n)
+  never orphans a stored secret that nothing references; the only residual
+  gap is the keychain write itself failing *after* both files already
+  landed, which self-heals on a repeat `config init --force` with the same
+  (or an explicit `--profile-id`).
 - **Connectivity check**: `--check-connection` (or, interactively, an
   explicit yes) runs a reachability probe against the base URL and, if
-  configured, the key — the same safe probe `cd_core::discovery::probe_provider`
-  and `cd_core::ai_probe::probe_ai_gateway` already use elsewhere. It never
-  sends corpus content (there is none in scope at `config init` time) and
-  is off by default everywhere, including interactively.
+  configured, the key already resolved in memory (never a second keychain
+  read) — the same safe probe `cd_core::discovery::probe_provider` already
+  uses elsewhere. It never sends corpus content (there is none in scope at
+  `config init` time) and is off by default everywhere, including
+  interactively. Refused outright for `xai-grok-build` on an isolated
+  profile — see [Isolated profiles](#isolated-profiles---data-dir---profile-dir).
 - Pass `--skip-provider` to write only CLI behavior preferences, matching
   the pre-existing behavior exactly.
 
@@ -249,19 +277,23 @@ grants every request; it is never the interactive default.
   CLI subcommands of their own.
 - `config init`'s credential storage (OS keychain) and its `AppConfig` /
   `cli.toml` writes (filesystem, atomic temp-file-then-rename) are two
-  separate systems with no shared transaction. The wizard orders every
-  fallible step — including the keychain write — before either file is
-  touched, so a *rejected* run (bad URL, invalid timezone, a mistyped
-  interactive answer) never stores an orphaned credential. It cannot
-  protect against the disk write itself failing (e.g. permission denied,
-  disk full) *after* the keychain write already succeeded — a narrow
-  window inherent to coordinating two independently-atomic stores, not
-  unique to this wizard.
+  separate systems with no shared transaction. The wizard orders the
+  keychain write LAST — strictly after both config files are written
+  successfully — so a *rejected* run (bad URL, invalid timezone, a
+  mistyped interactive answer) never stores an orphaned credential that
+  nothing references. It cannot protect against the keychain write itself
+  failing *after* both files already landed; that leaves a saved profile
+  whose `api_key_ref` points at a keychain entry that doesn't exist yet, a
+  narrower and self-healing failure mode (re-run `config init --force`
+  with the same profile id) than the reverse ordering would produce.
 - `--data-dir` isolates filesystem state only. Provider credentials always
   live in the same OS keychain regardless of `--data-dir` (see
-  [Isolated profiles](#isolated-profiles---data-dir---profile-dir)) — two
-  isolated profiles that reuse the same `--profile-id` intentionally share
-  a keychain entry.
+  [Isolated profiles](#isolated-profiles---data-dir---profile-dir)) —
+  `config init`'s *default* profile id is scoped by the data dir to avoid
+  colliding with the desktop-shared entry, but an explicit `--profile-id`
+  opts back out of that scoping by design, and `xai-grok-build`'s session
+  credential cannot be scoped by `--data-dir` at all (it is refused under
+  `--check-connection` rather than silently probed).
 
 ## Architecture
 
