@@ -18,11 +18,13 @@ use crate::providers::{ProviderCapabilities, ProviderKind, ProviderProfile};
 use crate::ssrf::SsrfPolicy;
 use crate::tool_host::ToolHost;
 use crate::tools::ToolSpec;
+use crate::turn_trace::{DryRunBackend, TracingChatBackend, TurnTraceSink};
 use crate::workspace::Workspace;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -790,6 +792,11 @@ where
 }
 
 /// Research turn with optional host-retained linked synthesis evidence.
+///
+/// Thin wrapper: no dry run, no trace capture. See
+/// [`research_turn_with_cancel_and_context_and_checkpoint_and_trace`] for
+/// the full parameter set — this function exists so the ~30 existing call
+/// sites (production and test) never need to know tracing exists.
 #[allow(clippy::too_many_arguments)] // explicit trust inputs avoid ambient retry state
 pub async fn research_turn_with_cancel_and_context_and_checkpoint(
     host: &mut ToolHost,
@@ -805,7 +812,63 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint(
     checkpoint_out: Option<&mut Option<LinkedSynthesisCheckpoint>>,
     turn_started_at: Option<Instant>,
     turn_prelude_emitted: bool,
+    live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+) -> CoreResult<Vec<StreamEvent>> {
+    research_turn_with_cancel_and_context_and_checkpoint_and_trace(
+        host,
+        profile,
+        api_key,
+        user_text,
+        history,
+        session_id,
+        force_local,
+        cancel,
+        log_explorer_context,
+        linked_synthesis_retry,
+        checkpoint_out,
+        turn_started_at,
+        turn_prelude_emitted,
+        live,
+        false,
+        None,
+    )
+    .await
+}
+
+/// Research turn with optional dry-run and/or trace capture (#chat-tracing).
+///
+/// `dry_run = true` skips every provider-reaching step — no Ollama health
+/// check, no [`backend_for`] (which for `XaiGrokBuild` profiles performs an
+/// OIDC credential refresh over the network before a client even exists),
+/// and no ambient-memory embedding call (an `EmbedBackend` can itself be a
+/// remote provider). A [`DryRunBackend`] is used in place of a real one, so
+/// [`crate::agent::run_agent_turn_with_sink_and_checkpoint`] — unmodified —
+/// still assembles the exact same bounded, redacted conversation and
+/// grounded log context a real turn would have sent, and stops after the one
+/// round that inert backend allows.
+///
+/// `trace_sink`, independent of `dry_run`, wraps whichever backend is chosen
+/// (real or dry-run) in a [`TracingChatBackend`], capturing every call for
+/// the caller to render at whatever trace level it wants — see
+/// `crates/cd-core/src/turn_trace.rs`.
+#[allow(clippy::too_many_arguments)] // explicit trust inputs avoid ambient retry state
+pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
+    host: &mut ToolHost,
+    profile: &ProviderProfile,
+    api_key: Option<String>,
+    user_text: &str,
+    history: &mut Vec<ChatMessage>,
+    session_id: &str,
+    force_local: bool,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    log_explorer_context: Option<crate::agent::LogExplorerTurnContext>,
+    linked_synthesis_retry: Option<LinkedSynthesisCheckpoint>,
+    checkpoint_out: Option<&mut Option<LinkedSynthesisCheckpoint>>,
+    turn_started_at: Option<Instant>,
+    turn_prelude_emitted: bool,
     mut live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+    dry_run: bool,
+    trace_sink: Option<Arc<dyn TurnTraceSink>>,
 ) -> CoreResult<Vec<StreamEvent>> {
     if force_local {
         if linked_synthesis_retry.is_some() {
@@ -858,7 +921,9 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint(
 
     // Ollama health soft-fail (not a construction error): remain here; client build is in backend_for.
     // #123: never silently fall back to keyword-only when a chat model is selected.
-    if profile.kind == ProviderKind::Ollama {
+    // Skipped entirely for a dry run: a health probe is itself a request to
+    // the configured endpoint, and `chat --dry-run` promises none occurs.
+    if !dry_run && profile.kind == ProviderKind::Ollama {
         let health = match OllamaClient::new(&profile.base_url, &profile.chat_model) {
             Ok(client) => {
                 await_provider_setup(turn_started_at, deadline_plan, cancel_ref, client.health())
@@ -902,46 +967,57 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint(
     }
 
     // #122: single factory for all wired kinds (no per-kind if-chain for client construction).
-    let backend = match await_provider_setup(
-        turn_started_at,
-        deadline_plan,
-        cancel_ref,
-        backend_for(profile, api_key),
-    )
-    .await
-    {
-        Ok(Ok(b)) => b,
-        Err(ProviderSetupWait::Cancelled) => {
-            return Ok(emit_provider_cancelled(
-                session_id,
-                Some(profile.chat_model.clone()),
-                turn_prelude_emitted,
-                live,
-            ));
-        }
-        Err(ProviderSetupWait::Deadline) => {
-            return Ok(emit_provider_deadline(
-                session_id,
-                Some(profile.chat_model.clone()),
-                deadline_plan.total_ms,
-                turn_prelude_emitted,
-                live,
-            ));
-        }
-        Ok(Err(e)) => {
-            let msg = e.to_string();
-            let code = if msg.to_lowercase().contains("not wired") {
-                "provider_not_wired"
-            } else {
-                "provider_error"
-            };
-            return Ok(emit_provider_error(
-                code,
-                msg,
-                session_id,
-                Some(profile.chat_model.clone()),
-                live,
-            ));
+    //
+    // A dry run never calls this factory at all — not even to build-and-discard
+    // a client. For `ProviderKind::XaiGrokBuild`, `backend_for` performs an OIDC
+    // credential refresh over the network before any client exists, which by
+    // itself would violate "no provider request occurs." `DryRunBackend` is
+    // constructed directly instead: it holds no client, base URL, or
+    // credential, so there is nothing in it capable of reaching a socket.
+    let backend: Box<dyn ChatBackend> = if dry_run {
+        Box::new(DryRunBackend)
+    } else {
+        match await_provider_setup(
+            turn_started_at,
+            deadline_plan,
+            cancel_ref,
+            backend_for(profile, api_key),
+        )
+        .await
+        {
+            Ok(Ok(b)) => b,
+            Err(ProviderSetupWait::Cancelled) => {
+                return Ok(emit_provider_cancelled(
+                    session_id,
+                    Some(profile.chat_model.clone()),
+                    turn_prelude_emitted,
+                    live,
+                ));
+            }
+            Err(ProviderSetupWait::Deadline) => {
+                return Ok(emit_provider_deadline(
+                    session_id,
+                    Some(profile.chat_model.clone()),
+                    deadline_plan.total_ms,
+                    turn_prelude_emitted,
+                    live,
+                ));
+            }
+            Ok(Err(e)) => {
+                let msg = e.to_string();
+                let code = if msg.to_lowercase().contains("not wired") {
+                    "provider_not_wired"
+                } else {
+                    "provider_error"
+                };
+                return Ok(emit_provider_error(
+                    code,
+                    msg,
+                    session_id,
+                    Some(profile.chat_model.clone()),
+                    live,
+                ));
+            }
         }
     };
 
@@ -960,7 +1036,14 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint(
     if let (Some(notice), Some(sink)) = (&tools_notice, live.as_mut()) {
         sink(notice.clone());
     }
-    let backend = CapabilityAwareBackend::new(backend, caps);
+    let backend: Box<dyn ChatBackend> = Box::new(CapabilityAwareBackend::new(backend, caps));
+    // Independent of dry_run: `--trace` on an ordinary (real) turn wraps the
+    // real backend the same way, so `TracingChatBackend` never needs to know
+    // which case it is in.
+    let backend: Box<dyn ChatBackend> = match trace_sink {
+        Some(sink) => Box::new(TracingChatBackend::new(backend, sink)),
+        None => backend,
+    };
 
     let mut opts = AgentOptions::from_budget(
         host.router_budget(),
@@ -974,14 +1057,19 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint(
     opts.deadline_plan = Some(deadline_plan);
     opts.turn_started_at = Some(turn_started_at);
     opts.turn_started_emitted = turn_prelude_emitted;
-    // Ambient recall follows host config (set by attach_durable_memory / rebuild_host).
-    opts.ambient_recall_enabled = host.ambient_recall_enabled() && host.durable_memory_active();
+    // Ambient recall follows host config (set by attach_durable_memory /
+    // rebuild_host) — except for a dry run, which forces it off. Durable
+    // memory injection embeds the query, and an `EmbedBackend` (e.g.
+    // `OllamaEmbedBackend`) can itself be a remote provider; dry run cannot
+    // assume that call is safe to make.
+    opts.ambient_recall_enabled =
+        !dry_run && host.ambient_recall_enabled() && host.durable_memory_active();
     // Per-model context budget (default / declared / learned).
     opts.context_char_budget = host
         .model_context_budgets()
         .resolve(Some(profile.chat_model.as_str()));
     let mut events = run_agent_turn_with_sink_and_checkpoint(
-        &backend,
+        backend.as_ref(),
         host,
         user_text,
         history,
@@ -1821,6 +1909,104 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, StreamEvent::TextDelta { .. })),
             "must not emit keyword TextDelta"
+        );
+    }
+
+    /// Same unreachable-Ollama profile as `ollama_unreachable_errors_not_local_shell`
+    /// above, but with `dry_run = true`. A real turn against this profile fails
+    /// fast with `ollama_unreachable` because it tries the health check; a dry
+    /// run must complete cleanly because it never tries, proving the health
+    /// check — a provider request — is genuinely skipped, not merely tolerant
+    /// of failure.
+    #[tokio::test]
+    async fn dry_run_never_touches_an_unreachable_provider() {
+        let dir = tempdir().unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let mut host = build_host(ws, None).unwrap();
+        let mut profile = ProviderProfile::ollama_local();
+        profile.base_url = "http://127.0.0.1:9".into();
+        let mut history = vec![];
+        let events = research_turn_with_cancel_and_context_and_checkpoint_and_trace(
+            &mut host,
+            &profile,
+            None,
+            "billing",
+            &mut history,
+            "s-dry-run",
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::Error { code, .. } if code == "ollama_unreachable")),
+            "dry run must not perform the health check at all: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::TurnCompleted { reason } if reason == "stop")),
+            "dry run must still complete the turn: {events:?}"
+        );
+    }
+
+    /// `trace_sink` captures the exact bounded, redacted context a turn
+    /// assembled, for both the dry-run backend and (separately, elsewhere)
+    /// a real one — `agent.rs`'s round loop and context assembly are the
+    /// same code either way.
+    #[tokio::test]
+    async fn dry_run_trace_captures_the_assembled_system_and_user_messages() {
+        let dir = tempdir().unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let mut host = build_host(ws, None).unwrap();
+        let profile = ProviderProfile::ollama_local();
+        let mut history = vec![];
+        let recorder = Arc::new(crate::turn_trace::RecordingTurnTrace::new());
+        let sink: Arc<dyn TurnTraceSink> = recorder.clone();
+
+        let _events = research_turn_with_cancel_and_context_and_checkpoint_and_trace(
+            &mut host,
+            &profile,
+            None,
+            "what is in the billing report?",
+            &mut history,
+            "s-dry-trace",
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            true,
+            Some(sink),
+        )
+        .await
+        .unwrap();
+
+        let calls = recorder.calls();
+        assert_eq!(calls.len(), 1, "dry run makes exactly one backend call");
+        let call = &calls[0];
+        assert!(
+            call.messages
+                .iter()
+                .any(|m| m.role == "user" && m.content.contains("billing report")),
+            "traced messages must include the real user turn: {:?}",
+            call.messages
+        );
+        assert!(
+            matches!(&call.outcome, crate::turn_trace::TracedOutcome::Completed { finish_reason, .. } if finish_reason == "stop"),
         );
     }
 

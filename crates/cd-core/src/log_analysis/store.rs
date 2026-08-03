@@ -886,6 +886,14 @@ impl LogCorpus {
         self.event_revision.load(Ordering::SeqCst)
     }
 
+    /// Public, process-local revision marker: changes only after a
+    /// successful event append or revision publication. A trace/dry-run
+    /// summary uses this to state which corpus content a turn was actually
+    /// grounded against, without exposing corpus internals.
+    pub fn revision(&self) -> u64 {
+        self.event_revision()
+    }
+
     /// Read the durable event revision while the caller already holds the
     /// corpus connection lock.
     ///
