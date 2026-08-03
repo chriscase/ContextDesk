@@ -15,10 +15,28 @@ contextdesk chat "<question>"
 
 A normal import needs no per-file selection — the CLI accepts the same
 default preselection `cd_core::log_analysis::import_preview` computes for
-every host. `--explain-selection` prints exactly what was included/excluded
-and why. Corpus management, timezone review, and exploration are escape
-hatches for when the defaults aren't enough, never required for the happy
-path.
+every host, and routes ingest through the SAME production reviewed-format
+bindings-aware entry point desktop uses
+(`ingest_path_with_policy_bindings_and_observer`): if a durable reviewed
+grammar you saved earlier confidently matches a source's content (checked
+with `cd_core::log_analysis::reviewed_format::select_format`, the same
+matcher the review UI uses — never a path-only guess), it is applied
+automatically and named in the summary; otherwise the source imports
+through ordinary format detection. `--explain-selection` prints exactly
+what was included/excluded and why. Corpus management, timezone review, and
+exploration are escape hatches for when the defaults aren't enough, never
+required for the happy path.
+
+`import` shows bounded, throttled progress on stderr (one live-updating
+line on a real terminal; one line per phase transition when redirected),
+and honors Ctrl-C: cancelling publishes nothing (ingest's private staging
+directory is cleaned up via `Drop` regardless of where cancellation lands)
+and the same import can be retried immediately. The final summary reports
+exactly what happened — entries examined, sources selected vs.
+ignored/unsupported/excluded/failed, events imported, templates, detected
+formats, timestamp provenance, whether the import was partial, any
+reviewed formats that were applied, and any sources still needing a
+timezone declaration.
 
 State shared with the desktop app (provider profiles, the configured
 default timezone, imported corpora, chat sessions) lives in the same files
@@ -74,11 +92,18 @@ same contract as data — probe it once rather than parsing `--help`.
 On failure, `ok` is `false`, `data` is `null`, and `error` is
 `{ "kind": "<exit-code kind>", "message": "..." }`.
 
-### Streaming lines (`--jsonl`, currently `chat`)
+### Streaming lines (`--jsonl`)
 
-One JSON object per line, tagged by `type`: `session`, `text_delta`,
-`tool`, `permission_required`, `turn_completed`, `error`, `done`. `done` is
-always last.
+One JSON object per line, tagged by `type`.
+
+- `chat`: `text_delta`, `tool`, `permission_required`, `turn_completed`,
+  `error`, `done`. `done` is always last.
+- `import`: `progress` (schema version 1 — the same
+  `cd_core::process_progress::ProcessProgress` struct desktop broadcasts
+  over Tauri IPC, flattened onto the line) and `ingest_evidence` (one typed,
+  bounded, privacy-safe omission/failure observation per excluded or failed
+  source — `cd_core::process_progress::LogIngestEvidence`), followed by the
+  ordinary one-shot `import` envelope as the final line.
 
 ### Exit codes
 
@@ -91,6 +116,7 @@ always last.
 | 5 | `permission_denied` | A tool call requiring permission was denied. |
 | 6 | `provider_error` | The configured provider could not be reached or errored. |
 | 7 | `not_implemented` | Grammar accepted, behavior intentionally not implemented yet. Never conflated with success. |
+| 130 | `cancelled` | Interrupted by Ctrl-C before it finished. Matches the conventional Unix SIGINT exit code so an existing `$? == 130` script check keeps working. Nothing was published; safe to retry the same command. |
 | 70 | `internal` | Unexpected failure — a bug, not an expected branch. |
 
 Clap's own usage errors (bad flags, missing required args) use clap's
@@ -107,6 +133,7 @@ contextdesk corpus delete <id> --yes
 contextdesk corpus use <id>
 contextdesk timezone status [--corpus <id>]
 contextdesk timezone apply <source> <iana-timezone> [--corpus <id>] --yes
+contextdesk timezone apply-all <iana-timezone> [--corpus <id>] --yes
 contextdesk timezone clear <source> [--corpus <id>]
 contextdesk explore <query> [--corpus <id>] [--k N]
 contextdesk context <query> [--corpus <id>] [--k N]
@@ -131,6 +158,30 @@ default is to **deny and say so on stderr** — never silently proceed as if
 granted. `--auto-approve` is the explicit scripting/CI escape hatch that
 grants every request; it is never the interactive default.
 
+## Timezone handling
+
+Local timestamps with no resolvable zone are never guessed. Two honest
+paths resolve them, both recorded with accurate provenance
+(`cd_core::log_analysis::timezone_resolution::TimezoneDeclarationBasis`):
+
+- **Configured default** — set `default_timezone` in the shared
+  `AppConfig` (`~/.contextdesk/config.json`, the same file the desktop
+  Settings UI writes) and every source left ambiguous after an import is
+  resolved automatically, in one atomic revision bump, recorded as
+  `ConfiguredDefault` — honestly distinct from an in-the-moment human
+  choice, never presented as one.
+- **Explicit, grouped** — `contextdesk timezone apply-all <iana-timezone>
+  --corpus <id> --yes` resolves EVERY currently-ambiguous source in a
+  corpus with one command and one atomic revision bump (recorded as
+  `UserDeclared`), instead of requiring `timezone apply` once per file.
+  `timezone apply` (singular) remains for correcting one specific source.
+
+Both the import-time auto-apply and `timezone apply-all` share one
+implementation (`cd_workflow::timezone::apply_timezone_to_all_unresolved`)
+— re-previewing every source fresh immediately before applying, so a
+concurrent mutation between "decide" and "apply" fails the whole group
+closed as a `conflict` rather than partially applying.
+
 ## Known limitations (tracked, not silent)
 
 - `import --embed` is accepted by the grammar but returns `not_implemented`
@@ -145,6 +196,18 @@ grants every request; it is never the interactive default.
   `cd_workflow::chat::run_chat_workflow`; it does not yet expose the
   desktop app's fuller tool surface (clustering, timeline, anomalies) as
   CLI subcommands of their own.
+- Reviewed-format auto-apply during import requires an UNAMBIGUOUS content
+  match (`select_format` returns `Selected`, not `Conflict`/`NoMatch`) — a
+  tie between two saved formats, or a saved format that no longer matches
+  a source's content, means no binding is applied for that source, not a
+  guess. This is intentional, not a bug: see `reviewed_formats_applied` in
+  the import summary for exactly what was (and wasn't) bound.
+- Ctrl-C cancellation is handled once per `import` invocation (a single
+  `tokio::signal::ctrl_c()` listener) — a second Ctrl-C sent while cleanup
+  is still in progress falls through to the OS default (immediate
+  termination) rather than a second graceful stage. Cleanup is still safe
+  in that case (ingest's staging directory is removed via `Drop`, and any
+  orphan is swept on the next import), just less graceful.
 
 ## Architecture
 
@@ -154,12 +217,17 @@ React → thin Tauri adapter ─┐
 CLI  → thin CLI adapter   ──┘
 ```
 
-`cd-cli` calls `cd_workflow::{import, chat, provider, turn, tools}` for
-every behavior those modules already own. The Tauri desktop host's
-provider-selection helpers (`provider_profile_for_turn`,
+`cd-cli` calls `cd_workflow::{import, timezone, chat, provider, turn,
+tools}` for every behavior those modules already own. The Tauri desktop
+host's provider-selection helpers (`provider_profile_for_turn`,
 `model_tools_disabled_reason`, `model_tools_enabled` in
 `desktop/src-tauri/src/lib.rs`) delegate to `cd_workflow::provider` for the
 same reason — both hosts share one implementation, not two that merely
-look equivalent. `crates/cd-cli/tests/cli_workflow_parity.rs` exercises the
-CLI binary end to end against a mock provider to prove the adapter stays
-thin.
+look equivalent; `crates/cd-workflow/tests/architecture_tauri_delegates_to_shared_provider_logic.rs`
+guards against that regressing. `crates/cd-cli/tests/cli_workflow_parity.rs`
+and `crates/cd-cli/tests/import_production_cli.rs` exercise the CLI binary
+end to end (including a real Ctrl-C signal) to prove the adapter stays
+thin; `crates/cd-workflow/tests/import_production.rs` exercises the shared
+import/timezone logic directly against synthetic ZIP fixtures (nested
+archives, duplicate basenames, selection drift, reviewed bindings, mixed
+partial imports, cancellation + retry).
