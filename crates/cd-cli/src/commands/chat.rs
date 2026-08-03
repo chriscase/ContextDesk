@@ -173,11 +173,10 @@ pub async fn run(
 
     let trace_lines = match effective_trace {
         Some(level) => {
-            let calls = recorder
-                .as_ref()
-                .map(|r| r.calls())
-                .unwrap_or_default();
-            let budget_chars = host.model_context_budgets().resolve(Some(&outcome.chat_model));
+            let calls = recorder.as_ref().map(|r| r.calls()).unwrap_or_default();
+            let budget_chars = host
+                .model_context_budgets()
+                .resolve(Some(&outcome.chat_model));
             Some(build_trace_lines(
                 level,
                 args.dry_run,
@@ -368,9 +367,9 @@ fn grounding_status(corpus_id: Option<&str>, events: &[StreamEvent]) -> &'static
     if corpus_id.is_none() {
         return "not_applicable";
     }
-    let ungrounded = events
-        .iter()
-        .any(|event| matches!(event, StreamEvent::Error { code, .. } if code.starts_with("linked_")));
+    let ungrounded = events.iter().any(
+        |event| matches!(event, StreamEvent::Error { code, .. } if code.starts_with("linked_")),
+    );
     if ungrounded {
         "ungrounded"
     } else {
@@ -440,10 +439,13 @@ fn build_trace_lines(
                 TracedOutcome::Completed {
                     finish_reason,
                     tool_call_count,
-                } => ("completed", Some(finish_reason.clone()), Some(*tool_call_count), None),
-                TracedOutcome::Failed { message } => {
-                    ("failed", None, None, Some(message.clone()))
-                }
+                } => (
+                    "completed",
+                    Some(finish_reason.clone()),
+                    Some(*tool_call_count),
+                    None,
+                ),
+                TracedOutcome::Failed { message } => ("failed", None, None, Some(message.clone())),
             };
             let context = TraceContextLine {
                 round: call.seq,
@@ -492,4 +494,79 @@ fn build_trace_lines(
     }
 
     lines
+}
+
+#[cfg(test)]
+mod grounding_tests {
+    use super::*;
+
+    fn citation(source_id: &str) -> StreamEvent {
+        StreamEvent::Citation {
+            source_id: source_id.to_string(),
+            label: "label".to_string(),
+            locator: None,
+        }
+    }
+
+    fn linked_error(code: &str) -> StreamEvent {
+        StreamEvent::Error {
+            code: code.to_string(),
+            message: "message".to_string(),
+        }
+    }
+
+    #[test]
+    fn ordinary_turn_is_not_applicable_regardless_of_events() {
+        // Adversarial: a Citation event present on an ordinary (unlinked)
+        // turn must not be read as grounding — there is no corpus to be
+        // grounded against, so the status must say so rather than guess.
+        let events = vec![citation("log_event:1")];
+        assert_eq!(grounding_status(None, &events), "not_applicable");
+    }
+
+    #[test]
+    fn linked_turn_with_no_evidence_error_is_grounded() {
+        let events = vec![citation("log_event:1"), citation("log_event:2")];
+        assert_eq!(grounding_status(Some("corpus-a"), &events), "grounded");
+    }
+
+    #[test]
+    fn a_linked_evidence_error_makes_the_turn_ungrounded_even_with_a_citation_present() {
+        // Adversarial: a spurious Citation must not mask a real
+        // evidence-validation failure — the error is authoritative.
+        let events = vec![
+            citation("log_event:1"),
+            linked_error("linked_required_source_missing"),
+        ];
+        assert_eq!(grounding_status(Some("corpus-a"), &events), "ungrounded");
+    }
+
+    #[test]
+    fn a_non_linked_error_code_does_not_flip_grounding() {
+        // Adversarial: an ordinary provider error code (not the `linked_`
+        // family) must not be misread as an evidence-validation failure.
+        let events = vec![citation("log_event:1"), linked_error("ollama_unreachable")];
+        assert_eq!(grounding_status(Some("corpus-a"), &events), "grounded");
+    }
+
+    #[test]
+    fn evidence_ids_are_deduplicated_and_order_preserved() {
+        let events = vec![
+            citation("log_event:1"),
+            citation("log_event:2"),
+            citation("log_event:1"),
+        ];
+        assert_eq!(
+            dedup_citation_ids(&events),
+            vec!["log_event:1", "log_event:2"]
+        );
+    }
+
+    #[test]
+    fn evidence_ids_are_bounded() {
+        let events: Vec<StreamEvent> = (0..(MAX_TRACE_SUMMARY_ITEMS + 50))
+            .map(|i| citation(&format!("log_event:{i}")))
+            .collect();
+        assert!(dedup_citation_ids(&events).len() <= MAX_TRACE_SUMMARY_ITEMS);
+    }
 }

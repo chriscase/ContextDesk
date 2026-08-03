@@ -508,7 +508,10 @@ mod tests {
         assert!(outcome.events.iter().any(
             |event| matches!(event, StreamEvent::TurnCompleted { reason } if reason == "stop")
         ));
-        assert_eq!(outcome.provider_profile_id, cfg.providers.active_id.clone().unwrap());
+        assert_eq!(
+            outcome.provider_profile_id,
+            cfg.providers.active_id.clone().unwrap()
+        );
         assert_eq!(outcome.chat_model, "test-model");
 
         let after = std::fs::read(sessions_dir.path().join(format!("{}.json", existing.id)))

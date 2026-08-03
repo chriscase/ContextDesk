@@ -1947,9 +1947,9 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, StreamEvent::Error { code, .. } if code == "ollama_unreachable")),
+            !events.iter().any(
+                |e| matches!(e, StreamEvent::Error { code, .. } if code == "ollama_unreachable")
+            ),
             "dry run must not perform the health check at all: {events:?}"
         );
         assert!(
