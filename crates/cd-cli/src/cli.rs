@@ -209,6 +209,23 @@ pub enum SessionAction {
     Show { id: String },
 }
 
+/// How much of a turn's actual provider traffic `chat --trace` reveals.
+/// Each level includes everything the level below it shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum TraceLevel {
+    /// Provider/model identity, corpus + revision, history/retrieval
+    /// counts, evidence ids, context budget, tool names, timings, and
+    /// final grounding status. No message content.
+    Summary,
+    /// `summary`, plus the exact bounded, redacted messages and evidence
+    /// this turn actually supplied to the provider, one line per round.
+    Context,
+    /// `context`, plus a bounded, redacted record of every tool call this
+    /// turn made. Requires `--trace-ack`.
+    Full,
+}
+
 #[derive(Debug, clap::Args)]
 pub struct ChatArgs {
     pub question: String,
@@ -227,6 +244,22 @@ pub struct ChatArgs {
     /// Scripting/CI escape hatch — never the interactive default.
     #[arg(long)]
     pub auto_approve: bool,
+    /// Construct the same bounded, redacted conversation and grounded log
+    /// context a real turn would, but guarantee no provider request
+    /// occurs — no chat completion, no health probe, no credential
+    /// refresh. Implies `--trace summary` if `--trace` is not also given.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Emit a trace of what this turn actually sent a provider, at the
+    /// named level of detail.
+    #[arg(long, value_enum)]
+    pub trace: Option<TraceLevel>,
+    /// Required with `--trace full`: acknowledges that full-trace output
+    /// includes bounded, redacted conversation and tool-call content
+    /// (never credentials, authorization headers, or pre-redaction
+    /// content — those are never captured in the first place).
+    #[arg(long)]
+    pub trace_ack: bool,
 }
 
 #[derive(Debug, Subcommand)]

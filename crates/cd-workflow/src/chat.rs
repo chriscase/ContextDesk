@@ -31,6 +31,7 @@ use cd_core::keychain_store::SecretStore;
 use cd_core::permissions::PermissionDecision;
 use cd_core::sessions::{Session, SessionStore, StoredMessage};
 use cd_core::tool_host::ToolHost;
+use cd_core::turn_trace::TurnTraceSink;
 use serde_json::Value;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -52,6 +53,18 @@ pub struct ChatWorkflowRequest<'a> {
     pub explicit_profile_id: Option<&'a str>,
     /// Explicit per-turn chat model override.
     pub chat_model_override: Option<&'a str>,
+    /// Construct the exact same bounded, redacted conversation and grounded
+    /// log context a real turn would, but guarantee no provider request
+    /// occurs (see `cd_core::research`'s `..._and_trace` entry point for the
+    /// exact mechanism). Session/corpus resolution and binding happen
+    /// exactly as normal; only persistence is skipped — see
+    /// [`run_chat_workflow`].
+    pub dry_run: bool,
+    /// Capture every backend call this turn makes — real, or under
+    /// `dry_run`, synthetic — for the caller to render at whatever trace
+    /// level it wants. `None` costs nothing extra: no wrapping backend is
+    /// constructed at all.
+    pub trace_sink: Option<Arc<dyn TurnTraceSink>>,
 }
 
 /// Outcome of one workflow call.
@@ -62,6 +75,19 @@ pub struct ChatWorkflowOutcome {
     pub events: Vec<StreamEvent>,
     /// Convenience: the concatenation of every `TextDelta` chunk.
     pub final_text: String,
+    /// Resolved provider profile id this turn used — a real request under
+    /// this identity for an ordinary call, or the identity a real turn
+    /// would have used, for a dry run.
+    pub provider_profile_id: String,
+    /// Resolved chat model id, same caveat as `provider_profile_id`.
+    pub chat_model: String,
+    /// The linked corpus's event revision at bind time, if this turn was
+    /// corpus-linked.
+    pub corpus_revision: Option<u64>,
+    /// Total messages in this session's chat history after the turn
+    /// (system preamble + every prior + new turn) — a trace summary's
+    /// "history count."
+    pub history_messages: usize,
 }
 
 fn role_str(role: &Role) -> &'static str {
@@ -103,6 +129,15 @@ fn has_pending_permission(events: &[StreamEvent]) -> Option<(String, String, Val
 /// new messages, and unbind. This is the one entry point a thin Tauri
 /// adapter and a thin CLI adapter should both call — never a copy of its
 /// internals.
+///
+/// `request.dry_run` changes exactly one thing about this sequence:
+/// **nothing is persisted**. Profile resolution, session load/creation,
+/// corpus binding, and context assembly all happen exactly as they would for
+/// a real turn — a dry run inspects the real machinery, it does not take a
+/// separate path through it — but `sessions.save` is never called, so a dry
+/// run against an existing session can never silently add a stray empty
+/// "assistant reply" to that session's durable history, and a dry run with
+/// no `--session` never creates one at all.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_chat_workflow(
     host: &mut ToolHost,
@@ -167,6 +202,8 @@ pub async fn run_chat_workflow(
                 corpus_id,
                 cancel.clone(),
                 Some(&mut *live_sink),
+                request.dry_run,
+                request.trace_sink.clone(),
             )
             .await
         } else {
@@ -178,6 +215,8 @@ pub async fn run_chat_workflow(
                 &session_id,
                 cancel.clone(),
                 Some(&mut *live_sink),
+                request.dry_run,
+                request.trace_sink.clone(),
             )
             .await
         };
@@ -231,17 +270,26 @@ pub async fn run_chat_workflow(
         all_events.extend(grant_events);
     }
 
+    let corpus_revision = binding.as_ref().map(|b| b.revision);
     if let Some(binding) = binding {
         unbind_linked_corpus(host, binding);
     }
 
-    for message in &history[before_len..] {
-        session.messages.push(stored_from_chat(message));
+    // A dry run has zero persistent side effects: it inspects the real
+    // machinery without ever writing what that inspection produced. The
+    // turn's (empty) synthetic reply is never appended to `session` and
+    // `sessions.save` is never called — an existing session named with
+    // `--session` is read for its real history but left byte-for-byte
+    // unchanged on disk, and no session file is created when none existed.
+    if !request.dry_run {
+        for message in &history[before_len..] {
+            session.messages.push(stored_from_chat(message));
+        }
+        session.maybe_auto_title_from_first_user();
+        session.touch();
+        sessions.ensure()?;
+        sessions.save(&session)?;
     }
-    session.maybe_auto_title_from_first_user();
-    session.touch();
-    sessions.ensure()?;
-    sessions.save(&session)?;
 
     let final_text = all_events
         .iter()
@@ -255,6 +303,10 @@ pub async fn run_chat_workflow(
     Ok(ChatWorkflowOutcome {
         session_id,
         events: all_events,
+        provider_profile_id: resolved.profile.id.clone(),
+        chat_model: resolved.profile.chat_model.clone(),
+        corpus_revision,
+        history_messages: history.len(),
         final_text,
     })
 }
@@ -335,6 +387,8 @@ mod tests {
                 corpus_id: None,
                 explicit_profile_id: None,
                 chat_model_override: None,
+                dry_run: false,
+                trace_sink: None,
             },
             None,
             None,
@@ -366,5 +420,112 @@ mod tests {
         assert_eq!(saved.messages[1].content, "hi there");
         assert_eq!(saved.messages[2].role, "assistant");
         assert_eq!(saved.messages[2].content, "hello from the mock model");
+    }
+
+    /// A dry run against an *existing* session must leave that session's
+    /// saved file byte-for-byte untouched — not merely "no new session
+    /// created," but "the one the caller pointed at is not mutated either."
+    #[tokio::test]
+    async fn dry_run_never_persists_and_never_touches_an_existing_session() {
+        // Deliberately no Mock mounted for /v1/chat/completions: if the dry
+        // run were to make a real request, `run_ordinary_turn` would either
+        // get wiremock's default 404 (surfacing as a provider error) or, if
+        // this profile were misconfigured to skip that path, silently
+        // succeed with unexpected content — either way the assertions below
+        // would catch it.
+        let server = MockServer::start().await;
+
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new("t", vec![workspace_dir.path().to_path_buf()]);
+        let index = KeywordIndex::build(&workspace).unwrap();
+        let mut host = ToolHost::new(workspace, index, None);
+
+        let secrets = MemorySecretStore::new();
+        secrets.set("test/fake/api_key", "sk-test-key").unwrap();
+
+        let mut profile = ProviderProfile::ollama_local();
+        profile.kind = ProviderKind::OpenAiCompatible;
+        profile.base_url = server.uri();
+        profile.local_only = true;
+        profile.api_key_ref = Some("test/fake/api_key".into());
+        profile.chat_model = "test-model".into();
+        profile.capabilities.tools = false;
+
+        let cfg = AppConfig {
+            providers: ProviderConfig {
+                active_id: Some(profile.id.clone()),
+                profiles: vec![profile],
+            },
+            ..AppConfig::default()
+        };
+
+        let sessions_dir = tempfile::tempdir().unwrap();
+        let sessions = SessionStore::new(sessions_dir.path());
+
+        // Seed a real, pre-existing session the dry run will point at.
+        let mut existing = cd_core::sessions::Session::new("existing".to_string());
+        existing.messages.push(cd_core::sessions::StoredMessage {
+            id: "m1".into(),
+            role: "user".into(),
+            content: "previously said this".into(),
+            tools: None,
+            citations: None,
+            trail: None,
+            meta: None,
+        });
+        sessions.ensure().unwrap();
+        sessions.save(&existing).unwrap();
+        let before = std::fs::read(sessions_dir.path().join(format!("{}.json", existing.id)))
+            .expect("session file exists before the dry run");
+
+        let outcome = run_chat_workflow(
+            &mut host,
+            &secrets,
+            &cfg,
+            &sessions,
+            workspace_dir.path(),
+            Some(&existing.id),
+            "dry run question",
+            ChatWorkflowRequest {
+                corpus_id: None,
+                explicit_profile_id: None,
+                chat_model_override: None,
+                dry_run: true,
+                trace_sink: None,
+            },
+            None,
+            None,
+            |_tool, _target, _reason, _preview, _risk| PermissionDecision::Deny,
+        )
+        .await
+        .expect("dry run must complete without a real provider request");
+
+        assert_eq!(outcome.session_id, existing.id);
+        assert_eq!(
+            outcome.final_text, "",
+            "the dry-run backend never produces real content"
+        );
+        assert!(outcome.events.iter().any(
+            |event| matches!(event, StreamEvent::TurnCompleted { reason } if reason == "stop")
+        ));
+        assert_eq!(
+            outcome.provider_profile_id,
+            cfg.providers.active_id.clone().unwrap()
+        );
+        assert_eq!(outcome.chat_model, "test-model");
+
+        let after = std::fs::read(sessions_dir.path().join(format!("{}.json", existing.id)))
+            .expect("session file still exists after the dry run");
+        assert_eq!(
+            before, after,
+            "a dry run must not mutate the existing session file at all"
+        );
+
+        let reloaded = sessions.load(&existing.id).unwrap();
+        assert_eq!(
+            reloaded.messages.len(),
+            1,
+            "the dry run's own (empty) turn must never be appended"
+        );
     }
 }

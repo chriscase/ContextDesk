@@ -44,18 +44,79 @@ both hosts read: `~/.contextdesk/config.json`, `~/.contextdesk/cache/`,
 `~/.contextdesk/sessions/`. A corpus imported from one host is immediately
 visible from the other.
 
+## Isolated profiles (`--data-dir` / `--profile-dir`)
+
+```bash
+contextdesk --data-dir ~/ci-profile import ./archive.zip
+contextdesk --data-dir ~/ci-profile chat "what broke?"
+```
+
+`--data-dir <path>` (alias `--profile-dir`, env `CONTEXTDESK_DATA_DIR`)
+isolates **every** piece of state this process touches — the shared
+`AppConfig`, this CLI's own `cli.toml`, the corpus cache, durable sessions,
+and CLI state (`<data-dir>/{config.json,cli.toml,cache,sessions,cli}`) —
+under exactly the directory given, created if absent. Omit it to keep the
+default: state shared with the desktop app under `~/.contextdesk`.
+
+This is a filesystem-only boundary — credentials never live on disk at all,
+they stay in the OS keychain (see [Configuration](#configuration)) — so a
+provider credential is always a keychain entry scoped by *profile id*, not
+by `--data-dir`. `config init` accounts for that: an isolated profile's
+*default* id (no explicit `--profile-id`) is itself derived from the data
+dir, so the single most common invocation (no `--profile-id`) can never
+silently read or overwrite the desktop-shared profile's keychain entry for
+the same provider kind, and two isolated profiles at two different
+`--data-dir` values never collide with each other either — same `--data-dir`
+always yields the same default id, so a repeat `config init --force`
+targets the same entry it created before. Passing an explicit
+`--profile-id` opts back out of that scoping (a deliberate escape hatch,
+e.g. to intentionally share one credential across profiles); two profiles
+that are given the same explicit id share that keychain entry the same way
+two desktop installs would.
+
+One provider kind cannot be isolated at all: a `xai-grok-build` profile's
+session lives in `~/.grok/auth.json`, a real, single, machine-wide login —
+not a per-profile credential — so `--check-connection` refuses to probe it
+under an isolated `--data-dir` rather than silently reading and
+transmitting the real session from outside the isolated directory. Every
+other provider kind's connectivity check only ever uses the profile's own
+resolved key.
+
+Setting `--data-dir` skips the `$HOME` lookup entirely (no `dirs::home_dir()`
+call happens at all), which is what makes an isolated profile deterministic,
+cross-platform, and testable **without overriding `HOME`**: two processes
+given two different `--data-dir` values cannot observe or mutate each
+other's state regardless of what `$HOME` resolves to in the environment —
+including a broken or absent `$HOME`, which fails the default
+(desktop-shared) path but never an isolated one. `--app-config` still overrides the
+`AppConfig` path on top of either default, isolated or not, and is used as
+an exact path (never joined with `--data-dir`).
+
+`contextdesk config init`'s output always reports the resolved data
+location and whether it is isolated:
+
+```json
+{ "data_dir": "/Users/you/ci-profile", "isolated": true, "...": "..." }
+```
+
+The same root also holds the durable **reviewed-format** store when used by import (`<data-dir>/cache/reviewed_formats` or the app-config-relative path the host opens for profiles under that data root).
 ## Configuration
 
 The CLI has its own, separate, versioned TOML configuration for CLI-only
-preferences (output format, color, a preferred provider profile/model) —
-**never credentials or provider secrets**, which stay exclusively in the OS
-keychain and the shared `config.json`. See `crates/cd-cli/src/config.rs` for
-the full schema.
+preferences (output format, color, a preferred provider profile/model). It
+never holds credentials or provider secrets: those live exclusively in the
+OS keychain, referenced (never embedded) from the shared `config.json` by a
+path-like id such as `provider/<profile-id>/api_key`
+(`cd_core::keychain_store::looks_like_raw_secret` refuses to save a config
+that embeds anything else). See `crates/cd-cli/src/config.rs` for the CLI's
+own TOML schema.
 
-Precedence, lowest to highest:
+Precedence, lowest to highest — unaffected by `--data-dir`, which only
+relocates *where* the global layer and the shared `AppConfig` live, never
+the merge order:
 
 1. compiled-in defaults
-2. global config (`~/.contextdesk/cli.toml`)
+2. global config (`<data-dir-or-~/.contextdesk>/cli.toml`)
 3. explicitly selected project config (`./.contextdesk.toml` in the current
    directory, or a path passed via `--config`)
 4. environment variables (`CONTEXTDESK_*`)
@@ -69,6 +130,67 @@ contextdesk config validate [path]
 contextdesk config show                # effective config + which layer won each field
 contextdesk config path
 ```
+
+### The `config init` wizard
+
+Beyond CLI behavior preferences, `config init` also configures the *shared*
+`AppConfig` — a provider profile and the default timezone — in one pass.
+Interactively it prompts for each step; every step also has a flag for
+scripted/CI use. Every prompt (and any human-readable error) goes to
+**stderr**, never stdout — stdout stays reserved for the final
+`--json`/`--jsonl` envelope even when the interactive wizard runs under
+`--json` (auto-detected purely from whether stdin is a tty, independent of
+`--format`).
+
+```bash
+contextdesk config init --non-interactive \
+  --provider-kind openai-compatible \
+  --base-url https://api.example.com/v1 \
+  --chat-model gpt-4o-mini \
+  --default-timezone America/Chicago \
+  --api-key-env MY_PROVIDER_KEY \
+  --check-connection
+```
+
+- **Data location** is report-only — it just states the already-resolved
+  `--data-dir` (or the default), since there is nothing to read a saved
+  choice from until a config file exists there.
+- **Provider kind**: `--provider-kind ollama|openai-compatible|anthropic|
+  xai-grok-build`. Base URL, capabilities, and locality defaults come from
+  `cd_core::providers::descriptor_for` for the chosen kind — override the
+  base URL with `--base-url` (required non-interactively for kinds with no
+  built-in default, e.g. `openai-compatible`). `--profile-id` /
+  `--profile-label` override the generated id/label.
+- **Chat model**: `--chat-model` (defaults to `mistral` for `ollama`;
+  required non-interactively for every other kind).
+- **Default timezone**: `--default-timezone <iana-id>`, validated as a real
+  IANA zone before anything is written; omit to leave any existing
+  configured value untouched.
+- **Credential**: never accepted as a literal flag value (that would leak
+  via shell history / `ps`). Pick exactly one of `--api-key-env <VAR>`
+  (read the named environment variable's current value, trimmed),
+  `--api-key-file <path>` (read and trim the file's contents), or
+  `--api-key-stdin` (read and trim one line from stdin) — read once, held
+  in memory, then committed to the OS keychain only as the single last
+  fallible step of the whole command, strictly after both config files
+  (`cli.toml` and the shared `AppConfig`) have already been written
+  successfully. Omit all three to leave the profile without a credential
+  (configurable later). This ordering means a rejected value anywhere in
+  the run (a bad URL, an invalid timezone, a mistyped interactive y/n)
+  never orphans a stored secret that nothing references; the only residual
+  gap is the keychain write itself failing *after* both files already
+  landed, which self-heals on a repeat `config init --force` with the same
+  (or an explicit `--profile-id`).
+- **Connectivity check**: `--check-connection` (or, interactively, an
+  explicit yes) runs a reachability probe against the base URL and, if
+  configured, the key already resolved in memory (never a second keychain
+  read) — the same safe probe `cd_core::discovery::probe_provider` already
+  uses elsewhere. It never sends corpus content (there is none in scope at
+  `config init` time) and is off by default everywhere, including
+  interactively. Refused outright for `xai-grok-build` on an isolated
+  profile — see [Isolated profiles](#isolated-profiles---data-dir---profile-dir).
+- Pass `--skip-provider` to write only CLI behavior preferences, matching
+  the pre-existing behavior exactly.
 
 ## Output
 
@@ -92,18 +214,19 @@ same contract as data — probe it once rather than parsing `--help`.
 On failure, `ok` is `false`, `data` is `null`, and `error` is
 `{ "kind": "<exit-code kind>", "message": "..." }`.
 
-### Streaming lines (`--jsonl`)
+### Streaming lines (`--jsonl`, currently `chat`)
 
-One JSON object per line, tagged by `type`.
+One JSON object per line, tagged by `type`: `text_delta`, `tool`,
+`permission_required`, `turn_completed`, `error`, `trace_summary`,
+`trace_context`, `trace_tool`, `done`. Every line parses independently; a
+reader must not assume line count or ordering beyond "the line tagged `done`
+is last, and appears exactly once" — that holds on a successful turn and on a
+failed one alike. On failure, the last two lines are always `error` (the
+failure, `code`/`message`) then `done` with `ok:false`; nothing else on
+stdout is ever a bare, untagged JSON object under `--jsonl`.
 
-- `chat`: `text_delta`, `tool`, `permission_required`, `turn_completed`,
-  `error`, `done`. `done` is always last.
-- `import`: `progress` (schema version 1 — the same
-  `cd_core::process_progress::ProcessProgress` struct desktop broadcasts
-  over Tauri IPC, flattened onto the line) and `ingest_evidence` (one typed,
-  bounded, privacy-safe omission/failure observation per excluded or failed
-  source — `cd_core::process_progress::LogIngestEvidence`), followed by the
-  ordinary one-shot `import` envelope as the final line.
+`trace_summary`/`trace_context`/`trace_tool` only appear when `chat` was run
+with `--dry-run` and/or `--trace` — see below.
 
 ### Exit codes
 
@@ -116,11 +239,14 @@ One JSON object per line, tagged by `type`.
 | 5 | `permission_denied` | A tool call requiring permission was denied. |
 | 6 | `provider_error` | The configured provider could not be reached or errored. |
 | 7 | `not_implemented` | Grammar accepted, behavior intentionally not implemented yet. Never conflated with success. |
-| 130 | `cancelled` | Interrupted by Ctrl-C before it finished. Matches the conventional Unix SIGINT exit code so an existing `$? == 130` script check keeps working. Nothing was published; safe to retry the same command. |
 | 70 | `internal` | Unexpected failure — a bug, not an expected branch. |
 
 Clap's own usage errors (bad flags, missing required args) use clap's
 default exit code (2) and are not part of this table.
+
+### Import progress stream (`--jsonl` on `import`)
+
+See also the import command: phase transitions and a final result object form the documented JSONL stream contract.
 
 ## Command grammar
 
@@ -133,20 +259,85 @@ contextdesk corpus delete <id> --yes
 contextdesk corpus use <id>
 contextdesk timezone status [--corpus <id>]
 contextdesk timezone apply <source> <iana-timezone> [--corpus <id>] --yes
-contextdesk timezone apply-all <iana-timezone> [--corpus <id>] --yes
 contextdesk timezone clear <source> [--corpus <id>]
 contextdesk explore <query> [--corpus <id>] [--k N]
 contextdesk context <query> [--corpus <id>] [--k N]
 contextdesk session list
 contextdesk session show <id>
 contextdesk chat <question> [--corpus <id>] [--session <id>] [--new] [--auto-approve]
-contextdesk config init|validate|show|path
+contextdesk config init [--project] [--interactive|--non-interactive] [--force]
+                        [--format <fmt>] [--color <mode>] [--default-provider-profile <id>]
+                        [--skip-provider] [--provider-kind <kind>] [--base-url <url>]
+                        [--chat-model <id>] [--default-timezone <iana-id>]
+                        [--profile-id <id>] [--profile-label <label>]
+                        [--api-key-env <var>|--api-key-file <path>|--api-key-stdin]
+                        [--check-connection]
+contextdesk config validate|show|path
 contextdesk capabilities
 ```
 
 Global flags (available on every subcommand): `--format`, `--json`,
-`--jsonl`, `--color`, `--config <path>`, `--app-config <path>`, `--profile
-<id>`, `--model <id>`.
+`--jsonl`, `--color`, `--config <path>`, `--app-config <path>`,
+`--data-dir <path>` (alias `--profile-dir`), `--profile <id>`, `--model
+<id>`.
+
+## `chat --dry-run` / `--trace` (inspecting a turn without sending it, or alongside sending it)
+
+`--dry-run` constructs the exact same bounded, redacted conversation and
+grounded log context a real turn would — the same profile resolution, session
+load, corpus binding, system prompt, and tool-schema assembly — but
+guarantees no provider request occurs: no chat completion, no Ollama health
+probe, and no credential refresh (`ProviderKind::XaiGrokBuild` would otherwise
+refresh an OIDC token over the network before a client even exists). This is
+a property of the backend used under the hood
+(`cd_core::turn_trace::DryRunBackend`, which holds no HTTP client, base URL,
+or credential), not a flag checked at the last moment. A dry run never writes
+anything: it never creates a session, and if `--session` names an existing
+one, that session's saved file is left byte-for-byte untouched.
+
+`--dry-run` implies `--trace summary` when `--trace` is not also given —
+otherwise it would produce no output at all, since the dry-run backend never
+produces real text.
+
+`--trace {summary,context,full}` captures what a turn actually sent a
+provider and renders it at the named level; each level includes everything
+the level below it shows. Works with or without `--dry-run` — on a real turn
+it captures the real request(s) alongside sending them.
+
+- **`summary`** (`trace_summary`, one line): provider/model identity, corpus
+  id + revision, history/retrieval message counts, evidence ids (deduped
+  citation source ids), this model's context budget vs. characters actually
+  sent, distinct tool names offered or called, elapsed time, and a grounding
+  status — `not_applicable` for an ordinary (unlinked) turn, `ungrounded` if
+  the turn ended with one of the `linked_*` evidence-validation error codes,
+  `grounded` otherwise.
+- **`context`** (adds `trace_context`, one line per provider call — one for a
+  dry run, one per round for a real multi-round turn): the exact bounded,
+  redacted messages and tool names that call sent. Reading consecutive
+  `trace_context` lines shows context added between rounds — round *N+1*'s
+  messages include round *N*'s tool results, already folded into history the
+  same way a real turn folds them.
+- **`full`** (adds `trace_tool`, one line per tool call the turn actually
+  made): id/name/ok/summary/detail — the same bounded data a UI's tool
+  lifecycle display already has, correlated by round rather than dropped.
+  Requires `--trace-ack`: refused otherwise with a `user_error` naming what
+  full trace exposes. Raw JSON tool-call *arguments* are not part of any
+  trace level — only the outcome (summary/detail) already surfaced to a UI.
+
+No trace level, at any depth, ever includes a credential, an HTTP
+authorization header, or pre-redaction content. Every captured message is
+passed through the same secret-scrubbing pass memory writes use
+(`crate::redact::scrub_secrets`) and length-bounded (4,000 characters per
+message, 50 messages, 64 tool names per call) before it is captured at all —
+structurally true regardless of trace level, not something a renderer has to
+remember to apply. Provider API keys and HTTP headers cannot reach this
+capture point in the first place: the traced boundary
+(`ChatBackend::complete`) takes only `(&[ChatMessage], &[ToolSpec])`, never a
+credential.
+
+```json
+{"type":"trace_summary","provider_profile_id":"ollama-local","chat_model":"mistral","corpus_id":null,"corpus_revision":null,"dry_run":true,"history_messages":3,"retrieved_evidence":0,"evidence_ids":[],"context_budget_chars":120000,"context_used_chars":828,"tool_names":["search_kb"],"elapsed_ms":2,"grounding":"not_applicable"}
+```
 
 ## Permission prompts (`chat`)
 
@@ -185,29 +376,16 @@ closed as a `conflict` rather than partially applying.
 ## Known limitations (tracked, not silent)
 
 - `import --embed` is accepted by the grammar but returns `not_implemented`
-  — `cd_workflow::import::default_import` always ingests with no embedding.
-  Import without `--embed`, then embed via the desktop app.
 - `corpus rename` only changes the cosmetic display name
-  (`cd_core::log_analysis::LogCorpus::rename`, added for this slice) — never
-  identity, ingest data, or citations.
 - No cross-corpus search — `explore`/`context` operate on one corpus at a
-  time, matching every `cd_core::log_analysis` search API's shape.
 - `chat` runs an ordinary or corpus-linked turn through
-  `cd_workflow::chat::run_chat_workflow`; it does not yet expose the
-  desktop app's fuller tool surface (clustering, timeline, anomalies) as
-  CLI subcommands of their own.
+- `chat --dry-run` forces ambient-memory recall off even when the profile
+- `chat --trace full` does not capture raw JSON tool-call *arguments* — only
+- `chat --trace`'s round/call model is per backend call, not a labeled
 - Reviewed-format auto-apply during import requires an UNAMBIGUOUS content
-  match (`select_format` returns `Selected`, not `Conflict`/`NoMatch`) — a
-  tie between two saved formats, or a saved format that no longer matches
-  a source's content, means no binding is applied for that source, not a
-  guess. This is intentional, not a bug: see `reviewed_formats_applied` in
-  the import summary for exactly what was (and wasn't) bound.
 - Ctrl-C cancellation is handled once per `import` invocation (a single
-  `tokio::signal::ctrl_c()` listener) — a second Ctrl-C sent while cleanup
-  is still in progress falls through to the OS default (immediate
-  termination) rather than a second graceful stage. Cleanup is still safe
-  in that case (ingest's staging directory is removed via `Drop`, and any
-  orphan is swept on the next import), just less graceful.
+- `config init`'s credential storage (OS keychain) and its `AppConfig` /
+- `--data-dir` isolates filesystem state only. Provider credentials always
 
 ## Architecture
 
@@ -217,17 +395,12 @@ React → thin Tauri adapter ─┐
 CLI  → thin CLI adapter   ──┘
 ```
 
-`cd-cli` calls `cd_workflow::{import, timezone, chat, provider, turn,
-tools}` for every behavior those modules already own. The Tauri desktop
-host's provider-selection helpers (`provider_profile_for_turn`,
+`cd-cli` calls `cd_workflow::{import, chat, provider, turn, tools}` for
+every behavior those modules already own. The Tauri desktop host's
+provider-selection helpers (`provider_profile_for_turn`,
 `model_tools_disabled_reason`, `model_tools_enabled` in
 `desktop/src-tauri/src/lib.rs`) delegate to `cd_workflow::provider` for the
 same reason — both hosts share one implementation, not two that merely
-look equivalent; `crates/cd-workflow/tests/architecture_tauri_delegates_to_shared_provider_logic.rs`
-guards against that regressing. `crates/cd-cli/tests/cli_workflow_parity.rs`
-and `crates/cd-cli/tests/import_production_cli.rs` exercise the CLI binary
-end to end (including a real Ctrl-C signal) to prove the adapter stays
-thin; `crates/cd-workflow/tests/import_production.rs` exercises the shared
-import/timezone logic directly against synthetic ZIP fixtures (nested
-archives, duplicate basenames, selection drift, reviewed bindings, mixed
-partial imports, cancellation + retry).
+look equivalent. `crates/cd-cli/tests/cli_workflow_parity.rs` exercises the
+CLI binary end to end against a mock provider to prove the adapter stays
+thin.
