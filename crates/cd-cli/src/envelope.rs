@@ -40,6 +40,11 @@ pub enum ExitCategory {
     /// success — a caller must be able to tell "ran and did nothing" apart
     /// from "refused to pretend to run."
     NotImplemented = 7,
+    /// The operation was interrupted by Ctrl-C before it finished. Matches
+    /// the conventional Unix SIGINT exit code (128 + 2) rather than joining
+    /// the sparse category numbering above, so a script's existing `$? ==
+    /// 130` check for "the user hit Ctrl-C" keeps working unmodified.
+    Cancelled = 130,
     /// Any failure that does not fit an above category — a bug, not an
     /// expected outcome a caller should branch on.
     Internal = 70,
@@ -59,6 +64,7 @@ impl ExitCategory {
             ExitCategory::PermissionDenied => "permission_denied",
             ExitCategory::ProviderError => "provider_error",
             ExitCategory::NotImplemented => "not_implemented",
+            ExitCategory::Cancelled => "cancelled",
             ExitCategory::Internal => "internal",
         }
     }
@@ -104,6 +110,10 @@ impl CliError {
 
     pub fn not_implemented(message: impl Into<String>) -> Self {
         Self::new(ExitCategory::NotImplemented, message)
+    }
+
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Self::new(ExitCategory::Cancelled, message)
     }
 
     pub fn internal(message: impl Into<String>) -> Self {

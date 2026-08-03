@@ -1,27 +1,49 @@
 //! `contextdesk import` — the first half of the configured happy path.
 //! Every decision (format detection, source selection, noise exclusion,
-//! normalization) is made by `cd_workflow::import::default_import`, the
-//! same default-path engine the desktop app's guided import wizard is
-//! meant to preselect from; this module only shapes CLI args/output and
-//! persists the resulting corpus as the CLI's new "current corpus."
+//! reviewed-grammar matching, normalization) is made by
+//! `cd_workflow::import::default_import_with_observer`, the same
+//! production, bindings-aware engine the desktop app's guided import wizard
+//! is meant to preselect from; this module only shapes CLI args/output,
+//! wires Ctrl-C cancellation, and persists the resulting corpus as the
+//! CLI's new "current corpus."
 
 use crate::cli::ImportArgs;
+use crate::config::OutputFormat;
 use crate::envelope::{CliError, CliResult, Render};
+use crate::progress::CliProgressObserver;
 use cd_core::config::AppConfig;
 use cd_core::log_analysis::import_preview::ImportPreviewItem;
-use cd_workflow::import::default_import;
+use cd_core::process_progress::CancelFlag;
+use cd_workflow::import::{default_import_with_observer, DefaultImportOutcome};
 use serde::Serialize;
 use std::path::Path;
+use std::sync::Arc;
 
 #[derive(Debug, Serialize)]
 pub struct ImportOutput {
     pub corpus_id: String,
     pub corpus_name: String,
+    pub entries_examined: u64,
+    pub sources_selected: u64,
+    pub sources_ignored: u64,
+    pub sources_unsupported: u64,
+    pub sources_excluded: u64,
+    pub sources_failed: u64,
     pub events_imported: u64,
-    pub excluded_count: u64,
+    pub templates: u64,
+    pub formats: std::collections::BTreeMap<String, u64>,
+    pub timestamp_provenance: std::collections::BTreeMap<String, u64>,
+    pub partial: bool,
     pub timezone_ambiguous_sources: Vec<String>,
+    pub reviewed_formats_applied: Vec<ReviewedFormatApplicationOut>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection: Option<Vec<SelectionItem>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReviewedFormatApplicationOut {
+    pub source_identity: String,
+    pub format_name: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,15 +78,52 @@ impl Render for ImportOutput {
             "imported {} events into corpus \"{}\" ({})",
             self.events_imported, self.corpus_name, self.corpus_id
         );
-        if self.excluded_count > 0 {
+        out.push_str(&format!(
+            "\n  examined {} entries: {} selected, {} ignored, {} unsupported, {} excluded, {} failed",
+            self.entries_examined,
+            self.sources_selected,
+            self.sources_ignored,
+            self.sources_unsupported,
+            self.sources_excluded,
+            self.sources_failed
+        ));
+        out.push_str(&format!("\n  {} template(s)", self.templates));
+        if !self.formats.is_empty() {
+            let formats: Vec<String> = self
+                .formats
+                .iter()
+                .map(|(id, count)| format!("{id}={count}"))
+                .collect();
+            out.push_str(&format!("\n  formats: {}", formats.join(", ")));
+        }
+        if !self.timestamp_provenance.is_empty() {
+            let provenance: Vec<String> = self
+                .timestamp_provenance
+                .iter()
+                .map(|(kind, count)| format!("{kind}={count}"))
+                .collect();
             out.push_str(&format!(
-                "\n{} item(s) excluded (noise/unsupported/review-only) — see `contextdesk import --explain-selection`",
-                self.excluded_count
+                "\n  timestamp provenance: {}",
+                provenance.join(", ")
             ));
+        }
+        if self.partial {
+            out.push_str(
+                "\n  PARTIAL: not everything discovered was imported — see the counts above",
+            );
+        }
+        if !self.reviewed_formats_applied.is_empty() {
+            out.push_str("\n  reviewed formats applied:");
+            for application in &self.reviewed_formats_applied {
+                out.push_str(&format!(
+                    "\n    {} -> {}",
+                    application.source_identity, application.format_name
+                ));
+            }
         }
         if !self.timezone_ambiguous_sources.is_empty() {
             out.push_str(&format!(
-                "\n{} source(s) still have ambiguous local timestamps — no default timezone is configured.\nReview with `contextdesk timezone status --corpus {}`",
+                "\n  {} source(s) still have ambiguous local timestamps — no default timezone is configured.\n  Resolve all of them at once: `contextdesk timezone apply-all <iana-timezone> --corpus {} --yes`",
                 self.timezone_ambiguous_sources.len(),
                 self.corpus_id
             ));
@@ -85,13 +144,47 @@ impl Render for ImportOutput {
     }
 }
 
-pub fn run(args: &ImportArgs, cache_root: &Path, cfg: &AppConfig) -> CliResult<ImportOutput> {
+impl From<DefaultImportOutcome> for ImportOutput {
+    fn from(outcome: DefaultImportOutcome) -> Self {
+        Self {
+            corpus_id: outcome.report.corpus_id.clone(),
+            corpus_name: outcome.corpus_name,
+            entries_examined: outcome.entries_examined,
+            sources_selected: outcome.sources_selected,
+            sources_ignored: outcome.sources_ignored,
+            sources_unsupported: outcome.sources_unsupported,
+            sources_excluded: outcome.sources_excluded,
+            sources_failed: outcome.sources_failed,
+            events_imported: outcome.events_imported,
+            templates: outcome.templates,
+            formats: outcome.formats,
+            timestamp_provenance: outcome.timestamp_provenance,
+            partial: outcome.partial,
+            timezone_ambiguous_sources: outcome.timezone_ambiguous_sources,
+            reviewed_formats_applied: outcome
+                .reviewed_formats_applied
+                .into_iter()
+                .map(|a| ReviewedFormatApplicationOut {
+                    source_identity: a.source_identity,
+                    format_name: a.format_name,
+                })
+                .collect(),
+            selection: None,
+        }
+    }
+}
+
+pub async fn run(
+    args: &ImportArgs,
+    cache_root: &Path,
+    cfg: &AppConfig,
+    format: OutputFormat,
+) -> CliResult<ImportOutput> {
     if args.embed {
-        // `cd_workflow::import::default_import` always ingests with
-        // `LogEmbedMode::None` (its default-path doc comment names
-        // `--embed` as a future escape hatch, not current behavior) — fail
-        // honestly rather than silently accepting the flag and doing an
-        // unembedded import anyway.
+        // `cd_workflow::import::default_import_with_observer` always
+        // ingests with `LogEmbedMode::None` — fail honestly rather than
+        // silently accepting the flag and doing an unembedded import
+        // anyway.
         return Err(CliError::not_implemented(
             "embedding during import is not implemented yet — import without --embed, then embed via the desktop app",
         ));
@@ -102,34 +195,88 @@ pub fn run(args: &ImportArgs, cache_root: &Path, cfg: &AppConfig) -> CliResult<I
             args.source.display()
         )));
     }
-    let outcome = default_import(cache_root, &args.source, cfg, None).map_err(|e| {
-        let message = e.to_string();
-        if message.contains("nothing importable") {
-            CliError::user(message)
-        } else {
-            CliError::internal(message)
+
+    let cancel = CancelFlag::new();
+    let observer = Arc::new(CliProgressObserver::new(format));
+
+    let cache_root_owned = cache_root.to_path_buf();
+    let source_owned = args.source.clone();
+    let cfg_owned = cfg.clone();
+    let cancel_for_task = cancel.clone();
+    let observer_for_task = observer.clone();
+    let mut import_task = tokio::task::spawn_blocking(move || {
+        default_import_with_observer(
+            &cache_root_owned,
+            &source_owned,
+            &cfg_owned,
+            Some(&cancel_for_task),
+            observer_for_task.as_ref(),
+        )
+    });
+
+    // `default_import_with_observer` runs on a blocking thread so this task
+    // stays free to race it against Ctrl-C; on cancel we set the flag and
+    // wait for the SAME task to actually return (ingest's staging cleanup
+    // runs via `Drop` on that thread, not here) rather than abandoning it.
+    let joined = tokio::select! {
+        joined = &mut import_task => joined,
+        ctrl_c_result = tokio::signal::ctrl_c() => {
+            if ctrl_c_result.is_err() {
+                observer.finish();
+                return Err(CliError::internal("failed to install Ctrl-C handler"));
+            }
+            cancel.cancel();
+            eprintln!(
+                "\ncancelling — cleaning up (safe to retry the same import once this finishes)..."
+            );
+            (&mut import_task).await
         }
-    })?;
+    };
+    observer.finish();
+
+    let outcome = match joined {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(core_error)) => {
+            if matches!(&core_error, cd_core::error::CoreError::Cancelled) {
+                return Err(CliError::cancelled(
+                    "import cancelled — no partial corpus was published, safe to retry",
+                ));
+            }
+            let message = core_error.to_string();
+            return Err(if message.contains("nothing importable") {
+                CliError::user(message)
+            } else {
+                CliError::internal(message)
+            });
+        }
+        Err(join_error) => {
+            return Err(CliError::internal(format!(
+                "import task panicked: {join_error}"
+            )))
+        }
+    };
 
     if let Some(name) = &args.name {
         cd_core::log_analysis::LogCorpus::rename(cache_root, &outcome.report.corpus_id, name)
             .map_err(|e| CliError::internal(format!("rename to requested name: {e}")))?;
     }
 
-    Ok(ImportOutput {
-        corpus_id: outcome.report.corpus_id.clone(),
-        corpus_name: args.name.clone().unwrap_or(outcome.corpus_name),
-        events_imported: outcome.report.stats.lines,
-        excluded_count: outcome.excluded_count,
-        timezone_ambiguous_sources: outcome.timezone_ambiguous_sources,
-        selection: args.explain_selection.then(|| {
-            outcome
-                .plan
-                .report
-                .items
-                .iter()
-                .map(SelectionItem::from)
-                .collect()
-        }),
-    })
+    let explain_selection = args.explain_selection;
+    let name_override = args.name.clone();
+    let plan_items: Option<Vec<SelectionItem>> = explain_selection.then(|| {
+        outcome
+            .plan
+            .report
+            .items
+            .iter()
+            .map(SelectionItem::from)
+            .collect()
+    });
+
+    let mut output = ImportOutput::from(outcome);
+    if let Some(name) = name_override {
+        output.corpus_name = name;
+    }
+    output.selection = plan_items;
+    Ok(output)
 }

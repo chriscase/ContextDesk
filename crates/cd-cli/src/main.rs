@@ -3,6 +3,7 @@ mod cli;
 mod commands;
 mod config;
 mod envelope;
+mod progress;
 
 use clap::Parser;
 use cli::{Cli, Command};
@@ -95,7 +96,7 @@ async fn dispatch(
 ) -> i32 {
     match command {
         Command::Import(args) => {
-            let result = commands::import::run(args, &paths.cache_root, app_cfg);
+            let result = commands::import::run(args, &paths.cache_root, app_cfg, format).await;
             if let Ok(outcome) = &result {
                 cli_state.set_current_corpus(outcome.corpus_id.clone());
             }
