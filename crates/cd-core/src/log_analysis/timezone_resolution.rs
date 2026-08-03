@@ -40,14 +40,19 @@ pub struct TimezoneResolutionScope {
 
 /// How a timezone declaration became authoritative for this resolution.
 ///
-/// The only applicable basis in this slice is an explicit user declaration.
 /// A filename, host, producer hint, abbreviation, sibling source, or model
-/// statement cannot be represented as source-native evidence.
+/// statement cannot be represented as source-native evidence — only these
+/// two explicit bases can.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TimezoneDeclarationBasis {
     /// A person explicitly chose and applied the IANA zone for this source.
     UserDeclared,
+    /// A configured application default was applied to a source left
+    /// ambiguous after import. Distinct from [`Self::UserDeclared`] so a
+    /// later review can tell "I picked this" from "my saved default kicked
+    /// in" — never presented as an in-the-moment user choice it was not.
+    ConfiguredDefault,
 }
 
 /// Persistable source-scoped timezone declaration.

@@ -564,6 +564,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cd-workflow"
+version = "0.1.0"
+dependencies = [
+ "cd-core",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

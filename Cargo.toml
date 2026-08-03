@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/cd-core",
     "crates/cd-server",
+    "crates/cd-workflow",
+    # "crates/cd-cli",  # added once the crate exists
     # "desktop/src-tauri",  # nested after scaffold
 ]
 
