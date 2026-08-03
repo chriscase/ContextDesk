@@ -4229,27 +4229,14 @@ fn persist_and_emit_host_terminal(
     Ok(())
 }
 
+/// Thin delegation to the shared workflow layer (`cd_workflow::provider`) —
+/// the CLI resolves provider profiles through the exact same function so
+/// the two hosts can never quietly drift into divergent selection rules.
 fn provider_profile_for_turn(
     config: &AppConfig,
     explicit_profile_id: Option<&str>,
 ) -> Result<ProviderProfile, String> {
-    let explicit_profile_id = explicit_profile_id
-        .map(str::trim)
-        .filter(|profile_id| !profile_id.is_empty());
-    if let Some(profile_id) = explicit_profile_id {
-        return config
-            .providers
-            .profiles
-            .iter()
-            .find(|profile| profile.id == profile_id)
-            .cloned()
-            .ok_or_else(|| profile_id.to_string());
-    }
-    Ok(config
-        .providers
-        .active()
-        .cloned()
-        .unwrap_or_else(ProviderProfile::ollama_local))
+    cd_workflow::provider::resolve_provider_profile(config, explicit_profile_id)
 }
 
 #[tauri::command]
@@ -5293,26 +5280,18 @@ fn parse_selection_key(key: &str) -> (Option<String>, String) {
     (provider, selection.model_id)
 }
 
+/// Thin delegation to `cd_workflow::provider` — see [`provider_profile_for_turn`].
 fn model_tools_disabled_reason(
     cfg: &AppConfig,
     profile: &ProviderProfile,
     model_id: &str,
 ) -> Option<&'static str> {
-    if !profile.capabilities.tools {
-        return Some("profile");
-    }
-    let canonical = model_selection_key(&profile.id, model_id);
-    let legacy = format!("{}::{model_id}", profile.id);
-    if cfg.model_tools_enabled.get(&canonical) == Some(&false)
-        || cfg.model_tools_enabled.get(&legacy) == Some(&false)
-    {
-        return Some("model");
-    }
-    None
+    cd_workflow::provider::model_tools_disabled_reason(cfg, profile, model_id)
 }
 
+/// Thin delegation to `cd_workflow::provider` — see [`provider_profile_for_turn`].
 fn model_tools_enabled(cfg: &AppConfig, profile: &ProviderProfile, model_id: &str) -> bool {
-    model_tools_disabled_reason(cfg, profile, model_id).is_none()
+    cd_workflow::provider::model_tools_enabled(cfg, profile, model_id)
 }
 
 fn provider_group_label(p: &ProviderProfile) -> String {
