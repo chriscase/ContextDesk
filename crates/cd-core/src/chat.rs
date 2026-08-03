@@ -245,16 +245,24 @@ fn tool_call_from_json(tc: &Value) -> StreamDelta {
         .get("name")
         .and_then(|x| x.as_str())
         .map(str::to_string);
-    let arguments = func
-        .get("arguments")
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string();
+    let arguments = function_arguments_as_string(func.get("arguments"), "");
     StreamDelta::ToolCall {
         index,
         id,
         name,
         arguments,
+    }
+}
+
+/// Normalize the two argument shapes seen across OpenAI-compatible servers.
+/// The OpenAI wire contract uses a JSON-encoded string, while several local
+/// model gateways return the decoded JSON object directly. Internally the
+/// agent loop intentionally keeps one representation: a JSON string.
+fn function_arguments_as_string(arguments: Option<&Value>, missing: &str) -> String {
+    match arguments {
+        Some(Value::String(value)) => value.clone(),
+        Some(Value::Null) | None => missing.to_string(),
+        Some(value) => serde_json::to_string(value).unwrap_or_else(|_| missing.to_string()),
     }
 }
 
@@ -546,6 +554,8 @@ impl OpenAiCompatibleClient {
         }
 
         let mut acc = StreamAccumulator::new();
+        let mut full_body = String::new();
+        let mut saw_sse_data = false;
         let mut line_buf = String::new();
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
@@ -554,17 +564,17 @@ impl OpenAiCompatibleClient {
             }
             let bytes = chunk.map_err(|e| CoreError::Message(format!("stream chunk: {e}")))?;
             let s = String::from_utf8_lossy(&bytes);
+            full_body.push_str(&s);
             line_buf.push_str(&s);
             while let Some(nl) = line_buf.find('\n') {
                 let line = line_buf[..nl].trim_end_matches('\r').to_string();
                 line_buf = line_buf[nl + 1..].to_string();
-                let data = line.strip_prefix("data:").map(str::trim).unwrap_or("");
+                let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+                    continue;
+                };
+                saw_sse_data = true;
                 if data.is_empty() {
                     continue;
-                }
-                // Full JSON object fallback (gateway ignored stream)
-                if data.starts_with('{') && !data.contains("\"choices\"") && line_buf.is_empty() {
-                    // keep scanning
                 }
                 match parse_openai_sse_data(data) {
                     Ok(Some(delta)) => {
@@ -578,14 +588,21 @@ impl OpenAiCompatibleClient {
                         acc.push(delta);
                     }
                     Ok(None) => {}
-                    Err(_) => {
-                        // Non-SSE full body
-                        if data.starts_with('{') {
-                            return parse_openai_completion(data);
-                        }
-                    }
+                    Err(error) => return Err(error),
                 }
             }
+        }
+        // Some OpenAI-compatible gateways accept `stream=true` but return a
+        // normal completion object (often with `application/json`). Parsing
+        // that object as an SSE delta sees only `finish_reason` and loses the
+        // assistant message/tool calls. Detect the absence of any SSE data
+        // lines and route the complete body through the non-stream parser.
+        if !saw_sse_data {
+            let completion = parse_openai_completion(full_body.trim())?;
+            if !completion.content.is_empty() {
+                on_delta(StreamDelta::Text(completion.content.clone()));
+            }
+            return Ok(completion);
         }
         // Flush remaining buffer
         if !line_buf.trim().is_empty() {
@@ -593,16 +610,21 @@ impl OpenAiCompatibleClient {
                 .trim()
                 .strip_prefix("data:")
                 .map(str::trim)
-                .unwrap_or(line_buf.trim());
-            if let Ok(Some(delta)) = parse_openai_sse_data(data) {
-                if let StreamDelta::Text(ref t) = delta {
-                    if !t.is_empty() {
-                        on_delta(StreamDelta::Text(t.clone()));
+                .unwrap_or("");
+            if data.is_empty() {
+                return Ok(acc.into_completion());
+            }
+            match parse_openai_sse_data(data) {
+                Ok(Some(delta)) => {
+                    if let StreamDelta::Text(ref t) = delta {
+                        if !t.is_empty() {
+                            on_delta(StreamDelta::Text(t.clone()));
+                        }
                     }
+                    acc.push(delta);
                 }
-                acc.push(delta);
-            } else if data.starts_with('{') {
-                return parse_openai_completion(data);
+                Ok(None) => {}
+                Err(error) => return Err(error),
             }
         }
         Ok(acc.into_completion())
@@ -714,23 +736,20 @@ pub fn parse_openai_completion(text: &str) -> CoreResult<ChatCompletion> {
         .to_string();
     let mut tool_calls = Vec::new();
     if let Some(arr) = message.get("tool_calls").and_then(|t| t.as_array()) {
-        for tc in arr {
+        for (index, tc) in arr.iter().enumerate() {
             let id = tc
                 .get("id")
                 .and_then(|x| x.as_str())
-                .unwrap_or("call")
-                .to_string();
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("call_{index}"));
             let func = tc.get("function").cloned().unwrap_or(json!({}));
             let name = func
                 .get("name")
                 .and_then(|x| x.as_str())
                 .unwrap_or("")
                 .to_string();
-            let arguments = func
-                .get("arguments")
-                .and_then(|x| x.as_str())
-                .unwrap_or("{}")
-                .to_string();
+            let arguments = function_arguments_as_string(func.get("arguments"), "{}");
             tool_calls.push(ToolCallMsg {
                 id,
                 kind: "function".into(),
@@ -1581,6 +1600,108 @@ mod tests {
         let c = parse_openai_completion(fixture).unwrap();
         assert_eq!(c.tool_calls.len(), 1);
         assert_eq!(c.tool_calls[0].function.name, "search_kb");
+    }
+
+    #[test]
+    fn parse_openai_compatible_object_arguments_and_missing_ids() {
+        // GPT-OSS/local gateways sometimes return already-decoded argument
+        // objects and omit call ids even on their OpenAI-compatible route.
+        let fixture = r#"{
+          "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {"type":"function","function":{"name":"search_logs","arguments":{"query":"checkout failed","limit":5}}},
+                {"id":"","type":"function","function":{"name":"get_log_event","arguments":{"event_id":"evt-1"}}}
+              ]
+            }
+          }]
+        }"#;
+        let completion = parse_openai_completion(fixture).unwrap();
+        assert_eq!(completion.tool_calls.len(), 2);
+        assert_eq!(completion.tool_calls[0].id, "call_0");
+        assert_eq!(completion.tool_calls[1].id, "call_1");
+        let first: Value =
+            serde_json::from_str(&completion.tool_calls[0].function.arguments).unwrap();
+        assert_eq!(first["query"], "checkout failed");
+        assert_eq!(first["limit"], 5);
+        let second: Value =
+            serde_json::from_str(&completion.tool_calls[1].function.arguments).unwrap();
+        assert_eq!(second["event_id"], "evt-1");
+    }
+
+    #[test]
+    fn parse_sse_object_arguments() {
+        let body = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"search_logs","arguments":{"query":"timeout","limit":3}}}]},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+"#;
+        let completion = accumulate_openai_sse(body).unwrap();
+        assert_eq!(completion.tool_calls.len(), 1);
+        assert_eq!(completion.tool_calls[0].id, "call_0");
+        let arguments: Value =
+            serde_json::from_str(&completion.tool_calls[0].function.arguments).unwrap();
+        assert_eq!(arguments["query"], "timeout");
+        assert_eq!(arguments["limit"], 3);
+    }
+
+    #[tokio::test]
+    async fn stream_callback_accepts_non_stream_json_from_compatible_gateway() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = r#"{
+          "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+              "role": "assistant",
+              "content": "checking the logs",
+              "tool_calls": [{
+                "type":"function",
+                "function":{"name":"search_logs","arguments":{"query":"timeout"}}
+              }]
+            }
+          }]
+        }"#;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_raw(body, "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let client =
+            OpenAiCompatibleClient::new(server.uri(), None, "gpt-oss-test", &SsrfPolicy::default())
+                .unwrap();
+        let messages = [ChatMessage {
+            role: Role::User,
+            content: "What timed out?".into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        let mut deltas = Vec::new();
+        let completion = client
+            .complete_stream_cb(&messages, None, |delta| deltas.push(delta), None)
+            .await
+            .unwrap();
+
+        assert_eq!(completion.content, "checking the logs");
+        assert_eq!(completion.tool_calls.len(), 1);
+        assert_eq!(completion.tool_calls[0].function.name, "search_logs");
+        let arguments: Value =
+            serde_json::from_str(&completion.tool_calls[0].function.arguments).unwrap();
+        assert_eq!(arguments["query"], "timeout");
+        assert_eq!(
+            deltas,
+            vec![StreamDelta::Text("checking the logs".into())],
+            "a non-stream fallback still produces one visible text delta"
+        );
     }
 
     #[test]
