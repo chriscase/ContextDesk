@@ -269,6 +269,13 @@ impl WorkspaceConfig {
     }
 }
 
+/// True when `value` names a real IANA timezone (e.g. `"America/Chicago"`).
+/// The one check applied to `default_timezone` before it is persisted — an
+/// invalid zone must be refused here, not discovered later at import time.
+pub fn is_valid_iana_timezone(value: &str) -> bool {
+    value.parse::<chrono_tz::Tz>().is_ok()
+}
+
 /// Resolve `~/<config_dir_name>/config.json`.
 pub fn config_path(branding: &Branding) -> CoreResult<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| CoreError::Config("no home dir".into()))?;
