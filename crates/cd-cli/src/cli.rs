@@ -42,9 +42,25 @@ pub struct GlobalArgs {
     pub config: Option<PathBuf>,
     /// Override the shared `AppConfig` file (provider profiles, configured
     /// default timezone) instead of the default
-    /// `~/.contextdesk/config.json` both hosts otherwise share.
+    /// `~/.contextdesk/config.json` both hosts otherwise share (or, when
+    /// `--data-dir` is also given, `<data-dir>/config.json`) — used as an
+    /// exact path, not joined with `--data-dir`.
     #[arg(long, global = true, env = "CONTEXTDESK_APP_CONFIG")]
     pub app_config: Option<PathBuf>,
+    /// Isolate every piece of state this process touches — the shared
+    /// `AppConfig`, this CLI's own `cli.toml`, the corpus cache, durable
+    /// sessions, and CLI state — under this directory instead of the
+    /// default `~/.contextdesk` the desktop app otherwise shares. Setting
+    /// this skips the `$HOME` lookup entirely, so an isolated profile is
+    /// deterministic and testable without overriding `HOME`. Omit to keep
+    /// the default: state shared with the desktop app.
+    #[arg(
+        long,
+        global = true,
+        alias = "profile-dir",
+        env = "CONTEXTDESK_DATA_DIR"
+    )]
+    pub data_dir: Option<PathBuf>,
     #[arg(long, global = true, env = "CONTEXTDESK_PROVIDER_PROFILE")]
     pub profile: Option<String>,
     #[arg(long, global = true, env = "CONTEXTDESK_CHAT_MODEL")]
@@ -238,4 +254,70 @@ pub struct ConfigInitArgs {
     pub color: Option<ColorMode>,
     #[arg(long)]
     pub default_provider_profile: Option<String>,
+
+    /// Skip provider configuration entirely — write only CLI behavior
+    /// preferences (format/color/profile pointer). Default in
+    /// `--non-interactive` mode unless `--provider-kind` is also given.
+    #[arg(long)]
+    pub skip_provider: bool,
+    /// Provider protocol kind for the profile this wizard writes into the
+    /// shared `AppConfig`.
+    #[arg(long, value_enum)]
+    pub provider_kind: Option<ProviderKindArg>,
+    /// Base URL for the provider (default depends on `--provider-kind`;
+    /// required for kinds with no built-in default, e.g.
+    /// `openai-compatible`).
+    #[arg(long)]
+    pub base_url: Option<String>,
+    /// Chat model id (default `mistral` for `ollama`; required for other
+    /// kinds in `--non-interactive` mode).
+    #[arg(long)]
+    pub chat_model: Option<String>,
+    /// Default IANA timezone applied to source-local timestamps with no
+    /// resolvable zone evidence of their own, e.g. `America/Chicago`.
+    /// Leaves any existing configured value untouched when omitted.
+    #[arg(long)]
+    pub default_timezone: Option<String>,
+    /// Stable id for the provider profile (default: derived from
+    /// `--provider-kind`).
+    #[arg(long)]
+    pub profile_id: Option<String>,
+    /// Human label for the provider profile (default: derived from
+    /// `--provider-kind`).
+    #[arg(long)]
+    pub profile_label: Option<String>,
+    /// Read the API key from this environment variable's current value —
+    /// read once, stored as an OS keychain reference, never written to disk
+    /// or echoed. Mutually exclusive with `--api-key-file` /
+    /// `--api-key-stdin`.
+    #[arg(long, conflicts_with_all = ["api_key_file", "api_key_stdin"])]
+    pub api_key_env: Option<String>,
+    /// Read the API key from this file's contents (trimmed) — read once,
+    /// stored as an OS keychain reference, never written to disk or echoed.
+    #[arg(long, conflicts_with = "api_key_stdin")]
+    pub api_key_file: Option<PathBuf>,
+    /// Read the API key as one line from stdin — read once, stored as an OS
+    /// keychain reference, never written to disk or echoed.
+    #[arg(long)]
+    pub api_key_stdin: bool,
+    /// After configuring a provider, run a safe reachability probe (base
+    /// URL and, if configured, the key — no corpus content is ever sent).
+    #[arg(long)]
+    pub check_connection: bool,
+}
+
+/// CLI-shape mirror of `cd_core::providers::ProviderKind` — this module is
+/// clap grammar only and must not depend on `cd_core`; the conversion lives
+/// in `commands::config_cmd`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum ProviderKindArg {
+    Ollama,
+    /// Matches `cd_core::providers::descriptor_for`'s `openai-compatible`
+    /// slug and the wizard's interactive prompt text exactly — plain
+    /// kebab-case would otherwise render this `open-ai-compatible`.
+    #[value(name = "openai-compatible")]
+    OpenAiCompatible,
+    Anthropic,
+    XaiGrokBuild,
 }
