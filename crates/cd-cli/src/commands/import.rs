@@ -23,7 +23,11 @@ use std::sync::Arc;
 pub struct ImportOutput {
     pub corpus_id: String,
     pub corpus_name: String,
+    /// Preview inventory count (`ImportPreviewCounts.total`).
     pub entries_examined: u64,
+    /// Ingest walk count (`IngestStats.discovered_files`); may exceed
+    /// `entries_examined` when directories/archive containers are walked.
+    pub discovered_files: u64,
     pub sources_selected: u64,
     pub sources_ignored: u64,
     pub sources_unsupported: u64,
@@ -36,6 +40,8 @@ pub struct ImportOutput {
     pub partial: bool,
     pub timezone_ambiguous_sources: Vec<String>,
     pub reviewed_formats_applied: Vec<ReviewedFormatApplicationOut>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviewed_format_warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection: Option<Vec<SelectionItem>>,
 }
@@ -78,15 +84,24 @@ impl Render for ImportOutput {
             "imported {} events into corpus \"{}\" ({})",
             self.events_imported, self.corpus_name, self.corpus_id
         );
+        // Preview inventory vs ingest walk are different metrics — always label both.
         out.push_str(&format!(
-            "\n  examined {} entries: {} selected, {} ignored, {} unsupported, {} excluded, {} failed",
-            self.entries_examined,
+            "\n  preview inventory: {} file entries; ingest walk: {} filesystem/archive entries",
+            self.entries_examined, self.discovered_files
+        ));
+        out.push_str(&format!(
+            "\n  selection: {} selected, {} ignored (noise/hidden/dirs), {} unsupported, {} excluded (policy), {} failed (I/O)",
             self.sources_selected,
             self.sources_ignored,
             self.sources_unsupported,
             self.sources_excluded,
             self.sources_failed
         ));
+        if self.sources_ignored > 0 && self.sources_failed == 0 {
+            out.push_str(
+                "\n  note: ignored entries are intentional noise filtering, not import failures",
+            );
+        }
         out.push_str(&format!("\n  {} template(s)", self.templates));
         if !self.formats.is_empty() {
             let formats: Vec<String> = self
@@ -121,6 +136,12 @@ impl Render for ImportOutput {
                 ));
             }
         }
+        if !self.reviewed_format_warnings.is_empty() {
+            out.push_str("\n  reviewed-format warnings:");
+            for warning in &self.reviewed_format_warnings {
+                out.push_str(&format!("\n    {warning}"));
+            }
+        }
         if !self.timezone_ambiguous_sources.is_empty() {
             out.push_str(&format!(
                 "\n  {} source(s) still have ambiguous local timestamps — no default timezone is configured.\n  Resolve all of them at once: `contextdesk timezone apply-all <iana-timezone> --corpus {} --yes`",
@@ -150,6 +171,7 @@ impl From<DefaultImportOutcome> for ImportOutput {
             corpus_id: outcome.report.corpus_id.clone(),
             corpus_name: outcome.corpus_name,
             entries_examined: outcome.entries_examined,
+            discovered_files: outcome.discovered_files,
             sources_selected: outcome.sources_selected,
             sources_ignored: outcome.sources_ignored,
             sources_unsupported: outcome.sources_unsupported,
@@ -169,6 +191,7 @@ impl From<DefaultImportOutcome> for ImportOutput {
                     format_name: a.format_name,
                 })
                 .collect(),
+            reviewed_format_warnings: outcome.reviewed_format_warnings,
             selection: None,
         }
     }

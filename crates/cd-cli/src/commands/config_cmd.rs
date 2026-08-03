@@ -292,13 +292,33 @@ async fn run_init(
         None
     };
 
+    // Timezone is independent of provider setup: `config init --default-timezone
+    // America/Chicago --skip-provider` must still land the IANA id on AppConfig
+    // so import's default-timezone apply path can use it without any provider.
+    // When a provider was configured, that path already resolved timezone.
+    let independent_timezone = if provider_setup.is_none() {
+        resolve_timezone_without_provider(args, interactive, &stdin, &mut stderr)?
+    } else {
+        None
+    };
+
     // Both layers are fully built (and every validation has already run)
     // before either write happens — a rejected timezone or URL never
     // leaves a half-written cli.toml behind.
     let created = !path.exists();
     save_layer(&path, &cli_cfg)?;
+
+    let timezone_written = provider_setup
+        .as_ref()
+        .and_then(|s| s.timezone.clone())
+        .or_else(|| independent_timezone.clone());
+
     if let Some(setup) = &provider_setup {
         save_app_config(paths, &setup.cfg)?;
+    } else if let Some(tz) = &independent_timezone {
+        let mut cfg = app_cfg.clone();
+        cfg.default_timezone = Some(tz.clone());
+        save_app_config(paths, &cfg)?;
     }
 
     // The one remaining fallible step, deliberately last: see this
@@ -321,11 +341,46 @@ async fn run_init(
         provider_profile_id: provider_setup.as_ref().map(|s| s.profile_id.clone()),
         provider_kind: provider_setup.as_ref().map(|s| s.kind_label.to_string()),
         credential_configured: provider_setup.as_ref().map(|s| s.credential_configured),
-        default_timezone: provider_setup.as_ref().and_then(|s| s.timezone.clone()),
+        default_timezone: timezone_written,
         connectivity_check: provider_setup
             .as_ref()
             .and_then(|s| s.probe_summary.clone()),
     }))
+}
+
+/// Resolve `--default-timezone` (or an interactive prompt) when no provider
+/// profile is being configured. Call only when `provider_setup` is `None`.
+fn resolve_timezone_without_provider(
+    args: &ConfigInitArgs,
+    interactive: bool,
+    stdin: &io::Stdin,
+    stderr: &mut io::Stderr,
+) -> CliResult<Option<String>> {
+    if let Some(tz) = &args.default_timezone {
+        if !is_valid_iana_timezone(tz) {
+            return Err(CliError::user(format!(
+                "{tz:?} is not a recognized IANA timezone"
+            )));
+        }
+        return Ok(Some(tz.clone()));
+    }
+    if interactive {
+        let raw = ask_line(
+            stdin,
+            stderr,
+            "Default timezone for ambiguous local timestamps (blank = leave unset, IANA id e.g. America/Chicago)",
+        )?;
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        if !is_valid_iana_timezone(&raw) {
+            return Err(CliError::user(format!(
+                "{raw:?} is not a recognized IANA timezone"
+            )));
+        }
+        return Ok(Some(raw));
+    }
+    Ok(None)
 }
 
 fn prompt_wizard(
@@ -1002,6 +1057,33 @@ mod tests {
         );
         assert!(!paths.app_config_path.exists());
         assert!(!global_config_path(&paths.config_dir).exists());
+    }
+
+    /// `--default-timezone` must land on AppConfig even when the caller
+    /// skips every provider step (`--skip-provider` / no `--provider-kind`).
+    #[tokio::test]
+    async fn default_timezone_works_with_skip_provider() {
+        let (dir, paths) = isolated_paths();
+        let mut args = base_args();
+        args.skip_provider = true;
+        args.default_timezone = Some("America/Chicago".into());
+
+        let secrets = MemorySecretStore::new();
+        let out = run_init(&args, &paths, dir.path(), &AppConfig::default(), &secrets)
+            .await
+            .expect("timezone-only init must succeed");
+        let json = out.render_json();
+        assert_eq!(json["default_timezone"], "America/Chicago");
+        assert!(json.get("provider_profile_id").is_none() || json["provider_profile_id"].is_null());
+
+        let cfg = cd_core::config::load_config(&paths.app_config_path)
+            .expect("app config must be written");
+        assert_eq!(
+            cfg.default_timezone.as_deref(),
+            Some("America/Chicago"),
+            "AppConfig.default_timezone must be set without any provider profile"
+        );
+        assert!(cfg.providers.profiles.is_empty());
     }
 
     /// A provider kind that doesn't need a key (Ollama) must never touch

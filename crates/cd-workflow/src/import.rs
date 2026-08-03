@@ -92,8 +92,16 @@ pub struct DefaultImportOutcome {
     /// The name assigned (see [`suggest_corpus_name`]).
     pub corpus_name: String,
     /// Every entry the preview inventoried, selected or not
-    /// (`plan.report.counts.total`).
+    /// (`plan.report.counts.total`). This is the **preview classifier**
+    /// count — not necessarily equal to ingest's filesystem/archive walk
+    /// (`discovered_files`), which also counts containers/directories the
+    /// preview may fold differently. Both are reported; never force-matched.
     pub entries_examined: u64,
+    /// File/archive entries the **ingest walk** discovered before policy
+    /// decisions (`report.stats.discovered_files`). May exceed
+    /// `entries_examined` when directories or intermediate archive members
+    /// are counted as walk entries but not as preview inventory rows.
+    pub discovered_files: u64,
     /// Sources the default selection actually chose
     /// (`plan.report.counts.selected`).
     pub sources_selected: u64,
@@ -138,6 +146,11 @@ pub struct DefaultImportOutcome {
     /// saved, none confidently matched, or a store race made the apply
     /// this module attempted stale (never guessed, never claimed anyway).
     pub reviewed_formats_applied: Vec<ReviewedFormatApplication>,
+    /// Bounded, human-safe warnings about reviewed-format auto-detect:
+    /// content ties (`Conflict`), store open/apply failures that fell back
+    /// to no bindings (never half-applied). Empty when nothing noteworthy.
+    /// Never contains log line content.
+    pub reviewed_format_warnings: Vec<String>,
     /// The plan review, retained so `--explain-selection` can render exact
     /// per-item reasons without a second preview pass.
     pub plan: ImportPreviewPlan,
@@ -206,10 +219,22 @@ pub fn default_import_with_observer(
     // Never fails the import: a store race or an empty catalog just means
     // no bindings are attempted this run, not a hard error — the same
     // "optional, best-effort" contract desktop's `format_apply: Option<_>`
-    // already has.
+    // already has. Surface a bounded warning so "no profile matched" is not
+    // confused with "store race / apply failed closed."
+    let mut reviewed_format_warnings = Vec::new();
     let (bindings, reviewed_formats_applied) =
-        auto_detect_reviewed_bindings(&reviewed_format_store_root(cache_root), &plan)
-            .unwrap_or_else(|_| (ReviewedFormatIngestBindings::new(), Vec::new()));
+        match auto_detect_reviewed_bindings(&reviewed_format_store_root(cache_root), &plan) {
+            Ok((b, applied, warnings)) => {
+                reviewed_format_warnings.extend(warnings);
+                (b, applied)
+            }
+            Err(e) => {
+                reviewed_format_warnings.push(format!(
+                    "reviewed-format auto-detect skipped (import continues without bindings): {e}"
+                ));
+                (ReviewedFormatIngestBindings::new(), Vec::new())
+            }
+        };
     let reviewed = (!reviewed_formats_applied.is_empty()).then_some(&bindings);
 
     let report = ingest_path_with_policy_bindings_and_observer(
@@ -232,6 +257,7 @@ pub fn default_import_with_observer(
 
     Ok(DefaultImportOutcome {
         entries_examined: counts.total,
+        discovered_files: report.stats.discovered_files,
         sources_selected: counts.selected,
         sources_ignored: counts.ignored,
         sources_unsupported: counts.unsupported,
@@ -246,6 +272,7 @@ pub fn default_import_with_observer(
         corpus_name,
         timezone_ambiguous_sources,
         reviewed_formats_applied,
+        reviewed_format_warnings,
         report,
         plan,
     })
@@ -259,7 +286,8 @@ fn reviewed_format_store_root(cache_root: &Path) -> std::path::PathBuf {
 /// grammar confidently applies to, using the SAME content-coverage matcher
 /// (`select_format`) the desktop review UI uses to answer "would this
 /// profile apply here" — never a bespoke path-only heuristic. A tie
-/// (`FormatSelection::Conflict`) or no match is skipped, never guessed.
+/// (`FormatSelection::Conflict`) is **not** guessed: the source stays
+/// unbound and a warning is returned. No-match is silent (normal).
 ///
 /// The apply is still revision-bound: [`apply_reviewed_format_bindings`]
 /// re-checks the store hasn't moved since `load_all`/`revision()` were read
@@ -269,52 +297,80 @@ fn reviewed_format_store_root(cache_root: &Path) -> std::path::PathBuf {
 fn auto_detect_reviewed_bindings(
     reviewed_root: &Path,
     plan: &ImportPreviewPlan,
-) -> CoreResult<(ReviewedFormatIngestBindings, Vec<ReviewedFormatApplication>)> {
+) -> CoreResult<(
+    ReviewedFormatIngestBindings,
+    Vec<ReviewedFormatApplication>,
+    Vec<String>,
+)> {
     let store = ReviewedFormatStore::open(reviewed_root)?;
     let catalog = store.load_all()?;
     if catalog.is_empty() {
-        return Ok((ReviewedFormatIngestBindings::new(), Vec::new()));
+        return Ok((ReviewedFormatIngestBindings::new(), Vec::new(), Vec::new()));
     }
     let revision = store.revision()?;
 
     let mut request_bindings = Vec::new();
     let mut applied = Vec::new();
+    let mut warnings = Vec::new();
+    // Cap warnings so a huge archive cannot flood stderr/JSON.
+    const MAX_TIE_WARNINGS: usize = 16;
+    let mut ties_reported = 0usize;
+    let mut ties_suppressed = 0usize;
+
     for item in plan.report.items.iter().filter(|item| item.selected) {
         let Some(sample) = item.representative.as_deref() else {
             continue;
         };
-        let FormatSelection::Selected { format_id, version } =
-            select_format(&catalog, &item.identity, sample)
-        else {
-            continue;
-        };
-        let Some(format) = catalog
-            .iter()
-            .find(|f| f.format_id == format_id && f.version == version)
-        else {
-            continue;
-        };
-        request_bindings.push(ReviewedFormatApplyBinding {
-            source_identity: item.identity.clone(),
-            format_id: format.format_id.clone(),
-            version: format.version,
-            digest: format.digest(),
-        });
-        applied.push(ReviewedFormatApplication {
-            source_identity: item.identity.clone(),
-            format_name: format.name.clone(),
-        });
+        match select_format(&catalog, &item.identity, sample) {
+            FormatSelection::Selected { format_id, version } => {
+                let Some(format) = catalog
+                    .iter()
+                    .find(|f| f.format_id == format_id && f.version == version)
+                else {
+                    continue;
+                };
+                request_bindings.push(ReviewedFormatApplyBinding {
+                    source_identity: item.identity.clone(),
+                    format_id: format.format_id.clone(),
+                    version: format.version,
+                    digest: format.digest(),
+                });
+                applied.push(ReviewedFormatApplication {
+                    source_identity: item.identity.clone(),
+                    format_name: format.name.clone(),
+                });
+            }
+            FormatSelection::Conflict { format_ids } => {
+                // Unbound on purpose — never half-apply a tied grammar.
+                if ties_reported < MAX_TIE_WARNINGS {
+                    warnings.push(format!(
+                        "reviewed-format tie left unbound for {}: competing profiles [{}] (explicit choice required)",
+                        item.identity,
+                        format_ids.join(", ")
+                    ));
+                    ties_reported += 1;
+                } else {
+                    ties_suppressed += 1;
+                }
+            }
+            FormatSelection::NoMatch => {}
+        }
+    }
+    if ties_suppressed > 0 {
+        warnings.push(format!(
+            "+{ties_suppressed} additional reviewed-format tie(s) left unbound (warning cap)"
+        ));
     }
 
     if request_bindings.is_empty() {
-        return Ok((ReviewedFormatIngestBindings::new(), Vec::new()));
+        return Ok((ReviewedFormatIngestBindings::new(), Vec::new(), warnings));
     }
     let request = ReviewedFormatApplyRequest {
         expected_store_revision: revision,
         bindings: request_bindings,
     };
     let bindings = apply_reviewed_format_bindings(&store, &request)?;
-    Ok((bindings, applied))
+    Ok((bindings, applied, warnings))
 }
 
 #[cfg(test)]

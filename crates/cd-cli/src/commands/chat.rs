@@ -378,7 +378,14 @@ fn grounding_status(corpus_id: Option<&str>, events: &[StreamEvent]) -> &'static
 }
 
 fn traced_call_context_used_chars(call: &TracedCall) -> usize {
-    call.messages.iter().map(|m| m.char_count).sum()
+    // Prefer the full-request sum recorded by turn_trace (honest when the
+    // stored `messages` vec was capped). Fall back to summing stored bodies
+    // for older test fixtures that only populated `messages`.
+    if call.context_used_chars > 0 {
+        call.context_used_chars
+    } else {
+        call.messages.iter().map(|m| m.char_count).sum()
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -399,6 +406,7 @@ fn build_trace_lines(
         .last()
         .map(traced_call_context_used_chars)
         .unwrap_or(0);
+    let context_messages_capped = calls.last().is_some_and(|c| c.messages_capped);
     let mut tool_names = dedup_tool_names(&outcome.events);
     for call in calls {
         for name in &call.tool_names {
@@ -420,6 +428,7 @@ fn build_trace_lines(
         evidence_ids,
         context_budget_chars,
         context_used_chars,
+        context_messages_capped,
         tool_names,
         // Prefer the sum of actual backend-call time when a trace sink was
         // active (it is, whenever this function runs); fall back to the
