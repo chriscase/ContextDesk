@@ -186,6 +186,85 @@ impl Envelope<()> {
     }
 }
 
+/// One message from a trace, as it was actually about to be sent — bounded
+/// and redacted upstream (`cd_core::turn_trace`) before this DTO is ever
+/// built. Never the raw pre-redaction content, never a credential, never an
+/// authorization header — those never reach `cd_core::turn_trace` in the
+/// first place (see that module's docs for why).
+#[derive(Debug, Clone, Serialize)]
+pub struct TracedMessageLine {
+    pub role: String,
+    pub content: String,
+    pub char_count: usize,
+    pub truncated: bool,
+}
+
+/// `--trace summary` (also included at `context` and `full`): aggregate
+/// facts about the turn, never message content.
+#[derive(Debug, Clone, Serialize)]
+pub struct TraceSummaryLine {
+    pub provider_profile_id: String,
+    pub chat_model: String,
+    pub corpus_id: Option<String>,
+    pub corpus_revision: Option<u64>,
+    pub dry_run: bool,
+    /// Total chat-history messages after this turn (system + prior + new).
+    pub history_messages: usize,
+    /// Distinct evidence ids cited (see `evidence_ids`).
+    pub retrieved_evidence: usize,
+    /// Stable evidence/citation source ids this turn's answer relied on.
+    pub evidence_ids: Vec<String>,
+    /// This model's resolved context budget, in characters.
+    pub context_budget_chars: usize,
+    /// Characters actually sent in the largest provider call this turn made.
+    pub context_used_chars: usize,
+    /// Distinct tool names offered or called across every round.
+    pub tool_names: Vec<String>,
+    /// Total wall-clock time across every backend call this turn made.
+    pub elapsed_ms: u64,
+    /// `"not_applicable"` (ordinary turn) | `"grounded"` | `"ungrounded"` —
+    /// derived from whether the turn completed cleanly or ended with one of
+    /// the `linked_*` evidence-validation error codes.
+    pub grounding: String,
+}
+
+/// `--trace context` / `--trace full`: one line per provider call this turn
+/// made (one for a dry run, one per round for a real multi-round turn),
+/// carrying the exact bounded, redacted messages and tool names that call
+/// sent — including tool-result messages already folded into history by an
+/// earlier round, which is how "context added between rounds" is visible:
+/// diff consecutive `TraceContext` lines' `messages`.
+#[derive(Debug, Clone, Serialize)]
+pub struct TraceContextLine {
+    /// 0-based order this call was made in.
+    pub round: usize,
+    pub elapsed_ms: u64,
+    pub tool_names: Vec<String>,
+    pub messages: Vec<TracedMessageLine>,
+    /// `"completed"` | `"failed"`.
+    pub outcome: &'static str,
+    pub finish_reason: Option<String>,
+    pub tool_call_count: Option<usize>,
+    /// Redacted error text, only when `outcome == "failed"`.
+    pub error: Option<String>,
+}
+
+/// `--trace full` only (requires `--trace-ack`): one line per tool call this
+/// turn actually made, correlating a bounded (already redacted, already
+/// UI-facing) name/outcome/detail to the round that made it. Reuses exactly
+/// the `Tool` lifecycle data every trace level already has access to via
+/// `StreamEvent::Tool` — no raw tool arguments are captured anywhere in this
+/// turn-tracing feature; only what a real UI would already show for a tool
+/// call is exposed here, correlated rather than dropped.
+#[derive(Debug, Clone, Serialize)]
+pub struct TraceToolLine {
+    pub id: String,
+    pub name: String,
+    pub ok: bool,
+    pub summary: String,
+    pub detail: Option<String>,
+}
+
 /// One line of a `--jsonl` streaming command's output. Every line is a
 /// complete, independently parseable JSON object; a reader must not assume
 /// line count or ordering beyond "the line tagged `done` is last."
@@ -213,6 +292,12 @@ pub enum StreamLine<'a> {
         code: &'a str,
         message: &'a str,
     },
+    /// `--trace summary` (and above). See [`TraceSummaryLine`].
+    TraceSummary(TraceSummaryLine),
+    /// `--trace context` (and `full`). See [`TraceContextLine`].
+    TraceContext(TraceContextLine),
+    /// `--trace full` only. See [`TraceToolLine`].
+    TraceTool(TraceToolLine),
     Done {
         ok: bool,
         session_id: &'a str,

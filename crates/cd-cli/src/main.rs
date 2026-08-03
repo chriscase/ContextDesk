@@ -147,6 +147,15 @@ async fn dispatch(
             .await;
             match result {
                 Ok(()) => 0,
+                // `commands::chat::run` already wrote the correct terminal
+                // JSONL shape on failure (`StreamLine::Error` +
+                // `StreamLine::Done{ok:false}`) before returning this `Err` —
+                // the generic one-shot `Envelope` `emit_error` would print
+                // is not `StreamLine`-tagged and would break "every stdout
+                // line under --jsonl is StreamLine-shaped." Text/Json chat
+                // failures never stream partial output, so they still go
+                // through the shared path.
+                Err(e) if format == OutputFormat::Jsonl => e.category.code(),
                 Err(e) => emit_error(format, "chat", e),
             }
         }
