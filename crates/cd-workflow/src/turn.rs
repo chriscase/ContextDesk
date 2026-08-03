@@ -15,6 +15,7 @@ use cd_core::error::CoreResult;
 use cd_core::events::StreamEvent;
 use cd_core::log_analysis::store::LogCorpus;
 use cd_core::tool_host::ToolHost;
+use cd_core::turn_trace::TurnTraceSink;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -28,6 +29,10 @@ use crate::provider::ResolvedTurnInputs;
 pub struct LinkedCorpusBinding {
     previous_scope: Option<String>,
     previous_active: Option<String>,
+    /// The corpus's event revision at the moment it was bound — a trace/
+    /// dry-run summary's "which corpus content this turn was grounded
+    /// against," since the corpus can keep receiving imports afterward.
+    pub revision: u64,
 }
 
 /// Bind one corpus to the tool host for a linked turn: pin log-tool scope,
@@ -45,12 +50,14 @@ pub fn bind_linked_corpus(
     host.set_log_corpus_scope(Some(corpus_id.to_string()));
     host.set_active_log_corpus(Some(corpus_id.to_string()));
     let corpus = Arc::new(LogCorpus::open(cache_root, corpus_id)?);
+    let revision = corpus.revision();
     host.seed_log_corpus_handle(corpus_id, corpus)?;
     host.pin_log_suppression_lens(corpus_id)?;
 
     Ok(LinkedCorpusBinding {
         previous_scope,
         previous_active,
+        revision,
     })
 }
 
@@ -64,6 +71,11 @@ pub fn unbind_linked_corpus(host: &mut ToolHost, binding: LinkedCorpusBinding) {
 /// [`bind_linked_corpus`], via [`LogExplorerTurnContext::for_main_chat`] — no
 /// viewport, filters, lanes, or selection implied, exactly the "one corpus
 /// attached to a durable chat" shape a CLI needs.
+///
+/// `dry_run` and `trace_sink` pass straight through to
+/// [`cd_core::research::research_turn_with_cancel_and_context_and_checkpoint_and_trace`]
+/// — see that function's docs for exactly what each guarantees. Ordinary
+/// callers that want neither pass `false, None`.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_linked_turn(
     host: &mut ToolHost,
@@ -74,9 +86,11 @@ pub async fn run_linked_turn(
     corpus_id: &str,
     cancel: Option<Arc<AtomicBool>>,
     live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+    dry_run: bool,
+    trace_sink: Option<Arc<dyn TurnTraceSink>>,
 ) -> CoreResult<Vec<StreamEvent>> {
     let context = LogExplorerTurnContext::for_main_chat(corpus_id)?;
-    cd_core::research::research_turn_with_cancel_and_context(
+    cd_core::research::research_turn_with_cancel_and_context_and_checkpoint_and_trace(
         host,
         &resolved.profile,
         resolved.api_key.clone(),
@@ -86,12 +100,21 @@ pub async fn run_linked_turn(
         false,
         cancel,
         Some(context),
+        None,
+        None,
+        None,
+        false,
         live,
+        dry_run,
+        trace_sink,
     )
     .await
 }
 
 /// Run one ordinary (unlinked) turn — no corpus, no log tools scoped.
+///
+/// See [`run_linked_turn`] for `dry_run`/`trace_sink`.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_ordinary_turn(
     host: &mut ToolHost,
     resolved: &ResolvedTurnInputs,
@@ -100,8 +123,10 @@ pub async fn run_ordinary_turn(
     session_id: &str,
     cancel: Option<Arc<AtomicBool>>,
     live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+    dry_run: bool,
+    trace_sink: Option<Arc<dyn TurnTraceSink>>,
 ) -> CoreResult<Vec<StreamEvent>> {
-    cd_core::research::research_turn_with_cancel_and_context(
+    cd_core::research::research_turn_with_cancel_and_context_and_checkpoint_and_trace(
         host,
         &resolved.profile,
         resolved.api_key.clone(),
@@ -111,7 +136,13 @@ pub async fn run_ordinary_turn(
         false,
         cancel,
         None,
+        None,
+        None,
+        None,
+        false,
         live,
+        dry_run,
+        trace_sink,
     )
     .await
 }
