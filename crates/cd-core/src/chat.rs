@@ -538,7 +538,7 @@ impl OpenAiCompatibleClient {
     where
         F: FnMut(StreamDelta),
     {
-        use crate::sse::SseLineDecoder;
+        use crate::sse::{BoundedBodyAccumulator, SseLineDecoder};
         use futures_util::StreamExt;
         use std::sync::atomic::Ordering;
 
@@ -601,7 +601,12 @@ impl OpenAiCompatibleClient {
         }
 
         let mut acc = StreamAccumulator::new();
-        let mut full_body = String::new();
+        // Only needed for the non-SSE-gateway fallback below; stop growing
+        // it once real SSE framing is confirmed. Raw bytes, decoded exactly
+        // once in that fallback — never per chunk, which would corrupt a
+        // multi-byte character split across two reads exactly the way
+        // `SseLineDecoder` avoids for line-oriented data.
+        let mut full_body = BoundedBodyAccumulator::new();
         let mut saw_sse_data = false;
         let mut decoder = SseLineDecoder::new();
         let mut stream = resp.bytes_stream();
@@ -610,10 +615,8 @@ impl OpenAiCompatibleClient {
                 return Err(CoreError::Message("cancelled".into()));
             }
             let bytes = chunk.map_err(|e| CoreError::Message(format!("stream chunk: {e}")))?;
-            // Only needed for the non-SSE-gateway fallback below; stop
-            // growing it once real SSE framing is confirmed.
             if !saw_sse_data {
-                full_body.push_str(&String::from_utf8_lossy(&bytes));
+                full_body.push(&bytes)?;
             }
             for line in decoder.push(&bytes)? {
                 let Some(data) = line.strip_prefix("data:").map(str::trim) else {
@@ -632,7 +635,7 @@ impl OpenAiCompatibleClient {
         // assistant message/tool calls. Detect the absence of any SSE data
         // lines and route the complete body through the non-stream parser.
         if !saw_sse_data {
-            let completion = parse_openai_completion(full_body.trim())?;
+            let completion = parse_openai_completion(full_body.finish()?.trim())?;
             if !completion.content.is_empty() {
                 on_delta(StreamDelta::Text(completion.content.clone()));
             }
@@ -640,7 +643,7 @@ impl OpenAiCompatibleClient {
         }
         // A provider that closes the connection without a trailing newline
         // after its last event — flush whatever line was still pending.
-        if let Some(trailing) = decoder.finish() {
+        if let Some(trailing) = decoder.finish()? {
             if !trailing.trim().is_empty() {
                 let data = trailing
                     .trim()
@@ -1606,7 +1609,7 @@ impl AnthropicClient {
                 }
             }
         }
-        if let Some(trailing) = decoder.finish() {
+        if let Some(trailing) = decoder.finish()? {
             full_body_lines.push(trailing);
         }
         accumulate_anthropic_sse(&full_body_lines.join("\n"))
@@ -2006,6 +2009,27 @@ data: [DONE]
             }
         }
         assert_eq!(acc.into_completion().content, "café 🎉 done");
+    }
+
+    /// The non-SSE "gateway ignored `stream=true`" fallback's exact
+    /// sequence — `BoundedBodyAccumulator::push` per chunk, then `finish`,
+    /// then `parse_openai_completion` — reproduced here the same way
+    /// `sse_text_delta_survives_utf8_character_split_across_chunks` proves
+    /// the line-oriented path: a multi-byte character split across chunk
+    /// boundaries must survive intact through to the parsed completion, not
+    /// corrupt the way a naive per-chunk `String::from_utf8_lossy` (the
+    /// pre-fix behavior for this fallback specifically) would.
+    #[test]
+    fn non_sse_fallback_body_survives_utf8_character_split_across_chunks() {
+        let body = "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"café 🎉 done\"}}]}";
+        let bytes = body.as_bytes();
+        let split_at = body.find('🎉').unwrap() + 1; // land inside the 4-byte emoji
+        let mut acc = crate::sse::BoundedBodyAccumulator::new();
+        for chunk in [&bytes[..split_at], &bytes[split_at..]] {
+            acc.push(chunk).unwrap();
+        }
+        let completion = parse_openai_completion(&acc.finish().unwrap()).unwrap();
+        assert_eq!(completion.content, "café 🎉 done");
     }
 
     /// A delta that carries both `content` (narration) and `tool_calls` in

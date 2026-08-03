@@ -350,3 +350,156 @@ async fn a_pre_set_cancel_flag_aborts_the_stream() {
         .unwrap_err();
     assert!(error.to_string().contains("cancelled"));
 }
+
+/// A gateway that ignores `stream=true` and returns one ordinary JSON
+/// completion body — the non-SSE fallback — must decode multi-byte UTF-8
+/// content correctly. The byte-exact chunk-boundary-splitting case for this
+/// same fallback is covered deterministically at the `cd_core::sse` unit
+/// level (`BoundedBodyAccumulator`'s own tests), since real TCP can't be
+/// forced to split at a byte-exact offset; this proves the REAL
+/// `complete_stream_cb` production path gets the content right end to end.
+#[tokio::test]
+async fn non_sse_json_fallback_decodes_multi_byte_utf8_content_correctly() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_raw(
+                    "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"caf\u{e9} \u{1f389} \u{65e5}\u{672c}\u{8a9e}\"}}]}".to_string(),
+                    "application/json",
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let completion = client(&server.uri())
+        .complete_stream_cb(&one_user_message("hi"), None, |_| {}, None)
+        .await
+        .unwrap();
+    assert_eq!(completion.content, "café 🎉 日本語");
+}
+
+/// Genuinely invalid UTF-8 (not a chunk-boundary artifact — this is the
+/// whole, complete SSE line, delivered as one HTTP response body) must fail
+/// closed rather than silently becoming replacement characters.
+#[tokio::test]
+async fn invalid_utf8_in_an_sse_line_fails_closed_not_lossy() {
+    let server = MockServer::start().await;
+    let mut body = b"data: {\"choices\":[{\"delta\":{\"content\":\"".to_vec();
+    body.extend_from_slice(&[0xFF, 0xFE]); // never valid UTF-8
+    body.extend_from_slice(b"\"}}]}\n\ndata: [DONE]\n\n");
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(body, "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+
+    let error = client(&server.uri())
+        .complete_stream_cb(&one_user_message("hi"), None, |_| {}, None)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("not valid UTF-8"), "{error}");
+}
+
+/// The non-SSE fallback body must fail closed on invalid UTF-8 too, not
+/// just the line-oriented SSE path.
+#[tokio::test]
+async fn invalid_utf8_in_a_non_sse_body_fails_closed_not_lossy() {
+    let server = MockServer::start().await;
+    let mut body = b"{\"choices\":[{\"message\":{\"content\":\"".to_vec();
+    body.extend_from_slice(&[0xFF, 0xFE]);
+    body.extend_from_slice(b"\"}}]}");
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_raw(body, "application/json"),
+        )
+        .mount(&server)
+        .await;
+
+    let error = client(&server.uri())
+        .complete_stream_cb(&one_user_message("hi"), None, |_| {}, None)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("not valid UTF-8"), "{error}");
+}
+
+/// A connection that closes (or a gateway that simply stops writing) mid
+/// JSON object, with no trailing newline after the incomplete `data:` line
+/// — the truncated-mid-object case. The trailing bytes ARE valid UTF-8 (this
+/// is testing JSON truncation specifically, not the UTF-8 guarantee above),
+/// so the flush path's attempt to parse it as JSON must fail cleanly rather
+/// than panic or silently drop the truncated event.
+#[tokio::test]
+async fn truncated_mid_json_object_with_no_trailing_newline_fails_cleanly() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"complete first\"}}]}\n\n\
+                     data: {\"choices\":[{\"delta\":{\"content\":\"cut off mid-obje"
+                        .to_string(),
+                    "text/event-stream",
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let mut live_texts = Vec::new();
+    let error = client(&server.uri())
+        .complete_stream_cb(
+            &one_user_message("hi"),
+            None,
+            |d| {
+                if let StreamDelta::Text(t) = d {
+                    live_texts.push(t);
+                }
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("sse json"), "{error}");
+    assert_eq!(
+        live_texts,
+        vec!["complete first".to_string()],
+        "the complete event before the truncation must still have been delivered live"
+    );
+}
+
+/// The same truncation, but for the non-SSE whole-body fallback: a plain
+/// JSON completion response that is simply cut off before the closing
+/// brace. Must fail with a clean parse error, not a panic.
+#[tokio::test]
+async fn truncated_non_sse_json_body_fails_cleanly() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_raw(
+                    "{\"choices\":[{\"message\":{\"content\":\"cut off",
+                    "application/json",
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let error = client(&server.uri())
+        .complete_stream_cb(&one_user_message("hi"), None, |_| {}, None)
+        .await
+        .unwrap_err();
+    assert!(!error.to_string().is_empty());
+}
