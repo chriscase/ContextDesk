@@ -1,10 +1,14 @@
 # ContextDesk CLI
 
-`cd-cli` (binary: `contextdesk`) is a thin adapter over `cd_workflow` — the
-same host-neutral orchestration layer the desktop app uses for import,
-timezone handling, corpus persistence, retrieval, and grounded chat. It
-never re-derives that logic; see `crates/cd-workflow/src/lib.rs` for the
-architectural invariant.
+`cd-cli` (binary: `contextdesk`) is a thin adapter over `cd_workflow`, which
+packages host-neutral operations around the production `cd_core` engine. The
+CLI and desktop share that lower-level engine for source selection, ingest,
+timezone handling, corpus persistence, retrieval, and the grounded agent
+loop. The desktop currently delegates provider selection to `cd_workflow`,
+while its import and `agent_turn` commands retain Tauri-specific orchestration
+and call `cd_core` directly. See [Architecture](#architecture) for the exact
+boundary; the hosts share the behavior kernel, but not yet every workflow
+wrapper.
 
 ## Happy path
 
@@ -376,31 +380,72 @@ closed as a `conflict` rather than partially applying.
 ## Known limitations (tracked, not silent)
 
 - `import --embed` is accepted by the grammar but returns `not_implemented`
+  — `cd_workflow::import::default_import_with_observer` always ingests with
+  no embedding. Import without `--embed`, then embed via the desktop app.
 - `corpus rename` only changes the cosmetic display name
+  (`cd_core::log_analysis::LogCorpus::rename`) — never identity, ingest data,
+  or citations.
 - No cross-corpus search — `explore`/`context` operate on one corpus at a
+  time, matching every `cd_core::log_analysis` search API's shape.
 - `chat` runs an ordinary or corpus-linked turn through
+  `cd_workflow::chat::run_chat_workflow`; it does not yet expose the desktop
+  app's fuller tool surface (clustering, timeline, anomalies) as CLI
+  subcommands of their own.
 - `chat --dry-run` forces ambient-memory recall off even when the profile
+  would otherwise use it. Durable-memory injection embeds the query, and an
+  `EmbedBackend` can itself be remote, which would violate the guarantee that
+  no provider request occurs. A dry-run trace can therefore omit ambient-memory
+  content that a real turn with the same profile would include.
 - `chat --trace full` does not capture raw JSON tool-call *arguments* — only
-- `chat --trace`'s round/call model is per backend call, not a labeled
-- Reviewed-format auto-apply during import requires an UNAMBIGUOUS content
-- Ctrl-C cancellation is handled once per `import` invocation (a single
-- `config init`'s credential storage (OS keychain) and its `AppConfig` /
+  the same id/name/ok/summary/detail a UI's tool lifecycle display already
+  has. Adding argument capture would require growing the `StreamEvent`
+  protocol itself.
+- `chat --trace` records backend calls in order but does not label a call as
+  a genuine next round versus a capability-driven retry; both appear as
+  `trace_context` lines.
+- Reviewed-format auto-apply during import requires an unambiguous content
+  match (`select_format` returns `Selected`, not `Conflict` or `NoMatch`). A
+  tie or stale saved format leaves that source unbound rather than guessing;
+  `reviewed_formats_applied` and `reviewed_format_warnings` report the result.
+- Ctrl-C cancellation is handled once per `import` invocation. A second
+  Ctrl-C while cleanup is still running falls through to the OS default
+  instead of starting another graceful stage. Staging cleanup remains safe
+  through `Drop`, and any orphan is swept by the next import.
+- `config init` writes the filesystem config and OS keychain through two
+  systems without a shared transaction. It deliberately writes the keychain
+  last, so rejected configuration never stores an orphaned credential. If
+  the keychain write itself fails after both config files land, re-run
+  `config init --force` with the same profile id to repair the reference.
 - `--data-dir` isolates filesystem state only. Provider credentials always
+  live in the OS keychain. The generated profile id is scoped by data dir,
+  but an explicit `--profile-id` opts out by design; `xai-grok-build` uses a
+  machine-wide session that cannot be isolated and is therefore refused by
+  `--check-connection` under an isolated data directory.
+- The desktop Tauri `agent_turn` command does not yet call
+  `cd_workflow::chat::run_chat_workflow`, and the desktop does not consume
+  CLI trace output. Both hosts use the same `cd_core` research/agent kernel;
+  converging the remaining host orchestration is separate follow-up work.
 
 ## Architecture
 
 ```
-React → thin Tauri adapter ─┐
-                             ├─► cd_workflow (shared, host-neutral) → cd_core
-CLI  → thin CLI adapter   ──┘
+React → Tauri host ───────────────► cd_core production engine
+           └─ provider helpers ──► cd_workflow::provider ──► cd_core
+
+CLI ──► cd_workflow (host-neutral workflows) ─────────────► cd_core
 ```
 
-`cd-cli` calls `cd_workflow::{import, chat, provider, turn, tools}` for
-every behavior those modules already own. The Tauri desktop host's
+`cd-cli` calls `cd_workflow::{import, timezone, chat, provider, turn, tools}`
+for every behavior those modules own. The Tauri desktop host's
 provider-selection helpers (`provider_profile_for_turn`,
 `model_tools_disabled_reason`, `model_tools_enabled` in
-`desktop/src-tauri/src/lib.rs`) delegate to `cd_workflow::provider` for the
-same reason — both hosts share one implementation, not two that merely
-look equivalent. `crates/cd-cli/tests/cli_workflow_parity.rs` exercises the
-CLI binary end to end against a mock provider to prove the adapter stays
-thin.
+`desktop/src-tauri/src/lib.rs`) also delegate to `cd_workflow::provider`, and
+an architecture test guards that boundary. Desktop import and chat still
+wrap `cd_core` directly because they own Tauri-specific admission, streaming,
+skills, window state, and review UI lifecycle.
+
+`crates/cd-cli/tests/cli_workflow_parity.rs` and
+`crates/cd-cli/tests/import_production_cli.rs` exercise the CLI adapter end to
+end, while `crates/cd-workflow/tests/import_production.rs` exercises shared
+import/timezone behavior against synthetic ZIP fixtures. The claim is shared
+production logic, not identical host orchestration.
