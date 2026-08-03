@@ -48,6 +48,42 @@ both hosts read: `~/.contextdesk/config.json`, `~/.contextdesk/cache/`,
 `~/.contextdesk/sessions/`. A corpus imported from one host is immediately
 visible from the other.
 
+## Repeatable provider rehearsal
+
+`scripts/cli-live-provider-rehearsal.sh` is a public, data-free acceptance
+rehearsal for the full CLI story. Its generated ZIP contains two synthetic
+JSON log events plus one binary attachment, so the run proves automatic
+selection as well as import, exploration, context assembly, and trace
+rendering. It never reads an existing corpus or log source.
+
+The default offline mode makes no provider request:
+
+```bash
+scripts/cli-live-provider-rehearsal.sh
+```
+
+Live mode copies only `config.json` from an already configured ContextDesk
+data directory into a disposable profile. Credentials remain in the OS
+keychain; corpus and session state from the source profile are neither read
+nor changed. It then performs two corpus-linked questions in one durable
+session and fails unless both turns execute a successful native
+`search_logs` call, finish grounded, emit valid full-trace JSONL, and retain
+the same session id:
+
+```bash
+CONTEXTDESK_REHEARSAL_MODE=live \
+CONTEXTDESK_REHEARSAL_DATA_DIR="$HOME/.contextdesk" \
+scripts/cli-live-provider-rehearsal.sh
+```
+
+Set `CONTEXTDESK_REHEARSAL_BIN` to test a particular built binary and
+`CONTEXTDESK_REHEARSAL_KEEP=1` to retain the disposable reports. The
+deterministic companion test
+`cargo test -p cd-cli --test live_provider_rehearsal` uses a local mock
+gateway and additionally covers two GPT-OSS/OpenAI-compatible variations:
+decoded object-shaped tool arguments and a gateway that returns ordinary
+JSON despite `stream=true`.
+
 ## Isolated profiles (`--data-dir` / `--profile-dir`)
 
 ```bash

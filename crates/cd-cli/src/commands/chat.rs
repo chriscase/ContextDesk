@@ -289,12 +289,21 @@ fn emit_jsonl(event: &StreamEvent) {
     let line = match event {
         StreamEvent::TextDelta { text } => Some(crate::envelope::StreamLine::TextDelta { text }),
         StreamEvent::Tool {
-            name, ok, summary, ..
+            name,
+            phase: cd_core::events::ToolPhase::Finished,
+            ok,
+            summary,
+            ..
         } => Some(crate::envelope::StreamLine::Tool {
             name,
             ok: ok.unwrap_or(false),
             summary,
         }),
+        // A Started event has no outcome yet. Rendering its absent `ok` as
+        // false makes one successful tool call look like a failure followed
+        // by a success. JSONL exposes only the terminal tool outcome; full
+        // lifecycle detail remains available through trace_tool.
+        StreamEvent::Tool { .. } => None,
         StreamEvent::PermissionRequired {
             tool_name,
             target,

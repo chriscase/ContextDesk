@@ -57,6 +57,7 @@ Out of scope:
 | Ordinary chat isolation | **Shipped** | [`agent.rs`](../../../crates/cd-core/src/agent.rs) and [context assembly method](DETERMINISTIC_CONTEXT_ASSEMBLY.md) | Repeat native proof per supported host |
 | Tools-disabled linked-chat refusal | **Shipped** | [`research.rs`](../../../crates/cd-core/src/research.rs) | Cannot pass a grounded linked-log evaluation |
 | Tools-enabled provider/model evaluation | **Partial** | Bounded tool loop and evidence validation ship in [`agent.rs`](../../../crates/cd-core/src/agent.rs) | Requires a real tools-enabled profile; provider quality is environment-dependent |
+| CLI ZIP-to-two-turn provider rehearsal | **Local integration** | Data-free [`cli-live-provider-rehearsal.sh`](../../../scripts/cli-live-provider-rehearsal.sh) plus compiled-binary gateway variation proof in [`live_provider_rehearsal.rs`](../../../crates/cd-cli/tests/live_provider_rehearsal.rs) | A real provider run remains explicit and environment-dependent; offline mode proves no model quality |
 | Quick in-app demo guide | **Local integration** | [demo Help page](../../help/log-analysis/demo-datasets.md), explicit fenced-command copy, and #732 optional first-run 25k install | Other fixtures and optional metrics remain source-checkout inputs |
 | Deep in-app handbook chapter/export | **Shipped** | This chapter, [`handbook.rs`](../../../desktop/src-tauri/src/handbook.rs), current-main proof on #719 | Live provider evaluation remains environment-dependent |
 
@@ -307,6 +308,17 @@ Open a corpus-linked chat. If the selected profile reports tools unavailable,
 pass the capability-control check only if the turn stops honestly before
 provider contact and tells the user to select/configure a tools-enabled
 profile. That profile cannot proceed to the grounded-quality score.
+
+The local CLI rehearsal packages this control as an executable acceptance
+path. Offline mode proves ZIP selection/import, deterministic exploration,
+bounded context, and zero-network dry-run tracing. Live mode uses only its
+generated synthetic records, requires two successful native `search_logs`
+rounds in one durable session, and accepts the provider run only when both
+trace summaries say `grounded`. Its deterministic gateway double also guards
+two compatibility edges common in local OpenAI-compatible deployments:
+object-shaped function arguments and a complete JSON response despite a
+streaming request. This is local integration evidence until promoted; it does
+not turn an untested provider/model into a shipped compatibility claim.
 
 **Portable input/output:** an explicit ordinary/linked binding and
 host-observed provider capabilities produce either an eligible bounded tool
