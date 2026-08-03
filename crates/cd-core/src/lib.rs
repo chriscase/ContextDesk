@@ -69,6 +69,7 @@ pub mod session_context;
 pub mod sessions;
 pub mod skills;
 pub mod sql_ro;
+pub mod sse;
 pub mod ssrf;
 pub mod text;
 pub mod tool_host;
