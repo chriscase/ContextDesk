@@ -17,5 +17,6 @@ pub mod chat;
 pub mod import;
 pub mod provider;
 pub mod session;
+pub mod timezone;
 pub mod tools;
 pub mod turn;
