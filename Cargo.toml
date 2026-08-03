@@ -4,7 +4,7 @@ members = [
     "crates/cd-core",
     "crates/cd-server",
     "crates/cd-workflow",
-    # "crates/cd-cli",  # added once the crate exists
+    "crates/cd-cli",
     # "desktop/src-tauri",  # nested after scaffold
 ]
 
