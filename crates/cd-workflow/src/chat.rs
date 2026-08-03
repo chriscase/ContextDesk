@@ -475,7 +475,6 @@ mod tests {
     /// contains non-ASCII text a naive per-chunk UTF-8 decode would have
     /// corrupted at a chunk boundary in the streaming path this exercises.
     #[tokio::test]
-    #[ignore = "requires CLI-tip SSE combined-delta core not composed onto activity base"]
     async fn run_chat_workflow_preserves_combined_content_and_tool_call_with_non_ascii_text() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use wiremock::{Request, Respond};
