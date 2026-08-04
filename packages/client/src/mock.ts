@@ -315,7 +315,14 @@ export class MockEngineClient implements EngineClient {
       }
       const corpusId = "mock-corpus-0001";
       this.#corpora.set(corpusId, { revision: 1, declarations: {} });
-      const unresolvedSources = importable.filter((identity) => identity.endsWith(".log"));
+      // The mock's raw-fallback source deliberately has no parser-validated
+      // timestamp. A `.log` suffix alone must not manufacture a timezone
+      // decision; the real confidence builder likewise offers review only
+      // when it retained unresolved local timestamp evidence.
+      const unresolvedSources = importable.filter((identity) => {
+        const item = this.#preview.items.find((candidate) => candidate.identity === identity);
+        return identity.endsWith(".log") && item?.status !== "raw_fallback";
+      });
       const notSelected =
         importableLogIdentities(this.#preview).length - importable.length;
       return {

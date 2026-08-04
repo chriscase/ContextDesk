@@ -67,6 +67,26 @@ describe("mock engine client determinism", () => {
     expect(report.exclusionCounts).toEqual({ not_selected: 1 });
   });
 
+  it("does not invent timezone evidence from a raw-fallback log name", async () => {
+    const client = createMockEngineClient();
+    const plan = await client.import.preview("/incidents");
+    const report = await client.import.run({
+      path: "/incidents",
+      planToken: plan.planToken,
+      planVersion: plan.planVersion,
+      selected: IMPORTABLE_LOG_IDENTITIES,
+    });
+    expect(report.confidence.sources.map((source) => source.source)).toEqual([
+      "api/api-gateway.log",
+      "support.zip!/host-a.zip!/logs/app.log",
+    ]);
+    expect(
+      report.confidence.sources.some(
+        (source) => source.source === "logs/console-fallback.log",
+      ),
+    ).toBe(false);
+  });
+
   it("scripted failure emits a failed phase and preserves the message", async () => {
     const client = createMockEngineClient({ failNextRun: "disk full while staging" });
     const phases: string[] = [];
