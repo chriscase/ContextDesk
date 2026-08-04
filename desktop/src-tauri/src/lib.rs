@@ -5645,6 +5645,11 @@ fn forget_session_activity(state: State<'_, AppState>, session_id: String) -> Re
         .lock()
         .map_err(|_| "Activity storage is temporarily unavailable".to_string())?;
     store.forget_session(&session_id);
+    if let Ok(dir) = ensure_config_dir(&state.branding) {
+        if let Ok(journal) = cd_core::activity::DurableActivityJournal::open(&dir) {
+            let _ = journal.forget_session(&session_id);
+        }
+    }
     Ok(())
 }
 
@@ -5696,14 +5701,23 @@ fn record_turn_activity(
     // `linked_required_source_missing`) as Error codes while the turn
     // completes with reason "stop". See `cd_core::activity::status_for_turn_events`.
     let status = match result {
-        Ok(events) => cd_core::activity::status_for_turn_events(events),
+        Ok(events) => {
+            recorder.record_stream_events(events);
+            cd_core::activity::status_for_turn_events(events)
+        }
         Err(_) => ActivityStatus::Failed,
     };
     let elapsed_ms = u64::try_from(turn_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
     let mut record: TurnActivityRecord = recorder.finish(status, elapsed_ms);
     record.message_id = Some(message_id.to_string());
     if let Ok(mut store) = state.activity.lock() {
-        store.insert(&req.session_id, message_id, record);
+        store.insert(&req.session_id, message_id, record.clone());
+    }
+    // Bounded redacted sidecar — Summary only; restart can hydrate metadata.
+    if let Ok(dir) = ensure_config_dir(&state.branding) {
+        if let Ok(journal) = cd_core::activity::DurableActivityJournal::open(&dir) {
+            let _ = journal.save_record(&record);
+        }
     }
 }
 
@@ -12130,7 +12144,17 @@ pub fn run() {
         ),
         chat_session_mutation: Mutex::new(()),
         investigation_mutation: Mutex::new(()),
-        activity: Mutex::new(cd_core::activity::ActivityStore::default()),
+        activity: Mutex::new({
+            let mut store = cd_core::activity::ActivityStore::default();
+            // Restart hydration: load bounded Summary-only records from disk.
+            // Use Branding::embedded() again — `branding` is moved into this struct.
+            if let Ok(dir) = ensure_config_dir(&Branding::embedded()) {
+                if let Ok(journal) = cd_core::activity::DurableActivityJournal::open(&dir) {
+                    let _ = journal.hydrate_store(&mut store);
+                }
+            }
+            store
+        }),
         cancels: Mutex::new(HashMap::new()),
         active_turn_owners: Mutex::new(HashMap::new()),
         next_turn_owner: std::sync::atomic::AtomicU64::new(0),

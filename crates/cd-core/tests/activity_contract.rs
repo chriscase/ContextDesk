@@ -663,3 +663,206 @@ fn capture_defaults_to_metadata_only_and_config_files_predating_it_load() {
     assert!(settings.enabled);
     assert!(!settings.retain_context_bodies);
 }
+
+// ---------------------------------------------------------------------
+// Stream-event projection (tools, permissions, retrieval) + durability
+// ---------------------------------------------------------------------
+
+#[test]
+fn stream_tools_and_permissions_are_recorded_as_metadata_only() {
+    use cd_core::events::{StreamEvent, ToolPhase};
+    let mut rec = ActivityRecorder::new(
+        "turn-stream",
+        SESSION,
+        DataScope::conversation(),
+        ActivityDetailLevel::Summary,
+    );
+    rec.record_stream_events(&[
+        StreamEvent::Tool {
+            id: "t1".into(),
+            name: "search_logs".into(),
+            phase: ToolPhase::Started,
+            summary: "query".into(),
+            detail: Some("should stay summary-safe".into()),
+            ok: None,
+        },
+        StreamEvent::Tool {
+            id: "t1".into(),
+            name: "search_logs".into(),
+            phase: ToolPhase::Finished,
+            summary: "3 hits".into(),
+            detail: None,
+            ok: Some(true),
+        },
+        StreamEvent::PermissionRequired {
+            request_id: "p1".into(),
+            tool_name: "write_file".into(),
+            target: "notes.md".into(),
+            reason: "model wants to write SECRET sk-leaked-token-here".into(),
+            preview: "draft body with sk-leaked-token-here".into(),
+            risk: "local".into(),
+            arguments: serde_json::json!({"path": "notes.md", "content": "sk-leaked"}),
+        },
+        StreamEvent::SearchTrail {
+            steps: vec!["memory".into(), "workspace".into()],
+        },
+    ]);
+    let finished = rec.finish(ActivityStatus::Ok, 50);
+    assert!(
+        finished
+            .events
+            .iter()
+            .any(|e| e.operation_id.starts_with("tool-") && e.phase == ActivityPhase::Completed),
+        "tool finish must be present"
+    );
+    let perm = finished
+        .events
+        .iter()
+        .find(|e| e.operation_id.starts_with("permission-"))
+        .expect("permission event");
+    assert_eq!(perm.origin, ActivityOrigin::UserDecision);
+    assert_eq!(perm.determinism, Determinism::Human);
+    // Reason/preview/arguments must not leak into detail.
+    let detail = perm.detail.as_deref().unwrap_or("");
+    assert!(
+        !detail.contains("sk-leaked"),
+        "permission detail must not carry secret-bearing preview: {detail}"
+    );
+    let retrieval = finished
+        .events
+        .iter()
+        .find(|e| e.label.contains("Retrieval"))
+        .expect("retrieval");
+    assert_eq!(retrieval.origin, ActivityOrigin::RepeatableHeuristic);
+    assert_eq!(retrieval.determinism, Determinism::Repeatable);
+}
+
+#[test]
+fn durable_journal_survives_restart_and_strips_bodies() {
+    use cd_core::activity::{
+        strip_bodies_for_durability, DurableActivityJournal, PrivacyClass, ContextMetadata,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let journal = DurableActivityJournal::open(dir.path()).expect("open journal");
+
+    let mut record = ActivityRecorder::new(
+        "turn-d",
+        "sess-d",
+        DataScope::conversation(),
+        ActivityDetailLevel::Full,
+    )
+    .finish(ActivityStatus::Ok, 9);
+    record.message_id = Some("msg-d".into());
+    // Inject a body that must not survive durability.
+    if let Some(event) = record.events.first_mut() {
+        event.privacy = PrivacyClass::RedactedContent;
+        event.context = Some(ContextMetadata {
+            round: 0,
+            message_count: 1,
+            context_used_chars: 12,
+            messages_capped: false,
+            tool_names: vec![],
+            roles: vec![],
+            bodies: Some(vec![cd_core::turn_trace::TracedMessage {
+                role: "user".into(),
+                content: "prompt body must not be durable".into(),
+                char_count: 30,
+                truncated: false,
+            }]),
+        });
+    } else {
+        // finish with no events — push a synthetic one via recorder properly
+        let mut rec = ActivityRecorder::new(
+            "turn-d",
+            "sess-d",
+            DataScope::conversation(),
+            ActivityDetailLevel::Summary,
+        );
+        rec.push(cd_core::activity::ActivityEvent {
+            turn_id: String::new(),
+            operation_id: "op".into(),
+            seq: 0,
+            elapsed_ms: 1,
+            phase: ActivityPhase::Completed,
+            status: ActivityStatus::Ok,
+            origin: ActivityOrigin::ProbabilisticModel,
+            determinism: Determinism::Probabilistic,
+            label: "Model request".into(),
+            detail: None,
+            trigger: ActivityTrigger::UserMessage,
+            scope: DataScope::conversation(),
+            evidence: vec![],
+            privacy: PrivacyClass::RedactedContent,
+            context: Some(ContextMetadata {
+                round: 0,
+                message_count: 1,
+                context_used_chars: 12,
+                messages_capped: false,
+                tool_names: vec![],
+                roles: vec![],
+                bodies: Some(vec![cd_core::turn_trace::TracedMessage {
+                    role: "user".into(),
+                    content: "prompt body must not be durable".into(),
+                    char_count: 30,
+                    truncated: false,
+                }]),
+            }),
+        });
+        record = rec.finish(ActivityStatus::Ok, 9);
+        record.message_id = Some("msg-d".into());
+    }
+
+    journal.save_record(&record).expect("save");
+
+    // Fresh store — simulate restart.
+    let mut store = ActivityStore::default();
+    let n = journal.hydrate_store(&mut store).expect("hydrate");
+    assert!(n >= 1, "hydrated {n}");
+    let loaded = store.get("sess-d", "msg-d").expect("loaded");
+    for e in &loaded.events {
+        if let Some(ctx) = &e.context {
+            assert!(ctx.bodies.is_none(), "durable load must strip bodies");
+        }
+        assert_ne!(e.privacy, PrivacyClass::RedactedContent);
+    }
+
+    // Secret-like content is refused.
+    let mut bad = record.clone();
+    bad.events[0].detail = Some("Authorization: Bearer sk-evil".into());
+    assert!(journal.save_record(&bad).is_err());
+
+    // Forget session removes file.
+    journal.forget_session("sess-d").expect("forget");
+    let mut store2 = ActivityStore::default();
+    let n2 = journal.hydrate_store(&mut store2).expect("hydrate empty");
+    assert_eq!(store2.get("sess-d", "msg-d"), None);
+    let _ = n2;
+    let _ = strip_bodies_for_durability;
+}
+
+#[test]
+fn cancellation_status_is_not_ok() {
+    assert_eq!(
+        cd_core::activity::status_for_turn_reason("cancel"),
+        ActivityStatus::Cancelled
+    );
+    assert_eq!(
+        cd_core::activity::status_for_turn_reason("cancelled"),
+        ActivityStatus::Cancelled
+    );
+    assert_ne!(
+        cd_core::activity::status_for_turn_reason("cancel"),
+        ActivityStatus::Ok
+    );
+}
+
+#[test]
+fn activity_and_customer_scopes_are_not_merged() {
+    let log = DataScope::log_corpus("corpus-abc");
+    let chat = DataScope::conversation();
+    assert_ne!(log.kind, chat.kind);
+    assert_eq!(log.kind, DataScopeKind::LogCorpus);
+    // Correlation is scope id, not a shared wall clock.
+    assert_eq!(log.id.as_deref(), Some("corpus-abc"));
+    assert!(chat.id.is_none());
+}

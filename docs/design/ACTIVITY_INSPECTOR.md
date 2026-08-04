@@ -1,7 +1,8 @@
 # Activity Inspector — contract and capture seam
 
-Status: **backend contract + capture seam landed, and the desktop UI now
-reads it live. Durable persistence remains an explicit residual.**
+Status: **backend contract + capture seam + desktop UI live. Bounded
+durable sidecar journal (Summary-only) hydrates across restart; tool /
+permission / retrieval stream events are projected as metadata.**
 
 The Activity Inspector answers one question about a finished turn: *what
 actually happened, and how much should I trust each step?* This document

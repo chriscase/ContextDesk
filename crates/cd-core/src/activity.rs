@@ -588,6 +588,139 @@ impl ActivityRecorder {
         }
     }
 
+    /// Project host stream events (tools, permissions, search trail, errors)
+    /// into activity steps. Only metadata / already-UI-facing summaries —
+    /// never raw tool arguments or permission previews (those can hold
+    /// unredacted draft content).
+    pub fn record_stream_events(&mut self, events: &[crate::events::StreamEvent]) {
+        use crate::events::{StreamEvent, ToolPhase};
+        for event in events {
+            match event {
+                StreamEvent::Tool {
+                    id,
+                    name,
+                    phase,
+                    summary,
+                    detail,
+                    ok,
+                } => {
+                    let (phase_a, status) = match phase {
+                        ToolPhase::Started => (ActivityPhase::Started, ActivityStatus::Pending),
+                        ToolPhase::Finished => (
+                            ActivityPhase::Completed,
+                            if ok.unwrap_or(false) {
+                                ActivityStatus::Ok
+                            } else {
+                                ActivityStatus::Failed
+                            },
+                        ),
+                    };
+                    self.push(ActivityEvent {
+                        turn_id: String::new(),
+                        operation_id: format!("tool-{id}"),
+                        seq: 0,
+                        elapsed_ms: 0,
+                        phase: phase_a,
+                        status,
+                        origin: ActivityOrigin::DeterministicHost,
+                        determinism: Determinism::Deterministic,
+                        label: format!("Tool {name}"),
+                        detail: Some(bound_chars(summary, MAX_ACTIVITY_DETAIL_CHARS)).filter(|s| {
+                            !s.is_empty()
+                        }).or_else(|| {
+                            detail
+                                .as_ref()
+                                .map(|d| bound_chars(d, MAX_ACTIVITY_DETAIL_CHARS))
+                        }),
+                        trigger: ActivityTrigger::ModelRequest { round: 0 },
+                        scope: self.scope.clone(),
+                        evidence: Vec::new(),
+                        privacy: PrivacyClass::Metadata,
+                        context: None,
+                    });
+                }
+                StreamEvent::PermissionRequired {
+                    request_id,
+                    tool_name,
+                    target,
+                    risk,
+                    ..
+                } => {
+                    // Deliberately ignore `reason`, `preview`, and `arguments` —
+                    // those can carry unredacted draft content.
+                    self.push(ActivityEvent {
+                        turn_id: String::new(),
+                        operation_id: format!("permission-{request_id}"),
+                        seq: 0,
+                        elapsed_ms: 0,
+                        phase: ActivityPhase::Started,
+                        status: ActivityStatus::Pending,
+                        origin: ActivityOrigin::UserDecision,
+                        determinism: Determinism::Human,
+                        label: format!("Permission: {tool_name}"),
+                        detail: Some(bound_chars(
+                            &format!("target={target}; risk={risk}"),
+                            MAX_ACTIVITY_DETAIL_CHARS,
+                        )),
+                        trigger: ActivityTrigger::UserDecision,
+                        scope: self.scope.clone(),
+                        evidence: Vec::new(),
+                        privacy: PrivacyClass::Metadata,
+                        context: None,
+                    });
+                }
+                StreamEvent::SearchTrail { steps } => {
+                    let n = steps.len();
+                    self.push(ActivityEvent {
+                        turn_id: String::new(),
+                        operation_id: format!("retrieval-trail-{}", self.seq),
+                        seq: 0,
+                        elapsed_ms: 0,
+                        phase: ActivityPhase::Completed,
+                        status: ActivityStatus::Ok,
+                        origin: ActivityOrigin::RepeatableHeuristic,
+                        determinism: Determinism::Repeatable,
+                        label: format!("Retrieval trail ({n} step(s))"),
+                        detail: None, // step text may echo user content
+                        trigger: ActivityTrigger::HostPolicy,
+                        scope: self.scope.clone(),
+                        evidence: Vec::new(),
+                        privacy: PrivacyClass::Metadata,
+                        context: None,
+                    });
+                }
+                StreamEvent::Citation {
+                    source_id,
+                    label,
+                    locator,
+                } => {
+                    self.push(ActivityEvent {
+                        turn_id: String::new(),
+                        operation_id: format!("citation-{source_id}"),
+                        seq: 0,
+                        elapsed_ms: 0,
+                        phase: ActivityPhase::Completed,
+                        status: ActivityStatus::Ok,
+                        origin: ActivityOrigin::DeterministicHost,
+                        determinism: Determinism::Deterministic,
+                        label: format!("Citation: {label}"),
+                        detail: locator.clone().map(|l| bound_chars(&l, MAX_ACTIVITY_DETAIL_CHARS)),
+                        trigger: ActivityTrigger::HostPolicy,
+                        scope: self.scope.clone(),
+                        evidence: vec![EvidenceRef {
+                            kind: "citation".into(),
+                            id: source_id.clone(),
+                            locator: locator.clone(),
+                        }],
+                        privacy: PrivacyClass::Metadata,
+                        context: None,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Finish, producing the record.
     ///
     /// `status` is the turn's terminal status as the host determined it —
@@ -945,4 +1078,251 @@ impl ActivityStore {
         self.records.clear();
         self.order.clear();
     }
+
+    /// Snapshot every held record as `(session_id, message_id, record)`.
+    pub fn entries(&self) -> Vec<(String, String, TurnActivityRecord)> {
+        self.order
+            .iter()
+            .filter_map(|key| {
+                self.records
+                    .get(key)
+                    .map(|r| (key.session_id.clone(), key.message_id.clone(), r.clone()))
+            })
+            .collect()
+    }
+}
+
+/// Maximum UTF-8 bytes for one session's durable activity file.
+pub const MAX_DURABLE_ACTIVITY_FILE_BYTES: usize = 512 * 1024;
+
+/// Maximum durable records retained per session on disk.
+pub const MAX_DURABLE_ACTIVITY_RECORDS_PER_SESSION: usize = 100;
+
+/// Sidecar journal under `{data_dir}/activity/<session_id>.json`.
+///
+/// Stores **Summary-only** records (bodies stripped) so a restart can restore
+/// metadata without rehydrating redacted prompt text. Atomic write
+/// (temp + rename). Unknown schema versions load as empty rather than
+/// inventing meaning.
+#[derive(Debug, Clone)]
+pub struct DurableActivityJournal {
+    /// Directory that holds per-session JSON files.
+    root: std::path::PathBuf,
+    max_records: usize,
+    max_file_bytes: usize,
+}
+
+impl DurableActivityJournal {
+    /// Open (or create) the journal root under `data_dir/activity`.
+    pub fn open(data_dir: &std::path::Path) -> crate::error::CoreResult<Self> {
+        let root = data_dir.join("activity");
+        std::fs::create_dir_all(&root).map_err(|e| {
+            crate::error::CoreError::Message(format!("activity journal mkdir: {e}"))
+        })?;
+        Ok(Self {
+            root,
+            max_records: MAX_DURABLE_ACTIVITY_RECORDS_PER_SESSION,
+            max_file_bytes: MAX_DURABLE_ACTIVITY_FILE_BYTES,
+        })
+    }
+
+    fn path_for(&self, session_id: &str) -> std::path::PathBuf {
+        // Session ids are opaque UUIDs / host keys — still refuse path separators.
+        let safe: String = session_id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        self.root.join(format!("{safe}.json"))
+    }
+
+    /// Persist one record for its session (Summary-only, bounded).
+    pub fn save_record(&self, record: &TurnActivityRecord) -> crate::error::CoreResult<()> {
+        let session_id = &record.session_id;
+        let message_id = record.message_id.as_deref().unwrap_or("");
+        if message_id.is_empty() {
+            return Ok(()); // nothing durable to key on
+        }
+        let mut durable = record.clone();
+        strip_bodies_for_durability(&mut durable);
+        if looks_like_secret_payload(&durable) {
+            return Err(crate::error::CoreError::Message(
+                "activity journal refused record with secret-like content".into(),
+            ));
+        }
+        let mut map = self.load_session_map(session_id)?;
+        map.insert(message_id.to_string(), durable);
+        // Evict oldest by total_elapsed insertion order approximation: keep last N keys.
+        if map.len() > self.max_records {
+            let drop_n = map.len() - self.max_records;
+            let keys: Vec<String> = map.keys().cloned().collect();
+            for k in keys.into_iter().take(drop_n) {
+                map.remove(&k);
+            }
+        }
+        self.write_session_map(session_id, &map)
+    }
+
+    /// Load every durable record for a session.
+    pub fn load_session(
+        &self,
+        session_id: &str,
+    ) -> crate::error::CoreResult<Vec<(String, TurnActivityRecord)>> {
+        let map = self.load_session_map(session_id)?;
+        Ok(map.into_iter().collect())
+    }
+
+    /// Hydrate an in-memory store from every session file under the journal.
+    pub fn hydrate_store(&self, store: &mut ActivityStore) -> crate::error::CoreResult<usize> {
+        let mut n = 0usize;
+        let rd = match std::fs::read_dir(&self.root) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => {
+                return Err(crate::error::CoreError::Message(format!(
+                    "activity journal readdir: {e}"
+                )))
+            }
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let raw = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if raw.len() > self.max_file_bytes {
+                continue;
+            }
+            let file: DurableSessionFile = match serde_json::from_str(&raw) {
+                Ok(f) => f,
+                Err(_) => continue, // fail-safe: unknown/corrupt schema
+            };
+            if file.version > ACTIVITY_CONTRACT_VERSION + 1 {
+                continue; // future major: refuse rather than invent
+            }
+            for (message_id, mut record) in file.records {
+                strip_bodies_for_durability(&mut record);
+                if looks_like_secret_payload(&record) {
+                    continue;
+                }
+                let session_id = record.session_id.clone();
+                store.insert(&session_id, &message_id, record);
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// Remove one session's durable file (chat delete).
+    pub fn forget_session(&self, session_id: &str) -> crate::error::CoreResult<()> {
+        let path = self.path_for(session_id);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(crate::error::CoreError::Message(format!(
+                "activity journal forget: {e}"
+            ))),
+        }
+    }
+
+    fn load_session_map(
+        &self,
+        session_id: &str,
+    ) -> crate::error::CoreResult<BTreeMap<String, TurnActivityRecord>> {
+        let path = self.path_for(session_id);
+        if !path.is_file() {
+            return Ok(BTreeMap::new());
+        }
+        let raw = std::fs::read_to_string(&path).map_err(|e| {
+            crate::error::CoreError::Message(format!("activity journal read: {e}"))
+        })?;
+        if raw.len() > self.max_file_bytes {
+            return Ok(BTreeMap::new());
+        }
+        let file: DurableSessionFile = match serde_json::from_str(&raw) {
+            Ok(f) => f,
+            Err(_) => return Ok(BTreeMap::new()),
+        };
+        if file.version > ACTIVITY_CONTRACT_VERSION + 1 {
+            return Ok(BTreeMap::new());
+        }
+        Ok(file.records)
+    }
+
+    fn write_session_map(
+        &self,
+        session_id: &str,
+        map: &BTreeMap<String, TurnActivityRecord>,
+    ) -> crate::error::CoreResult<()> {
+        let file = DurableSessionFile {
+            version: ACTIVITY_CONTRACT_VERSION,
+            session_id: session_id.to_string(),
+            records: map.clone(),
+        };
+        let bytes = serde_json::to_vec_pretty(&file).map_err(|e| {
+            crate::error::CoreError::Message(format!("activity journal encode: {e}"))
+        })?;
+        if bytes.len() > self.max_file_bytes {
+            return Err(crate::error::CoreError::Message(
+                "activity journal over byte budget".into(),
+            ));
+        }
+        let path = self.path_for(session_id);
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &bytes).map_err(|e| {
+            crate::error::CoreError::Message(format!("activity journal write: {e}"))
+        })?;
+        std::fs::rename(&tmp, &path).map_err(|e| {
+            crate::error::CoreError::Message(format!("activity journal rename: {e}"))
+        })?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DurableSessionFile {
+    #[serde(default = "default_contract_version")]
+    version: u32,
+    session_id: String,
+    #[serde(default)]
+    records: BTreeMap<String, TurnActivityRecord>,
+}
+
+/// Force Summary retention before any disk write.
+pub fn strip_bodies_for_durability(record: &mut TurnActivityRecord) {
+    record.detail_level = ActivityDetailLevel::Summary;
+    for event in &mut record.events {
+        if let Some(ctx) = event.context.as_mut() {
+            ctx.bodies = None;
+        }
+        // Never persist UserVisibleContent at Full privacy on disk.
+        if event.privacy == PrivacyClass::RedactedContent
+            || event.privacy == PrivacyClass::UserVisibleContent
+        {
+            event.privacy = PrivacyClass::Metadata;
+        }
+    }
+}
+
+fn looks_like_secret_payload(record: &TurnActivityRecord) -> bool {
+    let mut blob = String::new();
+    for e in &record.events {
+        blob.push_str(&e.label);
+        if let Some(d) = &e.detail {
+            blob.push_str(d);
+        }
+    }
+    let lower = blob.to_ascii_lowercase();
+    lower.contains("sk-")
+        || lower.contains("authorization: bearer")
+        || lower.contains("api_key")
+        || lower.contains("-----begin ")
 }
