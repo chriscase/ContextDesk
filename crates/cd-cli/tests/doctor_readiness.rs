@@ -774,17 +774,54 @@ fn grounded_two_turn_body(call_index: usize) -> Value {
     }
 }
 
+fn grounded_two_turn_response(call_index: usize, request: &Request) -> ResponseTemplate {
+    let body = grounded_two_turn_body(call_index);
+    let request_body: Value = serde_json::from_slice(&request.body).unwrap_or_default();
+    if request_body["stream"] != true {
+        return ResponseTemplate::new(200)
+            .insert_header("content-type", "application/json")
+            .set_body_json(body);
+    }
+    let choice = &body["choices"][0];
+    let message = &choice["message"];
+    let delta = if let Some(calls) = message["tool_calls"].as_array() {
+        let calls = calls
+            .iter()
+            .enumerate()
+            .map(|(index, call)| {
+                let mut call = call.clone();
+                call["index"] = json!(index);
+                if !call["function"]["arguments"].is_string() {
+                    call["function"]["arguments"] =
+                        json!(serde_json::to_string(&call["function"]["arguments"]).unwrap());
+                }
+                call
+            })
+            .collect::<Vec<_>>();
+        json!({"tool_calls": calls})
+    } else {
+        json!({"content": message["content"]})
+    };
+    let chunk = json!({"choices": [{"index": 0, "delta": delta}]});
+    let stop = json!({
+        "choices": [{"index": 0, "delta": {}, "finish_reason": choice["finish_reason"]}]
+    });
+    ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_raw(
+            format!("data: {chunk}\n\ndata: {stop}\n\ndata: [DONE]\n\n"),
+            "text/event-stream",
+        )
+}
+
 #[derive(Clone)]
 struct GroundedTwoTurnProvider {
     call: Arc<AtomicUsize>,
 }
 
 impl Respond for GroundedTwoTurnProvider {
-    fn respond(&self, _request: &Request) -> ResponseTemplate {
-        let body = grounded_two_turn_body(self.call.fetch_add(1, Ordering::SeqCst));
-        ResponseTemplate::new(200)
-            .insert_header("content-type", "application/json")
-            .set_body_json(body)
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        grounded_two_turn_response(self.call.fetch_add(1, Ordering::SeqCst), request)
     }
 }
 
@@ -801,11 +838,8 @@ struct DelayedGroundedTwoTurnProvider {
 }
 
 impl Respond for DelayedGroundedTwoTurnProvider {
-    fn respond(&self, _request: &Request) -> ResponseTemplate {
-        let body = grounded_two_turn_body(self.call.fetch_add(1, Ordering::SeqCst));
-        ResponseTemplate::new(200)
-            .insert_header("content-type", "application/json")
-            .set_body_json(body)
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        grounded_two_turn_response(self.call.fetch_add(1, Ordering::SeqCst), request)
             .set_delay(self.delay)
     }
 }
