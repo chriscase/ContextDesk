@@ -121,7 +121,10 @@ fn synthetic_sessions_left_behind(data_dir: &Path) -> usize {
 /// safe in one context silently wasn't in the other. Synchronizing on
 /// actual observed output removes that entire source of variance instead of
 /// padding the guess.
-fn wait_for_n_lines(stdout: std::process::ChildStdout, n: usize) -> Vec<String> {
+fn wait_for_n_lines(
+    stdout: std::process::ChildStdout,
+    n: usize,
+) -> (Vec<String>, std::sync::mpsc::Receiver<String>) {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         use std::io::BufRead;
@@ -149,7 +152,12 @@ fn wait_for_n_lines(stdout: std::process::ChildStdout, n: usize) -> Vec<String> 
             ),
         }
     }
-    lines
+    // Return the receiver as a drain guard. Dropping it here makes the
+    // reader thread stop at the child's next line and close the pipe; the
+    // child can then panic on stdout with EPIPE before it processes SIGINT.
+    // Keeping the receiver alive until `wait_with_output` completes leaves
+    // the reader thread draining the pipe for the lifetime of the child.
+    (lines, rx)
 }
 
 // ---------------------------------------------------------------------
@@ -520,7 +528,7 @@ async fn an_interrupted_run_still_cleans_up_the_synthetic_corpus() {
     // once. The mock's 20s delay on turn one itself guarantees it is still
     // in flight well after this buffer.
     let stdout = child.stdout.take().expect("piped stdout");
-    wait_for_n_lines(stdout, 2);
+    let (_observed, _stdout_drain) = wait_for_n_lines(stdout, 2);
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     let pid = child.id();
@@ -638,7 +646,7 @@ async fn an_interrupt_during_the_second_turn_still_removes_the_already_saved_ses
     // 20s, so any reasonable margin here still lands SIGINT squarely inside
     // turn two's wait, never inside turn one's.
     let stdout = child.stdout.take().expect("piped stdout");
-    wait_for_n_lines(stdout, 2);
+    let (_observed, _stdout_drain) = wait_for_n_lines(stdout, 2);
     tokio::time::sleep(Duration::from_millis(1800)).await;
 
     let pid = child.id();
