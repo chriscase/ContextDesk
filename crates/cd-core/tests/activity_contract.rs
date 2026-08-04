@@ -1,0 +1,665 @@
+//! Behavioural proof for the activity contract and its capture seam.
+//!
+//! Everything here drives the REAL capture path — a turn trace produced by
+//! [`cd_core::turn_trace::TracingChatBackend`] wrapping a backend, projected
+//! by [`cd_core::activity::ActivityRecorder`]. Nothing asserts on a
+//! hand-built record where that would let the projection be wrong and the
+//! test still pass.
+//!
+//! Every fixture is synthetic.
+
+use cd_core::activity::{
+    ActivityDetailLevel, ActivityOrigin, ActivityPhase, ActivityRecorder, ActivityStatus,
+    ActivityStore, ActivityTrigger, DataScope, DataScopeKind, Determinism, PrivacyClass,
+    MAX_ACTIVITY_EVENTS,
+};
+use cd_core::agent::ChatBackend;
+use cd_core::chat::{ChatCompletion, ChatMessage, Role};
+use cd_core::error::{CoreError, CoreResult};
+use cd_core::tools::ToolSpec;
+use cd_core::turn_trace::{RecordingTurnTrace, TracingChatBackend, TurnTraceSink};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+const SESSION: &str = "session-synthetic";
+const MESSAGE: &str = "message-synthetic";
+
+fn msg(role: Role, content: &str) -> ChatMessage {
+    ChatMessage {
+        role,
+        content: content.to_string(),
+        tool_call_id: None,
+        tool_calls: None,
+    }
+}
+
+fn tool(name: &str) -> ToolSpec {
+    ToolSpec {
+        name: name.to_string(),
+        description: "synthetic".to_string(),
+        side_effect: cd_core::tools::ToolSideEffect::Read,
+        parameters: serde_json::json!({ "type": "object" }),
+    }
+}
+
+/// A backend that answers a fixed number of rounds, then fails or succeeds.
+struct ScriptedBackend {
+    calls: AtomicUsize,
+    fail_on: Option<usize>,
+}
+
+impl ScriptedBackend {
+    fn ok() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            fail_on: None,
+        }
+    }
+    fn failing_on(round: usize) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            fail_on: Some(round),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ChatBackend for ScriptedBackend {
+    async fn complete(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[ToolSpec],
+    ) -> CoreResult<ChatCompletion> {
+        let round = self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_on == Some(round) {
+            // Deliberately carries something that must never survive.
+            return Err(CoreError::Message(
+                "upstream rejected token sk-synthetic-not-a-real-key".to_string(),
+            ));
+        }
+        Ok(ChatCompletion {
+            content: "answer".to_string(),
+            tool_calls: Vec::new(),
+            finish_reason: "stop".to_string(),
+        })
+    }
+}
+
+/// Drive `rounds` provider calls through the real tracing backend.
+async fn traced_rounds(backend: ScriptedBackend, rounds: usize) -> Arc<RecordingTurnTrace> {
+    let recorder = Arc::new(RecordingTurnTrace::new());
+    let sink: Arc<dyn TurnTraceSink> = recorder.clone();
+    let traced = TracingChatBackend::new(Box::new(backend), sink);
+    for round in 0..rounds {
+        let messages = vec![
+            msg(Role::System, "you are a synthetic assistant"),
+            msg(Role::User, &format!("question for round {round}")),
+            msg(Role::Assistant, "prior synthetic answer"),
+        ];
+        let _ = traced
+            .complete(&messages, &[tool("search_kb"), tool("read_file")])
+            .await;
+    }
+    recorder
+}
+
+fn record_from(
+    recorder: &RecordingTurnTrace,
+    scope: DataScope,
+    detail: ActivityDetailLevel,
+    status: ActivityStatus,
+) -> cd_core::activity::TurnActivityRecord {
+    let mut builder = ActivityRecorder::new("turn-1", SESSION, scope, detail);
+    builder.record_provider_rounds(&recorder.calls());
+    builder.finish(status, 42)
+}
+
+// ---------------------------------------------------------------------
+// Multi-round traces
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_multi_round_turn_yields_one_ordered_event_per_round() {
+    let recorder = traced_rounds(ScriptedBackend::ok(), 3).await;
+    let record = record_from(
+        &recorder,
+        DataScope::conversation(),
+        ActivityDetailLevel::Summary,
+        ActivityStatus::Ok,
+    );
+
+    assert_eq!(record.provider_round_count(), 3);
+    assert_eq!(record.events.len(), 3);
+
+    // Monotonic sequence, and ordering is `seq` rather than elapsed time —
+    // three fast rounds can share a millisecond.
+    let seqs: Vec<u64> = record.events.iter().map(|e| e.seq).collect();
+    assert_eq!(seqs, vec![0, 1, 2]);
+
+    for (index, event) in record.events.iter().enumerate() {
+        assert_eq!(event.turn_id, "turn-1");
+        assert_eq!(event.operation_id, format!("provider-round-{index}"));
+        assert_eq!(event.origin, ActivityOrigin::ProbabilisticModel);
+        assert_eq!(event.determinism, Determinism::Probabilistic);
+        assert_eq!(event.phase, ActivityPhase::Completed);
+        assert_eq!(event.status, ActivityStatus::Ok);
+        let context = event.context.as_ref().expect("provider round has context");
+        assert_eq!(context.round as usize, index);
+        assert_eq!(context.message_count, 3);
+        assert!(context.context_used_chars > 0);
+        assert_eq!(
+            context.tool_names,
+            vec!["search_kb".to_string(), "read_file".to_string()],
+            "tool NAMES are captured; schemas are not"
+        );
+    }
+
+    // The first round is caused by the user; later rounds are the host
+    // continuing its own loop.
+    assert_eq!(record.events[0].trigger, ActivityTrigger::UserMessage);
+    assert_eq!(record.events[1].trigger, ActivityTrigger::HostPolicy);
+
+    // Per-role shape without any bodies.
+    let roles = &record.events[0].context.as_ref().unwrap().roles;
+    let names: Vec<&str> = roles.iter().map(|r| r.role.as_str()).collect();
+    assert_eq!(names, vec!["assistant", "system", "user"]);
+    assert!(roles.iter().all(|r| r.chars > 0 && r.messages == 1));
+    assert_eq!(
+        record.total_context_chars(),
+        3 * record.events[0]
+            .context
+            .as_ref()
+            .unwrap()
+            .context_used_chars
+    );
+}
+
+// ---------------------------------------------------------------------
+// Cancellation / error
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_failed_round_is_recorded_as_failed_with_a_redacted_reason() {
+    let recorder = traced_rounds(ScriptedBackend::failing_on(1), 2).await;
+    let record = record_from(
+        &recorder,
+        DataScope::conversation(),
+        ActivityDetailLevel::Summary,
+        ActivityStatus::Failed,
+    );
+
+    assert_eq!(record.events.len(), 2);
+    assert_eq!(record.events[0].status, ActivityStatus::Ok);
+    assert_eq!(record.events[1].status, ActivityStatus::Failed);
+
+    let detail = record.events[1].detail.as_deref().unwrap_or_default();
+    assert!(
+        !detail.contains("sk-synthetic-not-a-real-key"),
+        "a failure reason must be redacted before it reaches an activity \
+         record; got: {detail}"
+    );
+    // Not merely "absent": the redaction marker must actually be there, so
+    // this cannot pass because the detail was empty or the reason was
+    // dropped wholesale.
+    assert!(
+        detail.contains("sk-***"),
+        "the secret-shaped token must be REPLACED, not just missing; got: {detail}"
+    );
+    assert!(
+        detail.contains("upstream rejected token"),
+        "and the useful part of the reason must survive; got: {detail}"
+    );
+}
+
+#[test]
+fn cancellation_and_withholding_are_not_reported_as_success() {
+    use cd_core::activity::status_for_turn_reason;
+    assert_eq!(status_for_turn_reason("cancel"), ActivityStatus::Cancelled);
+    assert_eq!(status_for_turn_reason("error"), ActivityStatus::Failed);
+    // Every host-withheld reason must classify as withheld, not ok — the
+    // list is shared with the product, never re-derived here.
+    for reason in cd_core::events::WITHHELD_TURN_REASONS {
+        assert_eq!(
+            status_for_turn_reason(reason),
+            ActivityStatus::Withheld,
+            "{reason} must never read as a delivered answer"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// Redaction and bounds
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_default_detail_level_retains_no_prompt_bodies() {
+    let recorder = traced_rounds(ScriptedBackend::ok(), 1).await;
+    let record = record_from(
+        &recorder,
+        DataScope::conversation(),
+        ActivityDetailLevel::Summary,
+        ActivityStatus::Ok,
+    );
+
+    let context = record.events[0].context.as_ref().unwrap();
+    assert!(
+        context.bodies.is_none(),
+        "summary detail must keep no message bodies at all"
+    );
+    assert_eq!(record.events[0].privacy, PrivacyClass::Metadata);
+
+    // And nothing anywhere in the serialized record contains the prompt.
+    let json = serde_json::to_string(&record).expect("serialize");
+    assert!(
+        !json.contains("question for round"),
+        "no prompt text may survive at the default detail level"
+    );
+    assert!(!json.contains("you are a synthetic assistant"));
+    // Counts still make it auditable.
+    assert!(context.context_used_chars > 0);
+    assert_eq!(context.message_count, 3);
+}
+
+#[tokio::test]
+async fn full_detail_retains_only_already_redacted_bounded_bodies() {
+    let recorder = traced_rounds(ScriptedBackend::ok(), 1).await;
+    let record = record_from(
+        &recorder,
+        DataScope::conversation(),
+        ActivityDetailLevel::Full,
+        ActivityStatus::Ok,
+    );
+
+    let bodies = record.events[0]
+        .context
+        .as_ref()
+        .unwrap()
+        .bodies
+        .as_ref()
+        .expect("full detail retains bodies");
+    assert_eq!(bodies.len(), 3);
+    assert_eq!(record.events[0].privacy, PrivacyClass::RedactedContent);
+    for body in bodies {
+        assert!(body.char_count > 0);
+        assert!(
+            body.content.chars().count() <= cd_core::turn_trace::MAX_TRACED_MESSAGE_CHARS,
+            "bodies stay length-bounded"
+        );
+    }
+}
+
+#[tokio::test]
+async fn opting_into_bodies_cannot_be_done_by_hand_building_an_event() {
+    // A caller that builds an event with bodies attached, on a Summary
+    // recorder, must not be able to smuggle them in.
+    let recorder = traced_rounds(ScriptedBackend::ok(), 1).await;
+    let full = record_from(
+        &recorder,
+        DataScope::conversation(),
+        ActivityDetailLevel::Full,
+        ActivityStatus::Ok,
+    );
+    let smuggled = full.events[0].clone();
+    assert!(smuggled.context.as_ref().unwrap().bodies.is_some());
+
+    let mut summary = ActivityRecorder::new(
+        "turn-2",
+        SESSION,
+        DataScope::conversation(),
+        ActivityDetailLevel::Summary,
+    );
+    summary.push(smuggled);
+    let record = summary.finish(ActivityStatus::Ok, 1);
+    assert!(
+        record.events[0].context.as_ref().unwrap().bodies.is_none(),
+        "the recorder strips bodies at Summary regardless of what the \
+         caller attached"
+    );
+}
+
+#[test]
+fn a_pathological_turn_is_bounded_and_says_that_it_was() {
+    let mut recorder = ActivityRecorder::new(
+        "turn-3",
+        SESSION,
+        DataScope::conversation(),
+        ActivityDetailLevel::Summary,
+    );
+    let overflow = 7;
+    for index in 0..(MAX_ACTIVITY_EVENTS + overflow) {
+        recorder.push(cd_core::activity::ActivityEvent {
+            turn_id: String::new(),
+            operation_id: format!("op-{index}"),
+            seq: 0,
+            elapsed_ms: 1,
+            phase: ActivityPhase::Completed,
+            status: ActivityStatus::Ok,
+            origin: ActivityOrigin::DeterministicHost,
+            determinism: Determinism::Deterministic,
+            label: "x".repeat(5_000),
+            detail: Some("y".repeat(50_000)),
+            trigger: ActivityTrigger::HostPolicy,
+            scope: DataScope::conversation(),
+            evidence: Vec::new(),
+            privacy: PrivacyClass::Metadata,
+            context: None,
+        });
+    }
+    let record = recorder.finish(ActivityStatus::Ok, 1);
+    assert_eq!(record.events.len(), MAX_ACTIVITY_EVENTS);
+    assert_eq!(record.dropped_events, overflow);
+    assert!(
+        record.is_truncated(),
+        "a prefix must announce itself; a UI must not present it as whole"
+    );
+    assert_eq!(
+        record.events[0].label.chars().count(),
+        cd_core::activity::MAX_ACTIVITY_LABEL_CHARS
+    );
+    assert_eq!(
+        record.events[0].detail.as_ref().unwrap().chars().count(),
+        cd_core::activity::MAX_ACTIVITY_DETAIL_CHARS
+    );
+}
+
+#[test]
+fn a_hand_built_heuristic_event_cannot_claim_determinism() {
+    let mut recorder = ActivityRecorder::new(
+        "turn-4",
+        SESSION,
+        DataScope::conversation(),
+        ActivityDetailLevel::Summary,
+    );
+    recorder.push(cd_core::activity::ActivityEvent {
+        turn_id: String::new(),
+        operation_id: "rank".to_string(),
+        seq: 0,
+        elapsed_ms: 3,
+        phase: ActivityPhase::Completed,
+        status: ActivityStatus::Ok,
+        origin: ActivityOrigin::RepeatableHeuristic,
+        // The caller lies here on purpose.
+        determinism: Determinism::Deterministic,
+        label: "Ranked candidates".to_string(),
+        detail: None,
+        trigger: ActivityTrigger::HostPolicy,
+        scope: DataScope::conversation(),
+        evidence: Vec::new(),
+        privacy: PrivacyClass::Metadata,
+        context: None,
+    });
+    let record = recorder.finish(ActivityStatus::Ok, 1);
+    assert_eq!(
+        record.events[0].determinism,
+        Determinism::Repeatable,
+        "the recorder re-derives determinism from origin, so a heuristic \
+         cannot be presented as a proof even if a caller asks it to be"
+    );
+}
+
+// ---------------------------------------------------------------------
+// No-trace path costs nothing
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_turn_with_no_sink_records_nothing_and_wraps_nothing() {
+    // The disabled shape: no tracing backend at all, exactly as the host
+    // builds it when the inspector is off.
+    let backend = ScriptedBackend::ok();
+    let messages = vec![msg(Role::User, "synthetic question")];
+    let direct = backend.complete(&messages, &[]).await.expect("completes");
+
+    // The enabled shape over the same script.
+    let recorder = Arc::new(RecordingTurnTrace::new());
+    let sink: Arc<dyn TurnTraceSink> = recorder.clone();
+    let traced = TracingChatBackend::new(Box::new(ScriptedBackend::ok()), sink);
+    let through_trace = traced.complete(&messages, &[]).await.expect("completes");
+
+    assert_eq!(direct.content, through_trace.content);
+    assert_eq!(direct.finish_reason, through_trace.finish_reason);
+    assert_eq!(direct.tool_calls.len(), through_trace.tool_calls.len());
+
+    // And a recorder handed no calls produces an empty, honest record.
+    let empty = record_from(
+        &RecordingTurnTrace::new(),
+        DataScope::conversation(),
+        ActivityDetailLevel::Summary,
+        ActivityStatus::Ok,
+    );
+    assert!(empty.events.is_empty());
+    assert_eq!(empty.provider_round_count(), 0);
+    assert!(!empty.is_truncated());
+}
+
+// ---------------------------------------------------------------------
+// Inspector on/off semantic equivalence
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn inspector_on_and_off_send_the_provider_identical_requests() {
+    // What the backend RECEIVES is the thing that must not change. This
+    // captures it on both sides and compares.
+    #[derive(Default)]
+    struct Capturing {
+        seen: std::sync::Mutex<Vec<(Vec<String>, Vec<String>)>>,
+    }
+    /// Newtype so the shared recorder can be handed to the wrapper AND kept
+    /// by the test (the orphan rule forbids implementing the trait on
+    /// `Arc<Capturing>` directly).
+    struct Shared(Arc<Capturing>);
+    #[async_trait::async_trait]
+    impl ChatBackend for Shared {
+        async fn complete(
+            &self,
+            messages: &[ChatMessage],
+            tools: &[ToolSpec],
+        ) -> CoreResult<ChatCompletion> {
+            self.0.seen.lock().expect("seen").push((
+                messages
+                    .iter()
+                    .map(|m| format!("{}:{}", m.role.as_str(), m.content))
+                    .collect(),
+                tools.iter().map(|t| t.name.clone()).collect(),
+            ));
+            Ok(ChatCompletion {
+                content: "answer".to_string(),
+                tool_calls: Vec::new(),
+                finish_reason: "stop".to_string(),
+            })
+        }
+    }
+
+    let messages = vec![
+        msg(Role::System, "system prompt"),
+        msg(Role::User, "synthetic question"),
+    ];
+    let tools = vec![tool("search_kb")];
+
+    // Inspector OFF: the bare backend, as the host uses it when the sink is
+    // `None`.
+    let off = Arc::new(Capturing::default());
+    Shared(Arc::clone(&off))
+        .complete(&messages, &tools)
+        .await
+        .expect("off");
+
+    // Inspector ON: the same backend behind the tracing wrapper.
+    let on = Arc::new(Capturing::default());
+    let recorder = Arc::new(RecordingTurnTrace::new());
+    let sink: Arc<dyn TurnTraceSink> = recorder.clone();
+    let traced = TracingChatBackend::new(Box::new(Shared(Arc::clone(&on))), sink);
+    traced.complete(&messages, &tools).await.expect("on");
+
+    let off_seen = off.seen.lock().expect("off seen").clone();
+    let on_seen = on.seen.lock().expect("on seen").clone();
+    assert_eq!(
+        off_seen, on_seen,
+        "turning the inspector on must not change one byte of what the \
+         provider is asked — same messages, same tools, same order"
+    );
+    assert_eq!(
+        recorder.calls().len(),
+        1,
+        "and the observation still happened"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Ordinary vs linked scope
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn ordinary_and_linked_turns_differ_only_in_scope() {
+    let recorder = traced_rounds(ScriptedBackend::ok(), 2).await;
+
+    let ordinary = record_from(
+        &recorder,
+        DataScope::conversation(),
+        ActivityDetailLevel::Summary,
+        ActivityStatus::Ok,
+    );
+    let linked = record_from(
+        &recorder,
+        DataScope::log_corpus("corpus-synthetic"),
+        ActivityDetailLevel::Summary,
+        ActivityStatus::Ok,
+    );
+
+    assert_eq!(ordinary.scope.kind, DataScopeKind::Conversation);
+    assert_eq!(ordinary.scope.id, None);
+    assert_eq!(linked.scope.kind, DataScopeKind::LogCorpus);
+    assert_eq!(linked.scope.id.as_deref(), Some("corpus-synthetic"));
+
+    // Same projection otherwise: one inspector serves both.
+    assert_eq!(ordinary.events.len(), linked.events.len());
+    for (a, b) in ordinary.events.iter().zip(linked.events.iter()) {
+        assert_eq!(a.operation_id, b.operation_id);
+        assert_eq!(a.origin, b.origin);
+        assert_eq!(a.status, b.status);
+        assert_eq!(
+            a.context.as_ref().map(|c| c.context_used_chars),
+            b.context.as_ref().map(|c| c.context_used_chars)
+        );
+        assert_eq!(a.scope, ordinary.scope);
+        assert_eq!(b.scope, linked.scope);
+    }
+}
+
+#[test]
+fn the_contract_is_not_log_specific() {
+    // A workspace/memory/connector scope needs no contract change, which is
+    // what keeps the same inspector usable beyond logs.
+    for kind in [
+        DataScopeKind::Workspace,
+        DataScopeKind::Memory,
+        DataScopeKind::Connector,
+    ] {
+        let scope = DataScope {
+            kind,
+            id: Some("id-synthetic".to_string()),
+            label: "Synthetic source".to_string(),
+        };
+        let json = serde_json::to_string(&scope).expect("serialize");
+        let back: DataScope = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, scope);
+    }
+}
+
+// ---------------------------------------------------------------------
+// Store: bounds and deletion lifecycle
+// ---------------------------------------------------------------------
+
+#[test]
+fn the_store_is_bounded_and_evicts_oldest_first() {
+    let mut store = ActivityStore::with_capacity(3);
+    for index in 0..5 {
+        let record = ActivityRecorder::new(
+            format!("turn-{index}"),
+            SESSION,
+            DataScope::conversation(),
+            ActivityDetailLevel::Summary,
+        )
+        .finish(ActivityStatus::Ok, 1);
+        store.insert(SESSION, &format!("msg-{index}"), record);
+    }
+    assert_eq!(store.len(), 3);
+    assert!(store.get(SESSION, "msg-0").is_none(), "oldest evicted");
+    assert!(store.get(SESSION, "msg-4").is_some(), "newest retained");
+}
+
+#[test]
+fn re_recording_one_message_does_not_evict_an_unrelated_one() {
+    let mut store = ActivityStore::with_capacity(2);
+    let make = || {
+        ActivityRecorder::new(
+            "t",
+            SESSION,
+            DataScope::conversation(),
+            ActivityDetailLevel::Summary,
+        )
+        .finish(ActivityStatus::Ok, 1)
+    };
+    store.insert(SESSION, "keep-me", make());
+    store.insert(SESSION, "retried", make());
+    // A retry of the same turn overwrites in place.
+    store.insert(SESSION, "retried", make());
+    assert_eq!(store.len(), 2);
+    assert!(
+        store.get(SESSION, "keep-me").is_some(),
+        "a retried turn must not push an unrelated record out"
+    );
+}
+
+#[test]
+fn deleting_a_session_forgets_its_activity() {
+    let mut store = ActivityStore::default();
+    let make = |session: &str| {
+        ActivityRecorder::new(
+            "t",
+            session,
+            DataScope::conversation(),
+            ActivityDetailLevel::Summary,
+        )
+        .finish(ActivityStatus::Ok, 1)
+    };
+    store.insert("session-a", MESSAGE, make("session-a"));
+    store.insert("session-b", MESSAGE, make("session-b"));
+
+    store.forget_session("session-a");
+    assert!(store.get("session-a", MESSAGE).is_none());
+    assert!(
+        store.get("session-b", MESSAGE).is_some(),
+        "deleting one chat must not take another chat's activity with it"
+    );
+
+    store.forget_message("session-b", MESSAGE);
+    assert!(store.is_empty());
+}
+
+// ---------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------
+
+#[test]
+fn capture_defaults_to_metadata_only_and_config_files_predating_it_load() {
+    let defaults = cd_core::config::ActivitySettings::default();
+    assert!(defaults.enabled, "an auditable turn is the default");
+    assert!(
+        !defaults.retain_context_bodies,
+        "retaining prompt bodies is opt-in, never the default"
+    );
+    assert_eq!(defaults.detail_level(), ActivityDetailLevel::Summary);
+
+    let full = cd_core::config::ActivitySettings {
+        enabled: true,
+        retain_context_bodies: true,
+    };
+    assert_eq!(full.detail_level(), ActivityDetailLevel::Full);
+
+    // A config written before the field existed must still load.
+    let legacy = serde_json::json!({});
+    let settings: cd_core::config::ActivitySettings =
+        serde_json::from_value(legacy).expect("absent settings default");
+    assert!(settings.enabled);
+    assert!(!settings.retain_context_bodies);
+}
