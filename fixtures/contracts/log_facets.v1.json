@@ -6,6 +6,7 @@
     "ERROR": 471,
     "INFO": 24529
   },
+  "orderOnlyEventCount": 171,
   "services": {
     "": 171,
     "checkout": 300
@@ -14,5 +15,6 @@
     "api.log": 300,
     "worker.log": 171
   },
-  "timeQuality": "mixed"
+  "timeQuality": "mixed",
+  "wallEventCount": 300
 }

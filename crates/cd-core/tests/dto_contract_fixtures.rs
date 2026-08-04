@@ -889,6 +889,8 @@ fn contract_fixtures() -> Vec<(&'static str, Value)> {
         services: BTreeMap::from([("".to_string(), 171_u64), ("checkout".into(), 300)]),
         hosts: BTreeMap::from([("api-7".to_string(), 300_u64)]),
         time_quality: TimeQuality::Mixed,
+        wall_event_count: 300,
+        order_only_event_count: 171,
     };
 
     fn to<T: serde::Serialize>(value: &T) -> Value {
