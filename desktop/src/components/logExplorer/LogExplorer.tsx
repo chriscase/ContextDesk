@@ -651,6 +651,16 @@ function parseUtcSeconds(value: string, label: string): number | null {
   return milliseconds / 1000;
 }
 
+/**
+ * Corpus timestamps cross the wire in SECONDS (every reader here does
+ * `new Date(ts * 1000)`); the Activity Inspector's clock types are in
+ * milliseconds. One conversion, named, so the two units cannot be confused
+ * at a call site again.
+ */
+function secondsToMs(seconds: number | null | undefined): number | null {
+  return seconds == null ? null : seconds * 1000;
+}
+
 function utcDraft(value: number | null): string {
   if (value == null) return "";
   return new Date(value * 1000).toISOString();
@@ -5710,8 +5720,12 @@ export function LogExplorer({ corpusId }: Props) {
    * `timeQuality` is what decides whether a shared axis is permitted at all.
    */
   const clientIncidentClock: ClientIncidentClock = {
-    tsMinMs: summary?.stats?.tsMin ?? null,
-    tsMaxMs: summary?.stats?.tsMax ?? null,
+    // Corpus timestamps are SECONDS on the wire (see `formatEventTimeTitle`
+    // and every other `new Date(ts * 1000)` site); the activity clock types
+    // are milliseconds. Passing these through unconverted would place the
+    // customer band in 1970 and blow the shared-axis domain out to decades.
+    tsMinMs: secondsToMs(summary?.stats?.tsMin),
+    tsMaxMs: secondsToMs(summary?.stats?.tsMax),
     timeQuality,
     selectedTsMs: null,
   };

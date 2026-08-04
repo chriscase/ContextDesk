@@ -144,6 +144,43 @@ describe("the dual-group view shares an axis only when clock evidence permits", 
   });
 });
 
+describe("units: the corpus clock is seconds, the activity clock is milliseconds", () => {
+  it("puts a correctly-converted corpus band in the same era as app activity", () => {
+    // Regression: corpus tsMin/tsMax arrive in SECONDS and must be x1000
+    // before reaching these millisecond fields. Unconverted, the customer
+    // band lands in 1970 while import activity sits in 2026, and the shared
+    // domain silently stretches across five decades.
+    const tsSeconds = Math.floor(T0 / 1000);
+    render(
+      <DualLaneTimeline
+        clientClock={{
+          tsMinMs: tsSeconds * 1000,
+          tsMaxMs: (tsSeconds + 3600) * 1000,
+          timeQuality: "wall",
+        }}
+        activityEvents={[event({ kind: "wall", atMs: T0 + 60_000 })]}
+      />,
+    );
+    const note = screen.getByTestId("dual-lane-axis-note").textContent ?? "";
+    expect(note).toMatch(/2026-01-02/);
+    expect(note).not.toMatch(/19[67]\d-/);
+  });
+
+  it("would show a decade-spanning domain if seconds were used as millis", () => {
+    // The failure this guards against, made explicit: feeding the raw
+    // seconds value in produces a 1970 customer band next to 2026 activity.
+    const raw = Math.floor(T0 / 1000);
+    render(
+      <DualLaneTimeline
+        clientClock={{ tsMinMs: raw, tsMaxMs: raw + 3600, timeQuality: "wall" }}
+        activityEvents={[event({ kind: "wall", atMs: T0 })]}
+      />,
+    );
+    const note = screen.getByTestId("dual-lane-axis-note").textContent ?? "";
+    expect(note).toMatch(/1970-/);
+  });
+});
+
 describe("the two groups synchronize independently", () => {
   it("selects an activity correlation without touching customer state", () => {
     const onSelectCorrelation = vi.fn();
