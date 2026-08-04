@@ -175,6 +175,9 @@ pub enum ImportPreviewReason {
     /// An unhinted source did not contain enough distinct structured event
     /// records to justify automatic log import.
     InsufficientEventEvidence,
+    /// Timestamp-stamped configuration or tabular output describes
+    /// one snapshot rather than a sequence of operational events.
+    SnapshotDocument,
     /// XML-shaped material is inventoried but cannot yet be parsed into
     /// trustworthy event records.
     XmlEventParsingUnsupported,
@@ -964,6 +967,25 @@ pub(super) fn classify(
         }
     }
 
+    // Exporters commonly prefix every physical line of a configuration or
+    // tabular snapshot with the same capture time. Those lines satisfy a
+    // timestamp grammar individually, but treating the document as a stream
+    // invents events from table rules and key/value settings. Require several
+    // independent content clues before routing it as supporting material.
+    // An explicit log filename or validated manifest remains authoritative;
+    // this is only an automatic-role decision for otherwise unhinted text.
+    if !name_hints_log(identity)
+        && (looks_like_single_time_snapshot(sample) || looks_like_marker_delimited_snapshot(sample))
+    {
+        reasons.push(ImportPreviewReason::SnapshotDocument);
+        return (
+            ImportItemStatus::Supporting,
+            ImportItemRole::Attachment,
+            reasons,
+            fingerprint,
+        );
+    }
+
     // A log/rotation name may keep raw text available as honest fallback, but
     // an unhinted document needs repeated, distinct structured records before
     // it is automatically treated as an event source. Deduplication prevents
@@ -1076,6 +1098,130 @@ fn credible_structured_record_count(sample: &BoundedSample) -> usize {
         }
     }
     distinct.len()
+}
+
+/// Detect a timestamp-stamped snapshot without mistaking it for an event log.
+///
+/// The gate is intentionally conjunctive: parsed timestamps must stay within
+/// at most two exact capture prefixes, no record may carry a severity, and at
+/// least two payloads must look like configuration assignments or tabular
+/// framing.
+/// Repeated records with distinct times or ordinary log messages remain event
+/// candidates regardless of extension.
+fn looks_like_single_time_snapshot(sample: &BoundedSample) -> bool {
+    const MAX_RECORDS: usize = 256;
+
+    let mut distinct_records = BTreeSet::new();
+    let mut timestamp_prefixes = BTreeSet::new();
+    let mut timestamped = 0usize;
+    let mut snapshot_clues = 0usize;
+
+    for record in sample
+        .windows
+        .iter()
+        .flat_map(|window| window.lines())
+        .map(str::trim)
+        .filter(|record| !record.is_empty())
+    {
+        if !distinct_records.insert(record) {
+            continue;
+        }
+        if distinct_records.len() > MAX_RECORDS {
+            break;
+        }
+
+        let parsed = super::parse::parse_line_with_fingerprint(record, None, 0).parsed;
+        let payload = if parsed.timestamp_provenance != super::parse::TimestampProvenance::OrderOnly
+            && parsed.message != parsed.raw
+        {
+            timestamped += 1;
+            if parsed.level != "unknown" {
+                return false;
+            }
+            let Some(message_offset) = record.find(&parsed.message) else {
+                return false;
+            };
+            timestamp_prefixes.insert(record[..message_offset].trim_end());
+            parsed.message.as_str()
+        } else {
+            record
+        };
+
+        if is_snapshot_payload(payload) {
+            snapshot_clues += 1;
+        }
+    }
+
+    timestamped >= 1 && timestamp_prefixes.len() <= 2 && snapshot_clues >= 2
+}
+
+/// Detect a marker-delimited script/export bundle with embedded structured
+/// payloads. Multiple JSON or markup blocks can otherwise look like repeated
+/// events even though explicit block boundaries make this one captured
+/// document.
+fn looks_like_marker_delimited_snapshot(sample: &BoundedSample) -> bool {
+    let mut distinct_records = BTreeSet::new();
+    let mut starts = 0usize;
+    let mut ends = 0usize;
+    let mut script_paths = 0usize;
+
+    for record in sample
+        .windows
+        .iter()
+        .flat_map(|window| window.lines())
+        .map(str::trim)
+        .filter(|record| !record.is_empty())
+    {
+        if !distinct_records.insert(record) {
+            continue;
+        }
+        let upper = record.to_ascii_uppercase();
+        starts += usize::from(upper.starts_with('#') && upper.contains("START"));
+        ends += usize::from(upper.starts_with('#') && upper.contains("END"));
+        script_paths += usize::from(
+            record.starts_with('\\')
+                && record[1..].bytes().any(|byte| matches!(byte, b'\\' | b'/')),
+        );
+    }
+
+    starts >= 1 && ends >= 1 && script_paths >= 1
+}
+
+fn is_snapshot_payload(payload: &str) -> bool {
+    let payload = payload.trim();
+    if payload.is_empty() {
+        return false;
+    }
+
+    if let Some(index) = payload.find('=') {
+        let left = payload[..index].trim();
+        let right = payload[index + 1..].trim();
+        let spaced = payload[..index].ends_with(char::is_whitespace)
+            || payload[index + 1..].starts_with(char::is_whitespace);
+        let key = !left.is_empty()
+            && left
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'));
+        if spaced && key && !right.is_empty() {
+            return true;
+        }
+    }
+
+    let punctuation = payload
+        .bytes()
+        .filter(|byte| matches!(byte, b'-' | b'=' | b'+' | b'|'))
+        .count();
+    if punctuation >= 3
+        && payload
+            .bytes()
+            .all(|byte| byte.is_ascii_whitespace() || matches!(byte, b'-' | b'=' | b'+' | b'|'))
+    {
+        return true;
+    }
+
+    payload.starts_with('(')
+        && payload.ends_with(')')
+        && payload.bytes().any(|byte| byte.is_ascii_digit())
 }
 
 /// Whether a source crosses the current HTML parser-capability boundary.
@@ -2042,6 +2188,112 @@ mod tests {
         assert_eq!(repeated.role, ImportItemRole::Log);
         assert!(repeated.selected);
         assert!(event_importable(&repeated));
+    }
+
+    #[test]
+    fn single_time_config_and_table_snapshots_are_supporting_not_events() {
+        let config = item_from_sample(
+            "snapshots/XYZ_settings.txt",
+            256,
+            &sample_of(&[
+                "2026-01-01 12:00:00,000  max_connections = 100",
+                "2026-01-01 12:00:00,000  shared_buffers = 256MB",
+                "2026-01-01 12:00:00,000  archive_mode = on",
+            ]),
+            None,
+            false,
+        );
+        let table = item_from_sample(
+            "snapshots/XYZ_table.txt",
+            256,
+            &sample_of(&[
+                "2026-01-01 12:00:00,000  setting",
+                "2026-01-01 12:00:00,000  ----------------",
+                "2026-01-01 12:00:00,000  enabled",
+                "2026-01-01 12:00:00,000  (1 row)",
+            ]),
+            None,
+            false,
+        );
+        let marker_bundle = item_from_sample(
+            "XYZ_bundle",
+            512,
+            &sample_of(&[
+                "\\scripts\\capture_state",
+                "#START#",
+                r#"{"section":"one","enabled":true}"#,
+                r#"{"section":"two","workers":4}"#,
+                "#END#",
+            ]),
+            None,
+            false,
+        );
+
+        for item in [&config, &table, &marker_bundle] {
+            assert_eq!(item.status, ImportItemStatus::Supporting);
+            assert_eq!(item.role, ImportItemRole::Attachment);
+            assert!(!item.selected);
+            assert!(!event_importable(item));
+            assert_eq!(item.reasons, vec![ImportPreviewReason::SnapshotDocument]);
+        }
+    }
+
+    #[test]
+    fn real_text_event_streams_and_command_inputs_survive_snapshot_gate() {
+        let repeated_events = item_from_sample(
+            "XYZ_alerts",
+            256,
+            &sample_of(&[
+                "2026-01-01 12:00:00,000 INFO first event",
+                "2026-01-01 12:00:01,000 WARN second event",
+            ]),
+            None,
+            false,
+        );
+        let same_clock_events = item_from_sample(
+            "XYZ_same_clock.txt",
+            256,
+            &sample_of(&[
+                "2026-01-01 12:00:00,000 INFO first event",
+                "2026-01-01 12:00:00,000 WARN second event",
+            ]),
+            None,
+            false,
+        );
+        let command_input = item_from_sample(
+            "XYZ_commands.txt",
+            256,
+            &sample_of(&[
+                "2026-01-01 12:00:00,000  \\status",
+                "2026-01-01 12:00:00,000  select version();",
+            ]),
+            None,
+            false,
+        );
+        let explicitly_named_log = item_from_sample(
+            "XYZ_snapshot.log",
+            256,
+            &sample_of(&[
+                "2026-01-01 12:00:00,000  max_connections = 100",
+                "2026-01-01 12:00:00,000  shared_buffers = 256MB",
+            ]),
+            None,
+            false,
+        );
+
+        for item in [
+            &repeated_events,
+            &same_clock_events,
+            &command_input,
+            &explicitly_named_log,
+        ] {
+            assert_eq!(item.role, ImportItemRole::Log);
+            assert!(item.selected);
+            assert!(event_importable(item));
+            assert!(!item
+                .reasons
+                .contains(&ImportPreviewReason::SnapshotDocument));
+        }
     }
 
     #[test]

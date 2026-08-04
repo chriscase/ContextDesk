@@ -270,7 +270,7 @@ fn source_quality_gate_has_folder_zip_parity_for_logs_probes_and_markup() {
     let folder = dir.path().join("quality-folder");
     std::fs::create_dir_all(&folder).expect("create folder");
 
-    let members: [(&str, &[u8]); 7] = [
+    let members: [(&str, &[u8]); 10] = [
         ("service.log", b"plain event payload\n"),
         ("service.log.1", b"plain rotated event payload\n"),
         (
@@ -287,6 +287,18 @@ fn source_quality_gate_has_folder_zip_parity_for_logs_probes_and_markup() {
             "status-page.html",
             b"<!doctype html><html><body><p>status</p></body></html>\n",
         ),
+        (
+            "snapshots/XYZ_settings.txt",
+            b"2026-01-01 12:00:00,000  max_connections = 100\n2026-01-01 12:00:00,000  shared_buffers = 256MB\n2026-01-01 12:00:00,000  archive_mode = on\n",
+        ),
+        (
+            "XYZ_alerts",
+            b"2026-01-01 12:00:00,000 INFO first event\n2026-01-01 12:00:01,000 WARN second event\n",
+        ),
+        (
+            "XYZ_bundle",
+            b"\\scripts\\capture_state\n#START#\n{\"section\":\"one\",\"enabled\":true}\n{\"section\":\"two\",\"workers\":4}\n#END#\n",
+        ),
     ];
     for (identity, body) in members {
         write(&folder.join(identity), body);
@@ -296,7 +308,12 @@ fn source_quality_gate_has_folder_zip_parity_for_logs_probes_and_markup() {
 
     let folder_report = preview_import_path(&folder, None).expect("folder preview");
     let zip_report = preview_import_path(&archive, None).expect("zip preview");
-    let expected_selected = vec!["event-records.txt", "service.log", "service.log.1"];
+    let expected_selected = vec![
+        "XYZ_alerts",
+        "event-records.txt",
+        "service.log",
+        "service.log.1",
+    ];
 
     for report in [&folder_report, &zip_report] {
         assert_eq!(report.selected_identities(), expected_selected);
@@ -325,6 +342,42 @@ fn source_quality_gate_has_folder_zip_parity_for_logs_probes_and_markup() {
         assert!(html
             .reasons
             .contains(&ImportPreviewReason::HtmlEventParsingUnsupported));
+
+        let snapshot = report
+            .items
+            .iter()
+            .find(|item| item.identity == "snapshots/XYZ_settings.txt")
+            .expect("configuration snapshot remains visible");
+        assert_eq!(snapshot.status, ImportItemStatus::Supporting);
+        assert_eq!(snapshot.role, ImportItemRole::Attachment);
+        assert!(!snapshot.selected);
+        assert_eq!(
+            snapshot.reasons,
+            vec![ImportPreviewReason::SnapshotDocument]
+        );
+
+        let extensionless_events = report
+            .items
+            .iter()
+            .find(|item| item.identity == "XYZ_alerts")
+            .expect("extensionless event stream remains visible");
+        assert_eq!(extensionless_events.status, ImportItemStatus::Ready);
+        assert_eq!(extensionless_events.role, ImportItemRole::Log);
+        assert!(extensionless_events.selected);
+        assert!(event_importable(extensionless_events));
+
+        let marker_bundle = report
+            .items
+            .iter()
+            .find(|item| item.identity == "XYZ_bundle")
+            .expect("marker-delimited snapshot remains visible");
+        assert_eq!(marker_bundle.status, ImportItemStatus::Supporting);
+        assert_eq!(marker_bundle.role, ImportItemRole::Attachment);
+        assert!(!marker_bundle.selected);
+        assert_eq!(
+            marker_bundle.reasons,
+            vec![ImportPreviewReason::SnapshotDocument]
+        );
     }
 
     let summarize = |report: &cd_core::log_analysis::import_preview::ImportPreviewReport| {
