@@ -820,6 +820,11 @@ export function LogExplorer({ corpusId }: Props) {
   const [laneSourceQuery, setLaneSourceQuery] = useState("");
   const [allSourcesOpen, setAllSourcesOpen] = useState(false);
   const [timeQuality, setTimeQuality] = useState<TimeQuality>("order_only");
+  const [wallTimePreferred, setWallTimePreferred] = useState(true);
+  const [timeEvidenceCounts, setTimeEvidenceCounts] = useState<{
+    wall: number;
+    orderOnly: number;
+  } | null>(null);
   const [timeResolutionOpen, setTimeResolutionOpen] = useState(false);
   const timeResolutionTriggerRef = useRef<HTMLButtonElement>(null);
   const [totalMatched, setTotalMatched] = useState(0);
@@ -1314,13 +1319,62 @@ export function LogExplorer({ corpusId }: Props) {
       includeSuppression = true,
     ) =>
       filtersToQuery(nextFilters, {
+        wallTimeOnly: wallTimePreferred,
         ...extra,
         excludedTemplateIds: includeSuppression
           ? activeSuppressionTemplateIds
           : [],
       }),
-    [activeSuppressionTemplateIds],
+    [activeSuppressionTemplateIds, wallTimePreferred],
   );
+
+  const wallEventCount = timeEvidenceCounts?.wall ?? null;
+  const orderOnlyEventCount = timeEvidenceCounts?.orderOnly ?? null;
+  const wallTimeScopeActive =
+    wallTimePreferred && (wallEventCount == null || wallEventCount > 0);
+  const corpusTimeQualityFromCounts: TimeQuality | null =
+    wallEventCount == null || orderOnlyEventCount == null
+      ? null
+      : wallEventCount > 0 && orderOnlyEventCount > 0
+        ? "mixed"
+        : wallEventCount > 0
+          ? "wall"
+          : "order_only";
+  const headerTimeQuality = wallTimeScopeActive
+    ? timeQuality === "order_only"
+      ? corpusTimeQualityFromCounts ?? timeQuality
+      : "wall"
+    : corpusTimeQualityFromCounts ?? timeQuality;
+  useEffect(() => {
+    if (wallEventCount === 0) setWallTimePreferred(false);
+  }, [wallEventCount]);
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all([
+      hostLogCountEvents(corpusId, {
+        ...filtersToQuery(emptyFilters()),
+        wallTimeOnly: true,
+      }),
+      hostLogCountEvents(corpusId, {
+        ...filtersToQuery(emptyFilters()),
+        wallTimeOnly: false,
+      }),
+    ])
+      .then(([wall, all]) => {
+        if (!cancelled) {
+          setTimeEvidenceCounts({
+            wall: wall.totalMatched,
+            orderOnly: Math.max(0, all.totalMatched - wall.totalMatched),
+          });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setTimeEvidenceCounts(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [corpusId, timeQuality]);
 
   const setAutoStatus = useCallback((nextStatus: string) => {
     if (autoStatusLockRef.current === "bookmark-restore") {
@@ -2099,11 +2153,24 @@ export function LogExplorer({ corpusId }: Props) {
           visibleLanes[0],
           eventFilters,
         );
-        const query = queryWithNoise(eventFilters, { sources: sourceFilter });
-        const page =
+        let query = queryWithNoise(eventFilters, { sources: sourceFilter });
+        let page =
           sourceFilter?.length === 0
             ? emptyEventRowsPage()
             : await hostLogQueryEventRows(corpusId, query);
+        // Legacy corpora may not expose active-basis counts in summary stats.
+        // If the explicit wall-time scope proves empty, immediately fall back
+        // to the complete evidence view instead of presenting a false empty
+        // corpus. Modern mixed corpora keep the wall-time-first scope.
+        if (
+          sourceFilter?.length !== 0 &&
+          wallTimePreferred &&
+          page.events.length === 0
+        ) {
+          query = { ...query, wallTimeOnly: false };
+          page = await hostLogQueryEventRows(corpusId, query);
+          if (page.events.length > 0) setWallTimePreferred(false);
+        }
         if (requestId !== eventsRequestRef.current) return;
         const laneState: LaneTimeState =
           page.events.length > 0
@@ -2342,6 +2409,7 @@ export function LogExplorer({ corpusId }: Props) {
     queryWithNoise,
     setAutoStatus,
     suppressionLoadState,
+    wallTimePreferred,
   ]);
 
   useLayoutEffect(() => {
@@ -2369,6 +2437,8 @@ export function LogExplorer({ corpusId }: Props) {
     setFacets(null);
     setTimelineReady(false);
     setTimeQuality("order_only");
+    setWallTimePreferred(true);
+    setTimeEvidenceCounts(null);
     setGaps([]);
     setLaneSourceCatalog([]);
     setLaneSourceCatalogNextCursor(null);
@@ -5996,7 +6066,7 @@ export function LogExplorer({ corpusId }: Props) {
               summary={summary}
               summaryLoadState={summaryLoadState}
               summaryLoadError={summaryLoadError}
-              timeQuality={timeQuality}
+              timeQuality={headerTimeQuality}
               corpusTotal={corpusTotal}
               measureRef={identityLockupRef}
               dismissPeerGroup={TOOLBAR_DISMISSIBLE_GROUP}
@@ -6008,15 +6078,36 @@ export function LogExplorer({ corpusId }: Props) {
           >
             <span
               className={
-                timeQuality === "order_only"
+                headerTimeQuality === "order_only"
                   ? "log-explorer__badge log-explorer__badge--warn"
                   : "log-explorer__badge"
               }
-              title={timeQualityLabel(timeQuality)}
+              title={timeQualityLabel(headerTimeQuality)}
             >
-              {timeQualityLabel(timeQuality)}
+              {timeQualityLabel(headerTimeQuality)}
             </span>
-            {timeQuality !== "wall" ? (
+            {wallEventCount != null &&
+            wallEventCount > 0 &&
+            orderOnlyEventCount != null &&
+            orderOnlyEventCount > 0 ? (
+              <button
+                type="button"
+                className="log-explorer__badge log-explorer__badge-action"
+                data-testid="time-evidence-scope-toggle"
+                aria-pressed={!wallTimeScopeActive}
+                title={
+                  wallTimeScopeActive
+                    ? "Wall-time evidence is foregrounded. Show every event, including order-only preamble and configuration rows."
+                    : "All evidence is shown. Foreground events with normalized wall-clock time."
+                }
+                onClick={() => setWallTimePreferred((current) => !current)}
+              >
+                {wallTimeScopeActive
+                  ? `${wallEventCount.toLocaleString()} wall-time · ${orderOnlyEventCount.toLocaleString()} order-only available`
+                  : `All evidence · ${orderOnlyEventCount.toLocaleString()} order-only`}
+              </button>
+            ) : null}
+            {headerTimeQuality !== "wall" ? (
               <button
                 ref={timeResolutionTriggerRef}
                 type="button"

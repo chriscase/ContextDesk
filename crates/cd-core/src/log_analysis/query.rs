@@ -245,6 +245,10 @@ pub struct EventQuery {
     pub trace_id: Option<String>,
     /// Keyword substring (case-insensitive) on redacted message.
     pub keyword: Option<String>,
+    /// Restrict rows to active timestamp bases that prove wall-clock time.
+    /// Used by the Explorer's explicit, reversible "wall-time first" scope.
+    #[serde(default)]
+    pub wall_time_only: bool,
     /// Keyset: with `after_ts` when `sort_by_time` — composite (ts, seq);
     /// without ts, seq-only (`seq > after_seq`).
     pub after_seq: Option<u64>,
@@ -281,6 +285,7 @@ impl Default for EventQuery {
             excluded_template_ids: vec![],
             trace_id: None,
             keyword: None,
+            wall_time_only: false,
             after_seq: None,
             after_ts: None,
             before_seq: None,
@@ -2582,6 +2587,11 @@ fn event_matches_filter(event: &ExplorerEvent, filter: &EventQuery) -> bool {
             return false;
         }
     }
+    if filter.wall_time_only
+        && classify_active_timestamp_basis(event.active_timestamp_basis) != TimeQuality::Wall
+    {
+        return false;
+    }
     true
 }
 
@@ -2730,6 +2740,13 @@ fn build_where(q: &EventQuery) -> CoreResult<(String, Vec<Value>)> {
             clauses.push("lower(message) LIKE ?".into());
             binds.push(Value::Text(format!("%{}%", kw.to_lowercase())));
         }
+    }
+    if q.wall_time_only {
+        clauses.push(format!(
+            "active_timestamp_basis IN ('{}', '{}')",
+            ActiveTimestampBasis::ExplicitWall.as_storage_str(),
+            ActiveTimestampBasis::ResolvedLocal.as_storage_str(),
+        ));
     }
 
     Ok((clauses.join(" AND "), binds))
@@ -4869,6 +4886,17 @@ mod tests {
             ActiveTimestampBasis::OrderOnly
         );
         assert_eq!(page.time_quality, TimeQuality::Mixed);
+        let wall_only = query_event_rows(
+            &corpus,
+            &EventQuery {
+                wall_time_only: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(wall_only.events.len(), 1);
+        assert_eq!(wall_only.events[0].message, "pre-2000 wall");
+        assert_eq!(wall_only.time_quality, TimeQuality::Wall);
     }
 
     #[test]

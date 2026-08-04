@@ -2518,6 +2518,8 @@ export type EventQueryDto = {
   excludedTemplateIds?: number[];
   traceId?: string | null;
   keyword?: string | null;
+  /** Explicit reversible view scope; never inferred from timestamp magnitude. */
+  wallTimeOnly?: boolean;
   afterSeq?: number | null;
   /** Composite keyset with afterSeq when sortByTime (wall-time page cursor). */
   afterTs?: number | null;

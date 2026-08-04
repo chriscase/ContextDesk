@@ -6495,6 +6495,73 @@ describe("LogExplorer shell", () => {
     },
   );
 
+  it("foregrounds wall-time evidence in a mixed corpus and explicitly toggles counted order-only rows", async () => {
+    vi.mocked(host.hostGetLogCorpus).mockResolvedValue({
+      id: "c1",
+      name: "mixed fixture",
+      eventCount: 10,
+      templateCount: 2,
+      engine: "duckdb",
+      createdAt: 0,
+      sourceLabel: null,
+      stats: {
+        files: 2,
+        discoveredFiles: 2,
+        excludedFiles: 0,
+        failedFiles: 0,
+        ignoredFiles: 0,
+        exclusionCounts: {},
+        exclusionExamples: [],
+        partial: false,
+        lines: 10,
+        templates: 2,
+        reductionRatio: 0.8,
+        embedded: 0,
+        sourceBytes: 100,
+        corpusBytes: 80,
+        levelCounts: { info: 10 },
+        tsMin: 1,
+        tsMax: 1_700_000_007,
+        formatCounts: { fixture: 10 },
+      },
+      topTemplates: [],
+      embedding: null,
+    });
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(async (_, query) =>
+      query?.wallTimeOnly
+        ? eventPage("normalized.log", "wall", 2, 1_700_000_000, 8)
+        : eventPage("preamble.log", "order_only", 2, 1, 10),
+    );
+    vi.mocked(host.hostLogCountEvents).mockImplementation(async (_, query) => ({
+      totalMatched: query?.wallTimeOnly ? 8 : 10,
+    }));
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/normalized\.log event 0/);
+    const scope = await screen.findByTestId("time-evidence-scope-toggle");
+    expect(scope.textContent).toContain("8 wall-time · 2 order-only available");
+    expect(screen.getByTestId("log-explorer-global-counts").textContent).toContain(
+      "wall clock",
+    );
+    expect(host.hostLogQueryEvents).toHaveBeenCalledWith(
+      "c1",
+      expect.objectContaining({ wallTimeOnly: true }),
+    );
+
+    fireEvent.click(scope);
+    await screen.findByText(/preamble\.log event 0/);
+    expect(screen.getByTestId("time-evidence-scope-toggle").textContent).toContain(
+      "All evidence · 2 order-only",
+    );
+    expect(screen.getByTestId("log-explorer-global-counts").textContent).toContain(
+      "mixed time quality",
+    );
+    expect(host.hostLogQueryEvents).toHaveBeenLastCalledWith(
+      "c1",
+      expect.objectContaining({ wallTimeOnly: false }),
+    );
+  });
+
   it.each([1, 2, 3, 4])(
     "keeps short Deep-mode events compact across %i visible lane(s)",
     async (laneCount) => {
