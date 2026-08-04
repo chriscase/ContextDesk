@@ -83,7 +83,10 @@ import { ActivityEventList } from "../activity/ActivityEventList";
 import { ActivityToggle } from "../activity/ActivityToggle";
 import { useActivityInspector } from "../../hooks/useActivityInspector";
 import type { ImportRunInput } from "../../lib/activity/types";
-import { publishImportRunActivity } from "../../lib/activity/importActivityBridge";
+import {
+  forgetCorpusImportActivity,
+  publishImportRunActivity,
+} from "../../lib/activity/importActivityBridge";
 import {
   beginImportActivityAttempt,
   recordImportProgress,
@@ -97,6 +100,8 @@ import {
 
 function hostProgressToWizard(p: ProcessProgressDto): WizardProgressDto {
   return {
+    operation_id: p.operation_id ?? null,
+    correlation_id: p.correlation_id ?? null,
     kind: p.kind,
     phase: p.phase as WizardProgressDto["phase"],
     message: p.message,
@@ -193,31 +198,24 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const [importActivityAttempt, setImportActivityAttempt] =
     useState<ImportActivityAttempt | null>(null);
   const importActivityAttemptRef = useRef<ImportActivityAttempt | null>(null);
+  const progressOwnerRef = useRef<{
+    correlationId: string;
+    kind: "import" | "reanalysis";
+  } | null>(null);
   const startImportActivity = useCallback(
     (sourceKind: ImportRunInput["sourceKind"]) => {
-      const begun = beginImportActivityAttempt(
-        `import:${globalThis.crypto.randomUUID()}`,
-        sourceKind,
-      );
-      // Invocation is itself a truthful causal observation. Record it
-      // immediately so Activity never appears to begin halfway through an
-      // import if an older host omits its optional `starting` progress row.
-      const next = recordImportProgress(begun, {
-        kind: "log_ingest",
-        phase: "starting",
-        message: "",
-        fraction: null,
-        lines_processed: null,
-        files_processed: null,
-        bytes_processed: null,
-        templates: null,
-        cancellable: true,
-        elapsed_ms: null,
-        phase_elapsed_ms: null,
-      });
-      importActivityAttemptRef.current = next;
-      setImportActivityAttempt(next);
+      const correlationId = `import:${globalThis.crypto.randomUUID()}`;
+      const begun = beginImportActivityAttempt(correlationId, sourceKind);
+      importActivityAttemptRef.current = begun;
+      progressOwnerRef.current = { correlationId, kind: "import" };
+      setImportActivityAttempt(begun);
       setLastImportRun(null);
+      setProgress(null);
+      // Reviewed import owns its busy state inside ImportFlow, but the parent
+      // toolbar must also prevent a concurrent re-analysis from sharing the
+      // app-global progress stream.
+      setBusy(true);
+      return correlationId;
     },
     [],
   );
@@ -238,8 +236,12 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       );
     const settled = settleImportActivityAttempt(current, run);
     importActivityAttemptRef.current = null;
+    if (progressOwnerRef.current?.kind === "import") {
+      progressOwnerRef.current = null;
+    }
     setImportActivityAttempt(settled);
     setLastImportRun(run);
+    setBusy(false);
     void publishImportRunActivity(run, settled.events);
   }, []);
   // The same shared preference chat and the Explorer use.
@@ -335,9 +337,14 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     void hostListenProcessProgress((p) => {
-      if (p.kind === "log_ingest") {
+      const owner = progressOwnerRef.current;
+      if (
+        p.kind === "log_ingest" &&
+        owner != null &&
+        p.correlation_id === owner.correlationId
+      ) {
         setProgress(p);
-        observeImportProgress(p);
+        if (owner.kind === "import") observeImportProgress(p);
       }
     }).then((fn) => {
       unlisten = fn;
@@ -812,9 +819,11 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     setProgress(null);
     setFailedIngestDiagnostic(null);
     const startedAtMs = Date.now();
-    startImportActivity(quickImportSourceKind(mode, path));
+    const correlationId = startImportActivity(
+      quickImportSourceKind(mode, path),
+    );
     try {
-      const r = await hostIngestLogPath(path, "incident");
+      const r = await hostIngestLogPath(path, "incident", correlationId);
       setNote(statsBlurb(r));
       setImportConfidence(
         r.confidence ? { corpusId: r.corpusId, report: r.confidence } : null,
@@ -916,8 +925,10 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     setError(null);
     setNote(null);
     setProgress(null);
+    const correlationId = `reanalyze:${globalThis.crypto.randomUUID()}`;
+    progressOwnerRef.current = { correlationId, kind: "reanalysis" };
     try {
-      const status = await hostReanalyzeLogCorpus(corpusId);
+      const status = await hostReanalyzeLogCorpus(corpusId, correlationId);
       setNote(
         `Local re-analysis complete: ${status.embeddedTemplates.toLocaleString()}/${status.totalTemplates.toLocaleString()} templates embedded.`,
       );
@@ -934,6 +945,9 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     } catch (e) {
       setError(String(e));
     } finally {
+      if (progressOwnerRef.current?.correlationId === correlationId) {
+        progressOwnerRef.current = null;
+      }
       setBusy(false);
       setReanalyzing(false);
     }
@@ -983,6 +997,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     setBusy(true);
     try {
       await hostDiscardLogCorpus(id);
+      forgetCorpusImportActivity(id);
       clearAnalysisForCorpus(id);
       if (activeIdRef.current === id) {
         activeIdRef.current = null;
@@ -1519,7 +1534,9 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
             const cancel = reanalyzing
               ? hostCancelLogReanalysis
               : hostCancelLogIngest;
-            return cancel().then((ok) => {
+            return cancel(
+              progressOwnerRef.current?.correlationId,
+            ).then((ok) => {
               if (ok) setNote("Cancel requested…");
             });
           }}
@@ -1597,8 +1614,10 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                   <ActivityEventList
                     events={importActivityLog.entries}
                     omittedNote={
-                      importActivityLog.omitted > 0
-                        ? `${importActivityLog.omitted} earlier import updates omitted by the ${importActivityLog.cap}-entry retention bound.`
+                      (importActivityAttempt?.omittedUpdates ?? 0) +
+                        importActivityLog.omitted >
+                      0
+                        ? `${(importActivityAttempt?.omittedUpdates ?? 0) + importActivityLog.omitted} intermediate host updates coalesced or omitted by the ${importActivityLog.cap}-entry retention bound. Latest counters are retained.`
                         : null
                     }
                     emptyLabel="Waiting for the host to report import progress."

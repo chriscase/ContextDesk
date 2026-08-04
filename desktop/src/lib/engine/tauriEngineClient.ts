@@ -76,6 +76,7 @@ export function createTauriEngineClient(
           planToken: request.planToken,
           planVersion: request.planVersion,
           selected: request.selected,
+          correlationId: request.correlationId ?? null,
         });
         return report;
       },

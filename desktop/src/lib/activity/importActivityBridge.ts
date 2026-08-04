@@ -172,7 +172,7 @@ function normalizeEvents(raw: unknown, corpusId: string): ActivityEventInput[] {
   if (!Array.isArray(raw) || raw.length > MAX_EVENTS) return [];
   const normalized: ActivityEventInput[] = [];
   for (const event of raw) {
-    const next = normalizeEvent(event, corpusId);
+    const next = safeProjectedEvent(event as ActivityEventInput, corpusId);
     if (!next) return [];
     normalized.push(next);
   }
@@ -215,6 +215,20 @@ function safeEventsForRun(
 ): ActivityEventInput[] {
   const corpusId = run.report?.corpusId;
   if (!corpusId) return [];
+  const correlationId = sourceEvents[0]?.correlationId;
+  // A corpus-scoped trace is only durable when it contains a milestone bound
+  // to the host-issued operation identity. A renderer-only request/result pair
+  // cannot prove which process-progress invocation produced the corpus.
+  if (
+    !correlationId ||
+    !sourceEvents.some(
+      (event) =>
+        event.correlationId === correlationId &&
+        event.operationId.startsWith(`${correlationId}:host:`),
+    )
+  ) {
+    return [];
+  }
   const projected = sourceEvents.map((event) =>
     safeProjectedEvent(event, corpusId),
   );
@@ -240,6 +254,16 @@ export function loadCorpusImportActivity(corpusId: string): ActivityEventInput[]
     return normalizeEvents(parsed.events, corpusId);
   } catch {
     return [];
+  }
+}
+
+/** Forget only the confirmed-discard corpus's renderer-side Activity cache. */
+export function forgetCorpusImportActivity(corpusId: string): void {
+  if (typeof window === "undefined" || !validCorpusId(corpusId)) return;
+  try {
+    window.localStorage.removeItem(storageKey(corpusId));
+  } catch {
+    // Corpus deletion remains authoritative even if web storage is blocked.
   }
 }
 

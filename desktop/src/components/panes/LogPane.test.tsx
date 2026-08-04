@@ -497,6 +497,7 @@ describe("LogPane", () => {
       expect(hostMocks.ingest).toHaveBeenCalledWith(
         "/tmp/incident-folder",
         "incident",
+        expect.stringMatching(/^import:/),
       ),
     );
     expect(hostMocks.openDirectory).toHaveBeenCalledWith("Choose log folder");
@@ -515,6 +516,7 @@ describe("LogPane", () => {
       expect(hostMocks.ingest).toHaveBeenCalledWith(
         "/tmp/server.log",
         "incident",
+        expect.stringMatching(/^import:/),
       ),
     );
     expect(hostMocks.openFile).toHaveBeenCalledWith("Choose log file or ZIP", [
@@ -1645,6 +1647,10 @@ describe("LogPane", () => {
     const item = corpus("corpus-a", "API incident");
     hostMocks.listCorpora.mockResolvedValue([item]);
     hostMocks.confirm.mockResolvedValue(false);
+    localStorage.setItem(
+      "contextdesk.importActivity.v1:corpus-a",
+      "retained-on-cancel",
+    );
 
     render(<LogPane />);
     const trigger = await screen.findByRole("button", {
@@ -1662,6 +1668,9 @@ describe("LogPane", () => {
       ),
     );
     expect(hostMocks.discard).not.toHaveBeenCalled();
+    expect(
+      localStorage.getItem("contextdesk.importActivity.v1:corpus-a"),
+    ).toBe("retained-on-cancel");
     await waitFor(() => expect(document.activeElement).toBe(trigger));
     expect(
       screen.getByRole("button", { name: corpusButtonName(item.name) }),
@@ -1675,6 +1684,14 @@ describe("LogPane", () => {
       .mockResolvedValueOnce([first, second])
       .mockResolvedValue([second]);
     hostMocks.confirm.mockResolvedValue(true);
+    localStorage.setItem(
+      "contextdesk.importActivity.v1:corpus-a",
+      "discarded",
+    );
+    localStorage.setItem(
+      "contextdesk.importActivity.v1:corpus-b",
+      "retained",
+    );
 
     render(<LogPane />);
     const trigger = await screen.findByRole("button", {
@@ -1688,6 +1705,12 @@ describe("LogPane", () => {
     await waitFor(() =>
       expect(hostMocks.discard).toHaveBeenCalledWith(first.id),
     );
+    expect(
+      localStorage.getItem("contextdesk.importActivity.v1:corpus-a"),
+    ).toBeNull();
+    expect(
+      localStorage.getItem("contextdesk.importActivity.v1:corpus-b"),
+    ).toBe("retained");
     const secondCard = await screen.findByRole("button", {
       name: corpusButtonName(second.name),
     });
@@ -2408,7 +2431,10 @@ describe("LogPane", () => {
         expect.stringContaining("stays on this machine"),
         expect.any(Object),
       );
-      expect(hostMocks.reanalyze).toHaveBeenCalledWith(corpus.id);
+      expect(hostMocks.reanalyze).toHaveBeenCalledWith(
+        corpus.id,
+        expect.stringMatching(/^reanalyze:/),
+      );
     });
   });
 
@@ -2432,7 +2458,10 @@ describe("LogPane", () => {
 
     fireEvent.click(screen.getByTestId("reanalyze-log-corpus"));
     await waitFor(() =>
-      expect(hostMocks.reanalyze).toHaveBeenCalledWith(item.id),
+      expect(hostMocks.reanalyze).toHaveBeenCalledWith(
+        item.id,
+        expect.stringMatching(/^reanalyze:/),
+      ),
     );
     await screen.findByText(/Local re-analysis complete:/);
 
@@ -2466,7 +2495,10 @@ describe("LogPane", () => {
     );
     fireEvent.click(screen.getByTestId("reanalyze-log-corpus"));
     await waitFor(() =>
-      expect(hostMocks.reanalyze).toHaveBeenCalledWith(first.id),
+      expect(hostMocks.reanalyze).toHaveBeenCalledWith(
+        first.id,
+        expect.stringMatching(/^reanalyze:/),
+      ),
     );
 
     fireEvent.click(
@@ -2545,9 +2577,13 @@ describe("LogPane", () => {
     await waitFor(() =>
       expect(hostMocks.listenProgress).toHaveBeenCalledTimes(1),
     );
+    await waitFor(() => expect(hostMocks.reanalyze).toHaveBeenCalledOnce());
+    const correlationId = hostMocks.reanalyze.mock.calls[0]?.[1];
     const publishProgress = hostMocks.listenProgress.mock.calls[0]?.[0];
     act(() => {
       publishProgress({
+        operation_id: "host-reanalysis",
+        correlation_id: correlationId,
         kind: "log_ingest",
         phase: "embed",
         message: "Embedding templates",
@@ -2905,6 +2941,8 @@ describe("LogPane reviewed-import progress ownership (defect: duplicated panel)"
     localStorage.setItem("cd-activity-inspector-mode", "compact");
     let capturedProgressCallback:
       | ((progress: {
+          operation_id?: string | null;
+          correlation_id?: string | null;
           kind: string;
           phase: string;
           message: string;
@@ -2922,6 +2960,7 @@ describe("LogPane reviewed-import progress ownership (defect: duplicated panel)"
     });
     engineMocks.client = createMockEngineClient({ manualFlush: true });
     const cancelSpy = vi.spyOn(engineMocks.client.import, "cancel");
+    const runSpy = vi.spyOn(engineMocks.client.import, "run");
 
     render(<LogPane />);
     fireEvent.click(
@@ -2950,11 +2989,28 @@ describe("LogPane reviewed-import progress ownership (defect: duplicated panel)"
     await waitFor(() =>
       expect(capturedProgressCallback).toBeTypeOf("function"),
     );
+    const correlationId = runSpy.mock.calls[0]?.[0].correlationId;
+    expect(correlationId).toMatch(/^import:/);
     // The host's process-progress stream is shared: the exact same event
     // LogPane's own listener receives for this reviewed import, regardless
     // of ImportFlow's separate engine-events subscription.
     act(() => {
       capturedProgressCallback!({
+        operation_id: "host-reviewed-import",
+        correlation_id: correlationId,
+        kind: "log_ingest",
+        phase: "starting",
+        message: "starting reviewed import",
+        fraction: null,
+        lines_processed: null,
+        files_processed: null,
+        bytes_processed: 4096,
+        templates: null,
+        cancellable: true,
+      });
+      capturedProgressCallback!({
+        operation_id: "host-reviewed-import",
+        correlation_id: correlationId,
         kind: "log_ingest",
         phase: "stream",
         message: "parsing and templating lines",
@@ -2967,7 +3023,11 @@ describe("LogPane reviewed-import progress ownership (defect: duplicated panel)"
       });
     });
 
-    return { cancelSpy };
+    return {
+      cancelSpy,
+      correlationId,
+      publishProgress: capturedProgressCallback!,
+    };
   }
 
   it("shows exactly one progress panel for a reviewed import in flight", async () => {
@@ -2998,6 +3058,33 @@ describe("LogPane reviewed-import progress ownership (defect: duplicated panel)"
     );
   });
 
+  it("ignores interleaved progress owned by a different invocation", async () => {
+    const { publishProgress } = await openReviewedImportToRunning();
+    const activity = screen.getByTestId("log-pane-activity");
+    const before = activity.textContent;
+
+    act(() => {
+      publishProgress({
+        operation_id: "host-foreign-reanalysis",
+        correlation_id: "reanalyze:foreign-corpus",
+        kind: "log_ingest",
+        phase: "completed",
+        message: "foreign operation completed",
+        fraction: 1,
+        lines_processed: 999_999,
+        files_processed: 999,
+        bytes_processed: 999_999,
+        templates: 999,
+        cancellable: false,
+      });
+    });
+
+    expect(document.querySelectorAll(".process-progress")).toHaveLength(1);
+    expect(activity.textContent).toBe(before);
+    expect(activity.textContent).not.toContain("999,999");
+    expect(activity.textContent).not.toContain("foreign operation");
+  });
+
   it("wires cancellation to the single owning panel — LogPane's, not a duplicate", async () => {
     const { cancelSpy } = await openReviewedImportToRunning();
 
@@ -3017,6 +3104,36 @@ describe("LogPane reviewed-import progress ownership (defect: duplicated panel)"
         screen.queryByRole("region", { name: "Import finished" }),
       ).not.toBeNull(),
     );
+  });
+
+  it("records a real reviewed cancellation without publishing a corpus Activity bridge", async () => {
+    const { cancelSpy } = await openReviewedImportToRunning();
+    hostMocks.cancelIngest.mockImplementationOnce(() =>
+      engineMocks.client!.import.cancel(),
+    );
+
+    expect(document.querySelectorAll(".process-progress")).toHaveLength(1);
+    expect(
+      screen.getAllByRole("button", { name: "Cancel ingest" }),
+    ).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel ingest" }));
+    await waitFor(() => expect(cancelSpy).toHaveBeenCalledOnce());
+    await act(async () => {
+      engineMocks.client!.flush();
+    });
+
+    expect(
+      await screen.findByText(/Import cancelled\. Nothing was published/i),
+    ).toBeTruthy();
+    expect(screen.getByTestId("log-pane-activity").textContent).toContain(
+      "Import cancelled — nothing published",
+    );
+    expect(loadCorpusImportActivity("mock-corpus-0001")).toEqual([]);
+    expect(
+      localStorage.getItem(
+        "contextdesk.importActivity.v1:mock-corpus-0001",
+      ),
+    ).toBeNull();
   });
 });
 

@@ -2177,11 +2177,13 @@ export async function hostListLogCorpora(): Promise<
 export async function hostIngestLogPath(
   path: string,
   name?: string,
+  correlationId?: string,
 ): Promise<LogIngestReportDto> {
   if (!isTauri()) throw new Error("Log ingest requires Tauri host");
   return invoke<LogIngestReportDto>("ingest_log_path", {
     path,
     name: name ?? null,
+    correlationId: correlationId ?? null,
   });
 }
 
@@ -2202,9 +2204,13 @@ export async function hostInstallDemoLogCorpus(): Promise<DemoLogInstallDto> {
 }
 
 /** Request cancel of SoftWrite log ingest (#498). */
-export async function hostCancelLogIngest(): Promise<boolean> {
+export async function hostCancelLogIngest(
+  correlationId?: string,
+): Promise<boolean> {
   if (!isTauri()) return false;
-  return invoke<boolean>("cancel_log_ingest");
+  return invoke<boolean>("cancel_log_ingest", {
+    correlationId: correlationId ?? null,
+  });
 }
 
 /** One memory-only failed-ingest diagnostic for the latest failed trial. */
@@ -2224,18 +2230,30 @@ export async function hostClearFailedLogIngestDiagnostic(): Promise<boolean> {
 /** Trusted local template-vector re-analysis; events are not reparsed. */
 export async function hostReanalyzeLogCorpus(
   corpusId: string,
+  correlationId?: string,
 ): Promise<LogEmbeddingStatusDto> {
   if (!isTauri()) throw new Error("Log re-analysis requires the desktop app");
-  return invoke<LogEmbeddingStatusDto>("reanalyze_log_corpus", { corpusId });
+  return invoke<LogEmbeddingStatusDto>("reanalyze_log_corpus", {
+    corpusId,
+    correlationId: correlationId ?? null,
+  });
 }
 
-export async function hostCancelLogReanalysis(): Promise<boolean> {
+export async function hostCancelLogReanalysis(
+  correlationId?: string,
+): Promise<boolean> {
   if (!isTauri()) return false;
-  return invoke<boolean>("cancel_log_reanalysis");
+  return invoke<boolean>("cancel_log_reanalysis", {
+    correlationId: correlationId ?? null,
+  });
 }
 
 /** Multi-phase process progress (#445 / #824) — redacted; no full home paths. */
 export type ProcessProgressDto = {
+  /** Host-generated id shared by every update from one command invocation. */
+  operation_id?: string | null;
+  /** Renderer correlation validated and echoed by the host. */
+  correlation_id?: string | null;
   kind: "log_ingest" | "session_context_import";
   phase: string;
   message: string;

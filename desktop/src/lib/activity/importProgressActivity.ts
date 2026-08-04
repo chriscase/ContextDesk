@@ -17,13 +17,16 @@ import {
 
 export type ImportActivityAttempt = {
   correlationId: string;
+  hostOperationId: string | null;
   sourceKind: ImportRunInput["sourceKind"];
   events: ActivityEventInput[];
   nextSequence: number;
   lastElapsedMs: number | null;
   terminal: boolean;
-  lastSignature: string | null;
+  omittedUpdates: number;
 };
+
+export const IMPORT_ACTIVITY_EVENT_CAP = 16;
 
 type ImportProgressPhase = ProcessProgressDto["phase"];
 
@@ -142,6 +145,61 @@ function workspaceScope() {
   };
 }
 
+function validHostOperationId(value: string | null | undefined): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 200 &&
+    /^[A-Za-z0-9:_-]+$/.test(value)
+  );
+}
+
+function invocationStart(correlationId: string): ActivityEventInput {
+  return {
+    correlationId,
+    operationId: `${correlationId}:request`,
+    origin: "user_decision",
+    determinism: determinismForOrigin("user_decision"),
+    phase: "started",
+    status: "pending",
+    clock: { kind: "sequence", seq: 0 },
+    label: "Import started",
+    scope: workspaceScope(),
+    privacy: "metadata",
+    evidence: [],
+    laneGroup: ACTIVITY_LANE_GROUP,
+  };
+}
+
+function bindHostOperation(
+  attempt: ImportActivityAttempt,
+  hostOperationId: string,
+): ImportActivityAttempt {
+  const operationId = `${attempt.correlationId}:host:${hostOperationId}`;
+  return {
+    ...attempt,
+    hostOperationId,
+    events: attempt.events.map((event) => ({
+      ...event,
+      operationId,
+    })),
+  };
+}
+
+function boundedEvents(
+  events: ActivityEventInput[],
+  omittedUpdates: number,
+): { events: ActivityEventInput[]; omittedUpdates: number } {
+  if (events.length <= IMPORT_ACTIVITY_EVENT_CAP) {
+    return { events, omittedUpdates };
+  }
+  const dropped = events.length - IMPORT_ACTIVITY_EVENT_CAP;
+  return {
+    events: [events[0]!, ...events.slice(-(IMPORT_ACTIVITY_EVENT_CAP - 1))],
+    omittedUpdates: omittedUpdates + dropped,
+  };
+}
+
 export function beginImportActivityAttempt(
   correlationId: string,
   sourceKind: ImportRunInput["sourceKind"],
@@ -151,12 +209,13 @@ export function beginImportActivityAttempt(
   }
   return {
     correlationId,
+    hostOperationId: null,
     sourceKind,
-    events: [],
-    nextSequence: 0,
+    events: [invocationStart(correlationId)],
+    nextSequence: 1,
     lastElapsedMs: null,
     terminal: false,
-    lastSignature: null,
+    omittedUpdates: 0,
   };
 }
 
@@ -167,41 +226,49 @@ export function recordImportProgress(
 ): ImportActivityAttempt {
   if (progress.kind !== "log_ingest" || attempt.terminal) return attempt;
   const phase = normalizedPhase(progress.phase);
+  const incomingOperationId = progress.operation_id;
+  if (
+    progress.correlation_id !== attempt.correlationId ||
+    !validHostOperationId(incomingOperationId)
+  ) {
+    return attempt;
+  }
+  let active = attempt;
+  if (active.hostOperationId == null) {
+    // A command owner binds only to its own first host milestone. A late
+    // terminal/progress row from an earlier global operation can never claim
+    // a newly-started attempt.
+    if (phase !== "starting") return attempt;
+    active = bindHostOperation(active, incomingOperationId);
+  } else if (incomingOperationId !== active.hostOperationId) {
+    return attempt;
+  }
   const detail = detailForProgress(progress);
   const elapsedMs = finiteNonnegative(progress.elapsed_ms);
-  const signature = JSON.stringify([
-    phase,
-    detail ?? null,
-    elapsedMs,
-    progress.cancellable,
-  ]);
-  const previous = attempt.events.at(-1);
+  const previous = active.events.at(-1);
   if (phase === "starting" && previous?.phase === "started") {
     if (elapsedMs == null && detail == null) {
-      return { ...attempt, lastSignature: signature };
+      return { ...active, nextSequence: active.nextSequence + 1 };
     }
-    const { clock, lastElapsedMs } = clockForProgress(attempt, progress);
+    const { clock, lastElapsedMs } = clockForProgress(active, progress);
     return {
-      ...attempt,
+      ...active,
       events: [
-        ...attempt.events.slice(0, -1),
+        ...active.events.slice(0, -1),
         { ...previous, clock, detail: detail ?? previous.detail },
       ],
+      nextSequence: active.nextSequence + 1,
       lastElapsedMs,
-      lastSignature: signature,
     };
   }
-  // Core can intentionally emit a canonical terminal after a lower layer
-  // noticed the same cancellation. Retain one causal terminal row.
-  if (signature === attempt.lastSignature) return attempt;
 
   const origin = originForPhase(phase);
-  const { clock, lastElapsedMs } = clockForProgress(attempt, progress);
+  const { clock, lastElapsedMs } = clockForProgress(active, progress);
   const terminal =
     phase === "completed" || phase === "cancelled" || phase === "failed";
   const base = {
-    correlationId: attempt.correlationId,
-    operationId: `${attempt.correlationId}:ingest`,
+    correlationId: active.correlationId,
+    operationId: `${active.correlationId}:host:${active.hostOperationId}`,
     origin,
     determinism: determinismForOrigin(origin),
     phase:
@@ -238,13 +305,22 @@ export function recordImportProgress(
         }
       : { ...base, origin };
 
+  const coalescePrevious =
+    !terminal && previous?.phase === "progress" && previous.label === event.label;
+  const nextEvents = coalescePrevious
+    ? [...active.events.slice(0, -1), event]
+    : [...active.events, event];
+  const bounded = boundedEvents(
+    nextEvents,
+    active.omittedUpdates + (coalescePrevious ? 1 : 0),
+  );
   return {
-    ...attempt,
-    events: [...attempt.events, event],
-    nextSequence: attempt.nextSequence + 1,
+    ...active,
+    events: bounded.events,
+    omittedUpdates: bounded.omittedUpdates,
+    nextSequence: active.nextSequence + 1,
     lastElapsedMs,
     terminal,
-    lastSignature: signature,
   };
 }
 
@@ -317,7 +393,10 @@ export function settleImportActivityAttempt(
   } else {
     events.push({
       correlationId: attempt.correlationId,
-      operationId: `${attempt.correlationId}:ingest`,
+      operationId:
+        attempt.hostOperationId == null
+          ? `${attempt.correlationId}:request`
+          : `${attempt.correlationId}:host:${attempt.hostOperationId}`,
       origin,
       determinism: determinismForOrigin(origin),
       phase: "completed",
@@ -332,9 +411,11 @@ export function settleImportActivityAttempt(
       corpusId: corpusId ?? undefined,
     });
   }
+  const bounded = boundedEvents(events, attempt.omittedUpdates);
   return {
     ...attempt,
-    events,
+    events: bounded.events,
+    omittedUpdates: bounded.omittedUpdates,
     nextSequence: attempt.nextSequence + (last?.phase === "completed" ? 0 : 1),
     terminal: true,
   };

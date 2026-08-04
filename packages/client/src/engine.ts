@@ -110,6 +110,8 @@ export type ImportRunReport = {
 
 /** Request for a reviewed, plan-bound import run. */
 export type ImportRunRequest = {
+  /** Renderer correlation echoed by the host on every progress update. */
+  correlationId?: string;
   /** Root path exactly as previewed. */
   path: string;
   /** Corpus display name. */

@@ -108,6 +108,8 @@ function importActivities(run: ImportRunInput) {
     [run.outcome === "completed" ? "completed" : run.outcome, 60],
   ] as const) {
     attempt = recordImportProgress(attempt, {
+      operation_id: "host-lane-isolation",
+      correlation_id: "import:lane-isolation",
       kind: "log_ingest",
       phase,
       message: "deliberately ignored",

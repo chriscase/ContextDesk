@@ -60,6 +60,10 @@ export type ProcessProgressPhase =
 
 /** Mirrors cd_core::process_progress::ProcessProgress wire shape. */
 export type ProcessProgressDto = {
+  /** Host-generated id shared by every update from one command invocation. */
+  operation_id?: string | null;
+  /** Renderer correlation validated and echoed by the host. */
+  correlation_id?: string | null;
   kind: ProcessProgressKind;
   phase: ProcessProgressPhase;
   message: string;

@@ -67,6 +67,8 @@ function importActivities(run: ImportRunInput) {
     ["completed", 50],
   ] as const) {
     attempt = recordImportProgress(attempt, {
+      operation_id: "host-activity-rail-test",
+      correlation_id: "import:activity-rail-test",
       kind: "log_ingest",
       phase,
       message: "ignored",

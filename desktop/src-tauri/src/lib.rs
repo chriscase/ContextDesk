@@ -46,7 +46,10 @@ use handbook::{HandbookIndex, HandbookLink, HandbookManifest, HandbookPage};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Condvar, Mutex,
+};
 use std::time::{Duration, Instant as StdInstant};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -1678,7 +1681,7 @@ fn session_context_import_path(
         cd_core::session_context::SessionContextCaps::default(),
     )
     .map_err(|e| e.to_string())?;
-    let progress = TauriProcessProgress { app };
+    let progress = TauriProcessProgress::new(app);
     let p = std::path::Path::new(&path);
     // Wizard "both"/session_context with a .zip must extract entries (not store the archive blob).
     let is_zip = p
@@ -1731,7 +1734,7 @@ fn session_context_import_bytes(
             }
         })
         .collect();
-    let progress = TauriProcessProgress { app };
+    let progress = TauriProcessProgress::new(app);
     store
         .import_bytes_with_progress(
             if safe.is_empty() { "file.bin" } else { &safe },
@@ -1784,7 +1787,7 @@ fn session_context_import_zip(
         cd_core::session_context::SessionContextCaps::default(),
     )
     .map_err(|e| e.to_string())?;
-    let progress = TauriProcessProgress { app };
+    let progress = TauriProcessProgress::new(app);
     store
         .import_zip_bytes_with_progress(
             &data,
@@ -8509,11 +8512,76 @@ fn import_log_corpus_package_path(
 /// Emits redacted multi-phase progress for long host ops (#445).
 struct TauriProcessProgress {
     app: tauri::AppHandle,
+    invocation: ProcessProgressInvocation,
+}
+
+static PROCESS_PROGRESS_OPERATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn next_process_progress_operation_id() -> String {
+    let sequence = PROCESS_PROGRESS_OPERATION_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
+    let epoch_millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    format!("host-{epoch_millis}-{sequence}")
+}
+
+#[derive(Clone)]
+struct ProcessProgressInvocation {
+    operation_id: String,
+    correlation_id: String,
+}
+
+impl ProcessProgressInvocation {
+    fn new(requested_correlation_id: Option<String>) -> Self {
+        let operation_id = next_process_progress_operation_id();
+        let correlation_id = requested_correlation_id
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 200
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b":_-".contains(&byte))
+            })
+            .unwrap_or_else(|| format!("host:{operation_id}"));
+        Self {
+            operation_id,
+            correlation_id,
+        }
+    }
+}
+
+#[derive(Clone, Serialize)]
+struct TauriProcessProgressPayload {
+    operation_id: String,
+    correlation_id: String,
+    #[serde(flatten)]
+    update: cd_core::process_progress::ProcessProgress,
+}
+
+impl TauriProcessProgress {
+    fn new(app: tauri::AppHandle) -> Self {
+        Self::new_correlated(app, None)
+    }
+
+    fn new_correlated(app: tauri::AppHandle, correlation_id: Option<String>) -> Self {
+        Self {
+            app,
+            invocation: ProcessProgressInvocation::new(correlation_id),
+        }
+    }
 }
 
 impl cd_core::process_progress::ProcessProgressObserver for TauriProcessProgress {
     fn progress(&self, update: cd_core::process_progress::ProcessProgress) {
-        let _ = self.app.emit("process-progress", update);
+        let _ = self.app.emit(
+            "process-progress",
+            TauriProcessProgressPayload {
+                operation_id: self.invocation.operation_id.clone(),
+                correlation_id: self.invocation.correlation_id.clone(),
+                update,
+            },
+        );
     }
 }
 
@@ -8521,12 +8589,20 @@ impl cd_core::process_progress::ProcessProgressObserver for TauriProcessProgress
 struct TauriLogIngestProgress {
     app: tauri::AppHandle,
     recorder: Arc<cd_core::log_analysis::FailedIngestDiagnosticRecorder>,
+    invocation: ProcessProgressInvocation,
 }
 
 impl cd_core::process_progress::ProcessProgressObserver for TauriLogIngestProgress {
     fn progress(&self, update: cd_core::process_progress::ProcessProgress) {
         self.recorder.progress(update.clone());
-        let _ = self.app.emit("process-progress", update);
+        let _ = self.app.emit(
+            "process-progress",
+            TauriProcessProgressPayload {
+                operation_id: self.invocation.operation_id.clone(),
+                correlation_id: self.invocation.correlation_id.clone(),
+                update,
+            },
+        );
     }
 
     fn log_ingest_evidence(&self, evidence: cd_core::process_progress::LogIngestEvidence) {
@@ -8563,7 +8639,12 @@ fn register_exclusive_cancel(
     flag: Arc<std::sync::atomic::AtomicBool>,
     already_active: &str,
 ) -> Result<(), String> {
-    if cancels.contains_key(key) {
+    let domain = key.split(':').next().unwrap_or(key);
+    let scoped_prefix = format!("{domain}:");
+    if cancels
+        .keys()
+        .any(|existing| existing == domain || existing.starts_with(&scoped_prefix))
+    {
         return Err(already_active.into());
     }
     cancels.insert(key.into(), flag);
@@ -8584,6 +8665,26 @@ fn remove_cancel_if_owned(
     } else {
         false
     }
+}
+
+fn find_cancel_for_correlation<'a>(
+    cancels: &'a HashMap<String, Arc<std::sync::atomic::AtomicBool>>,
+    domain: &str,
+    correlation_id: Option<&str>,
+) -> Option<&'a Arc<std::sync::atomic::AtomicBool>> {
+    if let Some(correlation_id) = correlation_id {
+        return cancels.get(&format!("{domain}:{correlation_id}"));
+    }
+    let prefix = format!("{domain}:");
+    let mut matches = cancels
+        .iter()
+        .filter(|(key, _)| key.as_str() == domain || key.starts_with(&prefix))
+        .map(|(_, flag)| flag);
+    let only = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    Some(only)
 }
 
 fn desktop_local_log_embed_plan(
@@ -8620,6 +8721,7 @@ async fn run_log_ingest(
     state: &AppState,
     path: PathBuf,
     name: Option<String>,
+    invocation: ProcessProgressInvocation,
     managed_identity: Option<String>,
     selection: Option<cd_core::log_analysis::IngestSelection>,
     cancel: cd_core::process_progress::CancelFlag,
@@ -8651,6 +8753,7 @@ async fn run_log_ingest(
     let progress = TauriLogIngestProgress {
         app: app.clone(),
         recorder: Arc::clone(&recorder),
+        invocation,
     };
     let name_owned = name.unwrap_or_else(|| "corpus".into());
     let cancel_for_job = cancel.clone();
@@ -8793,22 +8896,35 @@ async fn ingest_log_path(
     state: State<'_, AppState>,
     path: String,
     name: Option<String>,
+    correlation_id: Option<String>,
 ) -> Result<LogIngestReportDto, String> {
+    let invocation = ProcessProgressInvocation::new(correlation_id);
+    let cancel_key = format!("{LOG_INGEST_CANCEL_KEY}:{}", invocation.correlation_id);
     let cancel = cd_core::process_progress::CancelFlag::new();
     let cancel_registration = cancel.inner_arc();
     {
         let mut cancels = state.cancels.lock().expect("cancels");
         register_exclusive_cancel(
             &mut cancels,
-            LOG_INGEST_CANCEL_KEY,
+            &cancel_key,
             Arc::clone(&cancel_registration),
             "a log import is already running",
         )?;
     }
-    let result = run_log_ingest(app, &state, PathBuf::from(path), name, None, None, cancel).await;
+    let result = run_log_ingest(
+        app,
+        &state,
+        PathBuf::from(path),
+        name,
+        invocation,
+        None,
+        None,
+        cancel,
+    )
+    .await;
     remove_cancel_if_owned(
         &mut state.cancels.lock().expect("cancels"),
-        LOG_INGEST_CANCEL_KEY,
+        &cancel_key,
         &cancel_registration,
     );
     result.map_err(LogIngestRunError::into_message)
@@ -8913,6 +9029,7 @@ impl DemoLogInstallBackend for TauriDemoLogInstallBackend<'_> {
             self.state,
             resource,
             Some(DEMO_LOG_NAME.into()),
+            ProcessProgressInvocation::new(None),
             Some(DEMO_LOG_IDENTITY.into()),
             None,
             cancel.clone(),
@@ -9145,6 +9262,7 @@ async fn reanalyze_log_corpus(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     corpus_id: String,
+    correlation_id: Option<String>,
 ) -> Result<cd_core::log_analysis::CorpusEmbeddingStatus, String> {
     ensure_host(&state)?;
     let cache = log_cache_dir(&state)?;
@@ -9163,14 +9281,18 @@ async fn reanalyze_log_corpus(
             host.local_log_embed_model().to_string(),
         )
     };
-    let progress = TauriProcessProgress { app };
+    let invocation = ProcessProgressInvocation::new(correlation_id);
+    let cancel_key = format!("{LOG_REANALYZE_CANCEL_KEY}:{}", invocation.correlation_id);
+    let progress = TauriProcessProgress { app, invocation };
     let cancel = cd_core::process_progress::CancelFlag::new();
     {
         let mut cancels = state.cancels.lock().expect("cancels");
-        if cancels.contains_key(LOG_REANALYZE_CANCEL_KEY) {
-            return Err("a log re-analysis is already running".into());
-        }
-        cancels.insert(LOG_REANALYZE_CANCEL_KEY.into(), cancel.inner_arc());
+        register_exclusive_cancel(
+            &mut cancels,
+            &cancel_key,
+            cancel.inner_arc(),
+            "a log re-analysis is already running",
+        )?;
     }
     let cancel_for_job = cancel.clone();
     let reanalyzed_corpus_id = corpus_id.clone();
@@ -9187,11 +9309,7 @@ async fn reanalyze_log_corpus(
     })
     .await
     .map_err(|error| format!("re-analysis task join: {error}"));
-    state
-        .cancels
-        .lock()
-        .expect("cancels")
-        .remove(LOG_REANALYZE_CANCEL_KEY);
+    state.cancels.lock().expect("cancels").remove(&cancel_key);
     if matches!(&result, Ok(Ok(_))) {
         state.log_corpus_handles.remove(&reanalyzed_corpus_id);
     }
@@ -9200,9 +9318,16 @@ async fn reanalyze_log_corpus(
 
 /// Cancel the active trusted local template re-analysis.
 #[tauri::command]
-fn cancel_log_reanalysis(state: State<'_, AppState>) -> Result<bool, String> {
+fn cancel_log_reanalysis(
+    state: State<'_, AppState>,
+    correlation_id: Option<String>,
+) -> Result<bool, String> {
     let cancels = state.cancels.lock().expect("cancels");
-    if let Some(flag) = cancels.get(LOG_REANALYZE_CANCEL_KEY) {
+    if let Some(flag) = find_cancel_for_correlation(
+        &cancels,
+        LOG_REANALYZE_CANCEL_KEY,
+        correlation_id.as_deref(),
+    ) {
         flag.store(true, std::sync::atomic::Ordering::SeqCst);
         return Ok(true);
     }
@@ -9211,9 +9336,14 @@ fn cancel_log_reanalysis(state: State<'_, AppState>) -> Result<bool, String> {
 
 /// Request cancel of an in-flight SoftWrite log ingest (#498).
 #[tauri::command]
-fn cancel_log_ingest(state: State<'_, AppState>) -> Result<bool, String> {
+fn cancel_log_ingest(
+    state: State<'_, AppState>,
+    correlation_id: Option<String>,
+) -> Result<bool, String> {
     let cancels = state.cancels.lock().expect("cancels");
-    if let Some(flag) = cancels.get(LOG_INGEST_CANCEL_KEY) {
+    if let Some(flag) =
+        find_cancel_for_correlation(&cancels, LOG_INGEST_CANCEL_KEY, correlation_id.as_deref())
+    {
         flag.store(true, std::sync::atomic::Ordering::SeqCst);
         return Ok(true);
     }
@@ -9540,14 +9670,17 @@ async fn log_run_import(
     plan_token: String,
     plan_version: u32,
     selected: Vec<String>,
+    correlation_id: Option<String>,
 ) -> Result<LogIngestReportDto, String> {
+    let invocation = ProcessProgressInvocation::new(correlation_id);
+    let cancel_key = format!("{LOG_INGEST_CANCEL_KEY}:{}", invocation.correlation_id);
     let cancel = cd_core::process_progress::CancelFlag::new();
     let cancel_registration = cancel.inner_arc();
     {
         let mut cancels = state.cancels.lock().expect("cancels");
         register_exclusive_cancel(
             &mut cancels,
-            LOG_INGEST_CANCEL_KEY,
+            &cancel_key,
             Arc::clone(&cancel_registration),
             "a log import is already running",
         )?;
@@ -9571,7 +9704,7 @@ async fn log_run_import(
         Ok(Err(message)) | Err(message) => {
             remove_cancel_if_owned(
                 &mut state.cancels.lock().expect("cancels"),
-                LOG_INGEST_CANCEL_KEY,
+                &cancel_key,
                 &cancel_registration,
             );
             return Err(message);
@@ -9582,6 +9715,7 @@ async fn log_run_import(
         &state,
         PathBuf::from(path),
         name,
+        invocation,
         None,
         Some(selection),
         cancel,
@@ -9589,7 +9723,7 @@ async fn log_run_import(
     .await;
     remove_cancel_if_owned(
         &mut state.cancels.lock().expect("cancels"),
-        LOG_INGEST_CANCEL_KEY,
+        &cancel_key,
         &cancel_registration,
     );
     result.map_err(LogIngestRunError::into_message)
@@ -13286,6 +13420,91 @@ mod log_ingest_cancel_registry_tests {
             &newer,
         ));
         assert!(!cancels.contains_key(LOG_INGEST_CANCEL_KEY));
+    }
+
+    #[test]
+    fn stale_cancel_correlation_cannot_cancel_a_retry() {
+        let mut cancels = HashMap::new();
+        let retry = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let retry_key = format!("{LOG_INGEST_CANCEL_KEY}:import:retry");
+        register_exclusive_cancel(
+            &mut cancels,
+            &retry_key,
+            Arc::clone(&retry),
+            "a log import is already running",
+        )
+        .expect("retry starts");
+
+        assert!(
+            find_cancel_for_correlation(&cancels, LOG_INGEST_CANCEL_KEY, Some("import:stale"),)
+                .is_none()
+        );
+        let current =
+            find_cancel_for_correlation(&cancels, LOG_INGEST_CANCEL_KEY, Some("import:retry"))
+                .expect("current correlation resolves");
+        current.store(true, Ordering::SeqCst);
+        assert!(retry.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn scoped_import_and_legacy_preview_are_mutually_exclusive() {
+        let mut cancels = HashMap::new();
+        register_exclusive_cancel(
+            &mut cancels,
+            "log_ingest:import:one",
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            "busy",
+        )
+        .expect("scoped import starts");
+        assert_eq!(
+            register_exclusive_cancel(
+                &mut cancels,
+                LOG_INGEST_CANCEL_KEY,
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                "busy",
+            ),
+            Err("busy".into())
+        );
+    }
+}
+
+#[cfg(test)]
+mod process_progress_invocation_tests {
+    use super::*;
+
+    #[test]
+    fn host_operations_are_unique_and_correlation_is_validated() {
+        let first = ProcessProgressInvocation::new(Some("import:known_1".into()));
+        let second = ProcessProgressInvocation::new(Some("private/path.log".into()));
+        assert_ne!(first.operation_id, second.operation_id);
+        assert_eq!(first.correlation_id, "import:known_1");
+        assert_eq!(
+            second.correlation_id,
+            format!("host:{}", second.operation_id)
+        );
+    }
+
+    #[test]
+    fn event_envelope_flattens_progress_with_both_exact_ids() {
+        let payload = TauriProcessProgressPayload {
+            operation_id: "host-1".into(),
+            correlation_id: "import:one".into(),
+            update: cd_core::process_progress::ProcessProgress::phase(
+                cd_core::process_progress::ProcessProgressKind::LogIngest,
+                cd_core::process_progress::ProcessProgressPhase::Starting,
+                "starting",
+                true,
+            ),
+        };
+        let value = serde_json::to_value(payload).expect("serialize envelope");
+        assert_eq!(value["operation_id"], "host-1");
+        assert_eq!(value["correlation_id"], "import:one");
+        assert_eq!(value["kind"], "log_ingest");
+        assert_eq!(value["phase"], "starting");
+        assert!(
+            value.get("update").is_none(),
+            "core progress must be flattened"
+        );
     }
 }
 

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ImportRunInput } from "./types";
 import {
   IMPORT_ACTIVITY_CHANGED_EVENT,
+  forgetCorpusImportActivity,
   loadCorpusImportActivity,
   publishImportRunActivity,
   subscribeImportRunActivity,
@@ -74,6 +75,8 @@ function liveEvents(run: ImportRunInput) {
     [run.outcome === "completed" ? "completed" : run.outcome, 50],
   ] as const) {
     attempt = recordImportProgress(attempt, {
+      operation_id: "host-bridge-test",
+      correlation_id: "import:bridge-test",
       kind: "log_ingest",
       phase,
       message: "/sensitive/tenant-a/runtime.log",
@@ -165,6 +168,23 @@ describe("corpus import activity bridge", () => {
     expect(emit).not.toHaveBeenCalled();
   });
 
+  it("does not persist a renderer-only trace without a host operation identity", async () => {
+    const run = completedRun("corpus-unbound");
+    const unbound = settleImportActivityAttempt(
+      beginImportActivityAttempt("import:unbound", run.sourceKind),
+      run,
+    );
+    const emit = vi.fn(async () => undefined);
+
+    await publishImportRunActivity(run, unbound.events, emit);
+
+    expect(loadCorpusImportActivity("corpus-unbound")).toEqual([]);
+    expect(
+      localStorage.getItem("contextdesk.importActivity.v1:corpus-unbound"),
+    ).toBeNull();
+    expect(emit).not.toHaveBeenCalled();
+  });
+
   it("delivers one matching safe payload once across same-window and Tauri", async () => {
     const received = vi.fn();
     let tauriHandler:
@@ -213,5 +233,58 @@ describe("corpus import activity bridge", () => {
       }),
     );
     expect(loadCorpusImportActivity("corpus-b")).toEqual([]);
+  });
+
+  it("forgets only the confirmed-discard corpus", async () => {
+    for (const corpusId of ["discard-me", "keep-me"]) {
+      const run = completedRun(corpusId);
+      await publishImportRunActivity(
+        run,
+        liveEvents(run),
+        async () => undefined,
+      );
+    }
+    forgetCorpusImportActivity("discard-me");
+
+    expect(loadCorpusImportActivity("discard-me")).toEqual([]);
+    expect(loadCorpusImportActivity("keep-me").length).toBeGreaterThan(0);
+  });
+
+  it("rejects forged path or log text from storage and cross-webview input", async () => {
+    const run = completedRun("corpus-inbound");
+    const [safe] = liveEvents(run);
+    const forged = {
+      ...safe,
+      label: "Discovering and reading sources",
+      detail: "/private/customer/runtime.log: password=secret",
+      corpusId: "corpus-inbound",
+    };
+    localStorage.setItem(
+      "contextdesk.importActivity.v1:corpus-inbound",
+      JSON.stringify({ version: 1, events: [forged] }),
+    );
+    expect(loadCorpusImportActivity("corpus-inbound")).toEqual([]);
+
+    const received = vi.fn();
+    let tauriHandler:
+      | ((event: { payload: Record<string, unknown> }) => void)
+      | undefined;
+    const unsubscribe = subscribeImportRunActivity(
+      received,
+      async (_name, handler) => {
+        tauriHandler = handler as typeof tauriHandler;
+        return () => undefined;
+      },
+    );
+    await vi.waitFor(() => expect(tauriHandler).toBeTypeOf("function"));
+    tauriHandler?.({
+      payload: {
+        corpusId: "corpus-inbound",
+        eventId: "forged:1",
+        events: [forged],
+      },
+    });
+    expect(received).not.toHaveBeenCalled();
+    unsubscribe();
   });
 });

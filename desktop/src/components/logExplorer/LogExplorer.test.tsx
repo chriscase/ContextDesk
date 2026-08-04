@@ -760,6 +760,8 @@ function importActivityEvents(run: ImportRunInput) {
     ["completed", 50],
   ] as const) {
     attempt = recordImportProgress(attempt, {
+      operation_id: "host-explorer-test",
+      correlation_id: "import:explorer-test",
       kind: "log_ingest",
       phase,
       message: "ignored",

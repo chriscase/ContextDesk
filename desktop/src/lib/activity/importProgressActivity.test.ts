@@ -11,6 +11,8 @@ const progress = (
   phase: ProcessProgressDto["phase"],
   overrides: Partial<ProcessProgressDto> = {},
 ): ProcessProgressDto => ({
+  operation_id: "host-test-operation",
+  correlation_id: "import:test",
   kind: "log_ingest",
   phase,
   message: "host message deliberately ignored",
@@ -54,12 +56,65 @@ const completedRun = (): ImportRunInput => ({
 });
 
 describe("live import Activity projection", () => {
-  it("keeps one start row when the host enriches the invocation observation", () => {
-    let attempt = beginImportActivityAttempt("import:start", "zip");
-    attempt = recordImportProgress(attempt, progress("starting"));
+  it("rejects foreign and identifier-free global progress", () => {
+    const attempt = beginImportActivityAttempt("import:owned", "zip");
+    const foreign = recordImportProgress(
+      attempt,
+      progress("starting", {
+        correlation_id: "reanalyze:foreign",
+        operation_id: "host-foreign",
+      }),
+    );
+    const missing = recordImportProgress(
+      attempt,
+      progress("starting", {
+        correlation_id: null,
+        operation_id: null,
+      }),
+    );
+
+    expect(foreign).toBe(attempt);
+    expect(missing).toBe(attempt);
+    expect(attempt.hostOperationId).toBeNull();
+    expect(attempt.events).toHaveLength(1);
+  });
+
+  it("coalesces and bounds ten thousand hostile updates with disclosure", () => {
+    let attempt = beginImportActivityAttempt("import:flood", "directory");
     attempt = recordImportProgress(
       attempt,
-      progress("starting", { elapsed_ms: 0 }),
+      progress("starting", { correlation_id: "import:flood", elapsed_ms: 0 }),
+    );
+    for (let index = 0; index < 10_000; index += 1) {
+      attempt = recordImportProgress(
+        attempt,
+        progress(index % 2 === 0 ? "scan" : "stream", {
+          correlation_id: "import:flood",
+          elapsed_ms: index + 1,
+          lines_processed: index,
+        }),
+      );
+    }
+
+    expect(attempt.events).toHaveLength(16);
+    expect(attempt.events[0]?.label).toBe("Import started");
+    expect(attempt.events.at(-1)?.detail).toContain("9,999 events");
+    expect(attempt.omittedUpdates).toBe(9_985);
+    expect(attempt.nextSequence).toBe(10_002);
+  });
+
+  it("keeps one start row when the host enriches the invocation observation", () => {
+    let attempt = beginImportActivityAttempt("import:start", "zip");
+    attempt = recordImportProgress(
+      attempt,
+      progress("starting", { correlation_id: "import:start" }),
+    );
+    attempt = recordImportProgress(
+      attempt,
+      progress("starting", {
+        correlation_id: "import:start",
+        elapsed_ms: 0,
+      }),
     );
 
     expect(attempt.events).toHaveLength(1);
@@ -82,7 +137,10 @@ describe("live import Activity projection", () => {
     ] as const) {
       attempt = recordImportProgress(
         attempt,
-        progress(phase, { elapsed_ms: elapsedMs }),
+        progress(phase, {
+          correlation_id: "import:one",
+          elapsed_ms: elapsedMs,
+        }),
       );
     }
     const events = settleImportActivityAttempt(attempt, completedRun()).events;
@@ -105,7 +163,7 @@ describe("live import Activity projection", () => {
       new Set(["import:one"]),
     );
     expect(new Set(events.map((event) => event.operationId))).toEqual(
-      new Set(["import:one:ingest"]),
+      new Set(["import:one:host:host-test-operation"]),
     );
     expect(events.every((event) => event.corpusId === "corpus-a")).toBe(true);
   });
@@ -114,18 +172,27 @@ describe("live import Activity projection", () => {
     let attempt = beginImportActivityAttempt("import:sequence", "directory");
     attempt = recordImportProgress(
       attempt,
-      progress("starting", { elapsed_ms: 10 }),
+      progress("starting", {
+        correlation_id: "import:sequence",
+        elapsed_ms: 10,
+      }),
     );
-    attempt = recordImportProgress(attempt, progress("scan"));
     attempt = recordImportProgress(
       attempt,
-      progress("stream", { elapsed_ms: 5 }),
+      progress("scan", { correlation_id: "import:sequence" }),
+    );
+    attempt = recordImportProgress(
+      attempt,
+      progress("stream", {
+        correlation_id: "import:sequence",
+        elapsed_ms: 5,
+      }),
     );
 
     expect(attempt.events.map((event) => event.clock)).toEqual([
       { kind: "elapsed", elapsedMs: 10 },
-      { kind: "sequence", seq: 1 },
       { kind: "sequence", seq: 2 },
+      { kind: "sequence", seq: 3 },
     ]);
     expect(JSON.stringify(attempt.events)).not.toContain('"kind":"wall"');
   });
@@ -134,7 +201,12 @@ describe("live import Activity projection", () => {
     let attempt = beginImportActivityAttempt("import:private", "file");
     attempt = recordImportProgress(
       attempt,
+      progress("starting", { correlation_id: "import:private" }),
+    );
+    attempt = recordImportProgress(
+      attempt,
       progress("stream", {
+        correlation_id: "import:private",
         message:
           "Reading /Users/person/Downloads/company/EDM_Server-secret.log",
         lines_processed: 120,
@@ -159,8 +231,17 @@ describe("live import Activity projection", () => {
 
   it("discloses optional embedding as model work", () => {
     let attempt = beginImportActivityAttempt("import:embed", "zip");
-    attempt = recordImportProgress(attempt, progress("embed"));
-    const [event] = attempt.events;
+    attempt = recordImportProgress(
+      attempt,
+      progress("starting", { correlation_id: "import:embed" }),
+    );
+    attempt = recordImportProgress(
+      attempt,
+      progress("embed", { correlation_id: "import:embed" }),
+    );
+    const event = attempt.events.find(
+      (candidate) => candidate.origin === "probabilistic_model",
+    )!;
 
     expect(event.origin).toBe("probabilistic_model");
     if (event.origin !== "probabilistic_model") {
@@ -215,7 +296,17 @@ describe("live import Activity projection", () => {
     let attempt = beginImportActivityAttempt("import:terminal", "zip");
     attempt = recordImportProgress(
       attempt,
-      progress("completed", { elapsed_ms: 77 }),
+      progress("starting", {
+        correlation_id: "import:terminal",
+        elapsed_ms: 0,
+      }),
+    );
+    attempt = recordImportProgress(
+      attempt,
+      progress("completed", {
+        correlation_id: "import:terminal",
+        elapsed_ms: 77,
+      }),
     );
     const terminal = settleImportActivityAttempt(
       attempt,
