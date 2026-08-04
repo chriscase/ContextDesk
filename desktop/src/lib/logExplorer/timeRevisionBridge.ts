@@ -16,24 +16,35 @@
 export const TIME_REVISION_CHANGED_EVENT =
   "contextdesk:corpus-time-revision-changed";
 
-type RevisionPayload = { corpusId?: unknown };
+type RevisionPayload = { corpusId?: unknown; eventId?: unknown };
 type RevisionListen = (
   eventName: string,
   handler: (event: { payload: RevisionPayload }) => void,
 ) => Promise<() => void>;
 type RevisionEmit = (
   eventName: string,
-  payload: { corpusId: string },
+  payload: { corpusId: string; eventId: string },
 ) => Promise<void>;
+
+const MAX_SEEN_EVENT_IDS = 128;
+const MAX_EVENT_ID_LENGTH = 128;
+const senderId = globalThis.crypto.randomUUID();
+let nextEventSequence = 0;
+
+function createEventId(): string {
+  nextEventSequence += 1;
+  return `${senderId}:${nextEventSequence}`;
+}
 
 /** Broadcast that `corpusId`'s event revision changed to every open surface. */
 export async function broadcastTimeRevisionChanged(
   corpusId: string,
   injectedEmit?: RevisionEmit,
 ): Promise<void> {
+  const payload = { corpusId, eventId: createEventId() };
   window.dispatchEvent(
     new CustomEvent<RevisionPayload>(TIME_REVISION_CHANGED_EVENT, {
-      detail: { corpusId },
+      detail: payload,
     }),
   );
   try {
@@ -41,7 +52,7 @@ export async function broadcastTimeRevisionChanged(
       injectedEmit ??
       ((await import("@tauri-apps/api/event"))
         .emit as unknown as RevisionEmit);
-    await send(TIME_REVISION_CHANGED_EVENT, { corpusId });
+    await send(TIME_REVISION_CHANGED_EVENT, payload);
   } catch {
     // Browser preview and tests have no Tauri event bus.
   }
@@ -54,13 +65,37 @@ export function subscribeTimeRevisionChanged(
 ): () => void {
   let disposed = false;
   let stopTauri: (() => void) | null = null;
-  const accept = (value: unknown) => {
-    if (!disposed && typeof value === "string" && value.length > 0) {
-      onChanged(value);
+  const seenEventIds = new Set<string>();
+  const seenEventOrder: string[] = [];
+  const accept = (payload: RevisionPayload | undefined) => {
+    if (disposed || typeof payload?.corpusId !== "string") return;
+    if (payload.corpusId.length === 0) return;
+
+    // A Tauri emit is delivered to the originating webview too. The same
+    // logical signal therefore arrives first as a CustomEvent and then as a
+    // Tauri event. Keep a small FIFO of event ids so each subscriber invokes
+    // its callback once without retaining unbounded history. Older senders
+    // without an event id remain compatible and are accepted once per input.
+    if (payload.eventId != null) {
+      if (
+        typeof payload.eventId !== "string" ||
+        payload.eventId.length === 0 ||
+        payload.eventId.length > MAX_EVENT_ID_LENGTH
+      ) {
+        return;
+      }
+      if (seenEventIds.has(payload.eventId)) return;
+      seenEventIds.add(payload.eventId);
+      seenEventOrder.push(payload.eventId);
+      if (seenEventOrder.length > MAX_SEEN_EVENT_IDS) {
+        const expired = seenEventOrder.shift();
+        if (expired !== undefined) seenEventIds.delete(expired);
+      }
     }
+    onChanged(payload.corpusId);
   };
   const onCustom = (event: Event) => {
-    accept((event as CustomEvent<RevisionPayload>).detail?.corpusId);
+    accept((event as CustomEvent<RevisionPayload>).detail);
   };
 
   window.addEventListener(TIME_REVISION_CHANGED_EVENT, onCustom);
@@ -70,7 +105,7 @@ export function subscribeTimeRevisionChanged(
       ((await import("@tauri-apps/api/event"))
         .listen as unknown as RevisionListen);
     const stop = await listen(TIME_REVISION_CHANGED_EVENT, (event) =>
-      accept(event.payload?.corpusId),
+      accept(event.payload),
     );
     if (disposed) stop();
     else stopTauri = stop;

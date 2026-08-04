@@ -80,7 +80,10 @@ import {
 import { applyLogNav, type LogNavAction } from "../../lib/logExplorer/logNav";
 import { governedIdToSafeInteger } from "../../lib/citations";
 import { subscribeLogExplorerNavTargets } from "../../lib/engine/platform";
-import { refreshAfterTimeRevision } from "../../lib/logExplorer/timeRevisionRefresh";
+import {
+  createCoalescedTimeRevisionRefresh,
+  type TimeRevisionRefreshSteps,
+} from "../../lib/logExplorer/timeRevisionRefresh";
 import { subscribeTimeRevisionChanged } from "../../lib/logExplorer/timeRevisionBridge";
 import {
   formatPolicyBindingStatus,
@@ -2394,6 +2397,25 @@ export function LogExplorer({ corpusId }: Props) {
     void refreshSummary();
   }, [refreshSummary]);
 
+  const timeRevisionRefreshStepsRef = useRef<TimeRevisionRefreshSteps>({
+    invalidateInFlight: () => undefined,
+    refreshSummary: async () => undefined,
+    refreshSuppressionPolicy: async () => undefined,
+    reloadActiveInvestigation: async () => undefined,
+    loadFacets: async () => undefined,
+    loadEvents: async () => undefined,
+  });
+  timeRevisionRefreshStepsRef.current = {
+    invalidateInFlight: () => {
+      eventsRequestRef.current += 1;
+    },
+    refreshSummary,
+    refreshSuppressionPolicy,
+    reloadActiveInvestigation,
+    loadFacets,
+    loadEvents,
+  };
+
   // #875 — a timezone apply/undo can happen outside this Explorer entirely
   // (the reviewed-import summary's TimeReviewCard, or the Logs pane's own
   // LogTimezoneStatus) while this window or in-app embed stays open. Any
@@ -2401,27 +2423,21 @@ export function LogExplorer({ corpusId }: Props) {
   // used when the revision changes from inside the Explorer itself — never
   // a re-import, just re-reading what the host already persisted.
   useEffect(() => {
-    return subscribeTimeRevisionChanged((changedCorpusId) => {
+    const refresh = createCoalescedTimeRevisionRefresh(
+      () => timeRevisionRefreshStepsRef.current,
+      (refreshError) => {
+        setError(`Could not refresh revised event time: ${String(refreshError)}`);
+      },
+    );
+    const unsubscribe = subscribeTimeRevisionChanged((changedCorpusId) => {
       if (changedCorpusId !== corpusId) return;
-      void refreshAfterTimeRevision({
-        invalidateInFlight: () => {
-          eventsRequestRef.current += 1;
-        },
-        refreshSummary,
-        refreshSuppressionPolicy,
-        reloadActiveInvestigation,
-        loadFacets,
-        loadEvents,
-      });
+      refresh.request();
     });
-  }, [
-    corpusId,
-    refreshSummary,
-    refreshSuppressionPolicy,
-    reloadActiveInvestigation,
-    loadFacets,
-    loadEvents,
-  ]);
+    return () => {
+      unsubscribe();
+      refresh.dispose();
+    };
+  }, [corpusId]);
 
   useEffect(() => {
     void loadSuppressionPolicy().catch(() => {
@@ -8052,22 +8068,6 @@ export function LogExplorer({ corpusId }: Props) {
           corpusId={corpusId}
           triggerRef={timeResolutionTriggerRef}
           onDismiss={() => setTimeResolutionOpen(false)}
-          onChanged={async () => {
-            // #819 — a timezone apply/undo publishes a new corpus revision, so
-            // every downstream snapshot must be re-derived before any query
-            // reads exclusions. The order is the contract and is asserted by
-            // lib/logExplorer/timeRevisionRefresh.test.ts.
-            await refreshAfterTimeRevision({
-              invalidateInFlight: () => {
-                eventsRequestRef.current += 1;
-              },
-              refreshSummary,
-              refreshSuppressionPolicy,
-              reloadActiveInvestigation,
-              loadFacets,
-              loadEvents,
-            });
-          }}
         />
       ) : null}
 

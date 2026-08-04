@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  createCoalescedTimeRevisionRefresh,
   refreshAfterTimeRevision,
   TIME_REVISION_REFRESH_ORDER,
   type TimeRevisionRefreshSteps,
@@ -131,5 +132,78 @@ describe("refreshAfterTimeRevision (#819)", () => {
     expect(steps.loadFacets).not.toHaveBeenCalled();
     expect(steps.loadEvents).not.toHaveBeenCalled();
     expect(steps.reloadActiveInvestigation).not.toHaveBeenCalled();
+  });
+
+  it("serializes a burst into one running and one follow-up refresh", async () => {
+    const releases: Array<() => void> = [];
+    let active = 0;
+    let maximumActive = 0;
+    const completed = vi.fn();
+    const steps: TimeRevisionRefreshSteps = {
+      invalidateInFlight: vi.fn(),
+      refreshSummary: async () => {
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
+        await new Promise<void>((resolve) => {
+          releases.push(() => {
+            active -= 1;
+            resolve();
+          });
+        });
+      },
+      refreshSuppressionPolicy: async () => undefined,
+      reloadActiveInvestigation: async () => undefined,
+      loadFacets: async () => undefined,
+      loadEvents: async () => {
+        completed();
+      },
+    };
+    const errors = vi.fn();
+    const refresh = createCoalescedTimeRevisionRefresh(() => steps, errors);
+
+    refresh.request();
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    refresh.request();
+    refresh.request();
+    expect(releases).toHaveLength(1);
+
+    releases[0]?.();
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    releases[1]?.();
+    await vi.waitFor(() => expect(completed).toHaveBeenCalledTimes(2));
+
+    expect(maximumActive).toBe(1);
+    expect(errors).not.toHaveBeenCalled();
+    refresh.dispose();
+    refresh.request();
+    expect(completed).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops pending work and late errors after disposal", async () => {
+    let rejectSummary!: (error: unknown) => void;
+    const summary = new Promise<void>((_resolve, reject) => {
+      rejectSummary = reject;
+    });
+    const steps: TimeRevisionRefreshSteps = {
+      invalidateInFlight: vi.fn(),
+      refreshSummary: vi.fn(() => summary),
+      refreshSuppressionPolicy: vi.fn(async () => undefined),
+      reloadActiveInvestigation: vi.fn(async () => undefined),
+      loadFacets: vi.fn(async () => undefined),
+      loadEvents: vi.fn(async () => undefined),
+    };
+    const errors = vi.fn();
+    const refresh = createCoalescedTimeRevisionRefresh(() => steps, errors);
+
+    refresh.request();
+    refresh.request();
+    refresh.dispose();
+    rejectSummary(new Error("late failure"));
+    await vi.waitFor(() =>
+      expect(steps.refreshSummary).toHaveBeenCalledOnce(),
+    );
+
+    expect(errors).not.toHaveBeenCalled();
+    expect(steps.refreshSuppressionPolicy).not.toHaveBeenCalled();
   });
 });

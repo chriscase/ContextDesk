@@ -16,13 +16,13 @@ import {
   type LogTimezoneClearRequestDto,
   type LogTimezoneStateDto,
 } from "../../lib/host";
+import { broadcastTimeRevisionChanged } from "../../lib/logExplorer/timeRevisionBridge";
 import { LogTimezoneStatus } from "../panes/LogTimezoneStatus";
 
 type Props = {
   corpusId: string;
   triggerRef: RefObject<HTMLButtonElement | null>;
   onDismiss: () => void;
-  onChanged: () => Promise<void>;
 };
 
 function focusableElements(root: HTMLElement | null): HTMLElement[] {
@@ -37,7 +37,6 @@ export function ExplorerTimeResolutionDialog({
   corpusId,
   triggerRef,
   onDismiss,
-  onChanged,
 }: Props) {
   const [state, setState] = useState<LogTimezoneStateDto | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -88,7 +87,7 @@ export function ExplorerTimeResolutionDialog({
     await hostApplyLogSourceTimezone(request);
     const [next] = await Promise.all([
       hostLoadLogTimezoneState(corpusId),
-      onChanged(),
+      broadcastTimeRevisionChanged(request.corpusId),
     ]);
     setState(next);
   };
@@ -97,7 +96,7 @@ export function ExplorerTimeResolutionDialog({
     await hostClearLogSourceTimezone(request);
     const [next] = await Promise.all([
       hostLoadLogTimezoneState(corpusId),
-      onChanged(),
+      broadcastTimeRevisionChanged(request.corpusId),
     ]);
     setState(next);
   };

@@ -10,7 +10,9 @@ describe("cross-window time-revision bridge (#875)", () => {
     const received: string[] = [];
     const stop = vi.fn();
     let tauriHandler:
-      | ((event: { payload: { corpusId?: unknown } }) => void)
+      | ((event: {
+          payload: { corpusId?: unknown; eventId?: unknown };
+        }) => void)
       | undefined;
     const listen = vi.fn(async (_name, handler) => {
       tauriHandler = handler;
@@ -31,6 +33,9 @@ describe("cross-window time-revision bridge (#875)", () => {
     // Malformed or empty payloads must never surface as a "changed" signal.
     tauriHandler?.({ payload: { corpusId: "" } });
     tauriHandler?.({ payload: {} });
+    tauriHandler?.({
+      payload: { corpusId: "ignored", eventId: "x".repeat(129) },
+    });
 
     expect(received).toEqual(["corpus-a", "corpus-b"]);
     unsubscribe();
@@ -51,9 +56,61 @@ describe("cross-window time-revision bridge (#875)", () => {
     window.removeEventListener(TIME_REVISION_CHANGED_EVENT, custom);
 
     expect(custom).toHaveBeenCalledOnce();
-    expect(emit).toHaveBeenCalledWith(TIME_REVISION_CHANGED_EVENT, {
+    const customPayload = (custom.mock.calls[0]?.[0] as CustomEvent).detail;
+    expect(customPayload).toEqual({
       corpusId: "corpus-x",
+      eventId: expect.any(String),
     });
+    expect(emit).toHaveBeenCalledWith(
+      TIME_REVISION_CHANGED_EVENT,
+      customPayload,
+    );
+  });
+
+  it("delivers one logical same-window plus Tauri broadcast only once", async () => {
+    const received = vi.fn();
+    let tauriHandler:
+      | ((event: {
+          payload: { corpusId?: unknown; eventId?: unknown };
+        }) => void)
+      | undefined;
+    const listen = vi.fn(async (_name, handler) => {
+      tauriHandler = handler;
+      return vi.fn();
+    });
+    const unsubscribe = subscribeTimeRevisionChanged(received, listen);
+    await vi.waitFor(() => expect(tauriHandler).toBeTypeOf("function"));
+
+    await broadcastTimeRevisionChanged("corpus-dedup", async (_name, payload) => {
+      tauriHandler?.({ payload });
+    });
+
+    expect(received).toHaveBeenCalledOnce();
+    expect(received).toHaveBeenCalledWith("corpus-dedup");
+    unsubscribe();
+  });
+
+  it("bounds remembered event ids with deterministic FIFO eviction", async () => {
+    const received = vi.fn();
+    const unsubscribe = subscribeTimeRevisionChanged(
+      received,
+      async () => () => undefined,
+    );
+    const dispatch = (eventId: string) =>
+      window.dispatchEvent(
+        new CustomEvent(TIME_REVISION_CHANGED_EVENT, {
+          detail: { corpusId: "corpus-bounded", eventId },
+        }),
+      );
+
+    for (let index = 0; index < 129; index += 1) {
+      dispatch(`event-${index}`);
+    }
+    dispatch("event-128"); // newest remains remembered
+    dispatch("event-0"); // oldest was evicted after the 129th unique id
+
+    expect(received).toHaveBeenCalledTimes(130);
+    unsubscribe();
   });
 
   it("never throws when there is no Tauri event bus (browser preview, tests)", async () => {

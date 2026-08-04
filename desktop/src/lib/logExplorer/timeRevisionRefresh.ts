@@ -47,3 +47,45 @@ export async function refreshAfterTimeRevision(
   await steps.loadFacets();
   await steps.loadEvents();
 }
+
+/**
+ * Serialize revision refreshes and collapse any burst received while a refresh
+ * is running into one follow-up pass. `getSteps` reads the latest React
+ * callbacks without forcing the cross-webview listener to be re-registered.
+ */
+export function createCoalescedTimeRevisionRefresh(
+  getSteps: () => TimeRevisionRefreshSteps,
+  onError: (error: unknown) => void,
+): { request: () => void; dispose: () => void } {
+  let disposed = false;
+  let running = false;
+  let pending = false;
+
+  const drain = async () => {
+    running = true;
+    do {
+      pending = false;
+      try {
+        await refreshAfterTimeRevision(getSteps());
+      } catch (error) {
+        if (!disposed) onError(error);
+      }
+    } while (!disposed && pending);
+    running = false;
+  };
+
+  return {
+    request: () => {
+      if (disposed) return;
+      if (running) {
+        pending = true;
+        return;
+      }
+      void drain();
+    },
+    dispose: () => {
+      disposed = true;
+      pending = false;
+    },
+  };
+}
