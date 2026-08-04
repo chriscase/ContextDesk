@@ -1141,7 +1141,10 @@ fn looks_like_single_time_snapshot(sample: &BoundedSample) -> bool {
             let Some(message_offset) = record.find(&parsed.message) else {
                 return false;
             };
-            timestamp_prefixes.insert(record[..message_offset].trim_end());
+            let Some(timestamp_prefix) = record.get(..message_offset) else {
+                return false;
+            };
+            timestamp_prefixes.insert(timestamp_prefix.trim_end());
             parsed.message.as_str()
         } else {
             record
@@ -1179,8 +1182,9 @@ fn looks_like_marker_delimited_snapshot(sample: &BoundedSample) -> bool {
         starts += usize::from(upper.starts_with('#') && upper.contains("START"));
         ends += usize::from(upper.starts_with('#') && upper.contains("END"));
         script_paths += usize::from(
-            record.starts_with('\\')
-                && record[1..].bytes().any(|byte| matches!(byte, b'\\' | b'/')),
+            record
+                .strip_prefix('\\')
+                .is_some_and(|rest| rest.bytes().any(|byte| matches!(byte, b'\\' | b'/'))),
         );
     }
 
@@ -1193,11 +1197,11 @@ fn is_snapshot_payload(payload: &str) -> bool {
         return false;
     }
 
-    if let Some(index) = payload.find('=') {
-        let left = payload[..index].trim();
-        let right = payload[index + 1..].trim();
-        let spaced = payload[..index].ends_with(char::is_whitespace)
-            || payload[index + 1..].starts_with(char::is_whitespace);
+    if let Some((raw_left, raw_right)) = payload.split_once('=') {
+        let left = raw_left.trim();
+        let right = raw_right.trim();
+        let spaced =
+            raw_left.ends_with(char::is_whitespace) || raw_right.starts_with(char::is_whitespace);
         let key = !left.is_empty()
             && left
                 .bytes()
@@ -2215,11 +2219,15 @@ mod tests {
             None,
             false,
         );
+        let unicode_json = sample_of(&[
+            r#"{"ts":"2026-01-01T12:00:00Z","méta":"état","message":"label = café"}"#,
+            r#"{"ts":"2026-01-01T12:00:00Z","méta":"état","message":"mode = sûr"}"#,
+        ]);
         let marker_bundle = item_from_sample(
             "XYZ_bundle",
             512,
             &sample_of(&[
-                "\\scripts\\capture_state",
+                "\\scripts\\capture_状態",
                 "#START#",
                 r#"{"section":"one","enabled":true}"#,
                 r#"{"section":"two","workers":4}"#,
@@ -2236,6 +2244,9 @@ mod tests {
             assert!(!event_importable(item));
             assert_eq!(item.reasons, vec![ImportPreviewReason::SnapshotDocument]);
         }
+        assert!(looks_like_single_time_snapshot(&unicode_json));
+        assert!(!is_snapshot_payload("café = value"));
+        assert!(is_snapshot_payload("label = café"));
     }
 
     #[test]
