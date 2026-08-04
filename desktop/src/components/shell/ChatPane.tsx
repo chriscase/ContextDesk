@@ -246,6 +246,14 @@ export function ChatPane(props: ChatPaneProps) {
     Record<string, HostTurnActivityRecord | null>
   >({});
 
+  // Records are cached per message id, so switching sessions must drop them:
+  // otherwise a long-lived window accumulates every session's records for the
+  // life of the process, and a cached "no record" answer would outlive the
+  // session it was asked about.
+  useEffect(() => {
+    setActivityRecords({});
+  }, [resolvedSessionId]);
+
   // Settled assistant messages whose host record we have not asked for yet.
   // Keyed by message id, which is exactly how the host filed the record.
   const pendingRecordIds = useMemo(() => {
