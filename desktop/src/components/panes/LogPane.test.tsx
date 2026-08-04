@@ -2802,6 +2802,7 @@ describe("LogPane reviewed-import progress ownership (defect: duplicated panel)"
     hostMocks.listTemplates.mockResolvedValue([]);
     hostMocks.clusterProblems.mockResolvedValue([]);
     hostMocks.openDirectory.mockResolvedValue("/incidents/checkout-outage");
+    hostMocks.getFailedIngestDiagnostic.mockResolvedValue(null);
     hostMocks.loadTimezoneState.mockImplementation(async (corpusId: string) => ({
       corpusId,
       eventRevision: 0,
@@ -2919,6 +2920,7 @@ describe("LogPane time-revision refresh signalling (#875)", () => {
     hostMocks.clusterProblems.mockResolvedValue([]);
     hostMocks.openDirectory.mockResolvedValue("/incidents/checkout-outage");
     hostMocks.listenProgress.mockResolvedValue(() => {});
+    hostMocks.getFailedIngestDiagnostic.mockResolvedValue(null);
     hostMocks.loadTimezoneState.mockImplementation(async (corpusId: string) => ({
       corpusId,
       eventRevision: 0,
