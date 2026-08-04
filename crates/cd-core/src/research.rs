@@ -18,11 +18,13 @@ use crate::providers::{ProviderCapabilities, ProviderKind, ProviderProfile};
 use crate::ssrf::SsrfPolicy;
 use crate::tool_host::ToolHost;
 use crate::tools::ToolSpec;
+use crate::turn_trace::{TracingChatBackend, TurnTraceSink};
 use crate::workspace::Workspace;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -790,6 +792,11 @@ where
 }
 
 /// Research turn with optional host-retained linked synthesis evidence.
+///
+/// Thin wrapper: no trace capture. See
+/// [`research_turn_with_cancel_and_context_and_checkpoint_and_trace`] for the
+/// full parameter set — this function exists so the existing call sites
+/// (production and test) never need to know tracing exists.
 #[allow(clippy::too_many_arguments)] // explicit trust inputs avoid ambient retry state
 pub async fn research_turn_with_cancel_and_context_and_checkpoint(
     host: &mut ToolHost,
@@ -805,7 +812,54 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint(
     checkpoint_out: Option<&mut Option<LinkedSynthesisCheckpoint>>,
     turn_started_at: Option<Instant>,
     turn_prelude_emitted: bool,
+    live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+) -> CoreResult<Vec<StreamEvent>> {
+    research_turn_with_cancel_and_context_and_checkpoint_and_trace(
+        host,
+        profile,
+        api_key,
+        user_text,
+        history,
+        session_id,
+        force_local,
+        cancel,
+        log_explorer_context,
+        linked_synthesis_retry,
+        checkpoint_out,
+        turn_started_at,
+        turn_prelude_emitted,
+        live,
+        None,
+    )
+    .await
+}
+
+/// Research turn with optional trace capture.
+///
+/// `trace_sink` wraps the chosen backend in a [`TracingChatBackend`], which
+/// records one bounded, redacted [`crate::turn_trace::TracedCall`] per
+/// provider round *before* forwarding the call on unchanged. It cannot alter
+/// execution, tool selection, context composition, or which network requests
+/// are made — it only observes what was already assembled. With `None`, the
+/// backend is the exact value it was before this parameter existed, which is
+/// what the on/off equivalence test pins.
+#[allow(clippy::too_many_arguments)] // explicit trust inputs avoid ambient retry state
+pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
+    host: &mut ToolHost,
+    profile: &ProviderProfile,
+    api_key: Option<String>,
+    user_text: &str,
+    history: &mut Vec<ChatMessage>,
+    session_id: &str,
+    force_local: bool,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    log_explorer_context: Option<crate::agent::LogExplorerTurnContext>,
+    linked_synthesis_retry: Option<LinkedSynthesisCheckpoint>,
+    checkpoint_out: Option<&mut Option<LinkedSynthesisCheckpoint>>,
+    turn_started_at: Option<Instant>,
+    turn_prelude_emitted: bool,
     mut live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+    trace_sink: Option<Arc<dyn TurnTraceSink>>,
 ) -> CoreResult<Vec<StreamEvent>> {
     if force_local {
         if linked_synthesis_retry.is_some() {
@@ -960,7 +1014,14 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint(
     if let (Some(notice), Some(sink)) = (&tools_notice, live.as_mut()) {
         sink(notice.clone());
     }
-    let backend = CapabilityAwareBackend::new(backend, caps);
+    let backend: Box<dyn ChatBackend> = Box::new(CapabilityAwareBackend::new(backend, caps));
+    // Observation only: `TracingChatBackend` records the already-assembled,
+    // already-redacted call and forwards it unchanged. With no sink the value
+    // is the same backend it always was.
+    let backend: Box<dyn ChatBackend> = match trace_sink {
+        Some(sink) => Box::new(TracingChatBackend::new(backend, sink)),
+        None => backend,
+    };
 
     let mut opts = AgentOptions::from_budget(
         host.router_budget(),
@@ -981,7 +1042,7 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint(
         .model_context_budgets()
         .resolve(Some(profile.chat_model.as_str()));
     let mut events = run_agent_turn_with_sink_and_checkpoint(
-        &backend,
+        backend.as_ref(),
         host,
         user_text,
         history,
