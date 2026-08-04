@@ -42,6 +42,8 @@ use crate::turn_trace::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io::Write;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 /// Version of the activity contract this build emits.
 ///
@@ -1413,6 +1415,20 @@ pub const MAX_DURABLE_ACTIVITY_FILE_BYTES: usize = 512 * 1024;
 /// Maximum durable records retained per session on disk.
 pub const MAX_DURABLE_ACTIVITY_RECORDS_PER_SESSION: usize = 100;
 
+// Every journal handle in a desktop process shares this lifecycle lock. A
+// save is a read-modify-replace transaction, so locking only an individual
+// `DurableActivityJournal` value would still let independently opened handles
+// lose one another's records. The desktop is a single writer process; this
+// also serializes save against chat deletion/retirement.
+static DURABLE_ACTIVITY_JOURNAL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn lock_durable_activity_journal() -> crate::error::CoreResult<MutexGuard<'static, ()>> {
+    DURABLE_ACTIVITY_JOURNAL_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| crate::error::CoreError::Message("activity journal lock is poisoned".into()))
+}
+
 /// Sidecar journal under `{data_dir}/activity/<session_id>.json`.
 ///
 /// Stores **Summary-only** records (bodies stripped) so a restart can restore
@@ -1441,23 +1457,24 @@ impl DurableActivityJournal {
         })
     }
 
-    fn path_for(&self, session_id: &str) -> std::path::PathBuf {
-        // Session ids are opaque UUIDs / host keys — still refuse path separators.
-        let safe: String = session_id
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        self.root.join(format!("{safe}.json"))
+    fn path_for(&self, session_id: &str) -> crate::error::CoreResult<std::path::PathBuf> {
+        // Match SessionStore's id policy. Replacing unsafe characters would
+        // let two distinct ids alias the same durable file.
+        if session_id.is_empty()
+            || !session_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(crate::error::CoreError::Policy(
+                "invalid activity session id".into(),
+            ));
+        }
+        Ok(self.root.join(format!("{session_id}.json")))
     }
 
     /// Persist one record for its session (Summary-only, bounded).
     pub fn save_record(&self, record: &TurnActivityRecord) -> crate::error::CoreResult<()> {
+        let _journal = lock_durable_activity_journal()?;
         let session_id = &record.session_id;
         let message_id = record.message_id.as_deref().unwrap_or("");
         if message_id.is_empty() {
@@ -1488,12 +1505,14 @@ impl DurableActivityJournal {
         &self,
         session_id: &str,
     ) -> crate::error::CoreResult<Vec<(String, TurnActivityRecord)>> {
+        let _journal = lock_durable_activity_journal()?;
         let map = self.load_session_map(session_id)?;
         Ok(map.into_iter().collect())
     }
 
     /// Hydrate an in-memory store from every session file under the journal.
     pub fn hydrate_store(&self, store: &mut ActivityStore) -> crate::error::CoreResult<usize> {
+        let _journal = lock_durable_activity_journal()?;
         let mut n = 0usize;
         let rd = match std::fs::read_dir(&self.root) {
             Ok(rd) => rd,
@@ -1520,10 +1539,21 @@ impl DurableActivityJournal {
                 Ok(f) => f,
                 Err(_) => continue, // fail-safe: unknown/corrupt schema
             };
-            if file.version > ACTIVITY_CONTRACT_VERSION + 1 {
-                continue; // future major: refuse rather than invent
+            if file.version != ACTIVITY_CONTRACT_VERSION {
+                continue; // unknown schema: refuse rather than invent
+            }
+            let Some(file_stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if file.session_id != file_stem {
+                continue;
             }
             for (message_id, mut record) in file.records {
+                if record.session_id != file.session_id
+                    || record.message_id.as_deref() != Some(message_id.as_str())
+                {
+                    continue;
+                }
                 strip_bodies_for_durability(&mut record);
                 if looks_like_secret_payload(&record) {
                     continue;
@@ -1538,7 +1568,8 @@ impl DurableActivityJournal {
 
     /// Remove one session's durable file (chat delete).
     pub fn forget_session(&self, session_id: &str) -> crate::error::CoreResult<()> {
-        let path = self.path_for(session_id);
+        let _journal = lock_durable_activity_journal()?;
+        let path = self.path_for(session_id)?;
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1552,7 +1583,7 @@ impl DurableActivityJournal {
         &self,
         session_id: &str,
     ) -> crate::error::CoreResult<BTreeMap<String, TurnActivityRecord>> {
-        let path = self.path_for(session_id);
+        let path = self.path_for(session_id)?;
         if !path.is_file() {
             return Ok(BTreeMap::new());
         }
@@ -1565,10 +1596,17 @@ impl DurableActivityJournal {
             Ok(f) => f,
             Err(_) => return Ok(BTreeMap::new()),
         };
-        if file.version > ACTIVITY_CONTRACT_VERSION + 1 {
+        if file.version != ACTIVITY_CONTRACT_VERSION || file.session_id != session_id {
             return Ok(BTreeMap::new());
         }
-        Ok(file.records)
+        Ok(file
+            .records
+            .into_iter()
+            .filter(|(message_id, record)| {
+                record.session_id == session_id
+                    && record.message_id.as_deref() == Some(message_id.as_str())
+            })
+            .collect())
     }
 
     fn write_session_map(
@@ -1589,14 +1627,23 @@ impl DurableActivityJournal {
                 "activity journal over byte budget".into(),
             ));
         }
-        let path = self.path_for(session_id);
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, &bytes).map_err(|e| {
-            crate::error::CoreError::Message(format!("activity journal write: {e}"))
+        let path = self.path_for(session_id)?;
+        let mut temporary = tempfile::Builder::new()
+            .prefix(".activity-")
+            .tempfile_in(&self.root)
+            .map_err(|e| crate::error::CoreError::Message(format!("activity journal temp: {e}")))?;
+        temporary
+            .write_all(&bytes)
+            .and_then(|()| temporary.as_file_mut().sync_all())
+            .map_err(|e| {
+                crate::error::CoreError::Message(format!("activity journal write: {e}"))
+            })?;
+        let published = temporary.persist(&path).map_err(|e| {
+            crate::error::CoreError::Message(format!("activity journal replace: {}", e.error))
         })?;
-        std::fs::rename(&tmp, &path).map_err(|e| {
-            crate::error::CoreError::Message(format!("activity journal rename: {e}"))
-        })?;
+        published
+            .sync_all()
+            .map_err(|e| crate::error::CoreError::Message(format!("activity journal sync: {e}")))?;
         Ok(())
     }
 }

@@ -5729,15 +5729,26 @@ fn record_turn_activity(
     let elapsed_ms = u64::try_from(turn_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
     let mut record: TurnActivityRecord = recorder.finish(status, elapsed_ms);
     record.message_id = Some(message_id.to_string());
-    if let Ok(mut store) = state.activity.lock() {
-        store.insert(&req.session_id, message_id, record.clone());
+
+    // One lifecycle section covers "session still exists" and the bounded
+    // process-lifetime store. Trash/delete takes these locks in the same
+    // order, so a turn that finishes after its chat was retired cannot
+    // recreate the explanation the user just deleted.
+    let Ok(_session_lifecycle) = state.chat_session_mutation.lock() else {
+        return;
+    };
+    let Ok(session) = session_store(state)
+        .and_then(|store| store.load(&req.session_id).map_err(|error| error.to_string()))
+    else {
+        return;
+    };
+    if session.trashed {
+        return;
     }
-    // Bounded redacted sidecar — Summary only; restart can hydrate metadata.
-    if let Ok(dir) = ensure_config_dir(&state.branding) {
-        if let Ok(journal) = cd_core::activity::DurableActivityJournal::open(&dir) {
-            let _ = journal.save_record(&record);
-        }
-    }
+    let Ok(mut activity) = state.activity.lock() else {
+        return;
+    };
+    activity.insert(&req.session_id, message_id, record);
 }
 
 /// Active provider for Settings hydrate (no secrets).
@@ -12187,17 +12198,10 @@ pub fn run() {
         ),
         chat_session_mutation: Mutex::new(()),
         investigation_mutation: Mutex::new(()),
-        activity: Mutex::new({
-            let mut store = cd_core::activity::ActivityStore::default();
-            // Restart hydration: load bounded Summary-only records from disk.
-            // Use Branding::embedded() again — `branding` is moved into this struct.
-            if let Ok(dir) = ensure_config_dir(&Branding::embedded()) {
-                if let Ok(journal) = cd_core::activity::DurableActivityJournal::open(&dir) {
-                    let _ = journal.hydrate_store(&mut store);
-                }
-            }
-            store
-        }),
+        // Activity remains process-lifetime only until the durable format has
+        // closed privacy, global-retention, Windows replacement, and
+        // multi-process writer review. Do not hydrate sidecars at startup.
+        activity: Mutex::new(cd_core::activity::ActivityStore::default()),
         cancels: Mutex::new(HashMap::new()),
         active_turn_owners: Mutex::new(HashMap::new()),
         next_turn_owner: std::sync::atomic::AtomicU64::new(0),

@@ -1025,6 +1025,81 @@ fn durable_journal_survives_restart_and_strips_bodies() {
 }
 
 #[test]
+fn concurrent_durable_saves_do_not_lose_same_session_records() {
+    use cd_core::activity::{DurableActivityJournal, TurnActivityRecord};
+    use std::sync::{Arc, Barrier};
+
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Arc::new(DurableActivityJournal::open(dir.path()).expect("journal"));
+    let writers = 24usize;
+    let start = Arc::new(Barrier::new(writers));
+    let mut handles = Vec::new();
+    for index in 0..writers {
+        let journal = Arc::clone(&journal);
+        let start = Arc::clone(&start);
+        handles.push(std::thread::spawn(move || {
+            let message_id = format!("message-{index:02}");
+            let mut record: TurnActivityRecord = ActivityRecorder::new(
+                format!("turn-{index:02}"),
+                "session-concurrent",
+                DataScope::conversation(),
+                ActivityDetailLevel::Summary,
+            )
+            .finish(ActivityStatus::Ok, index as u64);
+            record.message_id = Some(message_id);
+            start.wait();
+            journal.save_record(&record)
+        }));
+    }
+    for handle in handles {
+        handle
+            .join()
+            .expect("writer thread")
+            .expect("concurrent durable save");
+    }
+
+    let loaded = journal
+        .load_session("session-concurrent")
+        .expect("load all records");
+    assert_eq!(
+        loaded.len(),
+        writers,
+        "a read-modify-write race lost a turn"
+    );
+}
+
+#[test]
+fn durable_journal_refuses_aliasing_session_ids_and_mismatched_files() {
+    use cd_core::activity::DurableActivityJournal;
+
+    let dir = tempfile::tempdir().unwrap();
+    let journal = DurableActivityJournal::open(dir.path()).expect("journal");
+    let mut invalid = ActivityRecorder::new(
+        "turn-invalid",
+        "session/alias",
+        DataScope::conversation(),
+        ActivityDetailLevel::Summary,
+    )
+    .finish(ActivityStatus::Ok, 1);
+    invalid.message_id = Some("message-invalid".into());
+    assert!(
+        journal.save_record(&invalid).is_err(),
+        "an unsafe id must be refused, not normalized onto another session"
+    );
+
+    let activity_root = dir.path().join("activity");
+    std::fs::write(
+        activity_root.join("session-a.json"),
+        r#"{"version":1,"session_id":"session-b","records":{}}"#,
+    )
+    .unwrap();
+    assert!(
+        journal.load_session("session-a").unwrap().is_empty(),
+        "a file whose embedded owner disagrees with its name must fail closed"
+    );
+}
+
+#[test]
 fn cancellation_status_is_not_ok() {
     assert_eq!(
         cd_core::activity::status_for_turn_reason("cancel"),
@@ -1162,5 +1237,32 @@ fn host_trash_and_delete_commands_call_retire_chat_session_activity() {
         src.contains("cd_core::activity::retire_session_activity")
             || src.contains("retire_session_activity("),
         "host must route through cd_core::activity::retire_session_activity"
+    );
+
+    // Completion and deletion must share a lifecycle boundary. Otherwise an
+    // in-flight turn can save its sidecar after trash/delete removed it.
+    let start = src
+        .find("fn record_turn_activity")
+        .expect("record_turn_activity host path");
+    let end = src[start..]
+        .find("\n/// Active provider")
+        .map(|offset| start + offset)
+        .expect("end of record_turn_activity");
+    let body = &src[start..end];
+    let mutation = body
+        .find("chat_session_mutation.lock()")
+        .expect("activity completion takes session lifecycle lock");
+    let retired_guard = body
+        .find("session.trashed")
+        .expect("activity completion refuses a trashed session");
+    let memory = body
+        .find("state.activity.lock()")
+        .expect("activity completion locks memory store");
+    let insertion = body
+        .find("activity.insert(&req.session_id, message_id, record)")
+        .expect("activity completion inserts the process-lifetime record");
+    assert!(
+        mutation < retired_guard && retired_guard < memory && memory < insertion,
+        "session existence and activity publication must share one ordered lifecycle"
     );
 }

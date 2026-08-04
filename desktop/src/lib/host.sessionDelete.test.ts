@@ -1,6 +1,6 @@
 /**
- * Product path: trash/delete must retire session activity (belt-and-suspenders
- * with the host command that also retires the durable journal).
+ * Product path: trash/delete must retire process-lifetime session activity
+ * (with the host command as the authoritative lifecycle boundary).
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 

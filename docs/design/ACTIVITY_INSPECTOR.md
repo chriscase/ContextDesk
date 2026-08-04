@@ -1,8 +1,9 @@
 # Activity Inspector — contract and capture seam
 
-Status: **backend contract + capture seam + desktop UI live. Bounded
-durable sidecar journal (Summary-only) hydrates across restart; tool /
-permission / retrieval stream events are projected as metadata.**
+Status: **backend contract + capture seam + desktop UI under integration
+review. Activity records are bounded and process-lifetime only; durable
+hydration is intentionally disabled pending privacy, retention, Windows,
+and multi-process writer proof.**
 
 The Activity Inspector answers one question about a finished turn: *what
 actually happened, and how much should I trust each step?* This document
@@ -55,16 +56,16 @@ is a test that constructs exactly that lie and asserts it is corrected.
 
 ## Capture seam
 
-`cd_workflow::turn::run_{ordinary,linked}_turn` already accepted
-`trace_sink: Option<Arc<dyn TurnTraceSink>>`; both desktop call sites passed
-`None`. That parameter *was* the seam. The desktop now passes a
-`RecordingTurnTrace` when capture is enabled. The same recorder timestamps
-provider completions and metadata-only host stream observations against one
-turn origin, then projects the ordered timeline after the turn via
+The shared `cd_core` research turn accepts an optional
+`Arc<dyn TurnTraceSink>`. The desktop passes a `RecordingTurnTrace` when
+capture is enabled. The same recorder timestamps provider completions and
+metadata-only host stream observations against one turn origin, then
+projects the ordered timeline after the turn via
 `ActivityRecorder::record_timeline`.
 
-No second tracing path exists. CLI `--trace`/`--dry-run` and the inspector
-consume the same `TracedCall`s.
+No second desktop tracing path exists. A future CLI must consume this same
+`TracedCall`/`TurnActivityRecord` contract; there is no CLI binary in this
+workspace today, so GUI/CLI parity is not claimed here.
 
 ### Why this cannot change execution
 
@@ -114,8 +115,7 @@ whole turn.
 ## Storage today
 
 `ActivityStore` on `AppState`: bounded (200 records), evicting oldest-first,
-keyed `(session_id, assistant message id)` and hydrated from the Summary-only
-sidecar described below. Re-recording
+**memory-only**, and keyed `(session_id, assistant message id)`. Re-recording
 one message replaces in place rather than consuming a second slot, so a
 retried turn cannot push an unrelated record out.
 
@@ -124,18 +124,19 @@ exposes `forget_session_activity`. Read side is `get_turn_activity`; there
 is deliberately no mutating command, because an explanation the user can
 edit is not an explanation.
 
-## Durable persistence (landed)
+## Durable persistence (not enabled)
 
-`DurableActivityJournal` writes **Summary-only** sidecars under
-`{config_dir}/activity/<session_id>.json` (atomic temp+rename). Bodies are
-stripped before disk; secret-like payloads are refused. Hydration on host
-start fills the in-memory `ActivityStore`. `forget_session` removes the
-sidecar with the memory entry.
+The product does not currently write or hydrate activity sidecars. The
+draft `DurableActivityJournal` is not connected to the desktop host until
+the durable representation has closed full-object privacy validation,
+ordered and global retention, Windows replacement, deletion ordering, lazy
+session hydration, and multiple-process writer behavior. Chat trash/delete
+still clears the bounded in-memory record and retires any experimental
+sidecar left by a development build.
 
-**Still residual:** joining the journal write into `chat_session_mutation`
-for exactly-once with transcript save; Explorer-linked turns not fully
-folded into the activity rail; CLI package not a workspace member on this
-tip (contract is shared; no `cd-cli` binary coverage here).
+**Residual:** Explorer-linked turns are not fully folded into the activity
+rail; the CLI package is not a workspace member on this tip (the contract is
+shared, but there is no `cd-cli` binary coverage here).
 
 ## What is captured today, and what is not
 
@@ -153,7 +154,7 @@ connector reads are external, and approved mutations are governed writes.
 The renderer does not guess from tool-name patterns. A permission request is
 pending host policy, never a completed human decision; the later UI allow or
 deny appends a `user_decision` event and the metadata-only governed tool
-outcome to the original record and durable sidecar.
+outcome to the original process-lifetime record.
 
 That classifier reads the whole event stream, not the terminal reason alone.
 Two of this product's withholding conditions — `linked_no_tool` and
