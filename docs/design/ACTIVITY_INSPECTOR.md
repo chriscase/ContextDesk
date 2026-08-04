@@ -1,6 +1,7 @@
 # Activity Inspector — contract and capture seam
 
-Status: **backend foundation landed; durable persistence is an explicit residual.**
+Status: **backend contract + capture seam landed, and the desktop UI now
+reads it live. Durable persistence remains an explicit residual.**
 
 The Activity Inspector answers one question about a finished turn: *what
 actually happened, and how much should I trust each step?* This document
@@ -157,11 +158,81 @@ Captured: one event per provider round, carrying round index, message count,
 total redacted context characters, whether the message list was capped, tool
 names offered, per-role tallies, elapsed time, finish reason or redacted
 error, and the turn's terminal status via
-`activity::status_for_turn_reason` (which reuses the product's own withheld
-list rather than re-deriving it).
+`activity::status_for_turn_events`.
+
+That classifier reads the whole event stream, not the terminal reason alone.
+Two of this product's withholding conditions — `linked_no_tool` and
+`linked_required_source_missing` — are emitted as `StreamEvent::Error` codes
+while `TurnCompleted.reason` stays `"stop"`, so a reason-only classifier
+would file a knowingly ungrounded answer as a clean success.
+`events::WITHHELD_TURN_REASONS` and `events::WITHHELD_TURN_ERROR_CODES` are
+split along exactly that line, and `budget_rounds` (the final answer failed)
+is kept apart from `budget_rounds_answer` (an answer was produced).
 
 Not captured yet, and each needs its own event source rather than a contract
 change: individual tool executions, permission decisions, retrieval and
 ranking steps, and connector calls. The `ActivityOrigin` variants for all of
 these already exist and are tested; what is missing is a host-side call to
 `ActivityRecorder::push` at each of those points.
+
+
+## The desktop surface
+
+One renderer model (`desktop/src/lib/activity/types.ts`) mirrors this
+contract, and one shared persisted preference — Off / Compact / Drawer /
+Docked — governs display in ordinary chat, the Logs pane, and the Log
+Explorer alike. Off hides the whole ContextDesk group and changes nothing
+about processing; host-side capture is `AppConfig.activity`, deliberately a
+different switch.
+
+### Two synchronized groups, never one
+
+| | Customer evidence lanes | ContextDesk activity lanes |
+| --- | --- | --- |
+| Made of | `ExplorerEventDto` | `ActivityEvent` |
+| Governed by | corpus, source facets, filters, suppression policy | operation / import / chat-turn / model-round / tool / correlation id |
+| Feeds | search, facets, grounded citations | nothing but the inspector |
+
+The separation is structural rather than conventional: every activity event
+carries `laneGroup: "contextdesk"`, that field's type is the single literal,
+and a repo-wide test asserts no production module outside `lib/activity`
+constructs one. Activity therefore cannot enter the corpus, the source
+facets, search or filter results, the suppression policy, or grounded
+evidence — none of those surfaces read the type.
+
+### Time is never invented
+
+An event's position is an `ActivityClock` union, not a nullable timestamp:
+
+- `wall` — real calendar time on this machine (import runs, Explorer work);
+- `elapsed` — milliseconds since turn start, which is exactly what the
+  contract carries for provider rounds;
+- `sequence` — order only, for steps the renderer observed without timing.
+
+`lib/activity/dualLaneAxis.ts` is the only place that decides whether the two
+groups may share a visual axis. It requires wall-clock evidence on **both**
+sides: an `order_only` or `mixed` corpus, or any activity event that is
+sequence- or elapsed-only, drops the view to two labelled tracks with the
+reason stated in words. Partial dating is refused rather than filled in —
+one undated event among dated ones would otherwise be placed at a moment
+nobody measured.
+
+### No fixture theater
+
+An earlier draft filled context categories, a token budget, and a round
+count from fixtures, tagging each `source: "fixture"` and rendering
+"(placeholder)" beside numbers that looked measured. That is removed.
+Production shows live facts or the words "not reported"; fixtures are
+test/story-only, and two repo-wide tests pin that no production file imports
+them and no activity module carries a live-vs-fixture provenance field.
+
+### Residual on the desktop side
+
+Per-turn chat activity currently shows provider rounds from the host record
+plus what the renderer itself observed (tool calls, citations, search trail).
+Tool executions, permission decisions, retrieval/ranking steps, and connector
+calls still have no host-side `ActivityRecorder::push`, so the inspector
+reports them as observed-but-untimed rather than as contract events. The
+Explorer rail records the deterministic work it genuinely performs (corpus
+summary reads, cross-surface timezone refreshes); linked-chat turns inside
+the Explorer are not yet folded into that rail.
