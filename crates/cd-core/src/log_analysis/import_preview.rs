@@ -486,21 +486,12 @@ pub(super) fn align_to_records(bytes: &[u8], at_source_start: bool, at_source_en
 pub(super) fn sample_bounded<R: Read + Seek>(reader: &mut R, total_bytes: u64) -> BoundedSample {
     use sha2::{Digest, Sha256};
 
-    let window = IMPORT_PREVIEW_SAMPLE_WINDOW_BYTES as u64;
-    let mut offsets = vec![0u64];
-    if total_bytes > window.saturating_mul(2) {
-        offsets.push(total_bytes / 2);
-    }
-    if total_bytes > window.saturating_mul(3) {
-        offsets.push(total_bytes.saturating_sub(window));
-    }
-
     let mut sample = BoundedSample {
         empty: true,
         ..BoundedSample::default()
     };
     let mut content_hasher = Sha256::new();
-    for offset in offsets.into_iter().take(IMPORT_PREVIEW_SAMPLE_WINDOWS) {
+    for offset in sample_offsets(total_bytes) {
         if reader.seek(SeekFrom::Start(offset)).is_err() {
             continue;
         }
@@ -516,17 +507,17 @@ pub(super) fn sample_bounded<R: Read + Seek>(reader: &mut R, total_bytes: u64) -
         content_hasher.update(offset.to_le_bytes());
         content_hasher.update((read as u64).to_le_bytes());
         content_hasher.update(bytes);
+        let at_source_start = offset == 0;
+        let at_source_end = offset.saturating_add(read as u64) >= total_bytes;
         // Binary detection runs on the RAW window: a binary blob has no
         // newlines to align to, and alignment would otherwise turn it into an
         // empty (and therefore "empty file") sample.
-        if is_binary(bytes) {
+        if is_binary_window(bytes, at_source_start) {
             sample.binary = true;
             sample.empty = false;
             sample.content_fingerprint = sha256_digest_hex(content_hasher.finalize());
             return sample;
         }
-        let at_source_start = offset == 0;
-        let at_source_end = offset.saturating_add(read as u64) >= total_bytes;
         let aligned = align_to_records(bytes, at_source_start, at_source_end);
         if aligned.is_empty() {
             // No whole record in this window — no evidence, not contrary
@@ -541,6 +532,20 @@ pub(super) fn sample_bounded<R: Read + Seek>(reader: &mut R, total_bytes: u64) -
     }
     sample.content_fingerprint = sha256_digest_hex(content_hasher.finalize());
     sample
+}
+
+/// Exact head/interior/tail offsets shared by seekable files and ZIP streams.
+fn sample_offsets(total_bytes: u64) -> Vec<u64> {
+    let window = IMPORT_PREVIEW_SAMPLE_WINDOW_BYTES as u64;
+    let mut offsets = vec![0];
+    if total_bytes > window.saturating_mul(2) {
+        offsets.push(total_bytes / 2);
+    }
+    if total_bytes > window.saturating_mul(3) {
+        offsets.push(total_bytes.saturating_sub(window));
+    }
+    offsets.truncate(IMPORT_PREVIEW_SAMPLE_WINDOWS);
+    offsets
 }
 
 /// Outcome of streaming a member for classification.
@@ -583,13 +588,11 @@ pub(super) fn sample_streaming<R: Read>(
     use sha2::{Digest, Sha256};
 
     let window = IMPORT_PREVIEW_SAMPLE_WINDOW_BYTES;
-    let mut head: Vec<u8> = Vec::new();
-    let mut middle: Vec<u8> = Vec::new();
-    let mut tail: Vec<u8> = Vec::new();
+    let mut raw_windows: Vec<(u64, Vec<u8>)> = sample_offsets(total_bytes)
+        .into_iter()
+        .map(|offset| (offset, Vec::with_capacity(window)))
+        .collect();
     let mut consumed: u64 = 0;
-    let midpoint = total_bytes / 2;
-    let mut middle_taken = false;
-    let mut binary = false;
     let mut chunk = vec![0u8; 8 * 1024];
     let mut content_hasher = Sha256::new();
 
@@ -609,29 +612,27 @@ pub(super) fn sample_streaming<R: Read>(
         };
         let bytes = &chunk[..read];
         content_hasher.update(bytes);
-        if !binary && is_binary(bytes) {
-            binary = true;
+        let chunk_end = consumed.saturating_add(read as u64);
+        for (offset, raw) in &mut raw_windows {
+            let window_end = offset.saturating_add(window as u64).min(total_bytes);
+            let overlap_start = consumed.max(*offset);
+            let overlap_end = chunk_end.min(window_end);
+            if overlap_start < overlap_end {
+                let start = (overlap_start - consumed) as usize;
+                let end = (overlap_end - consumed) as usize;
+                raw.extend_from_slice(&bytes[start..end]);
+            }
         }
-        if head.len() < window {
-            let take = read.min(window - head.len());
-            head.extend_from_slice(&bytes[..take]);
-        }
-        if !middle_taken
-            && total_bytes > (window as u64) * 2
-            && consumed + (read as u64) >= midpoint
-        {
-            middle.extend_from_slice(&bytes[..read.min(window)]);
-            middle_taken = true;
-        }
-        tail.extend_from_slice(bytes);
-        if tail.len() > window {
-            let drop_to = tail.len() - window;
-            tail.drain(..drop_to);
-        }
-        consumed = consumed.saturating_add(read as u64);
+        consumed = chunk_end;
     }
 
-    if binary {
+    // Classify the same bounded raw evidence as the seekable path. Transport
+    // chunk boundaries are not content boundaries: a valid multi-byte UTF-8
+    // code point can straddle two decompression reads.
+    if raw_windows
+        .iter()
+        .any(|(offset, raw)| is_binary_window(raw, *offset == 0))
+    {
         return Ok(SampleOutcome::Sampled(BoundedSample {
             windows: Vec::new(),
             binary: true,
@@ -640,20 +641,14 @@ pub(super) fn sample_streaming<R: Read>(
         }));
     }
 
-    // `head` starts at byte 0; `tail` ends at EOF. `middle` is interior on both
-    // sides, and `tail` starts mid-record whenever the member exceeded one
-    // window.
-    let tail_starts_at_source_start = consumed <= window as u64;
     let mut windows = Vec::new();
     let mut empty = true;
-    for (raw, at_start, at_end) in [
-        (head, true, consumed <= window as u64),
-        (middle, false, false),
-        (tail, tail_starts_at_source_start, true),
-    ] {
+    for (offset, raw) in raw_windows {
         if raw.is_empty() {
             continue;
         }
+        let at_start = offset == 0;
+        let at_end = offset.saturating_add(raw.len() as u64) >= total_bytes;
         let aligned = align_to_records(&raw, at_start, at_end);
         if aligned.is_empty() {
             continue;
@@ -722,11 +717,30 @@ fn read_bounded<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usiz
 /// A NUL byte is decisive. Otherwise a window is binary when more than one
 /// byte in eight fails UTF-8 decoding, which catches images and compiled
 /// objects while tolerating a stray invalid byte in an otherwise-text log.
+#[cfg(test)]
 pub(super) fn is_binary(bytes: &[u8]) -> bool {
+    is_binary_window(bytes, true)
+}
+
+/// Binary sniffing for a raw sample window.
+fn is_binary_window(bytes: &[u8], at_source_start: bool) -> bool {
     let sniff = &bytes[..bytes.len().min(IMPORT_PREVIEW_BINARY_SNIFF_BYTES)];
     if sniff.contains(&0) {
         return true;
     }
+    // Interior/tail windows may begin in the middle of one valid UTF-8 code
+    // point. Ignore only the at-most-three continuation bytes that can belong
+    // to that split character; dominant invalid data remains invalid.
+    let leading_continuations = if at_source_start {
+        0
+    } else {
+        sniff
+            .iter()
+            .take(3)
+            .take_while(|byte| (**byte & 0b1100_0000) == 0b1000_0000)
+            .count()
+    };
+    let sniff = &sniff[leading_continuations..];
     match std::str::from_utf8(sniff) {
         Ok(_) => false,
         Err(err) => {
@@ -951,6 +965,12 @@ fn name_hints_log(identity: &str) -> bool {
         || lower.ends_with(".jsonl")
         || lower.ends_with(".ndjson")
         || lower.contains(".log.")
+        || rolled_leaf_stem(leaf).is_some_and(|stem| has_log_extension(&stem))
+}
+
+fn has_log_extension(leaf: &str) -> bool {
+    let lower = leaf.to_ascii_lowercase();
+    lower.ends_with(".log") || lower.ends_with(".jsonl") || lower.ends_with(".ndjson")
 }
 
 /// Deterministic preselection.
@@ -966,9 +986,10 @@ pub(super) fn preselect(status: ImportItemStatus, role: ImportItemRole) -> bool 
 
 /// Strip a rotation suffix, returning the shared stem when one is present.
 ///
-/// Recognizes `app.log.1`, `app.log.2026-01-01`, `app-2026-01-01.log`, and
-/// `app.log.gz`-style trailers. Returns `None` when the name is not rolled,
-/// so unrelated files are never grouped.
+/// Recognizes `app.log.1`, `app.log.2026-01-01`,
+/// `app.log-20260101-120000`, `app-2026-01-01.log`, and `app.log.gz`-style
+/// trailers. Returns `None` when the name is not rolled, so unrelated files
+/// are never grouped.
 pub(super) fn rolled_stem(identity: &str) -> Option<String> {
     let (dir, leaf) = match identity.rsplit_once('/') {
         Some((dir, leaf)) => (Some(dir), leaf),
@@ -1046,45 +1067,139 @@ pub(super) fn item_with_status_for_test(
 
 /// Rotation-suffix stripping for a single leaf name.
 fn rolled_leaf_stem(leaf: &str) -> Option<String> {
-    // Trailing numeric or date segment: app.log.1 / app.log.2026-01-01
-    if let Some((head, tail)) = leaf.rsplit_once('.') {
-        if !tail.is_empty() && is_rotation_token(tail) && head.contains('.') {
-            return Some(head.to_string());
+    let (core, had_trailer) = strip_rotation_trailers(leaf);
+
+    // Timestamp after an extension: service.log-20260101-120000 or
+    // service.log.2026-01-01. Requiring an extension before the timestamp
+    // avoids treating an arbitrary date-named document as a rolled source.
+    for (index, separator) in core.char_indices() {
+        if !matches!(separator, '-' | '.') {
+            continue;
+        }
+        let Some(stem) = core.get(..index) else {
+            continue;
+        };
+        let Some(token) = core.get(index + separator.len_utf8()..) else {
+            continue;
+        };
+        if stem.contains('.') && is_datetime_token(token) {
+            return Some(stem.to_string());
         }
     }
-    // Embedded date before the extension: app-2026-01-01.log / app_20260101.log
-    //
-    // Matched by width from the right rather than by splitting on the last
-    // separator, because `rsplit_once('-')` on `app-2026-01-01` yields `01`
-    // and would never recognize the date.
-    if let Some((head, ext)) = leaf.rsplit_once('.') {
-        for width in [10usize, 8] {
-            if head.len() <= width + 1 || !head.is_char_boundary(head.len() - width) {
-                continue;
+
+    // Timestamp before an extension: service-2026-01-01_030405.log.
+    if let Some((head, extension)) = core.rsplit_once('.') {
+        if let Some(mut base) = strip_datetime_suffix(head) {
+            // Some producers couple a decimal process id directly to the
+            // datetime (`worker.1234-...`). Strip that id only in this proven
+            // datetime shape; a standalone dotted number remains untouched.
+            if let Some((candidate, pid)) = base.rsplit_once('.') {
+                if is_rotation_pid(pid) && !candidate.is_empty() {
+                    base = candidate;
+                }
             }
-            let (base, tail) = head.split_at(head.len() - width);
-            if !is_date_token(tail) {
-                continue;
-            }
-            let base = base.trim_end_matches(['-', '_']);
             if !base.is_empty() {
-                return Some(format!("{base}.{ext}"));
+                return Some(format!("{base}.{extension}"));
             }
+        }
+    }
+
+    // A generation/compression trailer alone is sufficient: app.log.1,
+    // app.log.gz, and compositions such as app.log.1.gz all normalize to the
+    // physical source stem. Content fingerprints still gate grouping.
+    (had_trailer && core.contains('.')).then(|| core.to_string())
+}
+
+fn strip_rotation_trailers(mut leaf: &str) -> (&str, bool) {
+    let mut stripped = false;
+    for _ in 0..2 {
+        let Some((head, trailer)) = leaf.rsplit_once('.') else {
+            break;
+        };
+        let lower = trailer.to_ascii_lowercase();
+        if is_rotation_index(trailer) || matches!(lower.as_str(), "gz" | "bz2" | "xz" | "zst") {
+            leaf = head;
+            stripped = true;
+        } else {
+            break;
+        }
+    }
+    (leaf, stripped)
+}
+
+fn strip_datetime_suffix(head: &str) -> Option<&str> {
+    for (index, separator) in head.char_indices() {
+        if !matches!(separator, '-' | '_') {
+            continue;
+        }
+        let Some(base) = head.get(..index) else {
+            continue;
+        };
+        let base = base.trim_end_matches(['-', '_']);
+        let Some(token) = head.get(index + separator.len_utf8()..) else {
+            continue;
+        };
+        if !base.is_empty() && is_datetime_token(token) {
+            return Some(base);
         }
     }
     None
 }
 
-/// Whether a token looks like a rotation index or date.
-fn is_rotation_token(token: &str) -> bool {
-    is_date_token(token) || (token.len() <= 4 && token.chars().all(|c| c.is_ascii_digit()))
+fn is_rotation_index(token: &str) -> bool {
+    !token.is_empty() && token.len() <= 4 && token.chars().all(|c| c.is_ascii_digit())
+}
+
+fn is_rotation_pid(token: &str) -> bool {
+    !token.is_empty() && token.len() <= 10 && token.chars().all(|c| c.is_ascii_digit())
+}
+
+fn is_datetime_token(token: &str) -> bool {
+    for date_len in [8usize, 10] {
+        if token.len() < date_len || !token.is_char_boundary(date_len) {
+            continue;
+        }
+        let (date, rest) = token.split_at(date_len);
+        if !is_date_token(date) {
+            continue;
+        }
+        if rest.is_empty() {
+            return true;
+        }
+        let mut chars = rest.chars();
+        if !chars.next().is_some_and(|c| matches!(c, '-' | '_' | '.')) {
+            continue;
+        }
+        if is_time_token(chars.as_str()) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether a token looks like `YYYY-MM-DD` or `YYYYMMDD`.
 fn is_date_token(token: &str) -> bool {
-    let digits = token.chars().filter(char::is_ascii_digit).count();
-    let seps = token.chars().filter(|c| *c == '-' || *c == '_').count();
-    (token.len() == 8 && digits == 8) || (token.len() == 10 && digits == 8 && seps == 2)
+    let bytes = token.as_bytes();
+    (bytes.len() == 8 && bytes.iter().all(u8::is_ascii_digit))
+        || (bytes.len() == 10
+            && bytes[4] == bytes[7]
+            && matches!(bytes[4], b'-' | b'_')
+            && bytes
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit()))
+}
+
+fn is_time_token(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    (bytes.len() == 6 && bytes.iter().all(u8::is_ascii_digit))
+        || (bytes.len() == 8
+            && bytes[2] == bytes[5]
+            && matches!(bytes[2], b'-' | b'_')
+            && bytes
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| matches!(index, 2 | 5) || byte.is_ascii_digit()))
 }
 
 /// Fold rolled sources into groups, but only where fingerprints agree.
@@ -1754,6 +1869,49 @@ mod tests {
             rolled_stem("app-2026-01-01.log").as_deref(),
             Some("app.log")
         );
+        assert_eq!(
+            rolled_stem("service.log-20260102-030405").as_deref(),
+            Some("service.log")
+        );
+        assert_eq!(
+            rolled_stem("database/service.log-2026-01-02").as_deref(),
+            Some("database/service.log")
+        );
+        assert_eq!(
+            rolled_stem("service-2026-01-02_030405.log").as_deref(),
+            Some("service.log")
+        );
+        assert_eq!(
+            rolled_stem("worker.4321-2026-01-02_030405.log.1").as_deref(),
+            Some("worker.log")
+        );
+        assert_eq!(
+            rolled_stem("service.log.2026-01-02").as_deref(),
+            Some("service.log")
+        );
+        assert_eq!(
+            rolled_stem("service.log.7.gz").as_deref(),
+            Some("service.log")
+        );
+        assert!(name_hints_log("service.log-20260102-030405"));
+        assert_eq!(rolled_stem("service.log-backup"), None);
+        assert!(!name_hints_log("service.log-backup"));
+        assert_eq!(rolled_stem("service-2026-01-02_backup.log"), None);
+        assert_eq!(rolled_stem("report.1"), None);
+        assert_eq!(
+            rolled_stem("worker.pid-2026-01-02_030405.log").as_deref(),
+            Some("worker.pid.log"),
+            "only a decimal pid is stripped"
+        );
+        assert_eq!(
+            rolled_stem("east/service.log.1").as_deref(),
+            Some("east/service.log")
+        );
+        assert_eq!(
+            rolled_stem("west/service.log.1").as_deref(),
+            Some("west/service.log"),
+            "duplicate basenames in different directories keep distinct stems"
+        );
         assert_eq!(rolled_stem("app.log"), None);
         assert_eq!(rolled_stem("unrelated.txt"), None);
 
@@ -1769,6 +1927,15 @@ mod tests {
             groups[0].possible_overlap,
             "rotation may duplicate records; overlap must be disclosed"
         );
+
+        let mut timestamped = vec![
+            item_from_sample("service.log-20260102-030405", 10, &json, None, false),
+            item_from_sample("service.log-20260101-020304", 10, &json, None, false),
+        ];
+        let groups = build_groups(&mut timestamped);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].member_identities.len(), 2);
+        assert!(timestamped.iter().all(|item| item.selected));
     }
 
     #[test]
@@ -1776,8 +1943,8 @@ mod tests {
         let json = sample_of(&[r#"{"ts":"2026-01-01T00:00:00Z","level":"info","msg":"a"}"#]);
         let syslog = sample_of(&["<34>1 2026-01-01T00:00:00Z host app - - - boot"]);
         let mut items = vec![
-            item_from_sample("app.log.1", 10, &json, None, false),
-            item_from_sample("app.log.2", 10, &syslog, None, false),
+            item_from_sample("service.log-2026-01-02", 10, &json, None, false),
+            item_from_sample("service.log-2026-01-01", 10, &syslog, None, false),
         ];
         let groups = build_groups(&mut items);
         assert!(
@@ -1812,8 +1979,58 @@ mod tests {
     #[test]
     fn binary_sniffing_accepts_utf8_and_rejects_nul() {
         assert!(!is_binary("héllo wörld log line".as_bytes()));
+        let mut split_suffix = vec![0x9f, 0xa7, 0xaa];
+        split_suffix.extend_from_slice(b" valid text after a split code point");
+        assert!(
+            is_binary(&split_suffix),
+            "invalid continuation bytes at the true source head remain binary"
+        );
+        assert!(
+            !is_binary_window(&split_suffix, false),
+            "an interior window may start with the continuation suffix of one UTF-8 code point"
+        );
         assert!(is_binary(b"\x00\x01\x02binary"));
         assert!(is_binary(&[0xff, 0xfe, 0xfd, 0xfc, 0xfb, 0xfa, 0xf9, 0xf8]));
+    }
+
+    #[test]
+    fn streaming_utf8_chunk_boundary_matches_seekable_sampling() {
+        let prefix = br#"{"ts":"2026-01-01T00:00:00Z","level":"info","msg":""#;
+        let mut body = prefix.to_vec();
+        body.resize(8_191, b'x');
+        body.extend_from_slice("🧪".as_bytes());
+        body.extend_from_slice(b"\"}\n");
+        for index in 0..800 {
+            body.extend_from_slice(
+                format!(
+                    r#"{{"ts":"2026-01-01T00:00:00Z","level":"info","seq":{index},"msg":"generic"}}"#
+                )
+                .as_bytes(),
+            );
+            body.push(b'\n');
+        }
+        assert_eq!(&body[8_191..8_195], "🧪".as_bytes());
+
+        let mut seekable = std::io::Cursor::new(body.clone());
+        let bounded = sample_bounded(&mut seekable, body.len() as u64);
+        let mut streamed = std::io::Cursor::new(body.clone());
+        let SampleOutcome::Sampled(streamed) =
+            sample_streaming(&mut streamed, body.len() as u64, None).unwrap()
+        else {
+            panic!("complete synthetic stream must be sampled");
+        };
+
+        assert!(!bounded.binary);
+        assert!(!streamed.binary);
+        assert_eq!(bounded.windows, streamed.windows);
+        let bounded_item =
+            item_from_sample("generic.jsonl", body.len() as u64, &bounded, None, false);
+        let streamed_item =
+            item_from_sample("generic.jsonl", body.len() as u64, &streamed, None, false);
+        assert_eq!(bounded_item.status, ImportItemStatus::Ready);
+        assert_eq!(streamed_item.status, bounded_item.status);
+        assert_eq!(streamed_item.format_id, bounded_item.format_id);
+        assert!(streamed_item.selected);
     }
 
     #[test]

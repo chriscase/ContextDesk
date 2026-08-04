@@ -327,6 +327,16 @@ equally to a direct ZIP, directory ZIP, and nested archive chain. Cancellation
 before atomic publication leaves no visible corpus; the UI remains present
 until cancellation or the non-cancellable publication window is acknowledged.
 
+Preview classification uses the same bounded 16 KiB head/interior/tail byte
+windows for seekable directory files and streamed ZIP members. Decompression
+read boundaries are transport details, not evidence boundaries; an interior
+window may begin with the continuation bytes of one split UTF-8 code point,
+while invalid bytes at the true source head, NULs, and dominant invalid UTF-8
+remain binary evidence. Rotation grammar may offer a weak family hint for
+bounded date/time, generation, and compression suffixes, but it never replaces
+content classification or the matching-fingerprint gate. Every physical path
+and archive member keeps its distinct source identity.
+
 1. Traverse only the selected import scope.
 2. Reject symlinks/path escapes and count excluded, ignored, and failed files.
 3. Treat a directly selected ZIP, a ZIP discovered in a directory, or a ZIP
