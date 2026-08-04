@@ -78,6 +78,21 @@ pub fn model_context_blob(messages: &[ChatMessage]) -> String {
         .join("\n")
 }
 
+/// Provider-visible message bodies plus tool-call envelopes and pairing ids.
+/// Content-only joins can miss a foreign canary embedded in tool arguments.
+pub fn model_context_envelope_blob(messages: &[ChatMessage]) -> String {
+    messages
+        .iter()
+        .map(|m| {
+            format!(
+                "role={:?}\ncontent={}\ntool_call_id={:?}\ntool_calls={:?}",
+                m.role, m.content, m.tool_call_id, m.tool_calls
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n---MESSAGE---\n")
+}
+
 pub fn msg(role: Role, content: impl Into<String>) -> ChatMessage {
     ChatMessage {
         role,
@@ -139,6 +154,14 @@ impl CaptureCtx {
         let g = self.rounds.lock().expect("capture lock");
         g.iter()
             .map(|m| model_context_blob(m))
+            .collect::<Vec<_>>()
+            .join("\n---ROUND---\n")
+    }
+
+    pub fn all_envelope_blob(&self) -> String {
+        let g = self.rounds.lock().expect("capture lock");
+        g.iter()
+            .map(|m| model_context_envelope_blob(m))
             .collect::<Vec<_>>()
             .join("\n---ROUND---\n")
     }
@@ -214,6 +237,11 @@ pub fn ordinary_workspace(root: &Path, canaries: &Canaries) -> (Workspace, Keywo
         ),
     )
     .expect("write runbook");
+    fs::write(
+        root.join("neutral-healthcheck.md"),
+        "Synthetic neutral healthcheck. NEUTRAL_TOOL_RESULT=healthy.\n",
+    )
+    .expect("write neutral healthcheck");
     let ws = Workspace::new("continuity-lab", vec![root.to_path_buf()]);
     let idx = KeywordIndex::build(&ws).expect("index");
     (ws, idx)

@@ -8,6 +8,7 @@
 //!
 //! All fixtures are neutral/synthetic. No network. No cd-cli / cd-workflow
 //! (absent on base 3e18a551 — residual reported separately).
+//! Lineage wording: base `3e18a551` is an ancestor of candidate `b8a36429`.
 
 #[path = "support/continuity_lab.rs"]
 mod continuity_lab;
@@ -15,8 +16,10 @@ mod continuity_lab;
 use cd_core::activity::{
     strip_bodies_for_durability, ActivityDetailLevel, ActivityRecorder, ActivityStatus, DataScope,
 };
-use cd_core::agent::{run_agent_turn, AgentOptions, LogExplorerTurnContext, ScriptedBackend};
-use cd_core::chat::{ChatCompletion, ChatMessage, Role};
+use cd_core::agent::{
+    run_agent_turn, AgentOptions, ChatBackend, LogExplorerTurnContext, ScriptedBackend,
+};
+use cd_core::chat::{ChatCompletion, ChatMessage, FunctionCall, Role, ToolCallMsg};
 use cd_core::events::StreamEvent;
 use cd_core::index::KeywordIndex;
 use cd_core::permissions::PermissionDecision;
@@ -30,8 +33,9 @@ use cd_core::turn_trace::{RecordingTurnTrace, TracingChatBackend, TurnTraceSink}
 use cd_core::workspace::Workspace;
 use continuity_lab::*;
 use std::fs;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -113,6 +117,38 @@ fn history_to_session(session_id: &str, history: &[ChatMessage], linked: Option<
     s
 }
 
+struct MidTurnCancelBackend {
+    entered_provider: Arc<AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl ChatBackend for MidTurnCancelBackend {
+    async fn complete(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[cd_core::tools::ToolSpec],
+    ) -> cd_core::error::CoreResult<ChatCompletion> {
+        unreachable!("the cancellation probe uses complete_streaming")
+    }
+
+    async fn complete_streaming(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[cd_core::tools::ToolSpec],
+        _on_text: &mut (dyn FnMut(String) + Send),
+        cancel: Option<&AtomicBool>,
+    ) -> cd_core::error::CoreResult<ChatCompletion> {
+        let cancel = cancel.expect("cancel flag");
+        self.entered_provider.store(true, Ordering::SeqCst);
+        loop {
+            if cancel.load(Ordering::SeqCst) {
+                return Err(cd_core::error::CoreError::Message("cancelled".into()));
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
 // ─── 1. 30+ turn ordinary-chat continuity ──────────────────────────────────
 
 /// Thirty-plus ordinary-chat turns through `run_agent_turn`, with multi-round
@@ -122,6 +158,7 @@ fn history_to_session(session_id: &str, history: &[ChatMessage], linked: Option<
 async fn lab_30_plus_turn_ordinary_chat_continuity() {
     let env = LabEnv::new();
     let c = &env.canaries;
+    const SKILL_PROCESS_TOKEN: &str = "SKILL_PROCESS_TOKEN=triage-origin-7f3a";
     let (ws, idx) = ordinary_workspace(&env.root, c);
     let mut host = ToolHost::new(ws, idx, None);
 
@@ -132,8 +169,10 @@ async fn lab_30_plus_turn_ordinary_chat_continuity() {
     // discover_skills finds dir/*/SKILL.md — write frontmatter file directly.
     fs::write(
         skill_dir.join("SKILL.md"),
-        "---\nid: triage\nname: Synthetic triage\ndescription: How to triage pool issues\nenabled: true\n---\n\
-         PROCESS: check runbook markers; never invent root cause.\n",
+        format!(
+            "---\nid: triage\nname: Synthetic triage\ndescription: How to triage pool issues\nenabled: true\n---\n\
+             PROCESS: check neutral evidence; never invent root cause. {SKILL_PROCESS_TOKEN}\n"
+        ),
     )
     .unwrap();
     let skills = discover_skills(&[skill_root]).unwrap();
@@ -159,9 +198,21 @@ async fn lab_30_plus_turn_ordinary_chat_continuity() {
         .unwrap();
 
     let capture = CaptureCtx::new();
-    let mut history: Vec<ChatMessage> = Vec::new();
-    let mut all_answers = String::new();
+    // Plant durable investigation state once, before the 32 neutral turns. Keep
+    // each early message below the summary snippet cap so survival is testable
+    // without re-stating any marker in the retained tail.
+    let mut history: Vec<ChatMessage> = vec![
+        msg(
+            Role::User,
+            format!("EARLY_ONLY {} {}", c.session_id, c.incident_id),
+        ),
+        msg(
+            Role::Assistant,
+            format!("EARLY_ONLY {} {}", c.user_constraint, c.open_question),
+        ),
+    ];
     let turn_count = 32usize;
+    let mut saw_compaction = false;
 
     // Script: mostly final answers; every 5th turn multi-round tool; one
     // deliberate empty/failed tool mid-stream; one SoftWrite permission stop.
@@ -175,45 +226,41 @@ async fn lab_30_plus_turn_ordinary_chat_continuity() {
                 r#"{"query":"NONEXISTENT_MARKER_ZZZ","limit":3}"#,
             ));
             script.push(final_answer(format!(
-                "Turn {t}: search returned no usable evidence for ZZZ; \
-                 not treating empty tool output as fact. Constraint still: {}",
-                c.user_constraint
+                "Turn {t}: search returned no usable evidence; not treating empty output as fact. {}",
+                "neutral-response-".repeat(28)
             )));
         } else if t == 11 {
-            // Multi-round: search → answer citing canaries.
+            // Multi-round neutral search: no continuity canary is re-planted.
             script.push(tool_call(
                 "ok-1",
                 "search_kb",
-                &format!(r#"{{"query":"{}","limit":3}}"#, c.incident_id),
+                r#"{"query":"neutral healthcheck","limit":3}"#,
             ));
             script.push(final_answer(format!(
-                "Turn {t}: found {} and {} in workspace. Open: {}",
-                c.incident_id, c.tool_result_id, c.open_question
+                "Turn {t}: neutral tool result recorded. {}",
+                "neutral-response-".repeat(28)
             )));
         } else if t == 15 {
             // SoftWrite: must stop at permission — no durable write yet.
             script.push(tool_call(
                 "mem-1",
                 "save_memory",
-                &format!(
-                    r#"{{"title":"lab-note","body_markdown":"Remember {} and constraint {}"}}"#,
-                    c.incident_id, c.user_constraint
-                ),
+                r#"{"title":"lab-note","body_markdown":"neutral pending note"}"#,
             ));
         } else if t % 5 == 0 && t > 0 {
             script.push(tool_call(
                 &format!("t{t}"),
                 "search_kb",
-                r#"{"query":"pool","limit":2}"#,
+                r#"{"query":"neutral healthcheck","limit":2}"#,
             ));
             script.push(final_answer(format!(
-                "Turn {t}: continuing investigation of {}. {}",
-                c.incident_id, c.user_constraint
+                "Turn {t}: neutral continuation after tool. {}",
+                "neutral-response-".repeat(28)
             )));
         } else {
             script.push(final_answer(format!(
-                "Turn {t}: still tracking {} / {}. {}",
-                c.session_id, c.incident_id, c.user_constraint
+                "Turn {t}: neutral continuation. {}",
+                "neutral-response-".repeat(28)
             )));
         }
     }
@@ -224,20 +271,32 @@ async fn lab_30_plus_turn_ordinary_chat_continuity() {
     for t in 0..turn_count {
         let user = if t == 0 {
             apply_pinned_skill_to_user_text(
-                &format!(
-                    "Start investigation {} for {}. {}. {}",
-                    c.session_id, c.incident_id, c.user_constraint, c.open_question
-                ),
+                "Start the synthetic investigation using the early durable state.",
                 Some("triage"),
                 &skills,
             )
         } else if t == 11 {
-            format!("Search runbook for {} and cite findings.", c.incident_id)
+            "Search the neutral healthcheck and cite the neutral result.".to_string()
         } else if t == 15 {
-            format!("Please remember constraint for {}.", c.incident_id)
+            "Please remember the neutral pending note.".to_string()
         } else {
-            format!("Status check turn {t} on {}", c.incident_id)
+            format!(
+                "Neutral status check turn {t}. {}",
+                "neutral-user-filler-".repeat(28)
+            )
         };
+
+        for marker in [
+            c.session_id.as_str(),
+            c.incident_id.as_str(),
+            c.user_constraint.as_str(),
+            c.open_question.as_str(),
+        ] {
+            assert!(
+                !user.contains(marker),
+                "continuity canary was re-planted in turn {t}: {marker}"
+            );
+        }
 
         // Production skill pin: first turn user text must carry skill process (not evidence).
         if t == 0 {
@@ -260,8 +319,8 @@ async fn lab_30_plus_turn_ordinary_chat_continuity() {
                 session_id: session_id.into(),
                 model: Some("scripted-lab".into()),
                 max_rounds: 6,
-                compact_keep_last: 6,
-                context_char_budget: 14_000,
+                compact_keep_last: 30,
+                context_char_budget: 24_000,
                 ambient_recall_enabled: false,
                 ..Default::default()
             },
@@ -269,22 +328,17 @@ async fn lab_30_plus_turn_ordinary_chat_continuity() {
         .await
         .unwrap_or_else(|e| panic!("turn {t} failed: {e}"));
 
-        all_answers.push_str(&text_from(&events));
-        all_answers.push('\n');
+        saw_compaction |= events.iter().any(
+            |event| matches!(event, StreamEvent::Error { code, .. } if code == "context_compacted"),
+        ) || capture
+            .last_blob()
+            .contains("Compacted earlier conversation");
 
         // After turn 0, provider must have seen skill-injected process text.
         if t == 0 {
-            let first_provider = capture.all_blob();
+            let first_provider = capture.last_blob();
             assert!(
-                first_provider.contains("check runbook")
-                    || first_provider.contains("PROCESS")
-                    || first_provider.contains("triage")
-                    || history.iter().any(|m| {
-                        m.role == Role::User
-                            && (m.content.contains("check runbook")
-                                || m.content.contains("PROCESS")
-                                || m.content.contains("triage"))
-                    }),
+                first_provider.contains(SKILL_PROCESS_TOKEN),
                 "skill process must reach model-facing history/provider after pin"
             );
         }
@@ -324,9 +378,13 @@ async fn lab_30_plus_turn_ordinary_chat_continuity() {
     );
     // Model context stayed under hard budget every round.
     assert!(
-        capture.max_chars() <= 14_000 + 2_000, // small slack for system policy injection
+        capture.max_chars() <= 24_000,
         "provider saw over-budget context: {}",
         capture.max_chars()
+    );
+    assert!(
+        saw_compaction,
+        "30+ turn production path must actually compact"
     );
     // Compaction should keep model message count well below full history.
     assert!(
@@ -335,6 +393,21 @@ async fn lab_30_plus_turn_ordinary_chat_continuity() {
         capture.max_message_count(),
         history.len()
     );
+
+    // The final pre-reopen provider call must recover the early-only state from
+    // compacted context. None of these markers was reintroduced after turn 0.
+    let final_provider = capture.last_blob();
+    for marker in [
+        c.session_id.as_str(),
+        c.incident_id.as_str(),
+        c.user_constraint.as_str(),
+        c.open_question.as_str(),
+    ] {
+        assert!(
+            final_provider.contains(marker),
+            "early-only continuity marker missing from final compacted provider context: {marker}\n{final_provider}"
+        );
+    }
 
     // Identifiers / constraints survive in durable history.
     let full = model_context_blob(&history);
@@ -349,17 +422,28 @@ async fn lab_30_plus_turn_ordinary_chat_continuity() {
     let sess_dir = env.root.join("sessions");
     let store = SessionStore::new(&sess_dir);
     store.ensure().unwrap();
-    let session = history_to_session(session_id, &history, None);
+    let expected_transcript: Vec<(String, String)> = history
+        .iter()
+        .map(|message| (format!("{:?}", message.role), message.content.clone()))
+        .collect();
+    let mut session = history_to_session(session_id, &history, None);
+    session.compact_keep_last = 30;
+    session.pinned_skill_id = Some("triage".into());
     store.save(&session).unwrap();
     drop(session);
     let reopened = store.load(session_id).unwrap();
     assert_eq!(reopened.id, session_id);
-    assert!(
-        reopened.messages.len() >= turn_count,
-        "reopened message count {}",
-        reopened.messages.len()
-    );
+    assert_eq!(reopened.messages.len(), history.len());
+    assert_eq!(reopened.pinned_skill_id.as_deref(), Some("triage"));
     let reopened_hist = reopened.to_chat_history();
+    let reopened_transcript: Vec<(String, String)> = reopened_hist
+        .iter()
+        .map(|message| (format!("{:?}", message.role), message.content.clone()))
+        .collect();
+    assert_eq!(
+        reopened_transcript, expected_transcript,
+        "close/reopen must preserve every role and body exactly"
+    );
     let reblob = model_context_blob(&reopened_hist);
     assert!(reblob.contains(&c.incident_id));
     assert!(
@@ -371,32 +455,41 @@ async fn lab_30_plus_turn_ordinary_chat_continuity() {
     let mut continued = reopened_hist;
     let cont_capture = CaptureCtx::new();
     let cont_backend = CapturingScriptedBackend::new(
-        vec![final_answer(format!(
-            "Post-reopen: still on {} with constraint intact.",
-            c.incident_id
-        ))],
+        vec![final_answer("Post-reopen neutral continuation completed.")],
         cont_capture.clone(),
+    );
+    let continued_user = apply_pinned_skill_to_user_text(
+        "Continue after session reopen without restating investigation markers.",
+        reopened.pinned_skill_id.as_deref(),
+        &skills,
     );
     let events = run_agent_turn(
         &cont_backend,
         &mut host,
-        "Continue after session reopen — confirm constraint.",
+        &continued_user,
         &mut continued,
-        &default_opts(session_id),
+        &AgentOptions {
+            compact_keep_last: 30,
+            context_char_budget: 24_000,
+            ..default_opts(session_id)
+        },
     )
     .await
     .unwrap();
     // Provider-facing context after reopen must still see durable investigation state.
     let post_reopen = cont_capture.last_blob();
-    assert!(
-        post_reopen.contains(&c.incident_id)
-            || post_reopen.contains("never reboot")
-            || post_reopen.contains("CONSTRAINT")
-            || continued.iter().any(|m| {
-                m.content.contains(&c.incident_id) || m.content.contains(&c.user_constraint)
-            }),
-        "session reopen must feed prior investigation state into model context: {post_reopen}"
-    );
+    for marker in [
+        c.session_id.as_str(),
+        c.incident_id.as_str(),
+        c.user_constraint.as_str(),
+        c.open_question.as_str(),
+        SKILL_PROCESS_TOKEN,
+    ] {
+        assert!(
+            post_reopen.contains(marker),
+            "reopened provider context missing durable marker {marker}: {post_reopen}"
+        );
+    }
     assert_eq!(
         reopened.id, session_id,
         "durable session identity must match across close/reopen"
@@ -412,7 +505,6 @@ async fn lab_30_plus_turn_ordinary_chat_continuity() {
             .any(|e| e.rel_path.contains("attachment-note")),
         "session-context attachment missing"
     );
-    assert!(all_answers.contains(&c.incident_id) || full.contains(&c.incident_id));
 }
 
 // ─── 2. Linked-log chat continuity (same production entry point) ───────────
@@ -692,7 +784,9 @@ async fn lab_cross_session_and_corpus_leak_barrier() {
         "session A private leaked into session B provider/history context"
     );
 
-    // Corpus X vs Y: poison Y history with X private; assert absent from Y provider capture.
+    // Corpus X vs Y: poison Y history with a complete foreign tool envelope.
+    // Production linked history must strip both the assistant tool call and its
+    // Role::Tool result before every provider round.
     let root_x = env.root.join("corp-x");
     fs::create_dir_all(&root_x).unwrap();
     let (_lx, _cache_x, corpus_x) = linked_log_fixture(&root_x, c);
@@ -723,10 +817,29 @@ async fn lab_cross_session_and_corpus_leak_barrier() {
     let backend_y =
         CapturingScriptedBackend::new(vec![final_answer("Corpus Y answer only.")], cap_y.clone());
     let mut hist_y = Vec::new();
-    hist_y.push(msg(
-        Role::Tool,
-        format!("STALE_CROSS {}", c.private_corpus_x),
-    ));
+    hist_y.push(ChatMessage {
+        role: Role::Assistant,
+        content: String::new(),
+        tool_call_id: None,
+        tool_calls: Some(vec![ToolCallMsg {
+            id: "foreign-x-call".into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: cd_core::log_analysis::SEARCH_LOGS.into(),
+                arguments: serde_json::json!({
+                    "query": c.private_corpus_x,
+                    "corpus_id": corpus_x.clone(),
+                })
+                .to_string(),
+            },
+        }]),
+    });
+    hist_y.push(ChatMessage {
+        role: Role::Tool,
+        content: format!("STALE_CROSS corpus_id={} {}", corpus_x, c.private_corpus_x),
+        tool_call_id: Some("foreign-x-call".into()),
+        tool_calls: None,
+    });
     run_agent_turn(
         &backend_y,
         &mut host_y,
@@ -755,15 +868,13 @@ async fn lab_cross_session_and_corpus_leak_barrier() {
         "Y system must not bind corpus X"
     );
 
-    // Provider-facing capture for Y must not treat corpus-X private as trusted
-    // active evidence. Linked turns rebuild model context from current-turn
-    // evidence + system bind; poisoned history tool msgs must not be the active
-    // corpus system identity.
-    let provider_y = cap_y.all_blob();
+    // Provider-facing capture for Y must contain no foreign content anywhere:
+    // bodies, tool arguments, tool result envelopes, or pairing ids.
+    let provider_y = cap_y.all_envelope_blob();
     assert!(!provider_y.is_empty(), "must capture provider rounds for Y");
     assert!(
-        provider_y.contains(&corpus_y) || sys_y.contains(&corpus_y),
-        "Y provider/system must reference corpus Y"
+        provider_y.contains(&corpus_y),
+        "Y provider must reference corpus Y"
     );
     // Active system bind in provider context should not claim corpus X.
     let provider_systems: String = cap_y
@@ -780,13 +891,17 @@ async fn lab_cross_session_and_corpus_leak_barrier() {
         !provider_systems.contains(&corpus_x),
         "provider system for Y must not bind corpus X id: {provider_systems}"
     );
-    // If the poison marker appears in provider context at all, it must only be
-    // as untrusted/history — not as the active corpus private evidence label
-    // in system policy. System must not present PRIVATE_CORPUS_X as Y's corpus.
-    assert!(
-        !provider_systems.contains(&c.private_corpus_x),
-        "Y system must not carry corpus-X private canary: {provider_systems}"
-    );
+    for foreign in [
+        corpus_x.as_str(),
+        c.private_corpus_x.as_str(),
+        "STALE_CROSS",
+        "foreign-x-call",
+    ] {
+        assert!(
+            !provider_y.contains(foreign),
+            "foreign corpus content leaked anywhere in Y provider envelope ({foreign}): {provider_y}"
+        );
+    }
 }
 
 // ─── 5. Later turn disproves earlier hypothesis with fresh evidence ────────
@@ -821,9 +936,10 @@ async fn lab_later_turn_disproves_hypothesis_with_fresh_evidence() {
             ),
             // Final answer may reference tool evidence — oracle requires Tool role
             // content from production search_logs, not this string alone.
-            final_answer(
-                "Updated root cause from tool evidence at seq=0 source=worker.log; H1 network partition is disproved.",
-            ),
+            final_answer(format!(
+                "Updated root cause from exact tool evidence at seq=0 source=worker.log: {}",
+                c.disproof_evidence
+            )),
         ],
         capture.clone(),
     );
@@ -847,7 +963,17 @@ async fn lab_later_turn_disproves_hypothesis_with_fresh_evidence() {
     .await
     .unwrap();
 
-    // REQUIRED: production tool result in history carries disproof from logs.
+    let rounds = capture.rounds.lock().expect("capture lock");
+    let first_provider = rounds
+        .first()
+        .map(|round| model_context_envelope_blob(round))
+        .unwrap_or_default();
+    assert!(
+        first_provider.contains(&c.hypothesis_h1),
+        "provider must receive the exact early hypothesis before fresh evidence: {first_provider}"
+    );
+
+    // REQUIRED: production tool result in history carries the exact disproof.
     let tool_blobs: Vec<&str> = history
         .iter()
         .filter(|m| m.role == Role::Tool)
@@ -859,26 +985,22 @@ async fn lab_later_turn_disproves_hypothesis_with_fresh_evidence() {
     );
     let tool_joined = tool_blobs.join("\n");
     assert!(
-        tool_joined.contains("db_pool")
-            || tool_joined.contains(&c.disproof_evidence)
-            || tool_joined.contains("DISPROOF")
-            || tool_joined.contains("pool"),
+        tool_joined.contains(&c.disproof_evidence),
         "tool-sourced evidence must carry disproof content from logs, not only scripted prose: {tool_joined}"
     );
 
     // Provider rounds after the tool must include the tool result (model saw evidence).
-    let after_tool_provider = capture.all_blob();
+    let after_tool_provider = rounds
+        .iter()
+        .skip(1)
+        .map(|round| model_context_envelope_blob(round))
+        .collect::<Vec<_>>()
+        .join("\n---ROUND---\n");
     assert!(
-        after_tool_provider.contains("db_pool")
-            || after_tool_provider.contains("DISPROOF")
-            || after_tool_provider.contains(&c.disproof_evidence)
-            || after_tool_provider.contains("worker.log")
-            || history.iter().any(|m| m.role == Role::Tool
-                && (m.content.contains("db_pool")
-                    || m.content.contains("DISPROOF")
-                    || m.content.contains("pool"))),
+        after_tool_provider.contains(&c.disproof_evidence),
         "provider-facing context must include tool-sourced disproof: {after_tool_provider}"
     );
+    drop(rounds);
 
     // H1 remains historical for challenge continuity.
     assert!(
@@ -991,7 +1113,8 @@ async fn lab_cancel_then_retry_softwrite_no_duplicate() {
     let env = LabEnv::new();
     let c = &env.canaries;
     let (ws, idx) = ordinary_workspace(&env.root, c);
-    let mut host = ToolHost::new(ws, idx, None);
+    let audit_path = env.root.join("write-audit.jsonl");
+    let mut host = ToolHost::new(ws, idx, Some(cd_core::audit::AuditLog::new(&audit_path)));
 
     // Turn 1: request SoftWrite → permission stop (0 writes).
     let backend1 = ScriptedBackend::new(vec![tool_call(
@@ -1018,61 +1141,76 @@ async fn lab_cancel_then_retry_softwrite_no_duplicate() {
     )));
     assert_eq!(count_memory_files(&env.root), 0);
 
-    let request_id = events.iter().find_map(|e| match e {
-        StreamEvent::PermissionRequired { request_id, .. } => Some(request_id.clone()),
-        _ => None,
-    });
+    let request_id = events
+        .iter()
+        .find_map(|e| match e {
+            StreamEvent::PermissionRequired { request_id, .. } => Some(request_id.clone()),
+            _ => None,
+        })
+        .expect("initial write must emit a permission request");
     // User cancels: Deny — still 0 writes.
-    if let Some(rid) = request_id {
-        let deny_events = cd_core::research::grant_and_execute(
-            &mut host,
-            &rid,
-            PermissionDecision::Deny,
-            None,
-            "save_memory",
-            &serde_json::json!({}),
-            Some(&mut history),
-        )
-        .await
-        .unwrap();
-        assert!(deny_events.iter().any(|e| matches!(
-            e,
-            StreamEvent::Error { code, .. } if code == "denied"
-        )));
-    }
-    assert_eq!(count_memory_files(&env.root), 0);
-
-    // Mid-turn cancel via flag (no write).
-    let cancel = Arc::new(AtomicBool::new(true));
-    let backend_cancel = ScriptedBackend::new(vec![tool_call(
-        "w-cancel",
-        "save_memory",
-        r#"{"title":"should-not","body_markdown":"cancelled-body"}"#,
-    )]);
-    let cancel_events = run_agent_turn(
-        &backend_cancel,
+    let deny_events = cd_core::research::grant_and_execute(
         &mut host,
-        "Try remember but I will cancel.",
-        &mut history,
-        &AgentOptions {
-            session_id: "write-sess".into(),
-            cancel: Some(cancel),
-            max_rounds: 4,
-            ambient_recall_enabled: false,
-            ..Default::default()
-        },
+        &request_id,
+        PermissionDecision::Deny,
+        None,
+        "save_memory",
+        &serde_json::json!({}),
+        Some(&mut history),
     )
     .await
     .unwrap();
+    assert!(deny_events.iter().any(|e| matches!(
+        e,
+        StreamEvent::Error { code, .. } if code == "denied"
+    )));
+    assert_eq!(count_memory_files(&env.root), 0);
+
+    // Real mid-turn timing: cancellation starts false, provider completion is
+    // entered and blocks, then the independent trigger flips the flag.
+    let cancel = Arc::new(AtomicBool::new(false));
+    let entered_provider = Arc::new(AtomicBool::new(false));
+    let backend_cancel = MidTurnCancelBackend {
+        entered_provider: entered_provider.clone(),
+    };
+    let cancel_for_trigger = cancel.clone();
+    let entered_for_trigger = entered_provider.clone();
+    let cancel_opts = AgentOptions {
+        session_id: "write-sess".into(),
+        cancel: Some(cancel.clone()),
+        max_rounds: 4,
+        ambient_recall_enabled: false,
+        ..Default::default()
+    };
+    let (cancel_result, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::join!(
+            run_agent_turn(
+                &backend_cancel,
+                &mut host,
+                "Wait in the provider until the user cancels.",
+                &mut history,
+                &cancel_opts,
+            ),
+            async move {
+                while !entered_for_trigger.load(Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+                assert!(!cancel_for_trigger.load(Ordering::SeqCst));
+                cancel_for_trigger.store(true, Ordering::SeqCst);
+            }
+        )
+    })
+    .await
+    .expect("mid-turn cancellation must complete promptly");
+    let cancel_events = cancel_result.unwrap();
     assert!(
         cancel_events.iter().any(|e| matches!(
             e,
             StreamEvent::TurnCompleted { reason } if reason == "cancel"
-        )) || cancel_events
-            .iter()
-            .any(|e| matches!(e, StreamEvent::TurnCompleted { .. })),
+        )),
         "cancel path must complete cleanly: {cancel_events:?}"
     );
+    assert!(entered_provider.load(Ordering::SeqCst));
     assert_eq!(count_memory_files(&env.root), 0);
 
     // Retry: permission then single grant → exactly one write.
@@ -1093,10 +1231,14 @@ async fn lab_cancel_then_retry_softwrite_no_duplicate() {
     )
     .await
     .unwrap();
-    let rid2 = events2
+    let (rid2, retry_args) = events2
         .iter()
         .find_map(|e| match e {
-            StreamEvent::PermissionRequired { request_id, .. } => Some(request_id.clone()),
+            StreamEvent::PermissionRequired {
+                request_id,
+                arguments,
+                ..
+            } => Some((request_id.clone(), arguments.clone())),
             _ => None,
         })
         .expect("retry must request permission again");
@@ -1123,6 +1265,33 @@ async fn lab_cancel_then_retry_softwrite_no_duplicate() {
         writes_after_grant, 1,
         "exactly one SoftWrite after single grant"
     );
+
+    let memory_path = env
+        .root
+        .join(".contextdesk")
+        .join("memory")
+        .join("lab-once.md");
+    let durable_before_replay = fs::read(&memory_path).expect("approved memory body");
+    let durable_text = String::from_utf8(durable_before_replay.clone()).unwrap();
+    let unique_body = format!("unique-body-{}-once", c.incident_id);
+    assert_eq!(durable_text.matches(&unique_body).count(), 1);
+    let revision_before_replay = fs::metadata(&memory_path).unwrap().modified().unwrap();
+    let audit_before_replay = fs::read(&audit_path).expect("write audit");
+
+    // Replaying the exact same AllowOnce id must be rejected before any durable
+    // content, file revision, or audit mutation. A `.get()` mutation in
+    // consume_grant makes this call execute again and must fail this oracle.
+    let replay = host.execute("save_memory", &retry_args, Some(&rid2)).await;
+    assert!(
+        replay.is_err(),
+        "consumed AllowOnce request id must never execute twice: {replay:?}"
+    );
+    assert_eq!(fs::read(&memory_path).unwrap(), durable_before_replay);
+    assert_eq!(
+        fs::metadata(&memory_path).unwrap().modified().unwrap(),
+        revision_before_replay
+    );
+    assert_eq!(fs::read(&audit_path).unwrap(), audit_before_replay);
 
     // Continuity: history still has prior turns + grant outcome.
     assert!(history.len() > 4, "history must preserve continuity");
@@ -1219,9 +1388,10 @@ async fn lab_developer_activity_on_truthful_off_no_sensitive_payload() {
         .unwrap_or(0);
     // Trace retains a capped body prefix; message_count metadata must match
     // what the production backend actually received.
-    assert_eq!(
-        first.messages.len().min(captured_n),
-        first.messages.len().min(captured_n)
+    assert!(
+        first.messages.len() <= captured_n,
+        "trace must not claim more messages than the provider received (trace={} provider={captured_n})",
+        first.messages.len()
     );
     // When both sides retain all messages (under cap), counts must agree.
     if captured_n > 0 && !first.messages_capped {
@@ -1451,8 +1621,13 @@ async fn lab_attachment_reaches_model_facing_context() {
     );
     let tool_joined = tool_bodies.join("\n");
     assert!(
-        tool_joined.contains(BODY_TOKEN) || tool_joined.contains(FILE_NAME),
-        "Role::Tool must surface attachment body/file from session pack, not only the user prompt: {tool_joined}"
+        tool_joined.contains(BODY_TOKEN),
+        "Role::Tool must surface the attachment body; filename metadata alone is forbidden: {tool_joined}"
+    );
+    assert_eq!(
+        tool_joined.matches(BODY_TOKEN).count(),
+        1,
+        "unique attachment body token must originate once in the tool result"
     );
     // User + assistant scripted text must not be the sole source of BODY_TOKEN.
     let non_tool: String = history
@@ -1477,9 +1652,9 @@ async fn lab_attachment_reaches_model_facing_context() {
     let post_tool_has_body = rounds.iter().skip(1).any(|r| {
         r.iter().any(|m| {
             m.role == Role::Tool
-                && (m.content.contains(BODY_TOKEN) || m.content.contains(FILE_NAME))
-        }) || model_context_blob(r).contains(BODY_TOKEN)
-            || model_context_blob(r).contains(FILE_NAME)
+                && m.content.contains(BODY_TOKEN)
+                && m.content.matches(BODY_TOKEN).count() == 1
+        })
     });
     assert!(
         post_tool_has_body,
@@ -1525,12 +1700,12 @@ fn oracle_no_cross_corpus(
     foreign_corpus: &str,
     foreign_private: &str,
 ) -> Result<(), String> {
-    if blob.contains(foreign_private) && !blob.contains("UNTRUSTED") {
+    if blob.contains(foreign_private) {
         return Err(format!("cross-corpus private leaked: {foreign_private}"));
     }
-    // Active bind must not claim the foreign corpus id as current when we
-    // assert isolation for a different corpus session.
-    let _ = foreign_corpus;
+    if blob.contains(foreign_corpus) {
+        return Err(format!("cross-corpus id leaked: {foreign_corpus}"));
+    }
     Ok(())
 }
 

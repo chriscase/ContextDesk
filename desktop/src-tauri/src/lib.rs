@@ -17692,6 +17692,101 @@ mod startup_host_tests {
 mod chat_session_host_tests {
     use super::*;
 
+    #[test]
+    fn desktop_close_reopen_history_seed_contract_preserves_full_transcript() {
+        let sessions_root = tempfile::tempdir().expect("sessions root");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let mut session = cd_core::sessions::Session::new("Continuity lifecycle");
+        session.id = "desktop-continuity-contract".into();
+        session.pinned_skill_id = Some("synthetic-triage".into());
+        for index in 0..68 {
+            let role = if index % 2 == 0 { "user" } else { "assistant" };
+            let content = if index == 0 {
+                "EARLY_DESKTOP_STATE=origin-only; CONSTRAINT=no-restart".to_string()
+            } else {
+                format!("neutral desktop transcript message {index}")
+            };
+            session.messages.push(cd_core::sessions::StoredMessage {
+                id: format!("desktop-message-{index}"),
+                role: role.into(),
+                content,
+                tools: (index == 17)
+                    .then(|| serde_json::json!({"status":"finished","name":"synthetic_read"})),
+                citations: (index == 19)
+                    .then(|| serde_json::json!([{"id":"synthetic-citation","label":"neutral"}])),
+                trail: (index == 21).then(|| vec!["neutral-search-step".into()]),
+                meta: (index == 23).then(|| serde_json::json!({"model":"synthetic-model"})),
+            });
+        }
+        let expected_messages = serde_json::to_value(&session.messages).unwrap();
+
+        let saved = save_chat_session_at(&store, session).expect("desktop save contract");
+        assert_eq!(saved.messages.len(), 68);
+        drop(store);
+
+        let reopened_store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let reopened = reopened_store
+            .load("desktop-continuity-contract")
+            .expect("desktop reopen contract");
+        assert_eq!(reopened.messages.len(), 68);
+        assert_eq!(
+            serde_json::to_value(&reopened.messages).unwrap(),
+            expected_messages,
+            "desktop save/load must preserve every transcript field exactly"
+        );
+        assert_eq!(
+            reopened.pinned_skill_id.as_deref(),
+            Some("synthetic-triage")
+        );
+        let seeded = reopened.to_chat_history();
+        assert_eq!(seeded.len(), reopened.messages.len());
+        for (model_message, stored_message) in seeded.iter().zip(&reopened.messages) {
+            assert_eq!(model_message.content, stored_message.content);
+            assert_eq!(
+                format!("{:?}", model_message.role).to_ascii_lowercase(),
+                stored_message.role
+            );
+        }
+
+        // Source contract for the shipped Tauri path: load must seed the cache,
+        // the seed must use Session::to_chat_history, and agent_turn must clone
+        // that session-keyed cache into the core provider path.
+        let source = include_str!("lib.rs");
+        let load_start = source
+            .find("fn load_chat_session(")
+            .expect("load_chat_session command");
+        let load_end = source[load_start..]
+            .find("fn should_persist_chat_session(")
+            .map(|offset| load_start + offset)
+            .expect("load command boundary");
+        let load_contract = &source[load_start..load_end];
+        assert!(load_contract.contains("store.load(&id)"));
+        assert!(load_contract.contains("seed_history_from_session(&state, &session)"));
+
+        let seed_start = source
+            .find("fn seed_history_from_session(")
+            .expect("history seed helper");
+        let seed_end = source[seed_start..]
+            .find("fn normalize_log_corpus_id(")
+            .map(|offset| seed_start + offset)
+            .expect("seed helper boundary");
+        let seed_contract = &source[seed_start..seed_end];
+        assert!(seed_contract.contains("session.to_chat_history()"));
+        assert!(seed_contract.contains("histories.insert(session.id.clone(), hist)"));
+
+        let agent_start = source
+            .find("async fn agent_turn(")
+            .expect("agent_turn command");
+        let agent_end = source[agent_start..]
+            .find("fn cancel_turn(")
+            .map(|offset| agent_start + offset)
+            .expect("agent command boundary");
+        let agent_contract = &source[agent_start..agent_end];
+        assert!(agent_contract.contains("histories.entry(req.session_id.clone())"));
+        assert!(agent_contract
+            .contains("research_turn_with_cancel_and_context_and_checkpoint_and_trace"));
+    }
+
     fn opt(key: &str, hidden: bool, is_default: bool) -> ModelOptionDto {
         ModelOptionDto {
             id: key.into(),
