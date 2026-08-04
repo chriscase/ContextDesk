@@ -143,14 +143,19 @@ import {
 import {
   composeLaneSources,
   defaultLanes,
+  EVIDENCE_LANE_APPLY_EVENT,
+  loadEvidenceHighlights,
   loadLanes,
   loadLinkMode,
+  loadVisibleLaneCount,
   restoreSpecificLaneSources,
   resizeLaneList,
   saveLanes,
   saveLinkMode,
+  saveVisibleLaneCount,
   selectAllLaneSources as selectAllSourcesForLane,
   toggleLaneSource,
+  type EvidenceLaneApplyDetail,
   type TimeLinkMode,
 } from "../../lib/logExplorer/laneCompose";
 import { buildAlignedLaneRows } from "../../lib/logExplorer/alignment";
@@ -975,11 +980,20 @@ export function LogExplorer({ corpusId }: Props) {
   const [linkMode, setLinkMode] = useState<TimeLinkMode>(() =>
     loadLinkMode(corpusId),
   );
-  const [laneCount, setLaneCount] = useState(1);
-  const [preferredLaneCount, setPreferredLaneCount] = useState(1);
+  const [laneCount, setLaneCount] = useState(() => {
+    const saved = loadVisibleLaneCount(corpusId);
+    return saved ?? 1;
+  });
+  const [preferredLaneCount, setPreferredLaneCount] = useState(() => {
+    const saved = loadVisibleLaneCount(corpusId);
+    return saved ?? 1;
+  });
   const [lanes, setLanes] = useState<LaneConfig[]>(() => {
     const saved = loadLanes(corpusId);
-    return saved && saved.length > 0 ? saved : defaultLanes(1);
+    const visible = loadVisibleLaneCount(corpusId) ?? 1;
+    return saved && saved.length > 0
+      ? saved
+      : defaultLanes(Math.max(1, visible));
   });
   const [laneEditorOpen, setLaneEditorOpen] = useState(false);
   const [laneEvents, setLaneEvents] = useState<
@@ -2496,11 +2510,14 @@ export function LogExplorer({ corpusId }: Props) {
     clearDetail();
 
     const savedLanes = loadLanes(corpusId);
+    const visible = loadVisibleLaneCount(corpusId) ?? 1;
     setLanes(
-      savedLanes && savedLanes.length > 0 ? savedLanes : defaultLanes(1),
+      savedLanes && savedLanes.length > 0
+        ? savedLanes
+        : defaultLanes(Math.max(1, visible)),
     );
-    setPreferredLaneCount(1);
-    setLaneCount(1);
+    setPreferredLaneCount(visible);
+    setLaneCount(visible);
     setLinkMode(loadLinkMode(corpusId));
     // ContextDesk activity is corpus-scoped just like the evidence state
     // above, but remains in its own store. Seed only the safe projected
@@ -2510,6 +2527,10 @@ export function LogExplorer({ corpusId }: Props) {
       appendActivities(createActivityLog(), loadCorpusImportActivity(corpusId)),
     );
     explorerOpenedAtRef.current = Date.now();
+    const highlights = loadEvidenceHighlights(corpusId);
+    if (highlights.length > 0) {
+      setHighlight(new Set(highlights));
+    }
   }, [clearDetail, corpusId]);
 
   useEffect(() => {
@@ -5110,6 +5131,7 @@ export function LogExplorer({ corpusId }: Props) {
     const count = clampLaneCount(n);
     setPreferredLaneCount(count);
     setLaneCount(Math.min(count, maxLaneCount));
+    saveVisibleLaneCount(corpusId, count);
     setLanes((prev) => {
       const next = resizeLaneList(prev, count);
       saveLanes(corpusId, next);
@@ -5117,6 +5139,39 @@ export function LogExplorer({ corpusId }: Props) {
     });
     if (count === 1) setLaneScrollSeq({});
   };
+
+  /**
+   * Live adopt Evidence · N Show-in-Explorer placement (same corpus).
+   * Cold open already reads loadLanes + loadVisibleLaneCount.
+   */
+  useEffect(() => {
+    const onApply = (event: Event) => {
+      const detail = (event as CustomEvent<EvidenceLaneApplyDetail>).detail;
+      if (!detail || detail.corpusId !== corpusId) return;
+      const nextLanes = detail.lanes.slice(0, 4).map((lane) => ({
+        ...lane,
+        sources: [...lane.sources],
+      }));
+      const visible = Math.max(
+        1,
+        Math.min(4, Math.floor(detail.visibleLaneCount)),
+      );
+      setLanes(nextLanes.length > 0 ? nextLanes : defaultLanes(visible));
+      setPreferredLaneCount(visible);
+      setLaneCount(Math.min(visible, maxLaneCount));
+      setLinkMode(detail.linkMode);
+      if (detail.highlightSeqs.length > 0) {
+        setHighlight(new Set(detail.highlightSeqs));
+      }
+      setStatus(
+        `Evidence placement · ${visible} customer-evidence lane${
+          visible === 1 ? "" : "s"
+        }`,
+      );
+    };
+    window.addEventListener(EVIDENCE_LANE_APPLY_EVENT, onApply);
+    return () => window.removeEventListener(EVIDENCE_LANE_APPLY_EVENT, onApply);
+  }, [corpusId, maxLaneCount, setStatus]);
 
   const updateLaneSources = (laneId: string, source: string) => {
     setLanes((prev) => {

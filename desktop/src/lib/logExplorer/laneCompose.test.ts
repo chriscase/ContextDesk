@@ -1,13 +1,17 @@
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import {
+  applyEvidenceLanesToExplorer,
   composeLaneSources,
   defaultLanes,
+  EVIDENCE_LANE_APPLY_EVENT,
+  loadEvidenceHighlights,
+  loadLanes,
+  loadVisibleLaneCount,
   restoreSpecificLaneSources,
   resizeLaneList,
+  saveLanes,
   selectAllLaneSources,
   toggleLaneSource,
-  loadLanes,
-  saveLanes,
   type LaneConfig,
 } from "./laneCompose";
 
@@ -110,5 +114,38 @@ describe("laneCompose", () => {
     saveLanes("corpus-a", lanes);
     expect(loadLanes("corpus-a")).toEqual(lanes);
     expect(loadLanes("corpus-b")).toBeNull();
+  });
+
+  it("applyEvidenceLanesToExplorer persists visible count, highlights, and dispatches", () => {
+    const heard: unknown[] = [];
+    const handler = (e: Event) => {
+      heard.push((e as CustomEvent).detail);
+    };
+    window.addEventListener(EVIDENCE_LANE_APPLY_EVENT, handler);
+    try {
+      const applied = applyEvidenceLanesToExplorer({
+        corpusId: "corpus-xyz-demo",
+        lanes: [
+          { id: "lane-0", label: "xyz-api", sources: ["xyz/api.log"] },
+          { id: "lane-1", label: "xyz-worker", sources: ["xyz/worker.log"] },
+        ],
+        visibleLaneCount: 2,
+        linkMode: "align_time",
+        highlightSeqs: [101, 202],
+      });
+      expect(applied.visibleLaneCount).toBe(2);
+      expect(loadVisibleLaneCount("corpus-xyz-demo")).toBe(2);
+      expect(loadLanes("corpus-xyz-demo")?.map((l) => l.sources)).toEqual([
+        ["xyz/api.log"],
+        ["xyz/worker.log"],
+      ]);
+      expect(loadEvidenceHighlights("corpus-xyz-demo")).toEqual([101, 202]);
+      expect(heard).toHaveLength(1);
+      expect((heard[0] as { visibleLaneCount: number }).visibleLaneCount).toBe(
+        2,
+      );
+    } finally {
+      window.removeEventListener(EVIDENCE_LANE_APPLY_EVENT, handler);
+    }
   });
 });

@@ -23,8 +23,12 @@ import {
   idleInvestigationAdd,
   laneEligibleItems,
   markInvestigationApplied,
+  pinLane,
   planShowInExplorer,
   previewInvestigationAdd,
+  previewOccupiedLaneChange,
+  removeLane,
+  reorderLanes,
   selectAllLaneEligible,
   selectionFromKeys,
   toggleEvidenceSelection,
@@ -37,7 +41,10 @@ import {
   type TimeQualityHint,
 } from "../lib/evidenceLaneBridge";
 import type { LaneConfig } from "../lib/logExplorer/laneCompose";
-import { loadLanes, saveLanes, saveLinkMode } from "../lib/logExplorer/laneCompose";
+import {
+  applyEvidenceLanesToExplorer,
+  loadLanes,
+} from "../lib/logExplorer/laneCompose";
 
 export type HostEventResolution = {
   corpusId: string;
@@ -138,6 +145,9 @@ export function EvidenceSetPanel({
   );
   const [busy, setBusy] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  /** Editable proposed lanes (pin / remove / reorder) before Show in Explorer. */
+  const [workingLanes, setWorkingLanes] = useState<LaneConfig[]>([]);
+  const [workingVisibleCount, setWorkingVisibleCount] = useState(1);
   const panelRef = useRef<HTMLDivElement>(null);
   const toggleRef = useRef<HTMLButtonElement>(null);
   const titleId = useId();
@@ -153,6 +163,8 @@ export function EvidenceSetPanel({
     setInvState(idleInvestigationAdd());
     setStatusMsg(null);
     setResolvedOverlay([]);
+    setWorkingLanes([]);
+    setWorkingVisibleCount(1);
   }, [citationSig, baseItems]);
 
   const selected = useMemo(
@@ -160,6 +172,24 @@ export function EvidenceSetPanel({
     [items, selectedKeys],
   );
   const logSelected = useMemo(() => laneEligibleItems(selected), [selected]);
+
+  // Refresh working lane draft when mode or selection changes.
+  useEffect(() => {
+    if (logSelected.length === 0) {
+      setWorkingLanes([]);
+      setWorkingVisibleCount(1);
+      return;
+    }
+    const existing =
+      logSelected[0]?.corpusId != null
+        ? loadLanes(logSelected[0].corpusId) ?? []
+        : [];
+    const assignment = assignEvidenceToLanes(logSelected, mode, existing);
+    setWorkingLanes(
+      assignment.lanes.map((l) => ({ ...l, sources: [...l.sources] })),
+    );
+    setWorkingVisibleCount(assignment.visibleLaneCount);
+  }, [mode, logSelected]);
 
   const ensureResolved = useCallback(async (): Promise<EvidenceItem[]> => {
     if (!resolveHostEvents) return logSelected;
@@ -231,41 +261,68 @@ export function EvidenceSetPanel({
         setStatusMsg(plan.error);
         return;
       }
-      if (plan.occupiedPreview.needsConfirm && !confirmReplace) {
-        setOccupiedPreview(plan);
+      // Prefer user-edited working lanes (pin/remove/reorder) when present.
+      const assignmentLanes =
+        workingLanes.length > 0
+          ? {
+              ...plan.assignment,
+              lanes: workingLanes,
+              visibleLaneCount: Math.max(
+                1,
+                Math.min(4, workingVisibleCount || workingLanes.length),
+              ),
+            }
+          : plan.assignment;
+      const previewPlan: ShowInExplorerPlan = {
+        ...plan,
+        assignment: assignmentLanes,
+        occupiedPreview: {
+          ...plan.occupiedPreview,
+          proposed: assignmentLanes.lanes,
+          needsConfirm: plan.occupiedPreview.needsConfirm,
+        },
+      };
+      // Recompute occupied preview against working lanes.
+      const occ = previewOccupiedLaneChange(existing, assignmentLanes.lanes);
+      previewPlan.occupiedPreview = occ;
+
+      if (occ.needsConfirm && !confirmReplace) {
+        setOccupiedPreview(previewPlan);
         return;
       }
       const applied = applyLaneAssignment(
         existing,
-        plan.assignment,
-        confirmReplace || !plan.occupiedPreview.needsConfirm,
+        assignmentLanes,
+        confirmReplace || !occ.needsConfirm,
       );
       if (!applied.applied) {
         setStatusMsg("Lane change cancelled — existing layout kept.");
         setOccupiedPreview(null);
         return;
       }
-      saveLanes(plan.corpusId, applied.lanes);
-      if (plan.assignment.linkMode !== "independent") {
-        saveLinkMode(plan.corpusId, plan.assignment.linkMode);
-      } else if (plan.assignment.alignmentRefuseReason) {
-        saveLinkMode(plan.corpusId, "independent");
-      }
-      const first = plan.navTargets[0] ?? null;
-      await onShowInExplorer?.({
+      // Persist + notify live Explorer (lanes, visible count, link mode, highlights).
+      const persisted = applyEvidenceLanesToExplorer({
         corpusId: plan.corpusId,
         lanes: applied.lanes,
         visibleLaneCount: applied.visibleLaneCount,
-        linkMode: plan.assignment.linkMode,
+        linkMode: assignmentLanes.linkMode,
         highlightSeqs: plan.highlightSeqs,
+      });
+      const first = plan.navTargets[0] ?? null;
+      await onShowInExplorer?.({
+        corpusId: persisted.corpusId,
+        lanes: persisted.lanes,
+        visibleLaneCount: persisted.visibleLaneCount,
+        linkMode: persisted.linkMode,
+        highlightSeqs: persisted.highlightSeqs,
         navTarget: first,
       });
       setOccupiedPreview(null);
       setStatusMsg(
-        plan.assignment.alignmentRefuseReason
-          ? `Opened Explorer · ${plan.assignment.alignmentRefuseReason}`
-          : `Opened Explorer with ${applied.visibleLaneCount} customer-evidence lane${
-              applied.visibleLaneCount === 1 ? "" : "s"
+        assignmentLanes.alignmentRefuseReason
+          ? `Opened Explorer · ${assignmentLanes.alignmentRefuseReason}`
+          : `Opened Explorer with ${persisted.visibleLaneCount} customer-evidence lane${
+              persisted.visibleLaneCount === 1 ? "" : "s"
             }.`,
       );
     } catch (err) {
@@ -297,11 +354,22 @@ export function EvidenceSetPanel({
     }
   };
 
-  const doConfirmInvestigation = async () => {
+  /** Confirm only — host write is a separate explicit step so Undo is reachable. */
+  const doConfirmInvestigation = () => {
     const confirmed = confirmInvestigationAdd(invState);
     setInvState(confirmed);
     if (confirmed.status !== "confirmed" || confirmed.failReason) {
       setStatusMsg(confirmed.failReason ?? "Confirm failed.");
+      return;
+    }
+    setStatusMsg(
+      "Confirmed — review, Undo, or Write to investigation (host write only after Write).",
+    );
+  };
+
+  const doApplyInvestigation = async () => {
+    if (invState.status !== "confirmed" || invState.failReason) {
+      setStatusMsg("Confirm the investigation preview before writing.");
       return;
     }
     if (!onAddToInvestigation) {
@@ -312,10 +380,10 @@ export function EvidenceSetPanel({
     }
     setBusy(true);
     try {
-      await onAddToInvestigation(confirmed);
-      setInvState(markInvestigationApplied(confirmed));
+      await onAddToInvestigation(invState);
+      setInvState(markInvestigationApplied(invState));
       setStatusMsg(
-        confirmed.createsDraft
+        invState.createsDraft
           ? "Draft investigation created with selected evidence."
           : "Evidence added to investigation.",
       );
@@ -477,6 +545,93 @@ export function EvidenceSetPanel({
             </p>
           </fieldset>
 
+          {workingLanes.length > 0 ? (
+            <div
+              className="evidence-set__lane-editor"
+              data-testid="evidence-lane-editor"
+            >
+              <div className="evidence-set__lane-editor-head">
+                Proposed customer-evidence lanes ({workingVisibleCount} visible)
+              </div>
+              <ol className="evidence-set__lane-list">
+                {workingLanes.map((lane, index) => (
+                  <li
+                    key={lane.id}
+                    className="evidence-set__lane-row"
+                    data-testid={`evidence-lane-row-${lane.id}`}
+                  >
+                    <span className="evidence-set__lane-label">
+                      {lane.label}
+                      {lane.sources.length > 0
+                        ? ` · ${lane.sources.join(", ")}`
+                        : " · open membership"}
+                    </span>
+                    <span className="evidence-set__lane-tools">
+                      <button
+                        type="button"
+                        className="evidence-set__btn evidence-set__btn--ghost"
+                        data-testid={`evidence-lane-pin-${lane.id}`}
+                        title="Pin to first lane"
+                        disabled={busy || index === 0}
+                        onClick={() => {
+                          setWorkingLanes((prev) => pinLane(prev, lane.id));
+                          setWorkingVisibleCount((n) =>
+                            Math.max(n, 1),
+                          );
+                        }}
+                      >
+                        Pin
+                      </button>
+                      <button
+                        type="button"
+                        className="evidence-set__btn evidence-set__btn--ghost"
+                        data-testid={`evidence-lane-up-${lane.id}`}
+                        title="Move up"
+                        disabled={busy || index === 0}
+                        onClick={() =>
+                          setWorkingLanes((prev) =>
+                            reorderLanes(prev, index, index - 1),
+                          )
+                        }
+                      >
+                        ↑
+                      </button>
+                      <button
+                        type="button"
+                        className="evidence-set__btn evidence-set__btn--ghost"
+                        data-testid={`evidence-lane-down-${lane.id}`}
+                        title="Move down"
+                        disabled={busy || index >= workingLanes.length - 1}
+                        onClick={() =>
+                          setWorkingLanes((prev) =>
+                            reorderLanes(prev, index, index + 1),
+                          )
+                        }
+                      >
+                        ↓
+                      </button>
+                      <button
+                        type="button"
+                        className="evidence-set__btn evidence-set__btn--ghost"
+                        data-testid={`evidence-lane-remove-${lane.id}`}
+                        title="Remove lane"
+                        disabled={busy || workingLanes.length <= 1}
+                        onClick={() => {
+                          setWorkingLanes((prev) => removeLane(prev, lane.id));
+                          setWorkingVisibleCount((n) =>
+                            Math.max(1, Math.min(n, workingLanes.length - 1)),
+                          );
+                        }}
+                      >
+                        Remove
+                      </button>
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          ) : null}
+
           {occupiedPreview ? (
             <div
               className="evidence-set__preview"
@@ -554,24 +709,37 @@ export function EvidenceSetPanel({
                     className="evidence-set__btn"
                     data-testid="evidence-investigation-confirm"
                     disabled={busy}
-                    onClick={() => void doConfirmInvestigation()}
+                    onClick={doConfirmInvestigation}
                   >
                     Confirm add
                   </button>
                 ) : null}
                 {invState.status === "confirmed" ? (
-                  <button
-                    type="button"
-                    className="evidence-set__btn evidence-set__btn--ghost"
-                    data-testid="evidence-investigation-undo"
-                    disabled={busy}
-                    onClick={() => {
-                      setInvState(undoInvestigationAdd(invState));
-                      setStatusMsg("Investigation add undone before apply.");
-                    }}
-                  >
-                    Undo
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      className="evidence-set__btn"
+                      data-testid="evidence-investigation-write"
+                      disabled={busy}
+                      onClick={() => void doApplyInvestigation()}
+                    >
+                      Write to investigation
+                    </button>
+                    <button
+                      type="button"
+                      className="evidence-set__btn evidence-set__btn--ghost"
+                      data-testid="evidence-investigation-undo"
+                      disabled={busy}
+                      onClick={() => {
+                        setInvState(undoInvestigationAdd(invState));
+                        setStatusMsg(
+                          "Investigation add undone before host write.",
+                        );
+                      }}
+                    >
+                      Undo
+                    </button>
+                  </>
                 ) : null}
                 <button
                   type="button"

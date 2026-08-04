@@ -183,3 +183,106 @@ export function saveLinkMode(corpusId: string, mode: TimeLinkMode): void {
     /* ignore */
   }
 }
+
+const VISIBLE_COUNT_PREFIX = "contextdesk.logExplorer.visibleLaneCount.v1:";
+const HIGHLIGHT_PREFIX = "contextdesk.logExplorer.evidenceHighlights.v1:";
+
+/** Custom event: live Explorer windows must adopt Evidence · N lane placement. */
+export const EVIDENCE_LANE_APPLY_EVENT = "contextdesk.evidence-lanes.apply";
+
+export type EvidenceLaneApplyDetail = {
+  corpusId: string;
+  lanes: LaneConfig[];
+  visibleLaneCount: number;
+  linkMode: TimeLinkMode;
+  highlightSeqs: number[];
+};
+
+export function loadVisibleLaneCount(corpusId: string): number | null {
+  try {
+    const raw = localStorage.getItem(VISIBLE_COUNT_PREFIX + corpusId);
+    if (raw == null) return null;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return null;
+    return Math.max(1, Math.min(4, Math.floor(n)));
+  } catch {
+    return null;
+  }
+}
+
+export function saveVisibleLaneCount(
+  corpusId: string,
+  count: number,
+): void {
+  try {
+    const n = Math.max(1, Math.min(4, Math.floor(count)));
+    localStorage.setItem(VISIBLE_COUNT_PREFIX + corpusId, String(n));
+  } catch {
+    /* ignore */
+  }
+}
+
+export function loadEvidenceHighlights(corpusId: string): number[] {
+  try {
+    const raw = localStorage.getItem(HIGHLIGHT_PREFIX + corpusId);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((x) => Number(x))
+      .filter((n) => Number.isSafeInteger(n) && n >= 0);
+  } catch {
+    return [];
+  }
+}
+
+export function saveEvidenceHighlights(
+  corpusId: string,
+  seqs: number[],
+): void {
+  try {
+    localStorage.setItem(
+      HIGHLIGHT_PREFIX + corpusId,
+      JSON.stringify(
+        seqs.filter((n) => Number.isSafeInteger(n) && n >= 0).slice(0, 64),
+      ),
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Persist Evidence · N Show-in-Explorer placement and notify any live Explorer
+ * for this corpus. Cold-open readers pick up via loadLanes / loadVisibleLaneCount.
+ */
+export function applyEvidenceLanesToExplorer(
+  detail: EvidenceLaneApplyDetail,
+): EvidenceLaneApplyDetail {
+  const lanes = detail.lanes.slice(0, 4).map((l) => ({
+    ...l,
+    sources: [...l.sources],
+  }));
+  const visibleLaneCount = Math.max(
+    1,
+    Math.min(4, Math.floor(detail.visibleLaneCount)),
+  );
+  const highlightSeqs = [...detail.highlightSeqs];
+  const applied: EvidenceLaneApplyDetail = {
+    corpusId: detail.corpusId,
+    lanes,
+    visibleLaneCount,
+    linkMode: detail.linkMode,
+    highlightSeqs,
+  };
+  saveLanes(applied.corpusId, applied.lanes);
+  saveVisibleLaneCount(applied.corpusId, applied.visibleLaneCount);
+  saveLinkMode(applied.corpusId, applied.linkMode);
+  saveEvidenceHighlights(applied.corpusId, applied.highlightSeqs);
+  if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+    window.dispatchEvent(
+      new CustomEvent(EVIDENCE_LANE_APPLY_EVENT, { detail: applied }),
+    );
+  }
+  return applied;
+}

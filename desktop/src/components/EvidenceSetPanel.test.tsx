@@ -108,23 +108,57 @@ describe("EvidenceSetPanel", () => {
     expect(onOpen).toHaveBeenCalledWith("log_event:101", "corpus-xyz-demo");
   });
 
-  it("Show in Explorer opens existing corpus without reimport", async () => {
+  it("Show in Explorer persists lanes + visible count and notifies Explorer", async () => {
     const onShow = vi.fn().mockResolvedValue(undefined);
-    render(
-      <EvidenceSetPanel
-        citations={hostCitations()}
-        onOpenCitation={vi.fn()}
-        onShowInExplorer={onShow}
-        availableCorpusIds={["corpus-xyz-demo"]}
-      />,
-    );
-    fireEvent.click(screen.getByTestId("evidence-set-toggle"));
-    fireEvent.click(screen.getByTestId("evidence-show-in-explorer"));
-    await waitFor(() => expect(onShow).toHaveBeenCalled());
-    const plan = onShow.mock.calls[0]![0];
-    expect(plan.corpusId).toBe("corpus-xyz-demo");
-    expect(plan.navTarget).toEqual({ kind: "event", id: "101" });
-    expect(plan.highlightSeqs).toEqual(expect.arrayContaining([101, 202]));
+    const appliedEvents: unknown[] = [];
+    const onApply = (e: Event) => {
+      appliedEvents.push((e as CustomEvent).detail);
+    };
+    window.addEventListener("contextdesk.evidence-lanes.apply", onApply);
+    try {
+      render(
+        <EvidenceSetPanel
+          citations={hostCitations()}
+          onOpenCitation={vi.fn()}
+          onShowInExplorer={onShow}
+          availableCorpusIds={["corpus-xyz-demo"]}
+        />,
+      );
+      fireEvent.click(screen.getByTestId("evidence-set-toggle"));
+      fireEvent.click(screen.getByTestId("evidence-mode-one_source_per_lane"));
+      fireEvent.click(screen.getByTestId("evidence-show-in-explorer"));
+      await waitFor(() => expect(onShow).toHaveBeenCalled());
+      const plan = onShow.mock.calls[0]![0];
+      expect(plan.corpusId).toBe("corpus-xyz-demo");
+      expect(plan.navTarget).toEqual({ kind: "event", id: "101" });
+      expect(plan.highlightSeqs).toEqual(expect.arrayContaining([101, 202]));
+      // Real lane placement — not open-only
+      expect(plan.lanes.length).toBeGreaterThanOrEqual(2);
+      expect(plan.visibleLaneCount).toBeGreaterThanOrEqual(2);
+      expect(plan.lanes.some((l: { sources: string[] }) => l.sources.includes("xyz/api.log"))).toBe(
+        true,
+      );
+      // Persisted for cold open
+      const raw = store.get(
+        "contextdesk.logExplorer.lanes.v1:corpus-xyz-demo",
+      );
+      expect(raw).toBeTruthy();
+      const savedLanes = JSON.parse(raw!);
+      expect(savedLanes.length).toBeGreaterThanOrEqual(2);
+      expect(
+        store.get("contextdesk.logExplorer.visibleLaneCount.v1:corpus-xyz-demo"),
+      ).toBe(String(plan.visibleLaneCount));
+      // Live Explorer event carries the same assignment
+      expect(appliedEvents.length).toBe(1);
+      const detail = appliedEvents[0] as {
+        visibleLaneCount: number;
+        lanes: { sources: string[] }[];
+      };
+      expect(detail.visibleLaneCount).toBe(plan.visibleLaneCount);
+      expect(detail.lanes).toEqual(plan.lanes);
+    } finally {
+      window.removeEventListener("contextdesk.evidence-lanes.apply", onApply);
+    }
   });
 
   it("occupied-lane preview cancel keeps layout", async () => {
@@ -162,7 +196,7 @@ describe("EvidenceSetPanel", () => {
     );
   });
 
-  it("investigation preview → confirm invokes host; undo before apply skips host", async () => {
+  it("investigation confirm then undo before write never hits host", async () => {
     const onAdd = vi.fn().mockResolvedValue(undefined);
     render(
       <EvidenceSetPanel
@@ -185,12 +219,83 @@ describe("EvidenceSetPanel", () => {
     await waitFor(() =>
       expect(screen.getByTestId("evidence-investigation-confirm")).toBeTruthy(),
     );
+    // Confirm alone must not host-write
     fireEvent.click(screen.getByTestId("evidence-investigation-confirm"));
+    await waitFor(() =>
+      expect(screen.getByTestId("evidence-investigation-undo")).toBeTruthy(),
+    );
+    expect(onAdd).not.toHaveBeenCalled();
+    expect(screen.getByTestId("evidence-investigation-write")).toBeTruthy();
+
+    // Undo before Write — still no host
+    fireEvent.click(screen.getByTestId("evidence-investigation-undo"));
+    expect(onAdd).not.toHaveBeenCalled();
+  });
+
+  it("investigation write after confirm invokes host once", async () => {
+    const onAdd = vi.fn().mockResolvedValue(undefined);
+    render(
+      <EvidenceSetPanel
+        citations={hostCitations()}
+        onOpenCitation={vi.fn()}
+        onAddToInvestigation={onAdd}
+        availableCorpusIds={["corpus-xyz-demo"]}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("evidence-set-toggle"));
+    fireEvent.click(screen.getByTestId("evidence-add-to-investigation"));
+    await waitFor(() =>
+      expect(screen.getByTestId("evidence-investigation-confirm")).toBeTruthy(),
+    );
+    fireEvent.click(screen.getByTestId("evidence-investigation-confirm"));
+    await waitFor(() =>
+      expect(screen.getByTestId("evidence-investigation-write")).toBeTruthy(),
+    );
+    fireEvent.click(screen.getByTestId("evidence-investigation-write"));
     await waitFor(() => expect(onAdd).toHaveBeenCalledTimes(1));
     const state = onAdd.mock.calls[0]![0];
     expect(state.status).toBe("confirmed");
     expect(state.eventRefs.length).toBe(2);
     expect(state.eventRefs[0].source).toBe("xyz/api.log");
+  });
+
+  it("exposes pin / remove / reorder on proposed lanes", async () => {
+    render(
+      <EvidenceSetPanel
+        citations={hostCitations()}
+        onOpenCitation={vi.fn()}
+        availableCorpusIds={["corpus-xyz-demo"]}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("evidence-set-toggle"));
+    fireEvent.click(screen.getByTestId("evidence-mode-one_source_per_lane"));
+    await waitFor(() =>
+      expect(screen.getByTestId("evidence-lane-editor")).toBeTruthy(),
+    );
+    const rows = screen.getAllByTestId(/evidence-lane-row-/);
+    expect(rows.length).toBeGreaterThanOrEqual(2);
+    const firstId = rows[0]!.getAttribute("data-testid")!.replace(
+      "evidence-lane-row-",
+      "",
+    );
+    const secondId = rows[1]!.getAttribute("data-testid")!.replace(
+      "evidence-lane-row-",
+      "",
+    );
+    fireEvent.click(screen.getByTestId(`evidence-lane-pin-${secondId}`));
+    await waitFor(() => {
+      const after = screen.getAllByTestId(/evidence-lane-row-/);
+      expect(after[0]!.getAttribute("data-testid")).toBe(
+        `evidence-lane-row-${secondId}`,
+      );
+    });
+    fireEvent.click(screen.getByTestId(`evidence-lane-down-${secondId}`));
+    fireEvent.click(screen.getByTestId(`evidence-lane-remove-${firstId}`));
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId(`evidence-lane-row-${firstId}`),
+      ).toBeNull();
+    });
   });
 
   it("Escape closes panel (keyboard focus path)", async () => {
