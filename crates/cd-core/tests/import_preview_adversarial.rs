@@ -13,8 +13,8 @@ use std::io::Write;
 use std::path::Path;
 
 use cd_core::log_analysis::import_preview::{
-    event_importable, preview_import_path, ImportItemRole, ImportItemStatus, ImportPreviewReason,
-    ImportSourceKind,
+    event_importable, preview_import_path, preview_import_plan, verify_import_plan,
+    ImportItemRole, ImportItemStatus, ImportPreviewReason, ImportSourceKind,
 };
 use cd_core::process_progress::CancelFlag;
 
@@ -605,6 +605,215 @@ fn rolled_files_group_only_when_content_agrees() {
         report.groups.is_empty(),
         "a shared rolled stem must never group sources whose content disagrees"
     );
+}
+
+#[test]
+fn rotation_families_are_transport_stable_visible_and_reviewable() {
+    const STRUCTURED: &[u8] = br#"{"ts":"2024-05-03T12:00:00Z","level":"info","msg":"synthetic"}
+"#;
+    const SYSLOG: &[u8] = b"<34>1 2024-05-03T12:00:00Z host svc - - - synthetic\n";
+    const UNSTRUCTURED: &[u8] = b"synthetic text with no format evidence\n";
+    const SIDECAR: &[u8] = b"synthetic resource fork metadata\n";
+    let members: [(&str, &[u8]); 16] = [
+        ("XYZ_Server.log", STRUCTURED),
+        ("XYZ_Server.log.1", STRUCTURED),
+        ("XYZ_Server-2024-05-03_120000.log", STRUCTURED),
+        ("XYZ_Server-20240504-120001.log", STRUCTURED),
+        ("XYZ_Server-2024-05-05T12:00:02.003.log", STRUCTURED),
+        ("XYZ_Server-10001.log", STRUCTURED),
+        ("XYZ_Server-10002.log", STRUCTURED),
+        ("nested/svc-a/XYZ_Server.log", STRUCTURED),
+        ("nested/svc-a/XYZ_Server.log.1", STRUCTURED),
+        ("nested/svc-b/XYZ_Server.log", STRUCTURED),
+        ("nested/svc-b/XYZ_Server.log.1", STRUCTURED),
+        ("XYZ_Mixed.log", STRUCTURED),
+        ("XYZ_Mixed.log.1", SYSLOG),
+        ("named-only.log", UNSTRUCTURED),
+        ("named-only.log.1", UNSTRUCTURED),
+        ("__MACOSX/._XYZ_Server.log", SIDECAR),
+    ];
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let folder = tmp.path().join("folder");
+    for (identity, body) in &members {
+        write(&folder.join(identity), body);
+    }
+    let archive = tmp.path().join("corpus.zip");
+    write(&archive, &zip_bytes(&members));
+
+    let folder_plan = preview_import_plan(&folder, None).expect("preview folder");
+    let archive_plan = preview_import_plan(&archive, None).expect("preview archive");
+
+    let public_facts = |report: &cd_core::log_analysis::import_preview::ImportPreviewReport| {
+        report
+            .items
+            .iter()
+            .map(|item| {
+                (
+                    item.identity.clone(),
+                    item.status,
+                    item.selected,
+                    item.format_id.clone(),
+                    item.group_id.clone(),
+                    item.reasons.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        public_facts(&folder_plan.report),
+        public_facts(&archive_plan.report),
+        "folder and ZIP must expose the same identities, classifications, selections, and families"
+    );
+    assert_eq!(
+        folder_plan.report.groups, archive_plan.report.groups,
+        "folder and ZIP family summaries must agree"
+    );
+    assert_eq!(
+        folder_plan.report.groups.len(),
+        3,
+        "only the root family and the two directory-scoped families group"
+    );
+
+    let root_group = folder_plan
+        .report
+        .groups
+        .iter()
+        .find(|group| group.stem == "XYZ_Server.log")
+        .expect("current and rotated root sources form one family");
+    assert_eq!(
+        root_group.member_identities,
+        vec![
+            "XYZ_Server-2024-05-03_120000.log",
+            "XYZ_Server-2024-05-05T12:00:02.003.log",
+            "XYZ_Server-20240504-120001.log",
+            "XYZ_Server.log",
+            "XYZ_Server.log.1",
+        ]
+    );
+
+    for identity in &root_group.member_identities {
+        let item = folder_plan
+            .report
+            .items
+            .iter()
+            .find(|item| &item.identity == identity)
+            .expect("group member keeps an individual ledger row");
+        assert!(
+            item.selected,
+            "group member must remain selectable: {identity}"
+        );
+        assert_eq!(item.group_id.as_deref(), Some(root_group.group_id.as_str()));
+    }
+
+    let nested_groups: Vec<_> = folder_plan
+        .report
+        .groups
+        .iter()
+        .filter(|group| group.stem.starts_with("nested/"))
+        .collect();
+    assert_eq!(nested_groups.len(), 2, "parents keep distinct families");
+    assert!(nested_groups
+        .iter()
+        .any(|group| group.stem == "nested/svc-a/XYZ_Server.log"));
+    assert!(nested_groups
+        .iter()
+        .any(|group| group.stem == "nested/svc-b/XYZ_Server.log"));
+    for group in &folder_plan.report.groups {
+        for identity in &group.member_identities {
+            let item = folder_plan
+                .report
+                .items
+                .iter()
+                .find(|item| &item.identity == identity)
+                .expect("every group member keeps its own ledger row");
+            assert!(
+                item.selected,
+                "every group member stays selected: {identity}"
+            );
+            assert_eq!(item.group_id.as_deref(), Some(group.group_id.as_str()));
+        }
+    }
+
+    for identity in ["XYZ_Server-10001.log", "XYZ_Server-10002.log"] {
+        let item = folder_plan
+            .report
+            .items
+            .iter()
+            .find(|item| item.identity == identity)
+            .expect("instance source remains visible");
+        assert_eq!(
+            item.group_id, None,
+            "non-date instance IDs must not collapse"
+        );
+    }
+    for identity in ["XYZ_Mixed.log", "XYZ_Mixed.log.1"] {
+        let item = folder_plan
+            .report
+            .items
+            .iter()
+            .find(|item| item.identity == identity)
+            .expect("mismatched peer remains visible");
+        assert_eq!(
+            item.group_id, None,
+            "format disagreement dissolves the family"
+        );
+    }
+    for identity in ["named-only.log", "named-only.log.1"] {
+        let item = folder_plan
+            .report
+            .items
+            .iter()
+            .find(|item| item.identity == identity)
+            .expect("name-only source remains visible");
+        assert_eq!(item.status, ImportItemStatus::RawFallback);
+        assert_eq!(
+            item.group_id, None,
+            "extension alone cannot create a family"
+        );
+        assert!(item
+            .reasons
+            .contains(&ImportPreviewReason::WeakNameHintOnly));
+    }
+    let sidecar = folder_plan
+        .report
+        .items
+        .iter()
+        .find(|item| item.identity == "__MACOSX/._XYZ_Server.log")
+        .expect("ignored sidecar is disclosed in the ledger");
+    assert_eq!(sidecar.status, ImportItemStatus::Ignored);
+    assert!(!sidecar.selected);
+
+    let folder_selected: Vec<String> = folder_plan
+        .report
+        .selected_identities()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let archive_selected: Vec<String> = archive_plan
+        .report
+        .selected_identities()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(folder_selected, archive_selected);
+    let folder_reviewed = verify_import_plan(
+        &folder,
+        folder_plan.plan_version,
+        &folder_plan.plan_token,
+        &folder_selected,
+        None,
+    )
+    .expect("reviewed folder selection verifies");
+    let archive_reviewed = verify_import_plan(
+        &archive,
+        archive_plan.plan_version,
+        &archive_plan.plan_token,
+        &archive_selected,
+        None,
+    )
+    .expect("reviewed archive selection verifies");
+    assert_eq!(folder_reviewed.selected, archive_reviewed.selected);
 }
 
 #[test]
