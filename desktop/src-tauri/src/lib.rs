@@ -336,6 +336,11 @@ struct AppState {
     chat_session_mutation: Mutex<()>,
     /// Serializes one-process Investigation selection/create/mutation across windows.
     investigation_mutation: Mutex<()>,
+    /// Bounded per-turn Activity Inspector records, keyed by
+    /// `(session_id, assistant message id)`. Memory-only and evicting; the
+    /// inspector is an explanation of a turn, never a second source of
+    /// truth for it. See `cd_core::activity::ActivityStore`.
+    activity: Mutex<cd_core::activity::ActivityStore>,
     /// Per-session cooperative cancel flags for in-flight turns (#109).
     cancels: Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
     /// Owner generation for each admitted chat turn. A second window cannot
@@ -4745,6 +4750,20 @@ async fn agent_turn(
         host.set_active_log_corpus(None);
     }
     let mut next_synthesis_checkpoint = linked_synthesis_retry.clone();
+    // Activity capture seam. `TracingChatBackend` wraps the same backend and
+    // forwards every call unchanged, so this cannot alter execution, tool
+    // selection, context composition, or which network requests are made —
+    // the sink only observes what was already assembled. With the inspector
+    // disabled the sink is `None` and the turn takes byte-identical
+    // arguments to before, which is what the on/off equivalence test pins.
+    let activity_settings = cfg.activity.clone();
+    let activity_sink: Option<std::sync::Arc<cd_core::turn_trace::RecordingTurnTrace>> =
+        activity_settings
+            .enabled
+            .then(|| std::sync::Arc::new(cd_core::turn_trace::RecordingTurnTrace::new()));
+    let trace_sink: Option<std::sync::Arc<dyn cd_core::turn_trace::TurnTraceSink>> = activity_sink
+        .clone()
+        .map(|sink| sink as std::sync::Arc<dyn cd_core::turn_trace::TurnTraceSink>);
     let result = if req.force_local {
         let ev = cd_core::research::research_local_with_skills(
             &mut host,
@@ -4761,7 +4780,7 @@ async fn agent_turn(
         }
         ev
     } else {
-        cd_core::research::research_turn_with_cancel_and_context_and_checkpoint(
+        cd_core::research::research_turn_with_cancel_and_context_and_checkpoint_and_trace(
             &mut host,
             &profile,
             api_key,
@@ -4776,10 +4795,20 @@ async fn agent_turn(
             Some(turn_started_at),
             turn_prelude_emitted,
             Some(&mut sink),
+            trace_sink,
         )
         .await
         .map_err(|e| e.to_string())
     };
+    record_turn_activity(
+        &state,
+        &req,
+        activity_settings,
+        activity_sink.as_deref(),
+        linked_citation_corpus.as_deref(),
+        &result,
+        turn_started_at,
+    );
     let linked_terminal_persistence = match (&linked_citation_corpus, &result) {
         (Some(_), Ok(events)) => {
             let _mutation = state
@@ -5580,6 +5609,102 @@ async fn list_models_for_draft(
         .into_iter()
         .map(|model| model.id)
         .collect())
+}
+
+/// Read the Activity Inspector record for one assistant message.
+///
+/// Returns `None` when the inspector was disabled for that turn, the turn
+/// predates this process, or the record has been evicted by the bounded
+/// store — all three are ordinary, and the UI must say "not available"
+/// rather than invent an explanation.
+///
+/// Read-only by construction: there is no command that mutates a record,
+/// because an explanation the user can edit is not an explanation.
+#[tauri::command]
+fn get_turn_activity(
+    state: State<'_, AppState>,
+    session_id: String,
+    message_id: String,
+) -> Result<Option<cd_core::activity::TurnActivityRecord>, String> {
+    let store = state
+        .activity
+        .lock()
+        .map_err(|_| "Activity storage is temporarily unavailable".to_string())?;
+    Ok(store.get(&session_id, &message_id).cloned())
+}
+
+/// Deletion lifecycle: drop every activity record for one session.
+///
+/// A record can hold redacted conversation text when the operator opted
+/// into full detail, so deleting a chat has to mean its explanations go
+/// too.
+#[tauri::command]
+fn forget_session_activity(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    let mut store = state
+        .activity
+        .lock()
+        .map_err(|_| "Activity storage is temporarily unavailable".to_string())?;
+    store.forget_session(&session_id);
+    Ok(())
+}
+
+/// Project one finished turn into a bounded Activity Inspector record.
+///
+/// Runs strictly AFTER the turn: it reads what the trace already recorded
+/// and what the host already emitted, and stores a projection. It cannot
+/// influence the turn, and a failure here is deliberately non-fatal — the
+/// answer the user asked for is not withheld because an explanation could
+/// not be filed.
+///
+/// Keyed by `(session_id, assistant message id)` so "show me what produced
+/// THIS answer" is answerable later, which is when a user actually opens
+/// the panel.
+fn record_turn_activity(
+    state: &AppState,
+    req: &AgentTurnReq,
+    settings: cd_core::config::ActivitySettings,
+    sink: Option<&cd_core::turn_trace::RecordingTurnTrace>,
+    linked_corpus_id: Option<&str>,
+    result: &Result<Vec<cd_core::events::StreamEvent>, String>,
+    turn_started_at: tokio::time::Instant,
+) {
+    use cd_core::activity::{ActivityRecorder, ActivityStatus, DataScope, TurnActivityRecord};
+    if !settings.enabled {
+        return;
+    }
+    let Some(message_id) = req.client_assistant_message_id.as_deref() else {
+        // No durable message to hang the record off; storing it under a
+        // synthesized key would make it unreachable anyway.
+        return;
+    };
+    let scope = match linked_corpus_id {
+        Some(corpus_id) => DataScope::log_corpus(corpus_id),
+        None => DataScope::conversation(),
+    };
+    let turn_id = format!("{}::{}", req.session_id, message_id);
+    let mut recorder = ActivityRecorder::new(
+        turn_id,
+        req.session_id.clone(),
+        scope,
+        settings.detail_level(),
+    );
+    if let Some(sink) = sink {
+        recorder.record_provider_rounds(&sink.calls());
+    }
+    // Whole-stream classification, not the terminal reason alone: this
+    // product signals two of its withholding conditions (`linked_no_tool`,
+    // `linked_required_source_missing`) as Error codes while the turn
+    // completes with reason "stop". See `cd_core::activity::status_for_turn_events`.
+    let status = match result {
+        Ok(events) => cd_core::activity::status_for_turn_events(events),
+        Err(_) => ActivityStatus::Failed,
+    };
+    let elapsed_ms = u64::try_from(turn_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let mut record: TurnActivityRecord = recorder.finish(status, elapsed_ms);
+    record.message_id = Some(message_id.to_string());
+    if let Ok(mut store) = state.activity.lock() {
+        store.insert(&req.session_id, message_id, record);
+    }
 }
 
 /// Active provider for Settings hydrate (no secrets).
@@ -12005,6 +12130,7 @@ pub fn run() {
         ),
         chat_session_mutation: Mutex::new(()),
         investigation_mutation: Mutex::new(()),
+        activity: Mutex::new(cd_core::activity::ActivityStore::default()),
         cancels: Mutex::new(HashMap::new()),
         active_turn_owners: Mutex::new(HashMap::new()),
         next_turn_owner: std::sync::atomic::AtomicU64::new(0),
@@ -12124,6 +12250,8 @@ pub fn run() {
             cancel_capability_qualification,
             clear_capability_qualification,
             get_active_provider,
+            get_turn_activity,
+            forget_session_activity,
             set_provider_tools_enabled,
             set_model_tools_enabled,
             get_curation_summary,

@@ -188,6 +188,60 @@ pub struct AppConfig {
     /// never a security or redaction boundary.
     #[serde(default)]
     pub model_curation: crate::model_curation::ModelCuration,
+    /// Activity Inspector capture settings.
+    ///
+    /// Absent in files written before this existed, so it takes
+    /// [`ActivitySettings::default`] — inspector on, summary only, no prompt
+    /// bodies retained.
+    #[serde(default)]
+    pub activity: ActivitySettings,
+}
+
+/// What the Activity Inspector captures.
+///
+/// Separate from whether the inspector *panel* is open: capture is a host
+/// concern with a retention consequence, and a UI toggle must never be able
+/// to change what a turn actually does. See
+/// [`crate::activity`] for the contract itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivitySettings {
+    /// Capture a per-turn activity record at all. Default `true`: the
+    /// summary is metadata-only and is what makes a turn auditable.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Retain the redacted, capped prompt bodies the turn trace produced.
+    ///
+    /// Default `false`, and deliberately a separate switch from `enabled`:
+    /// the summary answers "what happened" without keeping conversation
+    /// text anywhere but the transcript. Turning this on is the only way
+    /// bodies are retained, and even then they are already redacted and
+    /// already length-bounded.
+    #[serde(default)]
+    pub retain_context_bodies: bool,
+}
+
+impl Default for ActivitySettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            retain_context_bodies: false,
+        }
+    }
+}
+
+impl ActivitySettings {
+    /// Detail level implied by these settings.
+    pub fn detail_level(&self) -> crate::activity::ActivityDetailLevel {
+        if self.retain_context_bodies {
+            crate::activity::ActivityDetailLevel::Full
+        } else {
+            crate::activity::ActivityDetailLevel::Summary
+        }
+    }
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 fn default_index_max_files() -> usize {

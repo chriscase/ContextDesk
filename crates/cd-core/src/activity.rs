@@ -825,3 +825,124 @@ mod tests {
         assert!(!record.is_truncated());
     }
 }
+
+/// Bounded, process-lifetime store of recent turn activity, keyed by
+/// `(session_id, message_id)`.
+///
+/// # Why this exists in this shape
+///
+/// The inspector needs a record to be retrievable *after* the turn's event
+/// stream has finished, because a user opens the panel when something looks
+/// wrong — usually several messages later. Keying on the assistant message
+/// is what makes "show me what produced THIS answer" answerable.
+///
+/// This is deliberately in-memory and bounded. Durable persistence is
+/// designed for (every type here carries a contract version and serde
+/// defaults, and the key is already `(session, message, turn)`), but is a
+/// separate change: writing it into the session file would change a durable
+/// on-disk schema every host reads, and that belongs in its own reviewed
+/// batch rather than riding along with the capture seam. See
+/// `docs/design/ACTIVITY_INSPECTOR.md` for the exact residual.
+///
+/// Eviction is oldest-first by insertion order, so a long session cannot
+/// grow this without bound.
+#[derive(Debug)]
+pub struct ActivityStore {
+    capacity: usize,
+    order: std::collections::VecDeque<ActivityKey>,
+    records: std::collections::HashMap<ActivityKey, TurnActivityRecord>,
+}
+
+/// Durable-shaped key: which turn's activity, within which message, within
+/// which session.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ActivityKey {
+    /// Owning chat session.
+    pub session_id: String,
+    /// Owning assistant message.
+    pub message_id: String,
+}
+
+/// Default number of turn records kept in memory.
+pub const DEFAULT_ACTIVITY_STORE_CAPACITY: usize = 200;
+
+impl Default for ActivityStore {
+    fn default() -> Self {
+        Self::with_capacity(DEFAULT_ACTIVITY_STORE_CAPACITY)
+    }
+}
+
+impl ActivityStore {
+    /// Empty store holding at most `capacity` records (minimum 1).
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            order: std::collections::VecDeque::new(),
+            records: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Store one record, evicting the oldest if at capacity.
+    ///
+    /// Re-inserting the same key replaces in place and does not consume a
+    /// second slot — a retried turn overwrites its own record rather than
+    /// pushing an unrelated session's out.
+    pub fn insert(&mut self, session_id: &str, message_id: &str, record: TurnActivityRecord) {
+        let key = ActivityKey {
+            session_id: session_id.to_string(),
+            message_id: message_id.to_string(),
+        };
+        if self.records.insert(key.clone(), record).is_none() {
+            self.order.push_back(key);
+            while self.order.len() > self.capacity {
+                if let Some(evicted) = self.order.pop_front() {
+                    self.records.remove(&evicted);
+                }
+            }
+        }
+    }
+
+    /// Fetch a record.
+    pub fn get(&self, session_id: &str, message_id: &str) -> Option<&TurnActivityRecord> {
+        self.records.get(&ActivityKey {
+            session_id: session_id.to_string(),
+            message_id: message_id.to_string(),
+        })
+    }
+
+    /// How many records are held.
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    /// True when nothing is held.
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    /// Deletion lifecycle: drop everything for one session.
+    ///
+    /// A chat that is deleted or trashed must not leave its activity behind
+    /// — the record can hold redacted conversation text at `Full` detail,
+    /// and "I deleted that chat" has to mean it.
+    pub fn forget_session(&mut self, session_id: &str) {
+        self.records.retain(|key, _| key.session_id != session_id);
+        self.order.retain(|key| key.session_id != session_id);
+    }
+
+    /// Deletion lifecycle: drop one message's record.
+    pub fn forget_message(&mut self, session_id: &str, message_id: &str) {
+        let key = ActivityKey {
+            session_id: session_id.to_string(),
+            message_id: message_id.to_string(),
+        };
+        self.records.remove(&key);
+        self.order.retain(|existing| existing != &key);
+    }
+
+    /// Deletion lifecycle: drop everything.
+    pub fn clear(&mut self) {
+        self.records.clear();
+        self.order.clear();
+    }
+}
