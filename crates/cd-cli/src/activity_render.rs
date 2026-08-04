@@ -37,10 +37,15 @@ pub fn project_turn_activity(
     };
     let mut recorder = ActivityRecorder::new(turn_id, session_id, scope, detail_level(level));
     if let Some(sink) = sink {
-        recorder.record_timeline(&sink.timeline());
+        let timeline = sink.timeline();
+        if timeline.is_empty() {
+            // Early refusal / empty capture: still project the stream the
+            // host actually emitted (TurnStarted, Error, TurnCompleted…).
+            recorder.record_stream_events(events);
+        } else {
+            recorder.record_timeline(&timeline);
+        }
     } else {
-        // Fallback: stream-only projection when no sink was attached (should
-        // not happen when --activity is requested — chat always attaches one).
         recorder.record_stream_events(events);
     }
     let status = status_for_turn_events(events);

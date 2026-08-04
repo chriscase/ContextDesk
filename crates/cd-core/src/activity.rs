@@ -875,6 +875,90 @@ impl ActivityRecorder {
             };
             if let Some(traced) = traced {
                 self.record_host_event(&traced, None, 0, &awaiting_tool_ids);
+                continue;
+            }
+            // Truthful host lifecycle that is not on the provider/host timeline
+            // (early refusal, phase markers) still belongs in the inspector.
+            match event {
+                StreamEvent::TurnStarted { model, .. } => {
+                    self.push(ActivityEvent {
+                        turn_id: String::new(),
+                        operation_id: "turn-started".into(),
+                        seq: 0,
+                        elapsed_ms: None,
+                        phase: ActivityPhase::Started,
+                        status: ActivityStatus::Pending,
+                        origin: ActivityOrigin::DeterministicHost,
+                        determinism: Determinism::Deterministic,
+                        label: "Turn started".into(),
+                        detail: model.as_ref().map(|m| format!("model={m}")),
+                        trigger: ActivityTrigger::UserMessage,
+                        scope: self.scope.clone(),
+                        evidence: Vec::new(),
+                        privacy: PrivacyClass::Metadata,
+                        context: None,
+                    });
+                }
+                StreamEvent::TurnPhase { phase } => {
+                    self.push(ActivityEvent {
+                        turn_id: String::new(),
+                        operation_id: format!("phase-{phase:?}"),
+                        seq: 0,
+                        elapsed_ms: None,
+                        phase: ActivityPhase::Progress,
+                        status: ActivityStatus::Pending,
+                        origin: ActivityOrigin::DeterministicHost,
+                        determinism: Determinism::Deterministic,
+                        label: format!("Phase: {phase:?}"),
+                        detail: None,
+                        trigger: ActivityTrigger::HostPolicy,
+                        scope: self.scope.clone(),
+                        evidence: Vec::new(),
+                        privacy: PrivacyClass::Metadata,
+                        context: None,
+                    });
+                }
+                StreamEvent::Error { code, message } => {
+                    let redacted = crate::redact::scrub_secrets(message);
+                    self.push(ActivityEvent {
+                        turn_id: String::new(),
+                        operation_id: format!("error-{code}"),
+                        seq: 0,
+                        elapsed_ms: None,
+                        phase: ActivityPhase::Completed,
+                        status: ActivityStatus::Failed,
+                        origin: ActivityOrigin::DeterministicHost,
+                        determinism: Determinism::Deterministic,
+                        label: format!("Error: {code}"),
+                        detail: Some(bound_chars(&redacted, MAX_ACTIVITY_DETAIL_CHARS)),
+                        trigger: ActivityTrigger::HostPolicy,
+                        scope: self.scope.clone(),
+                        evidence: Vec::new(),
+                        privacy: PrivacyClass::Metadata,
+                        context: None,
+                    });
+                }
+                StreamEvent::TurnCompleted { reason } => {
+                    let status = status_for_turn_reason(reason);
+                    self.push(ActivityEvent {
+                        turn_id: String::new(),
+                        operation_id: "turn-completed".into(),
+                        seq: 0,
+                        elapsed_ms: None,
+                        phase: ActivityPhase::Completed,
+                        status,
+                        origin: ActivityOrigin::DeterministicHost,
+                        determinism: Determinism::Deterministic,
+                        label: format!("Turn completed ({reason})"),
+                        detail: None,
+                        trigger: ActivityTrigger::HostPolicy,
+                        scope: self.scope.clone(),
+                        evidence: Vec::new(),
+                        privacy: PrivacyClass::Metadata,
+                        context: None,
+                    });
+                }
+                _ => {}
             }
         }
     }
@@ -1061,7 +1145,15 @@ pub fn status_for_turn_reason(reason: &str) -> ActivityStatus {
         ActivityStatus::Failed
     } else if crate::events::is_withheld_turn_reason(reason) {
         ActivityStatus::Withheld
+    } else if reason.starts_with("linked_")
+        || reason.starts_with("provider_")
+        || reason == "ollama_unreachable"
+    {
+        // emit_provider_error terminals (e.g. linked_tools_unavailable) are
+        // not clean stops — classify as Failed rather than Ok.
+        ActivityStatus::Failed
     } else {
+        // stop, dry_run, budget_rounds_answer (answered after budget), empty…
         ActivityStatus::Ok
     }
 }
