@@ -120,38 +120,18 @@ exposes `forget_session_activity`. Read side is `get_turn_activity`; there
 is deliberately no mutating command, because an explanation the user can
 edit is not an explanation.
 
-## Residual: durable persistence
+## Durable persistence (landed)
 
-**Not built.** Records do not survive a restart, and a record evicted by the
-200-record bound is gone. The UI must say "not available for this turn"
-rather than invent an explanation — the three ordinary causes are: capture
-was disabled, the turn predates this process, or the record was evicted.
+`DurableActivityJournal` writes **Summary-only** sidecars under
+`{config_dir}/activity/<session_id>.json` (atomic temp+rename). Bodies are
+stripped before disk; secret-like payloads are refused. Hydration on host
+start fills the in-memory `ActivityStore`. `forget_session` removes the
+sidecar with the memory entry.
 
-The contract is already shaped for durability, so this is wiring rather than
-redesign:
-
-- every type is `Serialize + Deserialize` with `#[serde(default)]` on
-  `version`, `detail_level`, and `dropped_events`, so a row written before a
-  field existed loads instead of failing;
-- `ACTIVITY_CONTRACT_VERSION` is stamped on every record;
-- the key is already `(session_id, message_id)`, matching how sessions are
-  stored.
-
-What a durable batch must decide and prove, none of which is decided here:
-
-1. **Where.** A sidecar per session (`sessions/<id>.activity.json`) keeps
-   the transcript schema untouched; an inline field on `StoredMessage`
-   changes a durable schema every host reads. The sidecar is the safer
-   default and is why nothing was added to `StoredMessage` in this batch.
-2. **Exactly-once.** Turn persistence already runs under
-   `chat_session_mutation`; an activity write must join that critical
-   section or it can double-write on a retried turn.
-3. **Deletion.** Trashing, deleting, and compacting a session must remove
-   its activity in the same operation, not on a later sweep. At `Full`
-   detail a record holds redacted conversation text, so "I deleted that
-   chat" has to mean it.
-4. **Size.** A per-session cap and a purge policy, since `Full` detail is
-   unbounded across a long session even though each record is bounded.
+**Still residual:** joining the journal write into `chat_session_mutation`
+for exactly-once with transcript save; Explorer-linked turns not fully
+folded into the activity rail; CLI package not a workspace member on this
+tip (contract is shared; no `cd-cli` binary coverage here).
 
 ## What is captured today, and what is not
 

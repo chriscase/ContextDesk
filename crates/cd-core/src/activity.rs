@@ -625,13 +625,13 @@ impl ActivityRecorder {
                         origin: ActivityOrigin::DeterministicHost,
                         determinism: Determinism::Deterministic,
                         label: format!("Tool {name}"),
-                        detail: Some(bound_chars(summary, MAX_ACTIVITY_DETAIL_CHARS)).filter(|s| {
-                            !s.is_empty()
-                        }).or_else(|| {
-                            detail
-                                .as_ref()
-                                .map(|d| bound_chars(d, MAX_ACTIVITY_DETAIL_CHARS))
-                        }),
+                        detail: Some(bound_chars(summary, MAX_ACTIVITY_DETAIL_CHARS))
+                            .filter(|s| !s.is_empty())
+                            .or_else(|| {
+                                detail
+                                    .as_ref()
+                                    .map(|d| bound_chars(d, MAX_ACTIVITY_DETAIL_CHARS))
+                            }),
                         trigger: ActivityTrigger::ModelRequest { round: 0 },
                         scope: self.scope.clone(),
                         evidence: Vec::new(),
@@ -704,7 +704,9 @@ impl ActivityRecorder {
                         origin: ActivityOrigin::DeterministicHost,
                         determinism: Determinism::Deterministic,
                         label: format!("Citation: {label}"),
-                        detail: locator.clone().map(|l| bound_chars(&l, MAX_ACTIVITY_DETAIL_CHARS)),
+                        detail: locator
+                            .clone()
+                            .map(|l| bound_chars(&l, MAX_ACTIVITY_DETAIL_CHARS)),
                         trigger: ActivityTrigger::HostPolicy,
                         scope: self.scope.clone(),
                         evidence: vec![EvidenceRef {
@@ -1241,9 +1243,8 @@ impl DurableActivityJournal {
         if !path.is_file() {
             return Ok(BTreeMap::new());
         }
-        let raw = std::fs::read_to_string(&path).map_err(|e| {
-            crate::error::CoreError::Message(format!("activity journal read: {e}"))
-        })?;
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| crate::error::CoreError::Message(format!("activity journal read: {e}")))?;
         if raw.len() > self.max_file_bytes {
             return Ok(BTreeMap::new());
         }

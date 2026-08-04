@@ -740,7 +740,7 @@ fn stream_tools_and_permissions_are_recorded_as_metadata_only() {
 #[test]
 fn durable_journal_survives_restart_and_strips_bodies() {
     use cd_core::activity::{
-        strip_bodies_for_durability, DurableActivityJournal, PrivacyClass, ContextMetadata,
+        strip_bodies_for_durability, ContextMetadata, DurableActivityJournal, PrivacyClass,
     };
     let dir = tempfile::tempdir().unwrap();
     let journal = DurableActivityJournal::open(dir.path()).expect("open journal");
