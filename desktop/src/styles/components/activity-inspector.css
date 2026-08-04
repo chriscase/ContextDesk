@@ -1,0 +1,674 @@
+/* Activity Inspector — one stylesheet for the toggle, the shared inspector
+   body, the Drawer/Docked surfaces, and the Explorer's dual-lane timeline.
+
+   Colour is never the only signal: every origin badge pairs a glyph with a
+   text label (ActivityOriginBadge), and the rules below tint that badge as a
+   redundant third cue. The sheet must stay legible with colour removed.
+   Breakpoint ladder follows panes.css: 78rem / 54rem / 40rem. */
+
+/* --- Toggle: one unobtrusive control ------------------------------------ */
+
+.activity-toggle {
+  position: relative;
+  display: inline-flex;
+}
+
+.activity-toggle__trigger {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.3));
+  border-radius: 0.4rem;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.activity-toggle__trigger:hover {
+  color: var(--text);
+}
+
+.activity-toggle__value {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.activity-toggle__menu {
+  position: absolute;
+  top: calc(100% + 0.3rem);
+  right: 0;
+  z-index: 40;
+  min-width: 17rem;
+  display: flex;
+  flex-direction: column;
+  padding: 0.25rem;
+  border: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.3));
+  border-radius: 0.5rem;
+  background: var(--surface-raised, var(--surface, #1b1b1b));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+
+.activity-toggle__option {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.4rem 0.5rem;
+  border: 0;
+  border-radius: 0.35rem;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.activity-toggle__option:hover,
+.activity-toggle__option:focus-visible {
+  background: var(--surface-hover, rgba(128, 128, 128, 0.14));
+}
+
+.activity-toggle__option[aria-checked="true"] .activity-toggle__option-label::after {
+  content: " ✓";
+}
+
+.activity-toggle__option-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.activity-toggle__option-desc {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+/* --- Badges: text first, glyph second, colour third --------------------- */
+
+.activity-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.3));
+  border-radius: 999px;
+  font-size: 0.72rem;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+
+.activity-badge__label {
+  font-weight: 600;
+}
+
+.activity-badge__work {
+  color: var(--text-secondary);
+  font-size: 0.68rem;
+}
+
+/* Redundant tint only. Removing every rule below must change nothing about
+   what a reader can determine from the badge. */
+.activity-badge[data-work="nondeterministic"] {
+  border-color: var(--warning-border, rgba(214, 158, 46, 0.55));
+}
+
+.activity-badge[data-work="deterministic"] {
+  border-color: var(--border-subtle, rgba(128, 128, 128, 0.3));
+}
+
+/* --- Compact line ------------------------------------------------------- */
+
+.activity-compact-line {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-top: 0.3rem;
+  font-size: 0.76rem;
+  color: var(--text-secondary);
+}
+
+.activity-compact-line__details {
+  border: 0;
+  background: transparent;
+  color: var(--accent, #6ea8fe);
+  cursor: pointer;
+  font-size: 0.76rem;
+  padding: 0;
+}
+
+/* --- Inspector body ----------------------------------------------------- */
+
+.activity-inspector {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.activity-inspector__head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.7rem 0.8rem 0;
+}
+
+.activity-inspector__title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.activity-inspector__eyebrow {
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.activity-inspector__unrecorded {
+  font-size: 0.68rem;
+  padding: 0.05rem 0.35rem;
+  border: 1px dashed var(--border-subtle, rgba(128, 128, 128, 0.4));
+  border-radius: 0.3rem;
+  color: var(--text-secondary);
+}
+
+.activity-inspector__close {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.activity-inspector__turn-label {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.activity-inspector__tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.25));
+}
+
+.activity-inspector__tab {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  padding: 0.35rem 0.5rem;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.activity-inspector__tab[data-active="true"] {
+  color: var(--text);
+  border-bottom-color: var(--accent, #6ea8fe);
+  font-weight: 600;
+}
+
+.activity-inspector__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.6rem 0.8rem 0.8rem;
+}
+
+.activity-inspector__section-title {
+  margin: 0.9rem 0 0.35rem;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
+.activity-plain-summary {
+  margin: 0 0 0.7rem;
+  padding-left: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.83rem;
+  color: var(--text);
+}
+
+.activity-empty {
+  margin: 0.3rem 0;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.activity-technical,
+.activity-event-row__technical {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.activity-technical > div,
+.activity-event-row__technical > div {
+  display: grid;
+  grid-template-columns: minmax(7rem, 32%) 1fr;
+  gap: 0.5rem;
+}
+
+.activity-technical dt,
+.activity-event-row__technical dt {
+  color: var(--text-secondary);
+}
+
+.activity-technical dd,
+.activity-event-row__technical dd {
+  margin: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+/* --- Event rows --------------------------------------------------------- */
+
+.activity-event-list {
+  display: block;
+  min-width: 0;
+}
+
+.activity-event-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.16));
+  min-width: 0;
+}
+
+.activity-event-row__head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.activity-event-row__time {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.activity-event-row__label {
+  font-size: 0.82rem;
+  color: var(--text);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.activity-event-row__status {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
+.activity-event-row__more {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: var(--accent, #6ea8fe);
+  font-size: 0.72rem;
+  cursor: pointer;
+  padding: 0;
+}
+
+.activity-event-row__detail,
+.activity-event-row__hook {
+  margin: 0;
+  font-size: 0.76rem;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.activity-feed__omitted {
+  margin: 0 0 0.35rem;
+  font-size: 0.74rem;
+  color: var(--text-secondary);
+}
+
+/* --- Rounds ------------------------------------------------------------- */
+
+.activity-rounds,
+.activity-citations,
+.activity-permissions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+}
+
+.activity-round__head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.activity-round__tools {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.activity-budget__truncation {
+  margin: 0.3rem 0 0;
+  font-size: 0.76rem;
+  color: var(--text-secondary);
+}
+
+/* --- Drawer ------------------------------------------------------------- */
+
+.activity-drawer-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(0, 0, 0, 0.42);
+}
+
+.activity-drawer-panel {
+  width: min(30rem, 100vw);
+  height: 100%;
+  background: var(--surface, #17181a);
+  border-left: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.3));
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* --- Docked rail -------------------------------------------------------- */
+
+.activity-dock {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  min-height: 0;
+  border-left: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.25));
+  background: var(--surface, #17181a);
+}
+
+.activity-dock__handle {
+  flex: 0 0 6px;
+  cursor: col-resize;
+  background: transparent;
+}
+
+.activity-dock__handle:focus-visible {
+  outline: 2px solid var(--accent, #6ea8fe);
+  outline-offset: -2px;
+}
+
+.activity-dock__content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+
+.activity-dock__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  min-height: 0;
+  padding: 0.6rem 0.8rem;
+  overflow-y: auto;
+}
+
+.log-explorer__activity-elapsed {
+  font-size: 0.76rem;
+  color: var(--text-secondary);
+}
+
+/* Chat layout wrapper so the rail sits beside the transcript. */
+.chat-body-row {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.chat-main-column {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* --- Dual-lane timeline ------------------------------------------------- */
+
+.dual-lane {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.5rem 0;
+}
+
+.dual-lane__axis-note {
+  font-size: 0.76rem;
+  color: var(--text-secondary);
+  padding: 0.35rem 0.5rem;
+  border-left: 3px solid var(--border-subtle, rgba(128, 128, 128, 0.4));
+  background: var(--surface-hover, rgba(128, 128, 128, 0.07));
+  overflow-wrap: anywhere;
+}
+
+/* Separate tracks are the honest fallback, not an error — style them as a
+   normal state, with the dashed rule as the visual cue that the two bands are
+   not on one clock. */
+.dual-lane[data-alignment="separate_tracks"] .dual-lane__axis-note {
+  border-left-style: dashed;
+}
+
+.dual-lane__band {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.dual-lane__band-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.dual-lane__band-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.dual-lane__band-quality,
+.dual-lane__band-extent,
+.dual-lane__band-selected {
+  font-size: 0.74rem;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.dual-lane__track {
+  position: relative;
+  height: 1.6rem;
+  min-width: 0;
+}
+
+.dual-lane__track-line {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--border-subtle, rgba(128, 128, 128, 0.35));
+}
+
+.dual-lane__marker {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 0.7rem;
+  height: 0.7rem;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--text-secondary);
+  background: var(--surface, #17181a);
+  cursor: pointer;
+}
+
+.dual-lane__marker--selected {
+  background: var(--accent, #6ea8fe);
+  cursor: default;
+}
+
+.dual-lane__marker[aria-pressed="true"] {
+  outline: 2px solid var(--accent, #6ea8fe);
+  outline-offset: 1px;
+}
+
+/* Shape, not colour, distinguishes model/external markers. */
+.dual-lane__marker--activity[data-origin="probabilistic_model"],
+.dual-lane__marker--activity[data-origin="external_connector"] {
+  border-radius: 0.15rem;
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.dual-lane__sequence {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  counter-reset: activity-step;
+}
+
+.dual-lane__sequence-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  padding: 0.15rem 0.2rem;
+  border-radius: 0.3rem;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 0.8rem;
+  min-width: 0;
+}
+
+.dual-lane__sequence-row::before {
+  counter-increment: activity-step;
+  content: counter(activity-step) ".";
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.74rem;
+}
+
+.dual-lane__sequence-row:hover,
+.dual-lane__sequence-row:focus-visible,
+.dual-lane__sequence-row[aria-pressed="true"] {
+  background: var(--surface-hover, rgba(128, 128, 128, 0.14));
+}
+
+.dual-lane__sequence-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* --- Import summary + ledger -------------------------------------------- */
+
+.activity-import-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+}
+
+.activity-import-summary__line {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.activity-import-ledger {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.activity-import-ledger__section h4 {
+  margin: 0 0 0.25rem;
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
+.activity-import-ledger__section dl {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.activity-import-ledger__row {
+  display: grid;
+  grid-template-columns: minmax(8rem, 30%) 1fr;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+}
+
+.activity-import-ledger__row dt {
+  color: var(--text-secondary);
+}
+
+.activity-import-ledger__row dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* --- Responsive --------------------------------------------------------- */
+
+@media (max-width: 54rem) {
+  .activity-technical > div,
+  .activity-event-row__technical > div,
+  .activity-import-ledger__row {
+    grid-template-columns: 1fr;
+    gap: 0.1rem;
+  }
+
+  .activity-toggle__menu {
+    min-width: 14rem;
+  }
+}
+
+@media (max-width: 40rem) {
+  .activity-drawer-panel {
+    width: 100vw;
+  }
+}

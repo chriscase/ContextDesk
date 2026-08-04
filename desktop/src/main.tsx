@@ -32,6 +32,7 @@ import "./styles/components/session-wizard.css";
 import "./styles/components/log-explorer.css";
 import "./styles/components/import-flow.css";
 import "./styles/components/investigation-report.css";
+import "./styles/components/activity-inspector.css";
 import "./styles/help.css";
 
 function ExplorerBootError({ reason }: { reason: string }) {

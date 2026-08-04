@@ -1,4 +1,7 @@
 import {
+  useCallback,
+  useEffect,
+  useMemo,
   useState,
   type MouseEvent as ReactMouseEvent,
   type RefObject,
@@ -16,6 +19,13 @@ import {
 import { openPersistedLogCitation as openPersistedLogCitationCore } from "../../lib/citations";
 import { IconPin } from "../icons";
 import { MessageRow } from "./MessageRow";
+import { useActivityInspector } from "../../hooks/useActivityInspector";
+import { buildActivityTurn } from "../../lib/activity/adapter";
+import { fetchTurnActivity } from "../../lib/engine/turnActivity";
+import type { HostTurnActivityRecord } from "../../lib/activity/types";
+import { ActivityToggle } from "../activity/ActivityToggle";
+import { ActivityDrawer } from "../activity/ActivityDrawer";
+import { ActivityDock } from "../activity/ActivityDock";
 
 type Starter = {
   label: string;
@@ -228,6 +238,63 @@ export function ChatPane(props: ChatPaneProps) {
     openChatSessions.find((session) => session.id === resolvedSessionId) ??
     null;
 
+  // Activity Inspector: a read-only observability layer over the turn the
+  // host already ran. Nothing here participates in sending a message, and
+  // with the mode Off no surface mounts at all.
+  const activity = useActivityInspector();
+  const [activityRecords, setActivityRecords] = useState<
+    Record<string, HostTurnActivityRecord | null>
+  >({});
+
+  // Settled assistant messages whose host record we have not asked for yet.
+  // Keyed by message id, which is exactly how the host filed the record.
+  const pendingRecordIds = useMemo(() => {
+    if (activity.mode === "off" || !resolvedSessionId) return [] as string[];
+    return messages
+      .filter((m) => m.role === "assistant" && !m.streaming)
+      .map((m) => m.id)
+      .filter((id) => !(id in activityRecords));
+  }, [activity.mode, resolvedSessionId, messages, activityRecords]);
+
+  useEffect(() => {
+    if (pendingRecordIds.length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      const loaded: Record<string, HostTurnActivityRecord | null> = {};
+      for (const id of pendingRecordIds) {
+        loaded[id] = await fetchTurnActivity(resolvedSessionId, id);
+      }
+      // A null result is cached deliberately: "the host has no record for
+      // this turn" is an answer, and re-asking every render would hammer IPC.
+      if (!cancelled) setActivityRecords((prev) => ({ ...loaded, ...prev }));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pendingRecordIds, resolvedSessionId]);
+
+  const buildTurnFor = useCallback(
+    (msg: Msg) =>
+      buildActivityTurn(msg, { record: activityRecords[msg.id] ?? null }),
+    [activityRecords],
+  );
+
+  // Docked mode defaults to the latest settled assistant turn so the rail is
+  // never blank the moment a user opts in.
+  useEffect(() => {
+    if (activity.mode !== "docked" || activity.selectedTurnId) return;
+    const lastAssistant = [...messages]
+      .reverse()
+      .find((m) => m.role === "assistant" && !m.streaming);
+    if (lastAssistant) activity.selectTurn(lastAssistant.id);
+  }, [activity, messages]);
+
+  const selectedActivityTurn = useMemo(() => {
+    if (!activity.selectedTurnId) return null;
+    const msg = messages.find((m) => m.id === activity.selectedTurnId);
+    return msg ? buildTurnFor(msg) : null;
+  }, [activity.selectedTurnId, messages, buildTurnFor]);
+
   const kbdMod =
     typeof navigator !== "undefined" &&
     /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent)
@@ -256,6 +323,7 @@ export function ChatPane(props: ChatPaneProps) {
           </div>
         </div>
         <div className="chat-header__actions">
+          <ActivityToggle mode={activity.mode} onChange={activity.setMode} />
           <div className="chat-new-split" title="New chat">
             <button
               type="button"
@@ -297,6 +365,8 @@ export function ChatPane(props: ChatPaneProps) {
           ) : null}
         </div>
       </header>
+      <div className="chat-body-row">
+      <div className="chat-main-column">
       {/*
         A region, not a tabpanel: this sits *inside* the chat tabpanel and has
         no tab of its own, so `role="tabpanel"` here described a relationship
@@ -615,6 +685,13 @@ export function ChatPane(props: ChatPaneProps) {
                     onHeightChange={
                       windowed.virtualized ? windowed.onHeightChange : undefined
                     }
+                    activityMode={activity.mode}
+                    activityTurn={
+                      activity.mode !== "off" && m.role === "assistant"
+                        ? buildTurnFor(m)
+                        : null
+                    }
+                    onOpenActivityDetails={activity.openDrawerFor}
                   />
                 </div>
               ))}
@@ -683,6 +760,22 @@ export function ChatPane(props: ChatPaneProps) {
           onRetryModelTools={onRetryModelTools}
         />
       </div>
+      </div>
+      {activity.surface === "docked" ? (
+        <ActivityDock
+          turn={selectedActivityTurn}
+          width={activity.dockWidth}
+          onWidthChange={activity.setDockWidth}
+          onCollapse={() => activity.selectTurn(null)}
+        />
+      ) : null}
+      </div>
+      {activity.surface === "drawer" ? (
+        <ActivityDrawer
+          turn={selectedActivityTurn}
+          onClose={activity.closeDrawer}
+        />
+      ) : null}
     </div>
   );
 }

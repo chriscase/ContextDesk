@@ -24,7 +24,7 @@ import {
 } from "./InvestigationReport";
 import { IconChevronDown, IconChevronRight } from "../icons";
 
-export type InvestigationRailMode = "investigation" | "chat";
+export type InvestigationRailMode = "investigation" | "chat" | "activity";
 
 export type EvidenceItemView = {
   id: string;
@@ -116,11 +116,14 @@ export function InvestigationModeControl({
   mode,
   investigationCount,
   chatCount,
+  activityCount = 0,
   onChange,
 }: {
   mode: InvestigationRailMode;
   investigationCount: number;
   chatCount: number;
+  /** ContextDesk activity entries in this Explorer view. */
+  activityCount?: number;
   onChange: (mode: InvestigationRailMode) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -144,6 +147,12 @@ export function InvestigationModeControl({
       label: "Chat",
       count: chatCount,
       description: "Corpus-linked governed conversations",
+    },
+    {
+      mode: "activity",
+      label: "Activity",
+      count: activityCount,
+      description: "ContextDesk's own actions — separate from customer evidence",
     },
   ];
   const current = options.find((option) => option.mode === mode)!;

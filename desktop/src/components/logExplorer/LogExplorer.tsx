@@ -86,6 +86,19 @@ import {
 } from "../../lib/logExplorer/timeRevisionRefresh";
 import { subscribeTimeRevisionChanged } from "../../lib/logExplorer/timeRevisionBridge";
 import {
+  appendActivity,
+  createActivityLog,
+  type ActivityLogState,
+} from "../../lib/activity/activityLog";
+import {
+  ACTIVITY_LANE_GROUP,
+  determinismForOrigin,
+  type ActivityEventInput,
+  type ClientIncidentClock,
+} from "../../lib/activity/types";
+import { useActivityInspector } from "../../hooks/useActivityInspector";
+import { ActivityRail } from "./ActivityRail";
+import {
   formatPolicyBindingStatus,
   policyBindingBlocksApply,
 } from "../../lib/logExplorer/policyBinding";
@@ -741,6 +754,49 @@ function investigationBookmarkViews(
 
 export function LogExplorer({ corpusId }: Props) {
   const [summary, setSummary] = useState<LogCorpusSummaryDto | null>(null);
+  /**
+   * ContextDesk's OWN activity for this Explorer view — deliberately a
+   * separate store from every customer-evidence piece of state in this
+   * component. Nothing appended here reaches `events`, `facets`, `lanes`,
+   * the suppression policy, or the citation set; those are driven by corpus,
+   * source, filter, and suppression state and read none of this.
+   */
+  const [activityLog, setActivityLog] = useState<ActivityLogState>(() =>
+    createActivityLog(),
+  );
+  const explorerOpenedAtRef = useRef<number>(Date.now());
+  const recordActivity = useCallback((input: ActivityEventInput) => {
+    setActivityLog((current) => appendActivity(current, input));
+  }, []);
+  /** Deterministic host work this Explorer genuinely performed. */
+  const recordHostWork = useCallback(
+    (label: string, detail?: string, corpusIdForEvent?: string) => {
+      const origin = "deterministic_host" as const;
+      recordActivity({
+        correlationId: `explorer:${corpusIdForEvent ?? "view"}`,
+        operationId: `explorer:${label}`,
+        origin,
+        determinism: determinismForOrigin(origin),
+        phase: "completed",
+        status: "ok",
+        clock: { kind: "wall", atMs: Date.now() },
+        label,
+        detail,
+        scope: {
+          kind: "log_corpus",
+          id: corpusIdForEvent ?? null,
+          label: corpusIdForEvent
+            ? `Log corpus ${corpusIdForEvent}`
+            : "Log Explorer",
+        },
+        privacy: "metadata",
+        evidence: [],
+        laneGroup: ACTIVITY_LANE_GROUP,
+        corpusId: corpusIdForEvent,
+      });
+    },
+    [recordActivity],
+  );
   const [summaryLoadState, setSummaryLoadState] = useState<
     "loading" | "ready" | "error"
   >("loading");
@@ -1761,12 +1817,19 @@ export function LogExplorer({ corpusId }: Props) {
       setSummary(s);
       if (s) setCorpusTotal(s.eventCount ?? 0);
       setSummaryLoadState("ready");
+      recordHostWork(
+        "Corpus summary read",
+        s
+          ? `${(s.eventCount ?? 0).toLocaleString()} events · ${(s.templateCount ?? 0).toLocaleString()} templates`
+          : "No corpus returned",
+        corpusId,
+      );
     } catch (summaryError) {
       if (requestId !== summaryRequestRef.current) return;
       setSummaryLoadState("error");
       setSummaryLoadError(String(summaryError));
     }
-  }, [corpusId]);
+  }, [corpusId, recordHostWork]);
 
   const invalidateSuppressedEvidence = useCallback(() => {
     eventsRequestRef.current += 1;
@@ -2509,13 +2572,18 @@ export function LogExplorer({ corpusId }: Props) {
     );
     const unsubscribe = subscribeTimeRevisionChanged((changedCorpusId) => {
       if (changedCorpusId !== corpusId) return;
+      recordHostWork(
+        "Timezone revision applied — reloading this view",
+        "Re-read what the host already persisted; no re-import ran.",
+        corpusId,
+      );
       refresh.request();
     });
     return () => {
       unsubscribe();
       refresh.dispose();
     };
-  }, [corpusId]);
+  }, [corpusId, recordHostWork]);
 
   useEffect(() => {
     void loadSuppressionPolicy().catch(() => {
@@ -5633,12 +5701,27 @@ export function LogExplorer({ corpusId }: Props) {
     setInvestigationMode(mode);
     setInvestigationError(null);
   };
+  // The SAME shared preference ordinary chat uses — switching to Drawer in
+  // chat and opening the Explorer finds Drawer here too.
+  const activity = useActivityInspector();
+  /**
+   * The customer's incident clock, taken from the corpus itself. This is the
+   * only input the dual-lane view gets about customer time, and its
+   * `timeQuality` is what decides whether a shared axis is permitted at all.
+   */
+  const clientIncidentClock: ClientIncidentClock = {
+    tsMinMs: summary?.stats?.tsMin ?? null,
+    tsMaxMs: summary?.stats?.tsMax ?? null,
+    timeQuality,
+    selectedTsMs: null,
+  };
   const investigationModeControl = (
     <>
       <InvestigationModeControl
         mode={investigationMode}
         investigationCount={investigationMaterialCount}
         chatCount={chatSummary.chatCount}
+        activityCount={activityLog.entries.length}
         onChange={chooseInvestigationMode}
       />
       {investigationLoadState === "loading" ? (
@@ -8070,6 +8153,21 @@ export function LogExplorer({ corpusId }: Props) {
           developerMode={import.meta.env.MODE === "development"}
           onRailSummary={handleRailSummary}
           onToggleCollapsed={() => setChatCollapsed((collapsed) => !collapsed)}
+          onRequestClose={() => {
+            setNarrowChatOpen(false);
+            queueMicrotask(() => narrowChatToggleRef.current?.focus());
+          }}
+        />
+        <ActivityRail
+          visible={investigationMode === "activity"}
+          modeControl={investigationModeControl}
+          compactLayout={breakpoint === "narrow"}
+          desktopGridColumn={breakpoint === "narrow" ? undefined : 5}
+          clientClock={clientIncidentClock}
+          openedAtMs={explorerOpenedAtRef.current}
+          log={activityLog}
+          mode={activity.mode}
+          onModeChange={activity.setMode}
           onRequestClose={() => {
             setNarrowChatOpen(false);
             queueMicrotask(() => narrowChatToggleRef.current?.focus());

@@ -19,6 +19,8 @@ import {
 } from "../../lib/session";
 import { hostOpenExternalUrl, hostReadFile } from "../../lib/host";
 import { classifyCompletedCitation } from "../../lib/citations";
+import { ActivityCompactLine } from "../activity/ActivityCompactLine";
+import type { ActivityMode, ActivityTurn } from "../../lib/activity/types";
 
 function isHttpUrl(s: string): boolean {
   return /^https?:\/\//i.test(s.trim());
@@ -49,6 +51,14 @@ export type MessageRowProps = {
   onOpenLogCitation?: (sourceId: string, corpusId?: string) => void;
   /** Optional measure hook for virtualization. */
   onHeightChange?: (id: string, height: number) => void;
+  /**
+   * Activity Inspector (read-only observability — never changes chat
+   * behaviour). `activityTurn` is null unless the shared preference is
+   * Compact or above; the compact line reuses this row's footer conventions.
+   */
+  activityMode?: ActivityMode;
+  activityTurn?: ActivityTurn | null;
+  onOpenActivityDetails?: (turnId: string) => void;
 };
 
 function toolsSignature(tools: Msg["tools"]): string {
@@ -97,6 +107,16 @@ export function messageRowPropsEqual(
   }
   if (prev.turnStartedAt !== next.turnStartedAt) return false;
   if (prev.effectiveChatModel !== next.effectiveChatModel) return false;
+  if (prev.activityMode !== next.activityMode) return false;
+  // Compare the facts the compact line actually renders, not object identity:
+  // the adapter rebuilds the turn each render, so identity always differs.
+  const activitySig = (t?: ActivityTurn | null) =>
+    t
+      ? `${t.turnId}:${t.liveRecord}:${t.summary.modelRounds}:${t.summary.toolCalls}:${t.summary.grounded}:${t.summary.status}:${t.citations.length}`
+      : "";
+  if (activitySig(prev.activityTurn) !== activitySig(next.activityTurn)) {
+    return false;
+  }
   // setSource* / setPane are stable enough from shell; ignore identity churn
   return true;
 }
@@ -113,6 +133,9 @@ function MessageRowImpl({
   onOpenHelpCitation,
   onOpenLogCitation,
   onHeightChange,
+  activityMode = "off",
+  activityTurn = null,
+  onOpenActivityDetails,
 }: MessageRowProps) {
   const rootRef = useRef<HTMLElement | null>(null);
 
@@ -325,6 +348,15 @@ function MessageRowImpl({
           <summary>Response details</summary>
           <footer className="msg__meta">{formatMsgMetaFooter(m.meta)}</footer>
         </details>
+      ) : null}
+      {m.role === "assistant" &&
+      !m.streaming &&
+      activityMode !== "off" &&
+      activityTurn ? (
+        <ActivityCompactLine
+          turn={activityTurn}
+          onOpenDetails={() => onOpenActivityDetails?.(m.id)}
+        />
       ) : null}
     </article>
   );
