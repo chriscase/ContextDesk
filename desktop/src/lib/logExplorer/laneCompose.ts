@@ -253,10 +253,11 @@ export function saveEvidenceHighlights(
 }
 
 /**
- * Persist Evidence · N Show-in-Explorer placement and notify any live Explorer
- * for this corpus. Cold-open readers pick up via loadLanes / loadVisibleLaneCount.
+ * Persist placement only (lanes, visible count, link mode, highlights).
+ * Cross-window notify is `broadcastEvidenceLanesApply` / full
+ * `applyEvidenceLanesToExplorer` in evidenceLaneApplyBridge.
  */
-export function applyEvidenceLanesToExplorer(
+export function persistEvidenceLanesPlacement(
   detail: EvidenceLaneApplyDetail,
 ): EvidenceLaneApplyDetail {
   const lanes = detail.lanes.slice(0, 4).map((l) => ({
@@ -279,10 +280,5 @@ export function applyEvidenceLanesToExplorer(
   saveVisibleLaneCount(applied.corpusId, applied.visibleLaneCount);
   saveLinkMode(applied.corpusId, applied.linkMode);
   saveEvidenceHighlights(applied.corpusId, applied.highlightSeqs);
-  if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
-    window.dispatchEvent(
-      new CustomEvent(EVIDENCE_LANE_APPLY_EVENT, { detail: applied }),
-    );
-  }
   return applied;
 }

@@ -143,7 +143,6 @@ import {
 import {
   composeLaneSources,
   defaultLanes,
-  EVIDENCE_LANE_APPLY_EVENT,
   loadEvidenceHighlights,
   loadLanes,
   loadLinkMode,
@@ -155,9 +154,13 @@ import {
   saveVisibleLaneCount,
   selectAllLaneSources as selectAllSourcesForLane,
   toggleLaneSource,
-  type EvidenceLaneApplyDetail,
   type TimeLinkMode,
 } from "../../lib/logExplorer/laneCompose";
+import {
+  adoptEvidencePlacementForExplorer,
+  loadEvidencePlacementFromStorage,
+  subscribeEvidenceLanesApply,
+} from "../../lib/logExplorer/evidenceLaneApplyBridge";
 import { buildAlignedLaneRows } from "../../lib/logExplorer/alignment";
 import { createLinkedScrollCoordinator } from "../../lib/logExplorer/linkedScrollCoordinator";
 import { HelpTip } from "../HelpTip";
@@ -5141,37 +5144,61 @@ export function LogExplorer({ corpusId }: Props) {
   };
 
   /**
-   * Live adopt Evidence · N Show-in-Explorer placement (same corpus).
-   * Cold open already reads loadLanes + loadVisibleLaneCount.
+   * Live adopt Evidence · N placement from main chat or linked chat.
+   * Uses CustomEvent + Tauri cross-window bus (log-explorer-* webviews).
+   * Focus/visibility re-reads durable storage when the Explorer is focused
+   * after open_log_explorer_target from another window.
    */
   useEffect(() => {
-    const onApply = (event: Event) => {
-      const detail = (event as CustomEvent<EvidenceLaneApplyDetail>).detail;
-      if (!detail || detail.corpusId !== corpusId) return;
-      const nextLanes = detail.lanes.slice(0, 4).map((lane) => ({
-        ...lane,
-        sources: [...lane.sources],
-      }));
-      const visible = Math.max(
-        1,
-        Math.min(4, Math.floor(detail.visibleLaneCount)),
+    const adopt = (detail: {
+      corpusId: string;
+      lanes: { id: string; label: string; sources: string[] }[];
+      visibleLaneCount: number;
+      linkMode: TimeLinkMode;
+      highlightSeqs: number[];
+    }) => {
+      const next = adoptEvidencePlacementForExplorer(
+        corpusId,
+        maxLaneCount,
+        detail,
       );
-      setLanes(nextLanes.length > 0 ? nextLanes : defaultLanes(visible));
-      setPreferredLaneCount(visible);
-      setLaneCount(Math.min(visible, maxLaneCount));
-      setLinkMode(detail.linkMode);
-      if (detail.highlightSeqs.length > 0) {
-        setHighlight(new Set(detail.highlightSeqs));
+      if (!next) return;
+      setLanes(next.lanes);
+      setPreferredLaneCount(next.preferredLaneCount);
+      setLaneCount(next.laneCount);
+      setLinkMode(next.linkMode);
+      if (next.highlightSeqs.length > 0) {
+        setHighlight(new Set(next.highlightSeqs));
       }
       setStatus(
-        `Evidence placement · ${visible} customer-evidence lane${
-          visible === 1 ? "" : "s"
+        `Evidence placement · ${next.preferredLaneCount} customer-evidence lane${
+          next.preferredLaneCount === 1 ? "" : "s"
         }`,
       );
     };
-    window.addEventListener(EVIDENCE_LANE_APPLY_EVENT, onApply);
-    return () => window.removeEventListener(EVIDENCE_LANE_APPLY_EVENT, onApply);
-  }, [corpusId, maxLaneCount, setStatus]);
+
+    const unsubscribe = subscribeEvidenceLanesApply(adopt);
+
+    const rehydrateFromStorage = () => {
+      const stored = loadEvidencePlacementFromStorage(corpusId);
+      if (!stored) return;
+      adopt(stored);
+    };
+    // Focus path: main window staged lanes in localStorage then focused this
+    // Explorer via open_log_explorer_target — re-read so place succeeds even if
+    // the Tauri emit was missed.
+    window.addEventListener("focus", rehydrateFromStorage);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") rehydrateFromStorage();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
+    return () => {
+      unsubscribe();
+      window.removeEventListener("focus", rehydrateFromStorage);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [corpusId, maxLaneCount]);
 
   const updateLaneSources = (laneId: string, source: string) => {
     setLanes((prev) => {

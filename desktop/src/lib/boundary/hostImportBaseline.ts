@@ -93,4 +93,10 @@ export const TAURI_IMPORT_BASELINE: readonly string[] = [
   // uiScaleBridge above — the Tauri event bus is the only channel that
   // reaches a separate webview, and the engine boundary doesn't cover it.
   "src/lib/logExplorer/timeRevisionBridge.ts",
+  // Review decision (evidence-lane-bridge, 2026-08-04): main-chat / linked-chat
+  // Evidence · N "Show in Explorer" must place 1–4 lanes into an already-open
+  // log-explorer-* Tauri webview. CustomEvent is same-webview only; same bus
+  // pattern as timeRevisionBridge/themeBridge. Persist remains localStorage;
+  // emit/listen is signal only (no corpus reimport/mutate).
+  "src/lib/logExplorer/evidenceLaneApplyBridge.ts",
 ];

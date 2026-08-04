@@ -41,10 +41,8 @@ import {
   type TimeQualityHint,
 } from "../lib/evidenceLaneBridge";
 import type { LaneConfig } from "../lib/logExplorer/laneCompose";
-import {
-  applyEvidenceLanesToExplorer,
-  loadLanes,
-} from "../lib/logExplorer/laneCompose";
+import { loadLanes } from "../lib/logExplorer/laneCompose";
+import { applyEvidenceLanesToExplorer } from "../lib/logExplorer/evidenceLaneApplyBridge";
 
 export type HostEventResolution = {
   corpusId: string;

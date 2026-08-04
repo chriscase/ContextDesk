@@ -1,6 +1,5 @@
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import {
-  applyEvidenceLanesToExplorer,
   composeLaneSources,
   defaultLanes,
   EVIDENCE_LANE_APPLY_EVENT,
@@ -14,6 +13,7 @@ import {
   toggleLaneSource,
   type LaneConfig,
 } from "./laneCompose";
+import { applyEvidenceLanesToExplorer } from "./evidenceLaneApplyBridge";
 
 const store = new Map<string, string>();
 
