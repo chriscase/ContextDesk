@@ -78,6 +78,10 @@ import { broadcastTimeRevisionChanged } from "../../lib/logExplorer/timeRevision
 import { LogDiagnosticDialog } from "./LogDiagnosticDialog";
 import { LogImportConfidence } from "./LogImportConfidence";
 import { LogTimezoneStatus } from "./LogTimezoneStatus";
+import { ImportActivitySummary } from "../activity/ImportActivitySummary";
+import { ActivityToggle } from "../activity/ActivityToggle";
+import { useActivityInspector } from "../../hooks/useActivityInspector";
+import type { ImportRunInput } from "../../lib/activity/types";
 
 function hostProgressToWizard(p: ProcessProgressDto): WizardProgressDto {
   return {
@@ -158,6 +162,16 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const [reanalyzing, setReanalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  /**
+   * The last import attempt, as ContextDesk activity. Separate from
+   * `importConfidence` (which is customer-evidence metadata about the
+   * corpus): this describes what the APP did, and feeds the activity ledger.
+   */
+  const [lastImportRun, setLastImportRun] = useState<ImportRunInput | null>(
+    null,
+  );
+  // The same shared preference chat and the Explorer use.
+  const activity = useActivityInspector();
   const [importConfidence, setImportConfidence] = useState<{
     corpusId: string;
     report: LogImportConfidenceDto;
@@ -715,11 +729,21 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     setProgress(null);
     setFailedIngestDiagnostic(null);
     try {
+      const startedAtMs = Date.now();
       const r = await hostIngestLogPath(path, "incident");
       setNote(statsBlurb(r));
       setImportConfidence(
         r.confidence ? { corpusId: r.corpusId, report: r.confidence } : null,
       );
+      // Real measured run: both timestamps are this machine's clock, which is
+      // what lets these entries carry a genuine wall clock.
+      setLastImportRun({
+        startedAtMs,
+        endedAtMs: Date.now(),
+        outcome: "completed",
+        sourceKind: "directory",
+        report: r,
+      });
       await refresh();
       await selectCorpus(r.corpusId);
     } catch (e) {
@@ -1445,6 +1469,30 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
         </section>
       ) : null}
       {note ? <p className="muted log-pane__note">{note}</p> : null}
+      {/* ContextDesk's own account of the import, beside (never mixed into)
+          the corpus metadata above. Quiet by default: one line plus an
+          opt-in ledger, and nothing at all when the shared preference is
+          Off — which changes the display only, not the import. */}
+      {lastImportRun ? (
+        <div
+          className="log-pane__activity"
+          data-testid="log-pane-activity"
+        >
+          <div className="log-pane__activity-head">
+            <span className="log-pane__activity-title">
+              ContextDesk activity
+            </span>
+            <ActivityToggle
+              mode={activity.mode}
+              onChange={activity.setMode}
+              label="Show"
+            />
+          </div>
+          {activity.mode === "off" ? null : (
+            <ImportActivitySummary run={lastImportRun} />
+          )}
+        </div>
+      ) : null}
       {importConfidence?.corpusId === activeId ? (
         <LogImportConfidence
           confidence={importConfidence.report}

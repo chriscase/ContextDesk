@@ -672,3 +672,30 @@
     width: 100vw;
   }
 }
+
+/* --- Logs pane: the app's account of an import ---------------------------- */
+
+.log-pane__activity {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.25));
+  border-radius: 0.45rem;
+  max-width: 78rem;
+}
+
+.log-pane__activity-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.log-pane__activity-title {
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
