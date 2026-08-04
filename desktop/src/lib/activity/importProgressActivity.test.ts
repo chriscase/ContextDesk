@@ -208,7 +208,7 @@ describe("live import Activity projection", () => {
       progress("stream", {
         correlation_id: "import:private",
         message:
-          "Reading /Users/person/Downloads/company/EDM_Server-secret.log",
+          "Reading /private/synthetic/XYZ_Server-secret.log",
         lines_processed: 120,
         files_processed: 2,
         templates: 9,
@@ -220,8 +220,8 @@ describe("live import Activity projection", () => {
       settleImportActivityAttempt(attempt, completedRun()).events,
     );
 
-    expect(serialized).not.toContain("/Users/person");
-    expect(serialized).not.toContain("EDM_Server");
+    expect(serialized).not.toContain("/private/synthetic");
+    expect(serialized).not.toContain("XYZ_Server");
     expect(serialized).not.toContain("private-name.xml");
     expect(serialized).toContain("120 events");
     expect(serialized).toContain("2 files");

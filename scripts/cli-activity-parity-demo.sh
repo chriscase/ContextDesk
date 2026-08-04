@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/Users/chriscase/Documents/GitHub/ContextDesk/target}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$(git rev-parse --show-toplevel)/target}"
 export PATH="${HOME}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:${PATH}"
 export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
 cd "$ROOT"
