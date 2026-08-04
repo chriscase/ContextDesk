@@ -412,6 +412,18 @@ export async function agentTurn(
       // transcript reducer. They have a dedicated process-local bridge.
       return;
     }
+    if (ev.kind === "activity_settled") {
+      // The host just published this turn's activity record (ordinary
+      // and/or developer detail) into its process-lifetime store. Tell
+      // ChatPane so it replaces a cached placeholder ("not recorded by
+      // host" / stale-pending) immediately, on the real emit path — not
+      // only after a late permission decision (completePermission below).
+      const eventSessionId = String(ev.payload.session_id ?? "");
+      if (eventSessionId === sessionId) {
+        publishTurnActivityUpdate({ sessionId: eventSessionId });
+      }
+      return;
+    }
     collected.push(ev);
     onEvent?.(ev);
   });

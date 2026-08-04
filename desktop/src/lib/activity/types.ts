@@ -411,7 +411,12 @@ export type DeveloperDetailEvent = {
   round?: number | null;
   tool_name?: string | null;
   offered_tools: string[];
+  /** How many offered tool names the host sink dropped beyond its cap. */
+  offered_tools_omitted?: number;
   request: DeveloperPayload[];
+  /** How many request/argument payloads the host sink dropped beyond its
+   * cap (by count or by this event's own byte ceiling). */
+  request_omitted?: number;
   response?: DeveloperPayload | null;
   status: string;
   sensitive: true;

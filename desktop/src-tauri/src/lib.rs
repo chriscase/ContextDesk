@@ -4841,7 +4841,7 @@ async fn agent_turn(
         .await
         .map_err(|e| e.to_string())
     };
-    record_turn_activity(
+    let activity_settled = record_turn_activity(
         &state,
         &req,
         activity_settings,
@@ -4850,6 +4850,23 @@ async fn agent_turn(
         &result,
         turn_started_at,
     );
+    // Tell the frontend the settled record is now readable via
+    // `get_turn_activity` / `get_developer_turn_activity`, on the real
+    // production emit path — not the completePermission-only path this used
+    // to rely on. `ChatPane` listens for this exact event to replace its
+    // cached placeholder ("not recorded by host" / stale-pending) without a
+    // remount (#developer-activity settle).
+    if activity_settled {
+        if let Some(message_id) = req.client_assistant_message_id.as_deref() {
+            let _ = on_event.send(EventDto {
+                kind: "activity_settled".to_string(),
+                payload: serde_json::json!({
+                    "session_id": req.session_id,
+                    "message_id": message_id,
+                }),
+            });
+        }
+    }
     let linked_terminal_persistence = match (&linked_citation_corpus, &result) {
         (Some(_), Ok(events)) => {
             let _mutation = state
@@ -5738,6 +5755,10 @@ fn forget_session_activity(state: State<'_, AppState>, session_id: String) -> Re
 /// Keyed by `(session_id, assistant message id)` so "show me what produced
 /// THIS answer" is answerable later, which is when a user actually opens
 /// the panel.
+/// Returns `true` when this call actually published a record (ordinary
+/// activity, developer detail, or both) into the process-lifetime store —
+/// the caller uses this to decide whether the frontend needs telling that a
+/// new record is now readable (#developer-activity settle event).
 fn record_turn_activity(
     state: &AppState,
     req: &AgentTurnReq,
@@ -5746,12 +5767,12 @@ fn record_turn_activity(
     linked_corpus_id: Option<&str>,
     result: &Result<Vec<cd_core::events::StreamEvent>, String>,
     turn_started_at: tokio::time::Instant,
-) {
+) -> bool {
     use cd_core::activity::{ActivityRecorder, ActivityStatus, DataScope, TurnActivityRecord};
     let Some(message_id) = req.client_assistant_message_id.as_deref() else {
         // No durable message to hang the record off; storing it under a
         // synthesized key would make it unreachable anyway.
-        return;
+        return false;
     };
     let record = settings.enabled.then(|| {
         let scope = match linked_corpus_id {
@@ -5782,8 +5803,18 @@ fn record_turn_activity(
     } else {
         Vec::new()
     };
-    if record.is_none() && developer_events.is_empty() {
-        return;
+    // Events the recorder itself dropped (its own `MAX_DEVELOPER_EVENTS` cap
+    // was already full) — distinct from anything the store truncates below,
+    // and folded into the store's own omitted-count marker so a reader sees
+    // one honest total instead of a store-only count that undercounts.
+    let developer_dropped = if req.developer_activity_detail {
+        sink.map(cd_core::turn_trace::RecordingTurnTrace::developer_dropped)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    if record.is_none() && developer_events.is_empty() && developer_dropped == 0 {
+        return false;
     }
 
     // One lifecycle section covers "session still exists" and the bounded
@@ -5791,30 +5822,39 @@ fn record_turn_activity(
     // order, so a turn that finishes after its chat was retired cannot
     // recreate the explanation the user just deleted.
     let Ok(_session_lifecycle) = state.chat_session_mutation.lock() else {
-        return;
+        return false;
     };
     let Ok(session) = session_store(state).and_then(|store| {
         store
             .load(&req.session_id)
             .map_err(|error| error.to_string())
     }) else {
-        return;
+        return false;
     };
     if session.trashed {
-        return;
+        return false;
     }
+    let mut published = false;
     if let Some(record) = record {
         let Ok(mut activity) = state.activity.lock() else {
-            return;
+            return published;
         };
         activity.insert(&req.session_id, message_id, record);
+        published = true;
     }
-    if !developer_events.is_empty() {
+    if !developer_events.is_empty() || developer_dropped > 0 {
         let Ok(mut developer) = state.developer_activity.lock() else {
-            return;
+            return published;
         };
-        developer.insert(&req.session_id, message_id, developer_events);
+        developer.insert(
+            &req.session_id,
+            message_id,
+            developer_events,
+            developer_dropped,
+        );
+        published = true;
     }
+    published
 }
 
 /// Active provider for Settings hydrate (no secrets).

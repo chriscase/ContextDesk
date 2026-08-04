@@ -258,7 +258,18 @@ export function ActivityInspectorBody({
                           {event.offered_tools.length ? (
                             <div>
                               <dt>Tools offered</dt>
-                              <dd>{event.offered_tools.join(", ")}</dd>
+                              <dd>
+                                {event.offered_tools.join(", ")}
+                                {event.offered_tools_omitted ? (
+                                  <span
+                                    className="activity-developer-payload__omitted"
+                                    data-testid="offered-tools-omitted"
+                                  >
+                                    {" "}
+                                    (+{event.offered_tools_omitted} omitted)
+                                  </span>
+                                ) : null}
+                              </dd>
                             </div>
                           ) : null}
                         </dl>
@@ -267,17 +278,30 @@ export function ActivityInspectorBody({
                             <div>
                               Request {index + 1} · {payload.retained_bytes.toLocaleString()} of{" "}
                               {payload.original_bytes.toLocaleString()} bytes
-                              {payload.truncated ? " · truncated prefix" : " · complete"}
+                              {payload.truncated
+                                ? ` · truncated prefix, ${(payload.original_bytes - payload.retained_bytes).toLocaleString()} bytes dropped`
+                                : " · complete"}
                             </div>
                             <pre>{payload.content}</pre>
                           </div>
                         ))}
+                        {event.request_omitted ? (
+                          <p
+                            className="activity-developer-payload__omitted"
+                            data-testid="request-omitted"
+                            role="status"
+                          >
+                            {event.request_omitted} tool arg{event.request_omitted === 1 ? "" : "s"} omitted
+                          </p>
+                        ) : null}
                         {event.response ? (
                           <div className="activity-developer-payload">
                             <div>
                               Response · {event.response.retained_bytes.toLocaleString()} of{" "}
                               {event.response.original_bytes.toLocaleString()} bytes
-                              {event.response.truncated ? " · truncated prefix" : " · complete"}
+                              {event.response.truncated
+                                ? ` · truncated prefix, ${(event.response.original_bytes - event.response.retained_bytes).toLocaleString()} bytes dropped`
+                                : " · complete"}
                             </div>
                             <pre>{event.response.content}</pre>
                           </div>

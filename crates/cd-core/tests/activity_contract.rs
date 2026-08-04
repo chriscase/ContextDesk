@@ -1322,7 +1322,9 @@ fn host_trash_and_delete_commands_call_retire_chat_session_activity() {
         "session existence and activity publication must share one ordered lifecycle"
     );
     assert!(
-        body.contains("developer.insert(&req.session_id, message_id, developer_events)"),
+        body.contains(
+            "developer.insert(\n            &req.session_id,\n            message_id,\n            developer_events,\n            developer_dropped,\n        )"
+        ) || body.contains("developer.insert(&req.session_id, message_id, developer_events, developer_dropped)"),
         "developer detail must publish only inside the same session lifecycle boundary"
     );
     let retire_start = src
