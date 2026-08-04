@@ -231,6 +231,8 @@ export type ContextMetadata = {
   messagesCapped: boolean;
   toolNames: string[];
   roles: RoleTally[];
+  /** Duration of the provider call itself, not turn-relative placement. */
+  providerLatencyMs: number | null;
 };
 
 type ActivityEventBase = {
@@ -403,13 +405,14 @@ export type HostContextMetadata = {
   messages_capped: boolean;
   tool_names: string[];
   roles: { role: string; messages: number; chars: number }[];
+  provider_latency_ms?: number | null;
 };
 
 export type HostActivityEvent = {
   turn_id: string;
   operation_id: string;
   seq: number;
-  elapsed_ms: number;
+  elapsed_ms?: number | null;
   phase: ActivityPhase;
   status: ActivityStatus;
   origin: ActivityOrigin;

@@ -69,8 +69,54 @@ const TURN_1_RECORD: HostTurnActivityRecord = {
     },
     {
       turn_id: "s1::m-assistant-1",
-      operation_id: "provider-round-1",
+      operation_id: "retrieval-trail-1",
       seq: 1,
+      elapsed_ms: 1_510,
+      phase: "completed",
+      status: "ok",
+      origin: "repeatable_heuristic",
+      determinism: "repeatable",
+      label: "Retrieval trail (1 step)",
+      trigger: { trigger: "host_policy" },
+      scope: { kind: "log_corpus", id: "corpus-1", label: "Log corpus corpus-1" },
+      privacy: "metadata",
+    },
+    ...[
+      ["tool-1", "search_kb", 1_700],
+      ["tool-2", "read_file_slice", 1_900],
+    ].map(([id, name, elapsed], index) => ({
+      turn_id: "s1::m-assistant-1",
+      operation_id: `tool-${id}`,
+      seq: index + 2,
+      elapsed_ms: elapsed as number,
+      phase: "completed" as const,
+      status: "ok" as const,
+      origin: "deterministic_host" as const,
+      determinism: "deterministic" as const,
+      label: `Tool ${name}`,
+      trigger: { trigger: "model_request" as const, round: 0 },
+      scope: { kind: "log_corpus" as const, id: "corpus-1", label: "Log corpus corpus-1" },
+      privacy: "metadata" as const,
+    })),
+    {
+      turn_id: "s1::m-assistant-1",
+      operation_id: "citation-evt-9001",
+      seq: 4,
+      elapsed_ms: 2_000,
+      phase: "completed",
+      status: "ok",
+      origin: "deterministic_host",
+      determinism: "deterministic",
+      label: "Citation recorded",
+      trigger: { trigger: "host_policy" },
+      scope: { kind: "log_corpus", id: "corpus-1", label: "Log corpus corpus-1" },
+      evidence: [{ kind: "citation", id: "evt-9001" }],
+      privacy: "metadata",
+    },
+    {
+      turn_id: "s1::m-assistant-1",
+      operation_id: "provider-round-1",
+      seq: 5,
       elapsed_ms: 3_100,
       phase: "completed",
       status: "ok",
@@ -109,12 +155,11 @@ describe("a multi-turn chat with tool activity", () => {
     expect(turn.summary.contextUsedChars).toBe(17_600);
     expect(turn.requestRounds.map((r) => r.index)).toEqual([1, 2]);
     expect(turn.requestRounds[0]!.toolsOffered).toContain("cluster_problems");
-    // Observed results attach to the final round only.
-    expect(turn.requestRounds[0]!.toolsRun).toEqual([]);
-    expect(turn.requestRounds[1]!.toolsRun).toEqual([
+    expect(turn.requestRounds[0]!.toolsRun).toEqual([
       "search_kb",
       "read_file_slice",
     ]);
+    expect(turn.requestRounds[1]!.toolsRun).toEqual([]);
   });
 
   it("renders host rounds and observed tool steps in one honest timeline", () => {
@@ -129,9 +174,9 @@ describe("a multi-turn chat with tool activity", () => {
     expect(round.getAttribute("data-clock")).toBe("elapsed");
     expect(within(round).getByText("+1.5s")).toBeTruthy();
 
-    // ...while renderer-observed steps are ordinals, with no invented timing.
+    // Host-recorded tools share the same honest turn-relative clock.
     const tool = rows.find((r) => r.textContent?.includes("search_kb"))!;
-    expect(tool.getAttribute("data-clock")).toBe("sequence");
+    expect(tool.getAttribute("data-clock")).toBe("elapsed");
     expect(tool.textContent).not.toMatch(/\b(19|20)\d{2}\b/);
   });
 
@@ -139,10 +184,9 @@ describe("a multi-turn chat with tool activity", () => {
     const turn = buildActivityTurn(TURN_1_MSG, { record: TURN_1_RECORD });
     render(<ActivityInspectorBody turn={turn} />);
     const summary = screen.getByTestId("activity-panel-summary");
-    // 1 search heuristic + 2 tools + 1 citation = 4 deterministic-side steps;
-    // the 2 provider rounds are the model side.
-    expect(summary.textContent).toMatch(/4 steps were fixed app work/i);
-    expect(summary.textContent).toMatch(/2 involved a model or an outside system/i);
+    expect(summary.textContent).toMatch(/3 deterministic/i);
+    expect(summary.textContent).toMatch(/1 repeatable heuristic/i);
+    expect(summary.textContent).toMatch(/2 model\/external/i);
     expect(summary.textContent).toMatch(/cites sources you can open/i);
   });
 
@@ -199,7 +243,7 @@ describe("a multi-turn chat with tool activity", () => {
     expect(round.corpusId).toBe("corpus-1");
     // The citation is grounding evidence in the transcript's own sense; the
     // activity event only points at it by id, and carries no event payload.
-    const citation = turn.events.find((e) => e.origin === "client_evidence")!;
+    const citation = turn.events.find((e) => e.operationId === "citation-evt-9001")!;
     expect(citation.evidence).toEqual([{ kind: "citation", id: "evt-9001" }]);
     expect(citation).not.toHaveProperty("message");
   });

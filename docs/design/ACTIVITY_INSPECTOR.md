@@ -58,8 +58,10 @@ is a test that constructs exactly that lie and asserts it is corrected.
 `cd_workflow::turn::run_{ordinary,linked}_turn` already accepted
 `trace_sink: Option<Arc<dyn TurnTraceSink>>`; both desktop call sites passed
 `None`. That parameter *was* the seam. The desktop now passes a
-`RecordingTurnTrace` when capture is enabled, and projects it after the turn
-via `ActivityRecorder::record_provider_rounds`.
+`RecordingTurnTrace` when capture is enabled. The same recorder timestamps
+provider completions and metadata-only host stream observations against one
+turn origin, then projects the ordered timeline after the turn via
+`ActivityRecorder::record_timeline`.
 
 No second tracing path exists. CLI `--trace`/`--dry-run` and the inspector
 consume the same `TracedCall`s.
@@ -98,8 +100,9 @@ older config files load unchanged:
 | `retain_context_bodies` | **`false`** | retain prompt bodies |
 
 At the default `Summary` level a record holds counts, per-role tallies,
-timings, tool **names**, identifiers, and status — and **no prompt bodies at
-all**, not truncated ones. `Full` is the only level that retains bodies, and
+turn-relative placement, provider-call latency, tool **names**, identifiers,
+and status — and **no prompt bodies, tool arguments/results, permission
+targets/previews, or search text at all**. `Full` is the only level that retains bodies, and
 even then they are the already-redacted, already-capped ones the trace
 produced. `ActivityRecorder::push` strips bodies below `Full`, so a caller
 cannot smuggle them in by hand-building an event.
@@ -111,7 +114,8 @@ whole turn.
 ## Storage today
 
 `ActivityStore` on `AppState`: bounded (200 records), evicting oldest-first,
-**memory-only**, keyed `(session_id, assistant message id)`. Re-recording
+keyed `(session_id, assistant message id)` and hydrated from the Summary-only
+sidecar described below. Re-recording
 one message replaces in place rather than consuming a second slot, so a
 retried turn cannot push an unrelated record out.
 
@@ -137,9 +141,19 @@ tip (contract is shared; no `cd-cli` binary coverage here).
 
 Captured: one event per provider round, carrying round index, message count,
 total redacted context characters, whether the message list was capped, tool
-names offered, per-role tallies, elapsed time, finish reason or redacted
+names offered, per-role tallies, provider latency, turn-relative completion
+time, finish reason or redacted
 error, and the turn's terminal status via
 `activity::status_for_turn_events`.
+
+The same ordered capture includes tool lifecycle, count-only retrieval trails,
+citation identities, and pending permission gates. `ToolHost` supplies tool
+authority from its live registered catalog: local reads are host work,
+connector reads are external, and approved mutations are governed writes.
+The renderer does not guess from tool-name patterns. A permission request is
+pending host policy, never a completed human decision; the later UI allow or
+deny appends a `user_decision` event and the metadata-only governed tool
+outcome to the original record and durable sidecar.
 
 That classifier reads the whole event stream, not the terminal reason alone.
 Two of this product's withholding conditions — `linked_no_tool` and
@@ -150,11 +164,9 @@ would file a knowingly ungrounded answer as a clean success.
 split along exactly that line, and `budget_rounds` (the final answer failed)
 is kept apart from `budget_rounds_answer` (an answer was produced).
 
-Not captured yet, and each needs its own event source rather than a contract
-change: individual tool executions, permission decisions, retrieval and
-ranking steps, and connector calls. The `ActivityOrigin` variants for all of
-these already exist and are tested; what is missing is a host-side call to
-`ActivityRecorder::push` at each of those points.
+Still not captured: provider token billing when a gateway does not report it,
+raw tool arguments/results by design, fine-grained ranking candidates, and
+connector-internal retries that have no host event source.
 
 
 ## The desktop surface
@@ -186,9 +198,14 @@ evidence — none of those surfaces read the type.
 An event's position is an `ActivityClock` union, not a nullable timestamp:
 
 - `wall` — real calendar time on this machine (import runs, Explorer work);
-- `elapsed` — milliseconds since turn start, which is exactly what the
-  contract carries for provider rounds;
+- `elapsed` — milliseconds since turn start, captured for provider and host
+  observations on one shared clock;
 - `sequence` — order only, for steps the renderer observed without timing.
+
+Provider call duration is a separate `provider_latency_ms` field. It is never
+relabelled as turn-relative elapsed. Events appended after an older persisted
+turn (for example a permission response) use sequence placement when their
+original turn-relative time is unavailable; they never use a fabricated zero.
 
 `lib/activity/dualLaneAxis.ts` is the only place that decides whether the two
 groups may share a visual axis. It requires wall-clock evidence on **both**
@@ -209,11 +226,9 @@ them and no activity module carries a live-vs-fixture provenance field.
 
 ### Residual on the desktop side
 
-Per-turn chat activity currently shows provider rounds from the host record
-plus what the renderer itself observed (tool calls, citations, search trail).
-Tool executions, permission decisions, retrieval/ranking steps, and connector
-calls still have no host-side `ActivityRecorder::push`, so the inspector
-reports them as observed-but-untimed rather than as contract events. The
-Explorer rail records the deterministic work it genuinely performs (corpus
+Per-turn chat activity uses the host record as authoritative. Renderer-folded
+tool/citation/search rows are fallback-only when no host record exists, so a
+live record cannot display every operation twice. The Explorer rail records
+the deterministic work it genuinely performs (corpus
 summary reads, cross-surface timezone refreshes); linked-chat turns inside
 the Explorer are not yet folded into that rail.

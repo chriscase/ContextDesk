@@ -116,6 +116,14 @@
   border-color: var(--border-subtle, rgba(128, 128, 128, 0.3));
 }
 
+.activity-badge[data-work="repeatable"] {
+  border-style: dashed;
+}
+
+.activity-badge[data-work="human"] {
+  border-color: var(--accent-border, rgba(115, 145, 230, 0.55));
+}
+
 /* --- Compact line ------------------------------------------------------- */
 
 .activity-compact-line {

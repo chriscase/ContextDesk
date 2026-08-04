@@ -45,6 +45,7 @@ function toContext(context: HostContextMetadata): ContextMetadata {
       messages: r.messages,
       chars: r.chars,
     })),
+    providerLatencyMs: context.provider_latency_ms ?? null,
   };
 }
 
@@ -87,8 +88,11 @@ export function activityEventFromHost(
     operationId: event.operation_id,
     phase: event.phase,
     status: event.status,
-    // The contract measures elapsed-since-turn-start, not calendar time.
-    clock: { kind: "elapsed" as const, elapsedMs: event.elapsed_ms },
+    // Unknown timing stays unknown. `seq` still preserves actual causality.
+    clock:
+      event.elapsed_ms == null
+        ? ({ kind: "sequence" as const, seq: event.seq })
+        : ({ kind: "elapsed" as const, elapsedMs: event.elapsed_ms }),
     label: event.label,
     detail: event.detail ?? undefined,
     scope: toScope(event.scope),
@@ -121,20 +125,35 @@ export function activityEventsFromRecord(
 export function requestRoundsFromRecord(
   record: HostTurnActivityRecord,
 ): ActivityRequestRound[] {
-  return record.events
+  const events = [...record.events].sort((a, b) => a.seq - b.seq);
+  return events
     .filter((event) => event.origin === "probabilistic_model" && event.context)
-    .sort((a, b) => a.seq - b.seq)
     .map((event) => {
       const context = event.context!;
+      const nextRoundSeq = events.find(
+        (candidate) =>
+          candidate.seq > event.seq &&
+          candidate.origin === "probabilistic_model" &&
+          candidate.context != null,
+      )?.seq;
+      const toolsRun = events
+        .filter(
+          (candidate) =>
+            candidate.seq > event.seq &&
+            (nextRoundSeq == null || candidate.seq < nextRoundSeq) &&
+            candidate.operation_id.startsWith("tool-") &&
+            candidate.phase === "completed" &&
+            candidate.status !== "pending",
+        )
+        .map((candidate) => candidate.label.replace(/^Tool\s+/, ""));
       return {
         id: `${record.turn_id}:round-${context.round}`,
         index: context.round + 1,
         toolsOffered: [...context.tool_names],
-        // The contract records what was OFFERED per round; which of them ran
-        // is observed by the renderer from the tool results it saw, and is
-        // merged in by the adapter. Claiming them here would be a guess.
-        toolsRun: [],
-        elapsedMs: event.elapsed_ms,
+        // Shared host sequencing makes attribution causal instead of a
+        // renderer guess: these completed before the next model round.
+        toolsRun,
+        elapsedMs: context.provider_latency_ms ?? null,
         status: event.status,
         contextUsedChars: context.context_used_chars,
         messagesCapped: context.messages_capped,

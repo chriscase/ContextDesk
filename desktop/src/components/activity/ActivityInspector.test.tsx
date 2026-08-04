@@ -220,12 +220,9 @@ describe("progressive disclosure: plain language first, detail on request", () =
       />,
     );
     const summary = screen.getByTestId("activity-panel-summary");
-    // A heuristic counts on the deterministic side of the coarse split but is
-    // still never described as a proof — see its badge below.
-    expect(summary.textContent).toMatch(/2 steps were fixed app work/i);
-    expect(summary.textContent).toMatch(
-      /1 involved a model or an outside system/i,
-    );
+    expect(summary.textContent).toMatch(/1 deterministic/i);
+    expect(summary.textContent).toMatch(/1 repeatable heuristic/i);
+    expect(summary.textContent).toMatch(/1 model\/external/i);
   });
 });
 

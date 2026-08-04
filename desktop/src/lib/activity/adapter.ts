@@ -20,7 +20,6 @@ import {
   determinismForOrigin,
   type ActivityCitation,
   type ActivityEvent,
-  type ActivityRequestRound,
   type ActivityTurn,
   type HostTurnActivityRecord,
 } from "./types";
@@ -36,9 +35,6 @@ export type BuildActivityTurnOptions = {
   /** Wall-clock turn duration if the caller tracked it; null when unknown. */
   elapsedMs?: number | null;
 };
-
-/** Tool names that denote a durable or remote write requiring a grant. */
-const GOVERNED_WRITE_TOOL = /save_|write|update|create|retract|supersede|publish/;
 
 function shortLabel(text: string, max = 64): string {
   const t = text.replace(/\s+/g, " ").trim();
@@ -88,8 +84,8 @@ function observedEvents(msg: ChatMsg): ActivityEvent[] {
         ...common,
         id: `perm:${msg.id}:${t.id}`,
         operationId: `tool:${t.id}`,
-        origin: "user_decision",
-        determinism: determinismForOrigin("user_decision"),
+        origin: "client_evidence",
+        determinism: determinismForOrigin("client_evidence"),
         // The prompt was raised; whether it was answered is not knowable
         // from this row, so the status stays pending rather than claiming ok.
         status: "pending",
@@ -101,14 +97,15 @@ function observedEvents(msg: ChatMsg): ActivityEvent[] {
       });
       continue;
     }
-    const isWrite = GOVERNED_WRITE_TOOL.test(t.name);
-    const origin = isWrite ? ("governed_write" as const) : ("deterministic_host" as const);
     events.push({
       ...common,
       id: `tool:${msg.id}:${t.id}`,
       operationId: `tool:${t.id}`,
-      origin,
-      determinism: determinismForOrigin(origin),
+      // Without a host record the only fact this layer knows is that the
+      // renderer observed a tool row. It cannot infer connector/write
+      // authority from a name pattern.
+      origin: "client_evidence",
+      determinism: determinismForOrigin("client_evidence"),
       status: t.ok === false ? "failed" : "ok",
       clock: next(),
       label: `Tool · ${t.name}`,
@@ -142,30 +139,13 @@ function toolsRun(msg: ChatMsg): string[] {
     .map((t) => t.name);
 }
 
-/**
- * Merge observed tool names into the host's per-round offered lists.
- *
- * The host records which tools were OFFERED each round; the renderer knows
- * which ones produced results. Neither alone is the whole picture, and the
- * final round is the only one we can attribute observed results to without
- * guessing, so earlier rounds keep an empty `toolsRun`.
- */
-function mergeRounds(
-  rounds: ActivityRequestRound[],
-  ran: string[],
-): ActivityRequestRound[] {
-  if (rounds.length === 0 || ran.length === 0) return rounds;
-  return rounds.map((round, i) =>
-    i === rounds.length - 1 ? { ...round, toolsRun: [...ran] } : round,
-  );
-}
-
+/** Build one renderer-owned view from an authoritative host record when one exists. */
 export function buildActivityTurn(
   msg: ChatMsg,
   opts: BuildActivityTurnOptions = {},
 ): ActivityTurn {
   const record = opts.record ?? null;
-  const observed = observedEvents(msg);
+  const observed = record ? [] : observedEvents(msg);
   const citations: ActivityCitation[] = (msg.citations ?? []).map((c) => ({
     id: c.id,
     label: c.label,
@@ -174,9 +154,7 @@ export function buildActivityTurn(
   const ran = toolsRun(msg);
 
   const hostEvents = record ? activityEventsFromRecord(record) : [];
-  const rounds = record
-    ? mergeRounds(requestRoundsFromRecord(record), ran)
-    : [];
+  const rounds = record ? requestRoundsFromRecord(record) : [];
   const recordSummary = record ? summaryFromRecord(record) : null;
 
   // Grounding is a statement about the delivered answer, so it is only
@@ -196,7 +174,22 @@ export function buildActivityTurn(
     label: shortLabel(msg.content || "(streaming…)"),
     summary: {
       modelRounds: recordSummary?.modelRounds ?? null,
-      toolCalls: ran.length > 0 ? ran.length : msg.tools?.length ? 0 : null,
+      toolCalls: record
+        ? new Set(
+            record.events
+              .filter(
+                (event) =>
+                  event.operation_id.startsWith("tool-") &&
+                  event.phase === "completed" &&
+                  event.status !== "pending",
+              )
+              .map((event) => event.operation_id),
+          ).size
+        : ran.length > 0
+          ? ran.length
+          : msg.tools?.length
+            ? 0
+            : null,
       contextUsedChars: recordSummary?.contextUsedChars ?? null,
       grounded,
       status: recordSummary?.status ?? null,
@@ -212,13 +205,20 @@ export function buildActivityTurn(
           : null,
     },
     requestRounds: rounds,
-    // Host events first (they describe the provider work), then what the
-    // renderer saw. Both are ContextDesk-lane; neither is customer evidence.
+    // A host record is authoritative and already includes the live stream.
+    // Renderer-observed rows are a fallback only, never appended duplicates.
     events: [...hostEvents, ...observed],
     citations,
-    // Permission decisions are transient in the renderer (PermissionModal
-    // state) and the host record does not carry them yet. Honestly empty.
-    permissions: [],
+    permissions: record
+      ? record.events
+          .filter((event) => event.origin === "user_decision")
+          .map((event) => ({
+            id: event.operation_id,
+            toolName: event.label.replace(/^Permission (?:allowed|denied):\s*/, ""),
+            target: "target not retained",
+            decision: event.detail?.replace(/^decision=/, "") ?? null,
+          }))
+      : [],
     elapsedMs: opts.elapsedMs ?? record?.total_elapsed_ms ?? null,
     liveRecord: record != null,
     droppedEvents: record?.dropped_events ?? 0,

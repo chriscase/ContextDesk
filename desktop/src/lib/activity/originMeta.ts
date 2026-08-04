@@ -3,19 +3,18 @@
  *
  * Requirement 4: a reader must be able to tell deterministic host work from
  * model/external work **without relying on colour**. Every badge therefore
- * pairs a text label with a glyph, and the `work` field gives the coarse
- * deterministic-vs-nondeterministic split in words. Colour, where the
- * stylesheet uses it, is a third redundant signal only.
+ * pairs a text label with a glyph, and the `work` field spells out the exact
+ * deterministic, repeatable, probabilistic/external, or human class. Colour,
+ * where the stylesheet uses it, is a third redundant signal only.
  */
-import {
-  determinismForOrigin,
-  isNondeterministicOrigin,
-  type ActivityOrigin,
-  type Determinism,
-} from "./types";
+import { determinismForOrigin, type ActivityOrigin, type Determinism } from "./types";
 
-/** The coarse split requirement 4 asks the UI to make obvious. */
-export type ActivityWorkClass = "deterministic" | "nondeterministic";
+/** Reproducibility class the UI must make obvious without relying on colour. */
+export type ActivityWorkClass =
+  | "deterministic"
+  | "repeatable"
+  | "nondeterministic"
+  | "human";
 
 export type OriginMeta = {
   /** Primary signal. Always rendered as text. */
@@ -82,17 +81,25 @@ const META: Record<
 
 const WORK_LABEL: Record<ActivityWorkClass, string> = {
   deterministic: "Deterministic work",
+  repeatable: "Repeatable heuristic",
   nondeterministic: "Model / external work",
+  human: "Human decision",
 };
 
 export function originMeta(origin: ActivityOrigin): OriginMeta {
   const base = META[origin];
-  const work: ActivityWorkClass = isNondeterministicOrigin(origin)
-    ? "nondeterministic"
-    : "deterministic";
+  const determinism = determinismForOrigin(origin);
+  const work: ActivityWorkClass =
+    determinism === "probabilistic"
+      ? "nondeterministic"
+      : determinism === "repeatable"
+        ? "repeatable"
+        : determinism === "human"
+          ? "human"
+          : "deterministic";
   return {
     ...base,
-    determinism: determinismForOrigin(origin),
+    determinism,
     work,
     workLabel: WORK_LABEL[work],
   };

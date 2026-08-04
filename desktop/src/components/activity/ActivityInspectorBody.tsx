@@ -14,7 +14,7 @@ import { useId, useRef, useState, type KeyboardEvent } from "react";
 import { nextRovingIndex } from "../../lib/a11y";
 import { ActivityEventList } from "./ActivityEventList";
 import { ActivityOriginBadge } from "./ActivityOriginBadge";
-import { isNondeterministicOrigin, type ActivityTurn } from "../../lib/activity/types";
+import { type ActivityTurn } from "../../lib/activity/types";
 
 export type ActivityTabId = "summary" | "technical";
 
@@ -61,9 +61,17 @@ export function ActivityInspectorBody({
   };
 
   const deterministic = turn.events.filter(
-    (e) => !isNondeterministicOrigin(e.origin),
+    (event) => event.determinism === "deterministic",
   ).length;
-  const nondeterministic = turn.events.length - deterministic;
+  const repeatable = turn.events.filter(
+    (event) => event.determinism === "repeatable",
+  ).length;
+  const nondeterministic = turn.events.filter(
+    (event) => event.determinism === "probabilistic",
+  ).length;
+  const human = turn.events.filter(
+    (event) => event.determinism === "human",
+  ).length;
 
   const groundedText =
     turn.summary.grounded === true
@@ -146,9 +154,8 @@ export function ActivityInspectorBody({
                 {fact(turn.summary.modelRounds, "model request")}.
               </li>
               <li>
-                {deterministic} step{deterministic === 1 ? "" : "s"} were fixed
-                app work; {nondeterministic} involved a model or an outside
-                system.
+                {deterministic} deterministic · {repeatable} repeatable heuristic ·{" "}
+                {nondeterministic} model/external · {human} human decision.
               </li>
               <li>{groundedText}</li>
               {turn.droppedEvents > 0 ? (

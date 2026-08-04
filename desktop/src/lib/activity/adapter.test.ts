@@ -87,14 +87,30 @@ describe("the adapter reports live facts, never invented ones", () => {
     expect(turn.budget.totalChars).toBeNull();
   });
 
-  it("attributes observed tool runs only to the final round", () => {
+  it("attributes host-recorded tool runs to the causally preceding round", () => {
+    const live = record();
+    live.events.push({
+      turn_id: "s1::m1",
+      operation_id: "tool-t1",
+      seq: 1,
+      elapsed_ms: 950,
+      phase: "completed",
+      status: "ok",
+      origin: "deterministic_host",
+      determinism: "deterministic",
+      label: "Tool search_kb",
+      trigger: { trigger: "model_request", round: 0 },
+      scope: { kind: "conversation", label: "Conversation" },
+      privacy: "metadata",
+    });
     const turn = buildActivityTurn(
       msg({
         tools: [{ id: "t1", name: "search_kb", summary: "3 hits", ok: true }],
       }),
-      { record: record() },
+      { record: live },
     );
-    expect(turn.requestRounds.at(-1)!.toolsRun).toEqual(["search_kb"]);
+    expect(turn.requestRounds[0]!.toolsRun).toEqual(["search_kb"]);
+    expect(turn.events).toHaveLength(2);
   });
 
   it("marks a withheld turn as ungrounded even when citations exist", () => {
@@ -125,9 +141,31 @@ describe("the adapter reports live facts, never invented ones", () => {
     expect(turn.budget.truncationNote).toMatch(/prefix/i);
   });
 
-  it("keeps permissions honestly empty — the host does not record them yet", () => {
-    const turn = buildActivityTurn(msg(), { record: record() });
-    expect(turn.permissions).toEqual([]);
+  it("reports only actual host-recorded permission decisions", () => {
+    const live = record();
+    live.events.push({
+      turn_id: "s1::m1",
+      operation_id: "permission-p1",
+      seq: 1,
+      phase: "completed",
+      status: "withheld",
+      origin: "user_decision",
+      determinism: "human",
+      label: "Permission denied: save_memory",
+      detail: "decision=deny",
+      trigger: { trigger: "user_decision" },
+      scope: { kind: "conversation", label: "Conversation" },
+      privacy: "metadata",
+    });
+    const turn = buildActivityTurn(msg(), { record: live });
+    expect(turn.permissions).toEqual([
+      {
+        id: "permission-p1",
+        toolName: "save_memory",
+        target: "target not retained",
+        decision: "deny",
+      },
+    ]);
   });
 });
 
@@ -169,7 +207,7 @@ describe("event derivation", () => {
     }
   });
 
-  it("classifies a write tool as a governed write and a read as host work", () => {
+  it("does not guess tool authority from names when no host record exists", () => {
     const turn = buildActivityTurn(
       msg({
         tools: [
@@ -181,8 +219,8 @@ describe("event derivation", () => {
     );
     const write = turn.events.find((e) => e.label.includes("save_memory"))!;
     const read = turn.events.find((e) => e.label.includes("search_kb"))!;
-    expect(write.origin).toBe("governed_write");
-    expect(read.origin).toBe("deterministic_host");
+    expect(write.origin).toBe("client_evidence");
+    expect(read.origin).toBe("client_evidence");
   });
 
   it("reports a pending permission as pending, not as a completed decision", () => {
@@ -194,9 +232,37 @@ describe("event derivation", () => {
       }),
       { record: null },
     );
-    const perm = turn.events.find((e) => e.origin === "user_decision")!;
+    const perm = turn.events.find((e) => e.label.includes("Permission requested"))!;
+    expect(perm.origin).toBe("client_evidence");
     expect(perm.status).toBe("pending");
     expect(perm.phase).toBe("started");
+  });
+
+  it("does not duplicate renderer observations when a host record exists", () => {
+    const live = record();
+    live.events.push({
+      turn_id: "s1::m1",
+      operation_id: "tool-t1",
+      seq: 1,
+      elapsed_ms: 950,
+      phase: "completed",
+      status: "ok",
+      origin: "external_connector",
+      determinism: "probabilistic",
+      label: "Tool connector_read",
+      trigger: { trigger: "model_request", round: 0 },
+      scope: { kind: "connector", label: "Connector" },
+      privacy: "metadata",
+    });
+    const turn = buildActivityTurn(
+      msg({
+        trail: ["same host trail"],
+        tools: [{ id: "t1", name: "connector_read", summary: "done", ok: true }],
+      }),
+      { record: live },
+    );
+    expect(turn.events.filter((event) => event.operationId === "tool-t1")).toHaveLength(1);
+    expect(turn.events).toHaveLength(2);
   });
 
   it("marks a failed tool as failed", () => {
