@@ -706,7 +706,39 @@ fn stream_tools_and_permissions_are_recorded_as_metadata_only() {
         StreamEvent::SearchTrail {
             steps: vec!["memory".into(), "workspace".into()],
         },
+        StreamEvent::Citation {
+            source_id: format!(
+                "/Users/private/work/{}?token=sk-abcdefghijklmnopqrstuvwxyz0123456789ABCD",
+                "oversized/".repeat(2_000)
+            ),
+            label: "private file".into(),
+            locator: Some("/Users/private/work/secret.txt:42".into()),
+        },
     ]);
+    // The current citation stream carries only a source id. Exercise the
+    // public recorder boundary directly as well so a future caller cannot
+    // smuggle a path through an optional evidence locator.
+    rec.push(cd_core::activity::ActivityEvent {
+        turn_id: String::new(),
+        operation_id: "synthetic-evidence-locator".into(),
+        seq: 0,
+        elapsed_ms: Some(49),
+        phase: ActivityPhase::Completed,
+        status: ActivityStatus::Ok,
+        origin: ActivityOrigin::DeterministicHost,
+        determinism: Determinism::Deterministic,
+        label: "Synthetic evidence locator".into(),
+        detail: None,
+        trigger: ActivityTrigger::HostPolicy,
+        scope: DataScope::conversation(),
+        evidence: vec![cd_core::activity::EvidenceRef {
+            kind: "file".into(),
+            id: "/Users/private/work/secret.txt".into(),
+            locator: Some("/Users/private/work/secret.txt:42".into()),
+        }],
+        privacy: PrivacyClass::Metadata,
+        context: None,
+    });
     let finished = rec.finish(ActivityStatus::Ok, 50);
     assert!(
         finished
@@ -736,6 +768,30 @@ fn stream_tools_and_permissions_are_recorded_as_metadata_only() {
         .expect("retrieval");
     assert_eq!(retrieval.origin, ActivityOrigin::RepeatableHeuristic);
     assert_eq!(retrieval.determinism, Determinism::Repeatable);
+    let citation = finished
+        .events
+        .iter()
+        .find(|event| event.operation_id.starts_with("citation-"))
+        .expect("citation activity");
+    let evidence = citation.evidence.first().expect("opaque evidence");
+    assert!(evidence.id.starts_with("opaque:"));
+    assert!(evidence.id.len() <= 32);
+    assert!(evidence.locator.is_none());
+    let locator_evidence = finished
+        .events
+        .iter()
+        .find(|event| event.operation_id == "synthetic-evidence-locator")
+        .and_then(|event| event.evidence.first())
+        .expect("opaque locator evidence");
+    assert!(locator_evidence.id.starts_with("opaque:"));
+    assert!(locator_evidence
+        .locator
+        .as_deref()
+        .is_some_and(|locator| locator.starts_with("opaque:")));
+    let wire = serde_json::to_string(&finished).expect("activity wire");
+    assert!(!wire.contains("/Users/private"));
+    assert!(!wire.contains("sk-abcdefghijklmnopqrstuvwxyz"));
+    assert!(!wire.contains("oversized/oversized"));
 }
 
 #[test]
@@ -1264,6 +1320,18 @@ fn host_trash_and_delete_commands_call_retire_chat_session_activity() {
     assert!(
         mutation < retired_guard && retired_guard < memory && memory < insertion,
         "session existence and activity publication must share one ordered lifecycle"
+    );
+    assert!(
+        body.contains("developer.insert(&req.session_id, message_id, developer_events)"),
+        "developer detail must publish only inside the same session lifecycle boundary"
+    );
+    let retire_start = src
+        .find("fn retire_chat_session_activity")
+        .expect("shared retirement helper");
+    let retire_body = &src[retire_start..(retire_start + 1200).min(src.len())];
+    assert!(
+        retire_body.contains("developer.forget_session(session_id)"),
+        "trash/delete must clear process-local sensitive developer detail"
     );
 
     let permission_start = src

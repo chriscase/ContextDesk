@@ -341,6 +341,9 @@ struct AppState {
     /// inspector is an explanation of a turn, never a second source of
     /// truth for it. See `cd_core::activity::ActivityStore`.
     activity: Mutex<cd_core::activity::ActivityStore>,
+    /// Explicitly opt-in, sensitive developer payloads. Process-local only:
+    /// this type has no durable writer and is cleared with its chat session.
+    developer_activity: Mutex<cd_core::turn_trace::DeveloperDetailStore>,
     /// Per-session cooperative cancel flags for in-flight turns (#109).
     cancels: Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
     /// Owner generation for each admitted chat turn. A second window cannot
@@ -3185,6 +3188,9 @@ struct AgentTurnReq {
     client_user_message_id: Option<String>,
     #[serde(default)]
     client_assistant_message_id: Option<String>,
+    /// Per-turn opt-in for sensitive, redacted developer payload inspection.
+    #[serde(default)]
+    developer_activity_detail: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -4646,14 +4652,40 @@ async fn agent_turn(
     // host stream against the real turn origin. This preserves the causal
     // model → tool → model sequence instead of concatenating two lists later.
     let activity_settings = cfg.activity.clone();
+    let channel = on_event.clone();
+    let developer_observer = if req.developer_activity_detail {
+        req.client_assistant_message_id.as_ref().map(|message_id| {
+            let developer_channel = channel.clone();
+            let session_id = req.session_id.clone();
+            let message_id = message_id.clone();
+            std::sync::Arc::new(move |event: cd_core::turn_trace::DeveloperDetailEvent| {
+                let _ = developer_channel.send(EventDto {
+                    kind: "developer_activity".to_string(),
+                    payload: serde_json::json!({
+                        "session_id": session_id,
+                        "message_id": message_id,
+                        "event": event,
+                    }),
+                });
+            })
+                as std::sync::Arc<dyn Fn(cd_core::turn_trace::DeveloperDetailEvent) + Send + Sync>
+        })
+    } else {
+        None
+    };
     let activity_sink: Option<std::sync::Arc<cd_core::turn_trace::RecordingTurnTrace>> =
-        activity_settings.enabled.then(|| {
-            std::sync::Arc::new(cd_core::turn_trace::RecordingTurnTrace::with_started_at(
-                turn_started_at.into_std(),
-            ))
+        (activity_settings.enabled || developer_observer.is_some()).then(|| {
+            std::sync::Arc::new(match developer_observer {
+                Some(observer) => cd_core::turn_trace::RecordingTurnTrace::with_developer_detail(
+                    turn_started_at.into_std(),
+                    observer,
+                ),
+                None => cd_core::turn_trace::RecordingTurnTrace::with_started_at(
+                    turn_started_at.into_std(),
+                ),
+            })
         });
     let activity_tool_kinds = host.activity_tool_kinds();
-    let channel = on_event.clone();
     let linked_citation_corpus = log_explorer_context
         .as_ref()
         .map(|context| context.corpus_id.clone());
@@ -5263,13 +5295,15 @@ fn delete_chat_session(state: State<'_, AppState>, id: String) -> Result<(), Str
 /// `forget_session_activity` command so every product path shares one
 /// retirement path.
 fn retire_chat_session_activity(state: &AppState, session_id: &str) {
-    let Ok(mut store) = state.activity.lock() else {
-        return;
-    };
-    if let Ok(dir) = ensure_config_dir(&state.branding) {
-        cd_core::activity::retire_session_activity(&mut store, &dir, session_id);
-    } else {
-        store.forget_session(session_id);
+    if let Ok(mut store) = state.activity.lock() {
+        if let Ok(dir) = ensure_config_dir(&state.branding) {
+            cd_core::activity::retire_session_activity(&mut store, &dir, session_id);
+        } else {
+            store.forget_session(session_id);
+        }
+    }
+    if let Ok(mut developer) = state.developer_activity.lock() {
+        developer.forget_session(session_id);
     }
 }
 
@@ -5663,6 +5697,24 @@ fn get_turn_activity(
     Ok(store.get(&session_id, &message_id).cloned())
 }
 
+/// Read opt-in developer detail for one exact session/message pair.
+/// The store is process-local and contains only redacted, bounded payloads.
+#[tauri::command]
+fn get_developer_turn_activity(
+    state: State<'_, AppState>,
+    session_id: String,
+    message_id: String,
+) -> Result<Vec<cd_core::turn_trace::DeveloperDetailEvent>, String> {
+    let store = state
+        .developer_activity
+        .lock()
+        .map_err(|_| "Developer activity is temporarily unavailable".to_string())?;
+    Ok(store
+        .get(&session_id, &message_id)
+        .map(<[_]>::to_vec)
+        .unwrap_or_default())
+}
+
 /// Deletion lifecycle: drop every activity record for one session.
 ///
 /// A record can hold redacted conversation text when the operator opted
@@ -5696,39 +5748,43 @@ fn record_turn_activity(
     turn_started_at: tokio::time::Instant,
 ) {
     use cd_core::activity::{ActivityRecorder, ActivityStatus, DataScope, TurnActivityRecord};
-    if !settings.enabled {
-        return;
-    }
     let Some(message_id) = req.client_assistant_message_id.as_deref() else {
         // No durable message to hang the record off; storing it under a
         // synthesized key would make it unreachable anyway.
         return;
     };
-    let scope = match linked_corpus_id {
-        Some(corpus_id) => DataScope::log_corpus(corpus_id),
-        None => DataScope::conversation(),
+    let record = settings.enabled.then(|| {
+        let scope = match linked_corpus_id {
+            Some(corpus_id) => DataScope::log_corpus(corpus_id),
+            None => DataScope::conversation(),
+        };
+        let turn_id = format!("{}::{}", req.session_id, message_id);
+        let mut recorder = ActivityRecorder::new(
+            turn_id,
+            req.session_id.clone(),
+            scope,
+            settings.detail_level(),
+        );
+        if let Some(sink) = sink {
+            recorder.record_timeline(&sink.timeline());
+        }
+        let status = match result {
+            Ok(events) => cd_core::activity::status_for_turn_events(events),
+            Err(_) => ActivityStatus::Failed,
+        };
+        let elapsed_ms = u64::try_from(turn_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let mut record: TurnActivityRecord = recorder.finish(status, elapsed_ms);
+        record.message_id = Some(message_id.to_string());
+        record
+    });
+    let developer_events = if req.developer_activity_detail {
+        sink.map(|sink| sink.developer_events()).unwrap_or_default()
+    } else {
+        Vec::new()
     };
-    let turn_id = format!("{}::{}", req.session_id, message_id);
-    let mut recorder = ActivityRecorder::new(
-        turn_id,
-        req.session_id.clone(),
-        scope,
-        settings.detail_level(),
-    );
-    if let Some(sink) = sink {
-        recorder.record_timeline(&sink.timeline());
+    if record.is_none() && developer_events.is_empty() {
+        return;
     }
-    // Whole-stream classification, not the terminal reason alone: this
-    // product signals two of its withholding conditions (`linked_no_tool`,
-    // `linked_required_source_missing`) as Error codes while the turn
-    // completes with reason "stop". See `cd_core::activity::status_for_turn_events`.
-    let status = match result {
-        Ok(events) => cd_core::activity::status_for_turn_events(events),
-        Err(_) => ActivityStatus::Failed,
-    };
-    let elapsed_ms = u64::try_from(turn_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let mut record: TurnActivityRecord = recorder.finish(status, elapsed_ms);
-    record.message_id = Some(message_id.to_string());
 
     // One lifecycle section covers "session still exists" and the bounded
     // process-lifetime store. Trash/delete takes these locks in the same
@@ -5737,18 +5793,28 @@ fn record_turn_activity(
     let Ok(_session_lifecycle) = state.chat_session_mutation.lock() else {
         return;
     };
-    let Ok(session) = session_store(state)
-        .and_then(|store| store.load(&req.session_id).map_err(|error| error.to_string()))
-    else {
+    let Ok(session) = session_store(state).and_then(|store| {
+        store
+            .load(&req.session_id)
+            .map_err(|error| error.to_string())
+    }) else {
         return;
     };
     if session.trashed {
         return;
     }
-    let Ok(mut activity) = state.activity.lock() else {
-        return;
-    };
-    activity.insert(&req.session_id, message_id, record);
+    if let Some(record) = record {
+        let Ok(mut activity) = state.activity.lock() else {
+            return;
+        };
+        activity.insert(&req.session_id, message_id, record);
+    }
+    if !developer_events.is_empty() {
+        let Ok(mut developer) = state.developer_activity.lock() else {
+            return;
+        };
+        developer.insert(&req.session_id, message_id, developer_events);
+    }
 }
 
 /// Active provider for Settings hydrate (no secrets).
@@ -12205,6 +12271,7 @@ pub fn run() {
         // closed privacy, global-retention, Windows replacement, and
         // multi-process writer review. Do not hydrate sidecars at startup.
         activity: Mutex::new(cd_core::activity::ActivityStore::default()),
+        developer_activity: Mutex::new(cd_core::turn_trace::DeveloperDetailStore::default()),
         cancels: Mutex::new(HashMap::new()),
         active_turn_owners: Mutex::new(HashMap::new()),
         next_turn_owner: std::sync::atomic::AtomicU64::new(0),
@@ -12325,6 +12392,7 @@ pub fn run() {
             clear_capability_qualification,
             get_active_provider,
             get_turn_activity,
+            get_developer_turn_activity,
             forget_session_activity,
             set_provider_tools_enabled,
             set_model_tools_enabled,

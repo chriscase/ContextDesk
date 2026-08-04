@@ -1018,8 +1018,12 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
     // Observation only: `TracingChatBackend` records the already-assembled,
     // already-redacted call and forwards it unchanged. With no sink the value
     // is the same backend it always was.
+    let developer_trace_sink = trace_sink.clone();
     let backend: Box<dyn ChatBackend> = match trace_sink {
-        Some(sink) => Box::new(TracingChatBackend::new(backend, sink)),
+        Some(sink) => Box::new(
+            TracingChatBackend::new(backend, sink)
+                .with_developer_context(profile.id.clone(), profile.chat_model.clone()),
+        ),
         None => backend,
     };
 
@@ -1035,6 +1039,7 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
     opts.deadline_plan = Some(deadline_plan);
     opts.turn_started_at = Some(turn_started_at);
     opts.turn_started_emitted = turn_prelude_emitted;
+    opts.developer_trace = developer_trace_sink.map(crate::turn_trace::TurnTraceObserver::new);
     // Ambient recall follows host config (set by attach_durable_memory / rebuild_host).
     opts.ambient_recall_enabled = host.ambient_recall_enabled() && host.durable_memory_active();
     // Per-model context budget (default / declared / learned).

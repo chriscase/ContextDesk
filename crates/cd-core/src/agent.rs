@@ -105,6 +105,8 @@ pub struct AgentOptions {
     pub log_explorer_context: Option<LogExplorerTurnContext>,
     /// Host-retained evidence for an explicit synthesis-only retry.
     pub linked_synthesis_retry: Option<LinkedSynthesisCheckpoint>,
+    /// Optional process-local observer for redacted developer tool detail.
+    pub developer_trace: Option<crate::turn_trace::TurnTraceObserver>,
 }
 
 /// Host-only checkpoint retained after linked evidence succeeds but synthesis
@@ -1099,6 +1101,7 @@ impl Default for AgentOptions {
             context_char_budget: crate::sessions::DEFAULT_CONTEXT_CHAR_BUDGET,
             log_explorer_context: None,
             linked_synthesis_retry: None,
+            developer_trace: None,
         }
     }
 }
@@ -1127,6 +1130,7 @@ impl AgentOptions {
             context_char_budget: crate::sessions::DEFAULT_CONTEXT_CHAR_BUDGET,
             log_explorer_context: None,
             linked_synthesis_retry: None,
+            developer_trace: None,
         }
     }
 
@@ -2946,6 +2950,17 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                     continue;
                 }
             };
+            if let Some(trace) = opts
+                .developer_trace
+                .as_ref()
+                .filter(|trace| trace.developer_detail_enabled())
+            {
+                trace.record_developer(crate::turn_trace::DeveloperDetailDraft::tool_call(
+                    u32::try_from(round).unwrap_or(u32::MAX),
+                    &resolved_tool_name,
+                    &args,
+                ));
+            }
 
             if linked_broad_triage
                 && successful_log_tools == 0
@@ -3091,6 +3106,18 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                     }
                 }
             };
+            if let Some(trace) = opts
+                .developer_trace
+                .as_ref()
+                .filter(|trace| trace.developer_detail_enabled())
+            {
+                trace.record_developer(crate::turn_trace::DeveloperDetailDraft::tool_result(
+                    u32::try_from(round).unwrap_or(u32::MAX),
+                    &resolved_tool_name,
+                    result.ok,
+                    &result.detail_raw,
+                ));
+            }
             let mut governed_evidence_success = result.ok;
             if resolved_tool_name == crate::log_analysis::SEARCH_LOGS && result.ok {
                 if result.log_result_count.unwrap_or(0) > 0 && !result.log_evidence.is_empty() {

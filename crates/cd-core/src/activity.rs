@@ -65,6 +65,12 @@ pub const MAX_ACTIVITY_DETAIL_CHARS: usize = 2_000;
 /// Most evidence references retained per event.
 pub const MAX_ACTIVITY_EVIDENCE_REFS: usize = 32;
 
+/// Maximum retained characters in an evidence kind label.
+pub const MAX_ACTIVITY_EVIDENCE_KIND_CHARS: usize = 64;
+
+/// Opaque evidence identifiers are fixed-size digests, never source paths.
+const OPAQUE_EVIDENCE_ID_HEX_CHARS: usize = 24;
+
 /// Where a step's authority comes from.
 ///
 /// This is the distinction the inspector exists to make visible: a reader
@@ -487,7 +493,7 @@ impl TurnActivityRecord {
         event.detail = event
             .detail
             .map(|detail| bound_chars(&detail, MAX_ACTIVITY_DETAIL_CHARS));
-        event.evidence.truncate(MAX_ACTIVITY_EVIDENCE_REFS);
+        sanitize_evidence_refs(&mut event.evidence);
         if self.detail_level == ActivityDetailLevel::Summary {
             if let Some(context) = event.context.as_mut() {
                 context.bodies = None;
@@ -613,6 +619,29 @@ fn bound_chars(text: &str, max: usize) -> String {
     }
 }
 
+fn opaque_evidence_value(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(value.as_bytes());
+    let hex = format!("{digest:x}");
+    let opaque: String = hex.chars().take(OPAQUE_EVIDENCE_ID_HEX_CHARS).collect();
+    format!("opaque:{opaque}")
+}
+
+fn sanitize_evidence_refs(evidence: &mut Vec<EvidenceRef>) {
+    evidence.truncate(MAX_ACTIVITY_EVIDENCE_REFS);
+    for reference in evidence {
+        reference.kind = bound_chars(
+            &crate::redact::scrub_secrets(&reference.kind),
+            MAX_ACTIVITY_EVIDENCE_KIND_CHARS,
+        );
+        reference.id = opaque_evidence_value(&reference.id);
+        reference.locator = reference
+            .locator
+            .take()
+            .map(|locator| opaque_evidence_value(&locator));
+    }
+}
+
 /// Builds a [`TurnActivityRecord`] from what a turn produced.
 ///
 /// Deliberately a projection, not a second capture path: the caller hands
@@ -674,7 +703,7 @@ impl ActivityRecorder {
         event.detail = event
             .detail
             .map(|d| bound_chars(&d, MAX_ACTIVITY_DETAIL_CHARS));
-        event.evidence.truncate(MAX_ACTIVITY_EVIDENCE_REFS);
+        sanitize_evidence_refs(&mut event.evidence);
         if !self.detail.retains_bodies() {
             if let Some(context) = event.context.as_mut() {
                 context.bodies = None;
@@ -957,7 +986,7 @@ impl ActivityRecorder {
             }),
             TracedHostEvent::Citation { source_id } => self.push(ActivityEvent {
                 turn_id: String::new(),
-                operation_id: format!("citation-{source_id}"),
+                operation_id: format!("citation-{}", opaque_evidence_value(source_id)),
                 seq: 0,
                 elapsed_ms,
                 phase: ActivityPhase::Completed,

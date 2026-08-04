@@ -33,7 +33,9 @@ use crate::error::CoreResult;
 use crate::tools::ToolSpec;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::{HashMap, VecDeque};
+use std::fmt;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -47,6 +49,277 @@ pub const MAX_TRACED_MESSAGE_CHARS: usize = 4_000;
 
 /// Most tool names captured per call.
 pub const MAX_TRACED_TOOL_NAMES: usize = 64;
+
+/// Maximum UTF-8 bytes retained for one developer-detail payload.
+pub const MAX_DEVELOPER_PAYLOAD_BYTES: usize = 8 * 1024;
+
+/// Maximum developer-detail events retained for one turn.
+pub const MAX_DEVELOPER_EVENTS: usize = 256;
+
+/// Maximum process-local developer-detail turns retained by the host.
+pub const MAX_DEVELOPER_TURNS: usize = 100;
+
+/// A redacted, byte-bounded payload shown only in explicit developer detail.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeveloperPayload {
+    /// Redacted retained prefix.
+    pub content: String,
+    /// Bytes after redaction but before bounding.
+    pub original_bytes: usize,
+    /// Bytes actually retained.
+    pub retained_bytes: usize,
+    /// True when the retained content is only a prefix.
+    pub truncated: bool,
+}
+
+impl fmt::Debug for DeveloperPayload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeveloperPayload")
+            .field("original_bytes", &self.original_bytes)
+            .field("retained_bytes", &self.retained_bytes)
+            .field("truncated", &self.truncated)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DeveloperPayload {
+    /// Redact and byte-bound arbitrary text before it can reach a sink.
+    pub fn text(value: &str) -> Self {
+        let redacted = crate::redact::scrub_secrets(value);
+        Self::from_redacted(redacted)
+    }
+
+    /// Redact known secret-bearing object fields recursively, then serialize
+    /// and byte-bound the result.
+    pub fn json(value: &serde_json::Value) -> Self {
+        let redacted = redact_developer_json(value);
+        let encoded = serde_json::to_string_pretty(&redacted)
+            .unwrap_or_else(|_| "[unavailable: JSON serialization failed]".to_string());
+        Self::from_redacted(crate::redact::scrub_secrets(&encoded))
+    }
+
+    fn from_redacted(value: String) -> Self {
+        let original_bytes = value.len();
+        let mut end = original_bytes.min(MAX_DEVELOPER_PAYLOAD_BYTES);
+        while !value.is_char_boundary(end) {
+            end = end.saturating_sub(1);
+        }
+        let content = value.get(..end).unwrap_or_default().to_string();
+        Self {
+            retained_bytes: content.len(),
+            truncated: end < original_bytes,
+            original_bytes,
+            content,
+        }
+    }
+}
+
+fn is_secret_field(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    matches!(
+        normalized.as_str(),
+        "authorization"
+            | "proxyauthorization"
+            | "apikey"
+            | "accesstoken"
+            | "refreshtoken"
+            | "bearertoken"
+            | "password"
+            | "passwd"
+            | "secret"
+            | "clientsecret"
+            | "cookie"
+            | "setcookie"
+    ) || normalized.ends_with("token")
+        || normalized.ends_with("password")
+        || normalized.ends_with("secret")
+}
+
+fn redact_developer_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(key, value)| {
+                    (
+                        key.clone(),
+                        if is_secret_field(key) {
+                            serde_json::Value::String("[REDACTED]".to_string())
+                        } else {
+                            redact_developer_json(value)
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(redact_developer_json).collect())
+        }
+        serde_json::Value::String(value) => {
+            serde_json::Value::String(crate::redact::scrub_secrets(value))
+        }
+        other => other.clone(),
+    }
+}
+
+/// Developer-detail category. Every variant is opt-in and process-local.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeveloperDetailKind {
+    /// One completed/failed provider request and response.
+    ProviderExchange,
+    /// A model-selected tool call before host execution.
+    ToolCall,
+    /// A host tool result or rejection.
+    ToolResult,
+    /// A permission gate (the ordinary activity record owns the decision).
+    Permission,
+    /// A deterministic host phase.
+    DeterministicStage,
+    /// A cancellation observed by the host.
+    Cancellation,
+}
+
+/// Safe draft accepted by [`TurnTraceSink`]. Its constructors redact and
+/// bound content before a sink can observe it.
+#[derive(Clone)]
+pub struct DeveloperDetailDraft {
+    /// Event category.
+    pub kind: DeveloperDetailKind,
+    /// Plain metadata label.
+    pub label: String,
+    /// Provider profile label/id when applicable.
+    pub provider: Option<String>,
+    /// Model id when applicable.
+    pub model: Option<String>,
+    /// Zero-based model round when applicable.
+    pub round: Option<u32>,
+    /// Tool name when applicable.
+    pub tool_name: Option<String>,
+    /// Offered tool names for a provider exchange.
+    pub offered_tools: Vec<String>,
+    /// Redacted request messages or arguments.
+    pub request: Vec<DeveloperPayload>,
+    /// Redacted response/result/error.
+    pub response: Option<DeveloperPayload>,
+    /// Coarse status label.
+    pub status: String,
+}
+
+impl fmt::Debug for DeveloperDetailDraft {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeveloperDetailDraft")
+            .field("kind", &self.kind)
+            .field("label", &self.label)
+            .field("round", &self.round)
+            .field("tool_name", &self.tool_name)
+            .field("request_payloads", &self.request.len())
+            .field("has_response", &self.response.is_some())
+            .field("status", &self.status)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DeveloperDetailDraft {
+    /// Build a model-selected tool call from already-parsed arguments.
+    pub fn tool_call(round: u32, name: &str, arguments: &serde_json::Value) -> Self {
+        Self {
+            kind: DeveloperDetailKind::ToolCall,
+            label: format!("Selected tool: {name}"),
+            provider: None,
+            model: None,
+            round: Some(round),
+            tool_name: Some(name.to_string()),
+            offered_tools: Vec::new(),
+            request: vec![DeveloperPayload::json(arguments)],
+            response: None,
+            status: "selected".to_string(),
+        }
+    }
+
+    /// Build a tool result/error from host-returned content.
+    pub fn tool_result(round: u32, name: &str, ok: bool, content: &str) -> Self {
+        Self {
+            kind: DeveloperDetailKind::ToolResult,
+            label: format!("Tool result: {name}"),
+            provider: None,
+            model: None,
+            round: Some(round),
+            tool_name: Some(name.to_string()),
+            offered_tools: Vec::new(),
+            request: Vec::new(),
+            response: Some(DeveloperPayload::text(content)),
+            status: if ok { "ok" } else { "failed" }.to_string(),
+        }
+    }
+
+    /// Build a deterministic stage with no content payload.
+    pub fn stage(label: impl Into<String>, status: impl Into<String>) -> Self {
+        Self {
+            kind: DeveloperDetailKind::DeterministicStage,
+            label: label.into(),
+            provider: None,
+            model: None,
+            round: None,
+            tool_name: None,
+            offered_tools: Vec::new(),
+            request: Vec::new(),
+            response: None,
+            status: status.into(),
+        }
+    }
+}
+
+/// One sequenced developer-detail event. Payload content is sensitive even
+/// after redaction and must be prominently labelled by every renderer.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DeveloperDetailEvent {
+    /// Monotonic order shared with the ordinary model/host trace.
+    pub seq: u64,
+    /// Milliseconds from the turn origin; `None` is used when unknown.
+    pub elapsed_ms: Option<u64>,
+    /// Event category.
+    pub kind: DeveloperDetailKind,
+    /// Plain metadata label.
+    pub label: String,
+    /// Provider profile label/id.
+    pub provider: Option<String>,
+    /// Model id.
+    pub model: Option<String>,
+    /// Zero-based round.
+    pub round: Option<u32>,
+    /// Tool name.
+    pub tool_name: Option<String>,
+    /// Offered tool names.
+    pub offered_tools: Vec<String>,
+    /// Redacted request payloads.
+    pub request: Vec<DeveloperPayload>,
+    /// Redacted response/result/error.
+    pub response: Option<DeveloperPayload>,
+    /// Coarse status.
+    pub status: String,
+    /// Always true: this surface contains conversation/source content.
+    pub sensitive: bool,
+}
+
+impl fmt::Debug for DeveloperDetailEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeveloperDetailEvent")
+            .field("seq", &self.seq)
+            .field("kind", &self.kind)
+            .field("label", &self.label)
+            .field("request_payloads", &self.request.len())
+            .field("has_response", &self.response.is_some())
+            .field("status", &self.status)
+            .finish_non_exhaustive()
+    }
+}
 
 /// One message as it was actually about to be sent, redacted and bounded.
 // `Deserialize`/`Eq` so an activity record that opted into retaining
@@ -184,6 +457,50 @@ pub struct TracedTimelineEntry {
 pub trait TurnTraceSink: Send + Sync {
     /// Record one completed (or failed) backend call.
     fn record(&self, call: TracedCall);
+
+    /// Whether the caller should construct content-bearing developer detail.
+    fn developer_detail_enabled(&self) -> bool {
+        false
+    }
+
+    /// Record one provider call plus its separately gated safe detail.
+    fn record_provider(&self, call: TracedCall, detail: Option<DeveloperDetailDraft>) {
+        self.record(call);
+        if let Some(detail) = detail {
+            self.record_developer(detail);
+        }
+    }
+
+    /// Record a redacted/bounded developer-detail item.
+    fn record_developer(&self, _detail: DeveloperDetailDraft) {}
+}
+
+/// Cloneable/debug-safe handle placed in [`crate::agent::AgentOptions`] so
+/// the tool loop can contribute to the same opt-in trace.
+#[derive(Clone)]
+pub struct TurnTraceObserver(Arc<dyn TurnTraceSink>);
+
+impl TurnTraceObserver {
+    /// Wrap a shared sink.
+    pub fn new(sink: Arc<dyn TurnTraceSink>) -> Self {
+        Self(sink)
+    }
+
+    /// Whether developer content is explicitly enabled.
+    pub fn developer_detail_enabled(&self) -> bool {
+        self.0.developer_detail_enabled()
+    }
+
+    /// Record one already-redacted/bounded developer item.
+    pub fn record_developer(&self, detail: DeveloperDetailDraft) {
+        self.0.record_developer(detail);
+    }
+}
+
+impl fmt::Debug for TurnTraceObserver {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TurnTraceObserver(..)")
+    }
 }
 
 /// Discards every call. The default when no `--trace`/dry-run inspection was
@@ -196,21 +513,27 @@ impl TurnTraceSink for NoopTurnTrace {
 }
 
 /// Captures every call in order, for a caller to render or assert on.
-#[derive(Debug)]
 pub struct RecordingTurnTrace {
     started_at: Instant,
+    next_seq: AtomicU64,
     timeline: Mutex<Vec<TracedTimelineEntry>>,
+    developer_enabled: bool,
+    developer: Mutex<Vec<DeveloperDetailEvent>>,
+    developer_observer: Option<Arc<dyn Fn(DeveloperDetailEvent) + Send + Sync>>,
+}
+
+impl fmt::Debug for RecordingTurnTrace {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RecordingTurnTrace")
+            .field("developer_enabled", &self.developer_enabled)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for RecordingTurnTrace {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl TurnTraceSink for RecordingTurnTrace {
-    fn record(&self, call: TracedCall) {
-        self.push(TracedTimelineItem::ProviderCall(call));
     }
 }
 
@@ -224,14 +547,33 @@ impl RecordingTurnTrace {
     pub fn with_started_at(started_at: Instant) -> Self {
         Self {
             started_at,
+            next_seq: AtomicU64::new(0),
             timeline: Mutex::new(Vec::new()),
+            developer_enabled: false,
+            developer: Mutex::new(Vec::new()),
+            developer_observer: None,
+        }
+    }
+
+    /// Start capture with explicit process-local developer detail.
+    pub fn with_developer_detail(
+        started_at: Instant,
+        observer: Arc<dyn Fn(DeveloperDetailEvent) + Send + Sync>,
+    ) -> Self {
+        Self {
+            started_at,
+            next_seq: AtomicU64::new(0),
+            timeline: Mutex::new(Vec::new()),
+            developer_enabled: true,
+            developer: Mutex::new(Vec::new()),
+            developer_observer: Some(observer),
         }
     }
 
     fn push(&self, item: TracedTimelineItem) {
         let elapsed_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
         let mut timeline = self.timeline.lock().expect("turn trace lock");
-        let seq = u64::try_from(timeline.len()).unwrap_or(u64::MAX);
         timeline.push(TracedTimelineEntry {
             seq,
             elapsed_ms,
@@ -247,6 +589,51 @@ impl RecordingTurnTrace {
         tool_kinds: &std::collections::HashMap<String, crate::activity::ToolActivityKind>,
     ) {
         use crate::events::StreamEvent;
+        if self.developer_enabled {
+            let detail = match event {
+                StreamEvent::TurnPhase { phase } => Some(DeveloperDetailDraft::stage(
+                    format!("Host phase: {phase:?}"),
+                    "running",
+                )),
+                StreamEvent::PermissionRequired {
+                    tool_name,
+                    risk,
+                    arguments,
+                    ..
+                } => Some(DeveloperDetailDraft {
+                    kind: DeveloperDetailKind::Permission,
+                    label: format!("Permission required: {tool_name}"),
+                    provider: None,
+                    model: None,
+                    round: None,
+                    tool_name: Some(tool_name.clone()),
+                    offered_tools: Vec::new(),
+                    request: vec![DeveloperPayload::json(arguments)],
+                    response: None,
+                    status: format!("pending ({risk})"),
+                }),
+                StreamEvent::TurnCompleted { reason }
+                    if reason == "cancel" || reason == "cancelled" =>
+                {
+                    Some(DeveloperDetailDraft {
+                        kind: DeveloperDetailKind::Cancellation,
+                        label: "Turn cancelled".to_string(),
+                        provider: None,
+                        model: None,
+                        round: None,
+                        tool_name: None,
+                        offered_tools: Vec::new(),
+                        request: Vec::new(),
+                        response: None,
+                        status: reason.clone(),
+                    })
+                }
+                _ => None,
+            };
+            if let Some(detail) = detail {
+                self.record_developer(detail);
+            }
+        }
         let item = match event {
             StreamEvent::Tool {
                 id,
@@ -299,7 +686,133 @@ impl RecordingTurnTrace {
     /// Snapshot of provider and metadata-only host observations in their
     /// actual capture order.
     pub fn timeline(&self) -> Vec<TracedTimelineEntry> {
-        self.timeline.lock().expect("turn trace lock").clone()
+        let mut timeline = self.timeline.lock().expect("turn trace lock").clone();
+        timeline.sort_by_key(|entry| entry.seq);
+        timeline
+    }
+
+    /// Snapshot of opt-in content-bearing detail, in shared causal order.
+    pub fn developer_events(&self) -> Vec<DeveloperDetailEvent> {
+        let mut events = self.developer.lock().expect("developer trace lock").clone();
+        events.sort_by_key(|event| event.seq);
+        events
+    }
+}
+
+impl RecordingTurnTrace {
+    fn push_developer(&self, detail: DeveloperDetailDraft) {
+        if !self.developer_enabled {
+            return;
+        }
+        let elapsed_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let event = DeveloperDetailEvent {
+            seq: self.next_seq.fetch_add(1, Ordering::SeqCst),
+            elapsed_ms: Some(elapsed_ms),
+            kind: detail.kind,
+            label: detail.label,
+            provider: detail.provider,
+            model: detail.model,
+            round: detail.round,
+            tool_name: detail.tool_name,
+            offered_tools: detail.offered_tools,
+            request: detail.request,
+            response: detail.response,
+            status: detail.status,
+            sensitive: true,
+        };
+        let retained = {
+            let mut events = self.developer.lock().expect("developer trace lock");
+            if events.len() >= MAX_DEVELOPER_EVENTS {
+                false
+            } else {
+                events.push(event.clone());
+                true
+            }
+        };
+        if retained {
+            if let Some(observer) = self.developer_observer.as_ref() {
+                observer(event);
+            }
+        }
+    }
+}
+
+impl TurnTraceSink for RecordingTurnTrace {
+    fn record(&self, call: TracedCall) {
+        self.push(TracedTimelineItem::ProviderCall(call));
+    }
+
+    fn developer_detail_enabled(&self) -> bool {
+        self.developer_enabled
+    }
+
+    fn record_provider(&self, call: TracedCall, detail: Option<DeveloperDetailDraft>) {
+        self.record(call);
+        if let Some(detail) = detail {
+            self.push_developer(detail);
+        }
+    }
+
+    fn record_developer(&self, detail: DeveloperDetailDraft) {
+        self.push_developer(detail);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DeveloperTurnKey {
+    session_id: String,
+    message_id: String,
+}
+
+/// Bounded, process-local developer payload store. It has deliberately no
+/// serialization or filesystem API.
+#[derive(Debug, Default)]
+pub struct DeveloperDetailStore {
+    records: HashMap<DeveloperTurnKey, Vec<DeveloperDetailEvent>>,
+    order: VecDeque<DeveloperTurnKey>,
+}
+
+impl DeveloperDetailStore {
+    /// Insert or replace one exact session/message record.
+    pub fn insert(
+        &mut self,
+        session_id: &str,
+        message_id: &str,
+        mut events: Vec<DeveloperDetailEvent>,
+    ) {
+        events.truncate(MAX_DEVELOPER_EVENTS);
+        let key = DeveloperTurnKey {
+            session_id: session_id.to_string(),
+            message_id: message_id.to_string(),
+        };
+        if !self.records.contains_key(&key) {
+            self.order.push_back(key.clone());
+        }
+        self.records.insert(key, events);
+        while self.records.len() > MAX_DEVELOPER_TURNS {
+            if let Some(oldest) = self.order.pop_front() {
+                self.records.remove(&oldest);
+            }
+        }
+    }
+
+    /// Read one exact session/message record. Cross-session lookup cannot
+    /// alias because both identities are part of the key.
+    pub fn get(&self, session_id: &str, message_id: &str) -> Option<&[DeveloperDetailEvent]> {
+        self.records
+            .get(&DeveloperTurnKey {
+                session_id: session_id.to_string(),
+                message_id: message_id.to_string(),
+            })
+            .map(Vec::as_slice)
+    }
+
+    /// Delete every sensitive developer record for one chat session.
+    pub fn forget_session(&mut self, session_id: &str) {
+        self.records
+            .retain(|key, _| key.session_id.as_str() != session_id);
+        self.order
+            .retain(|key| key.session_id.as_str() != session_id);
     }
 }
 
@@ -343,6 +856,8 @@ pub struct TracingChatBackend {
     inner: Box<dyn ChatBackend>,
     sink: Arc<dyn TurnTraceSink>,
     seq: AtomicUsize,
+    developer_provider: Option<String>,
+    developer_model: Option<String>,
 }
 
 impl TracingChatBackend {
@@ -352,7 +867,20 @@ impl TracingChatBackend {
             inner,
             sink,
             seq: AtomicUsize::new(0),
+            developer_provider: None,
+            developer_model: None,
         }
+    }
+
+    /// Attach provider/model metadata used only by explicit developer detail.
+    pub fn with_developer_context(
+        mut self,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        self.developer_provider = Some(provider.into());
+        self.developer_model = Some(model.into());
+        self
     }
 
     fn record(
@@ -379,7 +907,7 @@ impl TracingChatBackend {
             },
         };
         let (stored_messages, context_used_chars, messages_capped) = traced_messages(messages);
-        self.sink.record(TracedCall {
+        let call = TracedCall {
             seq,
             elapsed_ms,
             tool_names,
@@ -387,7 +915,45 @@ impl TracingChatBackend {
             context_used_chars,
             messages_capped,
             outcome,
+        };
+        let developer = self.sink.developer_detail_enabled().then(|| {
+            let request = messages
+                .iter()
+                .take(MAX_TRACED_MESSAGES)
+                .map(|message| {
+                    DeveloperPayload::json(&serde_json::json!({
+                        "role": message.role.as_str(),
+                        "content": message.content,
+                        "tool_call_id": message.tool_call_id,
+                        "tool_calls": message.tool_calls,
+                    }))
+                })
+                .collect();
+            let response = match result {
+                Ok(completion) => DeveloperPayload::json(&serde_json::json!({
+                    "content": completion.content,
+                    "tool_calls": completion.tool_calls,
+                    "finish_reason": completion.finish_reason,
+                })),
+                Err(error) => DeveloperPayload::text(&error.to_string()),
+            };
+            DeveloperDetailDraft {
+                kind: DeveloperDetailKind::ProviderExchange,
+                label: format!("Model exchange (round {})", seq + 1),
+                provider: self.developer_provider.clone(),
+                model: self.developer_model.clone(),
+                round: Some(u32::try_from(seq).unwrap_or(u32::MAX)),
+                tool_name: None,
+                offered_tools: call.tool_names.clone(),
+                request,
+                response: Some(response),
+                status: match result {
+                    Ok(_) => "completed".to_string(),
+                    Err(_) => "failed".to_string(),
+                },
+            }
         });
+        self.sink.record_provider(call, developer);
     }
 }
 
@@ -612,5 +1178,64 @@ mod tests {
             }
             other => panic!("expected Failed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn developer_detail_is_off_by_default_and_captures_no_payload() {
+        let sink = Arc::new(RecordingTurnTrace::new());
+        let backend = TracingChatBackend::new(Box::new(DryRunBackend), sink.clone())
+            .with_developer_context("provider", "model");
+        backend
+            .complete(&[msg(Role::User, "private-default-off-sentinel")], &[])
+            .await
+            .unwrap();
+        assert!(sink.developer_events().is_empty());
+        assert!(!format!("{sink:?}").contains("private-default-off-sentinel"));
+    }
+
+    #[test]
+    fn developer_payload_redacts_known_fields_and_reports_byte_truncation() {
+        let payload = DeveloperPayload::json(&serde_json::json!({
+            "Authorization": "Bearer top-secret-value",
+            "nested": {
+                "api_key": "sk-abcdefghijklmnopqrstuvwxyz0123456789ABCD",
+                "password": "hunter2",
+                "ordinary": "visible"
+            },
+            "long": "x".repeat(MAX_DEVELOPER_PAYLOAD_BYTES * 2),
+        }));
+        assert!(!payload.content.contains("top-secret-value"));
+        assert!(!payload.content.contains("hunter2"));
+        assert!(!payload.content.contains("sk-abcdefghijklmnopqrstuvwxyz"));
+        assert!(payload.content.contains("[REDACTED]"));
+        assert!(payload.truncated);
+        assert_eq!(payload.retained_bytes, payload.content.len());
+        assert!(payload.retained_bytes <= MAX_DEVELOPER_PAYLOAD_BYTES);
+        assert!(payload.original_bytes > payload.retained_bytes);
+    }
+
+    #[test]
+    fn developer_store_is_exactly_session_scoped_and_forget_clears_it() {
+        let event = DeveloperDetailEvent {
+            seq: 1,
+            elapsed_ms: Some(2),
+            kind: DeveloperDetailKind::ToolResult,
+            label: "Tool result".into(),
+            provider: None,
+            model: None,
+            round: Some(0),
+            tool_name: Some("search_kb".into()),
+            offered_tools: Vec::new(),
+            request: Vec::new(),
+            response: Some(DeveloperPayload::text("bounded result")),
+            status: "ok".into(),
+            sensitive: true,
+        };
+        let mut store = DeveloperDetailStore::default();
+        store.insert("session-a", "same-message", vec![event]);
+        assert!(store.get("session-a", "same-message").is_some());
+        assert!(store.get("session-b", "same-message").is_none());
+        store.forget_session("session-a");
+        assert!(store.get("session-a", "same-message").is_none());
     }
 }
