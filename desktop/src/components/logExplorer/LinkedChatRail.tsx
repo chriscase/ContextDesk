@@ -40,6 +40,7 @@ import {
   hostSaveChatSession,
   hostSetChatLinkedCorpus,
   hostSetModelToolsEnabled,
+  hostSuppressDeveloperActivityDetail,
   modelSelectionKey,
   parseModelSelectionKey,
   type ChatSessionDto,
@@ -55,7 +56,10 @@ import {
   sessionToDto,
   type ChatMsg,
 } from "../../lib/session";
-import { loadDeveloperActivityDetail } from "../../lib/activity/prefs";
+import {
+  loadDeveloperActivityDetail,
+  subscribeDeveloperActivityDetail,
+} from "../../lib/activity/prefs";
 import {
   extractAndCleanLogNav,
   extractLogNavFromText,
@@ -572,6 +576,7 @@ export function LinkedChatRail({
     null,
   );
   const sendingChatsRef = useRef<Set<string>>(new Set());
+  const developerDetailEnabledRef = useRef(loadDeveloperActivityDetail());
   const cancellationRequestsRef = useRef<Set<string>>(new Set());
   const terminalChatsRef = useRef<Set<string>>(new Set());
   const detachedByChatRef = useRef(detachedByChat);
@@ -581,6 +586,22 @@ export function LinkedChatRail({
   const bottomRef = useRef<HTMLDivElement>(null);
   const activeChatIdRef = useRef<string | null>(null);
   activeChatIdRef.current = activeChatId;
+
+  useEffect(
+    () =>
+      subscribeDeveloperActivityDetail((enabled) => {
+        const wasEnabled = developerDetailEnabledRef.current;
+        developerDetailEnabledRef.current = enabled;
+        if (!wasEnabled || enabled) return;
+        // Linked chats can keep running after the operator switches chats or
+        // webviews. Close every unique in-flight session generation this rail
+        // owns; repeated Off events are inert until an explicit re-enable.
+        for (const sessionId of sendingChatsRef.current) {
+          void hostSuppressDeveloperActivityDetail(sessionId);
+        }
+      }),
+    [],
+  );
 
   const windowed = useMessageWindow(messages, threadRef);
 

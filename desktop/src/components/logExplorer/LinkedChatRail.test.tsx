@@ -12,6 +12,7 @@ import {
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as host from "../../lib/host";
+import { saveDeveloperActivityDetail } from "../../lib/activity/prefs";
 import {
   hasHostLinkedSynthesisRetry,
   LinkedChatRail,
@@ -116,6 +117,7 @@ vi.mock("../../lib/host", () => ({
   hostSaveChatSession: vi.fn(),
   hostSetChatLinkedCorpus: vi.fn(),
   hostCancelTurn: vi.fn(async () => undefined),
+  hostSuppressDeveloperActivityDetail: vi.fn(async () => undefined),
   hostSetModelToolsEnabled: vi.fn(async () => true),
   hostRenameChatSession: vi.fn(),
   hostPinChatSession: vi.fn(),
@@ -221,6 +223,7 @@ function sessionDto(
 describe("LinkedChatRail", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    saveDeveloperActivityDetail(false);
     vi.mocked(host.hostListChatModels).mockResolvedValue(defaultModels);
     vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([]);
     vi.mocked(host.hostLoadChatSession).mockResolvedValue(null);
@@ -236,6 +239,9 @@ describe("LinkedChatRail", () => {
       },
     );
     vi.mocked(host.hostCancelTurn).mockResolvedValue(undefined);
+    vi.mocked(host.hostSuppressDeveloperActivityDetail).mockResolvedValue(
+      undefined,
+    );
     vi.mocked(host.hostSetModelToolsEnabled).mockResolvedValue(true);
     vi.mocked(host.hostRenameChatSession).mockResolvedValue(null);
     vi.mocked(host.hostPinChatSession).mockResolvedValue(null);
@@ -855,6 +861,76 @@ describe("LinkedChatRail", () => {
         screen.getByLabelText("Chat message"),
       ),
     );
+  });
+
+  it("suppresses an in-flight linked turn exactly once when Developer detail turns Off", async () => {
+    let stored: host.ChatSessionDto | null = null;
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      stored = session;
+      return session;
+    });
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async () => stored);
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
+      async () =>
+        stored
+          ? [
+              {
+                id: stored.id,
+                title: stored.title,
+                archived: false,
+                pinned: false,
+                created_at: stored.created_at,
+                updated_at: stored.updated_at,
+                message_count: stored.messages.length,
+                preview: stored.messages.at(-1)?.content ?? "",
+                linked_corpus_id: "c1",
+              },
+            ]
+          : [],
+    );
+    let resolveTurn: ((events: host.EventDto[]) => void) | null = null;
+    vi.mocked(host.agentTurn).mockImplementation(
+      async (_id, _text, _fl, _m, _p, onEvent) =>
+        new Promise((resolve) => {
+          resolveTurn = (events) => {
+            for (const event of events) onEvent?.(event);
+            resolve(events);
+          };
+        }),
+    );
+    saveDeveloperActivityDetail(true);
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    const composer = await screen.findByLabelText("Chat message");
+    fireEvent.change(composer, { target: { value: "Inspect the failure" } });
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+    await waitFor(() => expect(host.agentTurn).toHaveBeenCalledTimes(1));
+    const sessionId = vi.mocked(host.agentTurn).mock.calls[0]?.[0];
+    expect(sessionId).toEqual(expect.any(String));
+    expect(vi.mocked(host.agentTurn).mock.calls[0]?.[9]).toEqual(
+      expect.objectContaining({ developerActivityDetail: true }),
+    );
+
+    act(() => saveDeveloperActivityDetail(false));
+    await waitFor(() =>
+      expect(host.hostSuppressDeveloperActivityDetail).toHaveBeenCalledWith(
+        sessionId,
+      ),
+    );
+    act(() => saveDeveloperActivityDetail(false));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(host.hostSuppressDeveloperActivityDetail).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveTurn?.([{ kind: "turn_completed", payload: {} }]);
+    });
   });
 
   it("stops before the first turn when governed linked-chat creation fails", async () => {
