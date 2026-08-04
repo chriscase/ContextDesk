@@ -1585,6 +1585,14 @@ fn parse_datetime_message_parts(raw: &str) -> Option<DateTimeMessageParts<'_>> {
     }
     let tail = raw.get(timestamp_bytes..)?;
 
+    // A near-WildFly record must fail closed as a whole record. In particular,
+    // accepting its calendar as a generic prefix would hide malformed
+    // logger/thread structure and make the remainder look like a clean
+    // message. The strict grammar above is the only path allowed to split it.
+    if looks_like_malformed_wildfly_tail(tail) {
+        return None;
+    }
+
     if let Some((offset, rest)) = take_wildfly_offset_prefix(tail) {
         return datetime_message_after_zone(source_timestamp, offset, rest);
     }
@@ -1611,7 +1619,13 @@ fn parse_datetime_message_parts(raw: &str) -> Option<DateTimeMessageParts<'_>> {
         });
     }
 
-    if separator_bytes < 2 || body.is_empty() {
+    // One separating space is safe only when the timestamp itself carries a
+    // strong machine-record clue: ISO `T`, or a fractional second. A plain
+    // `YYYY-MM-DD HH:mm:ss payload` remains deliberately conservative because
+    // that shape appears frequently in prose and copied snippets.
+    let strong_single_space = source_timestamp.as_bytes().get(10) == Some(&b'T')
+        || source_timestamp.len() > SECOND_TIMESTAMP_BYTES;
+    if (separator_bytes < 2 && !strong_single_space) || body.is_empty() {
         return None;
     }
     Some(DateTimeMessageParts {
@@ -1620,6 +1634,43 @@ fn parse_datetime_message_parts(raw: &str) -> Option<DateTimeMessageParts<'_>> {
         level: None,
         payload: body,
     })
+}
+
+fn looks_like_malformed_wildfly_tail(tail: &str) -> bool {
+    let tail = tail.trim_start();
+    let Some((level, after_level)) = take_token(tail) else {
+        return false;
+    };
+    let uppercase_level_like = (2..=32).contains(&level.len())
+        && level
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || matches!(byte, b'_' | b'-'));
+    if common_level_token(level).is_none() && !uppercase_level_like {
+        return false;
+    }
+
+    let bounded = after_level
+        .get(..after_level.len().min(512))
+        .unwrap_or(after_level);
+    if let Some(after_open) = bounded.strip_prefix('[') {
+        if let Some(close) = after_open.find(']') {
+            return after_open
+                .get(close + 1..)
+                .is_some_and(|rest| rest.trim_start().starts_with('('));
+        }
+        // Missing logger close: require the would-be logger to be one compact
+        // token immediately followed by a thread opener.
+        return after_open.find('(').is_some_and(|open| {
+            after_open
+                .get(..open)
+                .is_some_and(|logger| !logger.trim().is_empty() && !logger.trim().contains(' '))
+        });
+    }
+
+    let Some((logger, rest)) = take_token(bounded) else {
+        return false;
+    };
+    logger.ends_with(']') && rest.starts_with('(')
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1766,11 +1817,19 @@ fn common_level_token(token: &str) -> Option<&str> {
 }
 
 fn looks_like_unresolved_zone_column(token: &str, rest: &str) -> bool {
+    let upper = token.to_ascii_uppercase();
+    let next_is_level_like = take_token(rest).is_some_and(|(candidate, _)| {
+        let candidate = candidate.trim_end_matches(':');
+        common_level_token(candidate).is_some()
+            || ((2..=32).contains(&candidate.len())
+                && candidate
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || matches!(byte, b'_' | b'-')))
+    });
     (2..=8).contains(&token.len())
-        && token.bytes().all(|byte| byte.is_ascii_uppercase())
-        && take_token(rest)
-            .and_then(|(candidate, _)| common_level_token(candidate))
-            .is_some()
+        && (token.bytes().all(|byte| byte.is_ascii_uppercase())
+            || AMBIGUOUS_LOCAL_ZONES.contains(&upper.as_str()))
+        && next_is_level_like
 }
 
 fn strip_standalone_dash_delimiter(payload: &str) -> &str {
@@ -2701,6 +2760,12 @@ mod tests {
                 "--flag rejected",
                 "2026-07-29 09:14:11",
             ),
+            (
+                "2026-07-29T09:14:12.125 INFO processing item [5] (retry)",
+                "info",
+                "processing item [5] (retry)",
+                "2026-07-29T09:14:12.125",
+            ),
         ];
 
         for (index, (line, level, message, local_timestamp)) in cases.into_iter().enumerate() {
@@ -2739,6 +2804,9 @@ mod tests {
             "2026-07-29 25:14:05 INFO - impossible hour",
             "2026-07-29 09:14:05,1234567890 INFO - overlong fraction",
             "2026-07-29 09:14:05 single-space-message",
+            "call 2026-07-29T09:14:05.123 at extension 555-0100",
+            "2026-07-29T09:14:61.123 impossible second",
+            "2026-07-29 09:14:05 extension 555-0100",
         ];
 
         for (index, line) in lines.into_iter().enumerate() {
@@ -2752,6 +2820,54 @@ mod tests {
             assert_eq!(parsed.parsed.message, line, "line={line}");
             assert_eq!(
                 parsed.parsed.unresolved_local_timestamp, None,
+                "line={line}"
+            );
+        }
+    }
+
+    #[test]
+    fn strong_iso_or_fractional_local_prefix_accepts_one_space_without_a_level() {
+        let cases = [
+            (
+                "2026-07-29T09:14:05.123 connection established",
+                "2026-07-29T09:14:05.123",
+                "connection established",
+            ),
+            (
+                "2026-07-29T09:14:06,12 worker heartbeat",
+                "2026-07-29T09:14:06,12",
+                "worker heartbeat",
+            ),
+            (
+                "2026-07-29 09:14:07.004 query completed",
+                "2026-07-29 09:14:07.004",
+                "query completed",
+            ),
+            (
+                "2026-07-29T09:14:08 service started",
+                "2026-07-29T09:14:08",
+                "service started",
+            ),
+        ];
+
+        for (index, (line, source_timestamp, message)) in cases.into_iter().enumerate() {
+            let parsed = parse_line_with_fingerprint(line, None, 600 + index as u64);
+            assert_eq!(
+                parsed.fingerprint.format_id,
+                Some("datetime-message-record"),
+                "line={line}"
+            );
+            assert_eq!(parsed.parsed.message, message, "line={line}");
+            assert_eq!(parsed.parsed.raw, line, "line={line}");
+            assert_eq!(parsed.parsed.level, "unknown", "line={line}");
+            assert_eq!(
+                parsed.parsed.unresolved_local_timestamp.as_deref(),
+                Some(source_timestamp),
+                "line={line}"
+            );
+            assert_eq!(
+                parsed.parsed.timestamp_provenance,
+                TimestampProvenance::UnresolvedLocal,
                 "line={line}"
             );
         }
@@ -2918,7 +3034,11 @@ mod tests {
     fn wildfly_malformed_and_timestamp_like_payloads_do_not_false_parse_or_drop() {
         let lines = [
             "2026-13-29 09:14:05,123 INFO [org.example.BadDate] (main) impossible month",
+            "2026-07-29 09:14:05,12 INFO [org.example.ShortFraction] (main) malformed fraction",
+            "2026-07-29 09:14:05.1234 INFO [org.example.LongFraction] (main) malformed fraction",
             "2026-07-29 09:14:05,123 CUSTOMLEVEL [org.example.Level] (main) unsupported level",
+            "2026-07-29 09:14:05,123 INFO org.example.Logger] (main) missing bracket",
+            "2026-07-29 09:14:05,123 INFO [org.example.Logger (main) missing bracket",
             "INFO [org.example.Payload] (main) observed 2026-07-29 09:14:05,123 in a message",
         ];
 
