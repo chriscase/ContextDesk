@@ -50,7 +50,10 @@ pub struct IngestStats {
     /// Bounded basename-only examples (`reason: basename`).
     #[serde(default)]
     pub exclusion_examples: Vec<String>,
-    /// True when any discovered content was not fully imported.
+    /// True when content intended for import was excluded or could not be read.
+    /// Intentionally ignored entries (directories, hidden metadata, or items
+    /// outside a reviewed selection) remain counted but do not make a corpus
+    /// partial.
     #[serde(default)]
     pub partial: bool,
     /// Lines parsed.
@@ -130,17 +133,21 @@ impl IngestStats {
 
     fn ignored(&mut self, reason: &'static str, source: &Path) {
         self.ignored_files = self.ignored_files.saturating_add(1);
-        self.record_omission(reason, source);
+        self.record_omission_detail(reason, source);
     }
 
     fn record_omission(&mut self, reason: &'static str, source: &Path) {
+        self.record_omission_detail(reason, source);
+        self.partial = true;
+    }
+
+    fn record_omission_detail(&mut self, reason: &'static str, source: &Path) {
         *self.exclusion_counts.entry(reason.into()).or_insert(0) += 1;
         if self.exclusion_examples.len() < MAX_EXCLUSION_EXAMPLES {
             let safe_basename = redact_message(&progress_basename(source));
             self.exclusion_examples
                 .push(format!("{reason}: {safe_basename}"));
         }
-        self.partial = true;
     }
 }
 
@@ -4659,6 +4666,7 @@ mod tests {
         assert_eq!(sources, ["visible.log"]);
         // Everything discovered but unlisted is disclosed, never silent.
         assert_eq!(report.stats.exclusion_counts.get("not_selected"), Some(&2));
+        assert!(!report.stats.partial);
 
         // An empty allowlist skips everything and refuses to publish.
         let none = IngestSelection::default();
