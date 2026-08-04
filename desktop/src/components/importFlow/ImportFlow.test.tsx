@@ -135,6 +135,55 @@ describe("ImportFlow failure, cancel, and retry", () => {
   });
 });
 
+describe("ImportFlow hostOwnsProgress (defect: duplicated reviewed-import progress panel)", () => {
+  it("renders no progress panel of its own while running when the host owns progress", async () => {
+    const client = createMockEngineClient({ manualFlush: true });
+    render(<ImportFlow engine={client} variant="pane" hostOwnsProgress />);
+    fireEvent.click(screen.getByRole("button", { name: "Choose folder…" }));
+    await screen.findByText(/Looking at what/);
+    await waitFor(() => {
+      client.flush();
+    });
+    await screen.findByRole("region", { name: "Ready to import" });
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /I understand and want to proceed/ }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+
+    // The run is now in flight (manualFlush parks it there); a host-owned
+    // ImportFlow must show none of its own progress chrome or cancel
+    // control for it — the host is the single visible surface.
+    await waitFor(() =>
+      expect(screen.queryByRole("region", { name: "Ready to import" })).toBeNull(),
+    );
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel ingest" })).toBeNull();
+    expect(document.querySelector(".process-progress")).toBeNull();
+
+    client.flush();
+    await screen.findByRole("region", { name: "Import finished" });
+  });
+
+  it("still owns and shows its own progress panel by default (no host)", async () => {
+    const client = createMockEngineClient({ manualFlush: true });
+    render(<ImportFlow engine={client} variant="pane" />);
+    fireEvent.click(screen.getByRole("button", { name: "Choose folder…" }));
+    await screen.findByText(/Looking at what/);
+    await waitFor(() => {
+      client.flush();
+    });
+    await screen.findByRole("region", { name: "Ready to import" });
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /I understand and want to proceed/ }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    await screen.findByRole("button", { name: "Cancel ingest" });
+    expect(document.querySelector(".process-progress")).not.toBeNull();
+    client.flush();
+    await screen.findByRole("region", { name: "Import finished" });
+  });
+});
+
 describe("ImportFlow preview cancellation lifecycle", () => {
   it("keeps close pending until the preview itself acknowledges cancellation", async () => {
     const { client, cancel, acknowledge } = await controlledPreviewClient();

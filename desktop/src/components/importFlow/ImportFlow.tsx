@@ -33,6 +33,15 @@ type Props = {
   /** Called after the summary card applies or undoes source timezones. */
   onTimezoneChanged?: (corpusId: string) => void;
   /**
+   * The hosting surface already renders its own `ProcessProgressPanel` from
+   * the same host progress stream and owns cancel for it (LogPane does, for
+   * every import kind — quick, re-analysis, and reviewed). When true,
+   * ImportFlow must not render a second, duplicate panel for its own
+   * "running" stage. Defaults to false: an ImportFlow used on its own (the
+   * guided setup wizard, or in isolation) owns and shows its own progress.
+   */
+  hostOwnsProgress?: boolean;
+  /**
    * Monotonic close-request signal from the hosting surface (wizard Cancel,
    * Escape). Outside a run the flow exits immediately; during a run it
    * requests cancellation and stays truthfully visible until the engine
@@ -49,6 +58,7 @@ export function ImportFlow({
   variant,
   onPublished,
   onTimezoneChanged,
+  hostOwnsProgress = false,
   exitSignal = 0,
   onExit,
   initialState,
@@ -345,14 +355,22 @@ export function ImportFlow({
 
       {state.stage === "running" ? (
         <>
-          <ProcessProgressPanel
-            progress={(state.progress as ProcessProgressDto | null) ?? null}
-            kind="log_ingest"
-            error={null}
-            onCancel={() => {
-              void engine.import.cancel();
-            }}
-          />
+          {!hostOwnsProgress ? (
+            // A host that owns progress (LogPane) already renders its own
+            // ProcessProgressPanel from the same host progress stream, with
+            // its own cancel wiring — rendering one here too duplicated the
+            // panel for a reviewed import. Any other host (the guided setup
+            // wizard, or ImportFlow used on its own) has no such parent, so
+            // it keeps rendering — and owning cancel for — its own panel.
+            <ProcessProgressPanel
+              progress={(state.progress as ProcessProgressDto | null) ?? null}
+              kind="log_ingest"
+              error={null}
+              onCancel={() => {
+                void engine.import.cancel();
+              }}
+            />
+          ) : null}
           {state.exitRequested ? (
             <p className="import-flow__reason" role="status">
               {state.progress && state.progress.cancellable === false
