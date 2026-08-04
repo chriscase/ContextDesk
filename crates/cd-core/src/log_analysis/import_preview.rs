@@ -719,9 +719,10 @@ fn read_bounded<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usiz
 
 /// Whether a byte window looks binary.
 ///
-/// A NUL byte is decisive. Otherwise a window is binary when more than one
-/// byte in eight fails UTF-8 decoding, which catches images and compiled
-/// objects while tolerating a stray invalid byte in an otherwise-text log.
+/// A NUL byte is decisive. Control-heavy content is also binary. Otherwise a
+/// window is binary when more than one byte in eight actually fails UTF-8
+/// decoding, which catches images and compiled objects while tolerating
+/// isolated legacy-encoding bytes in an otherwise-text log.
 #[cfg(test)]
 pub(super) fn is_binary(bytes: &[u8]) -> bool {
     is_binary_window(bytes, true)
@@ -731,6 +732,13 @@ pub(super) fn is_binary(bytes: &[u8]) -> bool {
 fn is_binary_window(bytes: &[u8], at_source_start: bool) -> bool {
     let sniff = &bytes[..bytes.len().min(IMPORT_PREVIEW_BINARY_SNIFF_BYTES)];
     if sniff.contains(&0) {
+        return true;
+    }
+    let disallowed_controls = sniff
+        .iter()
+        .filter(|byte| byte.is_ascii_control() && !matches!(**byte, b'\t' | b'\n' | b'\r' | 0x0c))
+        .count();
+    if disallowed_controls.saturating_mul(16) > sniff.len() {
         return true;
     }
     // Interior/tail windows may begin in the middle of one valid UTF-8 code
@@ -746,18 +754,30 @@ fn is_binary_window(bytes: &[u8], at_source_start: bool) -> bool {
             .count()
     };
     let sniff = &sniff[leading_continuations..];
-    match std::str::from_utf8(sniff) {
-        Ok(_) => false,
-        Err(err) => {
-            // Trailing bytes may simply be a split multi-byte char.
-            let valid = err.valid_up_to();
-            if err.error_len().is_none() && valid + 4 >= sniff.len() {
-                return false;
-            }
-            let invalid = sniff.len().saturating_sub(valid);
-            invalid.saturating_mul(8) > sniff.len()
-        }
+    invalid_utf8_bytes(sniff).saturating_mul(8) > sniff.len()
+}
+
+/// Count only bytes belonging to malformed UTF-8 sequences.
+///
+/// `Utf8Error::valid_up_to` locates the first error; it does not say that the
+/// entire suffix is invalid. Advance past each malformed sequence and keep
+/// checking so valid text after an isolated legacy byte stays valid evidence.
+/// An incomplete final code point is ignored because every bounded sampling
+/// window may end in the middle of a valid source character.
+fn invalid_utf8_bytes(mut bytes: &[u8]) -> usize {
+    let mut invalid = 0usize;
+    while !bytes.is_empty() {
+        let Err(error) = std::str::from_utf8(bytes) else {
+            break;
+        };
+        let valid = error.valid_up_to();
+        let Some(error_len) = error.error_len() else {
+            break;
+        };
+        invalid = invalid.saturating_add(error_len);
+        bytes = &bytes[valid.saturating_add(error_len)..];
     }
+    invalid
 }
 
 /// Bounded, redacted, single-line excerpt of one representative record.
@@ -2149,17 +2169,41 @@ mod tests {
     fn binary_sniffing_accepts_utf8_and_rejects_nul() {
         assert!(!is_binary("héllo wörld log line".as_bytes()));
         let mut split_suffix = vec![0x9f, 0xa7, 0xaa];
+        assert!(is_binary(&split_suffix));
         split_suffix.extend_from_slice(b" valid text after a split code point");
-        assert!(
-            is_binary(&split_suffix),
-            "invalid continuation bytes at the true source head remain binary"
-        );
         assert!(
             !is_binary_window(&split_suffix, false),
             "an interior window may start with the continuation suffix of one UTF-8 code point"
         );
         assert!(is_binary(b"\x00\x01\x02binary"));
         assert!(is_binary(&[0xff, 0xfe, 0xfd, 0xfc, 0xfb, 0xfa, 0xf9, 0xf8]));
+    }
+
+    #[test]
+    fn binary_sniffing_counts_only_actual_invalid_sequences() {
+        let mut one_legacy_byte = b"2026-01-01 12:00:00 INFO operator caf".to_vec();
+        one_legacy_byte.push(0xe9);
+        one_legacy_byte.extend(std::iter::repeat_n(b'x', 13 * 1024));
+        assert!(!is_binary(&one_legacy_byte));
+
+        let mut several_legacy_bytes = b"2026-01-01 12:00:01 WARN message ".to_vec();
+        for byte in [0x93, 0x96, 0xe9, 0x94] {
+            several_legacy_bytes.push(byte);
+            several_legacy_bytes.extend_from_slice(b" readable text ");
+        }
+        assert!(!is_binary(&several_legacy_bytes));
+        assert_eq!(invalid_utf8_bytes(&several_legacy_bytes), 4);
+    }
+
+    #[test]
+    fn binary_sniffing_still_rejects_control_heavy_and_invalid_payloads() {
+        let mut controls = Vec::new();
+        for _ in 0..128 {
+            controls.extend_from_slice(&[0x01, 0x02, 0x03, b'A']);
+        }
+        assert!(is_binary(&controls));
+        assert!(is_binary(&[0xf5; 1024]));
+        assert!(is_binary(b"ordinary prefix\0ordinary suffix"));
     }
 
     #[test]

@@ -328,6 +328,94 @@ fn binary_content_under_a_log_name_is_unsupported_and_never_selected() {
 }
 
 #[test]
+fn legacy_encoded_text_remains_selectable_with_folder_zip_parity() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let folder = dir.path().join("source-folder");
+    std::fs::create_dir_all(&folder).expect("create folder");
+
+    let mut legacy_log = Vec::new();
+    for index in 0..240 {
+        legacy_log.extend_from_slice(
+            format!(
+                "2026-01-01 12:{:02}:{:02} INFO component sequence={index} message=caf",
+                index / 60 % 60,
+                index % 60
+            )
+            .as_bytes(),
+        );
+        legacy_log.push(0xe9);
+        legacy_log.extend_from_slice(b" completed\n");
+    }
+    assert!(legacy_log.len() > 13 * 1024);
+
+    let invalid_payload = vec![0xf5; 1024];
+    let mut control_payload = Vec::new();
+    for _ in 0..128 {
+        control_payload.extend_from_slice(&[0x01, 0x02, 0x03, b'A']);
+    }
+
+    const LEGACY: &str = "service.log-20260101-120000";
+    const INVALID: &str = "opaque-invalid.bin";
+    const CONTROLS: &str = "opaque-controls.bin";
+    write(&folder.join(LEGACY), &legacy_log);
+    write(&folder.join(INVALID), &invalid_payload);
+    write(&folder.join(CONTROLS), &control_payload);
+
+    let archive = dir.path().join("source-archive.zip");
+    write(
+        &archive,
+        &zip_bytes(&[
+            (LEGACY, &legacy_log),
+            (INVALID, &invalid_payload),
+            (CONTROLS, &control_payload),
+        ]),
+    );
+
+    let folder_report = preview_import_path(&folder, None).expect("folder preview");
+    let zip_report = preview_import_path(&archive, None).expect("zip preview");
+    for report in [&folder_report, &zip_report] {
+        let text = report
+            .items
+            .iter()
+            .find(|item| item.identity == LEGACY)
+            .expect("legacy text remains visible");
+        assert!(text.selected);
+        assert!(event_importable(text));
+        assert_ne!(text.status, ImportItemStatus::Unsupported);
+        assert!(!text.reasons.contains(&ImportPreviewReason::BinaryContent));
+
+        for identity in [INVALID, CONTROLS] {
+            let binary = report
+                .items
+                .iter()
+                .find(|item| item.identity == identity)
+                .expect("binary control remains visible");
+            assert_eq!(binary.status, ImportItemStatus::Unsupported);
+            assert!(!binary.selected);
+            assert!(!event_importable(binary));
+            assert!(binary.reasons.contains(&ImportPreviewReason::BinaryContent));
+        }
+    }
+
+    let summarize = |report: &cd_core::log_analysis::import_preview::ImportPreviewReport| {
+        report
+            .items
+            .iter()
+            .map(|item| {
+                (
+                    item.identity.clone(),
+                    item.status,
+                    item.role,
+                    item.selected,
+                    item.reasons.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(summarize(&folder_report), summarize(&zip_report));
+}
+
+#[test]
 fn empty_files_are_reported_rather_than_skipped() {
     let dir = tempfile::tempdir().expect("tempdir");
     write(&dir.path().join("empty.log"), b"");
