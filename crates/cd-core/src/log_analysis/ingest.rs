@@ -5317,6 +5317,54 @@ mod tests {
     }
 
     #[test]
+    fn reviewed_folder_and_zip_preserve_bracketed_current_and_rotated_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let current =
+            b"[2026-07-29 14:05:06,324][INFO ][XYZ.logger   ] [XYZ-node] synthetic current\n";
+        let rotated =
+            b"[2026-07-29 14:05:05,004][WARN ][XYZ.logger   ] [XYZ-node] synthetic rotated\n";
+        let current_identity = "XYZ-service.log";
+        let rotated_identity = "XYZ-service.log.1";
+        std::fs::write(logs.join(current_identity), current).unwrap();
+        std::fs::write(logs.join(rotated_identity), rotated).unwrap();
+
+        let archive = temp.path().join("XYZ-bundle.zip");
+        std::fs::write(
+            &archive,
+            zip_bytes(&[(current_identity, current), (rotated_identity, rotated)]),
+        )
+        .unwrap();
+
+        for (transport, path) in [("folder", logs.as_path()), ("zip", archive.as_path())] {
+            for (index, identity) in [current_identity, rotated_identity].into_iter().enumerate() {
+                let cache = temp.path().join(format!("cache-{transport}-{index}"));
+                let (report, sources) = ingest_one_reviewed_source(
+                    &cache,
+                    path,
+                    &format!("bracketed-{transport}-{index}"),
+                    identity,
+                );
+                assert_eq!(sources, [identity]);
+                assert_eq!(report.stats.lines, 1);
+                let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+                corpus.with_events(|events| {
+                    let event = &events[0];
+                    assert_eq!(
+                        event.timestamp_provenance,
+                        super::super::TimestampProvenance::UnresolvedLocal
+                    );
+                    assert_eq!(event.service.as_deref(), Some("XYZ.logger"));
+                    assert_eq!(event.host.as_deref(), Some("XYZ-node"));
+                    assert!(!event.message.contains("2026-07-29"));
+                    assert!(event.message.starts_with("synthetic "));
+                });
+            }
+        }
+    }
+
+    #[test]
     fn non_leaf_bang_identity_that_mimics_archive_boundary_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("cache");

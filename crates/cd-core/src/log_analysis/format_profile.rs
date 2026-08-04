@@ -29,7 +29,7 @@ pub enum BuiltInGrammar {
     DateTimeMessage,
     /// Complete local date/time, unresolved zone abbreviation, level, and message.
     DateTimeZoneAbbreviationLevel,
-    /// Four bracketed fields: timestamp, level, component, node.
+    /// Bracketed timestamp, level, component, and optional node.
     BracketedTimestampLevelComponentNode,
     /// Local minute/fraction plus an unresolved zone abbreviation.
     LocalMinuteZoneLevel,
@@ -224,7 +224,7 @@ pub const BUILT_IN_FORMAT_PROFILES: &[BuiltInFormatProfile] = &[
     },
     BuiltInFormatProfile {
         id: "bracketed-timestamp-level-component-node-record",
-        version: 1,
+        version: 2,
         grammar: BuiltInGrammar::BracketedTimestampLevelComponentNode,
         producer_hint: Some("elasticsearch-classic-family"),
         decisive_clue_codes: &["content.bracketed_timestamp_level_component_node"],

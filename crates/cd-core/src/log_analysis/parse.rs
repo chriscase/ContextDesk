@@ -1258,18 +1258,20 @@ struct ElasticsearchParts<'a> {
     source_timestamp: &'a str,
     level: &'a str,
     component: &'a str,
-    node: &'a str,
+    node: Option<&'a str>,
     payload: &'a str,
 }
 
 /// Parse the classic Elasticsearch prefix:
 ///
-/// `[YYYY-MM-DD HH:mm:ss,SSS][LEVEL][component][node] message`
+/// `[YYYY-MM-DD HH:mm:ss,SSS][LEVEL][component] [node] message`
 ///
-/// The shape is intentionally strict: four leading bracket groups, a valid
-/// calendar timestamp, a known severity, and non-empty component/node fields.
-/// This lets per-line recognition work despite a file-level `Plain` hint
-/// without mistaking arbitrary bracketed payloads for Elasticsearch records.
+/// The node field is optional and historical emitters disagree about whether
+/// whitespace precedes it. The shape remains strict: a valid calendar
+/// timestamp, known severity, non-empty component, non-empty payload, and a
+/// non-empty node whenever that fourth bracket group is present. This lets
+/// per-line recognition work despite a file-level `Plain` hint without
+/// mistaking arbitrary bracketed payloads for Elasticsearch records.
 fn parse_elasticsearch_parts(raw: &str) -> Option<ElasticsearchParts<'_>> {
     let (source_timestamp, rest) = take_bracketed_field(raw)?;
     let source_timestamp = source_timestamp.trim();
@@ -1284,9 +1286,23 @@ fn parse_elasticsearch_parts(raw: &str) -> Option<ElasticsearchParts<'_>> {
     if component.is_empty() {
         return None;
     }
-    let (node, rest) = take_bracketed_field(rest)?;
-    let node = node.trim();
-    if node.is_empty() {
+    let separated_rest = rest.trim_start();
+    let (node, payload) = if separated_rest.starts_with('[') {
+        let (node, rest) = take_bracketed_field(separated_rest)?;
+        let node = node.trim();
+        if node.is_empty() {
+            return None;
+        }
+        (Some(node), rest.trim_start())
+    } else {
+        // Without a node, whitespace must delimit the component from payload.
+        // Otherwise `[component]payload` is a malformed near-match.
+        if separated_rest.len() == rest.len() {
+            return None;
+        }
+        (None, separated_rest)
+    };
+    if payload.is_empty() {
         return None;
     }
 
@@ -1296,7 +1312,7 @@ fn parse_elasticsearch_parts(raw: &str) -> Option<ElasticsearchParts<'_>> {
         level,
         component,
         node,
-        payload: rest.trim_start(),
+        payload,
     })
 }
 
@@ -1363,7 +1379,7 @@ fn parse_elasticsearch(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
         unresolved_local_timestamp,
         level: normalize_level(parts.level),
         service: Some(parts.component.to_string()),
-        host: Some(parts.node.to_string()),
+        host: parts.node.map(str::to_string),
         trace_id: None,
         message: parts.payload.to_string(),
         raw: raw.to_string(),
@@ -2589,7 +2605,8 @@ mod tests {
 
     #[test]
     fn elasticsearch_classic_record_auto_detects_and_preserves_normalized_fields() {
-        let line = "[2026-07-29 14:05:06,324][INFO][transport   ][fixture-node.example] synthetic node initialized";
+        let line =
+            "[2026-07-29 14:05:06,324][INFO ][XYZ.logger   ] [XYZ-node] synthetic node initialized";
         assert_eq!(detect_format(line, None), LogFormat::Syslog);
 
         let parsed = parse_line(line, Some(LogFormat::Plain), 37);
@@ -2600,10 +2617,56 @@ mod tests {
             Some("2026-07-29 14:05:06,324")
         );
         assert_eq!(parsed.level, "info");
-        assert_eq!(parsed.service.as_deref(), Some("transport"));
-        assert_eq!(parsed.host.as_deref(), Some("fixture-node.example"));
+        assert_eq!(parsed.service.as_deref(), Some("XYZ.logger"));
+        assert_eq!(parsed.host.as_deref(), Some("XYZ-node"));
         assert_eq!(parsed.message, "synthetic node initialized");
         assert_eq!(parsed.raw, line);
+    }
+
+    #[test]
+    fn bracketed_logger_optional_node_fingerprints_current_and_rotated_sources() {
+        let with_node =
+            "[2026-07-29 14:05:06,324][WARN ][XYZ.logger   ] [XYZ-node] synthetic pressure";
+        for path in [Path::new("XYZ-service.log"), Path::new("XYZ-service.log.1")] {
+            let result = parse_line_with_fingerprint(with_node, Some(path), 41);
+            assert_eq!(
+                result.fingerprint.format_id,
+                Some("bracketed-timestamp-level-component-node-record")
+            );
+            assert_eq!(result.fingerprint.format_version, Some(2));
+            assert_eq!(
+                result.fingerprint.producer_hint,
+                Some("elasticsearch-classic-family")
+            );
+            assert_eq!(
+                result.fingerprint.decisive_clue_codes.as_ref(),
+                ["content.bracketed_timestamp_level_component_node"]
+            );
+            assert_eq!(
+                result.parsed.timestamp_provenance,
+                TimestampProvenance::UnresolvedLocal
+            );
+            assert_eq!(
+                result.parsed.unresolved_local_timestamp.as_deref(),
+                Some("2026-07-29 14:05:06,324")
+            );
+            assert_eq!(result.parsed.level, "warn");
+            assert_eq!(result.parsed.service.as_deref(), Some("XYZ.logger"));
+            assert_eq!(result.parsed.host.as_deref(), Some("XYZ-node"));
+            assert_eq!(result.parsed.message, "synthetic pressure");
+        }
+
+        let without_node =
+            "[2026-07-29 14:05:07,004][ERROR][XYZ.logger] synthetic node unavailable";
+        let parsed = parse_line(without_node, None, 42);
+        assert_eq!(
+            parsed.timestamp_provenance,
+            TimestampProvenance::UnresolvedLocal
+        );
+        assert_eq!(parsed.level, "error");
+        assert_eq!(parsed.service.as_deref(), Some("XYZ.logger"));
+        assert_eq!(parsed.host, None);
+        assert_eq!(parsed.message, "synthetic node unavailable");
     }
 
     #[test]
@@ -2654,7 +2717,9 @@ mod tests {
             "[2026-07-29 14:05:06,32][INFO][node][fixture.example] short fraction",
             "[2026-07-29 14:05:06,324][NOTICE][node][fixture.example] unsupported level",
             "[2026-07-29 14:05:06,324][INFO][][fixture.example] empty component",
-            "[2026-07-29 14:05:06,324][INFO][node] missing node field",
+            "[2026-07-29 14:05:06,324][INFO][node]missing payload separator",
+            "[2026-07-29 14:05:06,324][INFO][node][] empty explicit node",
+            "[2026-07-29 14:05:06,324][INFO][node][fixture.example]",
             "[node][INFO] ordinary bracketed payload",
             "\tat org.example.Worker.run(Worker.java:42)",
         ];
