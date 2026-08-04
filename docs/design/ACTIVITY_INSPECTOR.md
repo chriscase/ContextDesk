@@ -1,9 +1,9 @@
 # Activity Inspector — contract and capture seam
 
-Status: **backend contract + capture seam + desktop UI under integration
-review. Activity records are bounded and process-lifetime only; durable
-hydration is intentionally disabled pending privacy, retention, Windows,
-and multi-process writer proof.**
+Status: **shared backend contract, desktop surfaces, import ledger, evidence
+bridge, context-provenance detail, and CLI projection implemented and under
+integration review. Chat-turn records and Developer detail are bounded and
+process-lifetime only; durable chat hydration is intentionally disabled.**
 
 The Activity Inspector answers one question about a finished turn: *what
 actually happened, and how much should I trust each step?* This document
@@ -57,15 +57,18 @@ is a test that constructs exactly that lie and asserts it is corrected.
 ## Capture seam
 
 The shared `cd_core` research turn accepts an optional
-`Arc<dyn TurnTraceSink>`. The desktop passes a `RecordingTurnTrace` when
-capture is enabled. The same recorder timestamps provider completions and
-metadata-only host stream observations against one turn origin, then
-projects the ordered timeline after the turn via
-`ActivityRecorder::record_timeline`.
+`Arc<dyn TurnTraceSink>`. Tauri and `cd-cli` both reach that turn through the
+shared `cd-workflow` provider/turn seam and pass a `RecordingTurnTrace` when
+capture is enabled. The recorder timestamps provider completions and
+metadata-only host stream observations against one turn origin, then projects
+the ordered timeline after the turn via `ActivityRecorder::record_timeline`.
 
-No second desktop tracing path exists. A future CLI must consume this same
-`TracedCall`/`TurnActivityRecord` contract; there is no CLI binary in this
-workspace today, so GUI/CLI parity is not claimed here.
+There is no second desktop or CLI tracing loop. The CLI's `chat --activity
+summary|full` projects the same `TracedCall`/`TurnActivityRecord` contract;
+`full` requires `--activity-ack`. Human output keeps the answer on stdout and
+the activity summary on stderr. JSON and JSONL expose the same typed activity
+data, including failed turns. This is contract and execution-seam parity, not
+a claim that the CLI reproduces every desktop layout or import control.
 
 ### Why this cannot change execution
 
@@ -135,8 +138,8 @@ dedicated IPC event that never enters the ordinary transcript reducer.
 
 Developer payloads are held only in a bounded process-memory store keyed by
 the exact `(session_id, assistant_message_id)`. There is intentionally no
-serialization/filesystem API. Trash/delete/forget clears both ordinary and
-developer activity under the same session lifecycle boundary.
+connected serialization/filesystem path. Trash/delete/forget clears both
+ordinary and developer activity under the same session lifecycle boundary.
 
 Bounds are explicit: over `MAX_ACTIVITY_EVENTS` a record counts what it
 dropped and reports `is_truncated()`, so a UI cannot present a prefix as a
@@ -154,19 +157,25 @@ exposes `forget_session_activity`. Read side is `get_turn_activity`; there
 is deliberately no mutating command, because an explanation the user can
 edit is not an explanation.
 
-## Durable persistence (not enabled)
+## Durable chat persistence (not enabled)
 
-The product does not currently write or hydrate activity sidecars. The
-draft `DurableActivityJournal` is not connected to the desktop host until
-the durable representation has closed full-object privacy validation,
-ordered and global retention, Windows replacement, deletion ordering, lazy
-session hydration, and multiple-process writer behavior. Chat trash/delete
-still clears the bounded in-memory record and retires any experimental
-sidecar left by a development build.
+The product does not currently write or hydrate chat-turn activity sidecars.
+The tested `DurableActivityJournal` is deliberately not connected to the
+desktop completion or startup paths. Chat trash/delete clears the bounded
+in-memory record and retires any experimental sidecar left by a development
+build.
 
-**Residual:** Explorer-linked turns are not fully folded into the activity
-rail; the CLI package is not a workspace member on this tip (the contract is
-shared, but there is no `cd-cli` binary coverage here).
+This does not mean every activity-shaped surface is volatile. Completed
+**import summaries** are a separate, corpus-scoped renderer ledger persisted
+in bounded local storage so Logs and Explorer windows can show the last safely
+projected import. It contains aggregates and classifications, not source names
+or chat Developer-detail bodies. Failed or cancelled imports publish no
+corpus-bound ledger, and forged or mismatched events fail closed.
+
+**Residual:** chat-turn Activity and Developer detail disappear on process
+restart. The CLI emits turn activity for the current invocation but does not
+hydrate the desktop's in-memory store. Import-ledger persistence is not a
+general-purpose activity journal.
 
 ## What is captured today, and what is not
 
@@ -195,9 +204,12 @@ would file a knowingly ungrounded answer as a clean success.
 split along exactly that line, and `budget_rounds` (the final answer failed)
 is kept apart from `budget_rounds_answer` (an answer was produced).
 
-Still not captured: provider token billing when a gateway does not report it,
-raw tool arguments/results by design, fine-grained ranking candidates, and
-connector-internal retries that have no host event source.
+Still not captured in the ordinary Summary record: provider token billing when
+a gateway does not report it, raw tool arguments/results by design, and
+connector-internal retries that have no host event source. Opt-in Developer
+detail may show bounded, redacted tool payloads and host-computed context
+selection reasons; it does not invent candidates, scores, provider-internal
+work, or connector retries the host did not observe.
 
 
 ## The desktop surface
@@ -259,20 +271,28 @@ them and no activity module carries a live-vs-fixture provenance field.
 
 Per-turn chat activity uses the host record as authoritative. Renderer-folded
 tool/citation/search rows are fallback-only when no host record exists, so a
-live record cannot display every operation twice. The Explorer rail records
-the deterministic work it genuinely performs (corpus
-summary reads, cross-surface timezone refreshes); linked-chat turns inside
-the Explorer are not yet folded into that rail.
+live record cannot display every operation twice. Ordinary chat and linked-log
+chat both use the shared provider-turn capture seam. The Explorer rail also
+shows the deterministic work it genuinely performs, including corpus reads
+and cross-surface timezone refreshes; it does not turn those observations into
+customer evidence.
 
-Developer detail is currently strongest for ordinary/provider-backed chat.
-Provider responses are emitted after the streaming accumulator completes;
-individual token/SSE chunks are not retained. Context bodies show what was
-sent after preparation, but the record does not yet name which ambient
-memory, attachment, skill, connector context, ranking candidate, or
-compaction decision contributed each block. Package/demo installation,
-import/reanalysis `ProcessProgress`, timezone refresh failures, Explorer
-operations, and linked-chat activity inside the Explorer rail do not yet
-produce equivalent developer payload events. Permission decisions remain
-truthful in the ordinary Activity record, but an already-open renderer cache
-still needs explicit invalidation to show a decision made after the original
-turn record was fetched.
+Corpus import and reanalysis project a separate live ledger from the real
+progress/report contract. The ledger distinguishes deterministic host stages,
+repeatable heuristics, human decisions, and the optional local embedding model
+hook; it labels partial, failed, cancelled, order-only, mixed-time, and
+unresolved-time outcomes rather than filling gaps. It reports aggregates while
+leaving per-source names and detailed diagnostics in their dedicated views.
+
+With Developer detail enabled, each model round records ordered context
+provenance immediately before the provider call: system instructions, selected
+history, compaction, ambient memory, session packs, pinned skills, connector
+context, linked evidence, Explorer viewport, offered tool schemas, context
+budget, and the transition into the request. Each row carries the authority
+the host actually knows and says `not present` or `not reported` when it does
+not know. Character totals are labelled estimates, not provider token counts;
+ambient scores/reasons appear only when the host computed them. Provider
+responses are emitted after the streaming accumulator completes, so individual
+token/SSE chunks are not retained. Package installation and connector-internal
+work still do not gain fictional substeps, and a gateway that omits usage or
+internal retries remains `not reported`.
