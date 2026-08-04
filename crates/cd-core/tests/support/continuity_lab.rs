@@ -288,19 +288,71 @@ pub fn count_memory_files(root: &Path) -> usize {
         .unwrap_or(0)
 }
 
-/// Build a long synthetic history with planted canaries for budget tests.
-pub fn long_history_with_canaries(canaries: &Canaries, turns: usize) -> Vec<ChatMessage> {
+/// Fate of a planted canary after production `prepare_model_context`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanaryFate {
+    /// Full body appears in the pairing-safe keep tail (not only the compact note).
+    Present,
+    /// Appears only as a short snippet inside `[Compacted earlier conversation]`.
+    Summarized,
+    /// Not present in model-facing context at all.
+    Omitted,
+}
+
+/// Classify where a marker survived after prepare_model_context.
+///
+/// A marker is **Present** only if it appears in a non-compact message body
+/// (keep-tail / policy / truncated tail). **Summarized** if it appears solely
+/// inside a compact-summary system message. **Omitted** otherwise.
+pub fn classify_canary(model_msgs: &[ChatMessage], marker: &str) -> CanaryFate {
+    let mut in_compact = false;
+    let mut in_tail = false;
+    for m in model_msgs {
+        if !m.content.contains(marker) {
+            continue;
+        }
+        let is_compact = m.content.contains("Compacted earlier conversation");
+        if is_compact {
+            in_compact = true;
+        } else {
+            in_tail = true;
+        }
+    }
+    if in_tail {
+        CanaryFate::Present
+    } else if in_compact {
+        CanaryFate::Summarized
+    } else {
+        CanaryFate::Omitted
+    }
+}
+
+/// History layout for hard-budget classification:
+/// early private/stale → filler → mid canaries (id/constraint/open_q/tool/cite/H1)
+/// → keep-window recent turns that carry still-relevant investigation state.
+pub fn long_history_with_canaries(canaries: &Canaries, filler_turns: usize) -> Vec<ChatMessage> {
     let mut hist = vec![msg(
         Role::System,
         "policy: tools only via function calls; never invent facts",
     )];
-    // Early private/stale noise that must not dominate after compaction.
+    // EARLY: private/stale — should be Omitted under tight summary (newest-old first).
     hist.push(msg(
         Role::User,
         format!("{} {}", canaries.private_session_a, canaries.stale_noise),
     ));
     hist.push(msg(Role::Assistant, "Acknowledged private note."));
-    // Identifiers + constraints planted mid-history.
+    // Early filler so private is far from the keep boundary.
+    for i in 0..filler_turns {
+        hist.push(msg(
+            Role::User,
+            format!("early-filler user {i} {}", "x".repeat(100)),
+        ));
+        hist.push(msg(
+            Role::Assistant,
+            format!("early-filler asst {i} {}", "y".repeat(100)),
+        ));
+    }
+    // MID: investigation canaries immediately before keep — prefer Summarized.
     hist.push(msg(
         Role::User,
         format!(
@@ -318,7 +370,6 @@ pub fn long_history_with_canaries(canaries: &Canaries, turns: usize) -> Vec<Chat
             canaries.hypothesis_h1, canaries.citation_id
         ),
     ));
-    // Tool round with result id.
     hist.push(msg(Role::User, "Search the runbook for pool settings."));
     hist.push(ChatMessage {
         role: Role::Assistant,
@@ -345,20 +396,21 @@ pub fn long_history_with_canaries(canaries: &Canaries, turns: usize) -> Vec<Chat
     hist.push(msg(
         Role::Assistant,
         format!(
-            "Noted {}. Still open: {}",
-            canaries.tool_result_id, canaries.open_question
+            "Noted {}. Still open: {}. Hyp still {}",
+            canaries.tool_result_id, canaries.open_question, canaries.hypothesis_h1
         ),
     ));
-    // Filler turns to force compaction.
-    for i in 0..turns {
-        hist.push(msg(
-            Role::User,
-            format!("filler user turn {i} {}", "x".repeat(80)),
-        ));
-        hist.push(msg(
-            Role::Assistant,
-            format!("filler assistant turn {i} {}", "y".repeat(80)),
-        ));
-    }
+    // KEEP tail: newest turns WITHOUT re-planting canary markers.
+    // Mid-history canaries must be classified as Summarized/Omitted on their own;
+    // still-relevant survival is proven when they appear in the compact summary
+    // (newest-of-old) rather than by copying them into the keep window.
+    hist.push(msg(
+        Role::User,
+        "Status check — continue the open investigation without restating markers.",
+    ));
+    hist.push(msg(
+        Role::Assistant,
+        "Continuing; will use compacted prior investigation state.",
+    ));
     hist
 }

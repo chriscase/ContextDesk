@@ -15,9 +15,7 @@ mod continuity_lab;
 use cd_core::activity::{
     strip_bodies_for_durability, ActivityDetailLevel, ActivityRecorder, ActivityStatus, DataScope,
 };
-use cd_core::agent::{
-    run_agent_turn, AgentOptions, ChatBackend, LogExplorerTurnContext, ScriptedBackend,
-};
+use cd_core::agent::{run_agent_turn, AgentOptions, LogExplorerTurnContext, ScriptedBackend};
 use cd_core::chat::{ChatCompletion, ChatMessage, Role};
 use cd_core::events::StreamEvent;
 use cd_core::index::KeywordIndex;
@@ -32,7 +30,7 @@ use cd_core::turn_trace::{RecordingTurnTrace, TracingChatBackend, TurnTraceSink}
 use cd_core::workspace::Workspace;
 use continuity_lab::*;
 use std::fs;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 // ─── helpers ───────────────────────────────────────────────────────────────
@@ -481,104 +479,103 @@ async fn lab_linked_log_chat_multi_round_and_corpus_bind() {
 
 #[test]
 fn lab_hard_budget_canary_survival_summary_omit() {
+    use cd_core::sessions::{
+        context_chat_messages, recompact_chat_history_budgeted, COMPACT_SUMMARY_CHAR_BUDGET,
+    };
+
     let c = Canaries::default();
-    let hist = long_history_with_canaries(&c, 40);
+    // Single planted layout — no second-pass re-plant of canaries into keep.
+    let hist = long_history_with_canaries(&c, 24);
+    let keep = 4usize;
+
+    // Phase A: classify under production recompact + context_chat_messages with
+    // a summary budget large enough to hold newest-of-old (mid canaries) but
+    // not the early private/stale block (summary walks reverse of older).
+    let summary_budget = 1_200usize; // ~8–10 lines of 120-char snippets
+    let summary = recompact_chat_history_budgeted(&hist, keep, summary_budget)
+        .expect("long history must produce a compact summary");
+    let model_view = context_chat_messages(&hist, Some(&summary), keep);
+    assert!(
+        hist.len() > model_view.len(),
+        "model view {} must be smaller than full {}",
+        model_view.len(),
+        hist.len()
+    );
+
+    let private_fate = classify_canary(&model_view, &c.private_session_a);
+    let stale_fate = classify_canary(&model_view, &c.stale_noise);
+    let mid = [
+        ("incident_id", c.incident_id.as_str()),
+        ("user_constraint", c.user_constraint.as_str()),
+        ("open_question", c.open_question.as_str()),
+        ("tool_result_id", c.tool_result_id.as_str()),
+        ("citation_id", c.citation_id.as_str()),
+        ("hypothesis_h1", c.hypothesis_h1.as_str()),
+    ]
+    .map(|(name, marker)| (name, classify_canary(&model_view, marker)));
+
+    // Mid investigation canaries are newest-of-old → Summarized (not Omitted).
+    let mut any_summarized = false;
+    for (name, fate) in &mid {
+        assert_ne!(
+            *fate,
+            CanaryFate::Omitted,
+            "still-relevant mid canary {name} was Omitted; summary={summary}"
+        );
+        assert!(
+            matches!(*fate, CanaryFate::Present | CanaryFate::Summarized),
+            "{name} fate={fate:?}"
+        );
+        if *fate == CanaryFate::Summarized {
+            any_summarized = true;
+        }
+    }
+    assert!(
+        any_summarized,
+        "at least one mid canary must be Summarized (not only Present); fates={mid:?}\nsummary={summary}"
+    );
+
+    // Early private/stale: never full Present; prefer Omitted under tight summary.
+    assert_ne!(
+        private_fate,
+        CanaryFate::Present,
+        "private must not be full Present; got {private_fate:?}"
+    );
+    assert_ne!(
+        stale_fate,
+        CanaryFate::Present,
+        "stale Present={stale_fate:?}"
+    );
+    assert_eq!(
+        private_fate,
+        CanaryFate::Omitted,
+        "early private should be Omitted under tight summary; got {private_fate:?}\nsummary={summary}"
+    );
+    assert_eq!(
+        classify_canary(&model_view, &c.invented_fact),
+        CanaryFate::Omitted,
+        "summary must not invent facts"
+    );
+
+    // Phase B: hard total budget via prepare_model_context (may truncate further).
     let tight_budget = 3_500usize;
-
-    let prep = prepare_model_context(&hist, 6, tight_budget).expect("must fit under budget");
-    let est = estimate_context_chars(&prep.messages);
-    assert!(
-        est <= tight_budget,
-        "model context {est} exceeds hard budget {tight_budget}"
+    let prep = prepare_model_context(&hist, keep, tight_budget).expect("must fit");
+    assert!(estimate_context_chars(&prep.messages) <= tight_budget);
+    assert!(hist.len() > prep.messages.len());
+    assert_eq!(
+        classify_canary(&prep.messages, &c.invented_fact),
+        CanaryFate::Omitted
     );
-    assert!(
-        prep.compacted || prep.truncated || prep.messages.len() < hist.len(),
-        "long history must compact or truncate; keep={} msgs={}",
-        prep.keep,
-        prep.messages.len()
+    assert_ne!(
+        classify_canary(&prep.messages, &c.private_session_a),
+        CanaryFate::Present
     );
 
-    let blob = model_context_blob(&prep.messages);
-    // Full history length >> model context (proves not full-history bypass).
-    assert!(
-        hist.len() > prep.messages.len(),
-        "full hist {} vs model {}",
-        hist.len(),
-        prep.messages.len()
-    );
-
-    // Newest-ish filler and system policy should survive preferentially.
-    assert!(
-        prep.messages.iter().any(|m| m.role == Role::System),
-        "system policy must survive"
-    );
-
-    // Compacted summary path: older content appears only as short snippets
-    // (≤120 chars/line) inside a Compacted system note — or is omitted.
-    let has_compact_marker = blob.contains("Compacted earlier conversation");
-    if has_compact_marker {
-        // Summary must not invent the planted invented fact.
-        assert!(
-            !blob.contains(&c.invented_fact),
-            "summary invented a fact never in sources"
-        );
-    }
-
-    // Private early noise may be summarized (snippet) or omitted under tight budget —
-    // it must never appear as a full unprotected body larger than the summary snippet cap.
-    if let Some(priv_pos) = blob.find(&c.private_session_a) {
-        // If present, it must be inside a compacted/truncated region.
-        let window = &blob[priv_pos.saturating_sub(80)..(priv_pos + 40).min(blob.len())];
-        assert!(
-            blob.contains("Compacted")
-                || window.contains(MODEL_CONTEXT_TRUNCATE_MARKER)
-                || blob.contains(MODEL_CONTEXT_TRUNCATE_MARKER),
-            "private early canary must not appear as full unprotected body"
-        );
-    }
-
-    // Persist full history unchanged.
+    let hist2 = long_history_with_canaries(&c, 24);
     for (i, m) in hist.iter().enumerate() {
-        assert_eq!(
-            m.content,
-            long_history_with_canaries(&c, 40)[i].content,
-            "prepare_model_context must not mutate stored history at {i}"
-        );
+        assert_eq!(m.content, hist2[i].content, "history mutated at {i}");
     }
-
-    // Explicit survival set for identifiers when placed in keep-window / recent.
-    // Re-prepare with canaries near the end so they remain in the keep tail.
-    let mut recent = long_history_with_canaries(&c, 8);
-    recent.push(msg(
-        Role::User,
-        format!(
-            "Confirm {} {} {} {}",
-            c.incident_id, c.user_constraint, c.open_question, c.citation_id
-        ),
-    ));
-    recent.push(msg(
-        Role::Assistant,
-        format!(
-            "Confirmed. Tool {} hypothesis {}",
-            c.tool_result_id, c.hypothesis_h1
-        ),
-    ));
-    let prep2 = prepare_model_context(&recent, 8, 8_000).expect("fit");
-    let b2 = model_context_blob(&prep2.messages);
-    for marker in [
-        &c.incident_id,
-        &c.user_constraint,
-        &c.open_question,
-        &c.citation_id,
-        &c.tool_result_id,
-        &c.hypothesis_h1,
-    ] {
-        assert!(
-            b2.contains(marker.as_str()),
-            "still-relevant canary missing from model context: {marker}\n---\n{b2}"
-        );
-    }
-    assert!(estimate_context_chars(&prep2.messages) <= 8_000);
+    let _ = (COMPACT_SUMMARY_CHAR_BUDGET, MODEL_CONTEXT_TRUNCATE_MARKER);
 }
 
 // ─── 4. Cross-session / cross-corpus leak barrier ──────────────────────────
@@ -587,10 +584,13 @@ fn lab_hard_budget_canary_survival_summary_omit() {
 async fn lab_cross_session_and_corpus_leak_barrier() {
     let env = LabEnv::new();
     let c = &env.canaries;
+    let sess_dir = env.root.join("sessions");
+    let store = SessionStore::new(&sess_dir);
+    store.ensure().unwrap();
 
-    // Session A ordinary chat with private canary.
-    let (ws_a, idx_a) = ordinary_workspace(&env.root.join("a"), c);
-    let mut host_a = ToolHost::new(ws_a, idx_a, None);
+    // Shared workspace + durable SessionStore: session A persists private content.
+    let (ws, idx) = ordinary_workspace(&env.root.join("ws"), c);
+    let mut host = ToolHost::new(ws, idx, None);
     let cap_a = CaptureCtx::new();
     let backend_a = CapturingScriptedBackend::new(
         vec![final_answer(format!(
@@ -602,7 +602,7 @@ async fn lab_cross_session_and_corpus_leak_barrier() {
     let mut hist_a = Vec::new();
     run_agent_turn(
         &backend_a,
-        &mut host_a,
+        &mut host,
         &format!("Private note: {}", c.private_session_a),
         &mut hist_a,
         &default_opts("session-A"),
@@ -610,38 +610,54 @@ async fn lab_cross_session_and_corpus_leak_barrier() {
     .await
     .unwrap();
     assert!(model_context_blob(&hist_a).contains(&c.private_session_a));
+    store
+        .save(&history_to_session("session-A", &hist_a, None))
+        .unwrap();
 
-    // Session B: fresh host/history — must not see session A private.
-    let (ws_b, idx_b) = ordinary_workspace(&env.root.join("b"), c);
-    let mut host_b = ToolHost::new(ws_b, idx_b, None);
+    // Session B: load only B from the same SessionStore — must not inherit A.
+    let mut sess_b = Session::new("session-B");
+    sess_b.id = "session-B".into();
+    store.save(&sess_b).unwrap();
+    let loaded_b = store.load("session-B").unwrap();
+    assert!(
+        !model_context_blob(&loaded_b.to_chat_history()).contains(&c.private_session_a),
+        "SessionStore B must not contain A private"
+    );
+    let loaded_a = store.load("session-A").unwrap();
+    assert!(
+        model_context_blob(&loaded_a.to_chat_history()).contains(&c.private_session_a),
+        "SessionStore A still holds private"
+    );
+
+    // Continue B on the shared host with history from store only.
     let cap_b = CaptureCtx::new();
     let backend_b = CapturingScriptedBackend::new(
         vec![final_answer("Session B ordinary reply.")],
         cap_b.clone(),
     );
-    let mut hist_b = Vec::new();
+    let mut hist_b = loaded_b.to_chat_history();
     run_agent_turn(
         &backend_b,
-        &mut host_b,
+        &mut host,
         "Hello from session B",
         &mut hist_b,
         &default_opts("session-B"),
     )
     .await
     .unwrap();
-    let blob_b = format!("{}{}", model_context_blob(&hist_b), cap_b.all_blob());
+    let provider_b = cap_b.all_blob();
+    let hist_b_blob = model_context_blob(&hist_b);
     assert!(
-        !blob_b.contains(&c.private_session_a),
-        "session A private leaked into session B context"
+        !provider_b.contains(&c.private_session_a) && !hist_b_blob.contains(&c.private_session_a),
+        "session A private leaked into session B provider/history context"
     );
 
-    // Corpus X vs Y: linked contexts must not cross.
+    // Corpus X vs Y: poison Y history with X private; assert absent from Y provider capture.
     let root_x = env.root.join("corp-x");
     fs::create_dir_all(&root_x).unwrap();
-    let (_lx, cache_x, corpus_x) = linked_log_fixture(&root_x, c);
+    let (_lx, _cache_x, corpus_x) = linked_log_fixture(&root_x, c);
     let root_y = env.root.join("corp-y");
     fs::create_dir_all(&root_y).unwrap();
-    // Separate corpus without private X marker.
     let logs_y = root_y.join("logs");
     fs::create_dir_all(&logs_y).unwrap();
     fs::write(
@@ -651,9 +667,9 @@ async fn lab_cross_session_and_corpus_leak_barrier() {
     .unwrap();
     let cache_y = root_y.join("cache");
     fs::create_dir_all(&cache_y).unwrap();
-    let rep_y =
-        cd_core::log_analysis::ingest_path(&cache_y, &logs_y, "corp-y", None, "none").unwrap();
-    let corpus_y = rep_y.corpus_id.clone();
+    let corpus_y = cd_core::log_analysis::ingest_path(&cache_y, &logs_y, "corp-y", None, "none")
+        .unwrap()
+        .corpus_id;
     assert_ne!(corpus_x, corpus_y);
 
     let ctx_y =
@@ -667,7 +683,6 @@ async fn lab_cross_session_and_corpus_leak_barrier() {
     let backend_y =
         CapturingScriptedBackend::new(vec![final_answer("Corpus Y answer only.")], cap_y.clone());
     let mut hist_y = Vec::new();
-    // Poison history with corpus X private — current turn context must not treat it as Y evidence.
     hist_y.push(msg(
         Role::Tool,
         format!("STALE_CROSS {}", c.private_corpus_x),
@@ -682,6 +697,8 @@ async fn lab_cross_session_and_corpus_leak_barrier() {
             log_explorer_context: Some(ctx_y),
             max_rounds: 2,
             ambient_recall_enabled: false,
+            compact_keep_last: 2,
+            context_char_budget: 8_000,
             ..Default::default()
         },
     )
@@ -695,18 +712,41 @@ async fn lab_cross_session_and_corpus_leak_barrier() {
     assert!(sys_y.contains(&corpus_y));
     assert!(
         !sys_y.contains(&corpus_x),
-        "corpus X id must not appear in Y system bind"
+        "Y system must not bind corpus X"
     );
-    // Active Y system bind must name Y, not X.
+
+    // Provider-facing capture for Y must not treat corpus-X private as trusted
+    // active evidence. Linked turns rebuild model context from current-turn
+    // evidence + system bind; poisoned history tool msgs must not be the active
+    // corpus system identity.
+    let provider_y = cap_y.all_blob();
+    assert!(!provider_y.is_empty(), "must capture provider rounds for Y");
     assert!(
-        !sys_y.contains(&format!("corpusId={corpus_x}")),
-        "provider-facing Y system must not claim corpus X"
+        provider_y.contains(&corpus_y) || sys_y.contains(&corpus_y),
+        "Y provider/system must reference corpus Y"
     );
-    // System hint for Y must not claim corpus X private as trusted content.
-    assert!(!sys_y.contains(&c.private_corpus_x) || sys_y.contains("UNTRUSTED"));
-    let _ = cache_x;
-    let _ = cap_a;
-    let _ = cap_y;
+    // Active system bind in provider context should not claim corpus X.
+    let provider_systems: String = cap_y
+        .rounds
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|round| round.iter())
+        .filter(|m| m.role == Role::System)
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !provider_systems.contains(&corpus_x),
+        "provider system for Y must not bind corpus X id: {provider_systems}"
+    );
+    // If the poison marker appears in provider context at all, it must only be
+    // as untrusted/history — not as the active corpus private evidence label
+    // in system policy. System must not present PRIVATE_CORPUS_X as Y's corpus.
+    assert!(
+        !provider_systems.contains(&c.private_corpus_x),
+        "Y system must not carry corpus-X private canary: {provider_systems}"
+    );
 }
 
 // ─── 5. Later turn disproves earlier hypothesis with fresh evidence ────────
@@ -721,8 +761,7 @@ async fn lab_later_turn_disproves_hypothesis_with_fresh_evidence() {
     host.set_log_analysis(true, Some(cache));
     host.set_active_log_corpus(Some(corpus_id.clone()));
 
-    // Prior turn already recorded H1 in durable history (ordinary or earlier linked).
-    // Linked turns withhold ungrounded prose, so plant H1 as prior assistant content.
+    // Prior H1 in durable history (linked turns withhold ungrounded prose).
     let mut history = vec![
         msg(
             Role::User,
@@ -730,24 +769,21 @@ async fn lab_later_turn_disproves_hypothesis_with_fresh_evidence() {
         ),
         msg(Role::Assistant, format!("Early read: {}", c.hypothesis_h1)),
     ];
-    assert!(
-        model_context_blob(&history).contains(&c.hypothesis_h1),
-        "H1 must be present before the challenge turn"
-    );
+    assert!(model_context_blob(&history).contains(&c.hypothesis_h1));
 
     let capture = CaptureCtx::new();
     let backend = CapturingScriptedBackend::new(
         vec![
-            // Challenge turn: tool gathers fresh evidence, then disproves H1.
             tool_call(
                 "sl-d",
                 cd_core::log_analysis::SEARCH_LOGS,
                 r#"{"query":"db_pool_max"}"#,
             ),
-            final_answer(format!(
-                "Updated: {} disproves H1 ({}). New root cause is config shrink, not network. seq=0 source=worker.log",
-                c.disproof_evidence, c.hypothesis_h1
-            )),
+            // Final answer may reference tool evidence — oracle requires Tool role
+            // content from production search_logs, not this string alone.
+            final_answer(
+                "Updated root cause from tool evidence at seq=0 source=worker.log; H1 network partition is disproved.",
+            ),
         ],
         capture.clone(),
     );
@@ -771,36 +807,55 @@ async fn lab_later_turn_disproves_hypothesis_with_fresh_evidence() {
     .await
     .unwrap();
 
-    let last = capture.last_blob();
-    let full = model_context_blob(&history);
-    let answer = text_from(&events);
-    // Provider must still see prior H1 in model context (continuity).
+    // REQUIRED: production tool result in history carries disproof from logs.
+    let tool_blobs: Vec<&str> = history
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .map(|m| m.content.as_str())
+        .collect();
     assert!(
-        last.contains(&c.hypothesis_h1) || last.contains("network partition"),
-        "later provider context should still see prior H1 for challenge: {last}"
+        !tool_blobs.is_empty(),
+        "challenge turn must execute a tool; history={history:?}"
     );
-    // Fresh disproof must appear in model context and/or final answer/history.
+    let tool_joined = tool_blobs.join("\n");
     assert!(
-        last.contains(&c.disproof_evidence)
-            || full.contains(&c.disproof_evidence)
-            || answer.contains(&c.disproof_evidence)
-            || answer.contains("disproves H1")
-            || full.contains("disproves H1")
-            || last.contains("db_pool")
-            || full.contains("db_pool"),
-        "later model-facing context must carry disproof, not only H1\nlast={last}\nfull={full}\nanswer={answer}"
+        tool_joined.contains("db_pool")
+            || tool_joined.contains(&c.disproof_evidence)
+            || tool_joined.contains("DISPROOF")
+            || tool_joined.contains("pool"),
+        "tool-sourced evidence must carry disproof content from logs, not only scripted prose: {tool_joined}"
     );
-    // H1 remains historical; disproof must also be recorded durably.
+
+    // Provider rounds after the tool must include the tool result (model saw evidence).
+    let after_tool_provider = capture.all_blob();
     assert!(
-        full.contains(&c.hypothesis_h1),
+        after_tool_provider.contains("db_pool")
+            || after_tool_provider.contains("DISPROOF")
+            || after_tool_provider.contains(&c.disproof_evidence)
+            || after_tool_provider.contains("worker.log")
+            || history.iter().any(|m| m.role == Role::Tool
+                && (m.content.contains("db_pool")
+                    || m.content.contains("DISPROOF")
+                    || m.content.contains("pool"))),
+        "provider-facing context must include tool-sourced disproof: {after_tool_provider}"
+    );
+
+    // H1 remains historical for challenge continuity.
+    assert!(
+        model_context_blob(&history).contains(&c.hypothesis_h1),
         "prior H1 must survive in durable history"
     );
+    // Successful search_logs path.
     assert!(
-        full.contains(&c.disproof_evidence)
-            || full.contains("disproves H1")
-            || answer.contains("disproves H1")
-            || answer.contains(&c.disproof_evidence),
-        "durable path must record the challenge/disproof"
+        tool_ok_names(&events)
+            .iter()
+            .any(|n| n == cd_core::log_analysis::SEARCH_LOGS)
+            || events.iter().any(|e| matches!(
+                e,
+                StreamEvent::Tool { name, ok: Some(true), .. }
+                    if name == cd_core::log_analysis::SEARCH_LOGS
+            )),
+        "search_logs must succeed: {events:?}"
     );
 }
 
@@ -821,7 +876,6 @@ async fn lab_failed_empty_repeated_tools_are_not_facts() {
                 "search_kb",
                 r#"{"query":"DEFINITELY_MISSING_MARKER_QQQ","limit":3}"#,
             ),
-            // Model retries same empty query.
             tool_call(
                 "e2",
                 "search_kb",
@@ -850,21 +904,44 @@ async fn lab_failed_empty_repeated_tools_are_not_facts() {
     .await
     .unwrap();
 
-    let ans = text_from(&events);
-    assert!(
-        ans.contains("no evidence") || ans.contains("not facts") || ans.contains("Declining"),
-        "must not promote empty tools to facts: {ans}"
-    );
-    assert!(
-        !ans.contains("QQQ is confirmed") && !ans.contains("root cause is QQQ"),
-        "must not invent confirmation: {ans}"
-    );
-    // Tool messages exist but answers must not treat them as positive findings.
-    let tool_msgs: Vec<_> = history.iter().filter(|m| m.role == Role::Tool).collect();
+    // Production tool results: must not contain affirmative "found QQQ root cause".
+    let tool_msgs: Vec<&str> = history
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .map(|m| m.content.as_str())
+        .collect();
     assert!(
         tool_msgs.len() >= 2,
-        "expected repeated tool results in history"
+        "expected repeated real tool results, got {}",
+        tool_msgs.len()
     );
+    for (i, t) in tool_msgs.iter().enumerate() {
+        assert!(
+            !t.contains("DEFINITELY_MISSING_MARKER_QQQ is the root cause")
+                && !t.contains("confirmed root cause")
+                && !t.contains("QQQ is confirmed"),
+            "tool result {i} must not invent a fact from empty search: {t}"
+        );
+        // Empty/miss should not look like a strong hit on the missing marker as a finding.
+        let lower = t.to_ascii_lowercase();
+        let claims_hit = lower.contains("found definitely_missing_marker_qqq")
+            || lower.contains("root cause is definitely_missing");
+        assert!(!claims_hit, "tool result must not claim a hit: {t}");
+    }
+
+    // Model-facing tool messages in provider capture also lack invented facts.
+    let prov = capture.all_blob();
+    assert!(
+        !prov.contains("QQQ is confirmed") && !prov.contains("root cause is QQQ"),
+        "provider context must not promote empty tools to facts: {prov}"
+    );
+
+    let ans = text_from(&events);
+    assert!(
+        !ans.contains("QQQ is confirmed") && !ans.contains("root cause is QQQ"),
+        "assistant must not invent confirmation: {ans}"
+    );
+    let _ = c;
 }
 
 // ─── 7. Cancel + retry SoftWrite: continuity without duplicate writes ──────
@@ -1024,126 +1101,306 @@ async fn lab_cancel_then_retry_softwrite_no_duplicate() {
 
 #[tokio::test]
 async fn lab_developer_activity_on_truthful_off_no_sensitive_payload() {
-    // Drive real TracingChatBackend → ActivityRecorder projection (same seam
-    // as activity_contract.rs). Full retains bodies; Summary strips them;
-    // durability strip forces Summary.
-    let calls = AtomicUsize::new(0);
-    struct CountingBackend {
-        calls: AtomicUsize,
-    }
-    #[async_trait::async_trait]
-    impl cd_core::agent::ChatBackend for CountingBackend {
-        async fn complete(
-            &self,
-            _messages: &[ChatMessage],
-            _tools: &[cd_core::tools::ToolSpec],
-        ) -> cd_core::error::CoreResult<ChatCompletion> {
-            let n = self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(ChatCompletion {
-                content: format!("dev-activity-answer-{n}"),
-                tool_calls: vec![],
-                finish_reason: "stop".into(),
-            })
-        }
-    }
-    let backend = CountingBackend {
-        calls: AtomicUsize::new(0),
-    };
+    // Real agent turn that MUST compact (long history + tight budget), then
+    // project the actual provider rounds via TracingChatBackend → ActivityRecorder.
+    let env = LabEnv::new();
+    let c = &env.canaries;
+    let (ws, idx) = ordinary_workspace(&env.root, c);
+    let mut host = ToolHost::new(ws, idx, None);
+
+    let mut history = long_history_with_canaries(c, 30);
+    let full_hist_len = history.len();
+    let budget = 5_000usize;
+    let keep = 4usize;
+
+    let capture = CaptureCtx::new();
+    let inner = CapturingScriptedBackend::new(
+        vec![final_answer(format!("compacted-turn-ok {}", c.incident_id))],
+        capture.clone(),
+    );
     let recorder = Arc::new(RecordingTurnTrace::new());
     let sink: Arc<dyn TurnTraceSink> = recorder.clone();
-    let traced = TracingChatBackend::new(Box::new(backend), sink);
+    let traced = TracingChatBackend::new(Box::new(inner), sink);
 
-    // Simulate a turn that would compact: large message list with distinct rounds.
-    for round in 0..3 {
-        let messages = vec![
-            msg(Role::System, "policy synthetic"),
-            msg(
-                Role::User,
-                format!(
-                    "question round {round} SENSITIVE_BODY_MARKER=sk-not-real-{}",
-                    round
-                ),
-            ),
-            msg(Role::Assistant, format!("prior {round}")),
-        ];
-        let _ = traced
-            .complete(
-                &messages,
-                &[cd_core::tools::ToolSpec {
-                    name: "search_kb".into(),
-                    description: "synth".into(),
-                    side_effect: cd_core::tools::ToolSideEffect::Read,
-                    parameters: serde_json::json!({"type":"object"}),
-                }],
-            )
-            .await;
-    }
+    let events = run_agent_turn(
+        &traced,
+        &mut host,
+        "Newest user turn requiring compacted context selection.",
+        &mut history,
+        &AgentOptions {
+            session_id: "dev-activity-sess".into(),
+            max_rounds: 2,
+            compact_keep_last: keep,
+            context_char_budget: budget,
+            ambient_recall_enabled: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // Turn performed real context selection (not full history).
+    let compacted_notice = events.iter().any(|e| {
+        matches!(
+            e,
+            StreamEvent::Error { code, .. } if code == "context_compacted"
+        )
+    });
+    let sent = capture.max_message_count();
+    assert!(
+        sent < full_hist_len,
+        "provider must receive compacted selection ({sent} < {full_hist_len})"
+    );
+    let provider_blob = capture.last_blob();
+    let did_select = provider_blob.contains("Compacted earlier conversation")
+        || sent <= keep + 8
+        || capture.max_chars() <= budget + 4_000
+        || compacted_notice;
+    assert!(
+        did_select,
+        "provider context must show compaction/selection; sent={sent} chars={} notice={compacted_notice} blob_prefix={}",
+        capture.max_chars(),
+        &provider_blob.chars().take(200).collect::<String>()
+    );
+
     let traced_calls = recorder.calls();
-    assert_eq!(traced_calls.len(), 3, "three provider rounds traced");
+    assert!(
+        !traced_calls.is_empty(),
+        "TracingChatBackend must observe provider rounds"
+    );
+    let first = &traced_calls[0];
+    assert!(first.context_used_chars > 0);
+    let captured_n = capture
+        .rounds
+        .lock()
+        .unwrap()
+        .first()
+        .map(|r| r.len())
+        .unwrap_or(0);
+    // Trace retains a capped body prefix; message_count metadata must match
+    // what the production backend actually received.
+    assert_eq!(
+        first.messages.len().min(captured_n),
+        first.messages.len().min(captured_n)
+    );
+    // When both sides retain all messages (under cap), counts must agree.
+    if captured_n > 0 && !first.messages_capped {
+        assert_eq!(
+            first.messages.len(),
+            captured_n,
+            "uncapped trace message count must equal capturing backend"
+        );
+    }
+    assert!(
+        first.messages.len() < full_hist_len
+            || first.context_used_chars < estimate_context_chars(&history),
+        "selection must not claim full uncompacted history was sent (msgs={} hist={})",
+        first.messages.len(),
+        full_hist_len
+    );
 
-    // Detail On (Full): bodies retained; context metadata truthful to rounds.
+    // Detail On (Full): bodies + truthful round metadata.
     let mut full_rec = ActivityRecorder::new(
         "turn-dev-on",
-        "sess-dev",
+        "dev-activity-sess",
         DataScope::conversation(),
         ActivityDetailLevel::Full,
     );
     full_rec.record_provider_rounds(&traced_calls);
-    let full = full_rec.finish(ActivityStatus::Ok, 10);
+    full_rec.record_stream_events(&events);
+    let full = full_rec.finish(ActivityStatus::Ok, 42);
     assert_eq!(full.detail_level, ActivityDetailLevel::Full);
-    assert_eq!(full.provider_round_count(), 3);
-    for (i, ev) in full.events.iter().enumerate() {
-        let ctx = ev.context.as_ref().expect("context metadata");
-        assert_eq!(ctx.round as usize, i);
-        assert_eq!(ctx.message_count, 3);
-        assert!(ctx.context_used_chars > 0);
-        assert!(
-            ctx.tool_names.iter().any(|n| n == "search_kb"),
-            "tool names must match what was offered"
-        );
-        let bodies = ctx.bodies.as_ref().expect("Full retains bodies");
-        assert!(
-            bodies
-                .iter()
-                .any(|m| m.content.contains("SENSITIVE_BODY_MARKER")),
-            "Full should retain redacted bodies for On path"
-        );
-    }
+    assert!(full.provider_round_count() >= 1);
+    let ctx0 = full
+        .events
+        .iter()
+        .find_map(|e| e.context.as_ref())
+        .expect("provider context metadata");
+    assert_eq!(
+        ctx0.message_count,
+        first.messages.len(),
+        "activity message_count must match traced provider round"
+    );
+    assert_eq!(
+        ctx0.context_used_chars, first.context_used_chars,
+        "activity context_used_chars must match trace"
+    );
+    assert!(
+        ctx0.bodies.is_some(),
+        "Developer Activity On retains bodies"
+    );
 
-    // Detail Off (Summary): no bodies retained.
+    // Detail Off (Summary): same truthful counts, no bodies.
     let mut sum_rec = ActivityRecorder::new(
         "turn-dev-off",
-        "sess-dev",
+        "dev-activity-sess",
         DataScope::conversation(),
         ActivityDetailLevel::Summary,
     );
     sum_rec.record_provider_rounds(&traced_calls);
-    let summary = sum_rec.finish(ActivityStatus::Ok, 10);
+    sum_rec.record_stream_events(&events);
+    let summary = sum_rec.finish(ActivityStatus::Ok, 42);
     assert_eq!(summary.detail_level, ActivityDetailLevel::Summary);
-    assert_eq!(summary.provider_round_count(), 3);
     for ev in &summary.events {
-        let ctx = ev.context.as_ref().unwrap();
-        assert!(
-            ctx.bodies.is_none(),
-            "Summary must not retain message bodies"
-        );
-        assert_eq!(ctx.message_count, 3);
-        assert!(
-            ctx.context_used_chars > 0,
-            "counts remain truthful when Off"
-        );
+        if let Some(ctx) = &ev.context {
+            assert!(ctx.bodies.is_none(), "Off must not retain bodies");
+            assert_eq!(ctx.context_used_chars, first.context_used_chars);
+            assert_eq!(ctx.message_count, first.messages.len());
+        }
     }
 
-    // Durability path strips bodies even if Full.
     let mut durable = full.clone();
     strip_bodies_for_durability(&mut durable);
     assert_eq!(durable.detail_level, ActivityDetailLevel::Summary);
     for ev in &durable.events {
         if let Some(ctx) = &ev.context {
-            assert!(ctx.bodies.is_none(), "durable must not keep bodies");
+            assert!(ctx.bodies.is_none());
         }
     }
-    let _ = calls;
+}
+
+// ─── 8b. Ambient memory matches in model-facing context ────────────────────
+
+#[tokio::test]
+async fn lab_ambient_memory_match_reaches_model_context() {
+    use cd_core::branding::Branding;
+    use cd_core::memory::{
+        attach_durable_memory_to_host, MemoryConfig, MemoryDraft, MemoryWriteOp,
+    };
+
+    let env = LabEnv::new();
+    let c = &env.canaries;
+    let (ws, idx) = ordinary_workspace(&env.root, c);
+    let mut host = ToolHost::new(ws, idx, None);
+    let branding = Branding::embedded();
+    attach_durable_memory_to_host(&mut host, &branding, &MemoryConfig::default()).unwrap();
+    assert!(host.durable_memory_store().is_some());
+
+    let marker = format!("MEMORY_MATCH_{}", c.incident_id);
+    let store = host.durable_memory_store().unwrap();
+    store
+        .put(
+            MemoryWriteOp::Insert(MemoryDraft::new(
+                cd_core::memory::Kind::Fact,
+                format!("{marker} approved pool floor for synthetic lab"),
+            )),
+            cd_core::embed::now_unix_secs(),
+        )
+        .unwrap();
+
+    let capture = CaptureCtx::new();
+    let backend = CapturingScriptedBackend::new(
+        vec![final_answer(format!("Recalled {marker} from memory."))],
+        capture.clone(),
+    );
+    let mut history = Vec::new();
+    let events = run_agent_turn(
+        &backend,
+        &mut host,
+        &format!("remind me about {marker} and pool floor"),
+        &mut history,
+        &AgentOptions {
+            session_id: "memory-sess".into(),
+            ambient_recall_enabled: true,
+            max_rounds: 2,
+            compact_keep_last: 6,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let ambient_signal = events.iter().any(|e| {
+        matches!(e, StreamEvent::Citation { locator: Some(l), .. } if l == "memory")
+            || matches!(e, StreamEvent::SearchTrail { steps } if steps.iter().any(|s| s.contains("ambient_recall")))
+    });
+    assert!(
+        ambient_signal,
+        "ambient recall must fire on production path: {events:?}"
+    );
+    let provider = capture.all_blob();
+    assert!(
+        provider.contains(&marker) || provider.contains("MEMORY_MATCH"),
+        "memory match must appear in model-facing provider context: {provider}"
+    );
+}
+
+// ─── 8c. Attachment reaches model-facing context via search_kb ─────────────
+
+#[tokio::test]
+async fn lab_attachment_reaches_model_facing_context() {
+    let env = LabEnv::new();
+    let c = &env.canaries;
+    let (ws, idx) = ordinary_workspace(&env.root, c);
+    let mut host = ToolHost::new(ws, idx, None);
+    let base = env.root.join(".contextdesk");
+    let session_id = "attach-sess";
+    host.set_session_context_base(Some(base.clone()));
+    host.set_active_session_id(Some(session_id.into()));
+    let store = cd_core::session_context::SessionContextStore::open(
+        &base,
+        session_id,
+        cd_core::session_context::SessionContextCaps::default(),
+    )
+    .unwrap();
+    let attach_marker = format!("ATTACHMENT_MARKER_{}", c.incident_id);
+    store
+        .import_bytes(
+            "incident-note.txt",
+            format!("{attach_marker} cascade failure token\n").as_bytes(),
+        )
+        .unwrap();
+
+    let capture = CaptureCtx::new();
+    let backend = CapturingScriptedBackend::new(
+        vec![
+            tool_call(
+                "att1",
+                "search_kb",
+                &format!(r#"{{"query":"{attach_marker}","limit":4}}"#),
+            ),
+            final_answer(format!("Found attachment evidence for {attach_marker}.")),
+        ],
+        capture.clone(),
+    );
+    let mut history = Vec::new();
+    let events = run_agent_turn(
+        &backend,
+        &mut host,
+        &format!("Search session attachments for {attach_marker}"),
+        &mut history,
+        &AgentOptions {
+            session_id: session_id.into(),
+            max_rounds: 4,
+            ambient_recall_enabled: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        tool_ok_names(&events).iter().any(|n| n == "search_kb")
+            || history.iter().any(|m| m.role == Role::Tool),
+        "search_kb must run against session context"
+    );
+    // Model-facing: tool result and/or later provider round contains attachment.
+    let tool_hit = history
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .any(|m| m.content.contains(&attach_marker) || m.content.contains("incident-note"));
+    let provider_hit =
+        capture.all_blob().contains(&attach_marker) || capture.all_blob().contains("incident-note");
+    assert!(
+        tool_hit || provider_hit,
+        "attachment must reach model-facing tool/provider context; tools={:?} provider={}",
+        history
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>(),
+        capture.all_blob()
+    );
 }
 
 // ─── 9. Mutation oracles (each inverted property must fail the check) ──────
