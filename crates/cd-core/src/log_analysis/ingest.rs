@@ -5237,7 +5237,7 @@ mod tests {
     }
 
     #[test]
-    fn reviewed_directory_and_zip_agree_at_utf8_chunk_boundaries_and_reject_binary_controls() {
+    fn reviewed_directory_and_zip_agree_at_utf8_boundaries_and_binary_policy() {
         use super::super::import_preview::{
             preview_import_path, ImportItemStatus, ImportPreviewReason,
             IMPORT_PREVIEW_SAMPLE_WINDOW_BYTES,
@@ -5250,12 +5250,12 @@ mod tests {
         let structured = utf8_chunk_boundary_jsonl();
         let nul = b"level=info msg=before\0level=error msg=after\n";
         let invalid = vec![0xff; IMPORT_PREVIEW_SAMPLE_WINDOW_BYTES * 4];
-        let mut invalid_head = vec![0x80, 0x81, 0x82];
-        invalid_head.extend_from_slice(b"level=info msg=invalid-source-head\n");
+        let mut legacy_head = vec![0x93, 0x96, 0xe9];
+        legacy_head.extend_from_slice(b"level=info msg=legacy-source-head\n");
         std::fs::write(logs.join("generic-large.jsonl"), &structured).unwrap();
         std::fs::write(logs.join("nul.log"), nul).unwrap();
         std::fs::write(logs.join("invalid.log"), &invalid).unwrap();
-        std::fs::write(logs.join("invalid-head.log"), &invalid_head).unwrap();
+        std::fs::write(logs.join("legacy-head.log"), &legacy_head).unwrap();
 
         let archive = temp.path().join("generic.zip");
         std::fs::write(
@@ -5264,7 +5264,7 @@ mod tests {
                 ("generic-large.jsonl", &structured),
                 ("nul.log", nul),
                 ("invalid.log", &invalid),
-                ("invalid-head.log", &invalid_head),
+                ("legacy-head.log", &legacy_head),
             ]),
         )
         .unwrap();
@@ -5281,7 +5281,7 @@ mod tests {
             assert!(structured_item
                 .reasons
                 .contains(&ImportPreviewReason::StrongFormatMatch));
-            for identity in ["nul.log", "invalid.log", "invalid-head.log"] {
+            for identity in ["nul.log", "invalid.log"] {
                 let item = preview
                     .items
                     .iter()
@@ -5291,6 +5291,16 @@ mod tests {
                 assert!(!item.selected);
                 assert!(item.reasons.contains(&ImportPreviewReason::BinaryContent));
             }
+            let legacy_item = preview
+                .items
+                .iter()
+                .find(|item| item.identity == "legacy-head.log")
+                .unwrap();
+            assert_eq!(legacy_item.status, ImportItemStatus::RawFallback);
+            assert!(legacy_item.selected);
+            assert!(!legacy_item
+                .reasons
+                .contains(&ImportPreviewReason::BinaryContent));
         };
         assert_preview(&logs);
         assert_preview(&archive);
