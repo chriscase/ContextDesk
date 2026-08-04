@@ -12,15 +12,27 @@ import { ThinkingIndicator } from "../ThinkingIndicator";
 import { StreamLiveRegion } from "../StreamLiveRegion";
 import { ToolCallList } from "../ToolCallList";
 import { SourceCitations } from "../SourceCitations";
+import { EvidenceSetPanel } from "../EvidenceSetPanel";
 import {
   formatMsgMetaFooter,
   shortSourceLabel,
   type Msg,
 } from "../../lib/session";
-import { hostOpenExternalUrl, hostReadFile } from "../../lib/host";
+import {
+  hostOpenExternalUrl,
+  hostOpenLogExplorer,
+  hostOpenLogExplorerTarget,
+  hostReadFile,
+  hostLogAddInvestigationEvidence,
+  hostLogQueryEventNeighborhood,
+} from "../../lib/host";
 import { classifyCompletedCitation } from "../../lib/citations";
 import { ActivityCompactLine } from "../activity/ActivityCompactLine";
 import type { ActivityMode, ActivityTurn } from "../../lib/activity/types";
+import type {
+  HostEvidenceCitation,
+  InvestigationAddState,
+} from "../../lib/evidenceLaneBridge";
 
 function isHttpUrl(s: string): boolean {
   return /^https?:\/\//i.test(s.trim());
@@ -240,6 +252,138 @@ function MessageRowImpl({
                   }`,
                 ),
               );
+          }}
+        />
+      ) : null}
+      {m.role === "assistant" && m.citations?.length ? (
+        <EvidenceSetPanel
+          citations={m.citations.map(
+            (c): HostEvidenceCitation => ({
+              id: c.id,
+              label: shortSourceLabel(c.label, c.id),
+              title: c.title,
+              corpusId: c.corpusId,
+            }),
+          )}
+          onOpenCitation={(sourceId, corpusId) => {
+            const route = classifyCompletedCitation(sourceId);
+            if (route === "help") {
+              onOpenHelpCitation?.(sourceId);
+              return;
+            }
+            if (route === "log") {
+              onOpenLogCitation?.(sourceId, corpusId);
+              return;
+            }
+            if (sourceId.startsWith("memory:")) {
+              if (openCompositionFromMemoryId) {
+                openCompositionFromMemoryId(sourceId);
+              } else {
+                setPane("memory");
+                setMemoryPath?.(sourceId);
+              }
+              return;
+            }
+            if (isHttpUrl(sourceId)) {
+              openExternalUrl(sourceId);
+              return;
+            }
+            if (route === "invalid" || route === "deferred") {
+              setSourcePath(sourceId);
+              setPane("source");
+              setSourceContent(
+                "This citation is unsupported or malformed and was not opened.",
+              );
+              return;
+            }
+            setSourcePath(sourceId);
+            setPane("source");
+            setSourceContent("Loading…");
+            void hostReadFile(sourceId)
+              .then((body) => setSourceContent(body))
+              .catch((err) =>
+                setSourceContent(
+                  `Could not read ${sourceId}:\n${
+                    err instanceof Error ? err.message : String(err)
+                  }`,
+                ),
+              );
+          }}
+          onOpenWorkspace={(path) => {
+            setSourcePath(path);
+            setPane("source");
+            setSourceContent("Loading…");
+            void hostReadFile(path)
+              .then((body) => setSourceContent(body))
+              .catch((err) =>
+                setSourceContent(
+                  `Could not read ${path}:\n${
+                    err instanceof Error ? err.message : String(err)
+                  }`,
+                ),
+              );
+          }}
+          resolveHostEvents={async (need) => {
+            const out: {
+              corpusId: string;
+              seq: number;
+              source: string;
+              ts: number;
+              timeQuality: "wall" | "mixed" | "order_only";
+              service?: string | null;
+            }[] = [];
+            for (const item of need) {
+              if (!item.corpusId || item.seq == null) continue;
+              const hood = await hostLogQueryEventNeighborhood(item.corpusId, {
+                targetSeq: item.seq,
+                before: 0,
+                after: 0,
+              });
+              if (hood.status === "missing" || !hood.target) {
+                throw new Error(
+                  `Event ${item.id} missing or stale in corpus ${item.corpusId}.`,
+                );
+              }
+              const t = hood.target;
+              out.push({
+                corpusId: item.corpusId,
+                seq: t.seq,
+                source: t.source,
+                ts: t.ts,
+                timeQuality: t.timeQuality,
+                service: t.service,
+              });
+            }
+            return out;
+          }}
+          onShowInExplorer={async (plan) => {
+            // Open/focus existing corpus only — never reimport or duplicate.
+            if (plan.navTarget) {
+              await hostOpenLogExplorerTarget(plan.corpusId, plan.navTarget);
+            } else {
+              await hostOpenLogExplorer(plan.corpusId);
+            }
+          }}
+          onAddToInvestigation={async (state: InvestigationAddState) => {
+            if (
+              state.status !== "confirmed" ||
+              !state.corpusId ||
+              state.eventRefs.length === 0
+            ) {
+              throw new Error("Investigation add requires explicit confirm.");
+            }
+            const eventRefs = state.eventRefs.map((r) => ({
+              corpusId: r.corpusId,
+              seq: r.seq,
+              source: r.source,
+              timestampHint: r.timestampHint,
+              timeQualityHint: r.timeQualityHint,
+            }));
+            await hostLogAddInvestigationEvidence(state.corpusId, {
+              investigationId: state.investigationId,
+              title: state.title,
+              eventRefs,
+            });
           }}
         />
       ) : null}

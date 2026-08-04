@@ -29,6 +29,10 @@ import {
   hostListChatModels,
   hostListChatSessionsForCorpus,
   hostLoadChatSession,
+  hostLogAddInvestigationEvidence,
+  hostLogQueryEventNeighborhood,
+  hostOpenLogExplorer,
+  hostOpenLogExplorerTarget,
   hostPinChatSession,
   hostRenameChatSession,
   hostSaveChatSession,
@@ -61,10 +65,6 @@ import {
   openPersistedLogCitation,
   parseGovernedLogCitationId,
 } from "../../lib/citations";
-import {
-  hostOpenLogExplorer,
-  hostOpenLogExplorerTarget,
-} from "../../lib/host";
 import { curateModels } from "../../lib/modelCuration";
 import { useMessageWindow } from "../../hooks/useMessageWindow";
 import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
@@ -73,6 +73,7 @@ import { HelpTip } from "../HelpTip";
 import { IconChevronRight } from "../icons";
 import { MarkdownBody } from "../MarkdownBody";
 import { SourceCitations } from "../SourceCitations";
+import { EvidenceSetPanel } from "../EvidenceSetPanel";
 import { ToolCallList } from "../ToolCallList";
 
 export function hasHostLinkedSynthesisRetry(
@@ -362,6 +363,82 @@ function LinkedChatBubble({
           }))}
           onOpenFile={(citation) => {
             onOpenCitation?.(citation.id, citation.corpusId);
+          }}
+        />
+      ) : null}
+      {message.role === "assistant" &&
+      message.citations &&
+      message.citations.length > 0 ? (
+        <EvidenceSetPanel
+          compact
+          citations={message.citations.map((c) => ({
+            id: c.id,
+            label: c.label,
+            title: c.title,
+            corpusId: c.corpusId,
+          }))}
+          onOpenCitation={(sourceId, corpusId) => {
+            onOpenCitation?.(sourceId, corpusId);
+          }}
+          resolveHostEvents={async (need) => {
+            const out: {
+              corpusId: string;
+              seq: number;
+              source: string;
+              ts: number;
+              timeQuality: "wall" | "mixed" | "order_only";
+              service?: string | null;
+            }[] = [];
+            for (const item of need) {
+              if (!item.corpusId || item.seq == null) continue;
+              const hood = await hostLogQueryEventNeighborhood(item.corpusId, {
+                targetSeq: item.seq,
+                before: 0,
+                after: 0,
+              });
+              if (hood.status === "missing" || !hood.target) {
+                throw new Error(
+                  `Event ${item.id} missing or stale in corpus ${item.corpusId}.`,
+                );
+              }
+              const t = hood.target;
+              out.push({
+                corpusId: item.corpusId,
+                seq: t.seq,
+                source: t.source,
+                ts: t.ts,
+                timeQuality: t.timeQuality,
+                service: t.service,
+              });
+            }
+            return out;
+          }}
+          onShowInExplorer={async (plan) => {
+            if (plan.navTarget) {
+              await hostOpenLogExplorerTarget(plan.corpusId, plan.navTarget);
+            } else {
+              await hostOpenLogExplorer(plan.corpusId);
+            }
+          }}
+          onAddToInvestigation={async (state) => {
+            if (
+              state.status !== "confirmed" ||
+              !state.corpusId ||
+              state.eventRefs.length === 0
+            ) {
+              throw new Error("Investigation add requires explicit confirm.");
+            }
+            await hostLogAddInvestigationEvidence(state.corpusId, {
+              investigationId: state.investigationId,
+              title: state.title,
+              eventRefs: state.eventRefs.map((r) => ({
+                corpusId: r.corpusId,
+                seq: r.seq,
+                source: r.source,
+                timestampHint: r.timestampHint,
+                timeQualityHint: r.timeQualityHint,
+              })),
+            });
           }}
         />
       ) : null}
