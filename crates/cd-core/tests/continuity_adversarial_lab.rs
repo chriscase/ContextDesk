@@ -239,6 +239,18 @@ async fn lab_30_plus_turn_ordinary_chat_continuity() {
             format!("Status check turn {t} on {}", c.incident_id)
         };
 
+        // Production skill pin: first turn user text must carry skill process (not evidence).
+        if t == 0 {
+            assert!(
+                user.contains("triage")
+                    || user.contains("PROCESS")
+                    || user.contains("check runbook")
+                    || user.contains("Skill")
+                    || user.contains("skill"),
+                "pinned skill must inject process into user turn text: {user}"
+            );
+        }
+
         let events = run_agent_turn(
             &backend,
             &mut host,
@@ -259,6 +271,23 @@ async fn lab_30_plus_turn_ordinary_chat_continuity() {
 
         all_answers.push_str(&text_from(&events));
         all_answers.push('\n');
+
+        // After turn 0, provider must have seen skill-injected process text.
+        if t == 0 {
+            let first_provider = capture.all_blob();
+            assert!(
+                first_provider.contains("check runbook")
+                    || first_provider.contains("PROCESS")
+                    || first_provider.contains("triage")
+                    || history.iter().any(|m| {
+                        m.role == Role::User
+                            && (m.content.contains("check runbook")
+                                || m.content.contains("PROCESS")
+                                || m.content.contains("triage"))
+                    }),
+                "skill process must reach model-facing history/provider after pin"
+            );
+        }
 
         // Turn 15 must hit permission boundary without writing.
         if t == 15 {
@@ -338,7 +367,7 @@ async fn lab_30_plus_turn_ordinary_chat_continuity() {
         "constraint must survive close/reopen"
     );
 
-    // Continue after reopen with production prepare_model_context + agent.
+    // Continue after reopen with production SessionStore history → agent path.
     let mut continued = reopened_hist;
     let cont_capture = CaptureCtx::new();
     let cont_backend = CapturingScriptedBackend::new(
@@ -357,11 +386,22 @@ async fn lab_30_plus_turn_ordinary_chat_continuity() {
     )
     .await
     .unwrap();
+    // Provider-facing context after reopen must still see durable investigation state.
+    let post_reopen = cont_capture.last_blob();
     assert!(
-        text_from(&events).contains(&c.incident_id)
-            || cont_capture.last_blob().contains(&c.incident_id)
-            || continued.iter().any(|m| m.content.contains(&c.incident_id))
+        post_reopen.contains(&c.incident_id)
+            || post_reopen.contains("never reboot")
+            || post_reopen.contains("CONSTRAINT")
+            || continued.iter().any(|m| {
+                m.content.contains(&c.incident_id) || m.content.contains(&c.user_constraint)
+            }),
+        "session reopen must feed prior investigation state into model context: {post_reopen}"
     );
+    assert_eq!(
+        reopened.id, session_id,
+        "durable session identity must match across close/reopen"
+    );
+    let _ = text_from(&events);
 
     // Attachment still resolvable for this session id.
     assert!(
@@ -1343,31 +1383,46 @@ async fn lab_attachment_reaches_model_facing_context() {
         cd_core::session_context::SessionContextCaps::default(),
     )
     .unwrap();
-    let attach_marker = format!("ATTACHMENT_MARKER_{}", c.incident_id);
+    // Body-only secrets: never placed in the user prompt or final_answer script.
+    // Search uses a neutral query that still hits the session pack.
+    const BODY_TOKEN: &str = "cascade failure token ZQ9-ATTACH-ONLY";
+    const FILE_NAME: &str = "incident-note.txt";
     store
         .import_bytes(
-            "incident-note.txt",
-            format!("{attach_marker} cascade failure token\n").as_bytes(),
+            FILE_NAME,
+            format!("ATTACHMENT_MARKER_{} {BODY_TOKEN}\n", c.incident_id).as_bytes(),
         )
         .unwrap();
 
     let capture = CaptureCtx::new();
     let backend = CapturingScriptedBackend::new(
         vec![
+            // Neutral query — does not embed BODY_TOKEN or ATTACHMENT_MARKER.
             tool_call(
                 "att1",
                 "search_kb",
-                &format!(r#"{{"query":"{attach_marker}","limit":4}}"#),
+                r#"{"query":"cascade failure","limit":4}"#,
             ),
-            final_answer(format!("Found attachment evidence for {attach_marker}.")),
+            final_answer(
+                "I will answer only from tool evidence returned for the attachment search.",
+            ),
         ],
         capture.clone(),
     );
     let mut history = Vec::new();
+    // User prompt deliberately omits BODY_TOKEN, ATTACHMENT_MARKER, and file name.
+    let user_prompt = "Search the session context pack for any cascade-related notes.";
+    assert!(
+        !user_prompt.contains(BODY_TOKEN)
+            && !user_prompt.contains("ATTACHMENT_MARKER")
+            && !user_prompt.contains(FILE_NAME),
+        "fixture invariant: user prompt must not plant attachment body"
+    );
+
     let events = run_agent_turn(
         &backend,
         &mut host,
-        &format!("Search session attachments for {attach_marker}"),
+        user_prompt,
         &mut history,
         &AgentOptions {
             session_id: session_id.into(),
@@ -1380,26 +1435,56 @@ async fn lab_attachment_reaches_model_facing_context() {
     .unwrap();
 
     assert!(
-        tool_ok_names(&events).iter().any(|n| n == "search_kb")
-            || history.iter().any(|m| m.role == Role::Tool),
-        "search_kb must run against session context"
+        tool_ok_names(&events).iter().any(|n| n == "search_kb"),
+        "search_kb must succeed: {events:?}"
     );
-    // Model-facing: tool result and/or later provider round contains attachment.
-    let tool_hit = history
+
+    // REQUIRED: production Role::Tool result carries attachment body from the pack.
+    let tool_bodies: Vec<&str> = history
         .iter()
         .filter(|m| m.role == Role::Tool)
-        .any(|m| m.content.contains(&attach_marker) || m.content.contains("incident-note"));
-    let provider_hit =
-        capture.all_blob().contains(&attach_marker) || capture.all_blob().contains("incident-note");
+        .map(|m| m.content.as_str())
+        .collect();
     assert!(
-        tool_hit || provider_hit,
-        "attachment must reach model-facing tool/provider context; tools={:?} provider={}",
-        history
-            .iter()
-            .filter(|m| m.role == Role::Tool)
-            .map(|m| m.content.as_str())
-            .collect::<Vec<_>>(),
-        capture.all_blob()
+        !tool_bodies.is_empty(),
+        "expected Role::Tool messages from search_kb"
+    );
+    let tool_joined = tool_bodies.join("\n");
+    assert!(
+        tool_joined.contains(BODY_TOKEN) || tool_joined.contains(FILE_NAME),
+        "Role::Tool must surface attachment body/file from session pack, not only the user prompt: {tool_joined}"
+    );
+    // User + assistant scripted text must not be the sole source of BODY_TOKEN.
+    let non_tool: String = history
+        .iter()
+        .filter(|m| m.role != Role::Tool)
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !non_tool.contains(BODY_TOKEN),
+        "BODY_TOKEN must arrive via tool path, not user/assistant prose: {non_tool}"
+    );
+
+    // Post-tool provider rounds must include the tool-sourced body (model saw it).
+    let rounds = capture.rounds.lock().expect("capture lock");
+    assert!(
+        rounds.len() >= 2,
+        "expected search_kb round then synthesis round, got {}",
+        rounds.len()
+    );
+    // Round 0 is first complete() (tools requested); later rounds include Tool results.
+    let post_tool_has_body = rounds.iter().skip(1).any(|r| {
+        r.iter().any(|m| {
+            m.role == Role::Tool
+                && (m.content.contains(BODY_TOKEN) || m.content.contains(FILE_NAME))
+        }) || model_context_blob(r).contains(BODY_TOKEN)
+            || model_context_blob(r).contains(FILE_NAME)
+    });
+    assert!(
+        post_tool_has_body,
+        "post-tool provider context must include attachment body from Role::Tool; n_rounds={} tool_history={tool_joined}",
+        rounds.len()
     );
 }
 
