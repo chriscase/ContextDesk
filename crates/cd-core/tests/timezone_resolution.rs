@@ -98,3 +98,30 @@ fn mixed_explicit_and_offsetless_records_preserve_explicit_instant() {
     assert_eq!(provenance.basis, TimezoneDeclarationBasis::UserDeclared);
     assert_eq!(provenance.applied_revision, 12);
 }
+
+#[test]
+fn generic_local_datetime_message_resolves_after_user_iana_declaration() {
+    let record = parse_line(
+        "2021-03-05 02:53:53,654 INFO  - service initialized",
+        None,
+        202,
+    );
+    assert_eq!(record.ts, Some(202));
+    assert_eq!(record.message, "service initialized");
+    assert_eq!(
+        record.unresolved_local_timestamp.as_deref(),
+        Some("2021-03-05 02:53:53,654")
+    );
+
+    let TimestampResolution::Resolved {
+        unix_seconds,
+        provenance,
+    } = resolver("America/New_York")
+        .resolve(SOURCE, &record)
+        .unwrap()
+    else {
+        panic!("recognized local timestamp should resolve after timezone selection");
+    };
+    assert_eq!(unix_seconds, 1_614_930_833);
+    assert_eq!(provenance.basis, TimezoneDeclarationBasis::UserDeclared);
+}

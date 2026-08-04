@@ -109,6 +109,19 @@ fn rotated_secondary_log() -> Vec<u8> {
     (0..500).map(zoned_line).collect::<String>().into_bytes()
 }
 
+/// Producer-neutral local calendar records without logger/thread fields.
+/// These must still enter timezone review rather than falling back to plain
+/// order-only text with the timestamp embedded in the message.
+fn generic_local_log() -> Vec<u8> {
+    [
+        "2024-03-05 02:10:00,123 INFO  - service initialized\n",
+        "2024-03-05 02:10:01 DEBUG cache warmed\n",
+        "2024-03-05 02:10:02  APP_INFO-0003: configuration loaded\n",
+    ]
+    .concat()
+    .into_bytes()
+}
+
 /// The control: genuinely not text. A NUL plus a dominant run of invalid
 /// bytes must stay unsupported in BOTH transports — the parity fix must not
 /// be a blanket "treat everything as text".
@@ -124,12 +137,14 @@ fn binary_control() -> Vec<u8> {
 
 const PRIMARY: &str = "service.log-20240305T025959Z";
 const SECONDARY: &str = "database-20240305T120000Z.log";
+const GENERIC_LOCAL: &str = "local-application.log";
 const CONTROL: &str = "opaque_payload.bin";
 
 fn corpus_members() -> Vec<(&'static str, Vec<u8>)> {
     vec![
         (PRIMARY, rotated_primary_log()),
         (SECONDARY, rotated_secondary_log()),
+        (GENERIC_LOCAL, generic_local_log()),
         (CONTROL, binary_control()),
     ]
 }
@@ -409,15 +424,15 @@ fn quick_import_preserves_folder_and_zip_parity() {
         "quick import must not depend on transport"
     );
 
-    // Non-vacuous: the corpus really did import both text sources, the
+    // Non-vacuous: the corpus really did import every text source, the
     // binary control really was excluded, and timezone review really has
     // something to act on.
-    assert_eq!(from_folder.files, 2, "both text sources imported");
+    assert_eq!(from_folder.files, 3, "every text source imported");
     assert!(from_folder.lines > 900, "a large corpus, not a stub");
     assert_eq!(
         from_folder.unresolved_local,
-        vec![PRIMARY.to_string()],
-        "the local-timestamp source is the one needing a timezone"
+        vec![GENERIC_LOCAL.to_string(), PRIMARY.to_string()],
+        "both specialized and producer-neutral local timestamps need a timezone"
     );
     assert!(
         from_folder
@@ -456,7 +471,11 @@ fn reviewed_import_preserves_folder_and_zip_parity() {
     for (label, facts) in [("folder", &folder_preview), ("zip", &zip_preview)] {
         assert_eq!(
             facts.selected,
-            vec![SECONDARY.to_string(), PRIMARY.to_string()],
+            vec![
+                SECONDARY.to_string(),
+                GENERIC_LOCAL.to_string(),
+                PRIMARY.to_string(),
+            ],
             "{label}: every honest rotated text source must be preselected, \
              while the binary control remains excluded"
         );

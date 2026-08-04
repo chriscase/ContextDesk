@@ -361,6 +361,10 @@ pub(super) fn looks_like_wildfly(t: &str) -> bool {
     parse_wildfly_parts(t).is_some()
 }
 
+pub(super) fn looks_like_datetime_message(t: &str) -> bool {
+    parse_datetime_message_parts(t).is_some()
+}
+
 pub(super) fn looks_like_elasticsearch(t: &str) -> bool {
     parse_elasticsearch_parts(t).is_some()
 }
@@ -416,6 +420,9 @@ pub fn parse_line_with_fingerprint(
         }
         Some(BuiltInGrammar::DateLevelLoggerThread) => {
             parse_wildfly(raw, ingest_seq).unwrap_or_else(|| parse_plain(raw, ingest_seq))
+        }
+        Some(BuiltInGrammar::DateTimeMessage) => {
+            parse_datetime_message(raw, ingest_seq).unwrap_or_else(|| parse_plain(raw, ingest_seq))
         }
         Some(BuiltInGrammar::BracketedTimestampLevelComponentNode) => {
             parse_elasticsearch(raw, ingest_seq).unwrap_or_else(|| parse_plain(raw, ingest_seq))
@@ -1504,6 +1511,226 @@ fn is_wildfly_level(level: &str) -> bool {
     )
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DateTimeMessageParts<'a> {
+    timestamp: WildflyTimestamp,
+    source_timestamp: &'a str,
+    level: Option<&'a str>,
+    payload: &'a str,
+}
+
+/// Parse a producer-neutral local timestamp prefix followed by either a known
+/// severity or a message separated by at least two spaces. Specialized
+/// grammars retain precedence, and the timestamp remains unresolved until the
+/// user supplies a timezone.
+fn parse_datetime_message_parts(raw: &str) -> Option<DateTimeMessageParts<'_>> {
+    if parse_wildfly_parts(raw).is_some() {
+        return None;
+    }
+
+    const SECOND_TIMESTAMP_BYTES: usize = 19;
+    let second_timestamp = raw.get(..SECOND_TIMESTAMP_BYTES)?;
+    let bytes = second_timestamp.as_bytes();
+    if bytes.len() != SECOND_TIMESTAMP_BYTES
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !matches!(bytes[10], b' ' | b'T')
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7 | 10 | 13 | 16) || byte.is_ascii_digit())
+    {
+        return None;
+    }
+
+    let mut timestamp_bytes = SECOND_TIMESTAMP_BYTES;
+    if raw
+        .as_bytes()
+        .get(timestamp_bytes)
+        .is_some_and(|byte| matches!(byte, b',' | b'.'))
+    {
+        timestamp_bytes += 1;
+        let fraction_start = timestamp_bytes;
+        while raw
+            .as_bytes()
+            .get(timestamp_bytes)
+            .is_some_and(u8::is_ascii_digit)
+            && timestamp_bytes - fraction_start < 9
+        {
+            timestamp_bytes += 1;
+        }
+        if timestamp_bytes == fraction_start
+            || raw
+                .as_bytes()
+                .get(timestamp_bytes)
+                .is_some_and(u8::is_ascii_digit)
+        {
+            return None;
+        }
+    }
+
+    let source_timestamp = raw.get(..timestamp_bytes)?;
+    if !is_complete_local_timestamp(source_timestamp) {
+        return None;
+    }
+    let tail = raw.get(timestamp_bytes..)?;
+
+    if let Some((offset, rest)) = take_wildfly_offset_prefix(tail) {
+        return datetime_message_after_zone(source_timestamp, offset, rest);
+    }
+
+    let separator_bytes = tail.len().saturating_sub(tail.trim_start().len());
+    if separator_bytes == 0 {
+        return None;
+    }
+    let body = tail.trim_start();
+    let (token, token_tail) = take_token(body)?;
+    if let Some(offset) = canonical_datetime_zone(token) {
+        return datetime_message_after_zone(source_timestamp, &offset, token_tail);
+    }
+    if looks_like_unresolved_zone_column(token, token_tail) {
+        return None;
+    }
+    if let Some(level) = common_level_token(token) {
+        let payload = strip_standalone_dash_delimiter(token_tail.trim_start());
+        return Some(DateTimeMessageParts {
+            timestamp: WildflyTimestamp::Local,
+            source_timestamp,
+            level: Some(level),
+            payload,
+        });
+    }
+
+    if separator_bytes < 2 || body.is_empty() {
+        return None;
+    }
+    Some(DateTimeMessageParts {
+        timestamp: WildflyTimestamp::Local,
+        source_timestamp,
+        level: None,
+        payload: body,
+    })
+}
+
+fn datetime_message_after_zone<'a>(
+    source_timestamp: &'a str,
+    offset: &str,
+    rest: &'a str,
+) -> Option<DateTimeMessageParts<'a>> {
+    let body = rest.trim_start();
+    let (level_token, payload) = take_token(body)?;
+    let level = common_level_token(level_token)?;
+    let payload = strip_standalone_dash_delimiter(payload.trim_start());
+    Some(DateTimeMessageParts {
+        timestamp: WildflyTimestamp::Wall(parse_datetime_wall_timestamp(source_timestamp, offset)?),
+        source_timestamp,
+        level: Some(level),
+        payload,
+    })
+}
+
+fn canonical_datetime_zone(token: &str) -> Option<String> {
+    if matches!(token.to_ascii_uppercase().as_str(), "UTC" | "GMT") {
+        return Some("Z".into());
+    }
+    canonical_wildfly_offset(token)
+}
+
+fn parse_datetime_wall_timestamp(local: &str, offset: &str) -> Option<i64> {
+    let mut value = local.replace(',', ".");
+    value.replace_range(10..11, "T");
+    value.push_str(&canonical_datetime_zone(offset)?);
+    parse_explicit_timestamp(&value)
+}
+
+fn common_level_token(token: &str) -> Option<&str> {
+    let token = token
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(token);
+    let token = token.strip_suffix(':').unwrap_or(token);
+    matches!(
+        token.to_ascii_uppercase().as_str(),
+        "TRACE"
+            | "DEBUG"
+            | "INFO"
+            | "NOTICE"
+            | "LOG"
+            | "WARN"
+            | "WARNING"
+            | "ERROR"
+            | "SEVERE"
+            | "CRITICAL"
+            | "CRIT"
+            | "FATAL"
+            | "PANIC"
+            | "ALERT"
+            | "EMERG"
+            | "EMERGENCY"
+    )
+    .then_some(token)
+}
+
+fn looks_like_unresolved_zone_column(token: &str, rest: &str) -> bool {
+    (2..=8).contains(&token.len())
+        && token.bytes().all(|byte| byte.is_ascii_uppercase())
+        && take_token(rest)
+            .and_then(|(candidate, _)| common_level_token(candidate))
+            .is_some()
+}
+
+fn strip_standalone_dash_delimiter(payload: &str) -> &str {
+    let Some(after_dash) = payload.strip_prefix('-') else {
+        return payload;
+    };
+    if after_dash.is_empty() {
+        ""
+    } else if after_dash.chars().next().is_some_and(char::is_whitespace) {
+        after_dash.trim_start()
+    } else {
+        payload
+    }
+}
+
+fn parse_datetime_message(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
+    let parts = parse_datetime_message_parts(raw.trim())?;
+    let level = parts
+        .level
+        .or_else(|| extract_level_token(parts.payload))
+        .map(normalize_level)
+        .unwrap_or_else(|| "unknown".into());
+    let (ts, timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp) =
+        match parts.timestamp {
+            WildflyTimestamp::Wall(ts) => (
+                ts,
+                TimestampProvenance::ExplicitWallClock,
+                ActiveTimestampBasis::ExplicitWall,
+                None,
+            ),
+            WildflyTimestamp::Local => (
+                ingest_seq as i64,
+                TimestampProvenance::UnresolvedLocal,
+                ActiveTimestampBasis::OrderOnly,
+                Some(parts.source_timestamp.to_string()),
+            ),
+        };
+    Some(ParsedLine {
+        ts: Some(ts),
+        timestamp_provenance,
+        active_timestamp_basis,
+        unresolved_local_timestamp,
+        level,
+        service: None,
+        host: None,
+        trace_id: None,
+        message: parts.payload.to_string(),
+        raw: raw.to_string(),
+        format: LogFormat::Syslog,
+    })
+}
+
 fn parse_wildfly(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
     let parts = parse_wildfly_parts(raw.trim())?;
     let mut message = format!("[{}] ({})", parts.logger, parts.thread);
@@ -1895,6 +2122,8 @@ fn extract_level_token(s: &str) -> Option<&str> {
                 | "LOG"
                 | "NOTICE"
                 | "CRITICAL"
+                | "ALERT"
+                | "EMERG"
                 | "EMERGENCY"
                 | "PANIC"
         ) {
@@ -1917,10 +2146,10 @@ pub fn normalize_level(s: &str) -> String {
         "log" => "log".into(),
         "warn" | "warning" => "warn".into(),
         "error" | "err" | "severe" => "error".into(),
-        "critical" => "critical".into(),
+        "critical" | "crit" => "critical".into(),
+        "alert" => "alert".into(),
         "fatal" | "panic" => "fatal".into(),
         "emergency" | "emerg" => "emergency".into(),
-        "crit" => "critical".into(),
         "" => "unknown".into(),
         other => other.to_string(),
     }
@@ -1929,7 +2158,7 @@ pub fn normalize_level(s: &str) -> String {
 /// Severity rank for clustering (higher = worse).
 pub fn level_severity(level: &str) -> u8 {
     match normalize_level(level).as_str() {
-        "emergency" | "fatal" | "critical" | "panic" => 5,
+        "emergency" | "alert" | "fatal" | "critical" | "panic" => 5,
         "error" => 4,
         "warn" => 3,
         "info" | "notice" | "log" => 2,
@@ -2336,6 +2565,165 @@ mod tests {
     }
 
     #[test]
+    fn datetime_message_variants_preserve_time_evidence_and_clean_payloads() {
+        let cases = [
+            (
+                "2026-07-29 09:14:05,123 INFO  - service registered",
+                "info",
+                "service registered",
+                "2026-07-29 09:14:05,123",
+            ),
+            (
+                "2026-07-29T09:14:06.004321 [DEBUG] command completed",
+                "debug",
+                "command completed",
+                "2026-07-29T09:14:06.004321",
+            ),
+            (
+                "2026-07-29 09:14:07 INFO  service started",
+                "info",
+                "service started",
+                "2026-07-29 09:14:07",
+            ),
+            (
+                "2026-07-29 09:14:08  CORE_INFO-0003: configuration loaded",
+                "info",
+                "CORE_INFO-0003: configuration loaded",
+                "2026-07-29 09:14:08",
+            ),
+            (
+                "2026-07-29 09:14:09.12 NOTICE: maintenance scheduled",
+                "notice",
+                "maintenance scheduled",
+                "2026-07-29 09:14:09.12",
+            ),
+            (
+                "2026-07-29 09:14:10 CRITICAL -1 retries remaining",
+                "critical",
+                "-1 retries remaining",
+                "2026-07-29 09:14:10",
+            ),
+            (
+                "2026-07-29 09:14:11 INFO --flag rejected",
+                "info",
+                "--flag rejected",
+                "2026-07-29 09:14:11",
+            ),
+        ];
+
+        for (index, (line, level, message, local_timestamp)) in cases.into_iter().enumerate() {
+            let parsed = parse_line_with_fingerprint(line, None, 100 + index as u64);
+            assert_eq!(
+                parsed.fingerprint.format_id,
+                Some("datetime-message-record"),
+                "line={line}"
+            );
+            assert_eq!(parsed.parsed.format, LogFormat::Syslog, "line={line}");
+            assert_eq!(parsed.parsed.level, level, "line={line}");
+            assert_eq!(parsed.parsed.message, message, "line={line}");
+            assert_eq!(parsed.parsed.raw, line, "line={line}");
+            assert_eq!(
+                parsed.parsed.timestamp_provenance,
+                TimestampProvenance::UnresolvedLocal,
+                "line={line}"
+            );
+            assert_eq!(
+                parsed.parsed.unresolved_local_timestamp.as_deref(),
+                Some(local_timestamp),
+                "line={line}"
+            );
+            assert_eq!(
+                parsed.parsed.active_timestamp_basis,
+                ActiveTimestampBasis::OrderOnly,
+                "line={line}"
+            );
+        }
+    }
+
+    #[test]
+    fn datetime_message_requires_valid_time_and_unambiguous_separator() {
+        let lines = [
+            "2026-13-29 09:14:05,123 INFO - impossible month",
+            "2026-07-29 25:14:05 INFO - impossible hour",
+            "2026-07-29 09:14:05,1234567890 INFO - overlong fraction",
+            "2026-07-29 09:14:05 single-space-message",
+            "2026-07-29 09:14:05  EST INFO ambiguous abbreviation",
+        ];
+
+        for (index, line) in lines.into_iter().enumerate() {
+            let parsed = parse_line_with_fingerprint(line, None, 200 + index as u64);
+            assert_eq!(
+                parsed.fingerprint.format_id,
+                Some("plain-line"),
+                "line={line}"
+            );
+            assert_eq!(parsed.parsed.format, LogFormat::Plain, "line={line}");
+            assert_eq!(parsed.parsed.message, line, "line={line}");
+            assert_eq!(
+                parsed.parsed.unresolved_local_timestamp, None,
+                "line={line}"
+            );
+        }
+    }
+
+    #[test]
+    fn datetime_message_explicit_zones_are_wall_clock_and_never_redeclared() {
+        let cases = [
+            (
+                "2025-01-01 13:20:00 GMT LOG: database ready",
+                "log",
+                "database ready",
+            ),
+            ("2025-01-01 13:20:00  UTC INFO ready", "info", "ready"),
+            (
+                "2025-01-01T14:20:00.25 +01:00 WARN offset ready",
+                "warn",
+                "offset ready",
+            ),
+        ];
+
+        for (line, level, message) in cases {
+            let parsed = parse_line_with_fingerprint(line, None, 999);
+            assert_eq!(
+                parsed.fingerprint.format_id,
+                Some("datetime-message-record")
+            );
+            assert_eq!(parsed.parsed.ts, Some(SHARED_INSTANT_SECS), "line={line}");
+            assert_eq!(parsed.parsed.level, level, "line={line}");
+            assert_eq!(parsed.parsed.message, message, "line={line}");
+            assert_eq!(
+                parsed.parsed.timestamp_provenance,
+                TimestampProvenance::ExplicitWallClock,
+                "line={line}"
+            );
+            assert_eq!(
+                parsed.parsed.unresolved_local_timestamp, None,
+                "line={line}"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_datetime_does_not_override_an_explicit_coarse_format_hint() {
+        let line = "2026-07-29 09:14:05 INFO service ready";
+        let parsed = parse_line(line, Some(LogFormat::Plain), 301);
+        assert_eq!(parsed.format, LogFormat::Plain);
+        assert_eq!(parsed.message, line);
+        assert_eq!(parsed.unresolved_local_timestamp, None);
+    }
+
+    #[test]
+    fn specialized_wildfly_grammar_keeps_precedence_over_generic_local_datetime() {
+        let line = "2026-07-29 09:14:05,123 INFO [org.example.Startup] (main) ready";
+        let parsed = parse_line_with_fingerprint(line, None, 300);
+        assert_eq!(
+            parsed.fingerprint.format_id,
+            Some("date-level-logger-thread-record")
+        );
+        assert_eq!(parsed.parsed.message, "[org.example.Startup] (main) ready");
+    }
+
+    #[test]
     fn wildfly_explicit_offsets_normalize_to_the_same_unix_second() {
         let lines = [
             "2025-01-01 13:20:00,999Z INFO [org.example.Clock] (main) shared-z",
@@ -2360,9 +2748,7 @@ mod tests {
     fn wildfly_malformed_and_timestamp_like_payloads_do_not_false_parse_or_drop() {
         let lines = [
             "2026-13-29 09:14:05,123 INFO [org.example.BadDate] (main) impossible month",
-            "2026-07-29 09:14:05,12 INFO [org.example.ShortMillis] (main) short millis",
-            "2026-07-29 09:14:05,123 NOTICE [org.example.Level] (main) unsupported level",
-            "2026-07-29 09:14:05,123 INFO org.example.MissingBrackets (main) malformed",
+            "2026-07-29 09:14:05,123 CUSTOMLEVEL [org.example.Level] (main) unsupported level",
             "INFO [org.example.Payload] (main) observed 2026-07-29 09:14:05,123 in a message",
         ];
 
