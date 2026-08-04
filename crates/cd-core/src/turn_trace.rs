@@ -1093,6 +1093,34 @@ impl TurnTraceSink for RecordingTurnTrace {
     }
 }
 
+/// Bound one session/message id to a fixed-size, collision-safe stand-in.
+///
+/// An id at or under [`MAX_DEVELOPER_KEY_CHARS`] passes through unchanged
+/// (the common case — real ids are short). An id over that bound is NOT
+/// simply truncated to its first `N` characters: two different full-length
+/// ids that happen to share a long common prefix would then collapse onto
+/// the identical bounded key, letting `get`/`insert` resolve the wrong
+/// session's sensitive developer detail and letting `forget_session` delete
+/// more than the one session it was asked to forget. Instead, an oversized
+/// id becomes a short human-legible prefix plus a SHA-256 digest of the
+/// FULL raw string, so two distinct full-length ids can only ever collide
+/// with cryptographic-hash improbability — never merely from a shared
+/// prefix. The raw oversized id itself is never retained, only this bounded
+/// form; every entry point (`insert`, `get`, `forget_session`) MUST call
+/// this exact function so they never disagree on what a given id maps to.
+fn bound_id_component(value: &str) -> String {
+    if value.chars().count() <= MAX_DEVELOPER_KEY_CHARS {
+        return value.to_string();
+    }
+    use sha2::{Digest, Sha256};
+    let digest_hex = format!("{:x}", Sha256::digest(value.as_bytes()));
+    // `#` plus the fixed 64-hex-char digest is always the same length, so
+    // the prefix budget is a compile-time-obvious constant subtraction.
+    let prefix_budget = MAX_DEVELOPER_KEY_CHARS.saturating_sub(digest_hex.len() + 1);
+    let prefix: String = value.chars().take(prefix_budget).collect();
+    format!("{prefix}#{digest_hex}")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct DeveloperTurnKey {
     session_id: String,
@@ -1101,16 +1129,18 @@ struct DeveloperTurnKey {
 
 impl DeveloperTurnKey {
     /// The only way a [`DeveloperTurnKey`] gets built. Every id component is
-    /// bounded to [`MAX_DEVELOPER_KEY_CHARS`] here, uniformly, so:
+    /// bounded via [`bound_id_component`] here, uniformly, so:
     /// - `insert`/`get`/`forget_session` always agree on the same key for
     ///   the same input, however long that input is;
     /// - a caller cannot bypass [`MAX_DEVELOPER_STORE_BYTES`] by handing the
     ///   public `insert` API an unbounded session/message id — the id itself
-    ///   is capped, not merely the event payloads hung off it.
+    ///   is capped, not merely the event payloads hung off it;
+    /// - two DIFFERENT full-length ids can never collide onto the same key
+    ///   merely because they share a prefix — see [`bound_id_component`].
     fn bounded(session_id: &str, message_id: &str) -> Self {
         Self {
-            session_id: bound_chars(session_id, MAX_DEVELOPER_KEY_CHARS).0,
-            message_id: bound_chars(message_id, MAX_DEVELOPER_KEY_CHARS).0,
+            session_id: bound_id_component(session_id),
+            message_id: bound_id_component(message_id),
         }
     }
 
@@ -1342,8 +1372,12 @@ impl DeveloperDetailStore {
     }
 
     /// Delete every sensitive developer record for one chat session.
+    ///
+    /// Uses the IDENTICAL [`bound_id_component`] transform `insert`/`get`
+    /// use, so this can never diverge into deleting the wrong (or an
+    /// additional, aliased) session's records.
     pub fn forget_session(&mut self, session_id: &str) {
-        let bounded_session_id = bound_chars(session_id, MAX_DEVELOPER_KEY_CHARS).0;
+        let bounded_session_id = bound_id_component(session_id);
         let freed: usize = self
             .bytes
             .iter()
@@ -2329,5 +2363,71 @@ mod tests {
         // Lookup with the same (huge) ids must still resolve — insert and get
         // bound identically, so the same input always maps to the same key.
         assert!(store.get(&huge_session_id, &huge_message_id).is_some());
+    }
+
+    /// Regression for the shared-prefix-truncation bug: two DISTINCT
+    /// ~200k-char session ids that share the same first 256+ characters
+    /// (differing only in their tail) must NEVER be treated as the same
+    /// session. A naive `bound_chars`-only truncation collapses both onto
+    /// the identical bounded key — this proves the fix (a full-string
+    /// digest, not a prefix) keeps them apart end-to-end: insert, get, AND
+    /// forget_session all agree, and forgetting one never touches the other.
+    #[test]
+    fn oversized_session_ids_sharing_a_long_prefix_never_alias_across_insert_get_and_forget() {
+        let shared_prefix = "a".repeat(300_000);
+        let session_a = format!("{shared_prefix}-tail-A-only");
+        let session_b = format!("{shared_prefix}-tail-B-only");
+        assert_ne!(session_a, session_b);
+        let shared_probe_len = MAX_DEVELOPER_KEY_CHARS + 50;
+        assert_eq!(
+            session_a.chars().take(shared_probe_len).collect::<String>(),
+            session_b.chars().take(shared_probe_len).collect::<String>(),
+            "test setup sanity: the two ids must share more than \
+             MAX_DEVELOPER_KEY_CHARS of common prefix"
+        );
+
+        let mut event_a = bare_event(0, "record-for-session-A");
+        event_a.response = Some(DeveloperPayload::text("session A's sensitive content"));
+        let mut event_b = bare_event(0, "record-for-session-B");
+        event_b.response = Some(DeveloperPayload::text("session B's sensitive content"));
+
+        let mut store = DeveloperDetailStore::default();
+        store.insert(&session_a, "message-1", vec![event_a], 0);
+        store.insert(&session_b, "message-1", vec![event_b], 0);
+
+        // 1. Each session's `get` must resolve to ITS OWN record, not the
+        // other's — no aliasing from the shared 300k-char prefix.
+        let stored_a = store
+            .get(&session_a, "message-1")
+            .expect("session A record present");
+        let stored_b = store
+            .get(&session_b, "message-1")
+            .expect("session B record present");
+        assert_eq!(stored_a[0].label, "record-for-session-A");
+        assert_eq!(stored_b[0].label, "record-for-session-B");
+        assert_eq!(
+            stored_a[0].response.as_ref().unwrap().content,
+            "session A's sensitive content"
+        );
+        assert_eq!(
+            stored_b[0].response.as_ref().unwrap().content,
+            "session B's sensitive content"
+        );
+
+        // 2. Forgetting session A must remove ONLY session A's record —
+        // session B's must still be retrievable, byte-for-byte unchanged.
+        store.forget_session(&session_a);
+        assert!(
+            store.get(&session_a, "message-1").is_none(),
+            "forgotten session must actually be gone"
+        );
+        let still_b = store
+            .get(&session_b, "message-1")
+            .expect("forgetting session A must not remove session B's record");
+        assert_eq!(still_b[0].label, "record-for-session-B");
+        assert_eq!(
+            still_b[0].response.as_ref().unwrap().content,
+            "session B's sensitive content"
+        );
     }
 }
