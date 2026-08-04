@@ -4,7 +4,7 @@
 //! These drive the exact `cd-core` entry points the Tauri commands behind
 //! LogPane call — `log_preview_import` → [`preview_import_plan`],
 //! `log_run_import` → [`verify_import_plan`] + selection-bound ingest, and
-//! quick import → `ingest_path_with_policy_bindings_and_observer`. They are
+//! quick import → `ingest_path_with_policy_and_observer`. They are
 //! not reducer tests: every assertion is on what the trusted core actually
 //! produced from bytes on disk.
 //!
@@ -22,7 +22,9 @@
 use cd_core::log_analysis::import_preview::{
     event_importable, preview_import_plan, verify_import_plan,
 };
-use cd_core::log_analysis::ingest::ingest_path_with_policy_bindings_and_observer;
+use cd_core::log_analysis::ingest::{
+    ingest_path_with_policy_and_observer, ingest_path_with_policy_selection_and_observer,
+};
 use cd_core::log_analysis::store::LogCorpus;
 use cd_core::log_analysis::{
     apply_source_timezones, load_timezone_resolution_state, preview_source_timezone,
@@ -248,17 +250,28 @@ fn import_facts(cache: &Path, path: &Path, name: &str, reviewed: bool) -> Import
         verify_import_plan(path, plan.plan_version, &plan.plan_token, &selected, None)
             .expect("plan verifies")
     });
-    let report = ingest_path_with_policy_bindings_and_observer(
-        cache,
-        path,
-        name,
-        &LogEmbedPolicy::default(),
-        None,
-        &NoopProcessProgress,
-        None,
-        selection.as_ref(),
-        None,
-    )
+    let report = if let Some(selection) = selection.as_ref() {
+        ingest_path_with_policy_selection_and_observer(
+            cache,
+            path,
+            name,
+            &LogEmbedPolicy::default(),
+            None,
+            &NoopProcessProgress,
+            None,
+            selection,
+        )
+    } else {
+        ingest_path_with_policy_and_observer(
+            cache,
+            path,
+            name,
+            &LogEmbedPolicy::default(),
+            None,
+            &NoopProcessProgress,
+            None,
+        )
+    }
     .expect("ingest succeeds");
 
     let mut per_source: Vec<(String, u64)> = report
