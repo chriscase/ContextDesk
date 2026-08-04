@@ -856,6 +856,29 @@ pub enum TracedHostEvent {
         /// Stable source identifier.
         source_id: String,
     },
+    /// Turn prelude observed on the live stream (causal capture order).
+    TurnStarted {
+        /// Model id when known.
+        model: Option<String>,
+    },
+    /// Host-authored turn phase marker.
+    TurnPhase {
+        /// Debug label of the phase (avoids coupling this module to every
+        /// `AgentPhase` rename).
+        phase: String,
+    },
+    /// Host or provider error already scrubbed at the stream boundary.
+    Error {
+        /// Stable error code.
+        code: String,
+        /// Redacted message.
+        message: String,
+    },
+    /// Terminal turn reason.
+    TurnCompleted {
+        /// Completion / cancel / error reason string.
+        reason: String,
+    },
 }
 
 /// One item on the shared provider/host capture timeline.
@@ -1217,6 +1240,19 @@ impl RecordingTurnTrace {
             },
             StreamEvent::Citation { source_id, .. } => TracedHostEvent::Citation {
                 source_id: source_id.clone(),
+            },
+            StreamEvent::TurnStarted { model, .. } => TracedHostEvent::TurnStarted {
+                model: model.clone(),
+            },
+            StreamEvent::TurnPhase { phase } => TracedHostEvent::TurnPhase {
+                phase: format!("{phase:?}"),
+            },
+            StreamEvent::Error { code, message } => TracedHostEvent::Error {
+                code: code.clone(),
+                message: crate::redact::scrub_secrets(message),
+            },
+            StreamEvent::TurnCompleted { reason } => TracedHostEvent::TurnCompleted {
+                reason: reason.clone(),
             },
             _ => return,
         };

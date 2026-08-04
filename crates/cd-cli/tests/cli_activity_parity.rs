@@ -26,8 +26,8 @@ fn write_profile(home: &Path, server_uri: &str, tools: bool) -> PathBuf {
     profile.local_only = true;
     profile.chat_model = "test-model".into();
     profile.capabilities.tools = tools;
-    // Non-stream JSON completions parse tool_calls reliably in wiremock tests.
-    profile.capabilities.stream = false;
+    // Stream on: wiremock tests return SSE tool_calls the production client parses.
+    profile.capabilities.stream = true;
     let cfg = AppConfig {
         providers: ProviderConfig {
             active_id: Some(profile.id.clone()),
@@ -662,29 +662,39 @@ async fn non_interactive_permission_denies_without_auto_approve() {
                 .iter()
                 .any(|m| m.get("role").and_then(|r| r.as_str()) == Some("tool"));
             if n == 0 && !has_tool {
-                let payload = serde_json::json!({
-                    "id": "c1",
-                    "object": "chat.completion",
+                // SSE tool_calls (stream=true client path)
+                let args = r#"{"id":"s1","name":"S","description":"d","body_markdown":"body"}"#;
+                let d1 = serde_json::json!({
                     "choices": [{
                         "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": null,
+                        "delta": {
                             "tool_calls": [{
+                                "index": 0,
                                 "id": "call_1",
                                 "type": "function",
                                 "function": {
                                     "name": "save_skill",
-                                    "arguments": "{\"id\":\"s1\",\"name\":\"S\",\"description\":\"d\",\"body_markdown\":\"body\"}"
+                                    "arguments": args
                                 }
                             }]
-                        },
+                        }
+                    }]
+                });
+                let d2 = serde_json::json!({
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
                         "finish_reason": "tool_calls"
                     }]
                 });
+                let sse = format!(
+                    "data: {d1}\n\ndata: {d2}\n\ndata: [DONE]\n\n",
+                    d1 = serde_json::to_string(&d1).unwrap(),
+                    d2 = serde_json::to_string(&d2).unwrap(),
+                );
                 ResponseTemplate::new(200)
-                    .insert_header("content-type", "application/json")
-                    .set_body_json(payload)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_raw(sse, "text/event-stream")
             } else {
                 let sse =
                     "data: {\"choices\":[{\"delta\":{\"content\":\"final after permission\"}}]}\n\n\
@@ -731,25 +741,25 @@ async fn non_interactive_permission_denies_without_auto_approve() {
         .collect();
     let joined = activity_labels.join(" | ");
 
+    // SoftWrite without --auto-approve on a non-TTY must surface a permission
+    // phase — deny text, permission_required stream type, or activity label.
+    // No escape hatch via "any Tool label".
     let saw_permission = blob.contains("permission")
         || blob.contains("denied")
         || blob.contains("allow once")
         || lines.iter().any(|l| {
             l.get("type").and_then(|t| t.as_str()) == Some("permission_required")
-                || l.get("label")
-                    .and_then(|x| x.as_str())
-                    .is_some_and(|x| x.to_ascii_lowercase().contains("permission"))
+                || l.get("label").and_then(|x| x.as_str()).is_some_and(|x| {
+                    let xl = x.to_ascii_lowercase();
+                    xl.contains("permission") || xl.contains("awaiting permission")
+                })
+                || l.get("operation")
+                    .and_then(|o| o.as_str())
+                    .is_some_and(|o| o.contains("permission"))
         });
-    let saw_tool = activity_labels.iter().any(|l| {
-        let ll = l.to_ascii_lowercase();
-        ll.contains("tool") || ll.contains("save_skill") || ll.contains("awaiting permission")
-    });
-    // SoftWrite on a real binary: either permission phase or tool lifecycle must appear.
-    // If the provider returned tool_calls that the host executed, Tool rows appear;
-    // if permission is required, PermissionRequired / deny text appears.
     assert!(
-        saw_permission || saw_tool,
-        "expected permission or tool activity on SoftWrite binary path; labels={joined}; stderr={err}; stdout={out}"
+        saw_permission,
+        "SoftWrite path must assert permission/deny (not mere Tool label); labels={joined}; stderr={err}; stdout={out}"
     );
     assert!(call_n.load(Ordering::SeqCst) >= 1);
 }
