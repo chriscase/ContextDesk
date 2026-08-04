@@ -1,0 +1,827 @@
+//! Source-agnostic activity contract: what a turn actually did, in terms a
+//! person can audit.
+//!
+//! This is the shared model behind the Activity Inspector in ordinary chat
+//! **and** in linked-log chat, and it is deliberately not log-specific. A
+//! step that reads a workspace file, a Confluence page, a memory entry, or
+//! an imported log corpus is the same shape here; only its
+//! [`DataScope`] and [`EvidenceRef`]s differ. Nothing in this module knows
+//! what a corpus is.
+//!
+//! # Relationship to the turn trace
+//!
+//! [`crate::turn_trace`] already captures, bounded and redacted, exactly
+//! what each provider round was about to send. This module does not
+//! duplicate that: [`ActivityRecorder`] consumes
+//! [`crate::turn_trace::TracedCall`]s and [`crate::events::StreamEvent`]s
+//! and projects them into an auditable record. The agent loop, context
+//! composition, and tool execution are untouched and unaware.
+//!
+//! # Three properties this type system is meant to enforce
+//!
+//! 1. **Heuristics are never labelled deterministic.** Ranking, scoring,
+//!    and selection rules are repeatable — run them twice, get the same
+//!    answer — but that is not the same claim as "this is a proof." The
+//!    mapping lives in [`ActivityOrigin::determinism`] so no caller can
+//!    make that claim by accident, and a test pins it.
+//! 2. **Credentials cannot be captured.** Not "are scrubbed" — cannot
+//!    reach here. The only content-bearing input is
+//!    [`crate::turn_trace::TracedCall`], whose bodies are already scrubbed
+//!    and bounded, and which is itself built from a
+//!    `(&[ChatMessage], &[ToolSpec])` signature that carries no API key, no
+//!    base URL, and no HTTP header.
+//! 3. **The default retains no prompt bodies.**
+//!    [`ActivityDetailLevel::Summary`] — the default — keeps counts, roles,
+//!    and timings and drops every message body. Bodies are opt-in via
+//!    [`ActivityDetailLevel::Full`], and even then they are the already
+//!    redacted, already capped ones the trace produced.
+
+use crate::turn_trace::{TracedCall, TracedMessage, TracedOutcome};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+/// Version of the activity contract this build emits.
+///
+/// Persisted alongside every record so a later reader can migrate rather
+/// than guess. Bump on any change that a v1 reader could misinterpret;
+/// additive optional fields do not require a bump.
+pub const ACTIVITY_CONTRACT_VERSION: u32 = 1;
+
+/// Most events retained per turn. A pathological turn (many rounds, many
+/// tools) must not turn one transcript entry into an unbounded document.
+pub const MAX_ACTIVITY_EVENTS: usize = 512;
+
+/// Most characters kept in a `label`.
+pub const MAX_ACTIVITY_LABEL_CHARS: usize = 200;
+
+/// Most characters kept in a `detail`.
+pub const MAX_ACTIVITY_DETAIL_CHARS: usize = 2_000;
+
+/// Most evidence references retained per event.
+pub const MAX_ACTIVITY_EVIDENCE_REFS: usize = 32;
+
+/// Where a step's authority comes from.
+///
+/// This is the distinction the inspector exists to make visible: a reader
+/// must be able to tell "the host computed this and would compute it again"
+/// from "a model produced this" from "a person approved this," without
+/// reading code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityOrigin {
+    /// Supplied by the client or observed in the user's own input — the
+    /// question text, an attached selection, a viewport the UI reported.
+    ClientEvidence,
+    /// Trusted host work with a defined result: an exact lookup, a parse, a
+    /// bounded read that either found the thing or did not.
+    DeterministicHost,
+    /// A repeatable rule the host applies — ranking, scoring, selection,
+    /// summarization heuristics. Same inputs give the same output, which is
+    /// *not* the same as being a proof. Never classified as deterministic.
+    RepeatableHeuristic,
+    /// A request to a language model. Same inputs may give a different
+    /// answer.
+    ProbabilisticModel,
+    /// A system outside this application — an HTTP API, a database, a
+    /// connector. Neither the host nor the user controls the result.
+    ExternalConnector,
+    /// A human answered a question: a permission grant or denial, an
+    /// Accept/Discard on a proposed write.
+    UserDecision,
+    /// A durable mutation that required, and had, an explicit grant.
+    GovernedWrite,
+}
+
+/// How much a reader may rely on a step reproducing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Determinism {
+    /// Defined result for defined inputs.
+    Deterministic,
+    /// Same inputs, same output — but a rule, not a proof.
+    Repeatable,
+    /// May differ run to run.
+    Probabilistic,
+    /// A person decided; not reproducible at all.
+    Human,
+}
+
+impl ActivityOrigin {
+    /// The determinism class this origin implies.
+    ///
+    /// Deliberately a total function on the origin rather than a field a
+    /// caller sets, so "deterministic" cannot be claimed for a heuristic by
+    /// filling in a struct carelessly.
+    pub const fn determinism(self) -> Determinism {
+        match self {
+            // Client-supplied input is a fact about what was asked.
+            Self::ClientEvidence => Determinism::Deterministic,
+            Self::DeterministicHost => Determinism::Deterministic,
+            // A rule, not a proof — see the type docs.
+            Self::RepeatableHeuristic => Determinism::Repeatable,
+            Self::ProbabilisticModel => Determinism::Probabilistic,
+            // Outside our control: it may answer differently next time.
+            Self::ExternalConnector => Determinism::Probabilistic,
+            Self::UserDecision => Determinism::Human,
+            // The write itself is defined; the decision to allow it was human,
+            // and that decision is its own `UserDecision` event.
+            Self::GovernedWrite => Determinism::Deterministic,
+        }
+    }
+
+    /// Stable short label for UI grouping.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ClientEvidence => "Client evidence",
+            Self::DeterministicHost => "Host work",
+            Self::RepeatableHeuristic => "Heuristic",
+            Self::ProbabilisticModel => "Model request",
+            Self::ExternalConnector => "External connector",
+            Self::UserDecision => "User decision",
+            Self::GovernedWrite => "Governed write",
+        }
+    }
+}
+
+/// Lifecycle position of one operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityPhase {
+    /// The operation began.
+    Started,
+    /// Intermediate report; the operation is still running.
+    Progress,
+    /// The operation reached a terminal state.
+    Completed,
+}
+
+/// Terminal (or current) result of an operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityStatus {
+    /// Still running, or awaiting a decision.
+    Pending,
+    /// Finished as intended.
+    Ok,
+    /// Finished with an error.
+    Failed,
+    /// Stopped because the user or host cancelled.
+    Cancelled,
+    /// Completed, but the result was deliberately not delivered — an
+    /// ungrounded answer, a denied write, an exhausted budget.
+    Withheld,
+}
+
+/// What kind of material an event's captured text is, so a retention or
+/// export policy can be applied without inspecting the text.
+///
+/// There is deliberately no `Secret` variant: credentials never reach this
+/// boundary, so a classification for them would imply they might.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivacyClass {
+    /// Counts, names, timings, identifiers. No user or source text.
+    Metadata,
+    /// Text that passed through redaction and length bounding.
+    RedactedContent,
+    /// Text the user already sees in the transcript.
+    UserVisibleContent,
+}
+
+/// The kind of material a turn or step was working over. Source-agnostic on
+/// purpose: logs are one case, not the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DataScopeKind {
+    /// Nothing beyond the conversation itself.
+    Conversation,
+    /// An imported log corpus.
+    LogCorpus,
+    /// Files in the user's workspace.
+    Workspace,
+    /// Durable memory.
+    Memory,
+    /// An external connector (wiki, tracker, database).
+    Connector,
+}
+
+/// What a turn or step was scoped to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataScope {
+    /// Which kind of material.
+    pub kind: DataScopeKind,
+    /// Stable identifier within that kind, when one exists. Never a path
+    /// containing user content — an id or a corpus/space key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Short display label.
+    pub label: String,
+}
+
+impl DataScope {
+    /// An ordinary chat turn: the conversation and nothing else.
+    pub fn conversation() -> Self {
+        Self {
+            kind: DataScopeKind::Conversation,
+            id: None,
+            label: "Conversation".to_string(),
+        }
+    }
+
+    /// A turn linked to an imported log corpus.
+    pub fn log_corpus(corpus_id: impl Into<String>) -> Self {
+        let id = corpus_id.into();
+        Self {
+            kind: DataScopeKind::LogCorpus,
+            label: format!("Log corpus {id}"),
+            id: Some(id),
+        }
+    }
+}
+
+/// What caused a step to happen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "trigger", rename_all = "snake_case")]
+pub enum ActivityTrigger {
+    /// The user's message started it.
+    UserMessage,
+    /// The host decided to, as part of its own sequencing.
+    HostPolicy,
+    /// A model asked for it (a tool call).
+    ModelRequest {
+        /// Which provider round asked.
+        round: u32,
+    },
+    /// A person answered a prompt.
+    UserDecision,
+    /// A retry of an earlier step.
+    Retry {
+        /// The operation being retried.
+        of_operation_id: String,
+    },
+}
+
+/// A pointer to something a step read or produced, for "show me why".
+///
+/// Identifiers only — never the content itself. What an id means is the
+/// scope's business, which is what keeps this host-neutral.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceRef {
+    /// What kind of thing this points at (`"event"`, `"file"`, `"page"`,
+    /// `"memory"`, …). Free-form so new sources need no contract change.
+    pub kind: String,
+    /// Stable id within that kind.
+    pub id: String,
+    /// Optional locator within the thing (line range, anchor, offset).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locator: Option<String>,
+}
+
+/// Per-role tallies for one provider round — the shape of the context
+/// without the context itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleTally {
+    /// `system` | `user` | `assistant` | `tool`.
+    pub role: String,
+    /// How many messages of this role were sent.
+    pub messages: usize,
+    /// Sum of redacted character counts for this role.
+    pub chars: usize,
+}
+
+/// Bounded, redacted metadata about one provider round's context.
+///
+/// `bodies` is `None` unless the caller opted into
+/// [`ActivityDetailLevel::Full`]. Everything else is metadata and is always
+/// safe to retain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextMetadata {
+    /// 0-based provider round within the turn.
+    pub round: u32,
+    /// Messages actually sent this round.
+    pub message_count: usize,
+    /// Sum of redacted characters across **every** message sent, not only
+    /// the retained ones.
+    pub context_used_chars: usize,
+    /// True when more messages were sent than the trace retains, so any
+    /// bodies present are a prefix.
+    pub messages_capped: bool,
+    /// Tool names offered this round. Names only; never schemas.
+    pub tool_names: Vec<String>,
+    /// Per-role shape of the context.
+    pub roles: Vec<RoleTally>,
+    /// Redacted, capped message bodies — present only at
+    /// [`ActivityDetailLevel::Full`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bodies: Option<Vec<TracedMessage>>,
+}
+
+/// How much a record retains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityDetailLevel {
+    /// **Default.** Counts, roles, timings, names, identifiers. No prompt
+    /// bodies are retained at all — not truncated ones, none.
+    #[default]
+    Summary,
+    /// Additionally retains the redacted, capped message bodies the turn
+    /// trace produced. Opt-in, because this is the only level that keeps
+    /// conversation text outside the transcript itself.
+    Full,
+}
+
+impl ActivityDetailLevel {
+    /// Whether message bodies are retained at this level.
+    pub const fn retains_bodies(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
+/// One auditable step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityEvent {
+    /// The turn this belongs to.
+    pub turn_id: String,
+    /// Stable id for the operation, so `Started`/`Progress`/`Completed`
+    /// rows fold into one row in a UI.
+    pub operation_id: String,
+    /// Monotonic within the turn, starting at 0. Ordering is this field,
+    /// never wall-clock time — two events can share a millisecond.
+    pub seq: u64,
+    /// Milliseconds since the turn started.
+    pub elapsed_ms: u64,
+    /// Lifecycle position.
+    pub phase: ActivityPhase,
+    /// Current or terminal result.
+    pub status: ActivityStatus,
+    /// Where the step's authority comes from.
+    pub origin: ActivityOrigin,
+    /// Implied by `origin`; stored so a consumer need not re-derive it and
+    /// cannot derive it differently.
+    pub determinism: Determinism,
+    /// One concise line.
+    pub label: String,
+    /// Optional longer explanation, bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// What caused this step.
+    pub trigger: ActivityTrigger,
+    /// What material it was scoped to.
+    pub scope: DataScope,
+    /// What it read or produced.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<EvidenceRef>,
+    /// Classification of any text this event carries.
+    pub privacy: PrivacyClass,
+    /// Present on provider-round events only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextMetadata>,
+}
+
+/// Everything one turn did, bounded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnActivityRecord {
+    /// Contract version — see [`ACTIVITY_CONTRACT_VERSION`].
+    #[serde(default = "default_contract_version")]
+    pub version: u32,
+    /// Stable id for this turn.
+    pub turn_id: String,
+    /// Owning chat session.
+    pub session_id: String,
+    /// Owning assistant message, when the host has assigned one. This is
+    /// the key durable persistence hangs off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    /// What the turn as a whole was scoped to.
+    pub scope: DataScope,
+    /// Terminal status of the turn.
+    pub status: ActivityStatus,
+    /// Total wall-clock milliseconds.
+    pub total_elapsed_ms: u64,
+    /// How much this record retains.
+    #[serde(default)]
+    pub detail_level: ActivityDetailLevel,
+    /// Steps, in `seq` order.
+    pub events: Vec<ActivityEvent>,
+    /// How many events were dropped for the [`MAX_ACTIVITY_EVENTS`] bound.
+    /// Non-zero means this record is a prefix, and a reader must say so
+    /// rather than presenting it as the whole turn.
+    #[serde(default)]
+    pub dropped_events: usize,
+}
+
+fn default_contract_version() -> u32 {
+    ACTIVITY_CONTRACT_VERSION
+}
+
+impl TurnActivityRecord {
+    /// True when the bound dropped steps, so a UI must not claim
+    /// completeness.
+    pub fn is_truncated(&self) -> bool {
+        self.dropped_events > 0
+    }
+
+    /// Provider rounds this turn performed.
+    pub fn provider_round_count(&self) -> usize {
+        self.events
+            .iter()
+            .filter(|e| e.origin == ActivityOrigin::ProbabilisticModel)
+            .filter(|e| e.phase == ActivityPhase::Completed)
+            .count()
+    }
+
+    /// Total redacted characters sent across every provider round.
+    pub fn total_context_chars(&self) -> usize {
+        self.events
+            .iter()
+            .filter_map(|e| e.context.as_ref())
+            .map(|c| c.context_used_chars)
+            .sum()
+    }
+}
+
+fn bound_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        text.chars().take(max).collect()
+    }
+}
+
+/// Builds a [`TurnActivityRecord`] from what a turn produced.
+///
+/// Deliberately a projection, not a second capture path: the caller hands
+/// over [`TracedCall`]s that [`crate::turn_trace::TracingChatBackend`]
+/// already recorded, plus the host's own [`crate::events::StreamEvent`]s.
+/// Nothing here can observe anything the turn did not already produce.
+#[derive(Debug)]
+pub struct ActivityRecorder {
+    turn_id: String,
+    session_id: String,
+    scope: DataScope,
+    detail: ActivityDetailLevel,
+    events: Vec<ActivityEvent>,
+    dropped: usize,
+    seq: u64,
+}
+
+impl ActivityRecorder {
+    /// Start a record for one turn. `detail` defaults to
+    /// [`ActivityDetailLevel::Summary`] at every call site that does not
+    /// deliberately ask for more.
+    pub fn new(
+        turn_id: impl Into<String>,
+        session_id: impl Into<String>,
+        scope: DataScope,
+        detail: ActivityDetailLevel,
+    ) -> Self {
+        Self {
+            turn_id: turn_id.into(),
+            session_id: session_id.into(),
+            scope,
+            detail,
+            events: Vec::new(),
+            dropped: 0,
+            seq: 0,
+        }
+    }
+
+    /// The detail level this recorder was built with.
+    pub fn detail_level(&self) -> ActivityDetailLevel {
+        self.detail
+    }
+
+    /// Append one step, applying the [`MAX_ACTIVITY_EVENTS`] bound and
+    /// assigning the next monotonic `seq`.
+    ///
+    /// Over the bound, the step is counted in `dropped_events` and
+    /// discarded — a prefix that says it is a prefix, never a silent
+    /// truncation.
+    pub fn push(&mut self, mut event: ActivityEvent) {
+        if self.events.len() >= MAX_ACTIVITY_EVENTS {
+            self.dropped = self.dropped.saturating_add(1);
+            return;
+        }
+        event.turn_id.clone_from(&self.turn_id);
+        event.seq = self.seq;
+        event.determinism = event.origin.determinism();
+        event.label = bound_chars(&event.label, MAX_ACTIVITY_LABEL_CHARS);
+        event.detail = event
+            .detail
+            .map(|d| bound_chars(&d, MAX_ACTIVITY_DETAIL_CHARS));
+        event.evidence.truncate(MAX_ACTIVITY_EVIDENCE_REFS);
+        if !self.detail.retains_bodies() {
+            if let Some(context) = event.context.as_mut() {
+                context.bodies = None;
+            }
+        }
+        self.seq = self.seq.saturating_add(1);
+        self.events.push(event);
+    }
+
+    /// Project every provider round from the turn trace into events.
+    ///
+    /// One [`ActivityEvent`] per [`TracedCall`], carrying the round's
+    /// bounded context metadata. Bodies are attached only at
+    /// [`ActivityDetailLevel::Full`]; [`Self::push`] strips them otherwise,
+    /// so a caller cannot leak them by constructing the event by hand.
+    pub fn record_provider_rounds(&mut self, calls: &[TracedCall]) {
+        for call in calls {
+            let round = u32::try_from(call.seq).unwrap_or(u32::MAX);
+            let (status, label, detail) = match &call.outcome {
+                TracedOutcome::Completed {
+                    finish_reason,
+                    tool_call_count,
+                } => (
+                    ActivityStatus::Ok,
+                    format!("Model request (round {})", round + 1),
+                    Some(if *tool_call_count > 0 {
+                        format!(
+                            "finish_reason={finish_reason}; requested {tool_call_count} tool call(s)"
+                        )
+                    } else {
+                        format!("finish_reason={finish_reason}; no tool calls")
+                    }),
+                ),
+                // Already redacted by the trace.
+                TracedOutcome::Failed { message } => (
+                    ActivityStatus::Failed,
+                    format!("Model request failed (round {})", round + 1),
+                    Some(message.clone()),
+                ),
+            };
+            let context = ContextMetadata {
+                round,
+                message_count: call.messages.len(),
+                context_used_chars: call.context_used_chars,
+                messages_capped: call.messages_capped,
+                tool_names: call.tool_names.clone(),
+                roles: role_tallies(&call.messages),
+                bodies: self.detail.retains_bodies().then(|| call.messages.clone()),
+            };
+            let privacy = if context.bodies.is_some() {
+                PrivacyClass::RedactedContent
+            } else {
+                PrivacyClass::Metadata
+            };
+            self.push(ActivityEvent {
+                turn_id: String::new(),
+                operation_id: format!("provider-round-{round}"),
+                seq: 0,
+                elapsed_ms: call.elapsed_ms,
+                phase: ActivityPhase::Completed,
+                status,
+                origin: ActivityOrigin::ProbabilisticModel,
+                determinism: Determinism::Probabilistic,
+                label,
+                detail,
+                trigger: if round == 0 {
+                    ActivityTrigger::UserMessage
+                } else {
+                    ActivityTrigger::HostPolicy
+                },
+                scope: self.scope.clone(),
+                evidence: Vec::new(),
+                privacy,
+                context: Some(context),
+            });
+        }
+    }
+
+    /// Finish, producing the record.
+    ///
+    /// `status` is the turn's terminal status as the host determined it —
+    /// this module does not infer it, because "withheld" is a host policy
+    /// decision (see [`crate::events::is_withheld_turn_reason`]) and
+    /// guessing it here would let the inspector disagree with the product.
+    pub fn finish(self, status: ActivityStatus, total_elapsed_ms: u64) -> TurnActivityRecord {
+        TurnActivityRecord {
+            version: ACTIVITY_CONTRACT_VERSION,
+            turn_id: self.turn_id,
+            session_id: self.session_id,
+            message_id: None,
+            scope: self.scope,
+            status,
+            total_elapsed_ms,
+            detail_level: self.detail,
+            events: self.events,
+            dropped_events: self.dropped,
+        }
+    }
+}
+
+fn role_tallies(messages: &[TracedMessage]) -> Vec<RoleTally> {
+    let mut by_role: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    for message in messages {
+        let entry = by_role.entry(message.role.as_str()).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 = entry.1.saturating_add(message.char_count);
+    }
+    by_role
+        .into_iter()
+        .map(|(role, (messages, chars))| RoleTally {
+            role: role.to_string(),
+            messages,
+            chars,
+        })
+        .collect()
+}
+
+/// Map a terminal `TurnCompleted.reason` to an activity status.
+///
+/// Reuses [`crate::events::is_withheld_turn_reason`] rather than
+/// re-listing reasons, so the inspector and the product cannot disagree
+/// about whether an answer was delivered.
+pub fn status_for_turn_reason(reason: &str) -> ActivityStatus {
+    if reason == "cancel" || reason == "cancelled" {
+        ActivityStatus::Cancelled
+    } else if reason == "error" {
+        ActivityStatus::Failed
+    } else if crate::events::is_withheld_turn_reason(reason) {
+        ActivityStatus::Withheld
+    } else {
+        ActivityStatus::Ok
+    }
+}
+
+/// Terminal status for a whole turn, from the events it actually emitted.
+///
+/// This — not [`status_for_turn_reason`] alone — is what a host should call.
+/// Two of this product's withholding conditions (`linked_no_tool`,
+/// `linked_required_source_missing`) are signalled by a
+/// [`crate::events::StreamEvent::Error`] while `TurnCompleted.reason` stays
+/// `"stop"`. Classifying on the reason alone would report a knowingly
+/// ungrounded answer as a clean success, which is precisely the failure the
+/// inspector exists to make impossible.
+///
+/// A stream with no terminal `TurnCompleted` at all is [`ActivityStatus::Failed`]:
+/// the turn did not finish, and calling that success would be the inspector
+/// lying about the one thing it exists to show.
+pub fn status_for_turn_events(events: &[crate::events::StreamEvent]) -> ActivityStatus {
+    let terminal = events.iter().rev().find_map(|event| match event {
+        crate::events::StreamEvent::TurnCompleted { reason } => {
+            Some(status_for_turn_reason(reason))
+        }
+        _ => None,
+    });
+    match terminal {
+        None => ActivityStatus::Failed,
+        // An ordinary-looking completion can still carry an ungrounded-answer
+        // error code; that outranks `Ok`, but never overrides a cancellation
+        // or an outright failure, which are already more specific.
+        Some(ActivityStatus::Ok)
+            if events.iter().any(|event| match event {
+                crate::events::StreamEvent::Error { code, .. } => {
+                    crate::events::is_withheld_turn_error_code(code)
+                }
+                _ => false,
+            }) =>
+        {
+            ActivityStatus::Withheld
+        }
+        Some(status) => status,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::StreamEvent;
+
+    #[test]
+    fn a_heuristic_is_repeatable_but_never_deterministic() {
+        assert_eq!(
+            ActivityOrigin::RepeatableHeuristic.determinism(),
+            Determinism::Repeatable
+        );
+        assert_ne!(
+            ActivityOrigin::RepeatableHeuristic.determinism(),
+            Determinism::Deterministic,
+            "a ranking rule is repeatable, not a proof — calling it \
+             deterministic overstates what the inspector can promise"
+        );
+    }
+
+    #[test]
+    fn every_origin_has_a_determinism_and_a_label() {
+        for origin in [
+            ActivityOrigin::ClientEvidence,
+            ActivityOrigin::DeterministicHost,
+            ActivityOrigin::RepeatableHeuristic,
+            ActivityOrigin::ProbabilisticModel,
+            ActivityOrigin::ExternalConnector,
+            ActivityOrigin::UserDecision,
+            ActivityOrigin::GovernedWrite,
+        ] {
+            assert!(!origin.label().is_empty(), "{origin:?}");
+            // A model request and an external connector must never be
+            // presented as reproducible host work.
+            if matches!(
+                origin,
+                ActivityOrigin::ProbabilisticModel | ActivityOrigin::ExternalConnector
+            ) {
+                assert_eq!(origin.determinism(), Determinism::Probabilistic);
+            }
+        }
+    }
+
+    /// `linked_no_tool` is emitted by this product as an `Error` code while
+    /// the turn completes with reason `"stop"` — it is deliberately NOT in
+    /// `WITHHELD_TURN_REASONS`. Classifying it requires looking at the whole
+    /// stream, which is what `status_for_turn_events` is for.
+    #[test]
+    fn an_ungrounded_answer_signalled_by_error_code_is_not_reported_as_ok() {
+        let stream = vec![
+            StreamEvent::Error {
+                code: "linked_no_tool".into(),
+                message: "not log-grounded".into(),
+            },
+            StreamEvent::TurnCompleted {
+                reason: "stop".into(),
+            },
+        ];
+        // The reason alone says Ok — that is the trap.
+        assert_eq!(status_for_turn_reason("stop"), ActivityStatus::Ok);
+        // The stream as a whole must not.
+        assert_eq!(status_for_turn_events(&stream), ActivityStatus::Withheld);
+    }
+
+    #[test]
+    fn a_clean_turn_is_ok_and_an_unfinished_one_is_never_ok() {
+        assert_eq!(
+            status_for_turn_events(&[StreamEvent::TurnCompleted {
+                reason: "stop".into()
+            }]),
+            ActivityStatus::Ok
+        );
+        // No terminal event at all: the turn did not finish.
+        assert_eq!(
+            status_for_turn_events(&[StreamEvent::TextDelta { text: "hi".into() }]),
+            ActivityStatus::Failed
+        );
+        // A cancellation is more specific than "withheld" and keeps its identity.
+        assert_eq!(
+            status_for_turn_events(&[
+                StreamEvent::Error {
+                    code: "linked_no_tool".into(),
+                    message: "x".into()
+                },
+                StreamEvent::TurnCompleted {
+                    reason: "cancel".into()
+                }
+            ]),
+            ActivityStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn withheld_reasons_are_not_reported_as_ok() {
+        assert_eq!(status_for_turn_reason("stop"), ActivityStatus::Ok);
+        assert_eq!(status_for_turn_reason("cancel"), ActivityStatus::Cancelled);
+        assert_eq!(
+            status_for_turn_reason("budget_rounds"),
+            ActivityStatus::Withheld,
+            "the round budget ran out AND the final answer failed"
+        );
+        assert_eq!(
+            status_for_turn_reason("budget_rounds_answer"),
+            ActivityStatus::Ok,
+            "its sibling DID produce an answer — withholding it would be wrong"
+        );
+        assert_eq!(
+            status_for_turn_reason("context_too_long"),
+            ActivityStatus::Withheld
+        );
+    }
+
+    #[test]
+    fn contract_version_is_stamped_and_survives_a_roundtrip() {
+        let record = ActivityRecorder::new(
+            "turn-1",
+            "session-1",
+            DataScope::conversation(),
+            ActivityDetailLevel::Summary,
+        )
+        .finish(ActivityStatus::Ok, 12);
+        assert_eq!(record.version, ACTIVITY_CONTRACT_VERSION);
+        let json = serde_json::to_string(&record).expect("serialize");
+        let back: TurnActivityRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, record);
+    }
+
+    #[test]
+    fn a_record_written_before_versioning_defaults_rather_than_failing() {
+        // Forward/backward compatibility: the migration story is "absent
+        // optional fields take defaults", so a v0-shaped row still loads.
+        let legacy = serde_json::json!({
+            "turn_id": "t", "session_id": "s",
+            "scope": { "kind": "conversation", "label": "Conversation" },
+            "status": "ok", "total_elapsed_ms": 5, "events": []
+        });
+        let record: TurnActivityRecord = serde_json::from_value(legacy).expect("legacy loads");
+        assert_eq!(record.version, ACTIVITY_CONTRACT_VERSION);
+        assert_eq!(record.detail_level, ActivityDetailLevel::Summary);
+        assert_eq!(record.dropped_events, 0);
+        assert!(!record.is_truncated());
+    }
+}

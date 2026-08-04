@@ -9,6 +9,8 @@
 // Prefer `text::truncate_bytes` / `floor_char_boundary` for untrusted multi-byte text.
 #![warn(clippy::string_slice)]
 
+/// Source-agnostic activity contract for the Activity Inspector.
+pub mod activity;
 pub mod agent;
 pub mod ai_probe;
 pub mod audit;

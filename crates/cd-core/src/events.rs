@@ -117,6 +117,81 @@ pub enum StreamEvent {
     },
 }
 
+/// Terminal [`StreamEvent::TurnCompleted`] reasons that mean the turn did
+/// NOT deliver a usable, grounded answer — the host withheld it.
+///
+/// Kept next to the event type so every consumer classifies one shared list
+/// instead of string-matching its own subset. Reporting any of these as
+/// success is how an empty or ungrounded answer reaches a caller as "ok".
+///
+/// Deliberately excludes `budget_rounds_answer`: that reason means the round
+/// budget ran out but a final answer *was* produced. Its sibling
+/// `budget_rounds` means the final answer failed, and is withheld.
+/// `awaiting_permission` is also excluded — that turn is paused pending a
+/// human decision, which is pending, not withheld.
+pub const WITHHELD_TURN_REASONS: &[&str] = &[
+    // The answer did not truthfully reference the bounded evidence.
+    "linked_invalid_grounded_answer",
+    // The corpus changed under the turn; its evidence no longer holds.
+    "linked_log_snapshot_stale",
+    // Synthesis-only retry evidence no longer matches the live corpus.
+    "linked_synthesis_retry_stale",
+    // Synthesis exceeded its time budget before producing an answer.
+    "linked_synthesis_timeout",
+    // The turn could not be fitted into the model context budget.
+    "context_too_long",
+    // The turn ran out of its time budget before answering.
+    "budget_time",
+    // The round budget ran out AND the final answer failed.
+    "budget_rounds",
+];
+
+/// Stable [`StreamEvent::Error`] codes that mean the answer this turn
+/// produced is not log-grounded, even though the turn itself completed with
+/// an ordinary reason such as `"stop"`.
+///
+/// This list exists because the two conditions below are signalled by an
+/// `Error` event while `TurnCompleted.reason` stays `"stop"` — a consumer
+/// that only inspected the reason would report a knowingly ungrounded
+/// answer as a clean success.
+pub const WITHHELD_TURN_ERROR_CODES: &[&str] = &[
+    // Linked investigation finished with no successful bounded log-tool result.
+    "linked_no_tool",
+    // An explicitly requested bounded source never succeeded.
+    "linked_required_source_missing",
+];
+
+/// Whether a `TurnCompleted.reason` means the answer was withheld.
+pub fn is_withheld_turn_reason(reason: &str) -> bool {
+    WITHHELD_TURN_REASONS.contains(&reason)
+}
+
+/// Whether an `Error.code` means the delivered answer was not grounded.
+pub fn is_withheld_turn_error_code(code: &str) -> bool {
+    WITHHELD_TURN_ERROR_CODES.contains(&code)
+}
+
+/// The withheld reason this event stream terminated with, if any.
+///
+/// Checks both signals: the terminal reason, and the ungrounded-answer error
+/// codes that accompany an otherwise ordinary completion. Returns `None` for
+/// a genuine success.
+pub fn withheld_turn_reason(events: &[StreamEvent]) -> Option<&str> {
+    let terminal = events.iter().rev().find_map(|event| match event {
+        StreamEvent::TurnCompleted { reason } if is_withheld_turn_reason(reason) => {
+            Some(reason.as_str())
+        }
+        _ => None,
+    });
+    if terminal.is_some() {
+        return terminal;
+    }
+    events.iter().rev().find_map(|event| match event {
+        StreamEvent::Error { code, .. } if is_withheld_turn_error_code(code) => Some(code.as_str()),
+        _ => None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

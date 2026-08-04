@@ -32,7 +32,7 @@ use crate::chat::{ChatCompletion, ChatMessage};
 use crate::error::CoreResult;
 use crate::tools::ToolSpec;
 use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -49,7 +49,10 @@ pub const MAX_TRACED_MESSAGE_CHARS: usize = 4_000;
 pub const MAX_TRACED_TOOL_NAMES: usize = 64;
 
 /// One message as it was actually about to be sent, redacted and bounded.
-#[derive(Debug, Clone, Serialize)]
+// `Deserialize`/`Eq` so an activity record that opted into retaining
+// bodies can round-trip through durable storage; the trace itself only
+// ever writes them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TracedMessage {
     /// `"system" | "user" | "assistant" | "tool"`.
     pub role: String,
@@ -95,6 +98,13 @@ pub struct TracedCall {
     pub tool_names: Vec<String>,
     /// Messages sent, in order (capped at [`MAX_TRACED_MESSAGES`]).
     pub messages: Vec<TracedMessage>,
+    /// Sum of scrubbed character counts across **all** messages offered to
+    /// the backend this call — not just the stored (capped) `messages` vec.
+    /// Use this for honest `context_used_chars` reporting.
+    pub context_used_chars: usize,
+    /// True when more messages were sent than [`MAX_TRACED_MESSAGES`], so
+    /// `messages` is a prefix of the real request.
+    pub messages_capped: bool,
     /// What came back.
     pub outcome: TracedOutcome,
 }
@@ -218,18 +228,30 @@ impl TracingChatBackend {
                 message: crate::redact::scrub_secrets(&error.to_string()),
             },
         };
+        let (stored_messages, context_used_chars, messages_capped) = traced_messages(messages);
         self.sink.record(TracedCall {
             seq,
             elapsed_ms,
             tool_names,
-            messages: traced_messages(messages),
+            messages: stored_messages,
+            context_used_chars,
+            messages_capped,
             outcome,
         });
     }
 }
 
-fn traced_messages(messages: &[ChatMessage]) -> Vec<TracedMessage> {
-    messages
+/// Stored message bodies (capped) plus the **full** scrubbed character sum
+/// across every input message — so callers reporting `context_used_chars`
+/// stay honest when only the first [`MAX_TRACED_MESSAGES`] bodies are retained.
+fn traced_messages(messages: &[ChatMessage]) -> (Vec<TracedMessage>, usize, bool) {
+    let mut total_chars = 0usize;
+    for message in messages {
+        let scrubbed = crate::redact::scrub_secrets(&message.content);
+        total_chars = total_chars.saturating_add(scrubbed.chars().count());
+    }
+    let messages_capped = messages.len() > MAX_TRACED_MESSAGES;
+    let stored = messages
         .iter()
         .take(MAX_TRACED_MESSAGES)
         .map(|message| {
@@ -243,7 +265,8 @@ fn traced_messages(messages: &[ChatMessage]) -> Vec<TracedMessage> {
                 truncated,
             }
         })
-        .collect()
+        .collect();
+    (stored, total_chars, messages_capped)
 }
 
 fn bound_chars(text: &str, max_chars: usize) -> (String, bool) {
@@ -387,7 +410,26 @@ mod tests {
         let call = &calls[0];
         assert!(call.messages.len() <= MAX_TRACED_MESSAGES);
         assert!(call.tool_names.len() <= MAX_TRACED_TOOL_NAMES);
-        assert!(call.messages.iter().all(|m| m.content.chars().count() <= MAX_TRACED_MESSAGE_CHARS));
+        assert!(
+            call.messages_capped,
+            "more messages were sent than stored — messages_capped must be true"
+        );
+        // Strictly greater, not merely >=: this request sent more messages
+        // than storage retains, so a `context_used_chars` that only summed
+        // the stored prefix would under-report how much context actually
+        // went to the provider. `>=` would pass even for that bug.
+        let stored_sum: usize = call.messages.iter().map(|m| m.char_count).sum();
+        assert!(
+            call.context_used_chars > stored_sum,
+            "context_used_chars ({}) must exceed the stored-body sum ({}) when \
+             messages were dropped — otherwise it is counting only the prefix",
+            call.context_used_chars,
+            stored_sum
+        );
+        assert!(call
+            .messages
+            .iter()
+            .all(|m| m.content.chars().count() <= MAX_TRACED_MESSAGE_CHARS));
     }
 
     #[tokio::test]
