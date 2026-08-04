@@ -331,7 +331,7 @@ fn a_pathological_turn_is_bounded_and_says_that_it_was() {
             turn_id: String::new(),
             operation_id: format!("op-{index}"),
             seq: 0,
-            elapsed_ms: 1,
+            elapsed_ms: Some(1),
             phase: ActivityPhase::Completed,
             status: ActivityStatus::Ok,
             origin: ActivityOrigin::DeterministicHost,
@@ -374,7 +374,7 @@ fn a_hand_built_heuristic_event_cannot_claim_determinism() {
         turn_id: String::new(),
         operation_id: "rank".to_string(),
         seq: 0,
-        elapsed_ms: 3,
+        elapsed_ms: Some(3),
         phase: ActivityPhase::Completed,
         status: ActivityStatus::Ok,
         origin: ActivityOrigin::RepeatableHeuristic,
@@ -720,8 +720,9 @@ fn stream_tools_and_permissions_are_recorded_as_metadata_only() {
         .iter()
         .find(|e| e.operation_id.starts_with("permission-"))
         .expect("permission event");
-    assert_eq!(perm.origin, ActivityOrigin::UserDecision);
-    assert_eq!(perm.determinism, Determinism::Human);
+    assert_eq!(perm.origin, ActivityOrigin::DeterministicHost);
+    assert_eq!(perm.determinism, Determinism::Deterministic);
+    assert_eq!(perm.status, ActivityStatus::Pending);
     // Reason/preview/arguments must not leak into detail.
     let detail = perm.detail.as_deref().unwrap_or("");
     assert!(
@@ -735,6 +736,187 @@ fn stream_tools_and_permissions_are_recorded_as_metadata_only() {
         .expect("retrieval");
     assert_eq!(retrieval.origin, ActivityOrigin::RepeatableHeuristic);
     assert_eq!(retrieval.determinism, Determinism::Repeatable);
+}
+
+#[test]
+fn shared_timeline_preserves_model_tool_model_order_and_separates_latency() {
+    use cd_core::activity::ToolActivityKind;
+    use cd_core::events::ToolPhase;
+    use cd_core::turn_trace::{
+        TracedCall, TracedHostEvent, TracedOutcome, TracedTimelineEntry, TracedTimelineItem,
+    };
+    let call = |seq, latency| TracedCall {
+        seq,
+        elapsed_ms: latency,
+        tool_names: vec!["connector_read".into()],
+        messages: vec![cd_core::turn_trace::TracedMessage {
+            role: "user".into(),
+            content: "synthetic".into(),
+            char_count: 9,
+            truncated: false,
+        }],
+        context_used_chars: 9,
+        messages_capped: false,
+        outcome: TracedOutcome::Completed {
+            finish_reason: "stop".into(),
+            tool_call_count: usize::from(seq == 0),
+        },
+    };
+    let timeline = vec![
+        TracedTimelineEntry {
+            seq: 0,
+            elapsed_ms: 100,
+            item: TracedTimelineItem::ProviderCall(call(0, 87)),
+        },
+        TracedTimelineEntry {
+            seq: 1,
+            elapsed_ms: 110,
+            item: TracedTimelineItem::HostEvent(TracedHostEvent::Tool {
+                id: "tool-1".into(),
+                name: "connector_read".into(),
+                phase: ToolPhase::Started,
+                ok: None,
+                kind: ToolActivityKind::ExternalConnector,
+            }),
+        },
+        TracedTimelineEntry {
+            seq: 2,
+            elapsed_ms: 140,
+            item: TracedTimelineItem::HostEvent(TracedHostEvent::Tool {
+                id: "tool-1".into(),
+                name: "connector_read".into(),
+                phase: ToolPhase::Finished,
+                ok: Some(true),
+                kind: ToolActivityKind::ExternalConnector,
+            }),
+        },
+        TracedTimelineEntry {
+            seq: 3,
+            elapsed_ms: 250,
+            item: TracedTimelineItem::ProviderCall(call(1, 105)),
+        },
+    ];
+    let mut recorder = ActivityRecorder::new(
+        "turn-order",
+        SESSION,
+        DataScope::conversation(),
+        ActivityDetailLevel::Summary,
+    );
+    recorder.record_timeline(&timeline);
+    let record = recorder.finish(ActivityStatus::Ok, 250);
+    assert_eq!(
+        record
+            .events
+            .iter()
+            .map(|event| event.origin)
+            .collect::<Vec<_>>(),
+        vec![
+            ActivityOrigin::ProbabilisticModel,
+            ActivityOrigin::ExternalConnector,
+            ActivityOrigin::ExternalConnector,
+            ActivityOrigin::ProbabilisticModel,
+        ]
+    );
+    assert_eq!(record.events[0].elapsed_ms, Some(100));
+    assert_eq!(
+        record.events[0]
+            .context
+            .as_ref()
+            .expect("provider context")
+            .provider_latency_ms,
+        Some(87),
+        "per-call latency must not be relabelled as turn-relative elapsed"
+    );
+    assert_eq!(record.events[3].elapsed_ms, Some(250));
+}
+
+#[test]
+fn permission_prompt_is_pending_until_an_actual_human_decision() {
+    use cd_core::activity::ToolActivityKind;
+    use cd_core::events::{StreamEvent, ToolPhase};
+    use cd_core::permissions::PermissionDecision;
+    let mut recorder = ActivityRecorder::new(
+        "turn-permission",
+        SESSION,
+        DataScope::conversation(),
+        ActivityDetailLevel::Summary,
+    );
+    recorder.record_stream_events(&[
+        StreamEvent::Tool {
+            id: "write-1".into(),
+            name: "save_memory".into(),
+            phase: ToolPhase::Started,
+            summary: "permission required".into(),
+            detail: None,
+            ok: None,
+        },
+        StreamEvent::PermissionRequired {
+            request_id: "request-1".into(),
+            tool_name: "save_memory".into(),
+            target: "private target not retained".into(),
+            reason: "private reason not retained".into(),
+            preview: "private preview not retained".into(),
+            risk: "local".into(),
+            arguments: serde_json::json!({"secret": "not retained"}),
+        },
+        StreamEvent::Tool {
+            id: "write-1".into(),
+            name: "save_memory".into(),
+            phase: ToolPhase::Finished,
+            summary: "awaiting permission".into(),
+            detail: None,
+            ok: None,
+        },
+    ]);
+    let mut record = recorder.finish(ActivityStatus::Pending, 20);
+    assert!(record.events.iter().all(|event| {
+        event.status == ActivityStatus::Pending
+            && event.origin != ActivityOrigin::UserDecision
+            && event.elapsed_ms.is_none()
+    }));
+
+    record.record_permission_resolution(
+        "request-1",
+        "save_memory",
+        PermissionDecision::AllowOnce,
+        ToolActivityKind::GovernedWrite,
+        &[
+            StreamEvent::Tool {
+                id: "write-2".into(),
+                name: "save_memory".into(),
+                phase: ToolPhase::Started,
+                summary: "not retained".into(),
+                detail: Some("raw result not retained".into()),
+                ok: None,
+            },
+            StreamEvent::Tool {
+                id: "write-2".into(),
+                name: "save_memory".into(),
+                phase: ToolPhase::Finished,
+                summary: "not retained".into(),
+                detail: Some("raw result not retained".into()),
+                ok: Some(true),
+            },
+        ],
+    );
+    let decision = record
+        .events
+        .iter()
+        .find(|event| event.origin == ActivityOrigin::UserDecision)
+        .expect("actual decision");
+    assert_eq!(decision.status, ActivityStatus::Ok);
+    assert_eq!(decision.elapsed_ms, None);
+    let write = record
+        .events
+        .iter()
+        .rev()
+        .find(|event| event.origin == ActivityOrigin::GovernedWrite)
+        .expect("governed write outcome");
+    assert_eq!(write.status, ActivityStatus::Ok);
+    assert!(
+        write.detail.is_none(),
+        "raw tool result must not be retained"
+    );
 }
 
 #[test]
@@ -763,6 +945,7 @@ fn durable_journal_survives_restart_and_strips_bodies() {
             messages_capped: false,
             tool_names: vec![],
             roles: vec![],
+            provider_latency_ms: Some(4),
             bodies: Some(vec![cd_core::turn_trace::TracedMessage {
                 role: "user".into(),
                 content: "prompt body must not be durable".into(),
@@ -782,7 +965,7 @@ fn durable_journal_survives_restart_and_strips_bodies() {
             turn_id: String::new(),
             operation_id: "op".into(),
             seq: 0,
-            elapsed_ms: 1,
+            elapsed_ms: Some(1),
             phase: ActivityPhase::Completed,
             status: ActivityStatus::Ok,
             origin: ActivityOrigin::ProbabilisticModel,
@@ -800,6 +983,7 @@ fn durable_journal_survives_restart_and_strips_bodies() {
                 messages_capped: false,
                 tool_names: vec![],
                 roles: vec![],
+                provider_latency_ms: Some(4),
                 bodies: Some(vec![cd_core::turn_trace::TracedMessage {
                     role: "user".into(),
                     content: "prompt body must not be durable".into(),
@@ -890,7 +1074,7 @@ fn retire_session_activity_clears_memory_and_durable_journal() {
         turn_id: String::new(),
         operation_id: "op".into(),
         seq: 0,
-        elapsed_ms: 1,
+        elapsed_ms: Some(1),
         phase: ActivityPhase::Completed,
         status: ActivityStatus::Ok,
         origin: ActivityOrigin::DeterministicHost,

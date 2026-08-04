@@ -109,6 +109,72 @@ pub struct TracedCall {
     pub outcome: TracedOutcome,
 }
 
+/// Metadata-only host event retained beside provider calls so an inspector can
+/// preserve the order in which model and host work actually completed.
+///
+/// Deliberately omits tool arguments/results, permission targets/reasons/
+/// previews, search text, and citation display text. The activity capture is
+/// an audit index, not a second transcript or source-content store.
+#[derive(Debug, Clone)]
+pub enum TracedHostEvent {
+    /// Tool lifecycle metadata.
+    Tool {
+        /// Host correlation id.
+        id: String,
+        /// Registered tool name.
+        name: String,
+        /// Started or finished.
+        phase: crate::events::ToolPhase,
+        /// Terminal result when known.
+        ok: Option<bool>,
+        /// Host-known authority classification.
+        kind: crate::activity::ToolActivityKind,
+    },
+    /// A host permission gate was raised; no human decision has happened yet.
+    PermissionRequired {
+        /// Pending request correlation id.
+        request_id: String,
+        /// Registered tool name.
+        tool_name: String,
+        /// Coarse risk label only; target and preview are omitted.
+        risk: String,
+        /// Host-known authority classification of the requested action.
+        kind: crate::activity::ToolActivityKind,
+    },
+    /// Count-only retrieval trail observation.
+    SearchTrail {
+        /// Number of host-reported steps; step text is omitted.
+        step_count: usize,
+    },
+    /// Citation identity without display/source content.
+    Citation {
+        /// Stable source identifier.
+        source_id: String,
+    },
+}
+
+/// One item on the shared provider/host capture timeline.
+#[derive(Debug, Clone)]
+pub enum TracedTimelineItem {
+    /// A completed or failed provider call.
+    ProviderCall(TracedCall),
+    /// A metadata-only host observation.
+    HostEvent(TracedHostEvent),
+}
+
+/// A causally ordered capture item. `elapsed_ms` is measured from the same
+/// turn origin for provider and host work; `seq` is authoritative when two
+/// observations share a millisecond.
+#[derive(Debug, Clone)]
+pub struct TracedTimelineEntry {
+    /// Monotonic capture order.
+    pub seq: u64,
+    /// Milliseconds since the shared turn origin.
+    pub elapsed_ms: u64,
+    /// Provider or host observation.
+    pub item: TracedTimelineItem,
+}
+
 /// Receives one [`TracedCall`] per backend invocation.
 ///
 /// Mirrors the existing [`crate::process_progress::ProcessProgressObserver`]
@@ -130,26 +196,110 @@ impl TurnTraceSink for NoopTurnTrace {
 }
 
 /// Captures every call in order, for a caller to render or assert on.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RecordingTurnTrace {
-    calls: Mutex<Vec<TracedCall>>,
+    started_at: Instant,
+    timeline: Mutex<Vec<TracedTimelineEntry>>,
+}
+
+impl Default for RecordingTurnTrace {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TurnTraceSink for RecordingTurnTrace {
     fn record(&self, call: TracedCall) {
-        self.calls.lock().expect("turn trace lock").push(call);
+        self.push(TracedTimelineItem::ProviderCall(call));
     }
 }
 
 impl RecordingTurnTrace {
     /// New, empty recorder.
     pub fn new() -> Self {
-        Self::default()
+        Self::with_started_at(Instant::now())
+    }
+
+    /// Start capture against a host-supplied turn origin.
+    pub fn with_started_at(started_at: Instant) -> Self {
+        Self {
+            started_at,
+            timeline: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn push(&self, item: TracedTimelineItem) {
+        let elapsed_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let mut timeline = self.timeline.lock().expect("turn trace lock");
+        let seq = u64::try_from(timeline.len()).unwrap_or(u64::MAX);
+        timeline.push(TracedTimelineEntry {
+            seq,
+            elapsed_ms,
+            item,
+        });
+    }
+
+    /// Record the metadata-only subset of a host event at the instant the
+    /// live stream observes it.
+    pub fn record_host_event(
+        &self,
+        event: &crate::events::StreamEvent,
+        tool_kinds: &std::collections::HashMap<String, crate::activity::ToolActivityKind>,
+    ) {
+        use crate::events::StreamEvent;
+        let item = match event {
+            StreamEvent::Tool {
+                id,
+                name,
+                phase,
+                ok,
+                ..
+            } => TracedHostEvent::Tool {
+                id: id.clone(),
+                name: name.clone(),
+                phase: *phase,
+                ok: *ok,
+                kind: tool_kinds.get(name).copied().unwrap_or_default(),
+            },
+            StreamEvent::PermissionRequired {
+                request_id,
+                tool_name,
+                risk,
+                ..
+            } => TracedHostEvent::PermissionRequired {
+                request_id: request_id.clone(),
+                tool_name: tool_name.clone(),
+                risk: risk.clone(),
+                kind: tool_kinds.get(tool_name).copied().unwrap_or_default(),
+            },
+            StreamEvent::SearchTrail { steps } => TracedHostEvent::SearchTrail {
+                step_count: steps.len(),
+            },
+            StreamEvent::Citation { source_id, .. } => TracedHostEvent::Citation {
+                source_id: source_id.clone(),
+            },
+            _ => return,
+        };
+        self.push(TracedTimelineItem::HostEvent(item));
     }
 
     /// Snapshot of every call recorded so far, in call order.
     pub fn calls(&self) -> Vec<TracedCall> {
-        self.calls.lock().expect("turn trace lock").clone()
+        self.timeline
+            .lock()
+            .expect("turn trace lock")
+            .iter()
+            .filter_map(|entry| match &entry.item {
+                TracedTimelineItem::ProviderCall(call) => Some(call.clone()),
+                TracedTimelineItem::HostEvent(_) => None,
+            })
+            .collect()
+    }
+
+    /// Snapshot of provider and metadata-only host observations in their
+    /// actual capture order.
+    pub fn timeline(&self) -> Vec<TracedTimelineEntry> {
+        self.timeline.lock().expect("turn trace lock").clone()
     }
 }
 

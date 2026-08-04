@@ -4642,11 +4642,25 @@ async fn agent_turn(
         histories.entry(req.session_id.clone()).or_default().clone()
     };
 
+    // One capture object timestamps both provider completions and the live
+    // host stream against the real turn origin. This preserves the causal
+    // model → tool → model sequence instead of concatenating two lists later.
+    let activity_settings = cfg.activity.clone();
+    let activity_sink: Option<std::sync::Arc<cd_core::turn_trace::RecordingTurnTrace>> =
+        activity_settings.enabled.then(|| {
+            std::sync::Arc::new(cd_core::turn_trace::RecordingTurnTrace::with_started_at(
+                turn_started_at.into_std(),
+            ))
+        });
+    let activity_tool_kinds = host.activity_tool_kinds();
     let channel = on_event.clone();
     let linked_citation_corpus = log_explorer_context
         .as_ref()
         .map(|context| context.corpus_id.clone());
     let mut sink = |ev: cd_core::events::StreamEvent| {
+        if let Some(activity_sink) = activity_sink.as_ref() {
+            activity_sink.record_host_event(&ev, &activity_tool_kinds);
+        }
         let dto = event_to_dto_with_linked_corpus(&ev, linked_citation_corpus.as_deref());
         let _ = channel.send(dto);
     };
@@ -4756,11 +4770,6 @@ async fn agent_turn(
     // the sink only observes what was already assembled. With the inspector
     // disabled the sink is `None` and the turn takes byte-identical
     // arguments to before, which is what the on/off equivalence test pins.
-    let activity_settings = cfg.activity.clone();
-    let activity_sink: Option<std::sync::Arc<cd_core::turn_trace::RecordingTurnTrace>> =
-        activity_settings
-            .enabled
-            .then(|| std::sync::Arc::new(cd_core::turn_trace::RecordingTurnTrace::new()));
     let trace_sink: Option<std::sync::Arc<dyn cd_core::turn_trace::TurnTraceSink>> = activity_sink
         .clone()
         .map(|sink| sink as std::sync::Arc<dyn cd_core::turn_trace::TurnTraceSink>);
@@ -5707,17 +5716,14 @@ fn record_turn_activity(
         settings.detail_level(),
     );
     if let Some(sink) = sink {
-        recorder.record_provider_rounds(&sink.calls());
+        recorder.record_timeline(&sink.timeline());
     }
     // Whole-stream classification, not the terminal reason alone: this
     // product signals two of its withholding conditions (`linked_no_tool`,
     // `linked_required_source_missing`) as Error codes while the turn
     // completes with reason "stop". See `cd_core::activity::status_for_turn_events`.
     let status = match result {
-        Ok(events) => {
-            recorder.record_stream_events(events);
-            cd_core::activity::status_for_turn_events(events)
-        }
+        Ok(events) => cd_core::activity::status_for_turn_events(events),
         Err(_) => ActivityStatus::Failed,
     };
     let elapsed_ms = u64::try_from(turn_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -6861,6 +6867,11 @@ async fn complete_permission_cmd(
         let mut host_guard = state.host.lock().expect("host");
         host_guard.take().ok_or("host missing")?
     };
+    let activity_tool_kind = host
+        .activity_tool_kinds()
+        .get(&req.tool_name)
+        .copied()
+        .unwrap_or_default();
     let events = grant_and_execute(
         &mut host,
         &req.request_id,
@@ -6877,9 +6888,28 @@ async fn complete_permission_cmd(
         *host_guard = Some(host);
     }
     let events = events?;
-    if let (Some(sid), Some(h)) = (session_key, history_buf) {
+    if let (Some(sid), Some(h)) = (session_key.as_ref(), history_buf) {
         let mut histories = state.histories.lock().expect("hist");
-        histories.insert(sid, h);
+        histories.insert(sid.clone(), h);
+    }
+    if let Some(session_id) = session_key.as_deref() {
+        let updated = state.activity.lock().ok().and_then(|mut store| {
+            store.record_permission_resolution(
+                session_id,
+                &req.request_id,
+                &req.tool_name,
+                decision,
+                activity_tool_kind,
+                &events,
+            )
+        });
+        if let Some((_message_id, record)) = updated {
+            if let Ok(dir) = ensure_config_dir(&state.branding) {
+                if let Ok(journal) = cd_core::activity::DurableActivityJournal::open(&dir) {
+                    let _ = journal.save_record(&record);
+                }
+            }
+        }
     }
     Ok(events_to_dto(&events))
 }

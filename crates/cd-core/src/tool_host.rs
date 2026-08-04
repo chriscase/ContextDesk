@@ -3053,6 +3053,34 @@ impl ToolHost {
         specs
     }
 
+    /// Metadata-only activity authority for every tool currently exposed by
+    /// this host. The activity layer receives this snapshot before execution,
+    /// so it never needs arguments, results, connector credentials, or
+    /// name-pattern guesses in the renderer.
+    pub fn activity_tool_kinds(
+        &self,
+    ) -> std::collections::HashMap<String, crate::activity::ToolActivityKind> {
+        self.specs_for_model()
+            .into_iter()
+            .map(|spec| {
+                let kind = if spec.side_effect != ToolSideEffect::Read {
+                    crate::activity::ToolActivityKind::GovernedWrite
+                } else if self.dynamic_tools.contains_key(&spec.name)
+                    || confluence_tool_name(&spec.name)
+                    || matches!(
+                        spec.name.as_str(),
+                        names::WEB_SEARCH | names::WEB_FETCH | names::X_SEARCH
+                    )
+                {
+                    crate::activity::ToolActivityKind::ExternalConnector
+                } else {
+                    crate::activity::ToolActivityKind::DeterministicHost
+                };
+                (spec.name, kind)
+            })
+            .collect()
+    }
+
     /// Register a UI decision for a pending request id.
     /// Returns the stored request (including original tool arguments) and decision.
     pub fn complete_permission(
@@ -6949,6 +6977,32 @@ mod tests {
         let names: Vec<_> = host.specs().into_iter().map(|t| t.name).collect();
         assert!(names.iter().any(|n| n == names::WEB_SEARCH));
         assert!(names.iter().any(|n| n == names::WEB_FETCH));
+    }
+
+    #[test]
+    fn activity_tool_authority_comes_from_host_catalog_metadata() {
+        use crate::activity::ToolActivityKind;
+
+        let (_tmp, mut host) = host_with_docs();
+        host.set_web_research(true);
+
+        let kinds = host.activity_tool_kinds();
+        assert_eq!(
+            kinds.get(names::SEARCH_KB),
+            Some(&ToolActivityKind::DeterministicHost)
+        );
+        assert_eq!(
+            kinds.get(names::SAVE_MEMORY),
+            Some(&ToolActivityKind::GovernedWrite)
+        );
+        assert_eq!(
+            kinds.get(names::WEB_SEARCH),
+            Some(&ToolActivityKind::ExternalConnector)
+        );
+        assert_eq!(
+            kinds.get(names::WEB_FETCH),
+            Some(&ToolActivityKind::ExternalConnector)
+        );
     }
 
     #[tokio::test]

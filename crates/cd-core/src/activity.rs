@@ -36,7 +36,10 @@
 //!    [`ActivityDetailLevel::Full`], and even then they are the already
 //!    redacted, already capped ones the trace produced.
 
-use crate::turn_trace::{TracedCall, TracedMessage, TracedOutcome};
+use crate::turn_trace::{
+    TracedCall, TracedHostEvent, TracedMessage, TracedOutcome, TracedTimelineEntry,
+    TracedTimelineItem,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -45,7 +48,7 @@ use std::collections::BTreeMap;
 /// Persisted alongside every record so a later reader can migrate rather
 /// than guess. Bump on any change that a v1 reader could misinterpret;
 /// additive optional fields do not require a bump.
-pub const ACTIVITY_CONTRACT_VERSION: u32 = 1;
+pub const ACTIVITY_CONTRACT_VERSION: u32 = 2;
 
 /// Most events retained per turn. A pathological turn (many rounds, many
 /// tools) must not turn one transcript entry into an unbounded document.
@@ -90,6 +93,29 @@ pub enum ActivityOrigin {
     UserDecision,
     /// A durable mutation that required, and had, an explicit grant.
     GovernedWrite,
+}
+
+/// Host-known authority of a tool, captured without arguments or results.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolActivityKind {
+    /// Local read/compute with a host-defined result.
+    #[default]
+    DeterministicHost,
+    /// A read from a system outside this process.
+    ExternalConnector,
+    /// A local or remote mutation behind an explicit permission grant.
+    GovernedWrite,
+}
+
+impl ToolActivityKind {
+    const fn origin(self) -> ActivityOrigin {
+        match self {
+            Self::DeterministicHost => ActivityOrigin::DeterministicHost,
+            Self::ExternalConnector => ActivityOrigin::ExternalConnector,
+            Self::GovernedWrite => ActivityOrigin::GovernedWrite,
+        }
+    }
 }
 
 /// How much a reader may rely on a step reproducing.
@@ -310,6 +336,10 @@ pub struct ContextMetadata {
     pub tool_names: Vec<String>,
     /// Per-role shape of the context.
     pub roles: Vec<RoleTally>,
+    /// Duration of this provider call itself. This is deliberately separate
+    /// from the event's turn-relative `elapsed_ms` placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_latency_ms: Option<u64>,
     /// Redacted, capped message bodies — present only at
     /// [`ActivityDetailLevel::Full`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -349,7 +379,8 @@ pub struct ActivityEvent {
     /// never wall-clock time — two events can share a millisecond.
     pub seq: u64,
     /// Milliseconds since the turn started.
-    pub elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
     /// Lifecycle position.
     pub phase: ActivityPhase,
     /// Current or terminal result.
@@ -411,7 +442,7 @@ pub struct TurnActivityRecord {
 }
 
 fn default_contract_version() -> u32 {
-    ACTIVITY_CONTRACT_VERSION
+    1
 }
 
 impl TurnActivityRecord {
@@ -437,6 +468,138 @@ impl TurnActivityRecord {
             .filter_map(|e| e.context.as_ref())
             .map(|c| c.context_used_chars)
             .sum()
+    }
+
+    fn append(&mut self, mut event: ActivityEvent) {
+        if self.events.len() >= MAX_ACTIVITY_EVENTS {
+            self.dropped_events = self.dropped_events.saturating_add(1);
+            return;
+        }
+        event.turn_id.clone_from(&self.turn_id);
+        event.seq = self
+            .events
+            .last()
+            .map_or(0, |last| last.seq.saturating_add(1));
+        event.determinism = event.origin.determinism();
+        event.label = bound_chars(&event.label, MAX_ACTIVITY_LABEL_CHARS);
+        event.detail = event
+            .detail
+            .map(|detail| bound_chars(&detail, MAX_ACTIVITY_DETAIL_CHARS));
+        event.evidence.truncate(MAX_ACTIVITY_EVIDENCE_REFS);
+        if self.detail_level == ActivityDetailLevel::Summary {
+            if let Some(context) = event.context.as_mut() {
+                context.bodies = None;
+            }
+        }
+        self.events.push(event);
+    }
+
+    /// Complete a previously pending permission operation and append the
+    /// metadata-only outcome of the governed tool execution, if any.
+    pub fn record_permission_resolution(
+        &mut self,
+        request_id: &str,
+        tool_name: &str,
+        decision: crate::permissions::PermissionDecision,
+        tool_kind: ToolActivityKind,
+        result_events: &[crate::events::StreamEvent],
+    ) {
+        let allowed = !matches!(decision, crate::permissions::PermissionDecision::Deny);
+        self.append(ActivityEvent {
+            turn_id: String::new(),
+            operation_id: format!("permission-{request_id}"),
+            seq: 0,
+            // The permission command occurs after the original turn ended and
+            // the durable v1 record did not retain a wall origin. Unknown is
+            // truthful; zero or the tool latency would not be.
+            elapsed_ms: None,
+            phase: ActivityPhase::Completed,
+            status: if allowed {
+                ActivityStatus::Ok
+            } else {
+                ActivityStatus::Withheld
+            },
+            origin: ActivityOrigin::UserDecision,
+            determinism: Determinism::Human,
+            label: if allowed {
+                format!("Permission allowed: {tool_name}")
+            } else {
+                format!("Permission denied: {tool_name}")
+            },
+            detail: Some(
+                match decision {
+                    crate::permissions::PermissionDecision::Deny => "decision=deny",
+                    crate::permissions::PermissionDecision::AllowOnce => "decision=allow_once",
+                    crate::permissions::PermissionDecision::AllowSessionPath => {
+                        "decision=allow_session_path"
+                    }
+                }
+                .to_string(),
+            ),
+            trigger: ActivityTrigger::UserDecision,
+            scope: self.scope.clone(),
+            evidence: Vec::new(),
+            privacy: PrivacyClass::Metadata,
+            context: None,
+        });
+
+        if allowed {
+            let current_round = self
+                .events
+                .iter()
+                .filter_map(|event| event.context.as_ref().map(|context| context.round))
+                .max()
+                .unwrap_or(0);
+            let mut recorder = ActivityRecorder::new(
+                self.turn_id.clone(),
+                self.session_id.clone(),
+                self.scope.clone(),
+                self.detail_level,
+            );
+            for event in result_events {
+                if let crate::events::StreamEvent::Tool {
+                    id,
+                    name,
+                    phase,
+                    ok,
+                    ..
+                } = event
+                {
+                    recorder.record_host_event(
+                        &TracedHostEvent::Tool {
+                            id: id.clone(),
+                            name: name.clone(),
+                            phase: *phase,
+                            ok: *ok,
+                            kind: tool_kind,
+                        },
+                        None,
+                        current_round,
+                        &std::collections::HashSet::new(),
+                    );
+                }
+            }
+            for event in recorder.events {
+                self.append(event);
+            }
+            let tool_failed = result_events.iter().any(|event| {
+                matches!(
+                    event,
+                    crate::events::StreamEvent::Tool {
+                        ok: Some(false),
+                        ..
+                    }
+                )
+            });
+            self.status = if tool_failed {
+                ActivityStatus::Failed
+            } else {
+                ActivityStatus::Ok
+            };
+        } else {
+            self.status = ActivityStatus::Withheld;
+        }
+        self.version = ACTIVITY_CONTRACT_VERSION;
     }
 }
 
@@ -527,64 +690,103 @@ impl ActivityRecorder {
     /// so a caller cannot leak them by constructing the event by hand.
     pub fn record_provider_rounds(&mut self, calls: &[TracedCall]) {
         for call in calls {
-            let round = u32::try_from(call.seq).unwrap_or(u32::MAX);
-            let (status, label, detail) = match &call.outcome {
-                TracedOutcome::Completed {
-                    finish_reason,
-                    tool_call_count,
-                } => (
-                    ActivityStatus::Ok,
-                    format!("Model request (round {})", round + 1),
-                    Some(if *tool_call_count > 0 {
-                        format!(
-                            "finish_reason={finish_reason}; requested {tool_call_count} tool call(s)"
-                        )
-                    } else {
-                        format!("finish_reason={finish_reason}; no tool calls")
-                    }),
-                ),
-                // Already redacted by the trace.
-                TracedOutcome::Failed { message } => (
-                    ActivityStatus::Failed,
-                    format!("Model request failed (round {})", round + 1),
-                    Some(message.clone()),
-                ),
-            };
-            let context = ContextMetadata {
-                round,
-                message_count: call.messages.len(),
-                context_used_chars: call.context_used_chars,
-                messages_capped: call.messages_capped,
-                tool_names: call.tool_names.clone(),
-                roles: role_tallies(&call.messages),
-                bodies: self.detail.retains_bodies().then(|| call.messages.clone()),
-            };
-            let privacy = if context.bodies.is_some() {
-                PrivacyClass::RedactedContent
-            } else {
-                PrivacyClass::Metadata
-            };
-            self.push(ActivityEvent {
-                turn_id: String::new(),
-                operation_id: format!("provider-round-{round}"),
-                seq: 0,
-                elapsed_ms: call.elapsed_ms,
-                phase: ActivityPhase::Completed,
-                status,
-                origin: ActivityOrigin::ProbabilisticModel,
-                determinism: Determinism::Probabilistic,
-                label,
-                detail,
-                trigger: if round == 0 {
-                    ActivityTrigger::UserMessage
+            self.record_provider_round(call, None);
+        }
+    }
+
+    fn record_provider_round(&mut self, call: &TracedCall, elapsed_ms: Option<u64>) {
+        let round = u32::try_from(call.seq).unwrap_or(u32::MAX);
+        let (status, label, detail) = match &call.outcome {
+            TracedOutcome::Completed {
+                finish_reason,
+                tool_call_count,
+            } => (
+                ActivityStatus::Ok,
+                format!("Model request (round {})", round + 1),
+                Some(if *tool_call_count > 0 {
+                    format!(
+                        "finish_reason={finish_reason}; requested {tool_call_count} tool call(s)"
+                    )
                 } else {
-                    ActivityTrigger::HostPolicy
-                },
-                scope: self.scope.clone(),
-                evidence: Vec::new(),
-                privacy,
-                context: Some(context),
-            });
+                    format!("finish_reason={finish_reason}; no tool calls")
+                }),
+            ),
+            // Already redacted by the trace.
+            TracedOutcome::Failed { message } => (
+                ActivityStatus::Failed,
+                format!("Model request failed (round {})", round + 1),
+                Some(message.clone()),
+            ),
+        };
+        let context = ContextMetadata {
+            round,
+            message_count: call.messages.len(),
+            context_used_chars: call.context_used_chars,
+            messages_capped: call.messages_capped,
+            tool_names: call.tool_names.clone(),
+            roles: role_tallies(&call.messages),
+            provider_latency_ms: Some(call.elapsed_ms),
+            bodies: self.detail.retains_bodies().then(|| call.messages.clone()),
+        };
+        let privacy = if context.bodies.is_some() {
+            PrivacyClass::RedactedContent
+        } else {
+            PrivacyClass::Metadata
+        };
+        self.push(ActivityEvent {
+            turn_id: String::new(),
+            operation_id: format!("provider-round-{round}"),
+            seq: 0,
+            elapsed_ms,
+            phase: ActivityPhase::Completed,
+            status,
+            origin: ActivityOrigin::ProbabilisticModel,
+            determinism: Determinism::Probabilistic,
+            label,
+            detail,
+            trigger: if round == 0 {
+                ActivityTrigger::UserMessage
+            } else {
+                ActivityTrigger::HostPolicy
+            },
+            scope: self.scope.clone(),
+            evidence: Vec::new(),
+            privacy,
+            context: Some(context),
+        });
+    }
+
+    /// Project the shared capture timeline without reordering provider and
+    /// host work. This is the production path; the older per-list methods
+    /// remain for hosts that genuinely have no shared live clock.
+    pub fn record_timeline(&mut self, timeline: &[TracedTimelineEntry]) {
+        use std::collections::HashSet;
+        let awaiting_tool_ids: HashSet<&str> = timeline
+            .iter()
+            .filter_map(|entry| match &entry.item {
+                TracedTimelineItem::HostEvent(TracedHostEvent::Tool {
+                    id,
+                    phase: crate::events::ToolPhase::Finished,
+                    ok: None,
+                    ..
+                }) => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let mut current_round = 0u32;
+        for entry in timeline {
+            match &entry.item {
+                TracedTimelineItem::ProviderCall(call) => {
+                    current_round = u32::try_from(call.seq).unwrap_or(u32::MAX);
+                    self.record_provider_round(call, Some(entry.elapsed_ms));
+                }
+                TracedTimelineItem::HostEvent(event) => self.record_host_event(
+                    event,
+                    Some(entry.elapsed_ms),
+                    current_round,
+                    &awaiting_tool_ids,
+                ),
+            }
         }
     }
 
@@ -594,132 +796,184 @@ impl ActivityRecorder {
     /// unredacted draft content).
     pub fn record_stream_events(&mut self, events: &[crate::events::StreamEvent]) {
         use crate::events::{StreamEvent, ToolPhase};
+        let awaiting_tool_ids: std::collections::HashSet<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::Tool {
+                    id,
+                    phase: ToolPhase::Finished,
+                    ok: None,
+                    ..
+                } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
         for event in events {
-            match event {
+            let traced = match event {
                 StreamEvent::Tool {
                     id,
                     name,
                     phase,
-                    summary,
-                    detail,
                     ok,
-                } => {
-                    let (phase_a, status) = match phase {
-                        ToolPhase::Started => (ActivityPhase::Started, ActivityStatus::Pending),
-                        ToolPhase::Finished => (
-                            ActivityPhase::Completed,
-                            if ok.unwrap_or(false) {
-                                ActivityStatus::Ok
-                            } else {
-                                ActivityStatus::Failed
-                            },
-                        ),
-                    };
-                    self.push(ActivityEvent {
-                        turn_id: String::new(),
-                        operation_id: format!("tool-{id}"),
-                        seq: 0,
-                        elapsed_ms: 0,
-                        phase: phase_a,
-                        status,
-                        origin: ActivityOrigin::DeterministicHost,
-                        determinism: Determinism::Deterministic,
-                        label: format!("Tool {name}"),
-                        detail: Some(bound_chars(summary, MAX_ACTIVITY_DETAIL_CHARS))
-                            .filter(|s| !s.is_empty())
-                            .or_else(|| {
-                                detail
-                                    .as_ref()
-                                    .map(|d| bound_chars(d, MAX_ACTIVITY_DETAIL_CHARS))
-                            }),
-                        trigger: ActivityTrigger::ModelRequest { round: 0 },
-                        scope: self.scope.clone(),
-                        evidence: Vec::new(),
-                        privacy: PrivacyClass::Metadata,
-                        context: None,
-                    });
-                }
+                    ..
+                } => Some(TracedHostEvent::Tool {
+                    id: id.clone(),
+                    name: name.clone(),
+                    phase: *phase,
+                    ok: *ok,
+                    kind: ToolActivityKind::DeterministicHost,
+                }),
                 StreamEvent::PermissionRequired {
                     request_id,
                     tool_name,
-                    target,
                     risk,
                     ..
-                } => {
-                    // Deliberately ignore `reason`, `preview`, and `arguments` —
-                    // those can carry unredacted draft content.
-                    self.push(ActivityEvent {
-                        turn_id: String::new(),
-                        operation_id: format!("permission-{request_id}"),
-                        seq: 0,
-                        elapsed_ms: 0,
-                        phase: ActivityPhase::Started,
-                        status: ActivityStatus::Pending,
-                        origin: ActivityOrigin::UserDecision,
-                        determinism: Determinism::Human,
-                        label: format!("Permission: {tool_name}"),
-                        detail: Some(bound_chars(
-                            &format!("target={target}; risk={risk}"),
-                            MAX_ACTIVITY_DETAIL_CHARS,
-                        )),
-                        trigger: ActivityTrigger::UserDecision,
-                        scope: self.scope.clone(),
-                        evidence: Vec::new(),
-                        privacy: PrivacyClass::Metadata,
-                        context: None,
-                    });
-                }
-                StreamEvent::SearchTrail { steps } => {
-                    let n = steps.len();
-                    self.push(ActivityEvent {
-                        turn_id: String::new(),
-                        operation_id: format!("retrieval-trail-{}", self.seq),
-                        seq: 0,
-                        elapsed_ms: 0,
-                        phase: ActivityPhase::Completed,
-                        status: ActivityStatus::Ok,
-                        origin: ActivityOrigin::RepeatableHeuristic,
-                        determinism: Determinism::Repeatable,
-                        label: format!("Retrieval trail ({n} step(s))"),
-                        detail: None, // step text may echo user content
-                        trigger: ActivityTrigger::HostPolicy,
-                        scope: self.scope.clone(),
-                        evidence: Vec::new(),
-                        privacy: PrivacyClass::Metadata,
-                        context: None,
-                    });
-                }
-                StreamEvent::Citation {
-                    source_id,
-                    label,
-                    locator,
-                } => {
-                    self.push(ActivityEvent {
-                        turn_id: String::new(),
-                        operation_id: format!("citation-{source_id}"),
-                        seq: 0,
-                        elapsed_ms: 0,
-                        phase: ActivityPhase::Completed,
-                        status: ActivityStatus::Ok,
-                        origin: ActivityOrigin::DeterministicHost,
-                        determinism: Determinism::Deterministic,
-                        label: format!("Citation: {label}"),
-                        detail: locator
-                            .clone()
-                            .map(|l| bound_chars(&l, MAX_ACTIVITY_DETAIL_CHARS)),
-                        trigger: ActivityTrigger::HostPolicy,
-                        scope: self.scope.clone(),
-                        evidence: vec![EvidenceRef {
-                            kind: "citation".into(),
-                            id: source_id.clone(),
-                            locator: locator.clone(),
-                        }],
-                        privacy: PrivacyClass::Metadata,
-                        context: None,
-                    });
-                }
-                _ => {}
+                } => Some(TracedHostEvent::PermissionRequired {
+                    request_id: request_id.clone(),
+                    tool_name: tool_name.clone(),
+                    risk: risk.clone(),
+                    kind: ToolActivityKind::DeterministicHost,
+                }),
+                StreamEvent::SearchTrail { steps } => Some(TracedHostEvent::SearchTrail {
+                    step_count: steps.len(),
+                }),
+                StreamEvent::Citation { source_id, .. } => Some(TracedHostEvent::Citation {
+                    source_id: source_id.clone(),
+                }),
+                _ => None,
+            };
+            if let Some(traced) = traced {
+                self.record_host_event(&traced, None, 0, &awaiting_tool_ids);
             }
+        }
+    }
+
+    fn record_host_event(
+        &mut self,
+        event: &TracedHostEvent,
+        elapsed_ms: Option<u64>,
+        current_round: u32,
+        awaiting_tool_ids: &std::collections::HashSet<&str>,
+    ) {
+        match event {
+            TracedHostEvent::Tool {
+                id,
+                name,
+                phase,
+                ok,
+                kind,
+            } => {
+                let awaiting = awaiting_tool_ids.contains(id.as_str());
+                let (activity_phase, status) = match (phase, ok, awaiting) {
+                    (crate::events::ToolPhase::Started, _, _) => {
+                        (ActivityPhase::Started, ActivityStatus::Pending)
+                    }
+                    (crate::events::ToolPhase::Finished, _, true) => {
+                        (ActivityPhase::Progress, ActivityStatus::Pending)
+                    }
+                    (crate::events::ToolPhase::Finished, Some(true), false) => {
+                        (ActivityPhase::Completed, ActivityStatus::Ok)
+                    }
+                    (crate::events::ToolPhase::Finished, Some(false), false) => {
+                        (ActivityPhase::Completed, ActivityStatus::Failed)
+                    }
+                    (crate::events::ToolPhase::Finished, None, false) => {
+                        (ActivityPhase::Progress, ActivityStatus::Pending)
+                    }
+                };
+                let origin = if awaiting {
+                    ActivityOrigin::DeterministicHost
+                } else {
+                    kind.origin()
+                };
+                self.push(ActivityEvent {
+                    turn_id: String::new(),
+                    operation_id: format!("tool-{id}"),
+                    seq: 0,
+                    elapsed_ms,
+                    phase: activity_phase,
+                    status,
+                    origin,
+                    determinism: origin.determinism(),
+                    label: if awaiting {
+                        format!("Awaiting permission: {name}")
+                    } else {
+                        format!("Tool {name}")
+                    },
+                    detail: None,
+                    trigger: ActivityTrigger::ModelRequest {
+                        round: current_round,
+                    },
+                    scope: self.scope.clone(),
+                    evidence: Vec::new(),
+                    privacy: PrivacyClass::Metadata,
+                    context: None,
+                });
+            }
+            TracedHostEvent::PermissionRequired {
+                request_id,
+                tool_name,
+                risk,
+                kind,
+            } => {
+                self.push(ActivityEvent {
+                    turn_id: String::new(),
+                    operation_id: format!("permission-{request_id}"),
+                    seq: 0,
+                    elapsed_ms,
+                    phase: ActivityPhase::Progress,
+                    status: ActivityStatus::Pending,
+                    origin: ActivityOrigin::DeterministicHost,
+                    determinism: Determinism::Deterministic,
+                    label: format!("Permission needed: {tool_name}"),
+                    detail: Some(format!("risk={risk}; requested_action={kind:?}")),
+                    trigger: ActivityTrigger::ModelRequest {
+                        round: current_round,
+                    },
+                    scope: self.scope.clone(),
+                    evidence: Vec::new(),
+                    privacy: PrivacyClass::Metadata,
+                    context: None,
+                });
+            }
+            TracedHostEvent::SearchTrail { step_count } => self.push(ActivityEvent {
+                turn_id: String::new(),
+                operation_id: format!("retrieval-trail-{}", self.seq),
+                seq: 0,
+                elapsed_ms,
+                phase: ActivityPhase::Completed,
+                status: ActivityStatus::Ok,
+                origin: ActivityOrigin::RepeatableHeuristic,
+                determinism: Determinism::Repeatable,
+                label: format!("Retrieval trail ({step_count} step(s))"),
+                detail: None,
+                trigger: ActivityTrigger::HostPolicy,
+                scope: self.scope.clone(),
+                evidence: Vec::new(),
+                privacy: PrivacyClass::Metadata,
+                context: None,
+            }),
+            TracedHostEvent::Citation { source_id } => self.push(ActivityEvent {
+                turn_id: String::new(),
+                operation_id: format!("citation-{source_id}"),
+                seq: 0,
+                elapsed_ms,
+                phase: ActivityPhase::Completed,
+                status: ActivityStatus::Ok,
+                origin: ActivityOrigin::DeterministicHost,
+                determinism: Determinism::Deterministic,
+                label: "Citation recorded".into(),
+                detail: None,
+                trigger: ActivityTrigger::HostPolicy,
+                scope: self.scope.clone(),
+                evidence: vec![EvidenceRef {
+                    kind: "citation".into(),
+                    id: source_id.clone(),
+                    locator: None,
+                }],
+                privacy: PrivacyClass::Metadata,
+                context: None,
+            }),
         }
     }
 
@@ -770,6 +1024,8 @@ fn role_tallies(messages: &[TracedMessage]) -> Vec<RoleTally> {
 pub fn status_for_turn_reason(reason: &str) -> ActivityStatus {
     if reason == "cancel" || reason == "cancelled" {
         ActivityStatus::Cancelled
+    } else if reason == "awaiting_permission" {
+        ActivityStatus::Pending
     } else if reason == "error" {
         ActivityStatus::Failed
     } else if crate::events::is_withheld_turn_reason(reason) {
@@ -914,6 +1170,10 @@ mod tests {
         assert_eq!(status_for_turn_reason("stop"), ActivityStatus::Ok);
         assert_eq!(status_for_turn_reason("cancel"), ActivityStatus::Cancelled);
         assert_eq!(
+            status_for_turn_reason("awaiting_permission"),
+            ActivityStatus::Pending
+        );
+        assert_eq!(
             status_for_turn_reason("budget_rounds"),
             ActivityStatus::Withheld,
             "the round budget ran out AND the final answer failed"
@@ -954,7 +1214,7 @@ mod tests {
             "status": "ok", "total_elapsed_ms": 5, "events": []
         });
         let record: TurnActivityRecord = serde_json::from_value(legacy).expect("legacy loads");
-        assert_eq!(record.version, ACTIVITY_CONTRACT_VERSION);
+        assert_eq!(record.version, 1);
         assert_eq!(record.detail_level, ActivityDetailLevel::Summary);
         assert_eq!(record.dropped_events, 0);
         assert!(!record.is_truncated());
@@ -1043,6 +1303,44 @@ impl ActivityStore {
             session_id: session_id.to_string(),
             message_id: message_id.to_string(),
         })
+    }
+
+    /// Apply a UI permission response to the newest record in this session
+    /// that contains the corresponding pending operation. Returns the owning
+    /// message id and updated record for durable journal replacement.
+    pub fn record_permission_resolution(
+        &mut self,
+        session_id: &str,
+        request_id: &str,
+        tool_name: &str,
+        decision: crate::permissions::PermissionDecision,
+        tool_kind: ToolActivityKind,
+        result_events: &[crate::events::StreamEvent],
+    ) -> Option<(String, TurnActivityRecord)> {
+        let operation_id = format!("permission-{request_id}");
+        let key = self
+            .order
+            .iter()
+            .rev()
+            .find(|key| {
+                key.session_id == session_id
+                    && self.records.get(*key).is_some_and(|record| {
+                        record.events.iter().any(|event| {
+                            event.operation_id == operation_id
+                                && event.status == ActivityStatus::Pending
+                        })
+                    })
+            })?
+            .clone();
+        let record = self.records.get_mut(&key)?;
+        record.record_permission_resolution(
+            request_id,
+            tool_name,
+            decision,
+            tool_kind,
+            result_events,
+        );
+        Some((key.message_id, record.clone()))
     }
 
     /// How many records are held.
