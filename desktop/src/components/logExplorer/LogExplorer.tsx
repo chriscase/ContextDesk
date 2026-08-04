@@ -821,10 +821,6 @@ export function LogExplorer({ corpusId }: Props) {
   const [allSourcesOpen, setAllSourcesOpen] = useState(false);
   const [timeQuality, setTimeQuality] = useState<TimeQuality>("order_only");
   const [wallTimePreferred, setWallTimePreferred] = useState(true);
-  const [timeEvidenceCounts, setTimeEvidenceCounts] = useState<{
-    wall: number;
-    orderOnly: number;
-  } | null>(null);
   const [timeResolutionOpen, setTimeResolutionOpen] = useState(false);
   const timeResolutionTriggerRef = useRef<HTMLButtonElement>(null);
   const [totalMatched, setTotalMatched] = useState(0);
@@ -1328,53 +1324,16 @@ export function LogExplorer({ corpusId }: Props) {
     [activeSuppressionTemplateIds, wallTimePreferred],
   );
 
-  const wallEventCount = timeEvidenceCounts?.wall ?? null;
-  const orderOnlyEventCount = timeEvidenceCounts?.orderOnly ?? null;
+  const wallEventCount = facets?.wallEventCount ?? null;
+  const orderOnlyEventCount = facets?.orderOnlyEventCount ?? null;
   const wallTimeScopeActive =
     wallTimePreferred && (wallEventCount == null || wallEventCount > 0);
-  const corpusTimeQualityFromCounts: TimeQuality | null =
-    wallEventCount == null || orderOnlyEventCount == null
-      ? null
-      : wallEventCount > 0 && orderOnlyEventCount > 0
-        ? "mixed"
-        : wallEventCount > 0
-          ? "wall"
-          : "order_only";
   const headerTimeQuality = wallTimeScopeActive
-    ? timeQuality === "order_only"
-      ? corpusTimeQualityFromCounts ?? timeQuality
-      : "wall"
-    : corpusTimeQualityFromCounts ?? timeQuality;
+    ? timeQuality
+    : facets?.timeQuality ?? timeQuality;
   useEffect(() => {
     if (wallEventCount === 0) setWallTimePreferred(false);
   }, [wallEventCount]);
-  useEffect(() => {
-    let cancelled = false;
-    void Promise.all([
-      hostLogCountEvents(corpusId, {
-        ...filtersToQuery(emptyFilters()),
-        wallTimeOnly: true,
-      }),
-      hostLogCountEvents(corpusId, {
-        ...filtersToQuery(emptyFilters()),
-        wallTimeOnly: false,
-      }),
-    ])
-      .then(([wall, all]) => {
-        if (!cancelled) {
-          setTimeEvidenceCounts({
-            wall: wall.totalMatched,
-            orderOnly: Math.max(0, all.totalMatched - wall.totalMatched),
-          });
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setTimeEvidenceCounts(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [corpusId, timeQuality]);
 
   const setAutoStatus = useCallback((nextStatus: string) => {
     if (autoStatusLockRef.current === "bookmark-restore") {
@@ -2438,7 +2397,6 @@ export function LogExplorer({ corpusId }: Props) {
     setTimelineReady(false);
     setTimeQuality("order_only");
     setWallTimePreferred(true);
-    setTimeEvidenceCounts(null);
     setGaps([]);
     setLaneSourceCatalog([]);
     setLaneSourceCatalogNextCursor(null);

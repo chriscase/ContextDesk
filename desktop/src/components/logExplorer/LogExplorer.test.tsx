@@ -6532,9 +6532,15 @@ describe("LogExplorer shell", () => {
         ? eventPage("normalized.log", "wall", 2, 1_700_000_000, 8)
         : eventPage("preamble.log", "order_only", 2, 1, 10),
     );
-    vi.mocked(host.hostLogCountEvents).mockImplementation(async (_, query) => ({
-      totalMatched: query?.wallTimeOnly ? 8 : 10,
-    }));
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: { "normalized.log": 8, "preamble.log": 2 },
+      levels: { info: 10 },
+      services: {},
+      hosts: {},
+      timeQuality: "mixed",
+      wallEventCount: 8,
+      orderOnlyEventCount: 2,
+    });
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByText(/normalized\.log event 0/);

@@ -2803,6 +2803,8 @@ export type LogFacetsDto = {
   services: Record<string, number>;
   hosts: Record<string, number>;
   timeQuality: TimeQuality;
+  wallEventCount?: number;
+  orderOnlyEventCount?: number;
 };
 
 export type LogSourceCatalogEntryDto = {

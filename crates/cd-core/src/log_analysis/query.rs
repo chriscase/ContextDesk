@@ -738,6 +738,12 @@ pub struct LogFacets {
     pub hosts: BTreeMap<String, u64>,
     /// Corpus time quality.
     pub time_quality: TimeQuality,
+    /// Exact wall-clock events under the active non-time-quality filters.
+    #[serde(default)]
+    pub wall_event_count: u64,
+    /// Exact order-only events under the active non-time-quality filters.
+    #[serde(default)]
+    pub order_only_event_count: u64,
 }
 
 /// One stable full-path identity in the corpus source catalog.
@@ -1656,12 +1662,35 @@ fn summarize_event_quality(events: &[ExplorerEvent]) -> TimeQuality {
 pub fn query_facets(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<LogFacets> {
     let (where_sql, binds) = build_where(q)?;
 
+    // Time-evidence counts describe the reversible wall/all scope itself, so
+    // they honor every active filter except that scope predicate. They ride
+    // the existing deferred facets request and never add a startup count.
+    let mut all_time_query = q.clone();
+    all_time_query.wall_time_only = false;
+    let (all_time_where, all_time_binds) = build_where(&all_time_query)?;
+
     let mut facets = LogFacets {
         time_quality: corpus_time_quality_from_meta(corpus),
         ..Default::default()
     };
 
     corpus.with_connection(|conn| {
+        let time_sql = format!(
+            "SELECT COUNT(*), \
+                    COALESCE(SUM(CASE WHEN active_timestamp_basis IN ('{}', '{}') THEN 1 ELSE 0 END), 0) \
+             FROM events WHERE {all_time_where}",
+            ActiveTimestampBasis::ExplicitWall.as_storage_str(),
+            ActiveTimestampBasis::ResolvedLocal.as_storage_str(),
+        );
+        let mut time_stmt = conn.prepare(&time_sql).map_err(duck_err)?;
+        let (all, wall) = time_stmt
+            .query_row(params_ref(&all_time_binds).as_slice(), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(duck_err)?;
+        facets.wall_event_count = wall.max(0) as u64;
+        facets.order_only_event_count = all.saturating_sub(wall).max(0) as u64;
+
         for (col, map) in [
             ("source", &mut facets.sources),
             ("level", &mut facets.levels),
@@ -4897,6 +4926,20 @@ mod tests {
         assert_eq!(wall_only.events.len(), 1);
         assert_eq!(wall_only.events[0].message, "pre-2000 wall");
         assert_eq!(wall_only.time_quality, TimeQuality::Wall);
+
+        let facets = query_facets(
+            &corpus,
+            &EventQuery {
+                wall_time_only: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(facets.sources.get("old.log"), Some(&1));
+        assert!(!facets.sources.contains_key("large.log"));
+        assert_eq!(facets.wall_event_count, 1);
+        assert_eq!(facets.order_only_event_count, 1);
+        assert_eq!(facets.time_quality, TimeQuality::Mixed);
     }
 
     #[test]
