@@ -41,7 +41,7 @@
 //! code. The only bound is [`MAX_IMPORT_PREVIEW_ITEMS`], and reaching it sets
 //! [`ImportPreviewReport::truncated`] rather than quietly dropping the tail.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
@@ -1341,7 +1341,10 @@ fn is_datetime_token(token: &str) -> bool {
             return true;
         }
         let mut chars = rest.chars();
-        if !chars.next().is_some_and(|c| matches!(c, '-' | '_' | '.')) {
+        if !chars
+            .next()
+            .is_some_and(|c| matches!(c, '-' | '_' | '.' | 'T' | 't'))
+        {
             continue;
         }
         if is_time_token(chars.as_str()) {
@@ -1365,11 +1368,20 @@ fn is_date_token(token: &str) -> bool {
 }
 
 fn is_time_token(token: &str) -> bool {
+    let token = token
+        .split_once(['.', ','])
+        .map_or(token, |(whole, fraction)| {
+            if !fraction.is_empty() && fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+                whole
+            } else {
+                token
+            }
+        });
     let bytes = token.as_bytes();
     (bytes.len() == 6 && bytes.iter().all(u8::is_ascii_digit))
         || (bytes.len() == 8
             && bytes[2] == bytes[5]
-            && matches!(bytes[2], b'-' | b'_')
+            && matches!(bytes[2], b'-' | b'_' | b':')
             && bytes
                 .iter()
                 .enumerate()
@@ -1383,6 +1395,16 @@ fn is_time_token(token: &str) -> bool {
 /// together; it is never sufficient. Members that share a stem but disagree on
 /// format are deliberately left ungrouped, and each keeps its own row.
 pub(super) fn build_groups(items: &mut [ImportPreviewItem]) -> Vec<ImportPreviewGroup> {
+    // First learn the physical stems proven by at least one rolled member.
+    // The unsuffixed current file (`app.log`) has no rotation trailer of its
+    // own, so it may join only when an actual peer normalizes exactly to its
+    // full portable identity. Keeping the directory in that identity prevents
+    // duplicate basenames under different parents from collapsing together.
+    let rolled_stems: BTreeSet<String> = items
+        .iter()
+        .filter(|item| item.format_id.is_some() && matches!(item.status, ImportItemStatus::Ready))
+        .filter_map(|item| rolled_stem(&item.identity))
+        .collect();
     let mut by_stem: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (index, item) in items.iter().enumerate() {
         if item.format_id.is_none() {
@@ -1393,6 +1415,11 @@ pub(super) fn build_groups(items: &mut [ImportPreviewItem]) -> Vec<ImportPreview
         }
         if let Some(stem) = rolled_stem(&item.identity) {
             by_stem.entry(stem).or_default().push(index);
+        } else if rolled_stems.contains(&item.identity) {
+            by_stem
+                .entry(item.identity.clone())
+                .or_default()
+                .push(index);
         }
     }
 
@@ -2246,6 +2273,10 @@ mod tests {
             Some("service.log")
         );
         assert_eq!(
+            rolled_stem("service-2026-01-02T03:04:05.678.log").as_deref(),
+            Some("service.log")
+        );
+        assert_eq!(
             rolled_stem("worker.4321-2026-01-02_030405.log.1").as_deref(),
             Some("worker.log")
         );
@@ -2277,6 +2308,8 @@ mod tests {
             "duplicate basenames in different directories keep distinct stems"
         );
         assert_eq!(rolled_stem("app.log"), None);
+        assert_eq!(rolled_stem("service-123456.log"), None);
+        assert_eq!(rolled_stem("service_987654.log"), None);
         assert_eq!(rolled_stem("unrelated.txt"), None);
 
         let json = sample_of(&[r#"{"ts":"2026-01-01T00:00:00Z","level":"info","msg":"a"}"#]);
@@ -2300,6 +2333,26 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].member_identities.len(), 2);
         assert!(timestamped.iter().all(|item| item.selected));
+
+        let mut current_and_rotated = vec![
+            item_from_sample("service.log", 10, &json, None, false),
+            item_from_sample("service.log.1", 10, &json, None, false),
+            item_from_sample(
+                "service-2026-01-02T03:04:05.678.log",
+                10,
+                &json,
+                None,
+                false,
+            ),
+        ];
+        let groups = build_groups(&mut current_and_rotated);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].stem, "service.log");
+        assert_eq!(groups[0].member_identities.len(), 3);
+        let group_id = &groups[0].group_id;
+        assert!(current_and_rotated
+            .iter()
+            .all(|item| item.selected && item.group_id.as_deref() == Some(group_id.as_str())));
     }
 
     #[test]
