@@ -17944,7 +17944,8 @@ mod chat_session_host_tests {
 
         // Source contract for the shipped Tauri path: load must seed the cache,
         // the seed must use Session::to_chat_history, and agent_turn must clone
-        // that session-keyed cache into the core provider path.
+        // that session-keyed cache into the shared workflow turn kernel. The
+        // workflow kernel, in turn, must forward it to the core provider path.
         let source = include_str!("lib.rs");
         let load_start = source
             .find("fn load_chat_session(")
@@ -17977,7 +17978,19 @@ mod chat_session_host_tests {
             .expect("agent command boundary");
         let agent_contract = &source[agent_start..agent_end];
         assert!(agent_contract.contains("histories.entry(req.session_id.clone())"));
-        assert!(agent_contract
+        assert!(agent_contract.contains("cd_workflow::turn::run_turn"));
+        assert!(!agent_contract
+            .contains("research_turn_with_cancel_and_context_and_checkpoint_and_trace"));
+
+        let workflow_turn = include_str!("../../../crates/cd-workflow/src/turn.rs");
+        let shared_start = workflow_turn
+            .find("pub async fn run_turn(")
+            .expect("shared workflow turn kernel");
+        let shared_end = workflow_turn[shared_start..]
+            .find("/// Prior tool-host state")
+            .map(|offset| shared_start + offset)
+            .expect("shared workflow turn boundary");
+        assert!(workflow_turn[shared_start..shared_end]
             .contains("research_turn_with_cancel_and_context_and_checkpoint_and_trace"));
     }
 
