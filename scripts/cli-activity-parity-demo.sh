@@ -63,7 +63,7 @@ cat > "$APP_CFG" <<JSON
       "chat_model": "demo-model",
       "embed_model": null,
       "local_only": true,
-      "capabilities": { "tools": true, "stream": false, "embeddings": false }
+      "capabilities": { "tools": true, "stream": true, "embeddings": false }
     }]
   }
 }
@@ -105,13 +105,9 @@ print(m.group(0) if m else "")
 PY
 )
 echo "corpus=${CORPUS:-none}"
-if [[ -n "${CORPUS}" ]]; then
-  run --json chat --activity summary --new --corpus "$CORPUS" --auto-approve "summarize linked failures" \
-    >"$DEMO_HOME/2.json" 2>"$DEMO_HOME/2.err"
-else
-  run --json chat --activity summary --new --auto-approve "summarize linked failures" \
-    >"$DEMO_HOME/2.json" 2>"$DEMO_HOME/2.err"
-fi
+test -n "${CORPUS}"
+run --json chat --activity summary --new --corpus "$CORPUS" --auto-approve "summarize linked failures" \
+  >"$DEMO_HOME/2.json" 2>"$DEMO_HOME/2.err"
 assert_json_ok "$DEMO_HOME/2.json"
 python3 - <<'PY' "$DEMO_HOME/2.json"
 import json,sys
@@ -120,10 +116,13 @@ act=v["data"]["activity"]
 assert act.get("events"), act
 print("linked labels", [e.get("label") for e in act["events"]])
 labels="|".join(e.get("label","") for e in act["events"]).lower()
-if "error" in labels or act["status"]!="ok":
-    print("truthful non-ok/error path ok")
-# stream lifecycle must be mergeable: if activity has model rounds, errors still allowed
-assert act["events"]
+assert act["status"] == "ok", act
+assert "tool search_logs" in labels, labels
+assert "citation recorded" in labels, labels
+answer=v["data"]["final_text"]
+assert "seq=1 source=app.log" in answer, answer
+assert "linked_no_tool" not in labels, labels
+print("grounded linked answer", answer)
 PY
 
 # Unlinked data-dir for tool/fail/resume demos (avoid inheriting linked corpus state).
@@ -175,13 +174,11 @@ labels="|".join(
     e.get("label","") for e in ((v.get("data") or {}).get("activity") or {}).get("events") or []
 )
 print("fail attempt ok=", ok, "rc=", rc, "activity_status=", status, "labels=", labels)
-assert (
-    ok is False
-    or rc != 0
-    or status in ("failed","withheld")
-    or "error" in labels.lower()
-    or "Error:" in labels
-), (v, labels, rc)
+assert ok is False and rc != 0, (v, rc)
+assert status == "failed", (v, status)
+assert labels and "model request failed" in labels.lower(), labels
+activity_blob=json.dumps(((v.get("data") or {}).get("activity") or {}))
+assert "/private/" not in activity_blob and "sk-" not in activity_blob, activity_blob
 print("failure path ok")
 PY
 # Clean recovery turn after hard failure
@@ -196,7 +193,7 @@ assert v["data"]["activity"]["events"]
 print("recovery success ok")
 PY
 
-echo "== 5. session continuity + multi-turn context (compaction stand-in) =="
+echo "== 5. session continuity + multi-turn context (not a compaction claim) =="
 run2 --json chat --activity summary --new "continuity seed turn" \
   >"$DEMO_HOME/5a.json" 2>"$DEMO_HOME/5a.err"
 assert_json_ok "$DEMO_HOME/5a.json"
@@ -214,7 +211,6 @@ assert b["data"]["activity"]["events"]
 labels="|".join(e.get("label","") for e in b["data"]["activity"]["events"]).lower()
 assert "model" in labels or "request" in labels or "retrieval" in labels or "context" in labels, labels
 print("session continuity + multi-turn context activity ok; events", len(b["data"]["activity"]["events"]))
-# Honest note: mid-turn compaction is core-driven; multi-turn history growth is the offline demo stand-in.
 PY
 
 echo "== 6. NO_COLOR / TERM=dumb / piped =="

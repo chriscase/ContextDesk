@@ -742,11 +742,14 @@ impl ActivityRecorder {
                     format!("finish_reason={finish_reason}; no tool calls")
                 }),
             ),
-            // Already redacted by the trace.
-            TracedOutcome::Failed { message } => (
+            // The trace's redacted provider error remains available to an
+            // explicitly requested trace surface. Activity is a durable,
+            // broadly visible audit index, so it retains only the failure
+            // class and never a backend body, endpoint, or local path.
+            TracedOutcome::Failed { .. } => (
                 ActivityStatus::Failed,
                 format!("Model request failed (round {})", round + 1),
-                Some(message.clone()),
+                Some("Provider request failed before completion".to_string()),
             ),
         };
         let context = ContextMetadata {

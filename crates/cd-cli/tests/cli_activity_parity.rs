@@ -508,6 +508,256 @@ fn regex_lite_uuid(s: &str) -> Option<String> {
     None
 }
 
+/// Real linked-corpus happy path: the provider must request the native log
+/// tool, receive host-owned evidence, and then produce an answer whose exact
+/// seq/source pair passes the core grounding validator.  A generic final
+/// answer cannot satisfy this oracle.
+#[tokio::test]
+async fn linked_log_turn_returns_exact_grounded_evidence_and_activity_lifecycle() {
+    let server = MockServer::start().await;
+    let call_n = Arc::new(AtomicUsize::new(0));
+    let call_n2 = call_n.clone();
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(move |req: &Request| {
+            let body: Value = serde_json::from_slice(&req.body).expect("provider request JSON");
+            let messages = body["messages"].as_array().expect("messages");
+            let has_tool_result = messages.iter().any(|message| {
+                message["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("source_kind: log_templates"))
+            });
+            call_n2.fetch_add(1, Ordering::SeqCst);
+            if has_tool_result {
+                let tool_body = messages
+                    .iter()
+                    .find(|message| {
+                        message["content"]
+                            .as_str()
+                            .is_some_and(|content| content.contains("source_kind: log_templates"))
+                    })
+                    .and_then(|message| message["content"].as_str())
+                    .expect("model follow-up receives tool result");
+                assert!(
+                    tool_body.contains("seq=1") && tool_body.contains("source=app.log"),
+                    "follow-up must receive the exact host evidence: {tool_body}"
+                );
+                let answer = serde_json::json!({
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": "The payment failure is recorded at seq=1 source=app.log."},
+                        "finish_reason": null
+                    }]
+                });
+                let stop = serde_json::json!({
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+                });
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_raw(
+                        format!("data: {answer}\n\ndata: {stop}\n\ndata: [DONE]\n\n"),
+                        "text/event-stream",
+                    )
+            } else {
+                assert!(
+                    body["tools"].as_array().is_some_and(|tools| tools.iter().any(|tool| {
+                        tool["function"]["name"] == "search_logs"
+                    })),
+                    "linked first round must offer native search_logs: {body}"
+                );
+                let tool = serde_json::json!({
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "search-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "search_logs",
+                                    "arguments": "{\"query\":\"payment failed E42\",\"semantic\":false,\"k\":5}"
+                                }
+                            }]
+                        },
+                        "finish_reason": null
+                    }]
+                });
+                let stop = serde_json::json!({
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]
+                });
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_raw(
+                        format!("data: {tool}\n\ndata: {stop}\n\ndata: [DONE]\n\n"),
+                        "text/event-stream",
+                    )
+            }
+        })
+        .mount(&server)
+        .await;
+
+    let home = tempfile::tempdir().unwrap();
+    let app_config_path = write_profile(home.path(), &server.uri(), true);
+    let logs = home.path().join("logs");
+    std::fs::create_dir(&logs).unwrap();
+    std::fs::write(
+        logs.join("app.log"),
+        "2024-01-01T00:00:00Z INFO service started\n2024-01-01T00:00:01Z ERROR payment failed code=E42\n",
+    )
+    .unwrap();
+    let imported = cli(home.path())
+        .args([
+            "--app-config",
+            app_config_path.to_str().unwrap(),
+            "--json",
+            "import",
+            logs.to_str().unwrap(),
+        ])
+        .output()
+        .expect("import fixture");
+    assert!(
+        imported.status.success(),
+        "stderr={} stdout={}",
+        String::from_utf8_lossy(&imported.stderr),
+        String::from_utf8_lossy(&imported.stdout)
+    );
+    let imported = parse_jsonl(&imported.stdout)
+        .pop()
+        .expect("import envelope");
+    let corpus = imported["data"]["corpus_id"].as_str().expect("corpus id");
+
+    let output = cli(home.path())
+        .args([
+            "--app-config",
+            app_config_path.to_str().unwrap(),
+            "--json",
+            "chat",
+            "--activity",
+            "summary",
+            "--new",
+            "--corpus",
+            corpus,
+            "--auto-approve",
+            "Why did the payment fail?",
+        ])
+        .output()
+        .expect("linked chat");
+    assert!(
+        output.status.success(),
+        "stderr={} stdout={}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).expect("chat JSON");
+    assert_eq!(value["ok"], true, "{value}");
+    assert_eq!(
+        value["data"]["final_text"], "The payment failure is recorded at seq=1 source=app.log.",
+        "{value}"
+    );
+    let activity = &value["data"]["activity"];
+    assert_eq!(activity["status"], "ok", "{activity}");
+    let labels = activity["events"]
+        .as_array()
+        .expect("activity events")
+        .iter()
+        .filter_map(|event| event["label"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        labels.iter().any(|label| label.contains("search_logs")),
+        "native tool lifecycle missing: {labels:?}"
+    );
+    assert!(
+        activity["events"].as_array().unwrap().iter().any(|event| {
+            event["label"] == "Citation recorded"
+                && event["evidence"]
+                    .as_array()
+                    .is_some_and(|evidence| evidence.iter().any(|item| item["kind"] == "citation"))
+        }),
+        "governed privacy-safe host citation missing: {activity}"
+    );
+    assert!(
+        labels
+            .iter()
+            .filter(|label| label.contains("Model request"))
+            .count()
+            >= 2,
+        "tool round and grounded follow-up must both be visible: {labels:?}"
+    );
+    assert!(call_n.load(Ordering::SeqCst) >= 2);
+}
+
+#[tokio::test]
+async fn hard_provider_failure_returns_bounded_failed_activity_in_json_and_jsonl() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(500)
+                .insert_header("content-type", "application/json")
+                .set_body_raw(
+                    r#"{"error":{"message":"failure at /private/demo/secret.log bearer sk-private-marker"}}"#,
+                    "application/json",
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    for mode in ["--json", "--jsonl"] {
+        let home = tempfile::tempdir().unwrap();
+        let app_config_path = write_profile(home.path(), &server.uri(), false);
+        let output = cli(home.path())
+            .args([
+                "--app-config",
+                app_config_path.to_str().unwrap(),
+                mode,
+                "chat",
+                "--activity",
+                "summary",
+                "--new",
+                "trigger hard provider failure",
+            ])
+            .output()
+            .expect("failed chat");
+        assert_eq!(output.status.code(), Some(6), "mode={mode}");
+
+        if mode == "--json" {
+            let value: Value = serde_json::from_slice(&output.stdout).expect("failure JSON");
+            assert_eq!(value["ok"], false, "{value}");
+            let activity = &value["data"]["activity"];
+            assert_eq!(activity["status"], "failed", "{activity}");
+            assert!(
+                activity["events"]
+                    .as_array()
+                    .is_some_and(|events| !events.is_empty()),
+                "{activity}"
+            );
+            let retained = serde_json::to_string(activity).unwrap();
+            assert!(!retained.contains("/private/demo"), "{retained}");
+            assert!(!retained.contains("sk-private-marker"), "{retained}");
+            assert!(retained.contains("Error: provider_error"), "{retained}");
+        } else {
+            let lines = parse_jsonl(&output.stdout);
+            assert_eq!(lines.last().unwrap()["type"], "done");
+            assert_eq!(lines.last().unwrap()["ok"], false);
+            let activity = lines
+                .iter()
+                .filter(|line| line["type"] == "activity")
+                .collect::<Vec<_>>();
+            assert!(!activity.is_empty(), "{lines:#?}");
+            assert!(
+                activity.iter().any(|line| line["status"] == "failed"),
+                "{activity:#?}"
+            );
+            let retained = serde_json::to_string(&activity).unwrap();
+            assert!(!retained.contains("/private/demo"), "{retained}");
+            assert!(!retained.contains("sk-private-marker"), "{retained}");
+            for line in &lines {
+                assert_meta_fields(line);
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn session_resume_persists_and_continues() {
     let server = MockServer::start().await;

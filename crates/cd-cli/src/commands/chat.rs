@@ -1,8 +1,9 @@
 //! `contextdesk chat` — the second half of the configured happy path.
 //! Every decision (provider resolution, corpus binding, the actual model
 //! turn, citation enforcement, session persistence) happens in
-//! `cd_workflow::chat::run_chat_workflow` — the SAME entry point the
-//! desktop app's `agent_turn` Tauri command is meant to call. This module
+//! `cd_workflow::chat::run_chat_workflow`. The current selectively composed
+//! desktop host has not yet migrated its full turn orchestration to that
+//! entry point (the ignored architecture gates document that residual). This module
 //! is only the CLI's rendering and permission-prompt strategy around it,
 //! plus `--dry-run` / `--trace` rendering, which reads
 //! `cd_core::turn_trace` data the workflow call already produced rather
@@ -28,7 +29,7 @@ use serde::Serialize;
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Mirrors `commands::doctor`'s own `INTERRUPT_GRACE` exactly — the same
@@ -62,7 +63,9 @@ pub async fn run(
             "refusing --activity full without --activity-ack — full activity retains bounded,              redacted message bodies; re-run with --activity-ack to confirm",
         );
         if matches!(format, OutputFormat::Jsonl) {
-            print_jsonl_failure(&err);
+            print_jsonl_failure(&err, "", None);
+        } else if matches!(format, OutputFormat::Json) {
+            print_json_failure(&err, None);
         } else if matches!(format, OutputFormat::Text) {
             eprintln!("error: {err}");
         }
@@ -74,7 +77,9 @@ pub async fn run(
              redacted conversation and tool-call content; re-run with --trace-ack to confirm",
         );
         if matches!(format, OutputFormat::Jsonl) {
-            print_jsonl_failure(&err);
+            print_jsonl_failure(&err, "", None);
+        } else if matches!(format, OutputFormat::Json) {
+            print_json_failure(&err, None);
         } else if matches!(format, OutputFormat::Text) {
             // This refusal happens before the renderer exists (no turn has
             // started) — `main.rs` now treats every Text-mode chat error as
@@ -126,7 +131,9 @@ pub async fn run(
         Ok(host) => host,
         Err(error) => {
             if jsonl {
-                print_jsonl_failure(&error);
+                print_jsonl_failure(&error, "", None);
+            } else if matches!(format, OutputFormat::Json) {
+                print_json_failure(&error, None);
             }
             if text {
                 chat_renderer.finish(ChatOutcomeSummary::Failed {
@@ -147,7 +154,12 @@ pub async fn run(
     // Mirror Tauri: feed host stream events into the shared timeline so
     // ActivityRecorder.record_timeline sees tools/permissions in causal order.
     let host_event_sink = recorder.clone();
+    let observed_session_id = Arc::new(Mutex::new(session_id.clone()));
+    let live_session_id = observed_session_id.clone();
     let mut live_sink = |event: StreamEvent| {
+        if let StreamEvent::TurnStarted { session_id, .. } = &event {
+            *live_session_id.lock().expect("CLI live session lock") = Some(session_id.clone());
+        }
         if let Some(sink) = host_event_sink.as_ref() {
             let kinds = std::collections::HashMap::new();
             sink.record_host_event(&event, &kinds);
@@ -249,10 +261,63 @@ pub async fn run(
     let outcome = match result {
         Ok(outcome) => outcome,
         Err(error) => {
+            // A transport/provider failure can return `Err` after the shared
+            // trace has already captured one or more failed provider calls.
+            // Preserve that truthful prefix as Activity instead of discarding
+            // it merely because no `ChatWorkflowOutcome` was produced.  The
+            // synthetic terminal metadata is deliberately generic: the
+            // operator-facing error remains in the envelope/stderr, while the
+            // activity journal never gains a filesystem path, endpoint, or raw
+            // provider body from an error string.
+            let failure_events = vec![
+                StreamEvent::Error {
+                    code: error.category.kind().to_string(),
+                    message: "The chat turn failed before completion.".to_string(),
+                },
+                StreamEvent::TurnCompleted {
+                    reason: if error.category == crate::envelope::ExitCategory::Cancelled {
+                        "cancelled".to_string()
+                    } else {
+                        "error".to_string()
+                    },
+                },
+            ];
+            if let Some(sink) = recorder.as_ref() {
+                let kinds = std::collections::HashMap::new();
+                for event in &failure_events {
+                    sink.record_host_event(event, &kinds);
+                }
+            }
+            let failure_session_id = observed_session_id
+                .lock()
+                .expect("CLI live session lock")
+                .clone()
+                .unwrap_or_default();
+            let failure_turn_id = if failure_session_id.is_empty() {
+                String::new()
+            } else {
+                format!("{failure_session_id}::cli")
+            };
+            let activity_record = args.activity.map(|level| {
+                project_turn_activity(
+                    &failure_session_id,
+                    &failure_turn_id,
+                    corpus_id.as_deref(),
+                    level,
+                    recorder.as_deref(),
+                    &failure_events,
+                    elapsed_ms,
+                )
+            });
             if jsonl {
-                print_jsonl_failure(&error);
+                print_jsonl_failure(&error, &failure_session_id, activity_record.as_ref());
+            } else if matches!(format, OutputFormat::Json) {
+                print_json_failure(&error, activity_record.as_ref());
             }
             if text {
+                if let Some(record) = &activity_record {
+                    eprint!("{}", render_human_summary(record));
+                }
                 let summary = if error.category == crate::envelope::ExitCategory::Cancelled {
                     ChatOutcomeSummary::Cancelled
                 } else {
@@ -400,7 +465,13 @@ pub async fn run(
 
 fn map_workflow_error(e: cd_core::error::CoreError) -> CliError {
     let message = e.to_string();
-    if message.contains("provider") || message.contains("connect") || message.contains("http") {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("provider")
+        || lower.contains("connect")
+        || lower.contains("http")
+        || lower.contains("chat request")
+        || lower.contains("backend returned")
+    {
         CliError::provider(message)
     } else {
         CliError::internal(message)
@@ -415,12 +486,36 @@ fn map_workflow_error(e: cd_core::error::CoreError) -> CliError {
 /// printed via `live_sink` before the failure (e.g. a mid-turn `Tool` or
 /// `Error` event) are left as they were — this only supplies the missing
 /// terminal shape, never rewrites what already streamed.
-fn print_jsonl_failure(error: &CliError) {
+fn print_jsonl_failure(
+    error: &CliError,
+    session_id: &str,
+    activity: Option<&cd_core::activity::TurnActivityRecord>,
+) {
+    let turn_id = if session_id.is_empty() {
+        String::new()
+    } else {
+        format!("{session_id}::cli")
+    };
+    let mut seq = 0u64;
+    if let Some(record) = activity {
+        for line in activity_lines(record).into_iter().map(StreamLine::Activity) {
+            let operation = match &line {
+                StreamLine::Activity(activity) => activity.operation_id.clone(),
+                _ => "activity".to_string(),
+            };
+            let wrapped = JsonlMetaLine::wrap(session_id, &turn_id, &operation, seq, line);
+            println!(
+                "{}",
+                serde_json::to_string(&wrapped).expect("StreamLine is always serializable")
+            );
+            seq = seq.saturating_add(1);
+        }
+    }
     let error_line = crate::envelope::StreamLine::Error {
         code: error.category.kind(),
         message: &error.message,
     };
-    let err_wrapped = JsonlMetaLine::wrap("", "", "error", 0, error_line);
+    let err_wrapped = JsonlMetaLine::wrap(session_id, &turn_id, "error", seq, error_line);
     println!(
         "{}",
         serde_json::to_string(&err_wrapped).expect("StreamLine is always serializable")
@@ -429,13 +524,49 @@ fn print_jsonl_failure(error: &CliError) {
         ok: false,
         // No session id is known on a failure that happened before one
         // could be resolved (e.g. an unknown --profile) — never fabricate one.
-        session_id: "",
+        session_id,
         final_text: "",
     };
-    let done_wrapped = JsonlMetaLine::wrap("", "", "done", 1, done);
+    let done_wrapped =
+        JsonlMetaLine::wrap(session_id, &turn_id, "done", seq.saturating_add(1), done);
     println!(
         "{}",
         serde_json::to_string(&done_wrapped).expect("StreamLine is always serializable")
+    );
+}
+
+/// One-shot JSON failure shape for chat.  Unlike the generic command error
+/// envelope this may carry the shared bounded Activity prefix captured before
+/// the failure.  `data` is omitted for pre-turn validation/setup failures.
+fn print_json_failure(error: &CliError, activity: Option<&cd_core::activity::TurnActivityRecord>) {
+    #[derive(Serialize)]
+    struct FailureData<'a> {
+        activity: &'a cd_core::activity::TurnActivityRecord,
+    }
+
+    #[derive(Serialize)]
+    struct ChatFailure<'a> {
+        schema_version: u32,
+        ok: bool,
+        command: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        data: Option<FailureData<'a>>,
+        error: crate::envelope::ErrorEnvelope,
+    }
+
+    let envelope = ChatFailure {
+        schema_version: crate::envelope::ENVELOPE_SCHEMA_VERSION,
+        ok: false,
+        command: "chat",
+        data: activity.map(|activity| FailureData { activity }),
+        error: crate::envelope::ErrorEnvelope {
+            kind: error.category.kind(),
+            message: error.message.clone(),
+        },
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&envelope).expect("chat failure envelope is serializable")
     );
 }
 

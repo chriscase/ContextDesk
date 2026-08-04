@@ -165,9 +165,14 @@ async fn dispatch(
                 // self-rendered by `chat_renderer.finish(...)` (the concise
                 // `done`/`cancelled`/`failed` status line) before returning
                 // this `Err` — a second `emit_error` line would duplicate
-                // it. Json chat failures never stream partial output, so
-                // they still go through the shared path.
-                Err(e) if format == OutputFormat::Jsonl || format == OutputFormat::Text => {
+                // it. JSON chat failures may now include the same bounded
+                // Activity prefix captured before a provider failure, so the
+                // chat command also owns that one-shot failure envelope.
+                Err(e)
+                    if format == OutputFormat::Jsonl
+                        || format == OutputFormat::Json
+                        || format == OutputFormat::Text =>
+                {
                     e.category.code()
                 }
                 Err(e) => emit_error(format, "chat", e),

@@ -1020,6 +1020,43 @@ impl Respond for LabTwoTurnProvider {
                 }]
             })
         };
+        if body["stream"] == true {
+            let (delta, finish_reason) = if host_returned_evidence {
+                (
+                    json!({"content": format!(
+                        "{query} observed at seq={seq} source=\"{source}\"."
+                    )}),
+                    "stop",
+                )
+            } else {
+                (
+                    json!({"tool_calls": [{
+                        "index": 0,
+                        "id": format!("lab-call-{n}"),
+                        "type": "function",
+                        "function": {
+                            "name": "search_logs",
+                            "arguments": serde_json::to_string(&json!({
+                                "query": query,
+                                "semantic": false,
+                                "k": 5
+                            })).unwrap()
+                        }
+                    }]}),
+                    "tool_calls",
+                )
+            };
+            let chunk = json!({"choices": [{"index": 0, "delta": delta}]});
+            let stop = json!({
+                "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]
+            });
+            return ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(
+                    format!("data: {chunk}\n\ndata: {stop}\n\ndata: [DONE]\n\n"),
+                    "text/event-stream",
+                );
+        }
         ResponseTemplate::new(200)
             .insert_header("content-type", "application/json")
             .set_body_json(response)
