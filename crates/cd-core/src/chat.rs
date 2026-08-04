@@ -545,6 +545,39 @@ impl OpenAiCompatibleClient {
             )));
         }
 
+        // Some OpenAI-compatible gateways ignore `stream=true` and return a
+        // normal completion with an honest JSON content type. Parse that
+        // shape before the SSE line parser: a full completion's
+        // `finish_reason=tool_calls` also resembles one SSE finish delta, and
+        // accepting only that fragment silently drops `message.tool_calls`.
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if content_type.contains("application/json") {
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| CoreError::Message(format!("stream body: {e}")))?;
+            let completion = parse_openai_completion(&text)?;
+            if !completion.content.is_empty() {
+                on_delta(StreamDelta::Text(completion.content.clone()));
+            }
+            for (index, call) in completion.tool_calls.iter().enumerate() {
+                on_delta(StreamDelta::ToolCall {
+                    index,
+                    id: Some(call.id.clone()),
+                    name: Some(call.function.name.clone()),
+                    arguments: call.function.arguments.clone(),
+                });
+            }
+            on_delta(StreamDelta::Finish(completion.finish_reason.clone()));
+            on_delta(StreamDelta::Done);
+            return Ok(completion);
+        }
+
         let mut acc = StreamAccumulator::new();
         let mut line_buf = String::new();
         let mut stream = resp.bytes_stream();
