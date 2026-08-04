@@ -74,6 +74,7 @@ import { HelpTip } from "../HelpTip";
 import { ProcessProgressPanel } from "../wizards/ProcessProgressPanel";
 import type { ProcessProgressDto as WizardProgressDto } from "../wizards/types";
 import { LogExplorer } from "../logExplorer/LogExplorer";
+import { broadcastTimeRevisionChanged } from "../../lib/logExplorer/timeRevisionBridge";
 import { LogDiagnosticDialog } from "./LogDiagnosticDialog";
 import { LogImportConfidence } from "./LogImportConfidence";
 import { LogTimezoneStatus } from "./LogTimezoneStatus";
@@ -542,6 +543,9 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const applyTimezone = useCallback(
     async (request: LogTimezoneApplyRequestDto) => {
       await hostApplyLogSourceTimezone(request);
+      // Any open Explorer (in-app or its own window) may be showing this
+      // corpus regardless of what is active in this pane right now (#875).
+      void broadcastTimeRevisionChanged(request.corpusId);
       if (activeIdRef.current !== request.corpusId) return;
       setImportConfidence((current) =>
         current?.corpusId === request.corpusId ? null : current,
@@ -554,6 +558,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const clearTimezone = useCallback(
     async (request: LogTimezoneClearRequestDto) => {
       await hostClearLogSourceTimezone(request);
+      void broadcastTimeRevisionChanged(request.corpusId);
       if (activeIdRef.current !== request.corpusId) return;
       setImportConfidence((current) =>
         current?.corpusId === request.corpusId ? null : current,
@@ -1346,11 +1351,16 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
             <ImportFlow
               engine={paneEngine}
               variant="pane"
+              hostOwnsProgress
               onPublished={(corpusId) => {
                 void refresh();
                 void selectCorpus(corpusId);
               }}
               onTimezoneChanged={(corpusId) => {
+                // #875: signal every open Explorer for this corpus before
+                // the local activeId gate — an Explorer window can be open
+                // on a corpus this pane never re-selects.
+                void broadcastTimeRevisionChanged(corpusId);
                 if (activeIdRef.current !== corpusId) return;
                 void Promise.all([
                   refresh(),
@@ -1377,18 +1387,22 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
           kind="log_ingest"
           error={ingesting || reanalyzing ? error : null}
           cancelLabel={reanalyzing ? "Cancel re-analysis" : "Cancel ingest"}
-          onCancel={
-            ingesting || reanalyzing
-              ? () => {
-                  const cancel = reanalyzing
-                    ? hostCancelLogReanalysis
-                    : hostCancelLogIngest;
-                  return cancel().then((ok) => {
-                    if (ok) setNote("Cancel requested…");
-                  });
-                }
-              : undefined
-          }
+          onCancel={() => {
+            // This panel is the single owner of log_ingest progress and
+            // cancellation, including the reviewed-import path (defect:
+            // ImportFlow used to render a second, duplicate panel with its
+            // own cancel wiring for that case). Quick ingest and
+            // re-analysis keep their own dedicated host commands; a
+            // reviewed import in flight (progress present, neither flag
+            // set) shares the same `cancel_log_ingest` command ImportFlow
+            // itself used to call directly.
+            const cancel = reanalyzing
+              ? hostCancelLogReanalysis
+              : hostCancelLogIngest;
+            return cancel().then((ok) => {
+              if (ok) setNote("Cancel requested…");
+            });
+          }}
         />
       ) : null}
 

@@ -24,6 +24,7 @@ import {
   renderLogDiagnosticMarkdown,
   type LogDiagnosticManifest,
 } from "../../lib/logDiagnosticReport";
+import { createMockEngineClient } from "@contextdesk/client";
 import { LogPane } from "./LogPane";
 
 const hostMocks = vi.hoisted(() => ({
@@ -37,6 +38,7 @@ const hostMocks = vi.hoisted(() => ({
   importPackage: vi.fn(),
   reanalyze: vi.fn(),
   cancelReanalysis: vi.fn(),
+  cancelIngest: vi.fn(async () => true),
   discard: vi.fn(),
   confirm: vi.fn(),
   getBranding: vi.fn(),
@@ -55,6 +57,15 @@ const hostMocks = vi.hoisted(() => ({
   clearTimezone: vi.fn(),
 }));
 
+// Reviewed-import (ImportFlow) tests inject a deterministic mock EngineClient
+// in place of the real Tauri adapter, mirroring ImportFlow.test.tsx.
+const engineMocks = vi.hoisted(() => ({
+  client: null as unknown as ReturnType<typeof createMockEngineClient> | null,
+}));
+vi.mock("../../lib/engine/tauriEngineClient", () => ({
+  createTauriEngineClient: () => engineMocks.client,
+}));
+
 // #851: the in-app embed tests exercise LogPane's chrome, not the Explorer
 // internals (covered by LogExplorer.test.tsx and the visual suite) — the
 // full Explorer cannot mount against this file's partial host mock anyway.
@@ -67,7 +78,7 @@ vi.mock("../logExplorer/LogExplorer", () => ({
 vi.mock("../../lib/host", () => ({
   hostListLogCorpora: hostMocks.listCorpora,
   hostListenProcessProgress: hostMocks.listenProgress,
-  hostCancelLogIngest: vi.fn(async () => true),
+  hostCancelLogIngest: hostMocks.cancelIngest,
   hostClearFailedLogIngestDiagnostic: hostMocks.clearFailedIngestDiagnostic,
   hostCancelLogReanalysis: hostMocks.cancelReanalysis,
   hostDiscardLogCorpus: hostMocks.discard,
@@ -100,6 +111,13 @@ vi.mock("../../lib/host", () => ({
   hostLogDismissProposedReportSection: vi.fn(),
   hostLogSaveInvestigationReportExport: vi.fn(),
   hostLogReleaseInvestigationReportExport: vi.fn(async () => true),
+}));
+
+const revisionBridgeMocks = vi.hoisted(() => ({
+  broadcast: vi.fn(async () => {}),
+}));
+vi.mock("../../lib/logExplorer/timeRevisionBridge", () => ({
+  broadcastTimeRevisionChanged: revisionBridgeMocks.broadcast,
 }));
 
 vi.mock("../../lib/dialogs", () => ({
@@ -2773,5 +2791,203 @@ describe("in-app Explorer embed chrome (#851)", () => {
     expect(note.textContent).toContain("Multi-window open failed");
     expect(screen.getByTestId("log-pane-in-app-explorer")).toBeTruthy();
     expect(screen.getByTestId("stub-log-explorer")).toBeTruthy();
+  });
+});
+
+describe("LogPane reviewed-import progress ownership (defect: duplicated panel)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    hostMocks.listCorpora.mockResolvedValue([]);
+    hostMocks.listTemplates.mockResolvedValue([]);
+    hostMocks.clusterProblems.mockResolvedValue([]);
+    hostMocks.openDirectory.mockResolvedValue("/incidents/checkout-outage");
+    hostMocks.loadTimezoneState.mockImplementation(async (corpusId: string) => ({
+      corpusId,
+      eventRevision: 0,
+      declarations: {},
+      sources: [],
+    }));
+  });
+
+  async function openReviewedImportToRunning() {
+    let capturedProgressCallback:
+      | ((progress: {
+          kind: string;
+          phase: string;
+          message: string;
+          fraction: number | null;
+          lines_processed: number | null;
+          files_processed: number | null;
+          bytes_processed: number | null;
+          templates: number | null;
+          cancellable: boolean;
+        }) => void)
+      | undefined;
+    hostMocks.listenProgress.mockImplementation(async (callback) => {
+      capturedProgressCallback = callback;
+      return () => {};
+    });
+    engineMocks.client = createMockEngineClient({ manualFlush: true });
+    const cancelSpy = vi.spyOn(engineMocks.client.import, "cancel");
+
+    render(<LogPane />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Import with review…" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Choose folder…" }),
+    );
+    await screen.findByText(/Looking at what/);
+    await waitFor(() => engineMocks.client!.flush());
+    await screen.findByRole("region", { name: "Ready to import" });
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: /I understand and want to proceed/,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    // run() emits "starting"/"scan" synchronously, then parks (manualFlush) —
+    // the preflight region is gone once the reducer sees RUN_STARTED.
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("region", { name: "Ready to import" }),
+      ).toBeNull(),
+    );
+
+    await waitFor(() =>
+      expect(capturedProgressCallback).toBeTypeOf("function"),
+    );
+    // The host's process-progress stream is shared: the exact same event
+    // LogPane's own listener receives for this reviewed import, regardless
+    // of ImportFlow's separate engine-events subscription.
+    act(() => {
+      capturedProgressCallback!({
+        kind: "log_ingest",
+        phase: "stream",
+        message: "parsing and templating lines",
+        fraction: 0.5,
+        lines_processed: 500,
+        files_processed: 1,
+        bytes_processed: 4096,
+        templates: 2,
+        cancellable: true,
+      });
+    });
+
+    return { cancelSpy };
+  }
+
+  it("shows exactly one progress panel for a reviewed import in flight", async () => {
+    await openReviewedImportToRunning();
+    expect(document.querySelectorAll(".process-progress")).toHaveLength(1);
+    expect(
+      screen.getAllByRole("button", { name: "Cancel ingest" }),
+    ).toHaveLength(1);
+
+    engineMocks.client!.flush();
+    await screen.findByRole("region", { name: "Import finished" });
+  });
+
+  it("wires cancellation to the single owning panel — LogPane's, not a duplicate", async () => {
+    const { cancelSpy } = await openReviewedImportToRunning();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel ingest" }));
+    await waitFor(() =>
+      expect(hostMocks.cancelIngest).toHaveBeenCalledTimes(1),
+    );
+    // No second, orphaned cancel path through ImportFlow's own (now absent)
+    // panel — it never called the engine client's cancel directly.
+    expect(cancelSpy).not.toHaveBeenCalled();
+
+    // Let the parked mock run settle so nothing is left dangling; the point
+    // above (single command, single caller) already stands either way.
+    engineMocks.client!.flush();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("region", { name: "Import finished" }),
+      ).not.toBeNull(),
+    );
+  });
+});
+
+describe("LogPane time-revision refresh signalling (#875)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    hostMocks.listCorpora.mockResolvedValue([]);
+    hostMocks.listTemplates.mockResolvedValue([]);
+    hostMocks.clusterProblems.mockResolvedValue([]);
+    hostMocks.openDirectory.mockResolvedValue("/incidents/checkout-outage");
+    hostMocks.listenProgress.mockResolvedValue(() => {});
+    hostMocks.loadTimezoneState.mockImplementation(async (corpusId: string) => ({
+      corpusId,
+      eventRevision: 0,
+      declarations: {},
+      sources: [],
+    }));
+  });
+
+  it("broadcasts once per apply and once per undo, and never re-runs the import", async () => {
+    engineMocks.client = createMockEngineClient();
+    const runSpy = vi.spyOn(engineMocks.client.import, "run");
+
+    render(<LogPane />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Import with review…" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Choose folder…" }),
+    );
+    await screen.findByRole("region", { name: "Ready to import" });
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: /I understand and want to proceed/,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    await screen.findByRole("region", { name: "Import finished" });
+    expect(runSpy).toHaveBeenCalledTimes(1);
+
+    const applyButton = await screen.findByRole("button", {
+      name: /Apply to 2 sources/,
+    });
+
+    // TimeReviewCard's auto-preview is debounced; fake timers only while
+    // driving that (no findBy/waitFor in this window — those poll on real
+    // timers and would hang under vi.useFakeTimers()).
+    vi.useFakeTimers();
+    try {
+      fireEvent.change(screen.getByLabelText("IANA timezone"), {
+        target: { value: "America/Chicago" },
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400);
+      });
+      await act(async () => {
+        fireEvent.click(applyButton);
+        await vi.advanceTimersByTimeAsync(10);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(screen.getByText("America/Chicago · 2 sources")).toBeTruthy();
+    expect(revisionBridgeMocks.broadcast).toHaveBeenCalledTimes(1);
+    expect(revisionBridgeMocks.broadcast).toHaveBeenLastCalledWith(
+      "mock-corpus-0001",
+    );
+    // Applying reviewed timezones must never itself re-import the corpus.
+    expect(runSpy).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Undo / return to order-only" }),
+    );
+    await waitFor(() =>
+      expect(revisionBridgeMocks.broadcast).toHaveBeenCalledTimes(2),
+    );
+    expect(revisionBridgeMocks.broadcast).toHaveBeenLastCalledWith(
+      "mock-corpus-0001",
+    );
+    // Nor does undo — same read-only-refresh contract.
+    expect(runSpy).toHaveBeenCalledTimes(1);
   });
 });

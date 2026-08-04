@@ -86,4 +86,11 @@ export const TAURI_IMPORT_BASELINE: readonly string[] = [
   // themeBridge (grandfathered above) — the Tauri event bus is the only
   // cross-webview channel; the engine boundary does not cover window events.
   "src/lib/uiScaleBridge.ts",
+  // Review decision (#875, 2026-08-03): a timezone apply/undo from outside
+  // any given Log Explorer (TimeReviewCard on the reviewed-import summary,
+  // or LogTimezoneStatus in the Logs pane) must still reach an already-open
+  // Explorer, in-app or in its own OS window. Same shape as themeBridge/
+  // uiScaleBridge above — the Tauri event bus is the only channel that
+  // reaches a separate webview, and the engine boundary doesn't cover it.
+  "src/lib/logExplorer/timeRevisionBridge.ts",
 ];

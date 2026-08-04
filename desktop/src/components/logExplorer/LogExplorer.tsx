@@ -81,6 +81,7 @@ import { applyLogNav, type LogNavAction } from "../../lib/logExplorer/logNav";
 import { governedIdToSafeInteger } from "../../lib/citations";
 import { subscribeLogExplorerNavTargets } from "../../lib/engine/platform";
 import { refreshAfterTimeRevision } from "../../lib/logExplorer/timeRevisionRefresh";
+import { subscribeTimeRevisionChanged } from "../../lib/logExplorer/timeRevisionBridge";
 import {
   formatPolicyBindingStatus,
   policyBindingBlocksApply,
@@ -2392,6 +2393,35 @@ export function LogExplorer({ corpusId }: Props) {
   useEffect(() => {
     void refreshSummary();
   }, [refreshSummary]);
+
+  // #875 — a timezone apply/undo can happen outside this Explorer entirely
+  // (the reviewed-import summary's TimeReviewCard, or the Logs pane's own
+  // LogTimezoneStatus) while this window or in-app embed stays open. Any
+  // such change for this corpus runs the identical, ordered #819 refresh
+  // used when the revision changes from inside the Explorer itself — never
+  // a re-import, just re-reading what the host already persisted.
+  useEffect(() => {
+    return subscribeTimeRevisionChanged((changedCorpusId) => {
+      if (changedCorpusId !== corpusId) return;
+      void refreshAfterTimeRevision({
+        invalidateInFlight: () => {
+          eventsRequestRef.current += 1;
+        },
+        refreshSummary,
+        refreshSuppressionPolicy,
+        reloadActiveInvestigation,
+        loadFacets,
+        loadEvents,
+      });
+    });
+  }, [
+    corpusId,
+    refreshSummary,
+    refreshSuppressionPolicy,
+    reloadActiveInvestigation,
+    loadFacets,
+    loadEvents,
+  ]);
 
   useEffect(() => {
     void loadSuppressionPolicy().catch(() => {

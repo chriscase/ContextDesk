@@ -10,6 +10,9 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import checkoutTruth from "../../../../fixtures/log-lab/scenarios/checkout-cascade/truth/manifest.json";
 import * as host from "../../lib/host";
 import { ruleContributesToExclusion } from "../../lib/logExplorer/policyBinding";
+import {
+  broadcastTimeRevisionChanged,
+} from "../../lib/logExplorer/timeRevisionBridge";
 import { LogExplorer } from "./LogExplorer";
 
 vi.mock("../../lib/host", () => ({
@@ -931,6 +934,68 @@ describe("LogExplorer shell", () => {
     expect(within(vlist).getByText("worker.log")).toBeTruthy();
     expect(root.getAttribute("data-lane-count")).toBe("1");
     expect(screen.getByText(/Keyword-only corpus/)).toBeTruthy();
+  });
+
+  describe("external time-revision refresh (#875)", () => {
+    it("re-reads summary and rows when a timezone apply happens outside this Explorer", async () => {
+      render(<LogExplorer corpusId="c1" />);
+      await screen.findByText(/auth failure/);
+      const summaryCallsBefore = vi.mocked(host.hostGetLogCorpus).mock.calls
+        .length;
+      const rowsCallsBefore = vi.mocked(host.hostLogQueryEventRows).mock.calls
+        .length;
+
+      // A corpus this Explorer is NOT showing must never trigger a refresh —
+      // otherwise an unrelated apply elsewhere would still spuriously repaint.
+      await act(async () => {
+        await broadcastTimeRevisionChanged("some-other-corpus");
+      });
+      expect(vi.mocked(host.hostGetLogCorpus).mock.calls.length).toBe(
+        summaryCallsBefore,
+      );
+      expect(vi.mocked(host.hostLogQueryEventRows).mock.calls.length).toBe(
+        rowsCallsBefore,
+      );
+
+      // Simulates TimeReviewCard's applyMany (outside this Explorer, e.g. the
+      // reviewed-import summary) signalling that this corpus's revision moved.
+      await act(async () => {
+        await broadcastTimeRevisionChanged("c1");
+      });
+      await waitFor(() => {
+        expect(
+          vi.mocked(host.hostGetLogCorpus).mock.calls.length,
+        ).toBeGreaterThan(summaryCallsBefore);
+        expect(
+          vi.mocked(host.hostLogQueryEventRows).mock.calls.length,
+        ).toBeGreaterThan(rowsCallsBefore);
+      });
+      const summaryCallsAfterApply = vi.mocked(host.hostGetLogCorpus).mock
+        .calls.length;
+      const rowsCallsAfterApply = vi.mocked(host.hostLogQueryEventRows).mock
+        .calls.length;
+
+      // Undo publishes forward too (a new revision restoring the prior
+      // state) and must refresh through the identical path.
+      await act(async () => {
+        await broadcastTimeRevisionChanged("c1");
+      });
+      await waitFor(() => {
+        expect(
+          vi.mocked(host.hostGetLogCorpus).mock.calls.length,
+        ).toBeGreaterThan(summaryCallsAfterApply);
+        expect(
+          vi.mocked(host.hostLogQueryEventRows).mock.calls.length,
+        ).toBeGreaterThan(rowsCallsAfterApply);
+      });
+
+      // Read-only refresh: nothing about it re-imports or reprocesses the
+      // corpus — there is no import/apply command in this component's host
+      // surface at all, so a spurious extra one would show up as an
+      // unexpected call to a mock this suite already tracks.
+      expect(host.hostApplyLogSourceTimezone).not.toHaveBeenCalled();
+      expect(host.hostClearLogSourceTimezone).not.toHaveBeenCalled();
+    });
   });
 
   it("loads the durable noise policy before issuing any evidence query", async () => {
