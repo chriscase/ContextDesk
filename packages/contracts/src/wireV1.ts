@@ -1399,6 +1399,7 @@ export const IMPORT_PREVIEW_REASON = [
   "ambiguous_format_match",
   "mixed_format_records",
   "no_structured_match",
+  "xml_event_parsing_unsupported",
   "binary_content",
   "empty_content",
   "oversized",

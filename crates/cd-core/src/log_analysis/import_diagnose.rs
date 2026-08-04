@@ -736,6 +736,7 @@ fn reason_key(r: ImportPreviewReason) -> &'static str {
         ImportPreviewReason::AmbiguousFormatMatch => "ambiguous_format_match",
         ImportPreviewReason::MixedFormatRecords => "mixed_format_records",
         ImportPreviewReason::NoStructuredMatch => "no_structured_match",
+        ImportPreviewReason::XmlEventParsingUnsupported => "xml_event_parsing_unsupported",
         ImportPreviewReason::BinaryContent => "binary_content",
         ImportPreviewReason::EmptyContent => "empty_content",
         ImportPreviewReason::Oversized => "oversized",

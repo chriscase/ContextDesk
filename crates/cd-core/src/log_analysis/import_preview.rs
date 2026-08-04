@@ -17,11 +17,13 @@
 //!
 //! # Evidence rules
 //!
-//! * Path, name, and extension are **weak hints only**. Status is decided from
-//!   bounded content samples through [`super::format_profile::fingerprint_format`],
-//!   which itself ignores the path. A file called `app.log` holding a PNG is
-//!   `Unsupported`, and a file called `notes.txt` holding JSON records is a
-//!   strong match.
+//! * Path, name, and extension are **weak format hints only**. Status is
+//!   normally decided from bounded content samples through
+//!   [`super::format_profile::fingerprint_format`], which itself ignores the
+//!   path. A file called `app.log` holding a PNG is `Unsupported`, and a file
+//!   called `notes.txt` holding JSON records is a strong match. An extension
+//!   may still identify a parser capability boundary: XML is kept visible as
+//!   supporting material until a real XML event parser exists.
 //! * Samples are taken from **head, interior, and tail** windows. First-window
 //!   lock-in is explicitly rejected by #751, because a mixed-format file whose
 //!   first lines happen to be JSON is not a JSON corpus.
@@ -170,6 +172,9 @@ pub enum ImportPreviewReason {
     MixedFormatRecords,
     /// Readable text, but no structured grammar matched.
     NoStructuredMatch,
+    /// XML-shaped material is inventoried but cannot yet be parsed into
+    /// trustworthy event records.
+    XmlEventParsingUnsupported,
     /// Content sniffing found NUL bytes or invalid UTF-8 dominance.
     BinaryContent,
     /// Zero bytes, or nothing but whitespace.
@@ -879,6 +884,26 @@ pub(super) fn classify(
         );
     }
 
+    // XML needs record-boundary, namespace, and field-mapping semantics that
+    // the line-oriented fallback parser does not provide. Keep it in the
+    // ledger, but never present it as useful event data by default. A
+    // validated manifest can declare a role, but it does not supply a parser
+    // and therefore cannot bypass this capability boundary.
+    if name_or_sample_is_xml(identity, sample) {
+        if manifest_valid && manifest_role.is_some() {
+            reasons.push(ImportPreviewReason::ManifestDeclared);
+        }
+        reasons.push(ImportPreviewReason::XmlEventParsingUnsupported);
+        reasons.sort_unstable();
+        reasons.dedup();
+        return (
+            ImportItemStatus::Supporting,
+            ImportItemRole::Attachment,
+            reasons,
+            None,
+        );
+    }
+
     let (fingerprint, mixed) = fingerprint_sample(sample);
 
     // A validated manifest is authoritative for role, per #763. It is not
@@ -966,6 +991,41 @@ fn name_hints_log(identity: &str) -> bool {
         || lower.ends_with(".ndjson")
         || lower.contains(".log.")
         || rolled_leaf_stem(leaf).is_some_and(|stem| has_log_extension(&stem))
+}
+
+/// Whether a source crosses the current XML parser-capability boundary.
+///
+/// Content detection is refusal-only: it can keep XML-shaped material out of
+/// the line parser, but can never promote arbitrary XML into event data.
+fn name_or_sample_is_xml(identity: &str, sample: &BoundedSample) -> bool {
+    let leaf = identity.rsplit('/').next().unwrap_or(identity);
+    if leaf.to_ascii_lowercase().ends_with(".xml") {
+        return true;
+    }
+
+    let first = sample
+        .windows
+        .iter()
+        .map(|window| window.trim_start_matches(['\u{feff}', ' ', '\t', '\r', '\n']))
+        .find(|window| !window.is_empty());
+    let Some(first) = first else {
+        return false;
+    };
+
+    if first.starts_with("<?xml") || first.starts_with("<!DOCTYPE") || first.starts_with("<!--") {
+        return true;
+    }
+
+    let bytes = first.as_bytes();
+    let starts_with_element = bytes.first() == Some(&b'<')
+        && bytes
+            .get(1)
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || matches!(*byte, b'_' | b':'));
+    starts_with_element
+        && sample
+            .windows
+            .iter()
+            .any(|window| window.contains("</") || window.contains("/>"))
 }
 
 fn has_log_extension(leaf: &str) -> bool {
@@ -1800,6 +1860,50 @@ mod tests {
     }
 
     #[test]
+    fn xml_report_and_event_shaped_xml_are_supporting_not_events() {
+        let report = item_from_sample(
+            "diagnostic-report.xml",
+            128,
+            &sample_of(&["<report><summary status=\"ok\"/></report>"]),
+            None,
+            false,
+        );
+        let event_feed = item_from_sample(
+            "structured-feed.xml",
+            256,
+            &sample_of(&[
+                "<events><event level=\"info\">started</event><event level=\"warn\">slow</event></events>",
+            ]),
+            None,
+            false,
+        );
+
+        for item in [&report, &event_feed] {
+            assert_eq!(item.status, ImportItemStatus::Supporting);
+            assert_eq!(item.role, ImportItemRole::Attachment);
+            assert!(!item.selected);
+            assert!(!event_importable(item));
+            assert_eq!(
+                item.reasons,
+                vec![ImportPreviewReason::XmlEventParsingUnsupported]
+            );
+        }
+    }
+
+    #[test]
+    fn xml_shaped_content_cannot_hide_behind_a_text_name() {
+        let sample = sample_of(&[
+            "\u{feff}<?xml version=\"1.0\"?><settings><enabled>true</enabled></settings>",
+        ]);
+        let item = item_from_sample("settings-document.txt", 128, &sample, None, false);
+
+        assert_eq!(item.status, ImportItemStatus::Supporting);
+        assert_eq!(item.role, ImportItemRole::Attachment);
+        assert!(!item.selected);
+        assert!(!event_importable(&item));
+    }
+
+    #[test]
     fn mixed_format_windows_downgrade_to_review() {
         let sample = windows_of(&[
             r#"{"ts":"2026-01-01T00:00:00Z","level":"info","msg":"json head"}"#,
@@ -1834,6 +1938,30 @@ mod tests {
             "metrics are routed separately, not imported as logs"
         );
         assert!(item.reasons.contains(&ImportPreviewReason::MetricsDocument));
+    }
+
+    #[test]
+    fn validated_manifest_role_cannot_bypass_the_xml_parser_boundary() {
+        let sample = sample_of(&["<events><event>started</event></events>"]);
+        let item = item_from_sample(
+            "declared-feed.xml",
+            256,
+            &sample,
+            Some(ImportItemRole::Log),
+            true,
+        );
+
+        assert_eq!(item.status, ImportItemStatus::Supporting);
+        assert_eq!(item.role, ImportItemRole::Attachment);
+        assert!(!item.selected);
+        assert!(!event_importable(&item));
+        assert_eq!(
+            item.reasons,
+            vec![
+                ImportPreviewReason::ManifestDeclared,
+                ImportPreviewReason::XmlEventParsingUnsupported,
+            ]
+        );
     }
 
     #[test]

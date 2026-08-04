@@ -76,6 +76,30 @@ describe("EvidenceSelector keyboard and focus", () => {
     ).toBeTruthy();
   });
 
+  it("explains XML parser limits while keeping the supporting row disabled", () => {
+    const report = defaultMockPreview();
+    report.items = [
+      {
+        ...report.items[0],
+        identity: "attachments/diagnostic-report.xml",
+        basename: "diagnostic-report.xml",
+        status: "supporting",
+        role: "attachment",
+        selected: false,
+        reasons: ["xml_event_parsing_unsupported"],
+      },
+    ];
+
+    render(<EvidenceSelector report={report} selected={new Set()} dispatch={() => undefined} />);
+    const source = within(grid()).getByRole("checkbox", {
+      name: /diagnostic-report\.xml.*not selectable/,
+    }) as HTMLInputElement;
+    expect(source.disabled).toBe(true);
+    expect(
+      screen.getByText(/XML event parsing is not supported yet/),
+    ).toBeTruthy();
+  });
+
   it("collapse and expand with arrow keys hide members but keep the container", () => {
     render(<Harness />);
     const treegrid = grid();

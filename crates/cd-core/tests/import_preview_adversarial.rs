@@ -13,7 +13,8 @@ use std::io::Write;
 use std::path::Path;
 
 use cd_core::log_analysis::import_preview::{
-    preview_import_path, ImportItemStatus, ImportPreviewReason, ImportSourceKind,
+    event_importable, preview_import_path, ImportItemRole, ImportItemStatus, ImportPreviewReason,
+    ImportSourceKind,
 };
 use cd_core::process_progress::CancelFlag;
 
@@ -170,6 +171,97 @@ fn a_directly_selected_zip_previews_members_with_bare_identities() {
             .collect::<Vec<_>>(),
         vec!["visible.jsonl"]
     );
+}
+
+#[test]
+fn xml_capability_gate_has_folder_zip_parity_and_keeps_real_logs_selected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let folder = dir.path().join("source-folder");
+    std::fs::create_dir_all(&folder).expect("create folder");
+
+    let report_xml = b"<report><summary status=\"ok\"/></report>";
+    let repeated_xml =
+        b"<events><event level=\"info\">started</event><event level=\"warn\">slow</event></events>";
+    let disguised_xml = b"<?xml version=\"1.0\"?><settings><enabled>true</enabled></settings>";
+    write(&folder.join("diagnostic-report.xml"), report_xml);
+    write(&folder.join("structured-feed.xml"), repeated_xml);
+    write(&folder.join("settings-document.txt"), disguised_xml);
+    write(&folder.join("events.jsonl"), JSON_LINE.as_bytes());
+
+    let archive = dir.path().join("source-archive.zip");
+    write(
+        &archive,
+        &zip_bytes(&[
+            ("diagnostic-report.xml", report_xml),
+            ("structured-feed.xml", repeated_xml),
+            ("settings-document.txt", disguised_xml),
+            ("events.jsonl", JSON_LINE.as_bytes()),
+        ]),
+    );
+
+    let folder_report = preview_import_path(&folder, None).expect("folder preview");
+    let zip_report = preview_import_path(&archive, None).expect("zip preview");
+
+    for report in [&folder_report, &zip_report] {
+        assert_eq!(report.selected_identities(), vec!["events.jsonl"]);
+        for identity in [
+            "diagnostic-report.xml",
+            "settings-document.txt",
+            "structured-feed.xml",
+        ] {
+            let item = report
+                .items
+                .iter()
+                .find(|item| item.identity == identity)
+                .expect("XML-shaped item stays visible");
+            assert_eq!(item.status, ImportItemStatus::Supporting);
+            assert_eq!(item.role, ImportItemRole::Attachment);
+            assert!(!item.selected);
+            assert!(!event_importable(item));
+            assert_eq!(
+                item.reasons,
+                vec![ImportPreviewReason::XmlEventParsingUnsupported]
+            );
+        }
+
+        let json = report
+            .items
+            .iter()
+            .find(|item| item.identity == "events.jsonl")
+            .expect("structured log remains visible");
+        assert_eq!(json.status, ImportItemStatus::Ready);
+        assert_eq!(json.role, ImportItemRole::Log);
+        assert!(json.selected);
+        assert!(event_importable(json));
+    }
+
+    let folder_facts: Vec<_> = folder_report
+        .items
+        .iter()
+        .map(|item| {
+            (
+                item.identity.as_str(),
+                item.status,
+                item.role,
+                item.selected,
+                item.reasons.as_slice(),
+            )
+        })
+        .collect();
+    let zip_facts: Vec<_> = zip_report
+        .items
+        .iter()
+        .map(|item| {
+            (
+                item.identity.as_str(),
+                item.status,
+                item.role,
+                item.selected,
+                item.reasons.as_slice(),
+            )
+        })
+        .collect();
+    assert_eq!(folder_facts, zip_facts, "transport must not change routing");
 }
 
 #[test]
