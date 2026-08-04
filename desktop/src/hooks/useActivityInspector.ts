@@ -35,7 +35,11 @@ function readViewportWidth(): number {
 
 export type ActivitySurface = "none" | "drawer" | "docked";
 
-export function useActivityInspector(selectionScope?: string | null) {
+export function useActivityInspector(
+  selectionScope?: string | null,
+  /** Container-level guard; false degrades a Docked preference to Drawer. */
+  dockAllowed = true,
+) {
   const [mode, setModeState] = useState<ActivityMode>(() => loadActivityMode());
   const [dockWidth, setDockWidthState] = useState<number>(() => loadDockWidth());
   const [selectedTurnId, setSelectedTurnId] = useState<string | null>(null);
@@ -122,12 +126,12 @@ export function useActivityInspector(selectionScope?: string | null) {
     if (mode === "off") return "none";
     if (mode === "docked") {
       if (!selectedTurnId) return "none";
-      return isNarrowViewport ? "drawer" : "docked";
+      return isNarrowViewport || !dockAllowed ? "drawer" : "docked";
     }
     // "drawer" | "compact": overlay-based, so it only appears on an explicit
     // Details click (openDrawerFor), never automatically.
     return drawerOpen && selectedTurnId ? "drawer" : "none";
-  }, [mode, isNarrowViewport, selectedTurnId, drawerOpen]);
+  }, [mode, isNarrowViewport, dockAllowed, selectedTurnId, drawerOpen]);
 
   return {
     mode,

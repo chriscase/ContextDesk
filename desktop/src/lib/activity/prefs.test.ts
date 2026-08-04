@@ -62,6 +62,61 @@ describe("sensitive developer detail", () => {
     expect(seen).toEqual([true]);
     expect([...storage.keys()].some((key) => key.includes("developer"))).toBe(false);
   });
+
+  it("mirrors explicit changes across webviews and dedupes the local bus echo", async () => {
+    let listening = false;
+    let receive: (event: { payload: unknown }) => void = () => undefined;
+    const stopRemote = vi.fn();
+    const seen: boolean[] = [];
+    const stop = subscribeDeveloperActivityDetail(
+      (enabled) => seen.push(enabled),
+      async (_eventName, handler) => {
+        receive = handler;
+        listening = true;
+        return stopRemote;
+      },
+    );
+    await vi.waitFor(() => expect(listening).toBe(true));
+
+    const emitted: unknown[] = [];
+    saveDeveloperActivityDetail(true, async (_eventName, payload) => {
+      emitted.push(payload);
+      receive({ payload });
+    });
+    await vi.waitFor(() => expect(emitted).toHaveLength(1));
+    // CustomEvent and the Tauri echo carry the same event id, so one explicit
+    // choice is observed exactly once in the sending webview.
+    expect(seen).toEqual([true]);
+
+    receive({
+      payload: { enabled: false, eventId: "other-webview:1" },
+    });
+    expect(loadDeveloperActivityDetail()).toBe(false);
+    expect(seen).toEqual([true, false]);
+
+    stop();
+    expect(stopRemote).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects malformed cross-webview preference payloads", async () => {
+    let listening = false;
+    let receive: (event: { payload: unknown }) => void = () => undefined;
+    const onChange = vi.fn();
+    const stop = subscribeDeveloperActivityDetail(
+      onChange,
+      async (_eventName, handler) => {
+        receive = handler;
+        listening = true;
+        return () => undefined;
+      },
+    );
+    await vi.waitFor(() => expect(listening).toBe(true));
+    receive({ payload: { enabled: "yes", eventId: "remote:1" } });
+    receive({ payload: { enabled: true, eventId: "" } });
+    expect(onChange).not.toHaveBeenCalled();
+    expect(loadDeveloperActivityDetail()).toBe(false);
+    stop();
+  });
 });
 
 describe("the shared activity display preference", () => {

@@ -34,4 +34,31 @@ describe("useActivityInspector selection scope", () => {
     expect(result.current.surface).toBe("none");
     expect(result.current.mode).toBe("drawer");
   });
+
+  it("falls back to a Drawer when the measured chat container cannot fit a dock", () => {
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 900,
+    });
+    const { result } = renderHook(() =>
+      useActivityInspector("session-a", false),
+    );
+    act(() => result.current.setMode("docked"));
+    act(() => result.current.selectTurn("turn-a"));
+    expect(result.current.isNarrowViewport).toBe(false);
+    expect(result.current.surface).toBe("drawer");
+  });
+
+  it("keeps Docked on a wide viewport when the measured container can fit it", () => {
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 1_800,
+    });
+    const { result } = renderHook(() =>
+      useActivityInspector("session-a", true),
+    );
+    act(() => result.current.setMode("docked"));
+    act(() => result.current.selectTurn("turn-a"));
+    expect(result.current.surface).toBe("docked");
+  });
 });

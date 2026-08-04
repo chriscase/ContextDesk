@@ -38,7 +38,18 @@ import { ActivityDrawer } from "../activity/ActivityDrawer";
 import { ActivityDock } from "../activity/ActivityDock";
 import { MAX_DOCK_WIDTH, MIN_DOCK_WIDTH } from "../../lib/activity/prefs";
 
-const MIN_CHAT_MAIN_WIDTH_PX = 400;
+export const MIN_CHAT_MAIN_WIDTH_PX = 400;
+const ACTIVITY_DOCK_LAYOUT_GAP_PX = 1;
+
+/** A dock is allowed only when it preserves the measured chat/composer width. */
+export function canDockActivityInWidth(width: number | null): boolean {
+  return (
+    width != null &&
+    Number.isFinite(width) &&
+    width >=
+      MIN_CHAT_MAIN_WIDTH_PX + MIN_DOCK_WIDTH + ACTIVITY_DOCK_LAYOUT_GAP_PX
+  );
+}
 
 type Starter = {
   label: string;
@@ -254,7 +265,12 @@ export function ChatPane(props: ChatPaneProps) {
   // Activity Inspector: a read-only observability layer over the turn the
   // host already ran. Nothing here participates in sending a message, and
   // with the mode Off no surface mounts at all.
-  const activity = useActivityInspector(resolvedSessionId);
+  const chatBodyRef = useRef<HTMLDivElement>(null);
+  const [chatBodyWidth, setChatBodyWidth] = useState<number | null>(null);
+  const activity = useActivityInspector(
+    resolvedSessionId,
+    canDockActivityInWidth(chatBodyWidth),
+  );
   const [activityRecords, setActivityRecords] = useState<
     Record<string, HostTurnActivityRecord | null>
   >({});
@@ -262,10 +278,9 @@ export function ChatPane(props: ChatPaneProps) {
     Record<string, DeveloperDetailEvent[]>
   >({});
   const developerDetailEnabledRef = useRef(activity.developerDetail);
+  const previousDeveloperDetailRef = useRef(activity.developerDetail);
   const retiredSessionRef = useRef(false);
   const suppressedDeveloperMessageIdsRef = useRef<Set<string>>(new Set());
-  const chatBodyRef = useRef<HTMLDivElement>(null);
-  const [chatBodyWidth, setChatBodyWidth] = useState<number | null>(null);
 
   useEffect(() => {
     const body = chatBodyRef.current;
@@ -304,9 +319,22 @@ export function ChatPane(props: ChatPaneProps) {
   }, [resolvedSessionId]);
 
   useEffect(() => {
+    const wasEnabled = previousDeveloperDetailRef.current;
+    previousDeveloperDetailRef.current = activity.developerDetail;
     developerDetailEnabledRef.current = activity.developerDetail;
-    if (!activity.developerDetail) setDeveloperRecords({});
-  }, [activity.developerDetail]);
+    if (activity.developerDetail) return;
+    setDeveloperRecords({});
+    if (!wasEnabled || !resolvedSessionId) return;
+    // This effect also observes changes made in the Logs pane or another
+    // Tauri webview. Close the current session's one-way host gate on every
+    // real On -> Off transition, not only when ChatPane's own menu was used.
+    for (const message of messages) {
+      if (message.role === "assistant" && message.streaming) {
+        suppressedDeveloperMessageIdsRef.current.add(message.id);
+      }
+    }
+    void hostSuppressDeveloperActivityDetail(resolvedSessionId);
+  }, [activity.developerDetail, messages, resolvedSessionId]);
 
   useEffect(
     () =>
@@ -478,7 +506,6 @@ export function ChatPane(props: ChatPaneProps) {
           suppressedDeveloperMessageIdsRef.current.add(message.id);
         }
       }
-      void hostSuppressDeveloperActivityDetail(resolvedSessionId);
     },
     [activity, resolvedSessionId, messages],
   );

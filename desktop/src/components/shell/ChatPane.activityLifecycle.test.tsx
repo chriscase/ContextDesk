@@ -19,7 +19,7 @@ import {
 } from "../../lib/activity/prefs";
 import { publishTurnActivityUpdate } from "../../lib/activity/turnActivityUpdateBridge";
 import type { Msg } from "../../lib/session";
-import { ChatPane } from "./ChatPane";
+import { canDockActivityInWidth, ChatPane } from "./ChatPane";
 
 const engine = vi.hoisted(() => ({
   fetchTurnActivity: vi.fn(),
@@ -343,6 +343,40 @@ describe("ChatPane late activity lifecycle", () => {
 // live delivery immediately (see `suppress_developer_activity_detail`),
 // not silently continue until the turn ends.
 describe("ChatPane developer detail mid-turn toggle", () => {
+  it("suppresses when another same-window surface turns detail Off", async () => {
+    const streamingMessage: Msg = {
+      ...message,
+      id: "assistant-external-toggle",
+      streaming: true,
+    };
+    const base = props();
+    render(
+      <ChatPane
+        {...base}
+        messages={[streamingMessage]}
+        visibleMessages={[streamingMessage]}
+      />,
+    );
+
+    act(() => saveDeveloperActivityDetail(true));
+    fireEvent.click(screen.getByTestId("activity-toggle-trigger"));
+    await waitFor(() =>
+      expect(
+        screen
+          .getByTestId("activity-toggle-developer-detail")
+          .getAttribute("aria-checked"),
+      ).toBe("true"),
+    );
+    act(() => saveDeveloperActivityDetail(false));
+
+    await waitFor(() =>
+      expect(hostMocks.suppressDeveloperActivityDetail).toHaveBeenCalledWith(
+        "session-a",
+      ),
+    );
+    expect(hostMocks.suppressDeveloperActivityDetail).toHaveBeenCalledTimes(1);
+  });
+
   it("suppresses the in-flight turn when turned off while a message is streaming", async () => {
     engine.fetchTurnActivity.mockResolvedValue(null);
     const streamingMessage: Msg = {
@@ -502,5 +536,16 @@ describe("ChatPane developer detail mid-turn toggle", () => {
     const developerState = screen.getByTestId("developer-state-assistant-1");
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(developerState.textContent).toBe("");
+  });
+});
+
+describe("ChatPane measured dock eligibility", () => {
+  it("falls back at a 620px body even when the window itself is 900px wide", () => {
+    expect(900).toBeGreaterThan(880);
+    expect(canDockActivityInWidth(620)).toBe(false);
+  });
+
+  it("allows the dock on an ultrawide measured body", () => {
+    expect(canDockActivityInWidth(1_300)).toBe(true);
   });
 });

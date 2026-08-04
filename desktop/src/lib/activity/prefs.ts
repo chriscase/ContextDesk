@@ -26,6 +26,49 @@ export const ACTIVITY_MODE_CHANGED_EVENT = "contextdesk:activity-mode-changed";
 export const DEVELOPER_ACTIVITY_CHANGED_EVENT =
   "contextdesk:developer-activity-changed";
 
+type DeveloperActivityPreferencePayload = {
+  enabled: boolean;
+  eventId: string;
+};
+
+type DeveloperActivityEmit = (
+  eventName: string,
+  payload: DeveloperActivityPreferencePayload,
+) => Promise<void>;
+
+type DeveloperActivityListen = (
+  eventName: string,
+  handler: (event: { payload: unknown }) => void,
+) => Promise<() => void>;
+
+const DEVELOPER_EVENT_ID_MAX_CHARS = 256;
+const developerPreferenceSenderId =
+  typeof globalThis.crypto?.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
+    : `developer-pref-${Date.now()}`;
+let developerPreferenceSequence = 0;
+
+function nextDeveloperPreferenceEventId(): string {
+  developerPreferenceSequence += 1;
+  return `${developerPreferenceSenderId}:${developerPreferenceSequence}`;
+}
+
+function normalizeDeveloperPreferencePayload(
+  value: unknown,
+): DeveloperActivityPreferencePayload | null {
+  if (!value || typeof value !== "object") return null;
+  const payload = value as Record<string, unknown>;
+  if (
+    typeof payload.enabled !== "boolean" ||
+    typeof payload.eventId !== "string" ||
+    payload.eventId.length === 0 ||
+    payload.eventId.length > DEVELOPER_EVENT_ID_MAX_CHARS
+  ) {
+    return null;
+  }
+  return { enabled: payload.enabled, eventId: payload.eventId };
+}
+
 // Intentionally module/process lifetime only. This sensitive toggle is never
 // written to localStorage and therefore returns Off after restart.
 let developerActivityDetail = false;
@@ -34,28 +77,86 @@ export function loadDeveloperActivityDetail(): boolean {
   return developerActivityDetail;
 }
 
-export function saveDeveloperActivityDetail(enabled: boolean): void {
+export function saveDeveloperActivityDetail(
+  enabled: boolean,
+  injectedEmit?: DeveloperActivityEmit,
+): void {
   developerActivityDetail = enabled;
+  const payload: DeveloperActivityPreferencePayload = {
+    enabled,
+    eventId: nextDeveloperPreferenceEventId(),
+  };
   try {
     window.dispatchEvent(
-      new CustomEvent<boolean>(DEVELOPER_ACTIVITY_CHANGED_EVENT, {
-        detail: enabled,
-      }),
+      new CustomEvent<DeveloperActivityPreferencePayload>(
+        DEVELOPER_ACTIVITY_CHANGED_EVENT,
+        { detail: payload },
+      ),
     );
   } catch {
     /* no window (SSR / node test) */
   }
+  // Mirror the explicit choice to other live webviews without persisting it:
+  // a restart still returns this sensitive preference to Off.
+  void (async () => {
+    try {
+      const send =
+        injectedEmit ??
+        ((await import("../engine/activityBridgeTransport"))
+          .emitActivityBridgeEvent as DeveloperActivityEmit);
+      await send(DEVELOPER_ACTIVITY_CHANGED_EVENT, payload);
+    } catch {
+      // Browser preview and tests without Tauri still receive CustomEvent.
+    }
+  })();
 }
 
 export function subscribeDeveloperActivityDetail(
   onChange: (enabled: boolean) => void,
+  injectedListen?: DeveloperActivityListen,
 ): () => void {
   if (typeof window === "undefined") return () => undefined;
+  let disposed = false;
+  let stopTauri: (() => void) | null = null;
+  const seen = new Set<string>();
+  const seenOrder: string[] = [];
+  const accept = (raw: unknown) => {
+    if (disposed) return;
+    const payload = normalizeDeveloperPreferencePayload(raw);
+    if (!payload || seen.has(payload.eventId)) return;
+    seen.add(payload.eventId);
+    seenOrder.push(payload.eventId);
+    if (seenOrder.length > 64) {
+      const expired = seenOrder.shift();
+      if (expired) seen.delete(expired);
+    }
+    developerActivityDetail = payload.enabled;
+    onChange(payload.enabled);
+  };
   const handler = (event: Event) => {
-    onChange((event as CustomEvent<unknown>).detail === true);
+    accept((event as CustomEvent<unknown>).detail);
   };
   window.addEventListener(DEVELOPER_ACTIVITY_CHANGED_EVENT, handler);
-  return () => window.removeEventListener(DEVELOPER_ACTIVITY_CHANGED_EVENT, handler);
+  void (async () => {
+    try {
+      const listen =
+        injectedListen ??
+        ((await import("../engine/activityBridgeTransport"))
+          .listenActivityBridgeEvent as DeveloperActivityListen);
+      const stop = await listen(DEVELOPER_ACTIVITY_CHANGED_EVENT, (event) =>
+        accept(event.payload),
+      );
+      if (disposed) stop();
+      else stopTauri = stop;
+    } catch {
+      // Browser preview and tests have no Tauri event bus.
+    }
+  })();
+  return () => {
+    disposed = true;
+    window.removeEventListener(DEVELOPER_ACTIVITY_CHANGED_EVENT, handler);
+    stopTauri?.();
+  };
 }
 
 /** Quiet by default: the inspector must not appear until asked for. */
