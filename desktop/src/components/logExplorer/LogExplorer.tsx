@@ -217,6 +217,7 @@ type Props = {
 const FIND_PAGE_SIZE = 50;
 const LANE_SOURCE_PAGE_SIZE = 200;
 const LANE_SOURCE_SEARCH_DEBOUNCE_MS = 160;
+const TOP_SOURCE_LIMIT = 40;
 // Time + level + source + a useful message excerpt fit without reducing a
 // lane to timestamp/severity slivers. Availability is based on the central
 // evidence grid, after the live Filters/Chat rail widths and splitters.
@@ -799,6 +800,7 @@ export function LogExplorer({ corpusId }: Props) {
     null,
   );
   const [filters, setFilters] = useState<ExplorerFilters>(emptyFilters);
+  const [filtersCorpusId, setFiltersCorpusId] = useState(corpusId);
   const [facets, setFacets] = useState<LogFacetsDto | null>(null);
   const [facetsLoading, setFacetsLoading] = useState(true);
   const [timelineReady, setTimelineReady] = useState(false);
@@ -808,11 +810,15 @@ export function LogExplorer({ corpusId }: Props) {
   const [laneSourceCatalogTotal, setLaneSourceCatalogTotal] = useState<
     number | null
   >(null);
+  const [physicalSourceTotal, setPhysicalSourceTotal] = useState<number | null>(
+    null,
+  );
   const [laneSourceCatalogLoading, setLaneSourceCatalogLoading] =
     useState(false);
   const [laneSourceCatalogUnavailable, setLaneSourceCatalogUnavailable] =
     useState(false);
   const [laneSourceQuery, setLaneSourceQuery] = useState("");
+  const [allSourcesOpen, setAllSourcesOpen] = useState(false);
   const [timeQuality, setTimeQuality] = useState<TimeQuality>("order_only");
   const [timeResolutionOpen, setTimeResolutionOpen] = useState(false);
   const timeResolutionTriggerRef = useRef<HTMLButtonElement>(null);
@@ -1347,10 +1353,27 @@ export function LogExplorer({ corpusId }: Props) {
           ...(laneSourceCatalogUnavailable
             ? Object.keys(facets?.sources ?? {})
             : []),
+          ...filters.sources,
           ...lanes.flatMap((lane) => lane.sources),
         ]),
       ].sort(),
-    [facets, laneSourceCatalog, laneSourceCatalogUnavailable, lanes],
+    [
+      facets,
+      filters.sources,
+      laneSourceCatalog,
+      laneSourceCatalogUnavailable,
+      lanes,
+    ],
+  );
+  const topSourceEntries = useMemo(
+    () =>
+      Object.entries(facets?.sources ?? {})
+        .sort(
+          ([leftSource, leftCount], [rightSource, rightCount]) =>
+            rightCount - leftCount || leftSource.localeCompare(rightSource),
+        )
+        .slice(0, TOP_SOURCE_LIMIT),
+    [facets?.sources],
   );
   const visibleLaneEditorSources = useMemo(() => {
     const query = laneSourceQuery.trim().toLocaleLowerCase();
@@ -1373,6 +1396,11 @@ export function LogExplorer({ corpusId }: Props) {
         0,
       );
     }
+  }, []);
+  const openLaneEditor = useCallback(() => {
+    setAllSourcesOpen(false);
+    setLaneSourceQuery("");
+    setLaneEditorOpen(true);
   }, []);
   useDismissibleLayer({
     open: laneEditorOpen && breakpoint !== "narrow",
@@ -1931,11 +1959,13 @@ export function LogExplorer({ corpusId }: Props) {
   const loadFacets = useCallback(async () => {
     if (suppressionLoadState !== "ready") return;
     const requestId = ++facetRequestRef.current;
+    const facetFilters =
+      filtersCorpusId === corpusId ? filters : emptyFilters();
     setFacetsLoading(true);
     try {
       const f = await hostLogFacets(
         corpusId,
-        queryWithNoise(filters, { keyword: null }),
+        queryWithNoise(facetFilters, { keyword: null }),
       );
       if (requestId !== facetRequestRef.current) return;
       setFacets(f);
@@ -1945,7 +1975,13 @@ export function LogExplorer({ corpusId }: Props) {
     } finally {
       if (requestId === facetRequestRef.current) setFacetsLoading(false);
     }
-  }, [corpusId, filters, queryWithNoise, suppressionLoadState]);
+  }, [
+    corpusId,
+    filters,
+    filtersCorpusId,
+    queryWithNoise,
+    suppressionLoadState,
+  ]);
 
   const loadLaneSourceCatalog = useCallback(
     async ({
@@ -1979,6 +2015,9 @@ export function LogExplorer({ corpusId }: Props) {
         );
         setLaneSourceCatalogNextCursor(page.nextCursor);
         setLaneSourceCatalogTotal(page.totalMatched);
+        if (!laneSourceQuery.trim()) {
+          setPhysicalSourceTotal(page.totalMatched);
+        }
       } catch {
         if (requestId !== laneSourceRequestRef.current) return;
         setLaneSourceCatalogUnavailable(true);
@@ -2011,6 +2050,8 @@ export function LogExplorer({ corpusId }: Props) {
     }
     const requestId = ++eventsRequestRef.current;
     const countRequestId = ++countRequestRef.current;
+    const eventFilters =
+      filtersCorpusId === corpusId ? filters : emptyFilters();
     let loadedCurrentView = false;
     let shown = 0;
     const countPlans: Array<{
@@ -2054,8 +2095,11 @@ export function LogExplorer({ corpusId }: Props) {
     setGaps([]);
     try {
       if (laneCount <= 1) {
-        const sourceFilter = effectiveLaneSources(visibleLanes[0], filters);
-        const query = queryWithNoise(filters, { sources: sourceFilter });
+        const sourceFilter = effectiveLaneSources(
+          visibleLanes[0],
+          eventFilters,
+        );
+        const query = queryWithNoise(eventFilters, { sources: sourceFilter });
         const page =
           sourceFilter?.length === 0
             ? emptyEventRowsPage()
@@ -2105,7 +2149,7 @@ export function LogExplorer({ corpusId }: Props) {
         const states: Record<string, LaneTimeState> = {};
         const matchedByLane: Record<string, number | null> = {};
         const requests = visibleLanes.map(async (lane) => {
-          const sourceFilter = effectiveLaneSources(lane, filters);
+          const sourceFilter = effectiveLaneSources(lane, eventFilters);
           if (sourceFilter?.length === 0) {
             return {
               lane,
@@ -2113,7 +2157,7 @@ export function LogExplorer({ corpusId }: Props) {
               countQuery: null,
             };
           }
-          const q = queryWithNoise(filters, {
+          const q = queryWithNoise(eventFilters, {
             sources: sourceFilter,
             limit: 100,
             sortByTime: true,
@@ -2289,6 +2333,7 @@ export function LogExplorer({ corpusId }: Props) {
   }, [
     corpusId,
     filters,
+    filtersCorpusId,
     laneCount,
     lanes,
     finishRowLoadStatus,
@@ -2328,8 +2373,13 @@ export function LogExplorer({ corpusId }: Props) {
     setLaneSourceCatalog([]);
     setLaneSourceCatalogNextCursor(null);
     setLaneSourceCatalogTotal(null);
+    setPhysicalSourceTotal(null);
     setLaneSourceCatalogUnavailable(false);
     setLaneSourceQuery("");
+    setAllSourcesOpen(false);
+    setFilters(emptyFilters());
+    setFiltersCorpusId(corpusId);
+    setFilterDraft("");
     clearDetail();
 
     const savedLanes = loadLanes(corpusId);
@@ -2446,7 +2496,9 @@ export function LogExplorer({ corpusId }: Props) {
   }, [loadSuppressionPolicy]);
 
   useEffect(() => {
-    if (!laneEditorOpen) {
+    const catalogNeeded =
+      laneEditorOpen || allSourcesOpen || physicalSourceTotal == null;
+    if (!catalogNeeded) {
       laneSourceRequestRef.current += 1;
       laneSourceLoadingRef.current = false;
       setLaneSourceCatalogLoading(false);
@@ -2460,7 +2512,13 @@ export function LogExplorer({ corpusId }: Props) {
       window.clearTimeout(timeout);
       laneSourceRequestRef.current += 1;
     };
-  }, [laneEditorOpen, laneSourceQuery, loadLaneSourceCatalog]);
+  }, [
+    allSourcesOpen,
+    laneEditorOpen,
+    laneSourceQuery,
+    loadLaneSourceCatalog,
+    physicalSourceTotal,
+  ]);
 
   useEffect(() => {
     void loadEvents();
@@ -5672,7 +5730,7 @@ export function LogExplorer({ corpusId }: Props) {
               movesFocus: true,
               buttonRef: laneEditorToggleRef,
               run: () =>
-                laneEditorOpen ? closeLaneEditor() : setLaneEditorOpen(true),
+                laneEditorOpen ? closeLaneEditor() : openLaneEditor(),
             },
           ]}
         />
@@ -5685,7 +5743,7 @@ export function LogExplorer({ corpusId }: Props) {
           aria-expanded={laneEditorOpen}
           aria-controls="lane-editor"
           onClick={() =>
-            laneEditorOpen ? closeLaneEditor() : setLaneEditorOpen(true)
+            laneEditorOpen ? closeLaneEditor() : openLaneEditor()
           }
           title="Compose which sources belong to each lane"
         >
@@ -6894,23 +6952,135 @@ export function LogExplorer({ corpusId }: Props) {
                   ))}
               </div>
 
-              <div className="log-explorer__section-title">Sources</div>
-              <div className="log-explorer__facet">
-                {Object.entries(facets?.sources ?? {})
-                  .sort((a, b) => b[1] - a[1])
-                  .slice(0, 40)
-                  .map(([src, count]) => (
-                    <label key={src} className="log-explorer__facet-row">
-                      <input
-                        type="checkbox"
-                        checked={filters.sources.includes(src)}
-                        onChange={() => toggleSource(src)}
-                      />
-                      <span title={src}>{src}</span>
-                      <span className="count">{count}</span>
-                    </label>
-                  ))}
+              <div className="log-explorer__source-heading">
+                <div className="log-explorer__section-title">
+                  Top sources — showing {topSourceEntries.length}
+                  {physicalSourceTotal != null
+                    ? ` of ${physicalSourceTotal}`
+                    : laneSourceCatalogUnavailable
+                      ? " · complete catalog unavailable"
+                      : " · counting all sources…"}
+                </div>
+                <button
+                  type="button"
+                  className="log-explorer__btn log-explorer__all-sources-toggle"
+                  data-testid="all-sources-toggle"
+                  aria-expanded={allSourcesOpen}
+                  aria-controls="log-explorer-all-sources"
+                  onClick={() => {
+                    setLaneSourceQuery("");
+                    if (!allSourcesOpen) closeLaneEditor(false);
+                    setAllSourcesOpen(!allSourcesOpen);
+                  }}
+                >
+                  All sources
+                </button>
               </div>
+              <div className="log-explorer__facet">
+                {topSourceEntries.map(([src, count]) => (
+                  <label key={src} className="log-explorer__facet-row">
+                    <input
+                      type="checkbox"
+                      checked={filters.sources.includes(src)}
+                      onChange={() => toggleSource(src)}
+                    />
+                    <span title={src}>{src}</span>
+                    <span className="count">{count}</span>
+                  </label>
+                ))}
+              </div>
+              {allSourcesOpen ? (
+                <div
+                  id="log-explorer-all-sources"
+                  className="log-explorer__all-sources"
+                  data-testid="all-sources-catalog"
+                  role="region"
+                  aria-label="All source paths"
+                >
+                  <label className="log-explorer__lane-source-search">
+                    <span>Find all sources</span>
+                    <input
+                      className="log-explorer__input"
+                      type="search"
+                      value={laneSourceQuery}
+                      placeholder="Search exact source paths…"
+                      onChange={(event) =>
+                        setLaneSourceQuery(event.target.value)
+                      }
+                    />
+                  </label>
+                  <p className="log-explorer__lane-editor-help" role="status">
+                    {laneSourceQuery
+                      ? `${laneSourceCatalogTotal ?? visibleLaneEditorSources.length} matching source${
+                          (laneSourceCatalogTotal ??
+                            visibleLaneEditorSources.length) === 1
+                            ? ""
+                            : "s"
+                        }`
+                      : `${laneSourceCatalogTotal ?? visibleLaneEditorSources.length} physical source${
+                          (laneSourceCatalogTotal ??
+                            visibleLaneEditorSources.length) === 1
+                            ? ""
+                            : "s"
+                        }`}
+                    {laneSourceCatalogNextCursor
+                      ? ` · ${laneSourceCatalog.length} loaded`
+                      : ""}
+                  </p>
+                  {laneSourceCatalogUnavailable ? (
+                    <p className="log-explorer__lane-editor-help" role="status">
+                      Complete source catalog unavailable; showing known
+                      sources.
+                    </p>
+                  ) : null}
+                  {laneSourceCatalogLoading &&
+                  laneSourceCatalog.length === 0 ? (
+                    <p className="log-explorer__lane-editor-help" role="status">
+                      Loading source paths…
+                    </p>
+                  ) : null}
+                  <div className="log-explorer__facet">
+                    {visibleLaneEditorSources.map((src) => (
+                      <label key={src} className="log-explorer__facet-row">
+                        <input
+                          type="checkbox"
+                          checked={filters.sources.includes(src)}
+                          onChange={() => toggleSource(src)}
+                        />
+                        <span title={src}>{src}</span>
+                      </label>
+                    ))}
+                    {visibleLaneEditorSources.length === 0 ? (
+                      <p
+                        className="log-explorer__lane-editor-help"
+                        role="status"
+                      >
+                        No source paths match this search.
+                      </p>
+                    ) : null}
+                  </div>
+                  {laneSourceCatalogNextCursor ? (
+                    <button
+                      type="button"
+                      className="log-explorer__btn log-explorer__lane-source-more"
+                      disabled={laneSourceCatalogLoading}
+                      onClick={loadMoreLaneSources}
+                    >
+                      {laneSourceCatalogLoading
+                        ? "Loading more sources…"
+                        : `Load more sources${
+                            laneSourceCatalogTotal == null
+                              ? ""
+                              : ` (${Math.max(
+                                  0,
+                                  laneSourceCatalogTotal -
+                                    laneSourceCatalog.length,
+                                )} remaining)`
+                          }`}
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
 
               {Object.keys(facets?.services ?? {}).length > 0 ? (
                 <>

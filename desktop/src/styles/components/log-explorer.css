@@ -2023,6 +2023,34 @@
   margin: 0.5rem 0 0.35rem;
 }
 
+.log-explorer__source-heading {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.log-explorer__source-heading .log-explorer__section-title {
+  min-width: 0;
+}
+
+.log-explorer__all-sources-toggle {
+  flex: 0 0 auto;
+  font-size: 0.7rem;
+  padding: 0.2rem 0.4rem;
+}
+
+.log-explorer__all-sources {
+  border: 1px solid var(--border-subtle, #2a2d33);
+  border-radius: 0.4rem;
+  margin-bottom: 0.65rem;
+  max-height: min(24rem, 45vh);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 0.45rem;
+  scrollbar-gutter: stable;
+}
+
 .log-explorer__facet {
   display: flex;
   flex-direction: column;

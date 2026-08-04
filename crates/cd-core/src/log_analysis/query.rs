@@ -1664,7 +1664,7 @@ pub fn query_facets(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<LogFacets>
             ("COALESCE(host, '')", &mut facets.hosts),
         ] {
             let sql = format!(
-                "SELECT {col} AS k, COUNT(*) AS c FROM events WHERE {where_sql} GROUP BY 1 ORDER BY c DESC LIMIT 200"
+                "SELECT {col} AS k, COUNT(*) AS c FROM events WHERE {where_sql} GROUP BY 1 ORDER BY c DESC, k ASC LIMIT 200"
             );
             let mut stmt = conn.prepare(&sql).map_err(duck_err)?;
             let rows = bind_and_map_kv(&mut stmt, &binds)?;
@@ -4670,6 +4670,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(repeated_first.sources, sources[..37]);
+    }
+
+    #[test]
+    fn high_cardinality_facets_break_equal_count_ties_by_exact_source_path() {
+        let (dir, id) = high_cardinality_source_catalog_fixture();
+        let corpus = LogCorpus::open(&dir.path().join("cache"), &id).unwrap();
+
+        let facets = query_facets(&corpus, &EventQuery::default()).unwrap();
+        assert_eq!(facets.sources.len(), 200, "facets remain a bounded summary");
+        assert!(facets
+            .sources
+            .contains_key("services/service-001/application.log"));
+        assert!(facets
+            .sources
+            .contains_key("services/service-200/application.log"));
+        assert!(!facets
+            .sources
+            .contains_key("services/service-201/application.log"));
+        assert!(!facets
+            .sources
+            .contains_key("services/service-241/application.log"));
     }
 
     #[test]

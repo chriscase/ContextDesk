@@ -1979,6 +1979,60 @@ describe("LogExplorer shell", () => {
     expect(await screen.findByText("current corpus evidence")).toBeTruthy();
   });
 
+  it("does not carry a source filter into a replacement corpus", async () => {
+    vi.mocked(host.hostLogFacets).mockImplementation(
+      async (requestedCorpusId) => {
+        const source =
+          requestedCorpusId === "c1" ? "old/source.log" : "new/source.log";
+        return {
+          sources: { [source]: 2 },
+          levels: { info: 2 },
+          services: {},
+          hosts: {},
+          timeQuality: "wall",
+        };
+      },
+    );
+    vi.mocked(host.hostLogSourceCatalog).mockImplementation(
+      async (requestedCorpusId) => {
+        const source =
+          requestedCorpusId === "c1" ? "old/source.log" : "new/source.log";
+        return {
+          sources: [{ source, eventCount: 2 }],
+          nextCursor: null,
+          totalMatched: 1,
+        };
+      },
+    );
+
+    const view = render(<LogExplorer corpusId="c1" />);
+    const filtersPanel = await screen.findByTestId("log-explorer-filters");
+    fireEvent.click(
+      await within(filtersPanel).findByRole("checkbox", {
+        name: /old\/source\.log/i,
+      }),
+    );
+    expect(
+      await screen.findByRole("button", { name: "source:old/source.log ×" }),
+    ).toBeTruthy();
+
+    view.rerender(<LogExplorer corpusId="c2" />);
+    expect(
+      screen.queryByRole("button", { name: "source:old/source.log ×" }),
+    ).toBeNull();
+    await waitFor(() => {
+      const replacementQueries = vi
+        .mocked(host.hostLogQueryEventRows)
+        .mock.calls.filter(([requestedCorpusId]) => requestedCorpusId === "c2");
+      expect(replacementQueries.length).toBeGreaterThan(0);
+      expect(
+        replacementQueries.every(
+          ([, query]) => (query?.sources ?? []).length === 0,
+        ),
+      ).toBe(true);
+    });
+  });
+
   it("resolves visible lane counts independently without inventing a global total", async () => {
     const laneCounts = {
       "a.log": deferred<host.EventCountDto>(),
@@ -7358,6 +7412,86 @@ describe("LogExplorer shell", () => {
     ).toBeTruthy();
   });
 
+  it("labels top sources honestly and pages every physical source in filters", async () => {
+    const sourcePaths = Array.from(
+      { length: 241 },
+      (_, index) =>
+        `cluster-${String(index + 1).padStart(3, "0")}/runtime.log`,
+    );
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: Object.fromEntries(
+        sourcePaths.slice(0, 200).map((source) => [source, 1]),
+      ),
+      levels: { info: 241 },
+      services: {},
+      hosts: {},
+      timeQuality: "wall",
+    });
+    vi.mocked(host.hostLogSourceCatalog).mockImplementation(
+      async (_corpusId, query = {}) => {
+        const search = query.search?.toLocaleLowerCase() ?? "";
+        const matching = sourcePaths.filter((source) =>
+          source.toLocaleLowerCase().includes(search),
+        );
+        const start = query.cursor
+          ? Math.max(0, matching.indexOf(query.cursor) + 1)
+          : 0;
+        const limit = query.limit ?? 100;
+        const page = matching.slice(start, start + limit);
+        return {
+          sources: page.map((source) => ({ source, eventCount: 1 })),
+          nextCursor:
+            start + page.length < matching.length
+              ? (page[page.length - 1] ?? null)
+              : null,
+          totalMatched: matching.length,
+        };
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    const filtersPanel = await screen.findByTestId("log-explorer-filters");
+    expect(
+      await within(filtersPanel).findByText("Top sources — showing 40 of 241"),
+    ).toBeTruthy();
+    expect(
+      within(filtersPanel).queryByTitle("cluster-241/runtime.log"),
+    ).toBeNull();
+
+    fireEvent.click(within(filtersPanel).getByTestId("all-sources-toggle"));
+    const catalog = await within(filtersPanel).findByTestId(
+      "all-sources-catalog",
+    );
+    await waitFor(() =>
+      expect(within(catalog).getAllByRole("checkbox")).toHaveLength(200),
+    );
+    fireEvent.click(
+      within(catalog).getByRole("button", {
+        name: "Load more sources (41 remaining)",
+      }),
+    );
+    expect(
+      await within(catalog).findByRole("checkbox", {
+        name: "cluster-241/runtime.log",
+      }),
+    ).toBeTruthy();
+
+    fireEvent.change(
+      within(catalog).getByRole("searchbox", { name: "Find all sources" }),
+      { target: { value: "cluster-241/" } },
+    );
+    await waitFor(() =>
+      expect(within(catalog).getAllByRole("checkbox")).toHaveLength(1),
+    );
+    expect(
+      within(filtersPanel).getByText("Top sources — showing 40 of 241"),
+    ).toBeTruthy();
+    fireEvent.click(within(filtersPanel).getByTestId("all-sources-toggle"));
+    expect(
+      within(filtersPanel).getByText("Top sources — showing 40 of 241"),
+    ).toBeTruthy();
+  });
+
   it("pages and searches all 241 full source paths without losing lane membership", async () => {
     const sourcePaths = Array.from(
       { length: 241 },
@@ -7387,7 +7521,13 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByTestId("lane-count-picker");
-    expect(host.hostLogSourceCatalog).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(host.hostLogSourceCatalog).toHaveBeenCalledWith("c1", {
+        search: null,
+        cursor: null,
+        limit: 200,
+      }),
+    );
     openLaneComposer();
     const editor = await screen.findByTestId("lane-editor");
     const lane = editor.querySelector(
@@ -7477,6 +7617,10 @@ describe("LogExplorer shell", () => {
     expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
       "1 source",
     );
+    fireEvent.click(screen.getByTestId("lane-editor-close"));
+    expect(
+      screen.getByText("Top sources — showing 2 of 241"),
+    ).toBeTruthy();
   });
 
   it("keeps all-sources lanes explicit in shared timeline requests", async () => {

@@ -214,6 +214,31 @@ describe("hostLogSourceCatalog", () => {
     });
     expect(invokeMock).not.toHaveBeenCalled();
   });
+
+  it("preserves distinct full paths with the same basename", async () => {
+    invokeMock.mockResolvedValue({
+      sources: [
+        { source: "cluster-a/runtime.log", eventCount: 3 },
+        { source: "cluster-b/runtime.log", eventCount: 4 },
+      ],
+      nextCursor: "cluster-b/runtime.log",
+      totalMatched: 203,
+    });
+
+    await expect(
+      hostLogSourceCatalog("corpus-2", {
+        cursor: "cluster-0/runtime.log",
+        limit: 2,
+      }),
+    ).resolves.toEqual({
+      sources: [
+        { source: "cluster-a/runtime.log", eventCount: 3 },
+        { source: "cluster-b/runtime.log", eventCount: 4 },
+      ],
+      nextCursor: "cluster-b/runtime.log",
+      totalMatched: 203,
+    });
+  });
 });
 
 describe("hostSaveLogDiagnosticReport", () => {
