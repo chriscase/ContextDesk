@@ -752,14 +752,16 @@ fn developer_store_isolation_and_forget_session() {
         round: Some(0),
         tool_name: None,
         offered_tools: Vec::new(),
+        offered_tools_omitted: 0,
         request: vec![cd_core::turn_trace::DeveloperPayload::text(label)],
+        request_omitted: 0,
         response: None,
         status: "present".into(),
         sensitive: true,
     };
-    store.insert("session-a", "msg-1", vec![ev("a1")]);
-    store.insert("session-a", "msg-2", vec![ev("a2")]);
-    store.insert("session-b", "msg-1", vec![ev("b1")]);
+    store.insert("session-a", "msg-1", vec![ev("a1")], 0);
+    store.insert("session-a", "msg-2", vec![ev("a2")], 0);
+    store.insert("session-b", "msg-1", vec![ev("b1")], 0);
 
     assert_eq!(store.get("session-a", "msg-1").unwrap().len(), 1);
     assert!(store.get("session-b", "msg-1").is_some());
@@ -786,7 +788,10 @@ fn developer_payload_bounds_and_secret_redaction() {
         "body": long,
         "api_key": "sk-abcdefghijklmnopqrstuvwxyz0123456789ABCD",
     }));
-    assert!(payload.truncated);
+    assert!(
+        payload.truncated || payload.content.contains("[truncated]"),
+        "oversized structured content must disclose either byte truncation or the earlier JSON string bound"
+    );
     assert!(payload.retained_bytes <= MAX_DEVELOPER_PAYLOAD_BYTES);
     assert!(!payload.content.contains("super-secret-token-value"));
     assert!(!payload.content.contains("sk-abcdefghijklmnopqrstuvwxyz"));

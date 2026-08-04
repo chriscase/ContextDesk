@@ -629,6 +629,7 @@ impl DeveloperDetailDraft {
     ) -> Self {
         Self {
             kind: DeveloperDetailKind::ToolCall,
+            authority: None,
             label: format!("Rejected tool call: {name}"),
             provider: None,
             model: None,
@@ -1169,6 +1170,7 @@ impl RecordingTurnTrace {
                 // rather than being trusted and stored directly.
                 StreamEvent::Error { code, message } => Some(DeveloperDetailDraft {
                     kind: DeveloperDetailKind::DeterministicStage,
+                    authority: None,
                     label: format!("Host error: {code}"),
                     provider: None,
                     model: None,
