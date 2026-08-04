@@ -26,7 +26,8 @@ fn write_profile(home: &Path, server_uri: &str, tools: bool) -> PathBuf {
     profile.local_only = true;
     profile.chat_model = "test-model".into();
     profile.capabilities.tools = tools;
-    profile.capabilities.stream = true;
+    // Non-stream JSON completions parse tool_calls reliably in wiremock tests.
+    profile.capabilities.stream = false;
     let cfg = AppConfig {
         providers: ProviderConfig {
             active_id: Some(profile.id.clone()),
@@ -261,17 +262,19 @@ async fn activity_causal_phases_on_tool_round_are_monotonic() {
                 || l.to_ascii_lowercase().contains("round")),
         "missing provider/model phase in labels: {joined}"
     );
-    let has_tool_or_trail = labels.iter().any(|l| {
+    let has_tool = labels.iter().any(|l| {
         let ll = l.to_ascii_lowercase();
-        ll.contains("tool")
-            || ll.contains("search")
-            || ll.contains("retrieval")
-            || ll.contains("trail")
+        ll.contains("tool") || ll.contains("search_kb") || ll.contains("awaiting permission")
     });
     assert!(
-        has_tool_or_trail || call_n.load(Ordering::SeqCst) >= 2,
-        "expected tool/host activity or multi-round provider path; labels={joined} calls={}",
+        has_tool,
+        "expected Tool started/finished (or permission) activity after tool_calls round; labels={joined}; provider_calls={}",
         call_n.load(Ordering::SeqCst)
+    );
+    // Multi-round provider path: tool_calls round then final (or at least tool lifecycle)
+    assert!(
+        call_n.load(Ordering::SeqCst) >= 1,
+        "mock must have been contacted"
     );
     // Origins must be classified (not missing)
     for event in &events {
@@ -620,17 +623,46 @@ fn activity_full_without_ack_refuses() {
     }
 }
 
+#[test]
+fn cli_chat_non_interactive_defaults_permission_to_deny() {
+    let src = include_str!("../src/commands/chat.rs");
+    assert!(
+        src.contains("permission denied (non-interactive, no --auto-approve)"),
+        "CLI must deny permissions non-interactively without --auto-approve"
+    );
+    assert!(
+        src.contains("PermissionDecision::Deny"),
+        "CLI must return Deny on the non-interactive path"
+    );
+    assert!(
+        src.contains("stdout_is_tty") && src.contains("is_terminal"),
+        "permission path must check TTY"
+    );
+}
+
 #[tokio::test]
 async fn non_interactive_permission_denies_without_auto_approve() {
+    // SoftWrite on the real binary: save_skill requires Accept; non-TTY denies.
+    // Mirror the proven causal tool-round mock structure exactly (application/json
+    // tool_calls), only changing the tool name/args to a SoftWrite skill.
     let server = MockServer::start().await;
-    // Always request a HardWrite-ish tool if possible; search_kb may auto-run.
-    // Use a mock that always returns tool_calls for memory write style tool.
+    let call_n = Arc::new(AtomicUsize::new(0));
+    let call_n2 = call_n.clone();
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "application/json")
-                .set_body_json(serde_json::json!({
+        .respond_with(move |req: &Request| {
+            let n = call_n2.fetch_add(1, Ordering::SeqCst);
+            let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+            let messages = body
+                .get("messages")
+                .and_then(|m| m.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let has_tool = messages
+                .iter()
+                .any(|m| m.get("role").and_then(|r| r.as_str()) == Some("tool"));
+            if n == 0 && !has_tool {
+                let payload = serde_json::json!({
                     "id": "c1",
                     "object": "chat.completion",
                     "choices": [{
@@ -639,18 +671,30 @@ async fn non_interactive_permission_denies_without_auto_approve() {
                             "role": "assistant",
                             "content": null,
                             "tool_calls": [{
-                                "id": "call_w",
+                                "id": "call_1",
                                 "type": "function",
                                 "function": {
-                                    "name": "save_memory",
-                                    "arguments": "{\"text\":\"secret note\"}"
+                                    "name": "save_skill",
+                                    "arguments": "{\"id\":\"s1\",\"name\":\"S\",\"description\":\"d\",\"body_markdown\":\"body\"}"
                                 }
                             }]
                         },
                         "finish_reason": "tool_calls"
                     }]
-                })),
-        )
+                });
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(payload)
+            } else {
+                let sse =
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"final after permission\"}}]}\n\n\
+                     data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                     data: [DONE]\n\n";
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_raw(sse, "text/event-stream")
+            }
+        })
         .mount(&server)
         .await;
 
@@ -665,27 +709,47 @@ async fn non_interactive_permission_denies_without_auto_approve() {
             "--activity",
             "summary",
             "--new",
-            "remember this forever",
+            "please save a skill for me",
         ])
         .output()
         .expect("run");
-    // Non-interactive without --auto-approve should not hang; may deny permission.
-    let lines = parse_jsonl(&output.stdout);
-    if !lines.is_empty() {
-        assert_eq!(lines.last().unwrap()["type"], "done");
-        for line in &lines {
-            assert_meta_fields(line);
-        }
-    }
-    // stderr should mention deny if permission path hit
+
     let err = String::from_utf8_lossy(&output.stderr);
     let out = String::from_utf8_lossy(&output.stdout);
+    let lines = parse_jsonl(&output.stdout);
+    assert!(!lines.is_empty(), "stderr={err} stdout={out}");
+    assert_eq!(lines.last().unwrap()["type"], "done");
+    for line in &lines {
+        assert_meta_fields(line);
+    }
+
+    let blob = format!("{err}{out}").to_ascii_lowercase();
+    let activity_labels: Vec<String> = lines
+        .iter()
+        .filter(|l| l.get("type").and_then(|t| t.as_str()) == Some("activity"))
+        .filter_map(|l| l.get("label").and_then(|x| x.as_str()).map(str::to_string))
+        .collect();
+    let joined = activity_labels.join(" | ");
+
+    let saw_permission = blob.contains("permission")
+        || blob.contains("denied")
+        || blob.contains("allow once")
+        || lines.iter().any(|l| {
+            l.get("type").and_then(|t| t.as_str()) == Some("permission_required")
+                || l.get("label")
+                    .and_then(|x| x.as_str())
+                    .is_some_and(|x| x.to_ascii_lowercase().contains("permission"))
+        });
+    let saw_tool = activity_labels.iter().any(|l| {
+        let ll = l.to_ascii_lowercase();
+        ll.contains("tool") || ll.contains("save_skill") || ll.contains("awaiting permission")
+    });
+    // SoftWrite on a real binary: either permission phase or tool lifecycle must appear.
+    // If the provider returned tool_calls that the host executed, Tool rows appear;
+    // if permission is required, PermissionRequired / deny text appears.
     assert!(
-        err.contains("permission")
-            || out.contains("permission")
-            || out.contains("denied")
-            || out.contains("done")
-            || !output.status.success(),
-        "expected permission deny or clean terminal path; stderr={err} stdout={out}"
+        saw_permission || saw_tool,
+        "expected permission or tool activity on SoftWrite binary path; labels={joined}; stderr={err}; stdout={out}"
     );
+    assert!(call_n.load(Ordering::SeqCst) >= 1);
 }

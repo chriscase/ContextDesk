@@ -38,18 +38,40 @@ pub fn project_turn_activity(
     let mut recorder = ActivityRecorder::new(turn_id, session_id, scope, detail_level(level));
     if let Some(sink) = sink {
         let timeline = sink.timeline();
-        if timeline.is_empty() {
-            // Early refusal / empty capture: still project the stream the
-            // host actually emitted (TurnStarted, Error, TurnCompleted…).
-            recorder.record_stream_events(events);
-        } else {
+        if !timeline.is_empty() {
             recorder.record_timeline(&timeline);
         }
-    } else {
-        recorder.record_stream_events(events);
     }
+    // Always merge the live stream lifecycle. The shared timeline captures
+    // provider rounds + some host tools, but Error / permission / turn
+    // terminal codes and any tool events the timeline missed must still
+    // appear — otherwise a linked_no_tool or permission deny is invisible
+    // once any provider round landed on the timeline.
+    //
+    // `record_stream_events` is idempotent enough for CLI projection: tool
+    // rows re-appear only when the stream has them; we de-dupe by
+    // operation_id after finish via `dedupe_activity_ops` on the record.
+    recorder.record_stream_events(events);
     let status = status_for_turn_events(events);
-    recorder.finish(status, total_elapsed_ms)
+    let mut record = recorder.finish(status, total_elapsed_ms);
+    dedupe_activity_ops(&mut record);
+    record
+}
+
+/// Drop later events that reuse an earlier `operation_id` (timeline + stream
+/// both saw the same tool), preserving first-seen causal order and seq.
+fn dedupe_activity_ops(record: &mut TurnActivityRecord) {
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
+    let mut kept = Vec::with_capacity(record.events.len());
+    for mut event in record.events.drain(..) {
+        if !seen.insert(event.operation_id.clone()) {
+            continue;
+        }
+        event.seq = kept.len() as u64;
+        kept.push(event);
+    }
+    record.events = kept;
 }
 
 /// Convert a finished record into stable CLI activity lines (one per event).
@@ -194,5 +216,94 @@ mod tests {
         let human = render_human_summary(&record);
         assert!(human.contains("activity:"));
         assert!(!human.contains("sk-")); // no credential-looking noise
+    }
+
+    #[test]
+    fn merges_stream_error_and_tool_after_timeline_provider_rounds() {
+        use cd_core::events::{StreamEvent, ToolPhase};
+        use cd_core::turn_trace::{
+            RecordingTurnTrace, TracedCall, TracedMessage, TracedOutcome, TurnTraceSink,
+        };
+        use std::sync::Arc;
+
+        let sink = Arc::new(RecordingTurnTrace::new());
+        let call = TracedCall {
+            seq: 0,
+            elapsed_ms: 5,
+            tool_names: vec!["search_kb".into()],
+            messages: vec![TracedMessage {
+                role: "user".into(),
+                content: "q".into(),
+                char_count: 1,
+                truncated: false,
+            }],
+            context_used_chars: 1,
+            messages_capped: false,
+            outcome: TracedOutcome::Completed {
+                finish_reason: "tool_calls".into(),
+                tool_call_count: 1,
+            },
+        };
+        TurnTraceSink::record(sink.as_ref(), call);
+
+        let events = vec![
+            StreamEvent::TurnStarted {
+                session_id: "s".into(),
+                model: Some("m".into()),
+            },
+            StreamEvent::Tool {
+                id: "call_1".into(),
+                name: "search_kb".into(),
+                phase: ToolPhase::Started,
+                ok: None,
+                summary: "start".into(),
+                detail: None,
+            },
+            StreamEvent::Tool {
+                id: "call_1".into(),
+                name: "search_kb".into(),
+                phase: ToolPhase::Finished,
+                ok: Some(true),
+                summary: "ok".into(),
+                detail: None,
+            },
+            StreamEvent::Error {
+                code: "linked_no_tool".into(),
+                message: "no successful log tool".into(),
+            },
+            StreamEvent::TurnCompleted {
+                reason: "stop".into(),
+            },
+        ];
+        let record = project_turn_activity(
+            "s",
+            "s::t",
+            None,
+            ActivityLevel::Summary,
+            Some(sink.as_ref()),
+            &events,
+            20,
+        );
+        let labels: Vec<_> = record.events.iter().map(|e| e.label.as_str()).collect();
+        assert!(
+            labels.iter().any(|l| l.contains("Model request")),
+            "provider round missing: {labels:?}"
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|l| l.to_ascii_lowercase().contains("tool")),
+            "tool phase missing: {labels:?}"
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|l| l.to_ascii_lowercase().contains("error") || l.contains("linked_no_tool")),
+            "error lifecycle missing: {labels:?}"
+        );
+        // seq monotonic
+        for w in record.events.windows(2) {
+            assert!(w[0].seq < w[1].seq);
+        }
     }
 }
