@@ -2,7 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { ActivityRail } from "./ActivityRail";
 import { appendActivities, createActivityLog } from "../../lib/activity/activityLog";
-import { importRunActivities } from "../../lib/activity/importLedger";
+import {
+  beginImportActivityAttempt,
+  recordImportProgress,
+  settleImportActivityAttempt,
+} from "../../lib/activity/importProgressActivity";
 import type {
   ActivityMode,
   ClientIncidentClock,
@@ -52,7 +56,34 @@ const RUN: ImportRunInput = {
   },
 };
 
-const LOG = appendActivities(createActivityLog(), importRunActivities(RUN));
+function importActivities(run: ImportRunInput) {
+  let attempt = beginImportActivityAttempt("import:activity-rail-test", run.sourceKind);
+  for (const [phase, elapsedMs] of [
+    ["starting", 0],
+    ["scan", 10],
+    ["stream", 20],
+    ["validate", 30],
+    ["publish", 40],
+    ["completed", 50],
+  ] as const) {
+    attempt = recordImportProgress(attempt, {
+      kind: "log_ingest",
+      phase,
+      message: "ignored",
+      fraction: null,
+      lines_processed: null,
+      files_processed: null,
+      bytes_processed: null,
+      templates: null,
+      cancellable: phase !== "publish",
+      elapsed_ms: elapsedMs,
+      phase_elapsed_ms: null,
+    });
+  }
+  return settleImportActivityAttempt(attempt, run).events;
+}
+
+const LOG = appendActivities(createActivityLog(), importActivities(RUN));
 
 const WALL_CLOCK: ClientIncidentClock = {
   tsMinMs: T0,
@@ -98,12 +129,12 @@ describe("Off hides the whole ContextDesk group without changing processing", ()
 });
 
 describe("the rail shows the dual-group view only when docked", () => {
-  it("renders the timeline in Docked", () => {
+  it("renders live import activity on its honest causal track in Docked", () => {
     renderRail("docked");
     expect(screen.getByTestId("dual-lane-timeline")).toBeTruthy();
     expect(
       screen.getByTestId("dual-lane-timeline").getAttribute("data-alignment"),
-    ).toBe("shared_wall_clock");
+    ).toBe("separate_tracks");
   });
 
   it("omits the timeline in Compact and Drawer, keeping the list", () => {
@@ -163,7 +194,7 @@ describe("the rail keeps ContextDesk activity separate from customer evidence", 
   it("surfaces the retention bound when entries were dropped", () => {
     const small = appendActivities(
       createActivityLog(2),
-      importRunActivities(RUN),
+      importActivities(RUN),
     );
     renderRail("compact", { log: small });
     expect(screen.getByRole("note").textContent).toMatch(

@@ -6,13 +6,10 @@
  * per-run measurement (redaction, local-only ingest) the wording says so
  * plainly instead of implying a per-run proof.
  */
-import {
-  ACTIVITY_LANE_GROUP,
-  determinismForOrigin,
-  type ActivityEventInput,
-  type ImportRunInput,
-  type ImportReportInput,
-  type TimeQuality,
+import type {
+  ImportRunInput,
+  ImportReportInput,
+  TimeQuality,
 } from "./types";
 
 export type LedgerRow = { term: string; detail: string };
@@ -167,8 +164,8 @@ export function importLedgerSections(run: ImportRunInput): LedgerSection[] {
       }
       if (report.exclusionExamples.length > 0) {
         rows.push({
-          term: "Exclusion examples",
-          detail: report.exclusionExamples.join(", "),
+          term: "Excluded identities",
+          detail: `${formatCount(report.exclusionExamples.length)} bounded examples are available in Import confidence; Activity does not retain source names`,
         });
       }
       if (report.ignoredFiles > 0 || report.failedFiles > 0) {
@@ -188,7 +185,9 @@ export function importLedgerSections(run: ImportRunInput): LedgerSection[] {
       const sc = diagnostic.evidence.scanCounts;
       rows.push({
         term: run.outcome === "cancelled" ? "Cancelled" : "Failed",
-        detail: `${diagnostic.summary} (${diagnostic.reasonCode})`,
+        detail: diagnostic.cancelled
+          ? "Host confirmed cancellation; source-specific detail stays in the dedicated diagnostic view"
+          : "Host returned a failure diagnostic; source-specific detail stays in the dedicated diagnostic view",
       });
       rows.push({
         term: "Scan skips",
@@ -222,16 +221,10 @@ export function importLedgerSections(run: ImportRunInput): LedgerSection[] {
         term: "Format confidence",
         detail: `${formatCount(c.matched)} matched · ${formatCount(c.ambiguous)} ambiguous · ${formatCount(c.unknown)} unknown`,
       });
-      for (const source of report.confidence.sources.slice(0, 8)) {
+      if (report.confidence.sources.length > 0) {
         rows.push({
-          term: source.source,
-          detail: `${source.formatId ?? "unrecognized"} · ${source.outcome} · ${formatCount(source.lines)} lines`,
-        });
-      }
-      if (report.confidence.sources.length > 8) {
-        rows.push({
-          term: "…",
-          detail: `${report.confidence.sources.length - 8} more sources — see Import confidence`,
+          term: "Per-source detail",
+          detail: `${formatCount(report.confidence.sources.length)} sources are available in Import confidence; Activity does not retain their names`,
         });
       }
     }
@@ -342,151 +335,4 @@ export function importLedgerSections(run: ImportRunInput): LedgerSection[] {
   }
 
   return sections;
-}
-
-
-/**
- * Canonical ContextDesk activity entries for one import attempt.
- *
- * This is the deterministic half of requirement 4 made concrete: the archive
- * scan, the parser choice, normalization, and publication are all
- * `deterministic_host` or `governed_write`, while the optional embedding
- * phase is `probabilistic_model` and — because the type demands it — cannot
- * be recorded without disclosing what triggered it and what it could read.
- *
- * Import activity carries a genuine **wall** clock: these events happen on
- * this machine, now, and `startedAtMs`/`endedAtMs` are measured host runtime.
- * That is what lets the Explorer dock share an axis with a wall-clock corpus
- * (see `dualLaneAxis.ts`) — and only then.
- */
-export function importRunActivities(run: ImportRunInput): ActivityEventInput[] {
-  const events: ActivityEventInput[] = [];
-  const corpusId = run.report?.corpusId;
-  // One correlation id per attempt: selecting any row highlights the whole
-  // import across ContextDesk lanes, and touches no customer lane.
-  const correlationId = `import:${run.startedAtMs}:${corpusId ?? run.sourceKind}`;
-  const scope = corpusId
-    ? { kind: "log_corpus" as const, id: corpusId, label: `Log corpus ${corpusId}` }
-    : { kind: "workspace" as const, id: null, label: "Selected source" };
-  const common = {
-    correlationId,
-    scope,
-    laneGroup: ACTIVITY_LANE_GROUP,
-    privacy: "metadata" as const,
-    evidence: [],
-    corpusId,
-  };
-
-  events.push({
-    ...common,
-    operationId: `${correlationId}:start`,
-    origin: "user_decision",
-    determinism: determinismForOrigin("user_decision"),
-    phase: "started",
-    status: "ok",
-    clock: { kind: "wall", atMs: run.startedAtMs },
-    label: `Import started (${run.sourceKind})`,
-    detail: "You confirmed this import",
-  });
-
-  if (run.report) {
-    const report = run.report;
-    events.push({
-      ...common,
-      operationId: `${correlationId}:scan`,
-      origin: "deterministic_host",
-      determinism: determinismForOrigin("deterministic_host"),
-      phase: "completed",
-      status: "ok",
-      clock: { kind: "wall", atMs: run.startedAtMs },
-      label: "Archive scanned and classified",
-      detail: `${formatCount(report.discoveredFiles)} files discovered · ${formatCount(report.files)} imported · ${formatCount(report.excludedFiles)} excluded`,
-    });
-    const formats = Object.keys(report.formatCounts);
-    if (formats.length > 0) {
-      events.push({
-        ...common,
-        operationId: `${correlationId}:parse`,
-        origin: "deterministic_host",
-        determinism: determinismForOrigin("deterministic_host"),
-        phase: "completed",
-        status: "ok",
-        clock: { kind: "wall", atMs: run.startedAtMs },
-        label: "Parser selected per source",
-        detail: formats
-          .map((format) => `${format}: ${formatCount(report.formatCounts[format] ?? 0)}`)
-          .join(" · "),
-      });
-    }
-    events.push({
-      ...common,
-      operationId: `${correlationId}:normalize`,
-      origin: "deterministic_host",
-      determinism: determinismForOrigin("deterministic_host"),
-      phase: "completed",
-      status: "ok",
-      clock: { kind: "wall", atMs: run.endedAtMs },
-      label: "Events normalized into templates",
-      detail: `${formatCount(report.templates)} learned templates (${report.reductionRatio.toFixed(1)}× grouping)`,
-    });
-    if (report.confidence) {
-      events.push({
-        ...common,
-        operationId: `${correlationId}:timequality`,
-        origin: "deterministic_host",
-        determinism: determinismForOrigin("deterministic_host"),
-        phase: "completed",
-        status: "ok",
-        clock: { kind: "wall", atMs: run.endedAtMs },
-        label: `Timestamp quality resolved — ${timeQualityLabel(report.confidence.corpusTimeQuality)}`,
-        detail: `${formatCount(report.confidence.counts.wall)} wall-clock · ${formatCount(report.confidence.counts.mixed)} mixed · ${formatCount(report.confidence.counts.orderOnly)} order-only · ${formatCount(report.confidence.counts.unresolved)} unresolved timezone`,
-      });
-    }
-  }
-
-  const embedding = run.report?.embedding ?? null;
-  if (embedding && (embedding.state === "partial" || embedding.state === "complete")) {
-    events.push({
-      ...common,
-      operationId: `${correlationId}:embed`,
-      origin: "probabilistic_model",
-      determinism: determinismForOrigin("probabilistic_model"),
-      phase: "completed",
-      status: "ok",
-      clock: { kind: "wall", atMs: run.endedAtMs },
-      label: `Embedding model ran${embedding.modelId ? ` (${embedding.modelId})` : ""}`,
-      hook: {
-        trigger: "import → optional embedding phase",
-        dataScope: "learned templates of this corpus only",
-      },
-    });
-  }
-
-  events.push({
-    ...common,
-    operationId: `${correlationId}:publish`,
-    origin: run.outcome === "completed" ? "governed_write" : "deterministic_host",
-    determinism: determinismForOrigin(
-      run.outcome === "completed" ? "governed_write" : "deterministic_host",
-    ),
-    phase: "completed",
-    status:
-      run.outcome === "completed"
-        ? "ok"
-        : run.outcome === "cancelled"
-          ? "cancelled"
-          : "failed",
-    clock: { kind: "wall", atMs: run.endedAtMs },
-    label:
-      run.outcome === "completed"
-        ? "Corpus published"
-        : run.outcome === "cancelled"
-          ? "Import cancelled — nothing published"
-          : "Import failed — nothing published",
-    detail:
-      run.outcome === "completed" && run.report
-        ? `${formatCount(run.report.lines)} events · ${formatCount(run.report.templates)} templates`
-        : (run.diagnostic?.summary ?? undefined),
-  });
-  return events;
 }

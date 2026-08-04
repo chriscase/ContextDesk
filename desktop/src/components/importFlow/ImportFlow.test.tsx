@@ -12,6 +12,7 @@ vi.mock("../../lib/dialogs", () => dialogMocks);
 async function toPreflight(
   client = createMockEngineClient(),
   onRunSettled = vi.fn(),
+  onRunStarted = vi.fn(),
 ) {
   const onPublished = vi.fn();
   const utils = render(
@@ -19,12 +20,13 @@ async function toPreflight(
       engine={client}
       variant="pane"
       onPublished={onPublished}
+      onRunStarted={onRunStarted}
       onRunSettled={onRunSettled}
     />,
   );
   fireEvent.click(screen.getByRole("button", { name: "Choose folder…" }));
   await screen.findByRole("region", { name: "Ready to import" });
-  return { client, onPublished, onRunSettled, ...utils };
+  return { client, onPublished, onRunStarted, onRunSettled, ...utils };
 }
 
 async function controlledPreviewClient() {
@@ -53,7 +55,7 @@ async function controlledPreviewClient() {
 
 describe("ImportFlow ordinary path", () => {
   it("is two deliberate actions: choose input, then Import", async () => {
-    const { onPublished, onRunSettled } = await toPreflight();
+    const { onPublished, onRunStarted, onRunSettled } = await toPreflight();
     expect(
       screen.getByText(/Ready to import — 4 sources/),
     ).toBeTruthy();
@@ -66,6 +68,8 @@ describe("ImportFlow ordinary path", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: /I understand and want to proceed/ }));
     expect((importButton as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(importButton);
+    expect(onRunStarted).toHaveBeenCalledOnce();
+    expect(onRunStarted).toHaveBeenCalledWith("directory");
     await screen.findByRole("region", { name: "Import finished" });
     expect(onPublished).toHaveBeenCalledWith("mock-corpus-0001");
     expect(onRunSettled).toHaveBeenCalledOnce();

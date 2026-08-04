@@ -31,6 +31,8 @@ type Props = {
   variant: "pane" | "guided";
   /** Called after atomic publication with the new corpus id. */
   onPublished?: (corpusId: string) => void;
+  /** Called immediately before the trusted host import command starts. */
+  onRunStarted?: (sourceKind: ImportRunInput["sourceKind"]) => void;
   /**
    * Called exactly once when a reviewed import attempt settles. The payload
    * contains measured start/end clocks and the host report when publication
@@ -64,6 +66,7 @@ export function ImportFlow({
   engine,
   variant,
   onPublished,
+  onRunStarted,
   onRunSettled,
   onTimezoneChanged,
   hostOwnsProgress = false,
@@ -199,6 +202,7 @@ export function ImportFlow({
         ? "zip"
         : current.report?.sourceKind ?? "unknown";
     dispatch({ type: "RUN_STARTED" });
+    onRunStarted?.(sourceKind);
     try {
       const report = await engine.import.run({
         path: current.path,

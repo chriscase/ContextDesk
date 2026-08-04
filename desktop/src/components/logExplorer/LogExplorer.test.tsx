@@ -14,6 +14,11 @@ import {
   broadcastTimeRevisionChanged,
 } from "../../lib/logExplorer/timeRevisionBridge";
 import { publishImportRunActivity } from "../../lib/activity/importActivityBridge";
+import {
+  beginImportActivityAttempt,
+  recordImportProgress,
+  settleImportActivityAttempt,
+} from "../../lib/activity/importProgressActivity";
 import type { ImportRunInput } from "../../lib/activity/types";
 import { LogExplorer } from "./LogExplorer";
 
@@ -742,6 +747,33 @@ function importActivityRun(corpusId: string): ImportRunInput {
       },
     },
   };
+}
+
+function importActivityEvents(run: ImportRunInput) {
+  let attempt = beginImportActivityAttempt("import:explorer-test", run.sourceKind);
+  for (const [phase, elapsedMs] of [
+    ["starting", 0],
+    ["scan", 10],
+    ["stream", 20],
+    ["validate", 30],
+    ["publish", 40],
+    ["completed", 50],
+  ] as const) {
+    attempt = recordImportProgress(attempt, {
+      kind: "log_ingest",
+      phase,
+      message: "ignored",
+      fraction: null,
+      lines_processed: null,
+      files_processed: null,
+      bytes_processed: null,
+      templates: null,
+      cancellable: phase !== "publish",
+      elapsed_ms: elapsedMs,
+      phase_elapsed_ms: null,
+    });
+  }
+  return settleImportActivityAttempt(attempt, run).events;
 }
 
 
@@ -3675,7 +3707,12 @@ describe("LogExplorer shell", () => {
     await openActivityView();
 
     await act(async () => {
-      await publishImportRunActivity(importActivityRun("c1"), async () => undefined);
+      const run = importActivityRun("c1");
+      await publishImportRunActivity(
+        run,
+        importActivityEvents(run),
+        async () => undefined,
+      );
     });
     expect(await screen.findByText("Corpus published")).toBeTruthy();
     expect(screen.getByText(/100 events · 10 templates/)).toBeTruthy();
@@ -3705,12 +3742,22 @@ describe("LogExplorer shell", () => {
     );
 
     await act(async () => {
-      await publishImportRunActivity(importActivityRun("c1"), async () => undefined);
+      const run = importActivityRun("c1");
+      await publishImportRunActivity(
+        run,
+        importActivityEvents(run),
+        async () => undefined,
+      );
     });
     expect(screen.queryByText("Corpus published")).toBeNull();
 
     await act(async () => {
-      await publishImportRunActivity(importActivityRun("c2"), async () => undefined);
+      const run = importActivityRun("c2");
+      await publishImportRunActivity(
+        run,
+        importActivityEvents(run),
+        async () => undefined,
+      );
     });
     expect(await screen.findByText("Corpus published")).toBeTruthy();
   });

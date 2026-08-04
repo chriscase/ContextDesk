@@ -6,6 +6,11 @@ import {
   publishImportRunActivity,
   subscribeImportRunActivity,
 } from "./importActivityBridge";
+import {
+  beginImportActivityAttempt,
+  recordImportProgress,
+  settleImportActivityAttempt,
+} from "./importProgressActivity";
 
 function completedRun(corpusId = "corpus-a"): ImportRunInput {
   return {
@@ -58,6 +63,33 @@ function completedRun(corpusId = "corpus-a"): ImportRunInput {
   };
 }
 
+function liveEvents(run: ImportRunInput) {
+  let attempt = beginImportActivityAttempt("import:bridge-test", run.sourceKind);
+  for (const [phase, elapsedMs] of [
+    ["starting", 0],
+    ["scan", 10],
+    ["stream", 20],
+    ["validate", 30],
+    ["publish", 40],
+    [run.outcome === "completed" ? "completed" : run.outcome, 50],
+  ] as const) {
+    attempt = recordImportProgress(attempt, {
+      kind: "log_ingest",
+      phase,
+      message: "/sensitive/tenant-a/runtime.log",
+      fraction: null,
+      lines_processed: phase === "stream" ? 120 : null,
+      files_processed: phase === "scan" ? 2 : null,
+      bytes_processed: null,
+      templates: phase === "stream" ? 12 : null,
+      cancellable: phase !== "publish",
+      elapsed_ms: elapsedMs,
+      phase_elapsed_ms: null,
+    });
+  }
+  return settleImportActivityAttempt(attempt, run).events;
+}
+
 beforeEach(() => {
   const values = new Map<string, string>();
   vi.stubGlobal("localStorage", {
@@ -77,7 +109,8 @@ describe("corpus import activity bridge", () => {
     const custom = vi.fn();
     const emit = vi.fn(async () => undefined);
     window.addEventListener(IMPORT_ACTIVITY_CHANGED_EVENT, custom);
-    await publishImportRunActivity(completedRun(), emit);
+    const run = completedRun();
+    await publishImportRunActivity(run, liveEvents(run), emit);
     window.removeEventListener(IMPORT_ACTIVITY_CHANGED_EVENT, custom);
 
     const loaded = loadCorpusImportActivity("corpus-a");
@@ -97,15 +130,39 @@ describe("corpus import activity bridge", () => {
   it("does not persist or announce failed/cancelled attempts without a corpus", async () => {
     const custom = vi.fn();
     window.addEventListener(IMPORT_ACTIVITY_CHANGED_EVENT, custom);
-    await publishImportRunActivity({
+    const run: ImportRunInput = {
       startedAtMs: 1,
       endedAtMs: 2,
       outcome: "failed",
       sourceKind: "file",
-    });
+    };
+    await publishImportRunActivity(run, liveEvents(run));
     window.removeEventListener(IMPORT_ACTIVITY_CHANGED_EVENT, custom);
     expect(custom).not.toHaveBeenCalled();
     expect(loadCorpusImportActivity("corpus-a")).toEqual([]);
+  });
+
+  it("fails closed when a caller bypasses the payload-free projector", async () => {
+    const run = completedRun("corpus-forged");
+    const [first, ...rest] = liveEvents(run);
+    const emit = vi.fn(async () => undefined);
+    await publishImportRunActivity(
+      run,
+      [
+        {
+          ...first,
+          label: "Reading /private/customer/runtime.log",
+          detail: "secret tenant payload",
+        },
+        ...rest,
+      ],
+      emit,
+    );
+
+    expect(loadCorpusImportActivity("corpus-forged")).toEqual([]);
+    expect(localStorage.getItem("contextdesk.importActivity.v1:corpus-forged"))
+      .toBeNull();
+    expect(emit).not.toHaveBeenCalled();
   });
 
   it("delivers one matching safe payload once across same-window and Tauri", async () => {
@@ -128,7 +185,8 @@ describe("corpus import activity bridge", () => {
     );
     await vi.waitFor(() => expect(tauriHandler).toBeTypeOf("function"));
 
-    await publishImportRunActivity(completedRun(), async (_name, payload) => {
+    const run = completedRun();
+    await publishImportRunActivity(run, liveEvents(run), async (_name, payload) => {
       tauriHandler?.({ payload });
     });
     expect(received).toHaveBeenCalledOnce();

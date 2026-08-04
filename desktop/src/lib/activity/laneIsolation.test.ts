@@ -9,7 +9,11 @@ import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { appendActivities, createActivityLog } from "./activityLog";
-import { importRunActivities } from "./importLedger";
+import {
+  beginImportActivityAttempt,
+  recordImportProgress,
+  settleImportActivityAttempt,
+} from "./importProgressActivity";
 import {
   ACTIVITY_LANE_GROUP,
   determinismForOrigin,
@@ -92,11 +96,39 @@ const IMPORT_RUN: ImportRunInput = {
   },
 };
 
+function importActivities(run: ImportRunInput) {
+  let attempt = beginImportActivityAttempt("import:lane-isolation", run.sourceKind);
+  for (const [phase, elapsed] of [
+    ["starting", 0],
+    ["scan", 10],
+    ["stream", 20],
+    ["embed", 30],
+    ["validate", 40],
+    ["publish", 50],
+    [run.outcome === "completed" ? "completed" : run.outcome, 60],
+  ] as const) {
+    attempt = recordImportProgress(attempt, {
+      kind: "log_ingest",
+      phase,
+      message: "deliberately ignored",
+      fraction: null,
+      lines_processed: null,
+      files_processed: null,
+      bytes_processed: null,
+      templates: null,
+      cancellable: phase !== "publish",
+      elapsed_ms: elapsed,
+      phase_elapsed_ms: null,
+    });
+  }
+  return settleImportActivityAttempt(attempt, run).events;
+}
+
 describe("customer evidence and ContextDesk activity are separate groups", () => {
   it("stamps EVERY activity entry with the ContextDesk lane group", () => {
     const log = appendActivities(
       createActivityLog(),
-      importRunActivities(IMPORT_RUN),
+      importActivities(IMPORT_RUN),
     );
     expect(log.entries.length).toBeGreaterThan(0);
     for (const entry of log.entries) {
@@ -116,7 +148,7 @@ describe("customer evidence and ContextDesk activity are separate groups", () =>
     // reads: those are ExplorerEventDtos keyed by event id / source / lane.
     const [entry] = appendActivities(
       createActivityLog(),
-      importRunActivities(IMPORT_RUN),
+      importActivities(IMPORT_RUN),
     ).entries;
     for (const forbidden of [
       "eventId",
@@ -132,7 +164,7 @@ describe("customer evidence and ContextDesk activity are separate groups", () =>
   });
 
   it("scopes an import to its corpus WITHOUT joining that corpus's events", () => {
-    const entries = importRunActivities(IMPORT_RUN);
+    const entries = importActivities(IMPORT_RUN);
     // corpusId is a scope label so the reader knows what the work concerned.
     expect(entries.every((e) => e.corpusId === "corpus-1")).toBe(true);
     // One correlation id per attempt: selecting it highlights the import
@@ -193,12 +225,11 @@ describe("deterministic and model work are distinguishable", () => {
   });
 
   it("labels the import pipeline's fixed stages as deterministic host work", () => {
-    const entries = importRunActivities(IMPORT_RUN);
+    const entries = importActivities(IMPORT_RUN);
     for (const label of [
-      "Archive scanned",
-      "Parser selected",
-      "Events normalized",
-      "Timestamp quality",
+      "Discovering and reading sources",
+      "Reading, parsing, normalizing, and indexing",
+      "Validating staged corpus",
     ]) {
       const step = entries.find((e) => e.label.startsWith(label))!;
       expect(step, label).toBeDefined();
@@ -207,25 +238,33 @@ describe("deterministic and model work are distinguishable", () => {
     }
   });
 
+  it("records the confirmed import start as a human decision", () => {
+    const start = importActivities(IMPORT_RUN).find(
+      (event) => event.label === "Import started",
+    )!;
+    expect(start.origin).toBe("user_decision");
+    expect(start.determinism).toBe("human");
+  });
+
   it("labels the optional embedding phase as model work, with disclosure", () => {
-    const embed = importRunActivities(IMPORT_RUN).find((e) =>
-      e.label.startsWith("Embedding model ran"),
+    const embed = importActivities(IMPORT_RUN).find((e) =>
+      e.label.startsWith("Running optional local embedding"),
     )!;
     expect(embed.origin).toBe("probabilistic_model");
     expect(isNondeterministicOrigin(embed.origin)).toBe(true);
     // The union makes this mandatory — a model event cannot be built without it.
     expect(embed.hook).toEqual({
-      trigger: "import → optional embedding phase",
-      dataScope: "learned templates of this corpus only",
+      trigger: "import → optional local embedding phase",
+      dataScope: "learned templates of the selected import only",
     });
   });
 
   it("records publication as a governed write and cancellation as cancelled", () => {
-    const published = importRunActivities(IMPORT_RUN).at(-1)!;
+    const published = importActivities(IMPORT_RUN).at(-1)!;
     expect(published.origin).toBe("governed_write");
     expect(published.status).toBe("ok");
 
-    const cancelled = importRunActivities({
+    const cancelled = importActivities({
       ...IMPORT_RUN,
       outcome: "cancelled",
       report: null,
@@ -234,9 +273,9 @@ describe("deterministic and model work are distinguishable", () => {
     expect(cancelled.label).toMatch(/nothing published/i);
   });
 
-  it("gives import activity a WALL clock — it happened on this machine now", () => {
-    for (const entry of importRunActivities(IMPORT_RUN)) {
-      expect(entry.clock.kind).toBe("wall");
+  it("uses host elapsed clocks rather than invented calendar timestamps", () => {
+    for (const entry of importActivities(IMPORT_RUN)) {
+      expect(entry.clock.kind).toBe("elapsed");
     }
   });
 });

@@ -2902,6 +2902,7 @@ describe("LogPane reviewed-import progress ownership (defect: duplicated panel)"
   });
 
   async function openReviewedImportToRunning() {
+    localStorage.setItem("cd-activity-inspector-mode", "compact");
     let capturedProgressCallback:
       | ((progress: {
           kind: string;
@@ -2975,6 +2976,16 @@ describe("LogPane reviewed-import progress ownership (defect: duplicated panel)"
     expect(
       screen.getAllByRole("button", { name: "Cancel ingest" }),
     ).toHaveLength(1);
+    const activity = screen.getByTestId("log-pane-activity");
+    expect(activity.textContent).toContain("Import started");
+    expect(activity.textContent).toContain(
+      "Reading, parsing, normalizing, and indexing",
+    );
+    expect(activity.textContent).toContain("500 events");
+    expect(activity.textContent).toContain("1 file");
+    // The normal progress panel may show the host's prose; persisted Activity
+    // is intentionally built from typed counters and phases only.
+    expect(activity.textContent).not.toContain("parsing and templating lines");
 
     engineMocks.client!.flush();
     await screen.findByRole("region", { name: "Import finished" });

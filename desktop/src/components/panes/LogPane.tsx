@@ -79,10 +79,21 @@ import { LogDiagnosticDialog } from "./LogDiagnosticDialog";
 import { LogImportConfidence } from "./LogImportConfidence";
 import { LogTimezoneStatus } from "./LogTimezoneStatus";
 import { ImportActivitySummary } from "../activity/ImportActivitySummary";
+import { ActivityEventList } from "../activity/ActivityEventList";
 import { ActivityToggle } from "../activity/ActivityToggle";
 import { useActivityInspector } from "../../hooks/useActivityInspector";
 import type { ImportRunInput } from "../../lib/activity/types";
 import { publishImportRunActivity } from "../../lib/activity/importActivityBridge";
+import {
+  beginImportActivityAttempt,
+  recordImportProgress,
+  settleImportActivityAttempt,
+  type ImportActivityAttempt,
+} from "../../lib/activity/importProgressActivity";
+import {
+  appendActivities,
+  createActivityLog,
+} from "../../lib/activity/activityLog";
 
 function hostProgressToWizard(p: ProcessProgressDto): WizardProgressDto {
   return {
@@ -179,9 +190,57 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const [lastImportRun, setLastImportRun] = useState<ImportRunInput | null>(
     null,
   );
+  const [importActivityAttempt, setImportActivityAttempt] =
+    useState<ImportActivityAttempt | null>(null);
+  const importActivityAttemptRef = useRef<ImportActivityAttempt | null>(null);
+  const startImportActivity = useCallback(
+    (sourceKind: ImportRunInput["sourceKind"]) => {
+      const begun = beginImportActivityAttempt(
+        `import:${globalThis.crypto.randomUUID()}`,
+        sourceKind,
+      );
+      // Invocation is itself a truthful causal observation. Record it
+      // immediately so Activity never appears to begin halfway through an
+      // import if an older host omits its optional `starting` progress row.
+      const next = recordImportProgress(begun, {
+        kind: "log_ingest",
+        phase: "starting",
+        message: "",
+        fraction: null,
+        lines_processed: null,
+        files_processed: null,
+        bytes_processed: null,
+        templates: null,
+        cancellable: true,
+        elapsed_ms: null,
+        phase_elapsed_ms: null,
+      });
+      importActivityAttemptRef.current = next;
+      setImportActivityAttempt(next);
+      setLastImportRun(null);
+    },
+    [],
+  );
+  const observeImportProgress = useCallback((progress: ProcessProgressDto) => {
+    const current = importActivityAttemptRef.current;
+    if (!current) return;
+    const next = recordImportProgress(current, hostProgressToWizard(progress));
+    if (next === current) return;
+    importActivityAttemptRef.current = next;
+    setImportActivityAttempt(next);
+  }, []);
   const recordImportRun = useCallback((run: ImportRunInput) => {
+    const current =
+      importActivityAttemptRef.current ??
+      beginImportActivityAttempt(
+        `import:${globalThis.crypto.randomUUID()}`,
+        run.sourceKind,
+      );
+    const settled = settleImportActivityAttempt(current, run);
+    importActivityAttemptRef.current = null;
+    setImportActivityAttempt(settled);
     setLastImportRun(run);
-    void publishImportRunActivity(run);
+    void publishImportRunActivity(run, settled.events);
   }, []);
   // The same shared preference chat and the Explorer use.
   const activity = useActivityInspector();
@@ -203,6 +262,14 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const [progress, setProgress] = useState<ProcessProgressDto | null>(null);
   const [failedIngestDiagnostic, setFailedIngestDiagnostic] =
     useState<FailedLogIngestDiagnosticDto | null>(null);
+  const importActivityLog = useMemo(
+    () =>
+      appendActivities(
+        createActivityLog(),
+        importActivityAttempt?.events ?? [],
+      ),
+    [importActivityAttempt],
+  );
   /** In-app Explorer escape hatch when multi-window fails (#503). */
   const [inAppExplorerId, setInAppExplorerId] = useState<string | null>(null);
   /** Chrome-row status for the embed (window-open failures stay visible). */
@@ -268,14 +335,17 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     void hostListenProcessProgress((p) => {
-      if (p.kind === "log_ingest") setProgress(p);
+      if (p.kind === "log_ingest") {
+        setProgress(p);
+        observeImportProgress(p);
+      }
     }).then((fn) => {
       unlisten = fn;
     });
     return () => {
       unlisten?.();
     };
-  }, []);
+  }, [observeImportProgress]);
 
   const clearAnalysisForCorpus = useCallback((id: string) => {
     // Invalidate any in-flight token so late host replies cannot re-seed cache.
@@ -742,6 +812,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     setProgress(null);
     setFailedIngestDiagnostic(null);
     const startedAtMs = Date.now();
+    startImportActivity(quickImportSourceKind(mode, path));
     try {
       const r = await hostIngestLogPath(path, "incident");
       setNote(statsBlurb(r));
@@ -1399,6 +1470,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
               engine={paneEngine}
               variant="pane"
               hostOwnsProgress
+              onRunStarted={startImportActivity}
               onRunSettled={recordImportRun}
               onPublished={(corpusId) => {
                 void refresh();
@@ -1497,7 +1569,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
           the corpus metadata above. Quiet by default: one line plus an
           opt-in ledger, and nothing at all when the shared preference is
           Off — which changes the display only, not the import. */}
-      {lastImportRun ? (
+      {lastImportRun || importActivityAttempt ? (
         <div
           className="log-pane__activity"
           data-testid="log-pane-activity"
@@ -1515,7 +1587,30 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
             />
           </div>
           {activity.mode === "off" ? null : (
-            <ImportActivitySummary run={lastImportRun} />
+            <>
+              {lastImportRun ? <ImportActivitySummary run={lastImportRun} /> : null}
+              {importActivityLog.entries.length > 0 ? (
+                <details className="activity-import-ledger">
+                  <summary>
+                    Live trace · {importActivityLog.entries.at(-1)?.label}
+                  </summary>
+                  <ActivityEventList
+                    events={importActivityLog.entries}
+                    omittedNote={
+                      importActivityLog.omitted > 0
+                        ? `${importActivityLog.omitted} earlier import updates omitted by the ${importActivityLog.cap}-entry retention bound.`
+                        : null
+                    }
+                    emptyLabel="Waiting for the host to report import progress."
+                    maxHeightPx={280}
+                  />
+                </details>
+              ) : (
+                <p className="muted" role="status">
+                  Waiting for the host to report import progress…
+                </p>
+              )}
+            </>
           )}
         </div>
       ) : null}

@@ -10,7 +10,6 @@ import {
   appendActivities,
   createActivityLog,
 } from "./activityLog";
-import { importRunActivities } from "./importLedger";
 import {
   ACTIVITY_LANE_GROUP,
   ACTIVITY_ORIGINS,
@@ -31,6 +30,20 @@ const MAX_DETAIL_LENGTH = 2_000;
 const MAX_EVENTS = 32;
 const MAX_SEEN_EVENT_IDS = 128;
 const MAX_EVENT_ID_LENGTH = 128;
+const SAFE_IMPORT_LABELS = new Set([
+  "Import started",
+  "Discovering and reading sources",
+  "Reading, parsing, normalizing, and indexing",
+  "Running optional local embedding",
+  "Validating staged corpus",
+  "Publishing corpus atomically",
+  "Corpus published",
+  "Import cancelled — nothing published",
+  "Import failed — nothing published",
+  "Import processing",
+]);
+const SAFE_IMPORT_DETAIL_PART =
+  /^(?:[\d,]+ (?:files?|events?|templates?|bytes read)|\d+%|prior displayed phase [\d,]+ ms)$/;
 
 type BridgePayload = {
   corpusId?: unknown;
@@ -89,15 +102,28 @@ function normalizeEvent(
   ) {
     return null;
   }
-  const clock = value.clock as Record<string, unknown> | null;
-  if (
-    !clock ||
-    clock.kind !== "wall" ||
-    typeof clock.atMs !== "number" ||
-    !Number.isFinite(clock.atMs)
-  ) {
+  const rawClock = value.clock as Record<string, unknown> | null;
+  const clock = (() => {
+    if (!rawClock) return null;
+    if (
+      rawClock.kind === "elapsed" &&
+      typeof rawClock.elapsedMs === "number" &&
+      Number.isFinite(rawClock.elapsedMs) &&
+      rawClock.elapsedMs >= 0
+    ) {
+      return { kind: "elapsed" as const, elapsedMs: Math.floor(rawClock.elapsedMs) };
+    }
+    if (
+      rawClock.kind === "sequence" &&
+      typeof rawClock.seq === "number" &&
+      Number.isSafeInteger(rawClock.seq) &&
+      rawClock.seq >= 0
+    ) {
+      return { kind: "sequence" as const, seq: rawClock.seq };
+    }
     return null;
-  }
+  })();
+  if (!clock) return null;
 
   const origin = value.origin as ActivityOrigin;
   const base = {
@@ -107,7 +133,7 @@ function normalizeEvent(
     determinism: determinismForOrigin(origin),
     phase: value.phase as ActivityEventInput["phase"],
     status: value.status as ActivityEventInput["status"],
-    clock: { kind: "wall" as const, atMs: clock.atMs },
+    clock,
     label: value.label,
     detail: typeof value.detail === "string" ? value.detail : undefined,
     scope: {
@@ -153,10 +179,52 @@ function normalizeEvents(raw: unknown, corpusId: string): ActivityEventInput[] {
   return normalized;
 }
 
-function safeEventsForRun(run: ImportRunInput): ActivityEventInput[] {
+function safeImportDetail(detail: string | undefined): boolean {
+  if (detail == null || detail === "No corpus was published.") return true;
+  return detail.split(" · ").every((part) => SAFE_IMPORT_DETAIL_PART.test(part));
+}
+
+function safeProjectedEvent(
+  event: ActivityEventInput,
+  corpusId: string,
+): ActivityEventInput | null {
+  const normalized = normalizeEvent(event, corpusId);
+  if (
+    !normalized ||
+    !SAFE_IMPORT_LABELS.has(normalized.label) ||
+    !safeImportDetail(normalized.detail)
+  ) {
+    return null;
+  }
+  if (normalized.origin === "probabilistic_model") {
+    if (
+      normalized.hook.trigger !==
+        "import → optional local embedding phase" ||
+      normalized.hook.dataScope !==
+        "learned templates of the selected import only"
+    ) {
+      return null;
+    }
+  }
+  return normalized;
+}
+
+function safeEventsForRun(
+  run: ImportRunInput,
+  sourceEvents: ActivityEventInput[],
+): ActivityEventInput[] {
+  const corpusId = run.report?.corpusId;
+  if (!corpusId) return [];
+  const projected = sourceEvents.map((event) =>
+    safeProjectedEvent(event, corpusId),
+  );
+  // Reject the whole causal chain if any caller bypassed the projector. A
+  // partial Activity chain can make a successful import look misleadingly
+  // incomplete, and storing arbitrary "metadata" text could retain a path.
+  if (projected.some((event) => event == null)) return [];
   const bounded = appendActivities(
     createActivityLog(MAX_EVENTS),
-    importRunActivities(run),
+    projected as ActivityEventInput[],
   );
   return bounded.entries.map(({ id: _id, ...event }) => event);
 }
@@ -181,6 +249,7 @@ export function loadCorpusImportActivity(corpusId: string): ActivityEventInput[]
  */
 export async function publishImportRunActivity(
   run: ImportRunInput,
+  sourceEvents: ActivityEventInput[],
   injectedEmit?: BridgeEmit,
 ): Promise<void> {
   const corpusId = run.report?.corpusId;
@@ -191,7 +260,8 @@ export async function publishImportRunActivity(
   ) {
     return;
   }
-  const events = safeEventsForRun(run);
+  const events = safeEventsForRun(run, sourceEvents);
+  if (events.length === 0) return;
   try {
     window.localStorage.setItem(
       storageKey(corpusId),
