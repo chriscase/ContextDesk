@@ -9,6 +9,7 @@
   background: var(--bg-app, #0b0c0e);
   color: var(--fg-primary, #e8eaed);
   font-family: var(--font-ui, system-ui, sans-serif);
+  isolation: isolate;
   overflow: hidden;
   position: relative;
 }
@@ -36,6 +37,12 @@
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
+  /* Header popovers must own a sibling plane above the later-painted body.
+     Keep that plane local to .log-explorer (isolation above) so a chat rail,
+     narrow drawer, splitter, or future body-local overlay cannot cover a
+     toolbar menu merely by assigning its own z-index. */
+  position: relative;
+  z-index: 10;
 }
 
 .log-explorer__titlebar-row {
@@ -609,6 +616,11 @@
   min-height: 0;
   grid-template-columns: 220px 6px 1fr 6px 300px;
   grid-template-rows: 1fr;
+  /* Bound every rail/drawer z-index to the body plane. The titlebar is a
+     higher sibling plane, so open header menus remain visible with Chat both
+     expanded and collapsed. As a flex item, a non-auto z-index creates this
+     stacking context without changing the narrow drawers' containing block. */
+  z-index: 0;
 }
 
 .log-explorer--narrow .log-explorer__body {

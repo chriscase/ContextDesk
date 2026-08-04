@@ -619,6 +619,74 @@ describe("Log Explorer visual acceptance", () => {
     );
   });
 
+  it("keeps header dropdowns above the Explorer body with Chat expanded or collapsed", async () => {
+    const root = await renderReadyExplorer();
+    await waitForReadySettled(root);
+
+    const titlebar = root.querySelector<HTMLElement>(
+      ".log-explorer__titlebar",
+    )!;
+    const body = screen.getByTestId("log-explorer-body");
+    const titlebarStyle = getComputedStyle(titlebar);
+    const bodyStyle = getComputedStyle(body);
+
+    // This is a relational stacking contract, not a snapshot of magic
+    // numbers: the isolated Explorer owns two sibling planes and every body
+    // descendant (including Chat's local z-indexes) is bounded below Header.
+    expect(getComputedStyle(root).isolation).toBe("isolate");
+    expect(titlebarStyle.position).not.toBe("static");
+    expect(getComputedStyle(root).display).toBe("flex");
+    expect(body.parentElement).toBe(root);
+    expect(Number(titlebarStyle.zIndex)).toBeGreaterThan(
+      Number(bodyStyle.zIndex),
+    );
+
+    const assertMenuPaintsAboveBody = async () => {
+      fireEvent.click(screen.getByTestId("lane-count-picker"));
+      const menu = await screen.findByRole("menu", { name: "Lanes options" });
+      const menuRect = menu.getBoundingClientRect();
+      const bodyRect = body.getBoundingClientRect();
+
+      // The dropdown extends from Header into Body. At a point shared by both
+      // rectangles, the browser's hit-test must resolve to the menu subtree.
+      const x = menuRect.left + menuRect.width / 2;
+      const y = Math.max(menuRect.top + 4, bodyRect.top + 4);
+      expect(y).toBeLessThan(menuRect.bottom);
+      const painted = document.elementFromPoint(x, y);
+      expect(
+        painted === menu || (painted != null && menu.contains(painted)),
+      ).toBe(true);
+
+      // No intermediate header ancestor may clip the menu; only the root is
+      // allowed to clip content to the Explorer window itself.
+      for (
+        let ancestor = menu.parentElement;
+        ancestor && ancestor !== root;
+        ancestor = ancestor.parentElement
+      ) {
+        const style = getComputedStyle(ancestor);
+        expect(style.overflowX).toBe("visible");
+        expect(style.overflowY).toBe("visible");
+      }
+
+      fireEvent.click(screen.getByTestId("lane-count-picker"));
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("menu", { name: "Lanes options" }),
+        ).toBeNull(),
+      );
+    };
+
+    expect(root.getAttribute("data-chat-collapsed")).toBe("false");
+    await assertMenuPaintsAboveBody();
+
+    fireEvent.click(screen.getByTestId("collapse-linked-chat"));
+    await waitFor(() =>
+      expect(root.getAttribute("data-chat-collapsed")).toBe("true"),
+    );
+    await assertMenuPaintsAboveBody();
+  });
+
   it("breakpoints: narrow drawers at 640, ultrawide lane controls at 1720 (real viewport)", async () => {
     const root = await renderReadyExplorer();
     await waitForReadySettled(root);
