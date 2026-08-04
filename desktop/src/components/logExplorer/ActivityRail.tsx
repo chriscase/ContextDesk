@@ -13,7 +13,7 @@
  * renders ContextDesk activity only, and the shared axis appears only when
  * both sides carry calendar time — see `DualLaneTimeline`.
  */
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { ActivityLogState } from "../../lib/activity/activityLog";
 import type {
   ActivityMode,
@@ -45,6 +45,8 @@ export function ActivityRail({
   log,
   mode,
   onModeChange,
+  collapsed = false,
+  onToggleCollapsed,
   nowMs,
   onRequestClose,
 }: {
@@ -58,11 +60,15 @@ export function ActivityRail({
   /** The shared display preference — the same one ordinary chat uses. */
   mode: ActivityMode;
   onModeChange: (mode: ActivityMode) => void;
+  collapsed?: boolean;
+  onToggleCollapsed?: () => void;
   /** Test seam for the ticking investigation clock. */
   nowMs?: number;
   onRequestClose?: () => void;
 }) {
   const [tick, setTick] = useState(() => Date.now());
+  const collapseRef = useRef<HTMLButtonElement>(null);
+  const reopenRef = useRef<HTMLButtonElement>(null);
   const live = nowMs == null;
   useEffect(() => {
     if (!live || !visible) return;
@@ -70,10 +76,49 @@ export function ActivityRail({
     return () => window.clearInterval(interval);
   }, [live, visible]);
 
+  useEffect(() => {
+    if (!visible || compactLayout) return;
+    queueMicrotask(() => {
+      (collapsed ? reopenRef.current : collapseRef.current)?.focus();
+    });
+  }, [collapsed, compactLayout, visible]);
+
   const omittedNote =
     log.omitted > 0
       ? `${log.omitted} earlier ${log.omitted === 1 ? "entry" : "entries"} dropped by the ${log.cap}-entry retention bound.`
       : null;
+
+  if (visible && collapsed && !compactLayout) {
+    return (
+      <aside
+        className="log-explorer__chat log-explorer__chat--rail log-explorer__activity log-explorer__chat--collapsed"
+        data-testid="log-explorer-activity"
+        data-collapsed="true"
+        aria-label="ContextDesk activity collapsed"
+        style={
+          desktopGridColumn == null ? undefined : { gridColumn: desktopGridColumn }
+        }
+      >
+        <button
+          ref={reopenRef}
+          type="button"
+          className="log-explorer__chat-reopen"
+          data-testid="expand-activity-rail"
+          aria-label={`Expand ContextDesk activity, ${log.entries.length} ${
+            log.entries.length === 1 ? "entry" : "entries"
+          }`}
+          onClick={onToggleCollapsed}
+        >
+          <span aria-hidden="true">Activity</span>
+          {log.entries.length > 0 ? (
+            <span className="log-explorer__chat-reopen-count" aria-hidden="true">
+              {log.entries.length}
+            </span>
+          ) : null}
+        </button>
+      </aside>
+    );
+  }
 
   return (
     <aside
@@ -104,6 +149,19 @@ export function ActivityRail({
           </div>
         </div>
         <div className="log-explorer__chat-header-actions">
+          {!compactLayout && onToggleCollapsed ? (
+            <button
+              ref={collapseRef}
+              type="button"
+              className="log-explorer__rail-collapse log-explorer__rail-collapse--chat"
+              aria-label="Collapse ContextDesk activity rail"
+              title="Collapse activity"
+              data-testid="collapse-activity-rail"
+              onClick={onToggleCollapsed}
+            >
+              <span aria-hidden="true">›</span>
+            </button>
+          ) : null}
           <ActivityToggle mode={mode} onChange={onModeChange} label="Show" />
           {compactLayout && onRequestClose ? (
             <button

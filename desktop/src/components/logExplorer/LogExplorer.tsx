@@ -86,10 +86,15 @@ import {
 } from "../../lib/logExplorer/timeRevisionRefresh";
 import { subscribeTimeRevisionChanged } from "../../lib/logExplorer/timeRevisionBridge";
 import {
+  appendActivities,
   appendActivity,
   createActivityLog,
   type ActivityLogState,
 } from "../../lib/activity/activityLog";
+import {
+  loadCorpusImportActivity,
+  subscribeImportRunActivity,
+} from "../../lib/activity/importActivityBridge";
 import {
   ACTIVITY_LANE_GROUP,
   determinismForOrigin,
@@ -772,7 +777,7 @@ export function LogExplorer({ corpusId }: Props) {
    * source, filter, and suppression state and read none of this.
    */
   const [activityLog, setActivityLog] = useState<ActivityLogState>(() =>
-    createActivityLog(),
+    appendActivities(createActivityLog(), loadCorpusImportActivity(corpusId)),
   );
   const explorerOpenedAtRef = useRef<number>(Date.now());
   const recordActivity = useCallback((input: ActivityEventInput) => {
@@ -1627,12 +1632,19 @@ export function LogExplorer({ corpusId }: Props) {
     } else if (narrowChatOpen) {
       queueMicrotask(() => {
         const root = rootRef.current;
-        (investigationMode === "investigation"
-          ? root?.querySelector<HTMLElement>(
-              '[aria-label="Close Investigation drawer"]',
-            )
-          : root?.querySelector<HTMLElement>('[data-testid="new-linked-chat"]')
-        )?.focus();
+        const focusTarget =
+          investigationMode === "investigation"
+            ? root?.querySelector<HTMLElement>(
+                '[aria-label="Close Investigation drawer"]',
+              )
+            : investigationMode === "activity"
+              ? root?.querySelector<HTMLElement>(
+                  '[aria-label="Close Activity drawer"]',
+                )
+              : root?.querySelector<HTMLElement>(
+                  '[data-testid="new-linked-chat"]',
+                );
+        focusTarget?.focus();
       });
     }
   }, [breakpoint, investigationMode, narrowChatOpen, narrowFiltersOpen]);
@@ -2490,6 +2502,14 @@ export function LogExplorer({ corpusId }: Props) {
     setPreferredLaneCount(1);
     setLaneCount(1);
     setLinkMode(loadLinkMode(corpusId));
+    // ContextDesk activity is corpus-scoped just like the evidence state
+    // above, but remains in its own store. Seed only the safe projected
+    // import metadata for the new corpus; never carry the prior corpus's
+    // Activity rows across the switch.
+    setActivityLog(
+      appendActivities(createActivityLog(), loadCorpusImportActivity(corpusId)),
+    );
+    explorerOpenedAtRef.current = Date.now();
   }, [clearDetail, corpusId]);
 
   useEffect(() => {
@@ -2594,6 +2614,26 @@ export function LogExplorer({ corpusId }: Props) {
       refresh.dispose();
     };
   }, [corpusId, recordHostWork]);
+
+  // Imports originate in the Logs pane and may complete in another webview.
+  // Replace only this corpus's prior import correlation; retain Explorer work
+  // already recorded in this view and ignore every other corpus.
+  useEffect(() => {
+    return subscribeImportRunActivity((changedCorpusId, events) => {
+      if (changedCorpusId !== corpusId) return;
+      setActivityLog((current) =>
+        appendActivities(
+          {
+            ...current,
+            entries: current.entries.filter(
+              (event) => !event.correlationId.startsWith("import:"),
+            ),
+          },
+          events,
+        ),
+      );
+    });
+  }, [corpusId]);
 
   useEffect(() => {
     void loadSuppressionPolicy().catch(() => {
@@ -6487,10 +6527,17 @@ export function LogExplorer({ corpusId }: Props) {
             }}
           >
             Investigation ·{" "}
-            {investigationMode === "investigation" ? "Workspace" : "Chat"}
+            {investigationMode === "investigation"
+              ? "Workspace"
+              : investigationMode === "activity"
+                ? "Activity"
+                : "Chat"}
             {investigationMode === "investigation" &&
             investigationMaterialCount > 0
               ? ` (${investigationMaterialCount})`
+              : investigationMode === "activity" &&
+                  activityLog.entries.length > 0
+                ? ` (${activityLog.entries.length})`
               : investigationMode === "chat" && chatSummary.chatCount > 0
                 ? ` (${chatSummary.chatCount})`
                 : ""}
@@ -8182,6 +8229,10 @@ export function LogExplorer({ corpusId }: Props) {
           log={activityLog}
           mode={activity.mode}
           onModeChange={activity.setMode}
+          collapsed={breakpoint !== "narrow" && chatCollapsed}
+          onToggleCollapsed={() =>
+            setChatCollapsed((collapsed) => !collapsed)
+          }
           onRequestClose={() => {
             setNarrowChatOpen(false);
             queueMicrotask(() => narrowChatToggleRef.current?.focus());

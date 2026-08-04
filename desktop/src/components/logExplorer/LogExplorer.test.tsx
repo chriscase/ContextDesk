@@ -13,6 +13,8 @@ import { ruleContributesToExclusion } from "../../lib/logExplorer/policyBinding"
 import {
   broadcastTimeRevisionChanged,
 } from "../../lib/logExplorer/timeRevisionBridge";
+import { publishImportRunActivity } from "../../lib/activity/importActivityBridge";
+import type { ImportRunInput } from "../../lib/activity/types";
 import { LogExplorer } from "./LogExplorer";
 
 vi.mock("../../lib/host", () => ({
@@ -687,6 +689,59 @@ async function openInvestigationView(expectedItems: number) {
     }),
   );
   fireEvent.click(option);
+}
+
+async function openActivityView() {
+  const trigger = await screen.findByRole("button", {
+    name: /Investigation workspace view:/,
+  });
+  fireEvent.click(trigger);
+  fireEvent.click(
+    await screen.findByRole("menuitemradio", { name: /^Activity\b/i }),
+  );
+}
+
+function importActivityRun(corpusId: string): ImportRunInput {
+  return {
+    startedAtMs: 1_000,
+    endedAtMs: 2_000,
+    outcome: "completed",
+    sourceKind: "zip",
+    report: {
+      corpusId,
+      lines: 100,
+      templates: 10,
+      reductionRatio: 10,
+      embedded: 0,
+      files: 2,
+      discoveredFiles: 2,
+      excludedFiles: 0,
+      failedFiles: 0,
+      ignoredFiles: 0,
+      exclusionCounts: {},
+      exclusionExamples: [],
+      partial: false,
+      sourceBytes: 1_000,
+      corpusBytes: 500,
+      tsMin: null,
+      tsMax: null,
+      formatCounts: { wildfly: 2 },
+      embedding: { state: "keyword_only", modelId: null },
+      confidence: {
+        corpusTimeQuality: "order_only",
+        counts: {
+          wall: 0,
+          orderOnly: 100,
+          mixed: 0,
+          matched: 2,
+          ambiguous: 0,
+          unknown: 0,
+          unresolved: 100,
+        },
+        sources: [],
+      },
+    },
+  };
 }
 
 
@@ -3613,6 +3668,53 @@ describe("LogExplorer shell", () => {
     expect(timestamp.closest('[role="listitem"]')).toBe(row);
   });
 
+  it("shows a published import in only its corpus Activity rail and resets on corpus switch", async () => {
+    localStorage.setItem("cd-activity-inspector-mode", "compact");
+    const view = render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    await openActivityView();
+
+    await act(async () => {
+      await publishImportRunActivity(importActivityRun("c1"), async () => undefined);
+    });
+    expect(await screen.findByText("Corpus published")).toBeTruthy();
+    expect(screen.getByText(/100 events · 10 templates/)).toBeTruthy();
+
+    vi.mocked(host.hostGetLogCorpus).mockResolvedValue({
+      id: "c2",
+      name: "second fixture",
+      eventCount: 10,
+      templateCount: 2,
+      engine: "duckdb",
+      createdAt: 0,
+      sourceLabel: null,
+      stats: null,
+      topTemplates: [],
+      embedding: {
+        state: "keyword_only",
+        modelId: null,
+        embeddedTemplates: 0,
+        totalTemplates: 2,
+        reason: "local_model_unavailable",
+        updatedAt: 1,
+      },
+    });
+    view.rerender(<LogExplorer corpusId="c2" />);
+    await waitFor(() =>
+      expect(screen.queryByText("Corpus published")).toBeNull(),
+    );
+
+    await act(async () => {
+      await publishImportRunActivity(importActivityRun("c1"), async () => undefined);
+    });
+    expect(screen.queryByText("Corpus published")).toBeNull();
+
+    await act(async () => {
+      await publishImportRunActivity(importActivityRun("c2"), async () => undefined);
+    });
+    expect(await screen.findByText("Corpus published")).toBeTruthy();
+  });
+
   it("keeps narrow logs primary with keyboard-safe filter and chat drawers", async () => {
     const originalWidth = window.innerWidth;
     Object.defineProperty(window, "innerWidth", {
@@ -3693,7 +3795,25 @@ describe("LogExplorer shell", () => {
       );
       expect(screen.getByLabelText("Chat message")).toBeTruthy();
       expect(screen.getByTestId("send-linked-chat")).toBeTruthy();
-      fireEvent.click(screen.getByTestId("close-chat-drawer"));
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: /Investigation workspace view: Chat/i,
+        }),
+      );
+      fireEvent.click(
+        screen.getByRole("menuitemradio", { name: /^Activity\b/i }),
+      );
+      await waitFor(() =>
+        expect(document.activeElement).toBe(
+          screen.getByRole("button", { name: "Close Activity drawer" }),
+        ),
+      );
+      expect(chatToggle.textContent).toMatch(
+        /Investigation · Activity \([1-9]\d*\)/,
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: "Close Activity drawer" }),
+      );
       await waitFor(() => expect(document.activeElement).toBe(chatToggle));
       expect(chatToggle.getAttribute("aria-expanded")).toBe("false");
       expect(screen.getByTestId("log-explorer-detail")).toBeTruthy();

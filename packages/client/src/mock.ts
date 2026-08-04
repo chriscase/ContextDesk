@@ -325,9 +325,18 @@ export class MockEngineClient implements EngineClient {
       });
       const notSelected =
         importableLogIdentities(this.#preview).length - importable.length;
+      const sourceBytes = importable.reduce((total, identity) => {
+        const item = this.#preview.items.find(
+          (candidate) => candidate.identity === identity,
+        );
+        return total + (item?.bytes ?? 0);
+      }, 0);
       return {
         corpusId,
         lines: importable.length * 1_000,
+        templates: importable.length * 10,
+        reductionRatio: importable.length > 0 ? 100 : 0,
+        embedded: 0,
         files: importable.length,
         discoveredFiles: this.#preview.counts.total,
         excludedFiles: this.#preview.counts.blocked,
@@ -336,6 +345,15 @@ export class MockEngineClient implements EngineClient {
         exclusionCounts: notSelected > 0 ? { not_selected: notSelected } : {},
         exclusionExamples: [],
         partial: false,
+        sourceBytes,
+        corpusBytes: sourceBytes,
+        tsMin: null,
+        tsMax: null,
+        formatCounts:
+          importable.length > 0
+            ? { "date-level-logger-thread-record": importable.length }
+            : {},
+        embedding: { state: "keyword_only", modelId: null },
         confidence: {
           corpusTimeQuality: unresolvedSources.length > 0 ? "order_only" : "wall",
           counts: {

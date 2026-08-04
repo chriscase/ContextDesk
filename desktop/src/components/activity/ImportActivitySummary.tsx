@@ -31,6 +31,7 @@ export function ImportActivitySummary({ run }: { run: ImportRunInput }) {
       className="activity-import-summary"
       data-testid="activity-import-summary"
       data-outcome={summary.outcome}
+      data-source-kind={run.sourceKind}
     >
       <p className="activity-import-summary__line">
         <span>{line}</span>

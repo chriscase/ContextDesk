@@ -85,6 +85,9 @@ export type ImportConfidence = {
 export type ImportRunReport = {
   corpusId: string;
   lines: number;
+  templates: number;
+  reductionRatio: number;
+  embedded: number;
   files: number;
   discoveredFiles: number;
   excludedFiles: number;
@@ -93,6 +96,15 @@ export type ImportRunReport = {
   exclusionCounts: Record<string, number>;
   exclusionExamples: string[];
   partial: boolean;
+  sourceBytes: number;
+  corpusBytes: number;
+  tsMin: number | null;
+  tsMax: number | null;
+  formatCounts: Record<string, number>;
+  embedding?: {
+    state: "keyword_only" | "deferred" | "partial" | "complete";
+    modelId: string | null;
+  } | null;
   confidence: ImportConfidence;
 };
 

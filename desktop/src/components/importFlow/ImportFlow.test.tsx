@@ -9,12 +9,22 @@ const dialogMocks = vi.hoisted(() => ({
 }));
 vi.mock("../../lib/dialogs", () => dialogMocks);
 
-async function toPreflight(client = createMockEngineClient()) {
+async function toPreflight(
+  client = createMockEngineClient(),
+  onRunSettled = vi.fn(),
+) {
   const onPublished = vi.fn();
-  const utils = render(<ImportFlow engine={client} variant="pane" onPublished={onPublished} />);
+  const utils = render(
+    <ImportFlow
+      engine={client}
+      variant="pane"
+      onPublished={onPublished}
+      onRunSettled={onRunSettled}
+    />,
+  );
   fireEvent.click(screen.getByRole("button", { name: "Choose folder…" }));
   await screen.findByRole("region", { name: "Ready to import" });
-  return { client, onPublished, ...utils };
+  return { client, onPublished, onRunSettled, ...utils };
 }
 
 async function controlledPreviewClient() {
@@ -43,7 +53,7 @@ async function controlledPreviewClient() {
 
 describe("ImportFlow ordinary path", () => {
   it("is two deliberate actions: choose input, then Import", async () => {
-    const { onPublished } = await toPreflight();
+    const { onPublished, onRunSettled } = await toPreflight();
     expect(
       screen.getByText(/Ready to import — 4 sources/),
     ).toBeTruthy();
@@ -58,6 +68,14 @@ describe("ImportFlow ordinary path", () => {
     fireEvent.click(importButton);
     await screen.findByRole("region", { name: "Import finished" });
     expect(onPublished).toHaveBeenCalledWith("mock-corpus-0001");
+    expect(onRunSettled).toHaveBeenCalledOnce();
+    expect(onRunSettled).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: "completed",
+        sourceKind: "directory",
+        report: expect.objectContaining({ corpusId: "mock-corpus-0001" }),
+      }),
+    );
     // Atomic-publication honesty on the summary.
     expect(screen.getByText(/Import finished — corpus mock-corpus-0001/)).toBeTruthy();
   });
@@ -98,12 +116,19 @@ describe("ImportFlow zero-importable guard", () => {
 describe("ImportFlow failure, cancel, and retry", () => {
   it("failure leaves the library unchanged and offers retry back to review", async () => {
     const client = createMockEngineClient({ failNextRun: "disk full while staging" });
-    await toPreflight(client);
+    const onRunSettled = vi.fn();
+    await toPreflight(client, onRunSettled);
     fireEvent.click(screen.getByRole("checkbox", { name: /I understand and want to proceed/ }));
     fireEvent.click(screen.getByRole("button", { name: "Import" }));
     await screen.findByRole("alert");
     expect(screen.getByText(/Import failed: disk full while staging/)).toBeTruthy();
     expect(screen.getByText(/Nothing was published/)).toBeTruthy();
+    expect(onRunSettled).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: "failed",
+        sourceKind: "directory",
+      }),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Back to review" }));
     await screen.findByRole("region", { name: "Ready to import" });
     // Retry succeeds; the SoftWrite confirmation persists across retry.
@@ -117,7 +142,14 @@ describe("ImportFlow failure, cancel, and retry", () => {
 
   it("cancellation reports honestly and never claims publication", async () => {
     const client = createMockEngineClient({ manualFlush: true });
-    render(<ImportFlow engine={client} variant="pane" />);
+    const onRunSettled = vi.fn();
+    render(
+      <ImportFlow
+        engine={client}
+        variant="pane"
+        onRunSettled={onRunSettled}
+      />,
+    );
     fireEvent.click(screen.getByRole("button", { name: "Choose folder…" }));
     // Preview parks behind manualFlush; release it once it is parked.
     await screen.findByText(/Looking at what/);
@@ -130,6 +162,12 @@ describe("ImportFlow failure, cancel, and retry", () => {
     await screen.findByRole("button", { name: "Cancel ingest" });
     fireEvent.click(screen.getByRole("button", { name: "Cancel ingest" }));
     await screen.findByText(/Import cancelled\. Nothing was published/);
+    expect(onRunSettled).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: "cancelled",
+        sourceKind: "directory",
+      }),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Back to review" }));
     await screen.findByRole("region", { name: "Ready to import" });
   });
@@ -260,6 +298,9 @@ describe("ImportFlow timezone tail", () => {
     const report: ImportRunReport = {
       corpusId: "mixed-time-corpus",
       lines: 12,
+      templates: 3,
+      reductionRatio: 4,
+      embedded: 0,
       files: 2,
       discoveredFiles: 2,
       excludedFiles: 0,
@@ -268,6 +309,11 @@ describe("ImportFlow timezone tail", () => {
       exclusionCounts: {},
       exclusionExamples: [],
       partial: false,
+      sourceBytes: 120,
+      corpusBytes: 80,
+      tsMin: null,
+      tsMax: null,
+      formatCounts: { wildfly: 5 },
       confidence: {
         corpusTimeQuality: "order_only",
         counts: {

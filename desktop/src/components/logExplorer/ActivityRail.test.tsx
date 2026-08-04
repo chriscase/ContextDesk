@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { ActivityRail } from "./ActivityRail";
 import { appendActivities, createActivityLog } from "../../lib/activity/activityLog";
 import { importRunActivities } from "../../lib/activity/importLedger";
@@ -126,6 +126,25 @@ describe("the rail shows the dual-group view only when docked", () => {
 });
 
 describe("the rail keeps ContextDesk activity separate from customer evidence", () => {
+  it("offers a truthful reopen strip when the shared rail is collapsed", () => {
+    const onToggleCollapsed = vi.fn();
+    renderRail("compact", { collapsed: true, onToggleCollapsed });
+    expect(screen.queryByTestId("activity-dock-body")).toBeNull();
+    const reopen = screen.getByTestId("expand-activity-rail");
+    expect(reopen.getAttribute("aria-label")).toBe(
+      `Expand ContextDesk activity, ${LOG.entries.length} entries`,
+    );
+    fireEvent.click(reopen);
+    expect(onToggleCollapsed).toHaveBeenCalledOnce();
+  });
+
+  it("can collapse the expanded Activity rail", () => {
+    const onToggleCollapsed = vi.fn();
+    renderRail("compact", { onToggleCollapsed });
+    fireEvent.click(screen.getByTestId("collapse-activity-rail"));
+    expect(onToggleCollapsed).toHaveBeenCalledOnce();
+  });
+
   it("labels itself as app actions only", () => {
     renderRail("compact");
     expect(screen.getByText(/App actions only/i)).toBeTruthy();

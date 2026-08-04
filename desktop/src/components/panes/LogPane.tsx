@@ -82,6 +82,7 @@ import { ImportActivitySummary } from "../activity/ImportActivitySummary";
 import { ActivityToggle } from "../activity/ActivityToggle";
 import { useActivityInspector } from "../../hooks/useActivityInspector";
 import type { ImportRunInput } from "../../lib/activity/types";
+import { publishImportRunActivity } from "../../lib/activity/importActivityBridge";
 
 function hostProgressToWizard(p: ProcessProgressDto): WizardProgressDto {
   return {
@@ -134,6 +135,14 @@ type Props = {
 
 const LOG_LIBRARY_MENU_PEER_GROUP = "log-library-menu";
 
+export function quickImportSourceKind(
+  mode: "directory" | "file",
+  path: string,
+): ImportRunInput["sourceKind"] {
+  if (mode === "directory") return "directory";
+  return /\.zip$/i.test(path) ? "zip" : "file";
+}
+
 function CorpusOverflowGlyph() {
   return (
     <svg
@@ -170,6 +179,10 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const [lastImportRun, setLastImportRun] = useState<ImportRunInput | null>(
     null,
   );
+  const recordImportRun = useCallback((run: ImportRunInput) => {
+    setLastImportRun(run);
+    void publishImportRunActivity(run);
+  }, []);
   // The same shared preference chat and the Explorer use.
   const activity = useActivityInspector();
   const [importConfidence, setImportConfidence] = useState<{
@@ -728,8 +741,8 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     setImportConfidence(null);
     setProgress(null);
     setFailedIngestDiagnostic(null);
+    const startedAtMs = Date.now();
     try {
-      const startedAtMs = Date.now();
       const r = await hostIngestLogPath(path, "incident");
       setNote(statsBlurb(r));
       setImportConfidence(
@@ -737,22 +750,32 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       );
       // Real measured run: both timestamps are this machine's clock, which is
       // what lets these entries carry a genuine wall clock.
-      setLastImportRun({
+      recordImportRun({
         startedAtMs,
         endedAtMs: Date.now(),
         outcome: "completed",
-        sourceKind: "directory",
+        sourceKind: quickImportSourceKind(mode, path),
         report: r,
       });
       await refresh();
       await selectCorpus(r.corpusId);
     } catch (e) {
       setError(String(e));
+      let diagnostic: FailedLogIngestDiagnosticDto | null = null;
       try {
-        setFailedIngestDiagnostic(await hostGetFailedLogIngestDiagnostic());
+        diagnostic = await hostGetFailedLogIngestDiagnostic();
+        setFailedIngestDiagnostic(diagnostic);
       } catch {
         /* Preserve the visible ingest error if diagnostic retrieval fails. */
       }
+      recordImportRun({
+        startedAtMs,
+        endedAtMs: Date.now(),
+        outcome: diagnostic?.cancelled ? "cancelled" : "failed",
+        sourceKind:
+          diagnostic?.sourceKind ?? quickImportSourceKind(mode, path),
+        diagnostic,
+      });
     } finally {
       setBusy(false);
       setIngesting(false);
@@ -1376,6 +1399,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
               engine={paneEngine}
               variant="pane"
               hostOwnsProgress
+              onRunSettled={recordImportRun}
               onPublished={(corpusId) => {
                 void refresh();
                 void selectCorpus(corpusId);

@@ -10,6 +10,7 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { EngineClient } from "@contextdesk/client";
 import { EngineError } from "@contextdesk/client";
+import type { ImportRunInput } from "../../lib/activity/types";
 import { openDirectoryDialog, openFileDialog } from "../../lib/dialogs";
 import { ProcessProgressPanel } from "../wizards/ProcessProgressPanel";
 import type { ProcessProgressDto } from "../wizards/types";
@@ -30,6 +31,12 @@ type Props = {
   variant: "pane" | "guided";
   /** Called after atomic publication with the new corpus id. */
   onPublished?: (corpusId: string) => void;
+  /**
+   * Called exactly once when a reviewed import attempt settles. The payload
+   * contains measured start/end clocks and the host report when publication
+   * succeeded; cancellation and failure never pretend a corpus exists.
+   */
+  onRunSettled?: (run: ImportRunInput) => void;
   /** Called after the summary card applies or undoes source timezones. */
   onTimezoneChanged?: (corpusId: string) => void;
   /**
@@ -57,6 +64,7 @@ export function ImportFlow({
   engine,
   variant,
   onPublished,
+  onRunSettled,
   onTimezoneChanged,
   hostOwnsProgress = false,
   exitSignal = 0,
@@ -185,6 +193,11 @@ export function ImportFlow({
   const runImport = async () => {
     const current = stateRef.current;
     if (importDisabledReason(current) !== null || !current.path || !current.plan) return;
+    const startedAtMs = Date.now();
+    const sourceKind: ImportRunInput["sourceKind"] =
+      current.report?.sourceKind === "archive"
+        ? "zip"
+        : current.report?.sourceKind ?? "unknown";
     dispatch({ type: "RUN_STARTED" });
     try {
       const report = await engine.import.run({
@@ -195,14 +208,33 @@ export function ImportFlow({
         selected: selectedForRun(current),
       });
       dispatch({ type: "PUBLISHED", report });
+      onRunSettled?.({
+        startedAtMs,
+        endedAtMs: Date.now(),
+        outcome: "completed",
+        sourceKind,
+        report,
+      });
       onPublished?.(report.corpusId);
     } catch (error) {
       if (error instanceof EngineError && error.code === "cancelled") {
         dispatch({ type: "RUN_CANCELLED" });
+        onRunSettled?.({
+          startedAtMs,
+          endedAtMs: Date.now(),
+          outcome: "cancelled",
+          sourceKind,
+        });
       } else {
         dispatch({
           type: "RUN_FAILED",
           message: error instanceof Error ? error.message : String(error),
+        });
+        onRunSettled?.({
+          startedAtMs,
+          endedAtMs: Date.now(),
+          outcome: "failed",
+          sourceKind,
         });
       }
     }

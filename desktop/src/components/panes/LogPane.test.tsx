@@ -25,7 +25,18 @@ import {
   type LogDiagnosticManifest,
 } from "../../lib/logDiagnosticReport";
 import { createMockEngineClient } from "@contextdesk/client";
-import { LogPane } from "./LogPane";
+import { LogPane, quickImportSourceKind } from "./LogPane";
+import { loadCorpusImportActivity } from "../../lib/activity/importActivityBridge";
+
+describe("quick import source classification", () => {
+  it.each([
+    ["directory", "/logs/archive.zip", "directory"],
+    ["file", "/logs/current.log", "file"],
+    ["file", "C:\\Logs\\rotations.ZIP", "zip"],
+  ] as const)("classifies %s %s as %s", (mode, path, expected) => {
+    expect(quickImportSourceKind(mode, path)).toBe(expected);
+  });
+});
 
 const hostMocks = vi.hoisted(() => ({
   listCorpora: vi.fn(),
@@ -200,9 +211,24 @@ async function chooseImportMode(
   fireEvent.click(within(menu).getByRole("menuitem", { name }));
 }
 
+function installMemoryStorage(): void {
+  const values = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+    removeItem: (key: string) => values.delete(key),
+    clear: () => values.clear(),
+    key: (index: number) => [...values.keys()][index] ?? null,
+    get length() {
+      return values.size;
+    },
+  });
+}
+
 describe("LogPane", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    installMemoryStorage();
     hostMocks.listCorpora.mockResolvedValue([]);
     hostMocks.listTemplates.mockResolvedValue([]);
     hostMocks.clusterProblems.mockResolvedValue([]);
@@ -454,6 +480,7 @@ describe("LogPane", () => {
   });
 
   it("offers intentional folder and file import modes from both entry points", async () => {
+    localStorage.setItem("cd-activity-inspector-mode", "compact");
     hostMocks.openDirectory.mockResolvedValue("/tmp/incident-folder");
     hostMocks.openFile.mockResolvedValue("/tmp/server.log");
     hostMocks.confirm.mockResolvedValue(true);
@@ -474,6 +501,11 @@ describe("LogPane", () => {
     );
     expect(hostMocks.openDirectory).toHaveBeenCalledWith("Choose log folder");
     expect(hostMocks.openFile).not.toHaveBeenCalled();
+    expect(
+      (await screen.findByTestId("activity-import-summary")).getAttribute(
+        "data-source-kind",
+      ),
+    ).toBe("directory");
     await waitFor(() =>
       expect(emptyTrigger.hasAttribute("disabled")).toBe(false),
     );
@@ -494,6 +526,11 @@ describe("LogPane", () => {
     expect(hostMocks.openDirectory).toHaveBeenCalledTimes(1);
     expect(hostMocks.ingest).toHaveBeenCalledTimes(2);
     expect(hostMocks.confirm).toHaveBeenCalledTimes(2);
+    expect(
+      screen
+        .getByTestId("activity-import-summary")
+        .getAttribute("data-source-kind"),
+    ).toBe("file");
   });
 
   it("ends the action when either native import chooser is cancelled", async () => {
@@ -1115,6 +1152,7 @@ describe("LogPane", () => {
   });
 
   it("previews, copies, and clears one failed-ingest diagnostic without publishing a corpus", async () => {
+    localStorage.setItem("cd-activity-inspector-mode", "compact");
     const firstFailure = {
       schemaVersion: 2,
       generatedAt: 1_753_680_000,
@@ -1185,6 +1223,9 @@ describe("LogPane", () => {
     expect(
       screen.queryByRole("button", { name: corpusButtonName("incident") }),
     ).toBeNull();
+    const failedActivity = screen.getByTestId("activity-import-summary");
+    expect(failedActivity.getAttribute("data-outcome")).toBe("failed");
+    expect(failedActivity.getAttribute("data-source-kind")).toBe("zip");
 
     const exportButton = within(available).getByRole("button", {
       name: "Export diagnostics…",
@@ -1244,6 +1285,54 @@ describe("LogPane", () => {
     expect(document.activeElement).toBe(
       screen.getAllByRole("button", { name: "Import logs…" })[0],
     );
+  });
+
+  it("records a quick cancelled ZIP attempt as cancelled without publishing", async () => {
+    localStorage.setItem("cd-activity-inspector-mode", "compact");
+    hostMocks.confirm.mockResolvedValue(true);
+    hostMocks.ingest.mockRejectedValue(new Error("ingest cancelled"));
+    hostMocks.getFailedIngestDiagnostic
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        schemaVersion: 2,
+        generatedAt: 1_753_680_000,
+        sourceKind: "zip",
+        reasonCode: "cancelled",
+        summary: "Import cancelled before publication.",
+        cancelled: true,
+        progress: {
+          lastPhase: "scan",
+          linesProcessed: 0,
+          filesProcessed: 0,
+          bytesProcessed: 0,
+          templates: 0,
+          updatesSeen: 1,
+        },
+        evidence: {
+          scanCounts: {
+            binary: 0,
+            empty: 0,
+            hidden: 0,
+            oversized: 0,
+            readFailed: 0,
+            parseFailed: 0,
+          },
+          transcript: [],
+          omittedEntries: 0,
+        },
+        redacted: true,
+      });
+
+    render(<LogPane pickDirectory={async () => "/tmp/logs.zip"} />);
+    await chooseImportMode("Import a folder…");
+
+    const activitySummary = await screen.findByTestId(
+      "activity-import-summary",
+    );
+    expect(activitySummary.getAttribute("data-outcome")).toBe("cancelled");
+    expect(activitySummary.getAttribute("data-source-kind")).toBe("zip");
+    expect(screen.queryByTestId("corpus-list")).toBeNull();
+    expect(loadCorpusImportActivity("cancelled")).toEqual([]);
   });
 
   it("replaces repeated failure evidence and clears it when a later import succeeds", async () => {
@@ -2798,6 +2887,7 @@ describe("in-app Explorer embed chrome (#851)", () => {
 describe("LogPane reviewed-import progress ownership (defect: duplicated panel)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    installMemoryStorage();
     hostMocks.listCorpora.mockResolvedValue([]);
     hostMocks.listTemplates.mockResolvedValue([]);
     hostMocks.clusterProblems.mockResolvedValue([]);
@@ -2888,6 +2978,13 @@ describe("LogPane reviewed-import progress ownership (defect: duplicated panel)"
 
     engineMocks.client!.flush();
     await screen.findByRole("region", { name: "Import finished" });
+    await waitFor(() =>
+      expect(loadCorpusImportActivity("mock-corpus-0001")).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ label: "Corpus published" }),
+        ]),
+      ),
+    );
   });
 
   it("wires cancellation to the single owning panel — LogPane's, not a duplicate", async () => {

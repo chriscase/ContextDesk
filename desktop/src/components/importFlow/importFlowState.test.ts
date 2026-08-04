@@ -218,6 +218,9 @@ describe("timezone groups", () => {
     const report: ImportRunReport = {
       corpusId: "c",
       lines: 12,
+      templates: 3,
+      reductionRatio: 4,
+      embedded: 0,
       files: 2,
       discoveredFiles: 2,
       excludedFiles: 0,
@@ -226,6 +229,11 @@ describe("timezone groups", () => {
       exclusionCounts: {},
       exclusionExamples: [],
       partial: false,
+      sourceBytes: 120,
+      corpusBytes: 80,
+      tsMin: null,
+      tsMax: null,
+      formatCounts: { wildfly: 5 },
       confidence: {
         corpusTimeQuality: "order_only",
         counts: {
@@ -271,6 +279,9 @@ describe("timezone groups", () => {
     const report: ImportRunReport = {
       corpusId: "c",
       lines: 0,
+      templates: 0,
+      reductionRatio: 0,
+      embedded: 0,
       files: 0,
       discoveredFiles: 0,
       excludedFiles: 0,
@@ -279,6 +290,11 @@ describe("timezone groups", () => {
       exclusionCounts: {},
       exclusionExamples: [],
       partial: false,
+      sourceBytes: 0,
+      corpusBytes: 0,
+      tsMin: null,
+      tsMax: null,
+      formatCounts: {},
       confidence: {
         corpusTimeQuality: "order_only",
         counts: {
