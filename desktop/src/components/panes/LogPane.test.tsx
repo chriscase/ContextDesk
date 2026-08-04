@@ -1334,7 +1334,7 @@ describe("LogPane", () => {
     expect(activitySummary.getAttribute("data-outcome")).toBe("cancelled");
     expect(activitySummary.getAttribute("data-source-kind")).toBe("zip");
     expect(screen.queryByTestId("corpus-list")).toBeNull();
-    expect(loadCorpusImportActivity("cancelled")).toEqual([]);
+    expect(loadCorpusImportActivity("cancelled").events).toEqual([]);
   });
 
   it("replaces repeated failure evidence and clears it when a later import succeeds", async () => {
@@ -3030,6 +3030,100 @@ describe("LogPane reviewed-import progress ownership (defect: duplicated panel)"
     };
   }
 
+  /**
+   * Same setup as `openReviewedImportToRunning`, but returns immediately
+   * after `import.run` is invoked and its correlation id is known — before
+   * the host's `verify_import_plan` re-verification would ever emit its
+   * first `process-progress` event. (#900)
+   */
+  async function openReviewedImportBeforeFirstProgress() {
+    localStorage.setItem("cd-activity-inspector-mode", "compact");
+    hostMocks.listenProgress.mockImplementation(async () => () => {});
+    engineMocks.client = createMockEngineClient({ manualFlush: true });
+    const cancelSpy = vi.spyOn(engineMocks.client.import, "cancel");
+    const runSpy = vi.spyOn(engineMocks.client.import, "run");
+
+    render(<LogPane />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Import with review…" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Choose folder…" }),
+    );
+    await screen.findByText(/Looking at what/);
+    await waitFor(() => engineMocks.client!.flush());
+    await screen.findByRole("region", { name: "Ready to import" });
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: /I understand and want to proceed/,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("region", { name: "Ready to import" }),
+      ).toBeNull(),
+    );
+    await waitFor(() => expect(runSpy).toHaveBeenCalledTimes(1));
+    const correlationId = runSpy.mock.calls[0]?.[0].correlationId as string;
+    expect(correlationId).toMatch(/^import:/);
+
+    return { cancelSpy, runSpy, correlationId };
+  }
+
+  it("shows a single pending progress panel and invocation-scoped Cancel before the host's first progress event (#900)", async () => {
+    const { correlationId } = await openReviewedImportBeforeFirstProgress();
+
+    // No `process-progress` event has been observed yet — `verify_import_plan`
+    // re-verifies the plan synchronously before `run_log_ingest` emits
+    // anything. The single owning panel must already exist, not appear only
+    // once the first event lands.
+    expect(document.querySelectorAll(".process-progress")).toHaveLength(1);
+    const cancelButtons = screen.getAllByRole("button", {
+      name: "Cancel ingest",
+    });
+    expect(cancelButtons).toHaveLength(1);
+    expect((cancelButtons[0] as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(cancelButtons[0]!);
+    await waitFor(() =>
+      expect(hostMocks.cancelIngest).toHaveBeenCalledTimes(1),
+    );
+    // Scoped to this invocation's own correlation id, not a bare global
+    // cancel that could hit an unrelated import.
+    expect(hostMocks.cancelIngest).toHaveBeenCalledWith(correlationId);
+  });
+
+  it("cancelling before the first progress event publishes no corpus and leaves exactly one panel/cancel control", async () => {
+    await openReviewedImportBeforeFirstProgress();
+    hostMocks.cancelIngest.mockImplementationOnce(() =>
+      engineMocks.client!.import.cancel(),
+    );
+
+    expect(document.querySelectorAll(".process-progress")).toHaveLength(1);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Cancel ingest" }),
+    );
+    await waitFor(() => expect(hostMocks.cancelIngest).toHaveBeenCalledOnce());
+    await act(async () => {
+      engineMocks.client!.flush();
+    });
+
+    expect(
+      await screen.findByText(/Import cancelled\. Nothing was published/i),
+    ).toBeTruthy();
+    // Exactly one panel and one (now-disabled) cancel control remain — no
+    // duplicate, no orphaned second element.
+    expect(document.querySelectorAll(".process-progress")).toHaveLength(1);
+    expect(
+      screen.getAllByTestId("cancel-log-ingest"),
+    ).toHaveLength(1);
+    expect(loadCorpusImportActivity("mock-corpus-0001").events).toEqual([]);
+    expect(
+      localStorage.getItem("contextdesk.importActivity.v1:mock-corpus-0001"),
+    ).toBeNull();
+  });
+
   it("shows exactly one progress panel for a reviewed import in flight", async () => {
     await openReviewedImportToRunning();
     expect(document.querySelectorAll(".process-progress")).toHaveLength(1);
@@ -3050,7 +3144,7 @@ describe("LogPane reviewed-import progress ownership (defect: duplicated panel)"
     engineMocks.client!.flush();
     await screen.findByRole("region", { name: "Import finished" });
     await waitFor(() =>
-      expect(loadCorpusImportActivity("mock-corpus-0001")).toEqual(
+      expect(loadCorpusImportActivity("mock-corpus-0001").events).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ label: "Corpus published" }),
         ]),
@@ -3128,7 +3222,7 @@ describe("LogPane reviewed-import progress ownership (defect: duplicated panel)"
     expect(screen.getByTestId("log-pane-activity").textContent).toContain(
       "Import cancelled — nothing published",
     );
-    expect(loadCorpusImportActivity("mock-corpus-0001")).toEqual([]);
+    expect(loadCorpusImportActivity("mock-corpus-0001").events).toEqual([]);
     expect(
       localStorage.getItem(
         "contextdesk.importActivity.v1:mock-corpus-0001",

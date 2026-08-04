@@ -40,8 +40,17 @@ function safeCount(value: number | null | undefined): number | null {
   return finiteNonnegative(value);
 }
 
+// Pinned locale, not the host default: an unpinned `toLocaleString()` reads
+// the OS/runtime locale, and a German/French/Windows-style locale groups
+// thousands with "." instead of ",". These strings are persisted, broadcast
+// cross-webview, and re-validated by `SAFE_IMPORT_DETAIL_PART`
+// (`importActivityBridge.ts`), which only allows `[\d,]` — an unpinned
+// locale would make that regex fail closed and silently drop legitimate
+// progress on a non-US-locale desktop, not merely render a different comma.
+const IMPORT_COUNT_FORMAT = new Intl.NumberFormat("en-US");
+
 function countLabel(value: number, singular: string, plural = `${singular}s`) {
-  return `${value.toLocaleString()} ${value === 1 ? singular : plural}`;
+  return `${IMPORT_COUNT_FORMAT.format(value)} ${value === 1 ? singular : plural}`;
 }
 
 function normalizedPhase(phase: ImportProgressPhase): ImportProgressPhase {
@@ -113,7 +122,7 @@ function detailForProgress(progress: ProcessProgressDto): string | undefined {
   if (files != null) parts.push(countLabel(files, "file"));
   if (lines != null) parts.push(countLabel(lines, "event"));
   if (templates != null) parts.push(countLabel(templates, "template"));
-  if (bytes != null) parts.push(`${bytes.toLocaleString()} bytes read`);
+  if (bytes != null) parts.push(`${IMPORT_COUNT_FORMAT.format(bytes)} bytes read`);
   if (fraction != null) parts.push(`${Math.round(fraction * 100)}%`);
   const priorPhaseMs = finiteNonnegative(progress.phase_elapsed_ms);
   if (priorPhaseMs != null) parts.push(`prior displayed phase ${priorPhaseMs} ms`);

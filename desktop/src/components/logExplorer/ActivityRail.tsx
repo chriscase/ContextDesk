@@ -43,6 +43,7 @@ export function ActivityRail({
   clientClock,
   openedAtMs,
   log,
+  importOmittedUpdates = 0,
   mode,
   onModeChange,
   developerDetail = false,
@@ -59,6 +60,14 @@ export function ActivityRail({
   clientClock: ClientIncidentClock;
   openedAtMs: number;
   log: ActivityLogState;
+  /**
+   * The corpus's persisted/broadcast count of live import updates the
+   * `IMPORT_ACTIVITY_EVENT_CAP` retention bound coalesced or omitted while
+   * the import ran — sourced from the same validated bridge record `log`'s
+   * import rows came from, never recomputed client-side from partial data.
+   * Distinct from `log.omitted`, this rail's own separate ring-buffer cap.
+   */
+  importOmittedUpdates?: number;
   /** The shared display preference — the same one ordinary chat uses. */
   mode: ActivityMode;
   onModeChange: (mode: ActivityMode) => void;
@@ -87,10 +96,16 @@ export function ActivityRail({
     });
   }, [collapsed, compactLayout, visible]);
 
-  const omittedNote =
+  const railOmittedNote =
     log.omitted > 0
       ? `${log.omitted} earlier ${log.omitted === 1 ? "entry" : "entries"} dropped by the ${log.cap}-entry retention bound.`
       : null;
+  const importOmittedNote =
+    importOmittedUpdates > 0
+      ? `${importOmittedUpdates} intermediate import ${importOmittedUpdates === 1 ? "update was" : "updates were"} coalesced or omitted by the import's own retention bound. Latest counters are retained.`
+      : null;
+  const omittedNote =
+    [importOmittedNote, railOmittedNote].filter(Boolean).join(" ") || null;
 
   if (visible && collapsed && !compactLayout) {
     return (

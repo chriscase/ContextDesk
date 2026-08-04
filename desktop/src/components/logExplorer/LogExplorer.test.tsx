@@ -3713,6 +3713,7 @@ describe("LogExplorer shell", () => {
       await publishImportRunActivity(
         run,
         importActivityEvents(run),
+        0,
         async () => undefined,
       );
     });
@@ -3748,6 +3749,7 @@ describe("LogExplorer shell", () => {
       await publishImportRunActivity(
         run,
         importActivityEvents(run),
+        0,
         async () => undefined,
       );
     });
@@ -3758,6 +3760,7 @@ describe("LogExplorer shell", () => {
       await publishImportRunActivity(
         run,
         importActivityEvents(run),
+        0,
         async () => undefined,
       );
     });

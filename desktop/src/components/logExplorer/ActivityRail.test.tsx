@@ -204,6 +204,18 @@ describe("the rail keeps ContextDesk activity separate from customer evidence", 
     );
   });
 
+  it("discloses a nonzero omittedUpdates carried from the persisted/broadcast import record", () => {
+    renderRail("compact", { importOmittedUpdates: 4 });
+    expect(screen.getByRole("note").textContent).toMatch(
+      /4 intermediate import updates were coalesced or omitted/i,
+    );
+  });
+
+  it("shows no import-omitted disclosure when the carried count is zero", () => {
+    renderRail("compact", { importOmittedUpdates: 0 });
+    expect(screen.queryByRole("note")).toBeNull();
+  });
+
   it("stays hidden from the accessibility tree when not the active rail mode", () => {
     render(
       <ActivityRail

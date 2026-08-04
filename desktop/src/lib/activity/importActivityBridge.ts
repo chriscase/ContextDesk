@@ -16,6 +16,8 @@ import {
   determinismForOrigin,
   type ActivityEventInput,
   type ActivityOrigin,
+  type ActivityPhase,
+  type ActivityStatus,
   type ImportRunInput,
 } from "./types";
 
@@ -30,25 +32,111 @@ const MAX_DETAIL_LENGTH = 2_000;
 const MAX_EVENTS = 32;
 const MAX_SEEN_EVENT_IDS = 128;
 const MAX_EVENT_ID_LENGTH = 128;
-const SAFE_IMPORT_LABELS = new Set([
-  "Import started",
-  "Discovering and reading sources",
-  "Reading, parsing, normalizing, and indexing",
-  "Running optional local embedding",
-  "Validating staged corpus",
-  "Publishing corpus atomically",
-  "Corpus published",
-  "Import cancelled — nothing published",
-  "Import failed — nothing published",
-  "Import processing",
-]);
+// A generous bound, not a realistic count: the live cap
+// (`IMPORT_ACTIVITY_EVENT_CAP` in importProgressActivity.ts) is 16, so a
+// genuine value never exceeds a few dozen. This only rejects an implausible
+// or corrupted/tampered value read back from storage or another webview.
+const MAX_OMITTED_UPDATES = 1_000_000;
 const SAFE_IMPORT_DETAIL_PART =
   /^(?:[\d,]+ (?:files?|events?|templates?|bytes read)|\d+%|prior displayed phase [\d,]+ ms)$/;
+
+const NON_TERMINAL_PHASES: ReadonlySet<ActivityPhase> = new Set([
+  "started",
+  "progress",
+]);
+const TERMINAL_PHASE: ReadonlySet<ActivityPhase> = new Set(["completed"]);
+const PENDING_ONLY: ReadonlySet<ActivityStatus> = new Set(["pending"]);
+
+const EMBEDDING_HOOK = {
+  trigger: "import → optional local embedding phase",
+  dataScope: "learned templates of the selected import only",
+} as const;
+
+/**
+ * Exact allowlisted (label -> origin, phases, statuses[, hook]) tuple for
+ * every event `importProgressActivity.ts` can actually emit.
+ *
+ * This is the fix for two distinct forgeries the old label-only check let
+ * through: (1) a payload could claim ANY origin for a label — e.g.
+ * `label: "Corpus published"` with `origin: "deterministic_host"` and
+ * `status: "failed"` — since only the label was ever checked; (2) an
+ * `external_connector`-origin payload was accepted as long as it carried a
+ * well-formed-looking `hook`, because the old hook-content check ran only
+ * for `probabilistic_model`. Import never talks to an external connector —
+ * every real emitter above is `deterministic_host` / `governed_write` /
+ * `user_decision` / `probabilistic_model` (the local embedding step only) —
+ * so `external_connector` is rejected outright, and every other origin must
+ * match this table exactly, not merely "be a valid origin string".
+ */
+const IMPORT_LABEL_TUPLES: ReadonlyMap<
+  string,
+  {
+    origin: Exclude<ActivityOrigin, "external_connector">;
+    phases: ReadonlySet<ActivityPhase>;
+    statuses: ReadonlySet<ActivityStatus>;
+    hook?: { trigger: string; dataScope: string };
+  }
+> = new Map([
+  [
+    "Import started",
+    { origin: "user_decision", phases: new Set<ActivityPhase>(["started"]), statuses: PENDING_ONLY },
+  ],
+  [
+    "Discovering and reading sources",
+    { origin: "deterministic_host", phases: NON_TERMINAL_PHASES, statuses: PENDING_ONLY },
+  ],
+  [
+    "Reading, parsing, normalizing, and indexing",
+    { origin: "deterministic_host", phases: NON_TERMINAL_PHASES, statuses: PENDING_ONLY },
+  ],
+  [
+    "Running optional local embedding",
+    {
+      origin: "probabilistic_model",
+      phases: NON_TERMINAL_PHASES,
+      statuses: PENDING_ONLY,
+      hook: EMBEDDING_HOOK,
+    },
+  ],
+  [
+    "Validating staged corpus",
+    { origin: "deterministic_host", phases: NON_TERMINAL_PHASES, statuses: PENDING_ONLY },
+  ],
+  [
+    "Publishing corpus atomically",
+    { origin: "governed_write", phases: NON_TERMINAL_PHASES, statuses: PENDING_ONLY },
+  ],
+  [
+    "Corpus published",
+    { origin: "governed_write", phases: TERMINAL_PHASE, statuses: new Set<ActivityStatus>(["ok"]) },
+  ],
+  [
+    "Import cancelled — nothing published",
+    {
+      origin: "deterministic_host",
+      phases: TERMINAL_PHASE,
+      statuses: new Set<ActivityStatus>(["cancelled"]),
+    },
+  ],
+  [
+    "Import failed — nothing published",
+    {
+      origin: "deterministic_host",
+      phases: TERMINAL_PHASE,
+      statuses: new Set<ActivityStatus>(["failed"]),
+    },
+  ],
+  [
+    "Import processing",
+    { origin: "deterministic_host", phases: NON_TERMINAL_PHASES, statuses: PENDING_ONLY },
+  ],
+]);
 
 type BridgePayload = {
   corpusId?: unknown;
   eventId?: unknown;
   events?: unknown;
+  omittedUpdates?: unknown;
 };
 type BridgeListen = (
   eventName: string,
@@ -56,7 +144,12 @@ type BridgeListen = (
 ) => Promise<() => void>;
 type BridgeEmit = (
   eventName: string,
-  payload: { corpusId: string; eventId: string; events: ActivityEventInput[] },
+  payload: {
+    corpusId: string;
+    eventId: string;
+    events: ActivityEventInput[];
+    omittedUpdates: number;
+  },
 ) => Promise<void>;
 
 const senderId = globalThis.crypto.randomUUID();
@@ -77,6 +170,22 @@ function validString(value: unknown, max: number): value is string {
 
 function validCorpusId(value: unknown): value is string {
   return validString(value, MAX_CORPUS_ID_LENGTH);
+}
+
+/**
+ * Fail closed on anything but a genuine non-negative integer count: a
+ * tampered or out-of-bounds value from storage or another webview is
+ * rejected wholesale (falls back to 0 at every call site below) rather than
+ * clamped, so a forged large value cannot be laundered into a smaller-but
+ * still attacker-chosen disclosure count.
+ */
+function validOmittedUpdates(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= MAX_OMITTED_UPDATES
+  );
 }
 
 function normalizeEvent(
@@ -189,19 +298,26 @@ function safeProjectedEvent(
   corpusId: string,
 ): ActivityEventInput | null {
   const normalized = normalizeEvent(event, corpusId);
+  if (!normalized) return null;
+  // Import never involves an external connector — reject outright, before
+  // even consulting the label table, so a forged payload cannot rely on
+  // some future table entry accidentally omitting this check.
+  if (normalized.origin === "external_connector") return null;
+  const tuple = IMPORT_LABEL_TUPLES.get(normalized.label);
   if (
-    !normalized ||
-    !SAFE_IMPORT_LABELS.has(normalized.label) ||
+    !tuple ||
+    normalized.origin !== tuple.origin ||
+    !tuple.phases.has(normalized.phase) ||
+    !tuple.statuses.has(normalized.status) ||
     !safeImportDetail(normalized.detail)
   ) {
     return null;
   }
   if (normalized.origin === "probabilistic_model") {
     if (
-      normalized.hook.trigger !==
-        "import → optional local embedding phase" ||
-      normalized.hook.dataScope !==
-        "learned templates of the selected import only"
+      !tuple.hook ||
+      normalized.hook.trigger !== tuple.hook.trigger ||
+      normalized.hook.dataScope !== tuple.hook.dataScope
     ) {
       return null;
     }
@@ -244,16 +360,31 @@ function safeEventsForRun(
 }
 
 /** Read the last safely projected import activity for one corpus. */
-export function loadCorpusImportActivity(corpusId: string): ActivityEventInput[] {
-  if (typeof window === "undefined" || !validCorpusId(corpusId)) return [];
+export function loadCorpusImportActivity(corpusId: string): {
+  events: ActivityEventInput[];
+  omittedUpdates: number;
+} {
+  const empty = { events: [], omittedUpdates: 0 };
+  if (typeof window === "undefined" || !validCorpusId(corpusId)) return empty;
   try {
     const raw = window.localStorage.getItem(storageKey(corpusId));
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as { version?: unknown; events?: unknown };
-    if (parsed.version !== 1) return [];
-    return normalizeEvents(parsed.events, corpusId);
+    if (!raw) return empty;
+    const parsed = JSON.parse(raw) as {
+      version?: unknown;
+      events?: unknown;
+      omittedUpdates?: unknown;
+    };
+    if (parsed.version !== 1) return empty;
+    const events = normalizeEvents(parsed.events, corpusId);
+    // A tampered/out-of-bounds omittedUpdates never invalidates the
+    // (separately validated) events themselves — it just fails closed to 0,
+    // the truthful "nothing known to be omitted" default.
+    const omittedUpdates = validOmittedUpdates(parsed.omittedUpdates)
+      ? parsed.omittedUpdates
+      : 0;
+    return { events, omittedUpdates };
   } catch {
-    return [];
+    return empty;
   }
 }
 
@@ -274,6 +405,7 @@ export function forgetCorpusImportActivity(corpusId: string): void {
 export async function publishImportRunActivity(
   run: ImportRunInput,
   sourceEvents: ActivityEventInput[],
+  omittedUpdates = 0,
   injectedEmit?: BridgeEmit,
 ): Promise<void> {
   const corpusId = run.report?.corpusId;
@@ -286,16 +418,28 @@ export async function publishImportRunActivity(
   }
   const events = safeEventsForRun(run, sourceEvents);
   if (events.length === 0) return;
+  // This process is the trusted source of its own count, but still bound and
+  // validate it before it is persisted/broadcast — the same discipline every
+  // other outbound field here gets, and it keeps the value that reaches
+  // storage always passing `validOmittedUpdates` on the way back in.
+  const safeOmittedUpdates = validOmittedUpdates(omittedUpdates)
+    ? omittedUpdates
+    : 0;
   try {
     window.localStorage.setItem(
       storageKey(corpusId),
-      JSON.stringify({ version: 1, events }),
+      JSON.stringify({ version: 1, events, omittedUpdates: safeOmittedUpdates }),
     );
   } catch {
     // A live Explorer still receives the safe event payload below.
   }
 
-  const payload = { corpusId, eventId: createEventId(), events };
+  const payload = {
+    corpusId,
+    eventId: createEventId(),
+    events,
+    omittedUpdates: safeOmittedUpdates,
+  };
   window.dispatchEvent(
     new CustomEvent<BridgePayload>(IMPORT_ACTIVITY_CHANGED_EVENT, {
       detail: payload,
@@ -314,7 +458,11 @@ export async function publishImportRunActivity(
 
 /** Subscribe to published imports in this webview and other Tauri webviews. */
 export function subscribeImportRunActivity(
-  onChanged: (corpusId: string, events: ActivityEventInput[]) => void,
+  onChanged: (
+    corpusId: string,
+    events: ActivityEventInput[],
+    omittedUpdates: number,
+  ) => void,
   injectedListen?: BridgeListen,
 ): () => void {
   if (typeof window === "undefined") return () => undefined;
@@ -332,13 +480,18 @@ export function subscribeImportRunActivity(
     }
     const events = normalizeEvents(payload.events, payload.corpusId);
     if (events.length === 0) return;
+    // A cross-webview payload is exactly as untrusted as a localStorage
+    // read — fail closed to 0 rather than propagate a tampered count.
+    const omittedUpdates = validOmittedUpdates(payload.omittedUpdates)
+      ? payload.omittedUpdates
+      : 0;
     seenIds.add(payload.eventId);
     seenOrder.push(payload.eventId);
     if (seenOrder.length > MAX_SEEN_EVENT_IDS) {
       const expired = seenOrder.shift();
       if (expired) seenIds.delete(expired);
     }
-    onChanged(payload.corpusId, events);
+    onChanged(payload.corpusId, events, omittedUpdates);
   };
   const onCustom = (event: Event) => {
     accept((event as CustomEvent<BridgePayload>).detail);

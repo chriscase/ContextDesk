@@ -785,7 +785,21 @@ export function LogExplorer({ corpusId }: Props) {
    * source, filter, and suppression state and read none of this.
    */
   const [activityLog, setActivityLog] = useState<ActivityLogState>(() =>
-    appendActivities(createActivityLog(), loadCorpusImportActivity(corpusId)),
+    appendActivities(
+      createActivityLog(),
+      loadCorpusImportActivity(corpusId).events,
+    ),
+  );
+  /**
+   * The persisted/broadcast count of live import updates the retention cap
+   * (`IMPORT_ACTIVITY_EVENT_CAP` in importProgressActivity.ts) coalesced or
+   * dropped for the corpus's last published import — distinct from
+   * `activityLog.omitted`, which is this rail's own separate ring-buffer
+   * cap. Kept alongside `activityLog` so it resets identically on corpus
+   * switch and updates identically on a cross-webview import broadcast.
+   */
+  const [importOmittedUpdates, setImportOmittedUpdates] = useState<number>(
+    () => loadCorpusImportActivity(corpusId).omittedUpdates,
   );
   const explorerOpenedAtRef = useRef<number>(Date.now());
   const recordActivity = useCallback((input: ActivityEventInput) => {
@@ -2526,9 +2540,11 @@ export function LogExplorer({ corpusId }: Props) {
     // above, but remains in its own store. Seed only the safe projected
     // import metadata for the new corpus; never carry the prior corpus's
     // Activity rows across the switch.
+    const seeded = loadCorpusImportActivity(corpusId);
     setActivityLog(
-      appendActivities(createActivityLog(), loadCorpusImportActivity(corpusId)),
+      appendActivities(createActivityLog(), seeded.events),
     );
+    setImportOmittedUpdates(seeded.omittedUpdates);
     explorerOpenedAtRef.current = Date.now();
     const highlights = loadEvidenceHighlights(corpusId);
     if (highlights.length > 0) {
@@ -2643,7 +2659,7 @@ export function LogExplorer({ corpusId }: Props) {
   // Replace only this corpus's prior import correlation; retain Explorer work
   // already recorded in this view and ignore every other corpus.
   useEffect(() => {
-    return subscribeImportRunActivity((changedCorpusId, events) => {
+    return subscribeImportRunActivity((changedCorpusId, events, omittedUpdates) => {
       if (changedCorpusId !== corpusId) return;
       setActivityLog((current) =>
         appendActivities(
@@ -2656,6 +2672,7 @@ export function LogExplorer({ corpusId }: Props) {
           events,
         ),
       );
+      setImportOmittedUpdates(omittedUpdates);
     });
   }, [corpusId]);
 
@@ -8310,6 +8327,7 @@ export function LogExplorer({ corpusId }: Props) {
           clientClock={clientIncidentClock}
           openedAtMs={explorerOpenedAtRef.current}
           log={activityLog}
+          importOmittedUpdates={importOmittedUpdates}
           mode={activity.mode}
           onModeChange={activity.setMode}
           developerDetail={activity.developerDetail}

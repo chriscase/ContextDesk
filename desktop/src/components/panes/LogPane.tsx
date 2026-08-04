@@ -227,6 +227,50 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     importActivityAttemptRef.current = next;
     setImportActivityAttempt(next);
   }, []);
+  /**
+   * Reviewed import (`ImportFlow`, `hostOwnsProgress`) invokes a trusted
+   * `verify_import_plan` re-verification before `run_log_ingest` ever emits
+   * its first `process-progress` event (#900) — a synchronous re-enumeration
+   * of the source that can take real wall time on a large tree. Without a
+   * placeholder, this pane's single progress panel (`ingesting || reanalyzing
+   * || progress`, below) rendered nothing at all during that window, and its
+   * Cancel button — gated on `progress?.cancellable` — could not appear
+   * either. Quick ingest and re-analysis already show their panel
+   * immediately via their own `ingesting`/`reanalyzing` flags, so this seed
+   * is scoped to the reviewed path only via a dedicated `onRunStarted`
+   * wrapper, never touching `startImportActivity` itself (which quick import
+   * also calls directly).
+   *
+   * The seed carries this invocation's own `correlationId` — the same one
+   * `progressOwnerRef` is set to inside `startImportActivity` before this
+   * function returns — so the Cancel button it enables immediately targets
+   * `hostCancelLogIngest(progressOwnerRef.current?.correlationId)`, the
+   * already invocation-scoped host command, exactly as it does once a real
+   * progress event arrives. A genuine `process-progress` update for this
+   * correlation id (the listener above) simply overwrites this placeholder.
+   */
+  const beginReviewedImportProgress = useCallback(
+    (sourceKind: ImportRunInput["sourceKind"]) => {
+      const correlationId = startImportActivity(sourceKind);
+      setProgress({
+        operation_id: null,
+        correlation_id: correlationId,
+        kind: "log_ingest",
+        phase: "starting",
+        message: "Preparing to import — verifying the reviewed plan…",
+        fraction: null,
+        lines_processed: null,
+        files_processed: null,
+        bytes_processed: null,
+        templates: null,
+        cancellable: true,
+        elapsed_ms: null,
+        phase_elapsed_ms: null,
+      });
+      return correlationId;
+    },
+    [startImportActivity],
+  );
   const recordImportRun = useCallback((run: ImportRunInput) => {
     const current =
       importActivityAttemptRef.current ??
@@ -242,7 +286,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     setImportActivityAttempt(settled);
     setLastImportRun(run);
     setBusy(false);
-    void publishImportRunActivity(run, settled.events);
+    void publishImportRunActivity(run, settled.events, settled.omittedUpdates);
   }, []);
   // The same shared preference chat and the Explorer use.
   const activity = useActivityInspector();
@@ -1485,7 +1529,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
               engine={paneEngine}
               variant="pane"
               hostOwnsProgress
-              onRunStarted={startImportActivity}
+              onRunStarted={beginReviewedImportProgress}
               onRunSettled={recordImportRun}
               onPublished={(corpusId) => {
                 void refresh();
