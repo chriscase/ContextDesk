@@ -344,6 +344,20 @@ struct AppState {
     /// Explicitly opt-in, sensitive developer payloads. Process-local only:
     /// this type has no durable writer and is cleared with its chat session.
     developer_activity: Mutex<cd_core::turn_trace::DeveloperDetailStore>,
+    /// One-way per-turn latch: once set, the owning turn's live developer
+    /// detail channel stops sending further events for the rest of that
+    /// turn. A fresh flag is installed at the start of every turn, so
+    /// setting it never affects a later turn on the same session.
+    ///
+    /// Two independent triggers share this single flag rather than each
+    /// getting its own bespoke plumbing:
+    ///   - the session is trashed/deleted while the turn is still running
+    ///     (`retire_chat_session_activity`) — an in-flight observer must not
+    ///     keep delivering a deleted chat's sensitive detail;
+    ///   - the operator turns Developer detail off while the turn is still
+    ///     running (`suppress_developer_activity_detail`) — delivery stops
+    ///     immediately rather than continuing until the turn ends.
+    developer_activity_suppressed: DeveloperDetailSuppressionMap,
     /// Per-session cooperative cancel flags for in-flight turns (#109).
     cancels: Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
     /// Owner generation for each admitted chat turn. A second window cannot
@@ -3856,6 +3870,112 @@ impl Drop for AdmittedAgentTurn<'_> {
     }
 }
 
+type DeveloperDetailSuppressionMap =
+    Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>;
+
+/// Install a fresh, unset suppression flag for `session_id`, replacing
+/// whatever a prior turn left behind, and return it for the new turn to
+/// hold.
+///
+/// Fresh on every call is what makes the flag safe to reuse across turns: a
+/// trash performed after turn A finished, or a toggle-off during turn A,
+/// must never leak forward and wrongly suppress turn B on the same session.
+/// Turn B always gets its own clean flag.
+fn install_developer_detail_suppression_flag(
+    map: &DeveloperDetailSuppressionMap,
+    session_id: &str,
+) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if let Ok(mut map) = map.lock() {
+        map.insert(session_id.to_string(), flag.clone());
+    }
+    flag
+}
+
+/// Set the CURRENT suppression flag for `session_id`, if a turn installed
+/// one.
+///
+/// Never inserts — a session with no in-flight turn has no flag to set, and
+/// inserting one here would only grow the map for a session nobody is about
+/// to resume. Shared by both triggers that must stop live developer-detail
+/// delivery: the session being trashed/deleted, and the operator turning
+/// Developer detail off mid-turn.
+fn suppress_developer_detail_for_session(map: &DeveloperDetailSuppressionMap, session_id: &str) {
+    if let Ok(map) = map.lock() {
+        if let Some(flag) = map.get(session_id) {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+#[cfg(test)]
+mod developer_detail_suppression_tests {
+    use super::*;
+
+    #[test]
+    fn a_fresh_flag_starts_unset() {
+        let map: DeveloperDetailSuppressionMap = Mutex::new(HashMap::new());
+        let flag = install_developer_detail_suppression_flag(&map, "s1");
+        assert!(!flag.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn suppressing_a_session_sets_the_flag_a_live_turn_is_holding() {
+        let map: DeveloperDetailSuppressionMap = Mutex::new(HashMap::new());
+        let flag = install_developer_detail_suppression_flag(&map, "s1");
+        assert!(!flag.load(std::sync::atomic::Ordering::SeqCst));
+        suppress_developer_detail_for_session(&map, "s1");
+        assert!(
+            flag.load(std::sync::atomic::Ordering::SeqCst),
+            "the exact Arc the in-flight turn is holding must observe the change"
+        );
+    }
+
+    #[test]
+    fn suppressing_a_session_with_no_in_flight_turn_is_a_harmless_no_op() {
+        let map: DeveloperDetailSuppressionMap = Mutex::new(HashMap::new());
+        // Must not panic, and must not insert an entry for a session with
+        // nothing running — inserting would leak one map entry per ever-
+        // trashed session for the life of the process.
+        suppress_developer_detail_for_session(&map, "no-such-session");
+        assert!(map.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_new_turn_on_the_same_session_gets_a_fresh_flag_not_the_retired_one() {
+        // This is the exact regression the fresh-flag-per-turn design
+        // exists to prevent: trash a session mid-turn (suppressing turn A's
+        // flag), then start turn B on the SAME session id (as a restore +
+        // new message would). Turn B's flag must start unset.
+        let map: DeveloperDetailSuppressionMap = Mutex::new(HashMap::new());
+        let turn_a_flag = install_developer_detail_suppression_flag(&map, "s1");
+        suppress_developer_detail_for_session(&map, "s1");
+        assert!(turn_a_flag.load(std::sync::atomic::Ordering::SeqCst));
+
+        let turn_b_flag = install_developer_detail_suppression_flag(&map, "s1");
+        assert!(
+            !turn_b_flag.load(std::sync::atomic::Ordering::SeqCst),
+            "a later turn on the same session must not inherit an earlier \
+             turn's suppression"
+        );
+        // And turn A's own flag is untouched by turn B's fresh install —
+        // proving they are genuinely independent Arcs, not the same cell.
+        assert!(turn_a_flag.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn suppressing_after_a_new_turn_installed_only_affects_the_current_flag() {
+        let map: DeveloperDetailSuppressionMap = Mutex::new(HashMap::new());
+        let turn_a_flag = install_developer_detail_suppression_flag(&map, "s1");
+        let turn_b_flag = install_developer_detail_suppression_flag(&map, "s1");
+        // A trash/suppress call arriving after B has started must hit B's
+        // flag (the one the map currently holds), never resurrect A's.
+        suppress_developer_detail_for_session(&map, "s1");
+        assert!(turn_b_flag.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!turn_a_flag.load(std::sync::atomic::Ordering::SeqCst));
+    }
+}
+
 fn admit_agent_turn<'a>(
     owners: &'a Mutex<HashMap<String, u64>>,
     cancels: &'a Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
@@ -4653,12 +4773,31 @@ async fn agent_turn(
     // model → tool → model sequence instead of concatenating two lists later.
     let activity_settings = cfg.activity.clone();
     let channel = on_event.clone();
+    // Fresh one-way latch for THIS turn — see
+    // `install_developer_detail_suppression_flag` for why a fresh flag,
+    // never a reused one.
+    let developer_detail_suppressed = if req.developer_activity_detail {
+        install_developer_detail_suppression_flag(
+            &state.developer_activity_suppressed,
+            &req.session_id,
+        )
+    } else {
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
+    };
     let developer_observer = if req.developer_activity_detail {
         req.client_assistant_message_id.as_ref().map(|message_id| {
             let developer_channel = channel.clone();
             let session_id = req.session_id.clone();
             let message_id = message_id.clone();
+            let suppressed = developer_detail_suppressed.clone();
             std::sync::Arc::new(move |event: cd_core::turn_trace::DeveloperDetailEvent| {
+                // Checked per event, live: a session trashed/deleted mid-turn
+                // or a Developer-detail toggle-off must stop delivery of
+                // further sensitive detail immediately, not merely at the
+                // next turn.
+                if suppressed.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
                 let _ = developer_channel.send(EventDto {
                     kind: "developer_activity".to_string(),
                     payload: serde_json::json!({
@@ -5322,6 +5461,21 @@ fn retire_chat_session_activity(state: &AppState, session_id: &str) {
     if let Ok(mut developer) = state.developer_activity.lock() {
         developer.forget_session(session_id);
     }
+    // Stop any turn still running for this session from delivering further
+    // live developer detail.
+    suppress_developer_detail_for_session(&state.developer_activity_suppressed, session_id);
+}
+
+/// Stop live delivery of developer detail for a session's in-flight turn.
+///
+/// Called when the operator turns Developer detail off while a turn is
+/// still streaming. One-way: the same latch `retire_chat_session_activity`
+/// uses, so a stale re-enable can never resurrect delivery for a turn that
+/// was already cut off. A later turn on the same session is unaffected — it
+/// installs its own fresh flag when it starts.
+#[tauri::command]
+fn suppress_developer_activity_detail(state: State<'_, AppState>, session_id: String) {
+    suppress_developer_detail_for_session(&state.developer_activity_suppressed, &session_id);
 }
 
 /// Pin / unpin a chat for the sidebar.
@@ -12312,6 +12466,7 @@ pub fn run() {
         // multi-process writer review. Do not hydrate sidecars at startup.
         activity: Mutex::new(cd_core::activity::ActivityStore::default()),
         developer_activity: Mutex::new(cd_core::turn_trace::DeveloperDetailStore::default()),
+        developer_activity_suppressed: Mutex::new(HashMap::new()),
         cancels: Mutex::new(HashMap::new()),
         active_turn_owners: Mutex::new(HashMap::new()),
         next_turn_owner: std::sync::atomic::AtomicU64::new(0),
@@ -12434,6 +12589,7 @@ pub fn run() {
             get_turn_activity,
             get_developer_turn_activity,
             forget_session_activity,
+            suppress_developer_activity_detail,
             set_provider_tools_enabled,
             set_model_tools_enabled,
             get_curation_summary,

@@ -463,7 +463,7 @@ export async function completePermission(
     },
   });
   const owner = sessionId?.trim();
-  if (owner) publishTurnActivityUpdate({ sessionId: owner });
+  if (owner) void publishTurnActivityUpdate({ sessionId: owner });
   return events;
 }
 
@@ -1408,10 +1408,17 @@ export async function hostTrashChatSession(
 ): Promise<ChatSessionDto | null> {
   if (!isTauri()) return null;
   const session = await invoke<ChatSessionDto>("trash_chat_session", { id });
-  // Host also retires activity; belt-and-suspenders so the renderer cache
-  // cannot keep a stale explanation after trash.
+  // Host also retires activity server-side. This does two more things a
+  // server-side retirement alone cannot: (1) tell every mounted renderer —
+  // in THIS webview and any other open Tauri window — to drop its own
+  // cached record for this session, so a pane that isn't the one that
+  // triggered trash (e.g. the chat archive list trashing a session shown in
+  // a different window) cannot keep displaying it; (2) it is a no-op,
+  // idempotent belt-and-suspenders call, safe even if the host-side
+  // retirement already ran.
   const { forgetSessionActivity } = await import("./engine/turnActivity");
   await forgetSessionActivity(id);
+  await publishTurnActivityUpdate({ sessionId: id, retired: true });
   return session;
 }
 
@@ -1429,6 +1436,26 @@ export async function hostDeleteChatSession(id: string): Promise<void> {
   await invoke("delete_chat_session", { id });
   const { forgetSessionActivity } = await import("./engine/turnActivity");
   await forgetSessionActivity(id);
+  await publishTurnActivityUpdate({ sessionId: id, retired: true });
+}
+
+/**
+ * Stop live delivery of Developer detail for a session's in-flight turn.
+ *
+ * Called when the operator turns Developer detail off while a turn is still
+ * streaming — the host-side latch is one-way, so this only ever stops
+ * delivery early; it can never resurrect it for a turn already cut off.
+ */
+export async function hostSuppressDeveloperActivityDetail(
+  sessionId: string,
+): Promise<void> {
+  if (!isTauri() || !sessionId) return;
+  try {
+    await invoke("suppress_developer_activity_detail", { sessionId });
+  } catch {
+    // Best-effort: worst case the in-flight turn keeps streaming detail
+    // until it ends, same as before this fix.
+  }
 }
 
 export async function hostPinChatSession(

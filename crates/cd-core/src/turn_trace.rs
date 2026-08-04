@@ -457,6 +457,32 @@ impl DeveloperDetailDraft {
         }
     }
 
+    /// Build a rejected tool call — the model attempted a call that was
+    /// refused before host execution, so there is no [`Self::tool_result`]
+    /// to follow it. Used only where no `tool_call` draft could be built
+    /// either (malformed/non-object arguments): `raw_request` is the best
+    /// available evidence of what was attempted — the verbatim unparsable
+    /// text, already redacted/bounded like any other payload.
+    pub fn tool_rejected(
+        round: u32,
+        name: &str,
+        raw_request: DeveloperPayload,
+        detail: &str,
+    ) -> Self {
+        Self {
+            kind: DeveloperDetailKind::ToolCall,
+            label: format!("Rejected tool call: {name}"),
+            provider: None,
+            model: None,
+            round: Some(round),
+            tool_name: Some(name.to_string()),
+            offered_tools: Vec::new(),
+            request: vec![raw_request],
+            response: Some(DeveloperPayload::text(detail)),
+            status: "rejected".to_string(),
+        }
+    }
+
     /// Build a deterministic stage with no content payload.
     pub fn stage(label: impl Into<String>, status: impl Into<String>) -> Self {
         Self {
@@ -848,6 +874,37 @@ impl RecordingTurnTrace {
                         status: reason.clone(),
                     })
                 }
+                // Every other reason a turn ended without delivering an
+                // answer — budget, an unresolved linked requirement, an
+                // exhausted permission loop, a context that would not fit.
+                // Shares the product's own withheld-reason list
+                // (`events::is_withheld_turn_reason`) so this can never
+                // disagree with what the ordinary activity record reports.
+                StreamEvent::TurnCompleted { reason }
+                    if crate::events::is_withheld_turn_reason(reason) =>
+                {
+                    Some(DeveloperDetailDraft::stage(
+                        "Turn withheld".to_string(),
+                        reason.clone(),
+                    ))
+                }
+                // A generic host error. `message` is already contracted as
+                // safe-for-UI (see `StreamEvent::Error`'s own docs), but it
+                // still passes through `DeveloperPayload::text` — the same
+                // redaction/bounding every other payload in this file gets —
+                // rather than being trusted and stored directly.
+                StreamEvent::Error { code, message } => Some(DeveloperDetailDraft {
+                    kind: DeveloperDetailKind::DeterministicStage,
+                    label: format!("Host error: {code}"),
+                    provider: None,
+                    model: None,
+                    round: None,
+                    tool_name: None,
+                    offered_tools: Vec::new(),
+                    request: Vec::new(),
+                    response: Some(DeveloperPayload::text(message)),
+                    status: "error".to_string(),
+                }),
                 _ => None,
             };
             if let Some(detail) = detail {
@@ -1778,6 +1835,101 @@ mod tests {
             .unwrap();
         assert!(sink.developer_events().is_empty());
         assert!(!format!("{sink:?}").contains("private-default-off-sentinel"));
+    }
+
+    #[test]
+    fn a_generic_host_error_reaches_the_developer_trace_redacted() {
+        let sink = RecordingTurnTrace::with_developer_detail(Instant::now(), Arc::new(|_| {}));
+        let tool_kinds = std::collections::HashMap::new();
+        sink.record_host_event(
+            &crate::events::StreamEvent::Error {
+                code: "context_too_long".into(),
+                message: "budget exceeded, key=sk-realsecretvalue0123456789ABCDEF".to_string(),
+            },
+            &tool_kinds,
+        );
+        let events = sink.developer_events();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].kind, DeveloperDetailKind::DeterministicStage);
+        assert_eq!(events[0].label, "Host error: context_too_long");
+        let response = events[0].response.as_ref().expect("response payload");
+        assert!(
+            !response.content.contains("sk-realsecretvalue"),
+            "a generic error message must be redacted before capture: {}",
+            response.content
+        );
+        assert!(response.content.contains("budget exceeded"));
+    }
+
+    #[test]
+    fn withheld_turn_reasons_beyond_cancel_reach_the_developer_trace() {
+        let sink = RecordingTurnTrace::with_developer_detail(Instant::now(), Arc::new(|_| {}));
+        let tool_kinds = std::collections::HashMap::new();
+        for reason in [
+            "context_too_long",
+            "budget_time",
+            "linked_synthesis_timeout",
+        ] {
+            sink.record_host_event(
+                &crate::events::StreamEvent::TurnCompleted {
+                    reason: reason.to_string(),
+                },
+                &tool_kinds,
+            );
+        }
+        let events = sink.developer_events();
+        assert_eq!(events.len(), 3, "{events:?}");
+        for (event, reason) in events.iter().zip([
+            "context_too_long",
+            "budget_time",
+            "linked_synthesis_timeout",
+        ]) {
+            assert_eq!(event.kind, DeveloperDetailKind::DeterministicStage);
+            assert_eq!(event.status, reason);
+        }
+    }
+
+    #[test]
+    fn cancellation_is_still_its_own_kind_not_swallowed_by_the_withheld_branch() {
+        // Regression pin for the broadened match: `cancel`/`cancelled` are
+        // NOT in `WITHHELD_TURN_REASONS`, but if a future edit reordered the
+        // match arms (or added them to that list) this would silently
+        // reclassify a user-initiated cancel as a generic withheld reason.
+        let sink = RecordingTurnTrace::with_developer_detail(Instant::now(), Arc::new(|_| {}));
+        let tool_kinds = std::collections::HashMap::new();
+        sink.record_host_event(
+            &crate::events::StreamEvent::TurnCompleted {
+                reason: "cancel".to_string(),
+            },
+            &tool_kinds,
+        );
+        let events = sink.developer_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, DeveloperDetailKind::Cancellation);
+        assert!(
+            !crate::events::is_withheld_turn_reason("cancel"),
+            "this test's premise (cancel is not a withheld reason) must hold"
+        );
+    }
+
+    #[test]
+    fn tool_rejected_draft_carries_the_raw_request_and_rejection_detail() {
+        let draft = DeveloperDetailDraft::tool_rejected(
+            2,
+            "search_kb",
+            DeveloperPayload::text("{not json"),
+            "malformed arguments",
+        );
+        assert_eq!(draft.kind, DeveloperDetailKind::ToolCall);
+        assert_eq!(draft.round, Some(2));
+        assert_eq!(draft.tool_name.as_deref(), Some("search_kb"));
+        assert_eq!(draft.status, "rejected");
+        assert_eq!(draft.request.len(), 1);
+        assert!(draft.request[0].content.contains("{not json"));
+        assert_eq!(
+            draft.response.as_ref().unwrap().content,
+            "malformed arguments"
+        );
     }
 
     #[test]

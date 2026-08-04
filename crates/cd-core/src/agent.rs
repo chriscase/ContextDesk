@@ -2925,6 +2925,20 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                         tool_call_id: Some(tc.id),
                         tool_calls: None,
                     });
+                    if let Some(trace) = opts
+                        .developer_trace
+                        .as_ref()
+                        .filter(|trace| trace.developer_detail_enabled())
+                    {
+                        trace.record_developer(
+                            crate::turn_trace::DeveloperDetailDraft::tool_rejected(
+                                u32::try_from(round).unwrap_or(u32::MAX),
+                                &resolved_tool_name,
+                                crate::turn_trace::DeveloperPayload::text(&tc.function.arguments),
+                                &detail,
+                            ),
+                        );
+                    }
                     continue;
                 }
                 Err(_) => {
@@ -2947,6 +2961,20 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                         tool_call_id: Some(tc.id),
                         tool_calls: None,
                     });
+                    if let Some(trace) = opts
+                        .developer_trace
+                        .as_ref()
+                        .filter(|trace| trace.developer_detail_enabled())
+                    {
+                        trace.record_developer(
+                            crate::turn_trace::DeveloperDetailDraft::tool_rejected(
+                                u32::try_from(round).unwrap_or(u32::MAX),
+                                &resolved_tool_name,
+                                crate::turn_trace::DeveloperPayload::text(&tc.function.arguments),
+                                &detail,
+                            ),
+                        );
+                    }
                     continue;
                 }
             };
@@ -2989,6 +3017,18 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                     tool_call_id: Some(tc.id),
                     tool_calls: None,
                 });
+                if let Some(trace) = opts
+                    .developer_trace
+                    .as_ref()
+                    .filter(|trace| trace.developer_detail_enabled())
+                {
+                    trace.record_developer(crate::turn_trace::DeveloperDetailDraft::tool_result(
+                        u32::try_from(round).unwrap_or(u32::MAX),
+                        &resolved_tool_name,
+                        false,
+                        &detail,
+                    ));
+                }
                 continue;
             }
 
@@ -3018,6 +3058,18 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                     tool_call_id: Some(tc.id),
                     tool_calls: None,
                 });
+                if let Some(trace) = opts
+                    .developer_trace
+                    .as_ref()
+                    .filter(|trace| trace.developer_detail_enabled())
+                {
+                    trace.record_developer(crate::turn_trace::DeveloperDetailDraft::tool_result(
+                        u32::try_from(round).unwrap_or(u32::MAX),
+                        &resolved_tool_name,
+                        false,
+                        &detail,
+                    ));
+                }
                 continue;
             }
             if !linked_turn && crate::log_analysis::is_log_tool(&resolved_tool_name) {
@@ -3042,6 +3094,18 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                     tool_call_id: Some(tc.id),
                     tool_calls: None,
                 });
+                if let Some(trace) = opts
+                    .developer_trace
+                    .as_ref()
+                    .filter(|trace| trace.developer_detail_enabled())
+                {
+                    trace.record_developer(crate::turn_trace::DeveloperDetailDraft::tool_result(
+                        u32::try_from(round).unwrap_or(u32::MAX),
+                        &resolved_tool_name,
+                        false,
+                        &detail,
+                    ));
+                }
                 continue;
             }
 
@@ -5418,6 +5482,135 @@ mod tests {
                 .filter(|message| message.role == Role::Tool)
                 .any(|message| message.content.contains("AMBIENT_LOG_MUST_NOT_LEAK")),
             "ordinary chat resolved the ambient Explorer corpus"
+        );
+    }
+
+    /// Every pre-execution tool rejection must reach the developer trace, in
+    /// causal order, even though none of them ever call `host.execute`. This
+    /// scripts all three previously-vanishing shapes in one turn: malformed
+    /// JSON arguments, non-object arguments, and an ordinary-chat log-tool
+    /// rejection — plus one ordinary successful round, to prove the fix did
+    /// not disturb the already-working capture path.
+    #[tokio::test]
+    async fn developer_trace_captures_every_previously_vanishing_rejection() {
+        use crate::turn_trace::{DeveloperDetailKind, RecordingTurnTrace, TurnTraceObserver};
+        use std::sync::Arc;
+
+        let dir = tempdir().unwrap();
+        let ws = Workspace::new("vanish-t", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+
+        let backend = ScriptedBackend::new(vec![
+            // 1. Malformed JSON — arguments that do not even parse.
+            ChatCompletion {
+                content: String::new(),
+                tool_calls: vec![ToolCallMsg {
+                    id: "malformed".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "search_kb".into(),
+                        arguments: "{not json".into(),
+                    },
+                }],
+                finish_reason: "tool_calls".into(),
+            },
+            // 2. Valid JSON, but not an object.
+            ChatCompletion {
+                content: String::new(),
+                tool_calls: vec![ToolCallMsg {
+                    id: "non-object".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "search_kb".into(),
+                        arguments: "[1,2,3]".into(),
+                    },
+                }],
+                finish_reason: "tool_calls".into(),
+            },
+            // 3. A well-formed call to a log tool from an ordinary
+            //    (non-linked) chat — rejected by scope, not by arguments.
+            ChatCompletion {
+                content: String::new(),
+                tool_calls: vec![ToolCallMsg {
+                    id: "no-linked-corpus".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: crate::log_analysis::SEARCH_LOGS.into(),
+                        arguments: r#"{"query":"anything"}"#.into(),
+                    },
+                }],
+                finish_reason: "tool_calls".into(),
+            },
+            // 4. The model gives up and answers directly.
+            ChatCompletion {
+                content: "done".into(),
+                tool_calls: vec![],
+                finish_reason: "stop".into(),
+            },
+        ]);
+
+        let sink = Arc::new(RecordingTurnTrace::with_developer_detail(
+            std::time::Instant::now(),
+            Arc::new(|_event| {}),
+        ));
+        let mut history = Vec::new();
+        run_agent_turn(
+            &backend,
+            &mut host,
+            "hi",
+            &mut history,
+            &AgentOptions {
+                session_id: "vanish".into(),
+                log_explorer_context: None,
+                developer_trace: Some(TurnTraceObserver::new(sink.clone())),
+                max_rounds: 6,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let events = sink.developer_events();
+        let kinds: Vec<DeveloperDetailKind> = events.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                DeveloperDetailKind::ToolCall,   // malformed JSON: rejected-call draft
+                DeveloperDetailKind::ToolCall,   // non-object: rejected-call draft
+                DeveloperDetailKind::ToolCall,   // search_logs: model's original call
+                DeveloperDetailKind::ToolResult, // search_logs: rejected-result draft
+            ],
+            "every rejection that used to vanish must now appear, in the exact \
+             order the model→tool exchange actually happened; got {events:?}"
+        );
+
+        // Causal order: monotonic, and never fabricated (each entry's
+        // `elapsed_ms` is Some, populated from the real turn clock).
+        for pair in events.windows(2) {
+            assert!(pair[0].seq < pair[1].seq, "{events:?}");
+        }
+        assert!(events.iter().all(|e| e.elapsed_ms.is_some()));
+
+        assert_eq!(events[0].status, "rejected");
+        assert!(
+            events[0].request[0].content.contains("{not json"),
+            "the malformed request must retain the raw text as evidence: {:?}",
+            events[0]
+        );
+        assert_eq!(events[1].status, "rejected");
+        assert!(events[1].request[0].content.contains("[1,2,3]"));
+        assert_eq!(events[2].status, "selected"); // the tool_call draft itself
+        assert_eq!(events[3].status, "failed"); // the rejection result
+        assert!(
+            events[3]
+                .response
+                .as_ref()
+                .unwrap()
+                .content
+                .contains("not available to an ordinary chat"),
+            "{:?}",
+            events[3]
         );
     }
 

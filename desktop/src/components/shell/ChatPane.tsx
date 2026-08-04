@@ -14,6 +14,7 @@ import type { ChatSession, Msg } from "../../lib/session";
 import {
   hostOpenLogExplorer,
   hostOpenLogExplorerTarget,
+  hostSuppressDeveloperActivityDetail,
   type BrandingDto,
   type ModelOptionDto,
 } from "../../lib/host";
@@ -313,15 +314,51 @@ export function ChatPane(props: ChatPaneProps) {
   );
 
   // A permission decision mutates the already-settled host record after the
-  // original turn. Refresh the exact open session immediately so an Allow or
-  // Deny cannot remain shown as merely pending until this pane is remounted.
+  // original turn, and a trash/delete retires it entirely. This subscription
+  // stays live REGARDLESS of `activity.mode` — a missed update while the
+  // inspector is Off must not become permanently stale once it is turned
+  // back On, and it must also reach this pane from a decision made in a
+  // different Tauri window (the bridge is cross-webview; see
+  // turnActivityUpdateBridge).
+  //
+  // While mode is "off" this only EVICTS the affected cache entries rather
+  // than fetching — fetching while nothing renders would be pointless IPC.
+  // Eviction is what makes the later re-enable correct: `pendingRecordIds`
+  // only re-fetches ids that are NOT already cached, so a stale cached
+  // "pending" record that is never evicted would otherwise survive a
+  // mode: off -> on transition unrefreshed.
   useEffect(() => {
-    if (activity.mode === "off") return;
     return subscribeTurnActivityUpdate((update) => {
       if (update.sessionId !== resolvedSessionId) return;
+
+      if (update.retired) {
+        // The whole session was retired. Every cached record for it (in
+        // this pane) is now either wrong or forbidden to keep — clear both
+        // caches wholesale rather than try to enumerate which message ids
+        // might still be referenced.
+        setActivityRecords({});
+        setDeveloperRecords({});
+        return;
+      }
+
       const messageIds = messages
         .filter((message) => message.role === "assistant" && !message.streaming)
         .map((message) => message.id);
+
+      if (activity.mode === "off") {
+        setActivityRecords((current) => {
+          const next = { ...current };
+          for (const id of messageIds) delete next[id];
+          return next;
+        });
+        setDeveloperRecords((current) => {
+          const next = { ...current };
+          for (const id of messageIds) delete next[id];
+          return next;
+        });
+        return;
+      }
+
       void (async () => {
         const refreshed: Record<string, HostTurnActivityRecord> = {};
         for (const messageId of messageIds) {
@@ -398,6 +435,28 @@ export function ChatPane(props: ChatPaneProps) {
     [activityRecords, activity.developerDetail, developerRecords],
   );
 
+  // Turning Developer detail off while a turn is still streaming stops the
+  // host from delivering further sensitive events for THIS turn immediately
+  // (see `suppress_developer_activity_detail`) rather than continuing
+  // silently until the turn ends. Capture already in flight for the current
+  // round is not retroactively un-sent; the safest bound achievable without
+  // threading a live flag through the whole tool loop is "no further
+  // delivery from the moment the operator asks for it", which is what this
+  // gives. Turning it back on only ever affects a later turn.
+  const handleDeveloperDetailChange = useCallback(
+    (enabled: boolean) => {
+      activity.setDeveloperDetail(enabled);
+      if (enabled || !resolvedSessionId) return;
+      const hasStreamingTurn = messages.some(
+        (message) => message.role === "assistant" && message.streaming,
+      );
+      if (hasStreamingTurn) {
+        void hostSuppressDeveloperActivityDetail(resolvedSessionId);
+      }
+    },
+    [activity, resolvedSessionId, messages],
+  );
+
   // Docked mode defaults to the latest settled assistant turn so the rail is
   // never blank the moment a user opts in.
   useEffect(() => {
@@ -450,7 +509,7 @@ export function ChatPane(props: ChatPaneProps) {
             mode={activity.mode}
             onChange={activity.setMode}
             developerDetail={activity.developerDetail}
-            onDeveloperDetailChange={activity.setDeveloperDetail}
+            onDeveloperDetailChange={handleDeveloperDetailChange}
           />
           <div className="chat-new-split" title="New chat">
             <button

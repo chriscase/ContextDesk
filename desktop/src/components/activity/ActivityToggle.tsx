@@ -180,7 +180,8 @@ export function ActivityToggle({
                   </span>
                   <span className="activity-toggle__option-desc">
                     Sensitive: show redacted request, response, tool arguments,
-                    and results. Process lifetime only.
+                    and results. Process lifetime only. Turning this off stops
+                    new detail immediately, even mid-turn.
                   </span>
                 </button>
               ) : null}

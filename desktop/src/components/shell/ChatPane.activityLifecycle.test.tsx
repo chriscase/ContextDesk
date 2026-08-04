@@ -2,7 +2,7 @@ import { createRef } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HostTurnActivityRecord } from "../../lib/activity/types";
-import { saveActivityMode } from "../../lib/activity/prefs";
+import { saveActivityMode, saveDeveloperActivityDetail } from "../../lib/activity/prefs";
 import { publishTurnActivityUpdate } from "../../lib/activity/turnActivityUpdateBridge";
 import type { Msg } from "../../lib/session";
 import { ChatPane } from "./ChatPane";
@@ -11,8 +11,18 @@ const engine = vi.hoisted(() => ({
   fetchTurnActivity: vi.fn(),
   fetchDeveloperTurnActivity: vi.fn(async () => []),
 }));
+const hostMocks = vi.hoisted(() => ({
+  suppressDeveloperActivityDetail: vi.fn(async () => undefined),
+}));
 
 vi.mock("../../lib/engine/turnActivity", () => engine);
+vi.mock("../../lib/host", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../lib/host")>();
+  return {
+    ...original,
+    hostSuppressDeveloperActivityDetail: hostMocks.suppressDeveloperActivityDetail,
+  };
+});
 vi.mock("./MessageRow", () => ({
   MessageRow: ({
     msg,
@@ -147,7 +157,9 @@ function props() {
 
 beforeEach(() => {
   saveActivityMode("off");
+  saveDeveloperActivityDetail(false);
   engine.fetchTurnActivity.mockReset();
+  hostMocks.suppressDeveloperActivityDetail.mockClear();
 });
 
 afterEach(() => {
@@ -190,5 +202,147 @@ describe("ChatPane late activity lifecycle", () => {
     publishTurnActivityUpdate({ sessionId: "session-a" });
     await waitFor(() => expect(state.textContent).toMatch(/^recorded by host/));
     expect(state.textContent).not.toMatch(/^not recorded by host/);
+  });
+
+  // Item 2: a permission decision that resolves while Activity is Off must
+  // not leave the eventual On view stuck on stale/absent state — see
+  // ChatPane's subscribeTurnActivityUpdate effect for the eviction design.
+  it("evicts (not fetches) on an update while Off, so turning On refetches fresh", async () => {
+    engine.fetchTurnActivity
+      .mockResolvedValueOnce(permissionRecord(false)) // initial load, mode On
+      .mockResolvedValueOnce(permissionRecord(true)); // refetch after Off->On
+    render(<ChatPane {...props()} />);
+    fireEvent.click(screen.getByTestId("activity-toggle-trigger"));
+    fireEvent.click(screen.getByTestId("activity-toggle-compact"));
+
+    const state = await screen.findByTestId("activity-state-assistant-1");
+    await waitFor(() => expect(state.textContent).toContain("pending:Awaiting permission"));
+    expect(engine.fetchTurnActivity).toHaveBeenCalledTimes(1);
+
+    // Turn Activity Off. The permission then resolves while Off — the
+    // update must be observed (eviction), not silently missed.
+    fireEvent.click(screen.getByTestId("activity-toggle-trigger"));
+    fireEvent.click(screen.getByTestId("activity-toggle-off"));
+    publishTurnActivityUpdate({ sessionId: "session-a" });
+
+    // No new fetch while Off — eviction is local, not an IPC round trip.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(engine.fetchTurnActivity).toHaveBeenCalledTimes(1);
+
+    // Turn back On: the evicted cache entry must be re-fetched, landing on
+    // the CURRENT (resolved) record — not the stale pending one a
+    // non-evicting implementation would have kept showing.
+    fireEvent.click(screen.getByTestId("activity-toggle-trigger"));
+    fireEvent.click(screen.getByTestId("activity-toggle-compact"));
+    await waitFor(() =>
+      expect(state.textContent).toContain("ok:Permission allowed: save_memory"),
+    );
+    expect(engine.fetchTurnActivity).toHaveBeenCalledTimes(2);
+  });
+
+  // Item 3: trash/delete must invalidate this pane's cache even though this
+  // pane did not initiate the trash (e.g. triggered from the archive list,
+  // or — via the cross-webview bridge — from a different Tauri window).
+  it("clears cached activity for a session reported retired, regardless of mode", async () => {
+    engine.fetchTurnActivity
+      .mockResolvedValueOnce(permissionRecord(true))
+      // The host has genuinely forgotten this session's activity by the
+      // time any subsequent fetch (mode is still On, so the ordinary
+      // pending-fetch effect legitimately re-asks for the now-evicted
+      // entry) reaches it — a retired session's record is null.
+      .mockResolvedValue(null);
+    render(<ChatPane {...props()} />);
+    fireEvent.click(screen.getByTestId("activity-toggle-trigger"));
+    fireEvent.click(screen.getByTestId("activity-toggle-compact"));
+
+    const state = await screen.findByTestId("activity-state-assistant-1");
+    await waitFor(() => expect(state.textContent).toMatch(/^recorded by host/));
+
+    publishTurnActivityUpdate({ sessionId: "session-a", retired: true });
+
+    // The subscription handler itself evicts synchronously; the eventual
+    // settled state (after any legitimate mode-on refetch) must reflect
+    // that the host has nothing for this turn — never the stale
+    // pre-retirement record.
+    await waitFor(() =>
+      expect(state.textContent).toMatch(/^not recorded by host/),
+    );
+  });
+
+  it("does not clear an unrelated session's cache on a retirement update", async () => {
+    engine.fetchTurnActivity.mockResolvedValue(permissionRecord(true));
+    render(<ChatPane {...props()} />);
+    fireEvent.click(screen.getByTestId("activity-toggle-trigger"));
+    fireEvent.click(screen.getByTestId("activity-toggle-compact"));
+
+    const state = await screen.findByTestId("activity-state-assistant-1");
+    await waitFor(() => expect(state.textContent).toMatch(/^recorded by host/));
+
+    publishTurnActivityUpdate({ sessionId: "some-other-session", retired: true });
+    // Give any (incorrect) handler a turn to run before asserting nothing changed.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(state.textContent).toMatch(/^recorded by host/);
+  });
+});
+
+// Item 4: turning Developer detail off while a turn is streaming must stop
+// live delivery immediately (see `suppress_developer_activity_detail`),
+// not silently continue until the turn ends.
+describe("ChatPane developer detail mid-turn toggle", () => {
+  it("suppresses the in-flight turn when turned off while a message is streaming", async () => {
+    engine.fetchTurnActivity.mockResolvedValue(null);
+    const streamingMessage: Msg = { ...message, id: "assistant-2", streaming: true };
+    const base = props();
+    render(
+      <ChatPane
+        {...base}
+        messages={[streamingMessage]}
+        visibleMessages={[streamingMessage]}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("activity-toggle-trigger"));
+    fireEvent.click(screen.getByTestId("activity-toggle-developer-detail")); // On
+    expect(hostMocks.suppressDeveloperActivityDetail).not.toHaveBeenCalled();
+
+    // The developer-detail checkbox does not close the menu, so it can be
+    // clicked again directly to toggle back off.
+    fireEvent.click(screen.getByTestId("activity-toggle-developer-detail")); // Off, mid-stream
+
+    await waitFor(() =>
+      expect(hostMocks.suppressDeveloperActivityDetail).toHaveBeenCalledWith("session-a"),
+    );
+    expect(hostMocks.suppressDeveloperActivityDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not call suppress when turned off with no streaming turn", async () => {
+    engine.fetchTurnActivity.mockResolvedValue(null);
+    render(<ChatPane {...props()} />); // `message` here is not streaming
+
+    fireEvent.click(screen.getByTestId("activity-toggle-trigger"));
+    fireEvent.click(screen.getByTestId("activity-toggle-developer-detail")); // On
+    fireEvent.click(screen.getByTestId("activity-toggle-developer-detail")); // Off
+
+    // Give the (would-be) call a turn to happen before asserting it did not.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(hostMocks.suppressDeveloperActivityDetail).not.toHaveBeenCalled();
+  });
+
+  it("does not call suppress when turning developer detail ON", async () => {
+    engine.fetchTurnActivity.mockResolvedValue(null);
+    const streamingMessage: Msg = { ...message, id: "assistant-2", streaming: true };
+    render(
+      <ChatPane
+        {...props()}
+        messages={[streamingMessage]}
+        visibleMessages={[streamingMessage]}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("activity-toggle-trigger"));
+    fireEvent.click(screen.getByTestId("activity-toggle-developer-detail")); // Off -> On
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(hostMocks.suppressDeveloperActivityDetail).not.toHaveBeenCalled();
   });
 });
