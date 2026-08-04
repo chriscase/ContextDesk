@@ -386,4 +386,54 @@ mod tests {
         assert!(human.contains("activity:"));
         assert!(!human.contains("sk-"));
     }
+
+    /// Compaction signal on the shipped projection path: agent emits
+    /// `StreamEvent::Error { code: "context_compacted" }` after
+    /// `fit_model_context_to_budget` / reactive compact; CLI activity must
+    /// surface it (same live `record_host_event` → timeline-only project).
+    #[test]
+    fn projects_context_compacted_signal_from_shared_timeline() {
+        let sink = Arc::new(RecordingTurnTrace::new());
+        let kinds = empty_kinds();
+        let events = vec![
+            StreamEvent::TurnStarted {
+                session_id: "s".into(),
+                model: Some("m".into()),
+            },
+            StreamEvent::Error {
+                code: "context_compacted".into(),
+                message: "Conversation grew large — older turns were compacted for the model."
+                    .into(),
+            },
+            StreamEvent::TurnCompleted {
+                reason: "stop".into(),
+            },
+        ];
+        for e in &events {
+            sink.record_host_event(e, &kinds);
+        }
+        let record = project_turn_activity(
+            "s",
+            "s::t",
+            None,
+            ActivityLevel::Summary,
+            Some(sink.as_ref()),
+            &events,
+            30,
+        );
+        let labels: Vec<_> = record.events.iter().map(|e| e.label.as_str()).collect();
+        assert!(
+            labels
+                .iter()
+                .any(|l| l.contains("Error: context_compacted")),
+            "compaction signal must appear on activity timeline: {labels:?}"
+        );
+        let compact = record
+            .events
+            .iter()
+            .find(|e| e.operation_id == "error-context_compacted")
+            .expect("operation_id error-context_compacted");
+        assert_eq!(compact.phase, ActivityPhase::Completed);
+        assert_eq!(compact.status, ActivityStatus::Failed);
+    }
 }
