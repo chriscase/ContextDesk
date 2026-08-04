@@ -6127,8 +6127,7 @@ mod tests {
                 )
             })
             .collect();
-        let kinds: Vec<DeveloperDetailKind> =
-            tool_events.iter().map(|event| event.kind).collect();
+        let kinds: Vec<DeveloperDetailKind> = tool_events.iter().map(|event| event.kind).collect();
         assert_eq!(
             kinds,
             vec![

@@ -17,7 +17,7 @@ use cd_core::agent::ChatBackend;
 use cd_core::chat::{ChatCompletion, ChatMessage, Role};
 use cd_core::error::{CoreError, CoreResult};
 use cd_core::tools::ToolSpec;
-use cd_core::turn_trace::{RecordingTurnTrace, TracingChatBackend, TurnTraceSink};
+use cd_core::turn_trace::{RecordingTurnTrace, TracedOutcome, TracingChatBackend, TurnTraceSink};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -179,8 +179,18 @@ async fn a_multi_round_turn_yields_one_ordered_event_per_round() {
 // ---------------------------------------------------------------------
 
 #[tokio::test]
-async fn a_failed_round_is_recorded_as_failed_with_a_redacted_reason() {
+async fn a_failed_round_keeps_redacted_trace_detail_but_an_opaque_activity_reason() {
     let recorder = traced_rounds(ScriptedBackend::failing_on(1), 2).await;
+    let calls = recorder.calls();
+    let TracedOutcome::Failed { message } = &calls[1].outcome else {
+        panic!("second provider call must be captured as failed");
+    };
+    assert!(
+        !message.contains("sk-synthetic-not-a-real-key") && message.contains("sk-***"),
+        "the explicitly requested trace keeps useful error text only after redaction: {message}"
+    );
+    assert!(message.contains("upstream rejected token"));
+
     let record = record_from(
         &recorder,
         DataScope::conversation(),
@@ -192,22 +202,10 @@ async fn a_failed_round_is_recorded_as_failed_with_a_redacted_reason() {
     assert_eq!(record.events[0].status, ActivityStatus::Ok);
     assert_eq!(record.events[1].status, ActivityStatus::Failed);
 
-    let detail = record.events[1].detail.as_deref().unwrap_or_default();
-    assert!(
-        !detail.contains("sk-synthetic-not-a-real-key"),
-        "a failure reason must be redacted before it reaches an activity \
-         record; got: {detail}"
-    );
-    // Not merely "absent": the redaction marker must actually be there, so
-    // this cannot pass because the detail was empty or the reason was
-    // dropped wholesale.
-    assert!(
-        detail.contains("sk-***"),
-        "the secret-shaped token must be REPLACED, not just missing; got: {detail}"
-    );
-    assert!(
-        detail.contains("upstream rejected token"),
-        "and the useful part of the reason must survive; got: {detail}"
+    assert_eq!(
+        record.events[1].detail.as_deref(),
+        Some("Provider request failed before completion"),
+        "durable summary Activity must not retain provider bodies, endpoints, paths, or errors"
     );
 }
 
