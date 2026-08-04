@@ -9675,6 +9675,7 @@ async fn log_preview_import(
 /// before staging. The UI's disabled state is a courtesy, never the
 /// enforcement.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn log_run_import(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
