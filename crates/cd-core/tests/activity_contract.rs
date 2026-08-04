@@ -1240,7 +1240,7 @@ fn host_trash_and_delete_commands_call_retire_chat_session_activity() {
     );
 
     // Completion and deletion must share a lifecycle boundary. Otherwise an
-    // in-flight turn can save its sidecar after trash/delete removed it.
+    // in-flight turn can recreate activity after trash/delete removed it.
     let start = src
         .find("fn record_turn_activity")
         .expect("record_turn_activity host path");
@@ -1264,5 +1264,31 @@ fn host_trash_and_delete_commands_call_retire_chat_session_activity() {
     assert!(
         mutation < retired_guard && retired_guard < memory && memory < insertion,
         "session existence and activity publication must share one ordered lifecycle"
+    );
+
+    let permission_start = src
+        .find("async fn complete_permission_cmd")
+        .expect("permission completion host path");
+    let permission_end = src[permission_start..]
+        .find("\n#[tauri::command]\nfn reindex")
+        .map(|offset| permission_start + offset)
+        .expect("end of complete_permission_cmd");
+    let permission_body = &src[permission_start..permission_end];
+    assert!(
+        permission_body.contains("chat_session_mutation.lock()")
+            && permission_body.contains("!session.trashed")
+            && permission_body.contains("record_permission_resolution"),
+        "late permission completion must share deletion lifecycle and refuse retired sessions"
+    );
+
+    for completion_body in [body, permission_body] {
+        assert!(
+            !completion_body.contains("save_record("),
+            "desktop activity is process-lifetime only; a completion path re-enabled a sidecar"
+        );
+    }
+    assert!(
+        !src.contains("journal.hydrate_store(&mut store)"),
+        "desktop startup must not hydrate the experimental durable journal"
     );
 }

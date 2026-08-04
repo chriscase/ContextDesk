@@ -6904,21 +6904,24 @@ async fn complete_permission_cmd(
         histories.insert(sid.clone(), h);
     }
     if let Some(session_id) = session_key.as_deref() {
-        let updated = state.activity.lock().ok().and_then(|mut store| {
-            store.record_permission_resolution(
-                session_id,
-                &req.request_id,
-                &req.tool_name,
-                decision,
-                activity_tool_kind,
-                &events,
-            )
-        });
-        if let Some((_message_id, record)) = updated {
-            if let Ok(dir) = ensure_config_dir(&state.branding) {
-                if let Ok(journal) = cd_core::activity::DurableActivityJournal::open(&dir) {
-                    let _ = journal.save_record(&record);
-                }
+        // Permission completion updates the same process-lifetime record as
+        // the original turn. Share the session lifecycle boundary with
+        // trash/delete so a late decision cannot recreate retired activity.
+        if let Ok(_session_lifecycle) = state.chat_session_mutation.lock() {
+            let active_session = session_store(&state)
+                .and_then(|store| store.load(session_id).map_err(|error| error.to_string()))
+                .is_ok_and(|session| !session.trashed);
+            if active_session {
+                let _ = state.activity.lock().ok().and_then(|mut store| {
+                    store.record_permission_resolution(
+                        session_id,
+                        &req.request_id,
+                        &req.tool_name,
+                        decision,
+                        activity_tool_kind,
+                        &events,
+                    )
+                });
             }
         }
     }
