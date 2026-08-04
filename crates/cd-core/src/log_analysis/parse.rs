@@ -1515,7 +1515,18 @@ fn parse_wildfly_wall_timestamp(local: &str, offset: &str) -> Option<i64> {
 fn is_wildfly_level(level: &str) -> bool {
     matches!(
         level.to_ascii_uppercase().as_str(),
-        "TRACE" | "DEBUG" | "INFO" | "WARN" | "WARNING" | "ERROR" | "SEVERE" | "FATAL"
+        "TRACE"
+            | "DEBUG"
+            | "FINEST"
+            | "FINER"
+            | "FINE"
+            | "CONFIG"
+            | "INFO"
+            | "WARN"
+            | "WARNING"
+            | "ERROR"
+            | "SEVERE"
+            | "FATAL"
     )
 }
 
@@ -1606,9 +1617,6 @@ fn parse_datetime_message_parts(raw: &str) -> Option<DateTimeMessageParts<'_>> {
     if let Some(offset) = canonical_datetime_zone(token) {
         return datetime_message_after_zone(source_timestamp, &offset, token_tail);
     }
-    if looks_like_unresolved_zone_column(token, token_tail) {
-        return None;
-    }
     if let Some(level) = common_level_token(token) {
         let payload = strip_standalone_dash_delimiter(token_tail.trim_start());
         return Some(DateTimeMessageParts {
@@ -1617,6 +1625,9 @@ fn parse_datetime_message_parts(raw: &str) -> Option<DateTimeMessageParts<'_>> {
             level: Some(level),
             payload,
         });
+    }
+    if looks_like_unresolved_zone_column(token, token_tail) {
+        return None;
     }
 
     // One separating space is safe only when the timestamp itself carries a
@@ -1798,6 +1809,10 @@ fn common_level_token(token: &str) -> Option<&str> {
         token.to_ascii_uppercase().as_str(),
         "TRACE"
             | "DEBUG"
+            | "FINEST"
+            | "FINER"
+            | "FINE"
+            | "CONFIG"
             | "INFO"
             | "NOTICE"
             | "LOG"
@@ -2291,8 +2306,9 @@ fn extract_level_token(s: &str) -> Option<&str> {
 pub fn normalize_level(s: &str) -> String {
     match s.trim().to_ascii_lowercase().as_str() {
         "trace" | "trc" => "trace".into(),
-        "debug" | "dbg" | "debug1" | "debug2" | "debug3" | "debug4" | "debug5" => "debug".into(),
-        "info" | "information" | "informational" => "info".into(),
+        "debug" | "dbg" | "debug1" | "debug2" | "debug3" | "debug4" | "debug5" | "fine"
+        | "finer" | "finest" => "debug".into(),
+        "info" | "information" | "informational" | "config" => "info".into(),
         "notice" => "notice".into(),
         "log" => "log".into(),
         "warn" | "warning" => "warn".into(),
@@ -2761,6 +2777,12 @@ mod tests {
                 "2026-07-29 09:14:11",
             ),
             (
+                "2026-07-29 09:14:11,883 WARN  INDEXER generation: ambiguous name \"Column Count\" of \"001x_field\" in partition \"Primary\". Column will be named \"Column Count(001x_field)\".",
+                "warn",
+                "INDEXER generation: ambiguous name \"Column Count\" of \"001x_field\" in partition \"Primary\". Column will be named \"Column Count(001x_field)\".",
+                "2026-07-29 09:14:11,883",
+            ),
+            (
                 "2026-07-29T09:14:12.125 INFO processing item [5] (retry)",
                 "info",
                 "processing item [5] (retry)",
@@ -2930,6 +2952,18 @@ mod tests {
                 "2025-12-15T23:59:59 CEST",
                 "error",
                 "request rejected",
+            ),
+            (
+                "2025-12-15T23:59:58,125 CET FINEST: cache probe completed",
+                "2025-12-15T23:59:58,125 CET",
+                "debug",
+                "cache probe completed",
+            ),
+            (
+                "2025-12-15 23:59:57.5 CET CONFIG: listener configured",
+                "2025-12-15 23:59:57.5 CET",
+                "info",
+                "listener configured",
             ),
         ];
 

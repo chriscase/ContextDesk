@@ -13,8 +13,8 @@ use std::io::Write;
 use std::path::Path;
 
 use cd_core::log_analysis::import_preview::{
-    event_importable, preview_import_path, preview_import_plan, verify_import_plan,
-    ImportItemRole, ImportItemStatus, ImportPreviewReason, ImportSourceKind,
+    event_importable, preview_import_path, preview_import_plan, verify_import_plan, ImportItemRole,
+    ImportItemStatus, ImportPreviewReason, ImportSourceKind,
 };
 use cd_core::process_progress::CancelFlag;
 
