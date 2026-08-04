@@ -33,6 +33,8 @@ const CURRENT_BODY: &[u8] = b"\
 2026-07-29 09:14:05,125 DEBUG sending: SELECT record_id\n\
 FROM event_records\n\
 WHERE active = true\n\
+COMMIT;\n\
+arbitrary producer output without a timestamp\n\
 2026-07-29 09:14:06,250 INFO statement completed\n";
 const NUMERIC_BODY: &[u8] = b"2026-07-28 09:14:05,123 INFO previous numeric rotation\n";
 const TIMESTAMP_BODY: &[u8] = b"2026-07-29 12:00:00,000 WARN timestamp rotation retained\n";
@@ -294,6 +296,15 @@ fn reviewed_folder_and_zip_import_share_one_strict_durable_oracle() {
     assert_eq!(sql_events.len(), 1, "SQL statement must be one event");
     assert!(sql_events[0].message.contains("\nFROM event_records"));
     assert!(sql_events[0].message.contains("\nWHERE active = true"));
+    assert!(sql_events[0].message.contains("\nCOMMIT;"));
+    assert!(sql_events[0]
+        .message
+        .contains("\narbitrary producer output without a timestamp"));
+    assert!(folder_import
+        .events
+        .iter()
+        .all(|event| event.message != "COMMIT;"
+            && event.message != "arbitrary producer output without a timestamp"));
 
     let malformed = folder_import
         .events

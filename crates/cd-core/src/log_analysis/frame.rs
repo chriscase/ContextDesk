@@ -3,7 +3,10 @@
 //! Physical newlines are not always record boundaries: PostgreSQL DETAIL/HINT
 //! lines, CSV quoted fields, stack traces, CRI partial tags, and pretty-printed
 //! JSON must stay one logical event. A timestamped line always starts a new
-//! record (false-continuation protection).
+//! record (false-continuation protection). Once a timestamped record starts,
+//! any following non-record-start physical lines belong to it until the next
+//! timestamped start. This is deliberately content-agnostic: a continuation
+//! can be SQL, a stack frame, or arbitrary producer output.
 //!
 //! Accumulation is bounded here, not only by the caller. A single unbalanced
 //! quote, an unterminated CRI `P`, or a stray `{` would otherwise absorb every
@@ -301,6 +304,33 @@ fn is_continuation_of(pending: &str, line: &str) -> bool {
     // Timestamped lines otherwise always start a new record (false-continuation).
     if line_has_leading_timestamp(line) {
         return false;
+    }
+
+    // A few formats have an explicit structural start without a timestamp.
+    // In particular, Go writes a root panic record after an otherwise ordinary
+    // timestamped status line. Once a stack/panic is already open, subsequent
+    // panic-shaped text remains part of that record; only the root marker is a
+    // boundary.
+    if trimmed.starts_with("panic:") && !pending_looks_like_stack(pending) {
+        return false;
+    }
+
+    // In timestamp-led text logs the record boundary is the next timestamp,
+    // not the vocabulary or indentation of the lines in between. Producers
+    // routinely emit SQL terminators, exception details, command output, and
+    // arbitrary application text flush-left on subsequent physical lines.
+    // Requiring those lines to match a growing list of content heuristics
+    // silently turns real continuations into useless order-only events.
+    //
+    // Preamble remains protected: this applies only after a credible leading
+    // timestamp has already opened the pending record. Accumulation remains
+    // bounded by the framer's byte and physical-line caps.
+    if pending
+        .lines()
+        .next()
+        .is_some_and(line_has_leading_timestamp)
+    {
+        return true;
     }
 
     // Some producers print one timestamped SQL lead followed by flush-left
@@ -709,7 +739,7 @@ LIMIT 10
     }
 
     #[test]
-    fn sql_continuation_stops_at_unrelated_or_timestamped_records() {
+    fn timestamped_records_own_arbitrary_flush_left_lines_until_the_next_timestamp() {
         let text = "\
 2026-07-29T09:14:05.125 INFO statement: SELECT id FROM widgets
 UNION ALL
@@ -720,16 +750,32 @@ UNION standalone too
 2026-07-29T09:14:07.375 INFO done
 ";
         let recs = frame_text(text);
-        assert_eq!(recs.len(), 6, "{recs:?}");
-        assert!(recs[0].ends_with("UNION ALL"));
-        assert_eq!(recs[1], "ordinary flush-left status");
-        assert_eq!(recs[2], "SELECT standalone text");
-        assert_eq!(
-            recs[3],
-            "2026-07-29T09:14:06.250 INFO statement: not actually sql"
-        );
-        assert_eq!(recs[4], "UNION standalone too");
-        assert!(recs[5].starts_with("2026-07-29T09:14:07.375"));
+        assert_eq!(recs.len(), 3, "{recs:?}");
+        assert!(recs[0].ends_with("ordinary flush-left status\nSELECT standalone text"));
+        assert!(recs[1].ends_with("UNION standalone too"));
+        assert!(recs[2].starts_with("2026-07-29T09:14:07.375"));
+    }
+
+    #[test]
+    fn timestamped_record_owns_transaction_terminator_and_arbitrary_text() {
+        let text = "\
+2026-07-29 09:14:05,125 INFO - statement (2) : INSERT INTO widgets VALUES (1)
+COMMIT;
+arbitrary producer text
+2026-07-29 09:14:06,250 DEBUG - next record
+";
+        let recs = frame_text(text);
+        assert_eq!(recs.len(), 2, "{recs:?}");
+        assert_eq!(recs[0].lines().count(), 3);
+        assert!(recs[0].ends_with("COMMIT;\narbitrary producer text"));
+        assert!(recs[1].starts_with("2026-07-29 09:14:06,250"));
+    }
+
+    #[test]
+    fn untimestamped_preamble_and_plain_streams_remain_independent() {
+        let text = "preamble\nCOMMIT;\nplain status\n";
+        let recs = frame_text(text);
+        assert_eq!(recs, ["preamble", "COMMIT;", "plain status"]);
     }
 
     #[test]
