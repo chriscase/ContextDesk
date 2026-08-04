@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
   type RefObject,
@@ -26,6 +27,9 @@ import type { HostTurnActivityRecord } from "../../lib/activity/types";
 import { ActivityToggle } from "../activity/ActivityToggle";
 import { ActivityDrawer } from "../activity/ActivityDrawer";
 import { ActivityDock } from "../activity/ActivityDock";
+import { MAX_DOCK_WIDTH, MIN_DOCK_WIDTH } from "../../lib/activity/prefs";
+
+const MIN_CHAT_MAIN_WIDTH_PX = 400;
 
 type Starter = {
   label: string;
@@ -241,10 +245,37 @@ export function ChatPane(props: ChatPaneProps) {
   // Activity Inspector: a read-only observability layer over the turn the
   // host already ran. Nothing here participates in sending a message, and
   // with the mode Off no surface mounts at all.
-  const activity = useActivityInspector();
+  const activity = useActivityInspector(resolvedSessionId);
   const [activityRecords, setActivityRecords] = useState<
     Record<string, HostTurnActivityRecord | null>
   >({});
+  const chatBodyRef = useRef<HTMLDivElement>(null);
+  const [chatBodyWidth, setChatBodyWidth] = useState<number | null>(null);
+
+  useEffect(() => {
+    const body = chatBodyRef.current;
+    if (!body) return;
+    const updateWidth = () => {
+      const width = body.getBoundingClientRect().width || body.clientWidth;
+      if (width > 0) setChatBodyWidth(width);
+    };
+    updateWidth();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateWidth);
+      return () => window.removeEventListener("resize", updateWidth);
+    }
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(body);
+    return () => observer.disconnect();
+  }, []);
+
+  const activityDockMaxWidth =
+    chatBodyWidth == null
+      ? MAX_DOCK_WIDTH
+      : Math.max(
+          MIN_DOCK_WIDTH,
+          Math.min(MAX_DOCK_WIDTH, chatBodyWidth - MIN_CHAT_MAIN_WIDTH_PX),
+        );
 
   // Records are cached per message id, so switching sessions must drop them:
   // otherwise a long-lived window accumulates every session's records for the
@@ -373,7 +404,7 @@ export function ChatPane(props: ChatPaneProps) {
           ) : null}
         </div>
       </header>
-      <div className="chat-body-row">
+      <div className="chat-body-row" ref={chatBodyRef}>
       <div className="chat-main-column">
       {/*
         A region, not a tabpanel: this sits *inside* the chat tabpanel and has
@@ -773,6 +804,7 @@ export function ChatPane(props: ChatPaneProps) {
         <ActivityDock
           turn={selectedActivityTurn}
           width={activity.dockWidth}
+          maxWidth={activityDockMaxWidth}
           onWidthChange={activity.setDockWidth}
           onCollapse={() => activity.selectTurn(null)}
         />

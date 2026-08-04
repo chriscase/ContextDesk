@@ -15,15 +15,23 @@ const RESIZE_STEP = 16;
 export function ActivityDock({
   turn,
   width,
+  maxWidth = MAX_DOCK_WIDTH,
   onWidthChange,
   onCollapse,
 }: {
   turn: ActivityTurn | null;
   width: number;
+  /** Container-derived upper bound so the rail cannot consume the composer. */
+  maxWidth?: number;
   onWidthChange: (px: number) => void;
   onCollapse?: () => void;
 }) {
   const draggingRef = useRef(false);
+  const effectiveMaxWidth = Math.max(
+    MIN_DOCK_WIDTH,
+    Math.min(MAX_DOCK_WIDTH, Math.round(maxWidth)),
+  );
+  const effectiveWidth = Math.min(width, effectiveMaxWidth);
   const startXRef = useRef(0);
   const startWidthRef = useRef(width);
 
@@ -31,10 +39,10 @@ export function ActivityDock({
     (e: React.PointerEvent<HTMLDivElement>) => {
       draggingRef.current = true;
       startXRef.current = e.clientX;
-      startWidthRef.current = width;
+      startWidthRef.current = effectiveWidth;
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
     },
-    [width],
+    [effectiveWidth],
   );
 
   const onPointerMove = useCallback(
@@ -55,13 +63,15 @@ export function ActivityDock({
     (e: React.KeyboardEvent<HTMLDivElement>) => {
       if (e.key === "ArrowLeft") {
         e.preventDefault();
-        onWidthChange(width + RESIZE_STEP);
+        onWidthChange(
+          Math.min(effectiveMaxWidth, effectiveWidth + RESIZE_STEP),
+        );
       } else if (e.key === "ArrowRight") {
         e.preventDefault();
-        onWidthChange(width - RESIZE_STEP);
+        onWidthChange(effectiveWidth - RESIZE_STEP);
       }
     },
-    [onWidthChange, width],
+    [effectiveMaxWidth, effectiveWidth, onWidthChange],
   );
 
   if (!turn) return null;
@@ -70,7 +80,7 @@ export function ActivityDock({
     <aside
       className="activity-dock"
       aria-label="ContextDesk activity inspector"
-      style={{ width }}
+      style={{ width: effectiveWidth }}
       data-testid="activity-dock"
     >
       <div
@@ -79,8 +89,8 @@ export function ActivityDock({
         aria-orientation="vertical"
         aria-label="Resize activity inspector"
         aria-valuemin={MIN_DOCK_WIDTH}
-        aria-valuemax={MAX_DOCK_WIDTH}
-        aria-valuenow={width}
+        aria-valuemax={effectiveMaxWidth}
+        aria-valuenow={effectiveWidth}
         tabIndex={0}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}

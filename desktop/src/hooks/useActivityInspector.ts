@@ -32,7 +32,7 @@ function readViewportWidth(): number {
 
 export type ActivitySurface = "none" | "drawer" | "docked";
 
-export function useActivityInspector() {
+export function useActivityInspector(selectionScope?: string | null) {
   const [mode, setModeState] = useState<ActivityMode>(() => loadActivityMode());
   const [dockWidth, setDockWidthState] = useState<number>(() => loadDockWidth());
   const [selectedTurnId, setSelectedTurnId] = useState<string | null>(null);
@@ -47,6 +47,14 @@ export function useActivityInspector() {
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
+
+  // A selected turn belongs to exactly one chat session. A reused ChatPane
+  // must not carry that selection (or an open overlay showing it) into the
+  // next session. Display mode and dock width remain shared preferences.
+  useEffect(() => {
+    setSelectedTurnId(null);
+    setDrawerOpen(false);
+  }, [selectionScope]);
 
   // Another surface changed the shared preference: adopt it without writing
   // it back (which would loop) and without stealing the user's selection.

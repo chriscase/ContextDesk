@@ -105,6 +105,24 @@ describe("the one Activity control offers exactly the four modes", () => {
     expect(screen.queryByTestId("activity-toggle-menu")).toBeNull();
     expect(document.activeElement).toBe(trigger);
   });
+
+  it("portals and viewport-clamps the menu outside a clipped rail", () => {
+    const { container } = render(
+      <div style={{ width: 42, overflow: "hidden" }}>
+        <ActivityToggle mode="compact" onChange={vi.fn()} />
+      </div>,
+    );
+    const trigger = screen.getByTestId("activity-toggle-trigger");
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+      left: 4, right: 42, top: 20, bottom: 44, width: 38, height: 24,
+      x: 4, y: 20, toJSON: () => ({}),
+    });
+    fireEvent.click(trigger);
+    const menu = screen.getByTestId("activity-toggle-menu");
+    expect(container.contains(menu)).toBe(false);
+    expect(menu.parentElement).toBe(document.body);
+    expect(Number.parseFloat(menu.style.left)).toBeGreaterThanOrEqual(8);
+  });
 });
 
 describe("Drawer and Docked render the same body", () => {
@@ -152,6 +170,27 @@ describe("Drawer and Docked render the same body", () => {
       <ActivityDock turn={null} width={340} onWidthChange={vi.fn()} />,
     );
     expect(container.innerHTML).toBe("");
+  });
+
+  it("clamps a persisted dock width to its chat-container maximum", () => {
+    const onWidthChange = vi.fn();
+    render(
+      <ActivityDock
+        turn={turn()}
+        width={560}
+        maxWidth={420}
+        onWidthChange={onWidthChange}
+      />,
+    );
+    const dock = screen.getByTestId("activity-dock");
+    const handle = screen.getByRole("separator", {
+      name: "Resize activity inspector",
+    });
+    expect(dock.style.width).toBe("420px");
+    expect(handle.getAttribute("aria-valuemax")).toBe("420");
+    expect(handle.getAttribute("aria-valuenow")).toBe("420");
+    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    expect(onWidthChange).toHaveBeenCalledWith(420);
   });
 });
 
