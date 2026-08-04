@@ -1374,7 +1374,12 @@ export async function hostTrashChatSession(
   id: string,
 ): Promise<ChatSessionDto | null> {
   if (!isTauri()) return null;
-  return invoke<ChatSessionDto>("trash_chat_session", { id });
+  const session = await invoke<ChatSessionDto>("trash_chat_session", { id });
+  // Host also retires activity; belt-and-suspenders so the renderer cache
+  // cannot keep a stale explanation after trash.
+  const { forgetSessionActivity } = await import("./engine/turnActivity");
+  await forgetSessionActivity(id);
+  return session;
 }
 
 /** Restore chat from trash. */
@@ -1389,6 +1394,8 @@ export async function hostRestoreChatSession(
 export async function hostDeleteChatSession(id: string): Promise<void> {
   if (!isTauri()) return;
   await invoke("delete_chat_session", { id });
+  const { forgetSessionActivity } = await import("./engine/turnActivity");
+  await forgetSessionActivity(id);
 }
 
 export async function hostPinChatSession(

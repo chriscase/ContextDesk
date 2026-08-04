@@ -866,3 +866,117 @@ fn activity_and_customer_scopes_are_not_merged() {
     assert_eq!(log.id.as_deref(), Some("corpus-abc"));
     assert!(chat.id.is_none());
 }
+
+// ---------------------------------------------------------------------
+// Product-path retirement: store + durable journal together
+// ---------------------------------------------------------------------
+
+#[test]
+fn retire_session_activity_clears_memory_and_durable_journal() {
+    use cd_core::activity::{
+        retire_session_activity, ActivityRecorder, ActivityStatus, ActivityStore, DataScope,
+        DurableActivityJournal,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let journal = DurableActivityJournal::open(dir.path()).expect("journal");
+
+    let mut rec = ActivityRecorder::new(
+        "turn-retire",
+        "sess-retire",
+        DataScope::conversation(),
+        ActivityDetailLevel::Summary,
+    );
+    rec.push(cd_core::activity::ActivityEvent {
+        turn_id: String::new(),
+        operation_id: "op".into(),
+        seq: 0,
+        elapsed_ms: 1,
+        phase: ActivityPhase::Completed,
+        status: ActivityStatus::Ok,
+        origin: ActivityOrigin::DeterministicHost,
+        determinism: Determinism::Deterministic,
+        label: "Host work".into(),
+        detail: None,
+        trigger: ActivityTrigger::HostPolicy,
+        scope: DataScope::conversation(),
+        evidence: vec![],
+        privacy: PrivacyClass::Metadata,
+        context: None,
+    });
+    let mut record = rec.finish(ActivityStatus::Ok, 3);
+    record.message_id = Some("msg-retire".into());
+    journal.save_record(&record).expect("save durable");
+
+    let mut store = ActivityStore::default();
+    store.insert("sess-retire", "msg-retire", record.clone());
+    assert!(store.get("sess-retire", "msg-retire").is_some());
+
+    // Product path used by trash_chat_session / delete_chat_session.
+    retire_session_activity(&mut store, dir.path(), "sess-retire");
+
+    assert!(
+        store.get("sess-retire", "msg-retire").is_none(),
+        "memory store must forget the session"
+    );
+    let mut store2 = ActivityStore::default();
+    let n = journal
+        .hydrate_store(&mut store2)
+        .expect("hydrate after retire");
+    assert_eq!(
+        store2.get("sess-retire", "msg-retire"),
+        None,
+        "durable journal must not rehydrate retired session (n={n})"
+    );
+    // File should be gone.
+    let leftover: Vec<_> = std::fs::read_dir(dir.path().join("activity"))
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        leftover.iter().all(|n| !n.contains("sess-retire")),
+        "session sidecar must be removed: {leftover:?}"
+    );
+}
+
+/// Structural product-path proof: host trash/delete must call the shared
+/// retirement helper. Fails if delete only clears history and leaves activity.
+#[test]
+fn host_trash_and_delete_commands_call_retire_chat_session_activity() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../desktop/src-tauri/src/lib.rs"
+    );
+    let src =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read host lib.rs at {path}: {e}"));
+    for fname in ["fn trash_chat_session", "fn delete_chat_session"] {
+        let idx = src
+            .find(fname)
+            .unwrap_or_else(|| panic!("missing {fname} in host"));
+        // Slice until the next tauri command or a blank-line+fn at column 0-ish.
+        let rest = &src[idx..];
+        let end = rest
+            .match_indices("\n#[tauri::command]")
+            .nth(1) // first is this fn's own attribute if present; take next command
+            .map(|(i, _)| i)
+            .or_else(|| {
+                // Fallback: next "\nfn " after 80 chars
+                rest[80..].find("\nfn ").map(|i| i + 80)
+            })
+            .unwrap_or(800.min(rest.len()));
+        let body = &rest[..end.min(rest.len()).min(1500)];
+        assert!(
+            body.contains("retire_chat_session_activity"),
+            "{fname} must call retire_chat_session_activity so activity is \
+             not left behind; body was:\n{body}"
+        );
+    }
+    // Shared helper must use the core retirement API (store + journal).
+    assert!(
+        src.contains("cd_core::activity::retire_session_activity")
+            || src.contains("retire_session_activity("),
+        "host must route through cd_core::activity::retire_session_activity"
+    );
+}

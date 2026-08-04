@@ -5203,6 +5203,9 @@ fn trash_chat_session(state: State<'_, AppState>, id: String) -> Result<Session,
         .lock()
         .expect("linked synthesis checkpoints")
         .remove(&id);
+    // Activity can hold redacted conversation text at Full detail — trash
+    // must retire memory + durable sidecar, not leave them for another session.
+    retire_chat_session_activity(&state, &id);
     Ok(session)
 }
 
@@ -5240,7 +5243,25 @@ fn delete_chat_session(state: State<'_, AppState>, id: String) -> Result<(), Str
         .lock()
         .expect("linked synthesis checkpoints")
         .remove(&id);
+    // Permanent delete must retire activity explanations with the session.
+    retire_chat_session_activity(&state, &id);
     Ok(())
+}
+
+/// Shared deletion lifecycle for activity (memory + durable journal).
+///
+/// Called from `trash_chat_session`, `delete_chat_session`, and the
+/// `forget_session_activity` command so every product path shares one
+/// retirement path.
+fn retire_chat_session_activity(state: &AppState, session_id: &str) {
+    let Ok(mut store) = state.activity.lock() else {
+        return;
+    };
+    if let Ok(dir) = ensure_config_dir(&state.branding) {
+        cd_core::activity::retire_session_activity(&mut store, &dir, session_id);
+    } else {
+        store.forget_session(session_id);
+    }
 }
 
 /// Pin / unpin a chat for the sidebar.
@@ -5640,16 +5661,8 @@ fn get_turn_activity(
 /// too.
 #[tauri::command]
 fn forget_session_activity(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
-    let mut store = state
-        .activity
-        .lock()
-        .map_err(|_| "Activity storage is temporarily unavailable".to_string())?;
-    store.forget_session(&session_id);
-    if let Ok(dir) = ensure_config_dir(&state.branding) {
-        if let Ok(journal) = cd_core::activity::DurableActivityJournal::open(&dir) {
-            let _ = journal.forget_session(&session_id);
-        }
-    }
+    // Same path as trash/delete so the product cannot leave activity behind.
+    retire_chat_session_activity(&state, &session_id);
     Ok(())
 }
 

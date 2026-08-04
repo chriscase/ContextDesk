@@ -1094,6 +1094,21 @@ impl ActivityStore {
     }
 }
 
+/// Drop in-memory and durable activity for one session.
+///
+/// Host session trash/delete must call this so "I deleted that chat" also
+/// retires explanations. Best-effort on the journal: missing files are fine.
+pub fn retire_session_activity(
+    store: &mut ActivityStore,
+    data_dir: &std::path::Path,
+    session_id: &str,
+) {
+    store.forget_session(session_id);
+    if let Ok(journal) = DurableActivityJournal::open(data_dir) {
+        let _ = journal.forget_session(session_id);
+    }
+}
+
 /// Maximum UTF-8 bytes for one session's durable activity file.
 pub const MAX_DURABLE_ACTIVITY_FILE_BYTES: usize = 512 * 1024;
 
