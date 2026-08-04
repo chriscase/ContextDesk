@@ -364,7 +364,10 @@ mod tests {
         assert!(calls[1].tool_names.is_empty());
         assert!(matches!(
             calls[0].outcome,
-            TracedOutcome::Completed { tool_call_count: 0, .. }
+            TracedOutcome::Completed {
+                tool_call_count: 0,
+                ..
+            }
         ));
     }
 
@@ -374,10 +377,7 @@ mod tests {
         let backend = TracingChatBackend::new(Box::new(DryRunBackend), sink.clone());
         let secret = "sk-abcdefghijklmnopqrstuvwxyz0123456789ABCD";
         backend
-            .complete(
-                &[msg(Role::Tool, &format!("leaked key: {secret}"))],
-                &[],
-            )
+            .complete(&[msg(Role::Tool, &format!("leaked key: {secret}"))], &[])
             .await
             .unwrap();
 
@@ -450,7 +450,10 @@ mod tests {
         let sink = Arc::new(RecordingTurnTrace::new());
         let backend = TracingChatBackend::new(Box::new(AlwaysFails), sink.clone());
         let result = backend.complete(&[msg(Role::User, "hi")], &[]).await;
-        assert!(result.is_err(), "the underlying failure must still propagate");
+        assert!(
+            result.is_err(),
+            "the underlying failure must still propagate"
+        );
 
         let calls = sink.calls();
         match &calls[0].outcome {
