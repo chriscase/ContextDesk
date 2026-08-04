@@ -760,6 +760,81 @@ export function planShowInExplorer(
   };
 }
 
+/**
+ * User lane edits applied *after* assignment from host-resolved items.
+ * Never a full LaneConfig[] snapshot taken before resolve — that would discard
+ * host-verified sources when chat citations arrive without `source`.
+ */
+export type LaneEdit =
+  | { type: "pin"; laneId: string }
+  | { type: "remove"; laneId: string }
+  | { type: "reorder"; fromIndex: number; toIndex: number };
+
+/** Apply pin/remove/reorder log onto an assignment built from resolved items. */
+export function applyLaneEdits(
+  lanes: readonly LaneConfig[],
+  edits: readonly LaneEdit[],
+): LaneConfig[] {
+  let next = lanes.map((l) => ({ ...l, sources: [...l.sources] }));
+  for (const edit of edits) {
+    if (edit.type === "pin") {
+      next = pinLane(next, edit.laneId);
+    } else if (edit.type === "remove") {
+      next = removeLane(next, edit.laneId);
+    } else if (edit.type === "reorder") {
+      next = reorderLanes(next, edit.fromIndex, edit.toIndex);
+    }
+  }
+  return next.slice(0, MAX_EVIDENCE_LANES);
+}
+
+/**
+ * Demo/show path: **always** assign from host-resolved items, then apply
+ * optional lane edits. Never prefer a pre-resolve working LaneConfig[].
+ */
+export function finalizeShowAssignment(args: {
+  resolved: readonly EvidenceItem[];
+  mode: LaneAssignmentMode;
+  existing: readonly LaneConfig[];
+  laneEdits?: readonly LaneEdit[];
+  availableCorpusIds?: ReadonlySet<string> | readonly string[];
+}): ShowInExplorerPlan | { error: string } {
+  const plan = planShowInExplorer(
+    args.resolved,
+    args.mode,
+    args.existing,
+    { availableCorpusIds: args.availableCorpusIds },
+  );
+  if ("error" in plan) return plan;
+
+  const edits = args.laneEdits ?? [];
+  const lanes =
+    edits.length > 0
+      ? applyLaneEdits(plan.assignment.lanes, edits)
+      : plan.assignment.lanes.map((l) => ({
+          ...l,
+          sources: [...l.sources],
+        }));
+  const visibleLaneCount = Math.max(
+    1,
+    Math.min(
+      MAX_EVIDENCE_LANES,
+      edits.length > 0 ? Math.max(lanes.length, 1) : plan.assignment.visibleLaneCount,
+    ),
+  );
+  const assignment: LaneAssignmentResult = {
+    ...plan.assignment,
+    lanes,
+    visibleLaneCount,
+  };
+  const occupiedPreview = previewOccupiedLaneChange(args.existing, assignment.lanes);
+  return {
+    ...plan,
+    assignment,
+    occupiedPreview,
+  };
+}
+
 export function idleInvestigationAdd(): InvestigationAddState {
   return {
     status: "idle",

@@ -333,4 +333,74 @@ describe("EvidenceSetPanel", () => {
     );
     expect(container.querySelector("[data-testid=evidence-set]")).toBeNull();
   });
+
+  it("chat-shaped citations: host resolve supplies sources on Show in Explorer", async () => {
+    // Real main-chat shape: id/label/corpusId only — no source until host resolve.
+    const chatShaped: HostEvidenceCitation[] = [
+      {
+        id: "log_event:101",
+        label: "xyz-api",
+        title: "XYZ timeout",
+        corpusId: "corpus-xyz-demo",
+      },
+      {
+        id: "log_event:202",
+        label: "xyz-worker",
+        title: "XYZ retry",
+        corpusId: "corpus-xyz-demo",
+      },
+    ];
+    const resolveHostEvents = vi.fn(
+      async (need: { seq?: number; corpusId?: string }[]) =>
+        need.map((item) => {
+          if (item.seq === 101) {
+            return {
+              corpusId: "corpus-xyz-demo",
+              seq: 101,
+              source: "xyz/api.log",
+              ts: 1_700_000_101,
+              timeQuality: "wall" as const,
+              service: "xyz-api",
+            };
+          }
+          return {
+            corpusId: "corpus-xyz-demo",
+            seq: 202,
+            source: "xyz/worker.log",
+            ts: 1_700_000_202,
+            timeQuality: "wall" as const,
+            service: "xyz-worker",
+          };
+        }),
+    );
+    const onShow = vi.fn().mockResolvedValue(undefined);
+    render(
+      <EvidenceSetPanel
+        citations={chatShaped}
+        onOpenCitation={vi.fn()}
+        onShowInExplorer={onShow}
+        resolveHostEvents={resolveHostEvents}
+        availableCorpusIds={["corpus-xyz-demo"]}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("evidence-set-toggle"));
+    fireEvent.click(screen.getByTestId("evidence-mode-one_source_per_lane"));
+    fireEvent.click(screen.getByTestId("evidence-show-in-explorer"));
+    await waitFor(() => expect(resolveHostEvents).toHaveBeenCalled());
+    await waitFor(() => expect(onShow).toHaveBeenCalled());
+    const plan = onShow.mock.calls[0]![0];
+    const sources = plan.lanes
+      .flatMap((l: { sources: string[] }) => l.sources)
+      .sort();
+    // Must use host-resolved sources — not empty unresolved draft lanes.
+    expect(sources).toEqual(["xyz/api.log", "xyz/worker.log"]);
+    expect(plan.visibleLaneCount).toBeGreaterThanOrEqual(2);
+    const raw = store.get("contextdesk.logExplorer.lanes.v1:corpus-xyz-demo");
+    expect(raw).toBeTruthy();
+    const saved = JSON.parse(raw!) as { sources: string[] }[];
+    expect(saved.flatMap((l) => l.sources).sort()).toEqual([
+      "xyz/api.log",
+      "xyz/worker.log",
+    ]);
+  });
 });

@@ -5,6 +5,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyLaneAssignment,
+  applyLaneEdits,
   assignEvidenceToLanes,
   buildEvidenceSetFromHostCitations,
   cancelInvestigationAdd,
@@ -15,6 +16,7 @@ import {
   evidenceControlLabel,
   failClosedIdentityCheck,
   filterToHostEvidenceSet,
+  finalizeShowAssignment,
   idleInvestigationAdd,
   laneEligibleItems,
   markInvestigationApplied,
@@ -617,5 +619,95 @@ describe("opening evidence never mutates corpus", () => {
     expect(p.reimport).toBe(false);
     expect(p.mutate).toBe(false);
     expect(p.duplicate).toBe(false);
+  });
+});
+
+describe("finalizeShowAssignment (resolved path — never pre-resolve override)", () => {
+  it("builds one_source_per_lane from host-resolved sources, not unresolved draft", () => {
+    // Chat-shaped base: no source until host resolve
+    const unresolved = buildEvidenceSetFromHostCitations([
+      { id: "log_event:101", label: "a", corpusId: "corpus-xyz-demo" },
+      { id: "log_event:202", label: "b", corpusId: "corpus-xyz-demo" },
+    ]);
+    const badDraft = assignEvidenceToLanes(
+      unresolved,
+      "one_source_per_lane",
+      freeLanes(2),
+    );
+    // Unresolved collapses into empty/unresolved buckets
+    expect(
+      badDraft.lanes.every((l) => l.sources.length === 0) ||
+        badDraft.lanes.some((l) => l.label === "Unresolved source"),
+    ).toBe(true);
+
+    const resolved = enrichWithHostEvents(unresolved, [
+      {
+        corpusId: "corpus-xyz-demo",
+        seq: 101,
+        source: "xyz/api.log",
+        ts: 1,
+        timeQuality: "wall",
+        service: "xyz-api",
+      },
+      {
+        corpusId: "corpus-xyz-demo",
+        seq: 202,
+        source: "xyz/worker.log",
+        ts: 2,
+        timeQuality: "wall",
+        service: "xyz-worker",
+      },
+    ]);
+    const plan = finalizeShowAssignment({
+      resolved,
+      mode: "one_source_per_lane",
+      existing: freeLanes(2),
+      availableCorpusIds: ["corpus-xyz-demo"],
+    });
+    expect("error" in plan).toBe(false);
+    if ("error" in plan) return;
+    const sources = plan.assignment.lanes.flatMap((l) => l.sources).sort();
+    expect(sources).toEqual(["xyz/api.log", "xyz/worker.log"]);
+    expect(plan.assignment.visibleLaneCount).toBeGreaterThanOrEqual(2);
+    // Must not equal unresolved empty-source draft
+    expect(plan.assignment.lanes).not.toEqual(badDraft.lanes);
+  });
+
+  it("applies pin/reorder edits after resolved assignment", () => {
+    const resolved = laneEligibleItems(
+      buildEvidenceSetFromHostCitations(xyzCitations()),
+    ).slice(0, 2);
+    const base = finalizeShowAssignment({
+      resolved,
+      mode: "one_source_per_lane",
+      existing: freeLanes(2),
+      availableCorpusIds: ["corpus-xyz-demo"],
+    });
+    expect("error" in base).toBe(false);
+    if ("error" in base) return;
+    const secondId = base.assignment.lanes[1]!.id;
+    const pinned = finalizeShowAssignment({
+      resolved,
+      mode: "one_source_per_lane",
+      existing: freeLanes(2),
+      laneEdits: [{ type: "pin", laneId: secondId }],
+      availableCorpusIds: ["corpus-xyz-demo"],
+    });
+    expect("error" in pinned).toBe(false);
+    if ("error" in pinned) return;
+    expect(pinned.assignment.lanes[0]!.id).toBe(secondId);
+    // Host sources preserved after pin
+    expect(pinned.assignment.lanes[0]!.sources.length).toBeGreaterThan(0);
+  });
+
+  it("applyLaneEdits is pure and does not invent sources", () => {
+    const lanes = [
+      { id: "lane-0", label: "a", sources: ["xyz/a.log"] },
+      { id: "lane-1", label: "b", sources: ["xyz/b.log"] },
+    ];
+    const next = applyLaneEdits(lanes, [
+      { type: "reorder", fromIndex: 1, toIndex: 0 },
+    ]);
+    expect(next.map((l) => l.sources)).toEqual([["xyz/b.log"], ["xyz/a.log"]]);
   });
 });

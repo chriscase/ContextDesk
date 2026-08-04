@@ -14,21 +14,18 @@ import {
 } from "react";
 import {
   applyLaneAssignment,
+  applyLaneEdits,
   assignEvidenceToLanes,
   buildEvidenceSetFromHostCitations,
   cancelInvestigationAdd,
   confirmInvestigationAdd,
   enrichWithHostEvents,
   evidenceControlLabel,
+  finalizeShowAssignment,
   idleInvestigationAdd,
   laneEligibleItems,
   markInvestigationApplied,
-  pinLane,
-  planShowInExplorer,
   previewInvestigationAdd,
-  previewOccupiedLaneChange,
-  removeLane,
-  reorderLanes,
   selectAllLaneEligible,
   selectionFromKeys,
   toggleEvidenceSelection,
@@ -37,6 +34,7 @@ import {
   type HostEvidenceCitation,
   type InvestigationAddState,
   type LaneAssignmentMode,
+  type LaneEdit,
   type ShowInExplorerPlan,
   type TimeQualityHint,
 } from "../lib/evidenceLaneBridge";
@@ -143,9 +141,11 @@ export function EvidenceSetPanel({
   );
   const [busy, setBusy] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
-  /** Editable proposed lanes (pin / remove / reorder) before Show in Explorer. */
-  const [workingLanes, setWorkingLanes] = useState<LaneConfig[]>([]);
-  const [workingVisibleCount, setWorkingVisibleCount] = useState(1);
+  /**
+   * Pin/remove/reorder as an edit log applied *after* assignment from current
+   * (or host-resolved) items — never a full pre-resolve LaneConfig[] snapshot.
+   */
+  const [laneEdits, setLaneEdits] = useState<LaneEdit[]>([]);
   const panelRef = useRef<HTMLDivElement>(null);
   const toggleRef = useRef<HTMLButtonElement>(null);
   const titleId = useId();
@@ -161,8 +161,7 @@ export function EvidenceSetPanel({
     setInvState(idleInvestigationAdd());
     setStatusMsg(null);
     setResolvedOverlay([]);
-    setWorkingLanes([]);
-    setWorkingVisibleCount(1);
+    setLaneEdits([]);
   }, [citationSig, baseItems]);
 
   const selected = useMemo(
@@ -171,23 +170,26 @@ export function EvidenceSetPanel({
   );
   const logSelected = useMemo(() => laneEligibleItems(selected), [selected]);
 
-  // Refresh working lane draft when mode or selection changes.
+  // Clear edit log when mode or selection identity changes (not on enrich).
+  const selectionEditKey = useMemo(
+    () => `${mode}|${[...selectedKeys].sort().join(",")}`,
+    [mode, selectedKeys],
+  );
   useEffect(() => {
-    if (logSelected.length === 0) {
-      setWorkingLanes([]);
-      setWorkingVisibleCount(1);
-      return;
-    }
+    setLaneEdits([]);
+  }, [selectionEditKey]);
+
+  /** Display draft: assign from current items, then apply edit log. */
+  const displayLanes = useMemo((): LaneConfig[] => {
+    if (logSelected.length === 0) return [];
     const existing =
       logSelected[0]?.corpusId != null
         ? loadLanes(logSelected[0].corpusId) ?? []
         : [];
-    const assignment = assignEvidenceToLanes(logSelected, mode, existing);
-    setWorkingLanes(
-      assignment.lanes.map((l) => ({ ...l, sources: [...l.sources] })),
-    );
-    setWorkingVisibleCount(assignment.visibleLaneCount);
-  }, [mode, logSelected]);
+    const base = assignEvidenceToLanes(logSelected, mode, existing);
+    return applyLaneEdits(base.lanes, laneEdits);
+  }, [logSelected, mode, laneEdits]);
+  const displayVisibleCount = Math.max(1, Math.min(4, displayLanes.length || 1));
 
   const ensureResolved = useCallback(async (): Promise<EvidenceItem[]> => {
     if (!resolveHostEvents) return logSelected;
@@ -247,42 +249,26 @@ export function EvidenceSetPanel({
     setStatusMsg(null);
     setBusy(true);
     try {
+      // Host-resolve first, then finalize from *resolved* items only.
       const resolvedSelected = await ensureResolved();
       const existing =
         resolvedSelected[0]?.corpusId != null
           ? loadLanes(resolvedSelected[0].corpusId) ?? []
           : [];
-      const plan = planShowInExplorer(resolvedSelected, mode, existing, {
+      const plan = finalizeShowAssignment({
+        resolved: resolvedSelected,
+        mode,
+        existing,
+        laneEdits,
         availableCorpusIds,
       });
       if ("error" in plan) {
         setStatusMsg(plan.error);
         return;
       }
-      // Prefer user-edited working lanes (pin/remove/reorder) when present.
-      const assignmentLanes =
-        workingLanes.length > 0
-          ? {
-              ...plan.assignment,
-              lanes: workingLanes,
-              visibleLaneCount: Math.max(
-                1,
-                Math.min(4, workingVisibleCount || workingLanes.length),
-              ),
-            }
-          : plan.assignment;
-      const previewPlan: ShowInExplorerPlan = {
-        ...plan,
-        assignment: assignmentLanes,
-        occupiedPreview: {
-          ...plan.occupiedPreview,
-          proposed: assignmentLanes.lanes,
-          needsConfirm: plan.occupiedPreview.needsConfirm,
-        },
-      };
-      // Recompute occupied preview against working lanes.
-      const occ = previewOccupiedLaneChange(existing, assignmentLanes.lanes);
-      previewPlan.occupiedPreview = occ;
+      const assignmentLanes = plan.assignment;
+      const occ = plan.occupiedPreview;
+      const previewPlan: ShowInExplorerPlan = plan;
 
       if (occ.needsConfirm && !confirmReplace) {
         setOccupiedPreview(previewPlan);
@@ -543,16 +529,22 @@ export function EvidenceSetPanel({
             </p>
           </fieldset>
 
-          {workingLanes.length > 0 ? (
+          {displayLanes.length > 0 ? (
             <div
               className="evidence-set__lane-editor"
               data-testid="evidence-lane-editor"
             >
               <div className="evidence-set__lane-editor-head">
-                Proposed customer-evidence lanes ({workingVisibleCount} visible)
+                Proposed customer-evidence lanes ({displayVisibleCount} visible)
+                {logSelected.some((i) => !i.source) ? (
+                  <span className="evidence-set__mode-hint">
+                    {" "}
+                    · sources fill after host resolve on Show in Explorer
+                  </span>
+                ) : null}
               </div>
               <ol className="evidence-set__lane-list">
-                {workingLanes.map((lane, index) => (
+                {displayLanes.map((lane, index) => (
                   <li
                     key={lane.id}
                     className="evidence-set__lane-row"
@@ -571,12 +563,12 @@ export function EvidenceSetPanel({
                         data-testid={`evidence-lane-pin-${lane.id}`}
                         title="Pin to first lane"
                         disabled={busy || index === 0}
-                        onClick={() => {
-                          setWorkingLanes((prev) => pinLane(prev, lane.id));
-                          setWorkingVisibleCount((n) =>
-                            Math.max(n, 1),
-                          );
-                        }}
+                        onClick={() =>
+                          setLaneEdits((prev) => [
+                            ...prev,
+                            { type: "pin", laneId: lane.id },
+                          ])
+                        }
                       >
                         Pin
                       </button>
@@ -587,9 +579,14 @@ export function EvidenceSetPanel({
                         title="Move up"
                         disabled={busy || index === 0}
                         onClick={() =>
-                          setWorkingLanes((prev) =>
-                            reorderLanes(prev, index, index - 1),
-                          )
+                          setLaneEdits((prev) => [
+                            ...prev,
+                            {
+                              type: "reorder",
+                              fromIndex: index,
+                              toIndex: index - 1,
+                            },
+                          ])
                         }
                       >
                         ↑
@@ -599,11 +596,16 @@ export function EvidenceSetPanel({
                         className="evidence-set__btn evidence-set__btn--ghost"
                         data-testid={`evidence-lane-down-${lane.id}`}
                         title="Move down"
-                        disabled={busy || index >= workingLanes.length - 1}
+                        disabled={busy || index >= displayLanes.length - 1}
                         onClick={() =>
-                          setWorkingLanes((prev) =>
-                            reorderLanes(prev, index, index + 1),
-                          )
+                          setLaneEdits((prev) => [
+                            ...prev,
+                            {
+                              type: "reorder",
+                              fromIndex: index,
+                              toIndex: index + 1,
+                            },
+                          ])
                         }
                       >
                         ↓
@@ -613,13 +615,13 @@ export function EvidenceSetPanel({
                         className="evidence-set__btn evidence-set__btn--ghost"
                         data-testid={`evidence-lane-remove-${lane.id}`}
                         title="Remove lane"
-                        disabled={busy || workingLanes.length <= 1}
-                        onClick={() => {
-                          setWorkingLanes((prev) => removeLane(prev, lane.id));
-                          setWorkingVisibleCount((n) =>
-                            Math.max(1, Math.min(n, workingLanes.length - 1)),
-                          );
-                        }}
+                        disabled={busy || displayLanes.length <= 1}
+                        onClick={() =>
+                          setLaneEdits((prev) => [
+                            ...prev,
+                            { type: "remove", laneId: lane.id },
+                          ])
+                        }
                       >
                         Remove
                       </button>
