@@ -76,8 +76,8 @@ export function defaultMockPreview(): WireImportPreviewReport {
       reasons: ["ambiguous_format_match" as const],
     },
     {
-      identity: "notes/console-notes.txt",
-      basename: "console-notes.txt",
+      identity: "logs/console-fallback.log",
+      basename: "console-fallback.log",
       status: "raw_fallback" as const,
       role: "log" as const,
       selected: true,

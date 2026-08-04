@@ -7,7 +7,7 @@ const IMPORTABLE_LOG_IDENTITIES = [
   "api/api-gateway.log",
   "api/payments.jsonl",
   "support.zip!/host-a.zip!/logs/app.log",
-  "notes/console-notes.txt",
+  "logs/console-fallback.log",
 ];
 
 describe("mock engine client conformance", () => {
@@ -61,7 +61,7 @@ describe("mock engine client determinism", () => {
       planToken: plan.planToken,
       planVersion: plan.planVersion,
       selected: IMPORTABLE_LOG_IDENTITIES.filter(
-        (identity) => identity !== "notes/console-notes.txt",
+        (identity) => identity !== "logs/console-fallback.log",
       ),
     });
     expect(report.exclusionCounts).toEqual({ not_selected: 1 });

@@ -20,10 +20,10 @@
 //! * Path, name, and extension are **weak format hints only**. Status is
 //!   normally decided from bounded content samples through
 //!   [`super::format_profile::fingerprint_format`], which itself ignores the
-//!   path. A file called `app.log` holding a PNG is `Unsupported`, and a file
-//!   called `notes.txt` holding JSON records is a strong match. An extension
-//!   may still identify a parser capability boundary: XML is kept visible as
-//!   supporting material until a real XML event parser exists.
+//!   path. A file called `app.log` holding a PNG is `Unsupported`, while an
+//!   unhinted text file holding repeated JSON records is a strong match. An
+//!   extension may still identify a parser capability boundary: markup is
+//!   kept visible as supporting material until a real event parser exists.
 //! * Samples are taken from **head, interior, and tail** windows. First-window
 //!   lock-in is explicitly rejected by #751, because a mixed-format file whose
 //!   first lines happen to be JSON is not a JSON corpus.
@@ -172,9 +172,15 @@ pub enum ImportPreviewReason {
     MixedFormatRecords,
     /// Readable text, but no structured grammar matched.
     NoStructuredMatch,
+    /// An unhinted source did not contain enough distinct structured event
+    /// records to justify automatic log import.
+    InsufficientEventEvidence,
     /// XML-shaped material is inventoried but cannot yet be parsed into
     /// trustworthy event records.
     XmlEventParsingUnsupported,
+    /// HTML-shaped material is inventoried but cannot be parsed into
+    /// trustworthy event records by the line-oriented importer.
+    HtmlEventParsingUnsupported,
     /// Content sniffing found NUL bytes or invalid UTF-8 dominance.
     BinaryContent,
     /// Zero bytes, or nothing but whitespace.
@@ -904,16 +910,23 @@ pub(super) fn classify(
         );
     }
 
-    // XML needs record-boundary, namespace, and field-mapping semantics that
-    // the line-oriented fallback parser does not provide. Keep it in the
-    // ledger, but never present it as useful event data by default. A
-    // validated manifest can declare a role, but it does not supply a parser
-    // and therefore cannot bypass this capability boundary.
-    if name_or_sample_is_xml(identity, sample) {
+    // Markup needs record-boundary and field-mapping semantics that the
+    // line-oriented fallback parser does not provide. Keep it in the ledger,
+    // but never present it as useful event data by default. A validated
+    // manifest can declare a role, but it does not supply a parser and
+    // therefore cannot bypass these capability boundaries.
+    let unsupported_markup = if name_or_sample_is_html(identity, sample) {
+        Some(ImportPreviewReason::HtmlEventParsingUnsupported)
+    } else if name_or_sample_is_xml(identity, sample) {
+        Some(ImportPreviewReason::XmlEventParsingUnsupported)
+    } else {
+        None
+    };
+    if let Some(reason) = unsupported_markup {
         if manifest_valid && manifest_role.is_some() {
             reasons.push(ImportPreviewReason::ManifestDeclared);
         }
-        reasons.push(ImportPreviewReason::XmlEventParsingUnsupported);
+        reasons.push(reason);
         reasons.sort_unstable();
         reasons.dedup();
         return (
@@ -949,6 +962,28 @@ pub(super) fn classify(
             reasons.dedup();
             return (status, role, reasons, fingerprint);
         }
+    }
+
+    // A log/rotation name may keep raw text available as honest fallback, but
+    // an unhinted document needs repeated, distinct structured records before
+    // it is automatically treated as an event source. Deduplication prevents
+    // overlapping head/interior/tail samples from manufacturing repetition.
+    if !name_hints_log(identity) && credible_structured_record_count(sample) < 2 {
+        if fingerprint
+            .as_ref()
+            .is_none_or(|fp| fp.outcome == FormatFingerprintOutcome::Unknown)
+        {
+            reasons.push(ImportPreviewReason::NoStructuredMatch);
+        }
+        reasons.push(ImportPreviewReason::InsufficientEventEvidence);
+        reasons.sort_unstable();
+        reasons.dedup();
+        return (
+            ImportItemStatus::Supporting,
+            ImportItemRole::Attachment,
+            reasons,
+            fingerprint,
+        );
     }
 
     if mixed {
@@ -1002,7 +1037,10 @@ pub(super) fn classify(
     (status, ImportItemRole::Log, reasons, Some(fp))
 }
 
-/// Whether the name alone suggests a log. Never decisive on its own.
+/// Whether the name suggests a log or rotation.
+///
+/// This never decides format, but it preserves raw fallback candidacy for
+/// files the operator's source convention explicitly presents as logs.
 fn name_hints_log(identity: &str) -> bool {
     let leaf = identity.rsplit('/').next().unwrap_or(identity);
     let lower = leaf.to_ascii_lowercase();
@@ -1011,6 +1049,58 @@ fn name_hints_log(identity: &str) -> bool {
         || lower.ends_with(".ndjson")
         || lower.contains(".log.")
         || rolled_leaf_stem(leaf).is_some_and(|stem| has_log_extension(&stem))
+}
+
+/// Count distinct strong structured records in the bounded sample.
+///
+/// Only the threshold (two) matters to callers, so stop once it is met. Full
+/// record text is used as the deduplication key: the same sampled bytes must
+/// not become multiple votes merely because windows overlap.
+fn credible_structured_record_count(sample: &BoundedSample) -> usize {
+    let mut distinct = std::collections::BTreeSet::new();
+    for record in sample
+        .windows
+        .iter()
+        .flat_map(|window| window.lines())
+        .map(str::trim)
+        .filter(|record| !record.is_empty())
+    {
+        let fingerprint = fingerprint_format(record, None);
+        if fingerprint.outcome == FormatFingerprintOutcome::Matched
+            && fingerprint.score >= MIN_STRUCTURED_FORMAT_SCORE
+        {
+            distinct.insert(record);
+            if distinct.len() >= 2 {
+                return 2;
+            }
+        }
+    }
+    distinct.len()
+}
+
+/// Whether a source crosses the current HTML parser-capability boundary.
+///
+/// Like XML detection, content sniffing is refusal-only and cannot promote
+/// markup into event data.
+fn name_or_sample_is_html(identity: &str, sample: &BoundedSample) -> bool {
+    let leaf = identity.rsplit('/').next().unwrap_or(identity);
+    let lower_leaf = leaf.to_ascii_lowercase();
+    if lower_leaf.ends_with(".html") || lower_leaf.ends_with(".htm") {
+        return true;
+    }
+
+    sample
+        .windows
+        .iter()
+        .map(|window| window.trim_start_matches(['\u{feff}', ' ', '\t', '\r', '\n']))
+        .find(|window| !window.is_empty())
+        .is_some_and(|first| {
+            let prefix = first
+                .get(..first.len().min(64))
+                .unwrap_or(first)
+                .to_ascii_lowercase();
+            prefix.starts_with("<!doctype html") || prefix.starts_with("<html")
+        })
 }
 
 /// Whether a source crosses the current XML parser-capability boundary.
@@ -1869,14 +1959,99 @@ mod tests {
     }
 
     #[test]
-    fn plain_text_is_raw_fallback_and_preselected() {
+    fn plain_text_with_log_or_rotation_name_is_raw_fallback_and_preselected() {
         let sample = sample_of(&["just some prose with no structure at all"]);
-        let item = item_from_sample("notes.txt", 64, &sample, None, false);
-        assert_eq!(item.status, ImportItemStatus::RawFallback);
-        assert!(
-            item.selected,
-            "raw fallback is honest retained log evidence"
+        for identity in [
+            "service.log",
+            "service.log.1",
+            "service.log-20260101-120000",
+        ] {
+            let item = item_from_sample(identity, 64, &sample, None, false);
+            assert_eq!(item.status, ImportItemStatus::RawFallback);
+            assert!(
+                item.selected,
+                "raw fallback is honest retained log evidence"
+            );
+        }
+    }
+
+    #[test]
+    fn unhinted_text_needs_repeated_structured_event_evidence() {
+        let prose = item_from_sample(
+            "operator-notes.txt",
+            64,
+            &sample_of(&["plain prose with no event structure"]),
+            None,
+            false,
         );
+        let one_shot = item_from_sample(
+            "probe-output.txt",
+            64,
+            &sample_of(&["2026-01-01 12:00:00 INFO query completed"]),
+            None,
+            false,
+        );
+        let repeated = item_from_sample(
+            "event-records.txt",
+            128,
+            &sample_of(&[
+                "2026-01-01 12:00:00 INFO first event",
+                "2026-01-01 12:00:01 WARN second event",
+            ]),
+            None,
+            false,
+        );
+
+        for item in [&prose, &one_shot] {
+            assert_eq!(item.status, ImportItemStatus::Supporting);
+            assert_eq!(item.role, ImportItemRole::Attachment);
+            assert!(!item.selected);
+            assert!(!event_importable(item));
+            assert!(item
+                .reasons
+                .contains(&ImportPreviewReason::InsufficientEventEvidence));
+        }
+        assert_eq!(repeated.status, ImportItemStatus::Ready);
+        assert_eq!(repeated.role, ImportItemRole::Log);
+        assert!(repeated.selected);
+        assert!(event_importable(&repeated));
+    }
+
+    #[test]
+    fn duplicate_sampling_windows_do_not_manufacture_repeated_events() {
+        let record = "2026-01-01 12:00:00 INFO one sampled event";
+        let item = item_from_sample(
+            "single-record.txt",
+            64,
+            &windows_of(&[record, record, record]),
+            None,
+            false,
+        );
+
+        assert_eq!(item.status, ImportItemStatus::Supporting);
+        assert!(!item.selected);
+        assert!(item
+            .reasons
+            .contains(&ImportPreviewReason::InsufficientEventEvidence));
+    }
+
+    #[test]
+    fn html_is_supporting_and_manifest_role_cannot_supply_a_parser() {
+        let sample = sample_of(&["<!doctype html><html><body><p>status report</p></body></html>"]);
+        for (identity, role, valid) in [
+            ("status-page.html", None, false),
+            ("status-page.txt", None, false),
+            ("declared-page.html", Some(ImportItemRole::Log), true),
+        ] {
+            let item = item_from_sample(identity, 128, &sample, role, valid);
+            assert_eq!(item.status, ImportItemStatus::Supporting);
+            assert_eq!(item.role, ImportItemRole::Attachment);
+            assert!(!item.selected);
+            assert!(!event_importable(&item));
+            assert!(item
+                .reasons
+                .contains(&ImportPreviewReason::HtmlEventParsingUnsupported));
+        }
     }
 
     #[test]
@@ -2265,10 +2440,10 @@ mod tests {
         assert_eq!(identities, vec!["a.txt", "link", "z.jsonl"]);
         assert_eq!(report.counts.total, 3);
         assert_eq!(report.counts.ready, 1);
-        assert_eq!(report.counts.raw_fallback, 1);
+        assert_eq!(report.counts.supporting, 1);
         assert_eq!(report.counts.blocked, 1);
-        assert_eq!(report.counts.selected, 2);
-        assert_eq!(report.selected_identities(), vec!["a.txt", "z.jsonl"]);
+        assert_eq!(report.counts.selected, 1);
+        assert_eq!(report.selected_identities(), vec!["z.jsonl"]);
     }
 
     #[test]
@@ -2356,16 +2531,19 @@ mod tests {
             assert_eq!(report.plan_block(), None);
             assert_eq!(report.importable_count(), 1);
         }
-        // Raw fallback is both importable and preselected so the ordinary path
-        // does not silently discard valid text evidence.
-        let raw = finish_report(
+        // Unhinted prose remains visible but cannot create an empty-looking
+        // event corpus from a generic document.
+        let supporting = finish_report(
             ImportSourceKind::Directory,
             vec![item_from_sample("a.txt", 4, &text, None, false)],
             false,
             None,
         );
-        assert_eq!(raw.counts.selected, 1);
-        assert_eq!(raw.plan_block(), None);
+        assert_eq!(supporting.counts.selected, 0);
+        assert_eq!(
+            supporting.plan_block(),
+            Some(ImportPlanBlock::NoImportableSources)
+        );
     }
 
     #[test]

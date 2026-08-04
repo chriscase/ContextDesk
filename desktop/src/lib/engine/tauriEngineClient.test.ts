@@ -34,7 +34,7 @@ const IMPORTABLE_LOG_IDENTITIES = [
   "api/api-gateway.log",
   "api/payments.jsonl",
   "support.zip!/host-a.zip!/logs/app.log",
-  "notes/console-notes.txt",
+  "logs/console-fallback.log",
 ];
 
 /**

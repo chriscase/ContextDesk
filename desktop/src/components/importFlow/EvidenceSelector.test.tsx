@@ -100,6 +100,44 @@ describe("EvidenceSelector keyboard and focus", () => {
     ).toBeTruthy();
   });
 
+  it("explains source-quality and HTML parser limits on supporting rows", () => {
+    const report = defaultMockPreview();
+    report.items = [
+      {
+        ...report.items[0],
+        identity: "attachments/probe-output.txt",
+        basename: "probe-output.txt",
+        status: "supporting",
+        role: "attachment",
+        selected: false,
+        reasons: ["insufficient_event_evidence"],
+      },
+      {
+        ...report.items[0],
+        identity: "attachments/status-page.html",
+        basename: "status-page.html",
+        status: "supporting",
+        role: "attachment",
+        selected: false,
+        reasons: ["html_event_parsing_unsupported"],
+      },
+    ];
+
+    render(<EvidenceSelector report={report} selected={new Set()} dispatch={() => undefined} />);
+    const probe = within(grid()).getByRole("checkbox", {
+      name: /probe-output\.txt.*not selectable/,
+    }) as HTMLInputElement;
+    const html = within(grid()).getByRole("checkbox", {
+      name: /status-page\.html.*not selectable/,
+    }) as HTMLInputElement;
+    expect(probe.disabled).toBe(true);
+    expect(html.disabled).toBe(true);
+    expect(
+      screen.getByText(/Not enough repeated event records for automatic log import/),
+    ).toBeTruthy();
+    expect(screen.getByText(/HTML event parsing is not supported yet/)).toBeTruthy();
+  });
+
   it("collapse and expand with arrow keys hide members but keep the container", () => {
     render(<Harness />);
     const treegrid = grid();

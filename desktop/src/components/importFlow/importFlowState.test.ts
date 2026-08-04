@@ -79,7 +79,7 @@ describe("selection model", () => {
       "api/api-gateway.log",
       "api/payments.jsonl",
       "support.zip!/host-a.zip!/logs/app.log",
-      "notes/console-notes.txt",
+      "logs/console-fallback.log",
     ]);
     // Even a forced selection of a supporting row never reaches the wire.
     const forced = {
@@ -122,12 +122,12 @@ describe("selection model", () => {
     });
     const ranged = importFlowReducer(reAnchored, {
       type: "RANGE_TO_LEAF",
-      identity: "notes/console-notes.txt",
+      identity: "logs/console-fallback.log",
       visibleLeaves,
     });
     // Everything between payments and notes (selectable) becomes selected.
     expect(ranged.selected.has("support.zip!/host-a.zip!/logs/app.log")).toBe(true);
-    expect(ranged.selected.has("notes/console-notes.txt")).toBe(true);
+    expect(ranged.selected.has("logs/console-fallback.log")).toBe(true);
     // The blocked row inside the range stays unselected.
     expect(ranged.selected.has("support.zip!/host-a.zip!/inner.zip!/deep.log")).toBe(false);
   });

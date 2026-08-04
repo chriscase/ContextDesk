@@ -265,6 +265,87 @@ fn xml_capability_gate_has_folder_zip_parity_and_keeps_real_logs_selected() {
 }
 
 #[test]
+fn source_quality_gate_has_folder_zip_parity_for_logs_probes_and_markup() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let folder = dir.path().join("quality-folder");
+    std::fs::create_dir_all(&folder).expect("create folder");
+
+    let members: [(&str, &[u8]); 7] = [
+        ("service.log", b"plain event payload\n"),
+        ("service.log.1", b"plain rotated event payload\n"),
+        (
+            "event-records.txt",
+            b"2026-01-01 12:00:00 INFO first event\n2026-01-01 12:00:01 WARN second event\n",
+        ),
+        (
+            "probe-output.txt",
+            b"2026-01-01 12:00:00 INFO one-shot probe\n",
+        ),
+        ("operator-notes.txt", b"plain explanatory document\n"),
+        ("summary", b"ordinary extensionless report\n"),
+        (
+            "status-page.html",
+            b"<!doctype html><html><body><p>status</p></body></html>\n",
+        ),
+    ];
+    for (identity, body) in members {
+        write(&folder.join(identity), body);
+    }
+    let archive = dir.path().join("quality-archive.zip");
+    write(&archive, &zip_bytes(&members));
+
+    let folder_report = preview_import_path(&folder, None).expect("folder preview");
+    let zip_report = preview_import_path(&archive, None).expect("zip preview");
+    let expected_selected = vec!["event-records.txt", "service.log", "service.log.1"];
+
+    for report in [&folder_report, &zip_report] {
+        assert_eq!(report.selected_identities(), expected_selected);
+        for identity in ["operator-notes.txt", "probe-output.txt", "summary"] {
+            let item = report
+                .items
+                .iter()
+                .find(|item| item.identity == identity)
+                .expect("supporting source remains visible");
+            assert_eq!(item.status, ImportItemStatus::Supporting);
+            assert_eq!(item.role, ImportItemRole::Attachment);
+            assert!(!item.selected);
+            assert!(!event_importable(item));
+            assert!(item
+                .reasons
+                .contains(&ImportPreviewReason::InsufficientEventEvidence));
+        }
+        let html = report
+            .items
+            .iter()
+            .find(|item| item.identity == "status-page.html")
+            .expect("HTML remains visible");
+        assert_eq!(html.status, ImportItemStatus::Supporting);
+        assert_eq!(html.role, ImportItemRole::Attachment);
+        assert!(!html.selected);
+        assert!(html
+            .reasons
+            .contains(&ImportPreviewReason::HtmlEventParsingUnsupported));
+    }
+
+    let summarize = |report: &cd_core::log_analysis::import_preview::ImportPreviewReport| {
+        report
+            .items
+            .iter()
+            .map(|item| {
+                (
+                    item.identity.clone(),
+                    item.status,
+                    item.role,
+                    item.selected,
+                    item.reasons.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(summarize(&folder_report), summarize(&zip_report));
+}
+
+#[test]
 fn content_decides_archive_detection_not_the_extension() {
     let dir = tempfile::tempdir().expect("tempdir");
     // A ZIP wearing a .log extension.

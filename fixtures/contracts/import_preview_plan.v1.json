@@ -1,5 +1,5 @@
 {
-  "planToken": "7ffee955ba79b8a098f42065b22931420ff09680eedcdebb54a335b3fd1817ac",
+  "planToken": "c6411d9ee372771cfc874cf917df1f1a102de98f36b691fad5113ddc5c65b063",
   "planVersion": 1,
   "report": {
     "counts": {
@@ -27,6 +27,26 @@
       }
     ],
     "items": [
+      {
+        "basename": "fallback.log",
+        "bytes": 31,
+        "decisiveClueCodes": [
+          "fallback.no_structured_match"
+        ],
+        "formatId": "plain-line",
+        "formatVersion": 1,
+        "identity": "fallback.log",
+        "outcome": "unknown",
+        "reasons": [
+          "no_structured_match",
+          "weak_name_hint_only"
+        ],
+        "representative": "plain event text, no structure",
+        "role": "log",
+        "score": 0,
+        "selected": true,
+        "status": "raw_fallback"
+      },
       {
         "basename": "image.log",
         "bytes": 64,
@@ -78,25 +98,6 @@
         "score": 100,
         "selected": true,
         "status": "ready"
-      },
-      {
-        "basename": "notes.txt",
-        "bytes": 26,
-        "decisiveClueCodes": [
-          "fallback.no_structured_match"
-        ],
-        "formatId": "plain-line",
-        "formatVersion": 1,
-        "identity": "notes.txt",
-        "outcome": "unknown",
-        "reasons": [
-          "no_structured_match"
-        ],
-        "representative": "plain prose, no structure",
-        "role": "log",
-        "score": 0,
-        "selected": true,
-        "status": "raw_fallback"
       }
     ],
     "schemaVersion": 1,

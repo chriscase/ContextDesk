@@ -997,7 +997,11 @@ fn import_preview_report_sample() -> cd_core::log_analysis::import_preview::Impo
     std::fs::create_dir_all(dir.path().join("logs")).expect("create logs dir");
     std::fs::write(dir.path().join("logs/app.jsonl.1"), json).expect("write");
     std::fs::write(dir.path().join("logs/app.jsonl.2"), json).expect("write");
-    std::fs::write(dir.path().join("notes.txt"), b"plain prose, no structure\n").expect("write");
+    std::fs::write(
+        dir.path().join("fallback.log"),
+        b"plain event text, no structure\n",
+    )
+    .expect("write");
     std::fs::write(dir.path().join("image.log"), [0u8; 64]).expect("write");
 
     cd_core::log_analysis::import_preview::preview_import_path(dir.path(), None)
