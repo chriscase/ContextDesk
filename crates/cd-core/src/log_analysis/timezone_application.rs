@@ -193,12 +193,13 @@ fn resolver_for(
     iana_timezone: &str,
     declared_at: i64,
     applied_revision: u64,
+    basis: TimezoneDeclarationBasis,
 ) -> CoreResult<SourceTimezoneResolver> {
     SourceTimezoneResolver::new(SourceTimezoneDeclaration {
         schema_version: TIMEZONE_DECLARATION_SCHEMA_VERSION,
         source: source.into(),
         iana_timezone: iana_timezone.into(),
-        basis: TimezoneDeclarationBasis::UserDeclared,
+        basis,
         declared_at,
         applied_revision,
     })
@@ -283,7 +284,13 @@ pub fn preview_source_timezone(
     let applied_revision = expected_revision
         .checked_add(1)
         .ok_or_else(|| CoreError::Message("timezone event revision overflow".into()))?;
-    let resolver = resolver_for(source, iana_timezone, 0, applied_revision)?;
+    let resolver = resolver_for(
+        source,
+        iana_timezone,
+        0,
+        applied_revision,
+        TimezoneDeclarationBasis::UserDeclared,
+    )?;
     let scope = TimezoneResolutionScope {
         corpus_id: corpus_id.into(),
         event_revision: expected_revision,
@@ -347,6 +354,26 @@ pub fn apply_source_timezones(
     requests: &[SourceTimezoneApplyRequest],
     declared_at: i64,
 ) -> CoreResult<EventRevisionReport> {
+    apply_source_timezones_with_basis(
+        cache_root,
+        corpus_id,
+        expected_revision,
+        requests,
+        declared_at,
+        TimezoneDeclarationBasis::UserDeclared,
+    )
+}
+
+/// [`apply_source_timezones`], recording an explicit [`TimezoneDeclarationBasis`]
+/// rather than assuming [`TimezoneDeclarationBasis::UserDeclared`].
+pub fn apply_source_timezones_with_basis(
+    cache_root: &Path,
+    corpus_id: &str,
+    expected_revision: u64,
+    requests: &[SourceTimezoneApplyRequest],
+    declared_at: i64,
+    basis: TimezoneDeclarationBasis,
+) -> CoreResult<EventRevisionReport> {
     if requests.is_empty() {
         return Err(CoreError::Message(
             "timezone apply requires at least one source".into(),
@@ -382,6 +409,7 @@ pub fn apply_source_timezones(
             &request.iana_timezone,
             declared_at,
             applied_revision,
+            basis,
         )?;
         let preview = preview_source_timezone(
             cache_root,

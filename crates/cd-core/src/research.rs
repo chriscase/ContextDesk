@@ -18,7 +18,7 @@ use crate::providers::{ProviderCapabilities, ProviderKind, ProviderProfile};
 use crate::ssrf::SsrfPolicy;
 use crate::tool_host::ToolHost;
 use crate::tools::ToolSpec;
-use crate::turn_trace::{TracingChatBackend, TurnTraceSink};
+use crate::turn_trace::{DryRunBackend, TracingChatBackend, TurnTraceSink};
 use crate::workspace::Workspace;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -829,13 +829,19 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint(
         turn_started_at,
         turn_prelude_emitted,
         live,
+        false,
         None,
         &[],
     )
     .await
 }
 
-/// Research turn with optional trace capture.
+/// Research turn with optional dry-run and trace capture.
+///
+/// `dry_run = true` skips every provider-reaching step — no Ollama health
+/// probe, no OIDC refresh, no chat completion. The assembled turn is driven
+/// through a [`DryRunBackend`] so the multi-round loop, context assembly, and
+/// tool-schema path still run for inspection.
 ///
 /// `trace_sink` wraps the chosen backend in a [`TracingChatBackend`], which
 /// records one bounded, redacted [`crate::turn_trace::TracedCall`] per
@@ -860,6 +866,7 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
     turn_started_at: Option<Instant>,
     turn_prelude_emitted: bool,
     mut live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+    dry_run: bool,
     trace_sink: Option<Arc<dyn TurnTraceSink>>,
     applied_skill_ids: &[String],
 ) -> CoreResult<Vec<StreamEvent>> {
@@ -914,7 +921,9 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
 
     // Ollama health soft-fail (not a construction error): remain here; client build is in backend_for.
     // #123: never silently fall back to keyword-only when a chat model is selected.
-    if profile.kind == ProviderKind::Ollama {
+    // Skipped entirely for a dry run: a health probe is itself a request to
+    // the configured endpoint, and `chat --dry-run` promises none occurs.
+    if !dry_run && profile.kind == ProviderKind::Ollama {
         let health = match OllamaClient::new(&profile.base_url, &profile.chat_model) {
             Ok(client) => {
                 await_provider_setup(turn_started_at, deadline_plan, cancel_ref, client.health())
@@ -958,46 +967,57 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
     }
 
     // #122: single factory for all wired kinds (no per-kind if-chain for client construction).
-    let backend = match await_provider_setup(
-        turn_started_at,
-        deadline_plan,
-        cancel_ref,
-        backend_for(profile, api_key),
-    )
-    .await
-    {
-        Ok(Ok(b)) => b,
-        Err(ProviderSetupWait::Cancelled) => {
-            return Ok(emit_provider_cancelled(
-                session_id,
-                Some(profile.chat_model.clone()),
-                turn_prelude_emitted,
-                live,
-            ));
-        }
-        Err(ProviderSetupWait::Deadline) => {
-            return Ok(emit_provider_deadline(
-                session_id,
-                Some(profile.chat_model.clone()),
-                deadline_plan.total_ms,
-                turn_prelude_emitted,
-                live,
-            ));
-        }
-        Ok(Err(e)) => {
-            let msg = e.to_string();
-            let code = if msg.to_lowercase().contains("not wired") {
-                "provider_not_wired"
-            } else {
-                "provider_error"
-            };
-            return Ok(emit_provider_error(
-                code,
-                msg,
-                session_id,
-                Some(profile.chat_model.clone()),
-                live,
-            ));
+    //
+    // A dry run never calls this factory at all — not even to build-and-discard
+    // a client. For `ProviderKind::XaiGrokBuild`, `backend_for` performs an OIDC
+    // credential refresh over the network before any client exists, which by
+    // itself would violate "no provider request occurs." `DryRunBackend` is
+    // constructed directly instead: it holds no client, base URL, or
+    // credential, so there is nothing in it capable of reaching a socket.
+    let backend: Box<dyn ChatBackend> = if dry_run {
+        Box::new(DryRunBackend)
+    } else {
+        match await_provider_setup(
+            turn_started_at,
+            deadline_plan,
+            cancel_ref,
+            backend_for(profile, api_key),
+        )
+        .await
+        {
+            Ok(Ok(b)) => b,
+            Err(ProviderSetupWait::Cancelled) => {
+                return Ok(emit_provider_cancelled(
+                    session_id,
+                    Some(profile.chat_model.clone()),
+                    turn_prelude_emitted,
+                    live,
+                ));
+            }
+            Err(ProviderSetupWait::Deadline) => {
+                return Ok(emit_provider_deadline(
+                    session_id,
+                    Some(profile.chat_model.clone()),
+                    deadline_plan.total_ms,
+                    turn_prelude_emitted,
+                    live,
+                ));
+            }
+            Ok(Err(e)) => {
+                let msg = e.to_string();
+                let code = if msg.to_lowercase().contains("not wired") {
+                    "provider_not_wired"
+                } else {
+                    "provider_error"
+                };
+                return Ok(emit_provider_error(
+                    code,
+                    msg,
+                    session_id,
+                    Some(profile.chat_model.clone()),
+                    live,
+                ));
+            }
         }
     };
 
@@ -1044,7 +1064,8 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
     opts.developer_trace = developer_trace_sink.map(crate::turn_trace::TurnTraceObserver::new);
     opts.applied_skill_ids = applied_skill_ids.to_vec();
     // Ambient recall follows host config (set by attach_durable_memory / rebuild_host).
-    opts.ambient_recall_enabled = host.ambient_recall_enabled() && host.durable_memory_active();
+    opts.ambient_recall_enabled =
+        !dry_run && host.ambient_recall_enabled() && host.durable_memory_active();
     // Per-model context budget (default / declared / learned).
     opts.context_char_budget = host
         .model_context_budgets()

@@ -5140,6 +5140,7 @@ async fn agent_turn(
             Some(turn_started_at),
             turn_prelude_emitted,
             Some(&mut sink),
+            false,
             trace_sink,
             &applied_skill_ids,
         )

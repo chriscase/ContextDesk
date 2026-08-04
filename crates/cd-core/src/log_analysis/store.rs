@@ -886,6 +886,14 @@ impl LogCorpus {
         self.event_revision.load(Ordering::SeqCst)
     }
 
+    /// Public, process-local revision marker: changes only after a
+    /// successful event append or revision publication. A trace/dry-run
+    /// summary uses this to state which corpus content a turn was actually
+    /// grounded against, without exposing corpus internals.
+    pub fn revision(&self) -> u64 {
+        self.event_revision()
+    }
+
     /// Read the durable event revision while the caller already holds the
     /// corpus connection lock.
     ///
@@ -1449,6 +1457,24 @@ impl LogCorpus {
             std::fs::remove_dir_all(&root)?;
         }
         Ok(())
+    }
+
+    /// Rename a corpus in place (cosmetic only — never touched by ingest
+    /// identity, retrieval, or citations, all of which key on `id`).
+    ///
+    /// Rejects a blank name rather than silently keeping the old one, so a
+    /// caller passing empty input by mistake gets an honest error instead of
+    /// a no-op that looks like it worked.
+    pub fn rename(cache_root: &Path, id: &str, new_name: &str) -> CoreResult<()> {
+        validate_corpus_id(id)?;
+        let new_name = new_name.trim();
+        if new_name.is_empty() {
+            return Err(CoreError::Message("corpus name cannot be empty".into()));
+        }
+        let root = cache_root.join("log_corpora").join(id);
+        let mut meta = read_meta_file(&root)?;
+        meta.name = new_name.to_string();
+        write_meta_file(&root, &meta)
     }
 
     /// List corpus ids under cache root.

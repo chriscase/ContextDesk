@@ -188,6 +188,12 @@ pub struct AppConfig {
     /// never a security or redaction boundary.
     #[serde(default)]
     pub model_curation: crate::model_curation::ModelCuration,
+    /// Configured default timezone for source-local timestamps with no
+    /// resolvable zone evidence of their own (IANA identifier, e.g.
+    /// `"America/Chicago"`). Applied with clear provenance during import
+    /// aggregation; never guessed.
+    #[serde(default)]
+    pub default_timezone: Option<String>,
     /// Activity Inspector capture settings.
     ///
     /// Absent in files written before this existed, so it takes
@@ -373,6 +379,12 @@ pub fn save_config(path: &Path, cfg: &AppConfig) -> CoreResult<()> {
     fs::write(&tmp, raw)?;
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// The one check applied to `default_timezone` before it is persisted — an
+/// IANA identifier accepted by `chrono_tz`.
+pub fn is_valid_iana_timezone(value: &str) -> bool {
+    value.parse::<chrono_tz::Tz>().is_ok()
 }
 
 #[cfg(test)]

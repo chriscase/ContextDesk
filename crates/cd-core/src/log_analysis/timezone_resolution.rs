@@ -48,6 +48,11 @@ pub struct TimezoneResolutionScope {
 pub enum TimezoneDeclarationBasis {
     /// A person explicitly chose and applied the IANA zone for this source.
     UserDeclared,
+    /// A configured application default was applied to a source left
+    /// ambiguous after import. Distinct from [`Self::UserDeclared`] so a
+    /// later review can tell "I picked this" from "my saved default kicked
+    /// in" — never presented as an in-the-moment user choice it was not.
+    ConfiguredDefault,
 }
 
 /// Persistable source-scoped timezone declaration.

@@ -1,0 +1,576 @@
+//! Interactive-terminal rendering for `chat` — a bounded, redrawing stderr
+//! status line.
+//!
+//! Presentation only: every fact rendered here already exists on the
+//! shared `cd_core`/`cd_workflow` wire (`StreamEvent`) or was already
+//! computed by `commands::chat` (`grounding_status`, `elapsed_ms`).
+//! Nothing here changes what a turn does, what a tool call means, or what
+//! `--json`/`--jsonl` stdout contains — see `docs/CLI.md`'s Output section,
+//! which this module never touches: this renderer only ever writes to
+//! **stderr**, and only when `OutputFormat::Text` is in effect.
+//!
+//! Degrades to bounded, ANSI-free, one-line-per-transition output whenever
+//! the destination cannot support an overwriting status line — stderr
+//! redirected to a file or pipe, `TERM=dumb`, or no controlling terminal at
+//! all — the exact same rule `progress.rs` already applies to `import`,
+//! reused here rather than reinvented. Cancellation and mid-render errors
+//! both terminate through the same single `finish()` call, so the status
+//! line is always left in a clean, newline-terminated state exactly once,
+//! regardless of how the command ended.
+
+use crate::config::ColorMode;
+use cd_core::events::{StreamEvent, ToolPhase};
+use cd_core::router::AgentPhase;
+use std::io::{self, IsTerminal, Write};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// Minimum interval between overwriting-line redraws on a real terminal —
+/// mirrors `progress.rs`'s `MIN_REDRAW_INTERVAL` so both renderers feel
+/// like one product rather than two independently tuned ones.
+const MIN_REDRAW_INTERVAL: Duration = Duration::from_millis(120);
+
+/// What the destination terminal can actually do, resolved once at
+/// construction from the real process environment — never re-checked
+/// mid-render, so one command invocation's rendering behavior is
+/// internally consistent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalCapabilities {
+    /// stderr is a real controlling terminal AND that terminal claims to
+    /// support redraw (see `TERM=dumb` handling below) — an overwriting
+    /// `\r` + clear-line redraw is meaningful.
+    pub interactive: bool,
+    /// ANSI color escapes are safe to emit.
+    pub color: bool,
+}
+
+impl TerminalCapabilities {
+    /// Resolve from the real process environment.
+    pub fn detect(color_mode: ColorMode) -> Self {
+        Self::from_parts(
+            io::stderr().is_terminal(),
+            std::env::var("TERM").ok(),
+            std::env::var_os("NO_COLOR").is_some(),
+            color_mode,
+        )
+    }
+
+    /// Pure constructor used by [`Self::detect`] and directly by tests — no
+    /// env or fd access, so terminal-capability decisions are
+    /// unit-testable without a real pty or a subprocess.
+    ///
+    /// `TERM=dumb` (e.g. Emacs' `shell-mode`) disables the overwriting
+    /// redraw even when `is_terminal()` reports true — the same treatment
+    /// `less`/`git` give it. `NO_COLOR` (<https://no-color.org>) disables
+    /// color under `Auto` regardless of tty-ness; an explicit
+    /// `--color always` still wins (a deliberate user override beats an
+    /// ambient environment convention), and `--color never` always wins.
+    fn from_parts(
+        is_tty: bool,
+        term: Option<String>,
+        no_color_env: bool,
+        color_mode: ColorMode,
+    ) -> Self {
+        let dumb = term.as_deref() == Some("dumb");
+        let interactive = is_tty && !dumb;
+        let color = match color_mode {
+            ColorMode::Never => false,
+            ColorMode::Always => true,
+            ColorMode::Auto => interactive && !no_color_env,
+        };
+        Self { interactive, color }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatStage {
+    Connecting,
+    AssemblingContext,
+    WaitingOnModel,
+    RunningTools,
+    Regrounding,
+    SavingSession,
+}
+
+impl ChatStage {
+    fn label(self) -> &'static str {
+        match self {
+            ChatStage::Connecting => "Connecting to provider",
+            ChatStage::AssemblingContext => "Assembling context",
+            ChatStage::WaitingOnModel => "Waiting on model",
+            ChatStage::RunningTools => "Running tools",
+            ChatStage::Regrounding => "Validating grounded evidence",
+            ChatStage::SavingSession => "Saving session",
+        }
+    }
+}
+
+struct ChatStatusState {
+    stage: ChatStage,
+    tools_started: usize,
+    tools_finished: usize,
+    retries: usize,
+    started: Instant,
+    last_redraw: Instant,
+    printed_anything: bool,
+    /// Set once the first `TextDelta` arrives. From that point the reply
+    /// itself is streaming to stdout with no guaranteed trailing newline
+    /// (`print!`, not `println!`) and now owns the terminal cursor — even a
+    /// plain appended stderr line could land mid-word on the same shared
+    /// cursor. So once downgraded, `redraw()` prints nothing at all for
+    /// ANY further event (a phase change only updates its counters
+    /// internally); the streaming reply is the visible activity indicator
+    /// until the turn ends, at which point `finish()` — and only
+    /// `finish()` — is allowed to print again, with its own leading-newline
+    /// rule for `Cancelled`/`Failed` (see its doc comment).
+    downgraded: bool,
+}
+
+/// The concise, already-finished facts a chat turn ended with — reuses
+/// exactly what `commands::chat::run` already computed (session id,
+/// `grounding_status()`) rather than deriving anything new.
+pub enum ChatOutcomeSummary<'a> {
+    Ok {
+        session_id: &'a str,
+        grounding: &'a str,
+    },
+    Cancelled,
+    /// `message` is the same `CliError::message` the non-interactive error
+    /// path already prints verbatim (`main.rs`'s `emit_error`) — no new
+    /// data source, so no new leak surface.
+    Failed {
+        message: &'a str,
+    },
+}
+
+/// Bounded stderr status line for an interactive `chat` turn, fed by the
+/// SAME `StreamEvent`s `--jsonl` mode already serializes and `--trace`
+/// already inspects. Only ever advances this renderer's own display
+/// state; never reinterprets an event for any other purpose, and never
+/// writes to stdout (the reply text itself stays exactly where
+/// `commands::chat::run`'s existing `live_sink` already puts it).
+pub struct ChatStatusRenderer {
+    caps: TerminalCapabilities,
+    state: Mutex<ChatStatusState>,
+}
+
+impl ChatStatusRenderer {
+    pub fn new(caps: TerminalCapabilities) -> Self {
+        Self {
+            caps,
+            state: Mutex::new(ChatStatusState {
+                stage: ChatStage::Connecting,
+                tools_started: 0,
+                tools_finished: 0,
+                retries: 0,
+                started: Instant::now(),
+                last_redraw: Instant::now() - MIN_REDRAW_INTERVAL,
+                printed_anything: false,
+                downgraded: false,
+            }),
+        }
+    }
+
+    /// Print the initial status line before any `StreamEvent` has arrived.
+    /// `TurnStarted`/`TurnPhase` fire essentially immediately (before the
+    /// provider connect/health-probe step even begins — see
+    /// `cd_core::research`), so nothing on the shared event stream ever
+    /// marks "still connecting" on its own; call this once, right after
+    /// construction and before the turn starts, so a slow connect is never
+    /// silently invisible. Call exactly once.
+    pub fn start(&self) {
+        let mut state = self.state.lock().expect("chat status renderer lock");
+        self.redraw(&mut state, true);
+    }
+
+    /// Feed one shared `StreamEvent`.
+    pub fn on_event(&self, event: &StreamEvent) {
+        let mut state = self.state.lock().expect("chat status renderer lock");
+        // Once the reply itself has started streaming to stdout, it owns
+        // the terminal cursor: any further stderr line — even a plain
+        // appended one, not just an in-place redraw — could land mid-word
+        // and corrupt the visible reply. Downgrade suppresses ALL further
+        // printing from `redraw()` (see its own doc comment) for the rest
+        // of the turn; only `finish()` may print again, once, when the
+        // turn ends. Never printed for `TextDelta` itself either way — the
+        // streaming text is now the visible activity — and never reverts.
+        if let StreamEvent::TextDelta { .. } = event {
+            if !state.downgraded {
+                self.clear_in_place(&state);
+                state.downgraded = true;
+            }
+            return;
+        }
+        let phase_changed = match event {
+            StreamEvent::TurnStarted { .. } => {
+                let changed = state.stage != ChatStage::AssemblingContext;
+                state.stage = ChatStage::AssemblingContext;
+                changed
+            }
+            StreamEvent::TurnPhase { phase } => {
+                let next = match phase {
+                    AgentPhase::ChoosingEvidence | AgentPhase::RetrievingEvidence => {
+                        ChatStage::AssemblingContext
+                    }
+                    AgentPhase::SynthesizingAnswer => ChatStage::WaitingOnModel,
+                };
+                let changed = state.stage != next;
+                state.stage = next;
+                changed
+            }
+            StreamEvent::Tool {
+                phase: ToolPhase::Started,
+                ..
+            } => {
+                state.tools_started += 1;
+                let changed = state.stage != ChatStage::RunningTools;
+                state.stage = ChatStage::RunningTools;
+                changed
+            }
+            StreamEvent::Tool {
+                phase: ToolPhase::Finished,
+                ..
+            } => {
+                state.tools_finished += 1;
+                // Still "running tools" until the next distinct stage — a
+                // redraw here just refreshes the finished/started count.
+                true
+            }
+            StreamEvent::LinkedSynthesisRetry { .. } => {
+                state.retries += 1;
+                let changed = state.stage != ChatStage::Regrounding;
+                state.stage = ChatStage::Regrounding;
+                changed
+            }
+            StreamEvent::TurnCompleted { .. } => {
+                let changed = state.stage != ChatStage::SavingSession;
+                state.stage = ChatStage::SavingSession;
+                changed
+            }
+            StreamEvent::Error { .. } => {
+                // Terminal for this render; `finish()` writes the actual
+                // failure line — just force one last redraw of context.
+                true
+            }
+            StreamEvent::PermissionRequired { .. } => {
+                // `commands::chat::decide_permission` is about to print a
+                // synchronous, multi-line prompt on this same stderr
+                // stream — clear this renderer's in-place line first so
+                // the prompt never collides with a stale fragment, then
+                // let the prompt own the terminal until it returns.
+                self.clear_in_place(&state);
+                return;
+            }
+            StreamEvent::TextDelta { .. } => unreachable!("handled above"),
+            StreamEvent::ThoughtDelta { .. }
+            | StreamEvent::Citation { .. }
+            | StreamEvent::SearchTrail { .. } => return,
+        };
+        self.redraw(&mut state, phase_changed);
+    }
+
+    /// Clear the in-place status line before an out-of-band message (a
+    /// Ctrl-C interrupt notice) is about to print — the same courtesy
+    /// `on_event`'s `PermissionRequired` handling already gives the
+    /// synchronous permission prompt, so the interrupt message never
+    /// collides with a stale in-place fragment.
+    pub fn clear_for_interrupt(&self) {
+        let state = self.state.lock().expect("chat status renderer lock");
+        self.clear_in_place(&state);
+    }
+
+    fn redraw(&self, state: &mut ChatStatusState, phase_changed: bool) {
+        if state.downgraded {
+            // The reply is streaming to stdout with no guaranteed trailing
+            // newline (`print!`, not `println!` — see `commands::chat`'s
+            // `live_sink`), and may still be mid-line right now. ANY line
+            // this function would print here — even a plain appended one —
+            // would concatenate directly onto the end of that visible
+            // reply text on the shared terminal. So once downgraded, this
+            // function never prints anything at all; `on_event`'s callers
+            // still update `tools_started`/`tools_finished`/`retries`/
+            // `stage` unconditionally before reaching here, so those counts
+            // remain correct for `finish()`'s own single terminal line,
+            // which is the only thing allowed to print again after
+            // downgrade (see its own leading-newline handling).
+            return;
+        }
+        let interactive_now = self.caps.interactive;
+        if !phase_changed {
+            if interactive_now {
+                if state.last_redraw.elapsed() < MIN_REDRAW_INTERVAL {
+                    return;
+                }
+            } else {
+                // Redirected or dumb: an in-place redraw is meaningless
+                // once output is going to a file or pipe — only a genuine
+                // phase change is worth a line at all (matches
+                // `progress.rs`).
+                return;
+            }
+        }
+        state.last_redraw = Instant::now();
+        let mut line = String::new();
+        if interactive_now {
+            line.push('\r');
+            line.push_str("\x1b[2K");
+        }
+        // Else (redirected or dumb): no leading separator needed — the
+        // previous line (this function's own, or `start()`'s) always ended
+        // with `\n` in that mode.
+        if self.caps.color {
+            line.push_str("\x1b[36m");
+        }
+        line.push_str(state.stage.label());
+        if self.caps.color {
+            line.push_str("\x1b[0m");
+        }
+        if state.tools_started > 0 {
+            line.push_str(&format!(
+                " (tools {}/{})",
+                state.tools_finished, state.tools_started
+            ));
+        }
+        if state.retries > 0 {
+            line.push_str(&format!(" · retry {}", state.retries));
+        }
+        line.push_str(&format!(" · {:.1}s", state.started.elapsed().as_secs_f32()));
+        if !interactive_now {
+            line.push('\n');
+        }
+        eprint!("{line}");
+        let _ = io::stderr().flush();
+        state.printed_anything = true;
+    }
+
+    fn clear_in_place(&self, state: &ChatStatusState) {
+        if self.caps.interactive && !state.downgraded && state.printed_anything {
+            eprint!("\r\x1b[2K");
+            let _ = io::stderr().flush();
+        }
+    }
+
+    /// End the status render exactly once, with a concise completion
+    /// result — success (session id, grounding, tool count), cancellation,
+    /// or failure. Call exactly once, after the turn has fully finished
+    /// (including on Ctrl-C and on error) — never from inside `on_event`,
+    /// which does not know when the LAST event has arrived.
+    ///
+    /// Once downgraded (the reply has streamed to stdout with no
+    /// guaranteed trailing newline), a `Cancelled`/`Failed` outcome must
+    /// start this line on its own fresh line rather than concatenating
+    /// onto the end of the visible reply — `commands::chat::run`'s own
+    /// success path already prints that separating newline itself (on
+    /// stdout, terminating the reply's own line) before calling this with
+    /// `Ok`, so `Ok` must NOT also get one here, or a real terminal (where
+    /// stdout and stderr share one cursor) would show a spurious blank
+    /// line between the reply and `done`.
+    pub fn finish(&self, outcome: ChatOutcomeSummary<'_>) {
+        let state = self.state.lock().expect("chat status renderer lock");
+        let is_ok = matches!(outcome, ChatOutcomeSummary::Ok { .. });
+        if state.downgraded {
+            if !is_ok {
+                eprintln!();
+            }
+        } else if self.caps.interactive && state.printed_anything {
+            eprint!("\r\x1b[2K");
+        }
+        let elapsed = state.started.elapsed().as_secs_f32();
+        let mut line = String::new();
+        match outcome {
+            ChatOutcomeSummary::Ok {
+                session_id,
+                grounding,
+            } => {
+                self.push_colored(&mut line, "\x1b[32m", "done");
+                line.push_str(&format!(
+                    " · session {session_id} · {grounding} · tools {}/{}",
+                    state.tools_finished, state.tools_started
+                ));
+            }
+            ChatOutcomeSummary::Cancelled => {
+                self.push_colored(&mut line, "\x1b[33m", "cancelled");
+            }
+            ChatOutcomeSummary::Failed { message } => {
+                self.push_colored(&mut line, "\x1b[31m", "failed");
+                line.push_str(&format!(" · {message}"));
+            }
+        }
+        line.push_str(&format!(" · {elapsed:.1}s"));
+        eprintln!("{line}");
+        let _ = io::stderr().flush();
+    }
+
+    fn push_colored(&self, line: &mut String, code: &str, text: &str) {
+        if self.caps.color {
+            line.push_str(code);
+        }
+        line.push_str(text);
+        if self.caps.color {
+            line.push_str("\x1b[0m");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn caps(interactive: bool, color: bool) -> TerminalCapabilities {
+        TerminalCapabilities { interactive, color }
+    }
+
+    #[test]
+    fn real_terminal_with_default_term_is_interactive_and_colored() {
+        let caps = TerminalCapabilities::from_parts(true, None, false, ColorMode::Auto);
+        assert!(caps.interactive);
+        assert!(caps.color);
+    }
+
+    #[test]
+    fn term_dumb_disables_redraw_even_on_a_real_tty() {
+        let caps = TerminalCapabilities::from_parts(
+            true,
+            Some("dumb".to_string()),
+            false,
+            ColorMode::Auto,
+        );
+        assert!(!caps.interactive);
+        assert!(!caps.color);
+    }
+
+    #[test]
+    fn redirected_stderr_disables_redraw_and_color() {
+        let caps = TerminalCapabilities::from_parts(false, None, false, ColorMode::Auto);
+        assert!(!caps.interactive);
+        assert!(!caps.color);
+    }
+
+    #[test]
+    fn no_color_env_disables_color_but_not_redraw() {
+        let caps = TerminalCapabilities::from_parts(true, None, true, ColorMode::Auto);
+        assert!(caps.interactive);
+        assert!(!caps.color);
+    }
+
+    #[test]
+    fn explicit_color_always_beats_no_color_env() {
+        // Adversarial: NO_COLOR is an ambient convention; an explicit user
+        // flag is a deliberate override and must win.
+        let caps = TerminalCapabilities::from_parts(true, None, true, ColorMode::Always);
+        assert!(caps.color);
+    }
+
+    #[test]
+    fn explicit_color_never_beats_a_real_colorful_terminal() {
+        let caps = TerminalCapabilities::from_parts(true, None, false, ColorMode::Never);
+        assert!(!caps.color);
+        assert!(caps.interactive); // redraw is a separate concern from color
+    }
+
+    #[test]
+    fn redirected_output_only_lines_on_phase_change_never_redraws() {
+        let renderer = ChatStatusRenderer::new(caps(false, false));
+        renderer.on_event(&StreamEvent::TurnStarted {
+            session_id: "s1".into(),
+            model: None,
+        });
+        // A same-stage event must not itself force a new line under
+        // redirected output — only genuine phase transitions do.
+        let state = renderer.state.lock().unwrap();
+        assert_eq!(state.stage, ChatStage::AssemblingContext);
+    }
+
+    #[test]
+    fn tool_events_are_counted_and_advance_stage() {
+        let renderer = ChatStatusRenderer::new(caps(false, false));
+        renderer.on_event(&StreamEvent::Tool {
+            id: "t1".into(),
+            name: "search".into(),
+            phase: ToolPhase::Started,
+            summary: String::new(),
+            detail: None,
+            ok: None,
+        });
+        renderer.on_event(&StreamEvent::Tool {
+            id: "t1".into(),
+            name: "search".into(),
+            phase: ToolPhase::Finished,
+            summary: String::new(),
+            detail: None,
+            ok: Some(true),
+        });
+        let state = renderer.state.lock().unwrap();
+        assert_eq!(state.stage, ChatStage::RunningTools);
+        assert_eq!(state.tools_started, 1);
+        assert_eq!(state.tools_finished, 1);
+    }
+
+    #[test]
+    fn phase_changes_after_downgrade_update_counters_but_never_print_again() {
+        // Adversarial: `Tool`/`TurnCompleted`/etc. all report `phase_changed
+        // = true`, which used to force a redraw unconditionally — even
+        // once the reply had started streaming to stdout with no
+        // guaranteed trailing newline, concatenating the status word onto
+        // the visible reply. `redraw()` must now short-circuit entirely
+        // once downgraded, updating only the counters `on_event`'s own
+        // match arms already touch before calling it.
+        let renderer = ChatStatusRenderer::new(caps(true, false));
+        renderer.on_event(&StreamEvent::TextDelta {
+            text: "partial reply".into(),
+        });
+        let printed_before_downgrade = renderer.state.lock().unwrap().printed_anything;
+
+        renderer.on_event(&StreamEvent::Tool {
+            id: "t1".into(),
+            name: "search".into(),
+            phase: ToolPhase::Started,
+            summary: String::new(),
+            detail: None,
+            ok: None,
+        });
+        renderer.on_event(&StreamEvent::TurnCompleted {
+            reason: "stop".into(),
+        });
+
+        let state = renderer.state.lock().unwrap();
+        assert!(state.downgraded);
+        // Counters still update — only the printing is suppressed.
+        assert_eq!(state.tools_started, 1);
+        assert_eq!(state.stage, ChatStage::SavingSession);
+        // `redraw()` never ran its print branch after downgrade: the flag
+        // it alone sets to `true` is unchanged from before the downgrade.
+        assert_eq!(state.printed_anything, printed_before_downgrade);
+    }
+
+    #[test]
+    fn retry_events_are_counted_and_advance_stage() {
+        let renderer = ChatStatusRenderer::new(caps(false, false));
+        renderer.on_event(&StreamEvent::LinkedSynthesisRetry {
+            available: true,
+            session_id: "s1".into(),
+            corpus_id: "c1".into(),
+            provider_profile_id: None,
+            model_id: None,
+        });
+        let state = renderer.state.lock().unwrap();
+        assert_eq!(state.stage, ChatStage::Regrounding);
+        assert_eq!(state.retries, 1);
+    }
+
+    #[test]
+    fn permission_required_clears_the_in_place_line_without_starting_a_new_stage() {
+        let renderer = ChatStatusRenderer::new(caps(true, false));
+        let stage_before = renderer.state.lock().unwrap().stage;
+        renderer.on_event(&StreamEvent::PermissionRequired {
+            request_id: "r1".into(),
+            tool_name: "write_file".into(),
+            target: "note.md".into(),
+            reason: "save".into(),
+            preview: String::new(),
+            risk: "local".into(),
+            arguments: serde_json::Value::Null,
+        });
+        assert_eq!(renderer.state.lock().unwrap().stage, stage_before);
+    }
+}
