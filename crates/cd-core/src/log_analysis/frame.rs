@@ -303,6 +303,15 @@ fn is_continuation_of(pending: &str, line: &str) -> bool {
         return false;
     }
 
+    // Some producers print one timestamped SQL lead followed by flush-left
+    // clauses. Join those clauses only when the first physical line already
+    // proves that it is an explicit SQL statement/query emission. This keeps a
+    // standalone `SELECT ...` line independent and prevents a broad SQL-word
+    // heuristic from swallowing ordinary records.
+    if pending_looks_like_explicit_sql(pending) && is_sql_clause_continuation(trimmed) {
+        return true;
+    }
+
     if trimmed.is_empty() {
         // Blank lines inside Python chained tracebacks stay in-record.
         return pending_looks_like_stack(pending) || pending_looks_like_pg_stderr(pending);
@@ -316,6 +325,107 @@ fn is_continuation_of(pending: &str, line: &str) -> bool {
     }
 
     false
+}
+
+fn pending_looks_like_explicit_sql(pending: &str) -> bool {
+    let first = pending.lines().next().unwrap_or(pending);
+    if !line_has_leading_timestamp(first) {
+        return false;
+    }
+
+    sql_after_explicit_lead(first).is_some_and(is_sql_statement_start)
+}
+
+fn sql_after_explicit_lead(line: &str) -> Option<&str> {
+    let lower = line.to_ascii_lowercase();
+
+    if let Some(index) = find_word(&lower, "sending") {
+        let rest = line.get(index + "sending".len()..)?.trim_start();
+        if let Some(sql) = rest.strip_prefix(':') {
+            return Some(sql.trim_start());
+        }
+    }
+
+    let index = find_word(&lower, "statement")?;
+    let mut rest = line.get(index + "statement".len()..)?.trim_start();
+    if let Some(after_open) = rest.strip_prefix('(') {
+        let close = after_open.find(')')?;
+        rest = after_open.get(close + 1..)?.trim_start();
+    }
+    Some(rest.strip_prefix(':')?.trim_start())
+}
+
+fn find_word(haystack: &str, needle: &str) -> Option<usize> {
+    haystack.match_indices(needle).find_map(|(index, _)| {
+        let before = haystack.as_bytes().get(index.wrapping_sub(1)).copied();
+        let after = haystack.as_bytes().get(index + needle.len()).copied();
+        let boundary =
+            |byte: Option<u8>| byte.is_none_or(|b| !b.is_ascii_alphanumeric() && b != b'_');
+        (boundary(before) && boundary(after)).then_some(index)
+    })
+}
+
+fn is_sql_statement_start(sql: &str) -> bool {
+    sql_starts_with_keyword(
+        sql,
+        &[
+            "SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "CALL", "CREATE", "ALTER",
+            "DROP", "TRUNCATE", "GRANT", "REVOKE",
+        ],
+    )
+}
+
+fn is_sql_clause_continuation(line: &str) -> bool {
+    sql_starts_with_keyword(
+        line,
+        &[
+            "SELECT",
+            "UNION",
+            "INTERSECT",
+            "EXCEPT",
+            "WITH",
+            "FROM",
+            "WHERE",
+            "JOIN",
+            "INNER",
+            "LEFT",
+            "RIGHT",
+            "FULL",
+            "CROSS",
+            "NATURAL",
+            "ON",
+            "AND",
+            "OR",
+            "GROUP",
+            "ORDER",
+            "HAVING",
+            "WINDOW",
+            "LIMIT",
+            "OFFSET",
+            "FETCH",
+            "FOR",
+            "VALUES",
+            "SET",
+            "RETURNING",
+            "INTO",
+            "WHEN",
+            "ELSE",
+            "END",
+        ],
+    )
+}
+
+fn sql_starts_with_keyword(value: &str, keywords: &[&str]) -> bool {
+    let Some(token) = value
+        .trim_start()
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, '(' | ';'))
+        .next()
+    else {
+        return false;
+    };
+    keywords
+        .iter()
+        .any(|keyword| token.eq_ignore_ascii_case(keyword))
 }
 
 fn line_has_leading_timestamp(line: &str) -> bool {
@@ -555,6 +665,71 @@ mod tests {
 ";
         let recs = frame_text(text);
         assert_eq!(recs.len(), 4, "{recs:?}");
+    }
+
+    #[test]
+    fn timestamped_explicit_sql_leads_own_repeated_flush_left_clause_rows() {
+        let mut text = String::new();
+        for block in 0..12 {
+            text.push_str(&format!(
+                "2026-07-29T09:14:{block:02}.125 INFO - statement (report) : SELECT id FROM widgets\n"
+            ));
+            for index in 0..42 {
+                if index % 2 == 0 {
+                    text.push_str("UNION ALL\n");
+                } else {
+                    text.push_str(&format!("SELECT {index} FROM widgets\n"));
+                }
+            }
+        }
+
+        let recs = frame_text(&text);
+        assert_eq!(recs.len(), 12, "{recs:?}");
+        assert!(recs.iter().all(|record| record.lines().count() == 43));
+        assert_eq!(text.lines().count() - recs.len(), 504);
+        assert!(recs[0].contains("UNION ALL\nSELECT 41 FROM widgets"));
+    }
+
+    #[test]
+    fn timestamped_sending_lead_accepts_common_sql_clauses() {
+        let text = "\
+2026-07-29 09:14:05,125 DEBUG sending: SELECT id
+FROM widgets
+WHERE enabled = true
+GROUP BY id
+ORDER BY id
+LIMIT 10
+2026-07-29 09:14:06,250 INFO complete
+";
+        let recs = frame_text(text);
+        assert_eq!(recs.len(), 2, "{recs:?}");
+        assert_eq!(recs[0].lines().count(), 6);
+        assert!(recs[0].ends_with("LIMIT 10"));
+        assert!(recs[1].starts_with("2026-07-29 09:14:06,250"));
+    }
+
+    #[test]
+    fn sql_continuation_stops_at_unrelated_or_timestamped_records() {
+        let text = "\
+2026-07-29T09:14:05.125 INFO statement: SELECT id FROM widgets
+UNION ALL
+ordinary flush-left status
+SELECT standalone text
+2026-07-29T09:14:06.250 INFO statement: not actually sql
+UNION standalone too
+2026-07-29T09:14:07.375 INFO done
+";
+        let recs = frame_text(text);
+        assert_eq!(recs.len(), 6, "{recs:?}");
+        assert!(recs[0].ends_with("UNION ALL"));
+        assert_eq!(recs[1], "ordinary flush-left status");
+        assert_eq!(recs[2], "SELECT standalone text");
+        assert_eq!(
+            recs[3],
+            "2026-07-29T09:14:06.250 INFO statement: not actually sql"
+        );
+        assert_eq!(recs[4], "UNION standalone too");
+        assert!(recs[5].starts_with("2026-07-29T09:14:07.375"));
     }
 
     #[test]
