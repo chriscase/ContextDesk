@@ -57,7 +57,6 @@ fn function_body<'a>(source: &'a str, fn_name: &str) -> &'a str {
 }
 
 #[test]
-#[ignore = "selective compose: activity-tip Tauri not force-migrated to full cd-workflow provider/turn delegation"]
 fn provider_profile_for_turn_delegates_to_cd_workflow_provider() {
     let source = tauri_lib_source();
     let body = function_body(&source, "provider_profile_for_turn");
@@ -74,7 +73,6 @@ fn provider_profile_for_turn_delegates_to_cd_workflow_provider() {
 }
 
 #[test]
-#[ignore = "selective compose: activity-tip Tauri not force-migrated to full cd-workflow provider/turn delegation"]
 fn model_tools_disabled_reason_delegates_to_cd_workflow_provider() {
     let source = tauri_lib_source();
     let body = function_body(&source, "model_tools_disabled_reason");
@@ -86,7 +84,6 @@ fn model_tools_disabled_reason_delegates_to_cd_workflow_provider() {
 }
 
 #[test]
-#[ignore = "selective compose: activity-tip Tauri not force-migrated to full cd-workflow provider/turn delegation"]
 fn model_tools_enabled_delegates_to_cd_workflow_provider() {
     let source = tauri_lib_source();
     let body = function_body(&source, "model_tools_enabled");
@@ -111,27 +108,20 @@ fn model_tools_enabled_delegates_to_cd_workflow_provider() {
 /// `cd_workflow::turn` — it does not contain the forbidden substring this
 /// test checks for, so it needs no special-casing here.
 #[test]
-#[ignore = "selective compose: activity-tip Tauri not force-migrated to full cd-workflow provider/turn delegation"]
-fn agent_turn_calls_cd_workflow_turn_functions_not_research_turn_directly() {
+fn agent_turn_calls_cd_workflow_turn_kernel_not_research_turn_directly() {
     let source = tauri_lib_source();
     let body = function_body(&source, "agent_turn");
     assert!(
-        body.contains("cd_workflow::turn::run_linked_turn"),
-        "desktop/src-tauri's agent_turn must call cd_workflow::turn::run_linked_turn \
-         for its linked-corpus branch instead of driving cd_core::research directly \
-         — found body:\n{body}"
-    );
-    assert!(
-        body.contains("cd_workflow::turn::run_ordinary_turn"),
-        "desktop/src-tauri's agent_turn must call cd_workflow::turn::run_ordinary_turn \
-         for its unlinked branch instead of driving cd_core::research directly \
+        body.contains("cd_workflow::turn::run_turn"),
+        "desktop/src-tauri's agent_turn must call cd_workflow::turn::run_turn \
+         for both linked and ordinary turns instead of driving cd_core::research directly \
          — found body:\n{body}"
     );
     assert!(
         !body.contains("research_turn_with_cancel_and_context"),
         "desktop/src-tauri's agent_turn must not call \
          cd_core::research::research_turn_with_cancel_and_context* directly — that call \
-         belongs exclusively inside cd_workflow::turn::run_linked_turn/run_ordinary_turn \
+         belongs exclusively inside cd_workflow::turn::run_turn \
          now; agent_turn regaining a direct call would recreate the parallel \
          implementation this migration removed — found body:\n{body}"
     );
@@ -143,7 +133,6 @@ fn agent_turn_calls_cd_workflow_turn_functions_not_research_turn_directly() {
 /// removal fails here with a clear message instead of a confusing build
 /// error somewhere else.
 #[test]
-#[ignore = "selective compose: activity-tip Tauri not force-migrated to full cd-workflow provider/turn delegation"]
 fn tauri_host_depends_on_cd_workflow() {
     let path: PathBuf = [
         env!("CARGO_MANIFEST_DIR"),

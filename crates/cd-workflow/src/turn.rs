@@ -23,6 +23,62 @@ use tokio::time::Instant;
 
 use crate::provider::ResolvedTurnInputs;
 
+/// Host-neutral options for one provider-backed chat turn.
+///
+/// Both the CLI workflow and the desktop host pass their already-authorized,
+/// host-owned state through this value. It deliberately does not load or save
+/// sessions, prompt for permissions, acquire a Tauri host, or bind a corpus:
+/// those lifecycle decisions differ by host. It does own the single call into
+/// `cd-core` so streaming, cancellation, grounding, retry checkpoints,
+/// deadlines, tracing, and skill provenance cannot drift between hosts.
+#[derive(Default)]
+pub struct TurnExecutionOptions<'a> {
+    pub context: Option<LogExplorerTurnContext>,
+    pub cancel: Option<Arc<AtomicBool>>,
+    pub dry_run: bool,
+    pub trace_sink: Option<Arc<dyn TurnTraceSink>>,
+    pub linked_synthesis_retry: Option<LinkedSynthesisCheckpoint>,
+    pub turn_started_at: Option<Instant>,
+    pub turn_prelude_emitted: bool,
+    pub applied_skill_ids: &'a [String],
+}
+
+/// Drive the shared provider/tool kernel for either an ordinary or a linked
+/// turn. Host-specific lifecycle remains outside this seam; all model-facing
+/// execution inputs cross it explicitly.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_turn(
+    host: &mut ToolHost,
+    resolved: &ResolvedTurnInputs,
+    user_text: &str,
+    history: &mut Vec<ChatMessage>,
+    session_id: &str,
+    options: TurnExecutionOptions<'_>,
+    live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+    checkpoint_out: Option<&mut Option<LinkedSynthesisCheckpoint>>,
+) -> CoreResult<Vec<StreamEvent>> {
+    cd_core::research::research_turn_with_cancel_and_context_and_checkpoint_and_trace(
+        host,
+        &resolved.profile,
+        resolved.api_key.clone(),
+        user_text,
+        history,
+        session_id,
+        false,
+        options.cancel,
+        options.context,
+        options.linked_synthesis_retry,
+        checkpoint_out,
+        options.turn_started_at,
+        options.turn_prelude_emitted,
+        live,
+        options.dry_run,
+        options.trace_sink,
+        options.applied_skill_ids,
+    )
+    .await
+}
+
 /// Prior tool-host state captured by [`bind_linked_corpus`], so a caller can
 /// restore it after the turn — mirrors the snapshot/restore Tauri's
 /// `agent_turn` already performs around the same host methods, generalized
@@ -112,24 +168,24 @@ pub async fn run_linked_turn(
     turn_started_at: Option<Instant>,
     turn_prelude_emitted: bool,
 ) -> CoreResult<Vec<StreamEvent>> {
-    cd_core::research::research_turn_with_cancel_and_context_and_checkpoint_and_trace(
+    run_turn(
         host,
-        &resolved.profile,
-        resolved.api_key.clone(),
+        resolved,
         user_text,
         history,
         session_id,
-        false,
-        cancel,
-        Some(context),
-        linked_synthesis_retry,
-        checkpoint_out,
-        turn_started_at,
-        turn_prelude_emitted,
+        TurnExecutionOptions {
+            context: Some(context),
+            cancel,
+            dry_run,
+            trace_sink,
+            linked_synthesis_retry,
+            turn_started_at,
+            turn_prelude_emitted,
+            applied_skill_ids: &[],
+        },
         live,
-        dry_run,
-        trace_sink,
-        &[],
+        checkpoint_out,
     )
     .await
 }
@@ -154,24 +210,23 @@ pub async fn run_ordinary_turn(
     turn_started_at: Option<Instant>,
     turn_prelude_emitted: bool,
 ) -> CoreResult<Vec<StreamEvent>> {
-    cd_core::research::research_turn_with_cancel_and_context_and_checkpoint_and_trace(
+    run_turn(
         host,
-        &resolved.profile,
-        resolved.api_key.clone(),
+        resolved,
         user_text,
         history,
         session_id,
-        false,
-        cancel,
-        None,
-        linked_synthesis_retry,
-        checkpoint_out,
-        turn_started_at,
-        turn_prelude_emitted,
+        TurnExecutionOptions {
+            cancel,
+            dry_run,
+            trace_sink,
+            linked_synthesis_retry,
+            turn_started_at,
+            turn_prelude_emitted,
+            ..TurnExecutionOptions::default()
+        },
         live,
-        dry_run,
-        trace_sink,
-        &[],
+        checkpoint_out,
     )
     .await
 }
@@ -236,20 +291,28 @@ mod tests {
 
         let mut history = Vec::new();
         let mut checkpoint_slot: Option<LinkedSynthesisCheckpoint> = None;
-        let events = run_ordinary_turn(
+        let mut streamed = Vec::new();
+        let mut live = |event| streamed.push(event);
+        let trace = Arc::new(
+            cd_core::turn_trace::RecordingTurnTrace::with_developer_detail(
+                std::time::Instant::now(),
+                Arc::new(|_| {}),
+            ),
+        );
+        let applied_skill_ids = vec!["skill-fixture".to_string()];
+        let events = run_turn(
             &mut host,
             &resolved,
             "hi there",
             &mut history,
             "s-checkpoint",
-            None,
-            None,
-            false,
-            None,
-            None,
+            TurnExecutionOptions {
+                trace_sink: Some(trace.clone()),
+                applied_skill_ids: &applied_skill_ids,
+                ..TurnExecutionOptions::default()
+            },
+            Some(&mut live),
             Some(&mut checkpoint_slot),
-            None,
-            false,
         )
         .await
         .expect("ordinary turn completes");
@@ -261,6 +324,29 @@ mod tests {
             checkpoint_slot.is_none(),
             "an ordinary turn must never fabricate a linked-synthesis checkpoint"
         );
+        assert!(streamed
+            .iter()
+            .any(|e| matches!(e, StreamEvent::TurnStarted { .. })));
+        assert!(streamed
+            .iter()
+            .any(|e| matches!(e, StreamEvent::TextDelta { .. })));
+        assert!(streamed
+            .iter()
+            .any(|e| matches!(e, StreamEvent::TurnCompleted { reason } if reason == "stop")));
+        let developer_events = trace.developer_events();
+        let skill_provenance = developer_events
+            .iter()
+            .find(|event| event.label == "Context: pinned_skills")
+            .expect("shared kernel emits authoritative pinned-skill provenance");
+        assert_eq!(skill_provenance.status, "present");
+        assert_eq!(
+            skill_provenance.authority,
+            Some(cd_core::turn_trace::ContextProvenanceAuthority::HumanApproved)
+        );
+        assert!(skill_provenance
+            .request
+            .iter()
+            .any(|payload| payload.content.contains("skill-fixture")));
     }
 
     /// Two-round provider double for the mutation-proof context test below:
@@ -427,21 +513,18 @@ mod tests {
         );
 
         let mut history = Vec::new();
-        let events = run_linked_turn(
+        let events = run_turn(
             &mut host,
             &resolved,
             "what happened here? also check durable memory for related context",
             &mut history,
             "s-linked",
-            context,
+            TurnExecutionOptions {
+                context: Some(context),
+                ..TurnExecutionOptions::default()
+            },
             None,
             None,
-            false,
-            None,
-            None,
-            None,
-            None,
-            false,
         )
         .await
         .expect("linked turn completes with the caller's own context");
@@ -549,20 +632,18 @@ mod tests {
         // Turn 1: already-cancelled — the exact state a genuinely mid-flight
         // cancel leaves the flag in by the time the caller sees the result.
         let already_cancelled = std::sync::Arc::new(AtomicBool::new(true));
-        let cancelled_result = run_ordinary_turn(
+        let cancelled_result = run_turn(
             &mut host,
             &resolved,
             "first question",
             &mut history,
             "s-cancel-retry",
-            Some(already_cancelled),
+            TurnExecutionOptions {
+                cancel: Some(already_cancelled),
+                ..TurnExecutionOptions::default()
+            },
             None,
-            false,
             None,
-            None,
-            None,
-            None,
-            false,
         )
         .await
         .expect("a cancelled turn is a clean result, not an error");
@@ -588,20 +669,18 @@ mod tests {
             .mount(&server)
             .await;
         let fresh_cancel = std::sync::Arc::new(AtomicBool::new(false));
-        let retried = run_ordinary_turn(
+        let retried = run_turn(
             &mut host,
             &resolved,
             "first question",
             &mut history,
             "s-cancel-retry",
-            Some(fresh_cancel),
+            TurnExecutionOptions {
+                cancel: Some(fresh_cancel),
+                ..TurnExecutionOptions::default()
+            },
             None,
-            false,
             None,
-            None,
-            None,
-            None,
-            false,
         )
         .await
         .expect("the retry reaches the provider and completes");

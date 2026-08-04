@@ -4119,8 +4119,7 @@ mod developer_detail_suppression_tests {
     fn completed_turns_across_many_sessions_do_not_grow_the_map() {
         let map: DeveloperDetailSuppressionMap = Mutex::new(HashMap::new());
         for index in 0..1_000 {
-            let registration =
-                install_developer_detail_capture(&map, &format!("session-{index}"));
+            let registration = install_developer_detail_capture(&map, &format!("session-{index}"));
             assert_eq!(map.lock().unwrap().len(), 1);
             drop(registration);
         }
@@ -4510,23 +4509,7 @@ fn provider_profile_for_turn(
     config: &AppConfig,
     explicit_profile_id: Option<&str>,
 ) -> Result<ProviderProfile, String> {
-    let explicit_profile_id = explicit_profile_id
-        .map(str::trim)
-        .filter(|profile_id| !profile_id.is_empty());
-    if let Some(profile_id) = explicit_profile_id {
-        return config
-            .providers
-            .profiles
-            .iter()
-            .find(|profile| profile.id == profile_id)
-            .cloned()
-            .ok_or_else(|| profile_id.to_string());
-    }
-    Ok(config
-        .providers
-        .active()
-        .cloned()
-        .unwrap_or_else(ProviderProfile::ollama_local))
+    cd_workflow::provider::resolve_provider_profile(config, explicit_profile_id)
 }
 
 #[tauri::command]
@@ -4612,7 +4595,7 @@ async fn agent_turn(
         .map(DeveloperDetailCaptureRegistration::gate)
         .unwrap_or_default();
     let explicit_profile_id = req.provider_profile_id.as_deref();
-    let mut profile = match provider_profile_for_turn(&cfg, explicit_profile_id) {
+    let profile = match provider_profile_for_turn(&cfg, explicit_profile_id) {
         Ok(profile) => profile,
         Err(profile_id) => {
             let events = vec![
@@ -4643,32 +4626,19 @@ async fn agent_turn(
             return Ok(());
         }
     };
-    // Per-chat model override (mid-chat switch), else app default, else profile model.
-    if let Some(m) = req
-        .chat_model
-        .as_ref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
-        // Accept bare model id or provider::model selection key.
-        let (_pid, mid) = parse_selection_key(m);
-        profile.chat_model = mid;
-    } else if let Some(m) = cfg
-        .default_chat_model
-        .as_ref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
-        profile.chat_model = m.to_string();
-    }
-    profile.capabilities.tools = model_tools_enabled(&cfg, &profile, profile.chat_model.as_str());
-    let api_key = profile
-        .api_key_ref
-        .as_ref()
-        .and_then(|r| state.secrets.get(r).ok().flatten());
+    // The shared workflow resolver owns the exact model override, tools
+    // capability, keychain lookup, and deadline sequence used by the CLI.
+    // Tauri keeps its host-shaped missing-profile terminal above.
+    let resolved = cd_workflow::provider::resolve_turn_inputs_from_profile(
+        &state.secrets,
+        &cfg,
+        profile,
+        req.chat_model.as_deref(),
+    );
+    let profile = resolved.profile.clone();
     let cancel = admitted_turn.cancel.clone();
     let turn_started_at = tokio::time::Instant::now();
-    let deadline_plan = cd_core::router::TurnDeadlinePlan::for_profile(&cfg.router, &profile);
+    let deadline_plan = resolved.deadline_plan;
 
     // Resolve the linked corpus only from the durable session. Explorer may
     // contribute a bounded viewport brief, but neither the model nor an
@@ -4978,12 +4948,13 @@ async fn agent_turn(
     let activity_sink: Option<std::sync::Arc<cd_core::turn_trace::RecordingTurnTrace>> =
         (activity_settings.enabled || developer_observer.is_some()).then(|| {
             std::sync::Arc::new(match developer_observer {
-                Some(observer) =>
+                Some(observer) => {
                     cd_core::turn_trace::RecordingTurnTrace::with_developer_detail_gate(
                         turn_started_at.into_std(),
                         observer,
                         developer_detail_gate.clone(),
-                    ),
+                    )
+                }
                 None => cd_core::turn_trace::RecordingTurnTrace::with_started_at(
                     turn_started_at.into_std(),
                 ),
@@ -5125,24 +5096,24 @@ async fn agent_turn(
         }
         ev
     } else {
-        cd_core::research::research_turn_with_cancel_and_context_and_checkpoint_and_trace(
+        cd_workflow::turn::run_turn(
             &mut host,
-            &profile,
-            api_key,
+            &resolved,
             &user_text,
             &mut history,
             &req.session_id,
-            false,
-            Some(cancel.clone()),
-            log_explorer_context,
-            linked_synthesis_retry,
-            Some(&mut next_synthesis_checkpoint),
-            Some(turn_started_at),
-            turn_prelude_emitted,
+            cd_workflow::turn::TurnExecutionOptions {
+                context: log_explorer_context,
+                cancel: Some(cancel.clone()),
+                dry_run: false,
+                trace_sink,
+                linked_synthesis_retry,
+                turn_started_at: Some(turn_started_at),
+                turn_prelude_emitted,
+                applied_skill_ids: &applied_skill_ids,
+            },
             Some(&mut sink),
-            false,
-            trace_sink,
-            &applied_skill_ids,
+            Some(&mut next_synthesis_checkpoint),
         )
         .await
         .map_err(|e| e.to_string())
@@ -5723,21 +5694,11 @@ fn model_tools_disabled_reason(
     profile: &ProviderProfile,
     model_id: &str,
 ) -> Option<&'static str> {
-    if !profile.capabilities.tools {
-        return Some("profile");
-    }
-    let canonical = model_selection_key(&profile.id, model_id);
-    let legacy = format!("{}::{model_id}", profile.id);
-    if cfg.model_tools_enabled.get(&canonical) == Some(&false)
-        || cfg.model_tools_enabled.get(&legacy) == Some(&false)
-    {
-        return Some("model");
-    }
-    None
+    cd_workflow::provider::model_tools_disabled_reason(cfg, profile, model_id)
 }
 
 fn model_tools_enabled(cfg: &AppConfig, profile: &ProviderProfile, model_id: &str) -> bool {
-    model_tools_disabled_reason(cfg, profile, model_id).is_none()
+    cd_workflow::provider::model_tools_enabled(cfg, profile, model_id)
 }
 
 fn provider_group_label(p: &ProviderProfile) -> String {

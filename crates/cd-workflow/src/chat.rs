@@ -17,8 +17,8 @@
 //!   kernel both hosts call. Tauri's `agent_turn` command
 //!   (`desktop/src-tauri/src/lib.rs`) calls
 //!   `crate::provider::resolve_turn_inputs_from_profile` and
-//!   `crate::turn::run_linked_turn`/`run_ordinary_turn` directly — the same
-//!   functions [`run_chat_workflow`] below calls — so CLI and GUI turns given
+//!   `crate::turn::run_turn` directly — the same function
+//!   [`run_chat_workflow`] below calls — so CLI and GUI turns given
 //!   equivalent inputs produce equivalent grounding decisions, trace facts,
 //!   and tool results.
 //! - **NOT shared — `run_chat_workflow` itself**: Tauri's `agent_turn` does
@@ -57,7 +57,7 @@
 //! immediately from the CLI with no separate credential setup.
 
 use crate::provider::{resolve_turn_inputs, ResolvedTurnInputs};
-use crate::turn::{bind_linked_corpus, run_linked_turn, run_ordinary_turn, unbind_linked_corpus};
+use crate::turn::{bind_linked_corpus, run_turn, unbind_linked_corpus, TurnExecutionOptions};
 use cd_core::agent::LogExplorerTurnContext;
 use cd_core::chat::{ChatMessage, Role};
 use cd_core::config::AppConfig;
@@ -159,12 +159,13 @@ fn has_pending_permission(events: &[StreamEvent]) -> Option<(String, String, Val
     })
 }
 
-/// Run one chat turn end to end: resolve the profile, load or create the
+/// Run one CLI chat turn end to end: resolve the profile, load or create the
 /// session, bind the corpus if linked, drive the turn (resuming through up
 /// to [`MAX_PERMISSION_ROUNDS`] synchronous permission prompts), persist the
-/// new messages, and unbind. This is the one entry point a thin Tauri
-/// adapter and a thin CLI adapter should both call — never a copy of its
-/// internals.
+/// new messages, and unbind. Desktop cannot call this CLI-shaped lifecycle
+/// because its permission and transcript persistence handshakes are
+/// asynchronous renderer interactions; both hosts converge one layer down in
+/// [`run_turn`].
 ///
 /// `request.dry_run` changes exactly one thing about this sequence:
 /// **nothing is persisted**. Profile resolution, session load/creation,
@@ -246,42 +247,23 @@ pub async fn run_chat_workflow(
         None => &mut noop_sink,
     };
     loop {
-        let events = if let Some(context) = linked_context.clone() {
-            run_linked_turn(
-                host,
-                &resolved,
-                user_text,
-                &mut history,
-                &session_id,
-                context,
-                cancel.clone(),
-                Some(&mut *live_sink),
-                request.dry_run,
-                request.trace_sink.clone(),
-                None,
-                None,
-                None,
-                false,
-            )
-            .await
-        } else {
-            run_ordinary_turn(
-                host,
-                &resolved,
-                user_text,
-                &mut history,
-                &session_id,
-                cancel.clone(),
-                Some(&mut *live_sink),
-                request.dry_run,
-                request.trace_sink.clone(),
-                None,
-                None,
-                None,
-                false,
-            )
-            .await
-        };
+        let events = run_turn(
+            host,
+            &resolved,
+            user_text,
+            &mut history,
+            &session_id,
+            TurnExecutionOptions {
+                context: linked_context.clone(),
+                cancel: cancel.clone(),
+                dry_run: request.dry_run,
+                trace_sink: request.trace_sink.clone(),
+                ..TurnExecutionOptions::default()
+            },
+            Some(&mut *live_sink),
+            None,
+        )
+        .await;
         let events = match events {
             Ok(events) => events,
             Err(error) => {
