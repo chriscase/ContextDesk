@@ -30,6 +30,7 @@ import {
   shouldProcessEventWhileStopped,
 } from "../lib/turn";
 import { classifyCompletedCitation } from "../lib/citations";
+import { loadDeveloperActivityDetail } from "../lib/activity/prefs";
 
 export { classifyCompletedCitation } from "../lib/citations";
 
@@ -319,7 +320,13 @@ export function useTurnController(args: Args) {
           // persists a terminal turn itself (e.g. a chat pinned to a provider
           // profile that no longer exists) it de-duplicates against these
           // instead of writing a second copy of the same exchange.
-          { userMessageId: user.id, assistantMessageId: assistantId },
+          {
+            userMessageId: user.id,
+            assistantMessageId: assistantId,
+            ...(loadDeveloperActivityDetail()
+              ? { developerActivityDetail: true }
+              : {}),
+          },
         );
       } catch (e) {
         const err = e instanceof Error ? e.message : String(e);

@@ -18,6 +18,9 @@ export type {
 // Type-only (erased at build time): logDiagnosticReport imports types from here
 // as well, so this cannot create a runtime cycle.
 import type { LogDiagnosticSuppressionPolicyInput } from "./logDiagnosticReport";
+import { publishDeveloperDetail } from "./activity/developerDetailBridge";
+import { publishTurnActivityUpdate } from "./activity/turnActivityUpdateBridge";
+import type { DeveloperDetailEvent } from "./activity/types";
 
 export type EventDto = {
   kind: string;
@@ -345,6 +348,8 @@ export async function agentTurn(
   transcriptIds?: {
     userMessageId?: string | null;
     assistantMessageId?: string | null;
+    /** Sensitive, process-lifetime activity detail for this turn only. */
+    developerActivityDetail?: boolean;
   },
 ): Promise<EventDto[]> {
   const req = {
@@ -359,6 +364,8 @@ export async function agentTurn(
     client_user_message_id: transcriptIds?.userMessageId?.trim() || null,
     client_assistant_message_id:
       transcriptIds?.assistantMessageId?.trim() || null,
+    developer_activity_detail:
+      transcriptIds?.developerActivityDetail === true,
   };
 
   if (!isTauri()) {
@@ -394,6 +401,17 @@ export async function agentTurn(
   const collected: EventDto[] = [];
   // Tauri 2 Channel: host sends EventDto as each stream event is produced.
   const channel = new Channel<EventDto>((ev) => {
+    if (ev.kind === "developer_activity") {
+      const event = ev.payload.event as DeveloperDetailEvent | undefined;
+      const eventSessionId = String(ev.payload.session_id ?? "");
+      const messageId = String(ev.payload.message_id ?? "");
+      if (event && eventSessionId === sessionId && messageId) {
+        publishDeveloperDetail({ sessionId: eventSessionId, messageId, event });
+      }
+      // Sensitive developer payloads never enter the ordinary event batch or
+      // transcript reducer. They have a dedicated process-local bridge.
+      return;
+    }
     collected.push(ev);
     onEvent?.(ev);
   });
@@ -421,7 +439,7 @@ export async function completePermission(
   if (!isTauri()) {
     throw new Error("Permission grants require Tauri host");
   }
-  return invoke<EventDto[]>("complete_permission_cmd", {
+  const events = await invoke<EventDto[]>("complete_permission_cmd", {
     req: {
       request_id: requestId,
       decision,
@@ -432,6 +450,9 @@ export async function completePermission(
       session_id: sessionId?.trim() || null,
     },
   });
+  const owner = sessionId?.trim();
+  if (owner) publishTurnActivityUpdate({ sessionId: owner });
+  return events;
 }
 
 export async function hostPreflight(): Promise<PreflightReportDto | null> {

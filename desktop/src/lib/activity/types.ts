@@ -384,6 +384,37 @@ export type ActivityTurn = {
   droppedEvents: number;
   /** Contract version the record was written with, when live. */
   contractVersion: number | null;
+  /** Explicitly opted-in, process-local sensitive developer payloads. */
+  developerDetail?: DeveloperDetailEvent[];
+};
+
+export type DeveloperPayload = {
+  content: string;
+  original_bytes: number;
+  retained_bytes: number;
+  truncated: boolean;
+};
+
+export type DeveloperDetailEvent = {
+  seq: number;
+  elapsed_ms?: number | null;
+  kind:
+    | "provider_exchange"
+    | "tool_call"
+    | "tool_result"
+    | "permission"
+    | "deterministic_stage"
+    | "cancellation";
+  label: string;
+  provider?: string | null;
+  model?: string | null;
+  round?: number | null;
+  tool_name?: string | null;
+  offered_tools: string[];
+  request: DeveloperPayload[];
+  response?: DeveloperPayload | null;
+  status: string;
+  sensitive: true;
 };
 
 // ---------------------------------------------------------------------------

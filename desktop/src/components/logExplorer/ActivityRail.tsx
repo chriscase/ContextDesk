@@ -45,6 +45,8 @@ export function ActivityRail({
   log,
   mode,
   onModeChange,
+  developerDetail = false,
+  onDeveloperDetailChange,
   collapsed = false,
   onToggleCollapsed,
   nowMs,
@@ -60,6 +62,8 @@ export function ActivityRail({
   /** The shared display preference — the same one ordinary chat uses. */
   mode: ActivityMode;
   onModeChange: (mode: ActivityMode) => void;
+  developerDetail?: boolean;
+  onDeveloperDetailChange?: (enabled: boolean) => void;
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
   /** Test seam for the ticking investigation clock. */
@@ -162,7 +166,13 @@ export function ActivityRail({
               <span aria-hidden="true">›</span>
             </button>
           ) : null}
-          <ActivityToggle mode={mode} onChange={onModeChange} label="Show" />
+          <ActivityToggle
+            mode={mode}
+            onChange={onModeChange}
+            developerDetail={developerDetail}
+            onDeveloperDetailChange={onDeveloperDetailChange}
+            label="Show"
+          />
           {compactLayout && onRequestClose ? (
             <button
               type="button"

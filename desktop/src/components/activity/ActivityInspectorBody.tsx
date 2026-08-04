@@ -205,6 +205,90 @@ export function ActivityInspectorBody({
               </p>
             ) : null}
 
+            {(turn.developerDetail?.length ?? 0) > 0 ? (
+              <section
+                className="activity-developer-detail"
+                data-testid="activity-developer-detail"
+              >
+                <div className="activity-developer-detail__warning" role="note">
+                  <strong>Sensitive developer detail</strong>
+                  <span>
+                    Request, response, arguments, and results are redacted and
+                    bounded, but may still contain conversation or source content.
+                    This view is process-lifetime only.
+                  </span>
+                </div>
+                <h4 className="activity-inspector__section-title">
+                  Live developer trace
+                </h4>
+                <ol className="activity-developer-detail__events">
+                  {turn.developerDetail!.map((event) => (
+                    <li key={`${event.seq}-${event.kind}`}>
+                      <details>
+                        <summary>
+                          <span>{event.label}</span>
+                          <span>{event.status}</span>
+                          <span>
+                            {event.elapsed_ms == null
+                              ? `sequence ${event.seq}`
+                              : `${event.elapsed_ms}ms`}
+                          </span>
+                        </summary>
+                        <dl className="activity-technical">
+                          <div>
+                            <dt>Authority</dt>
+                            <dd>
+                              {event.kind === "deterministic_stage"
+                                ? "Deterministic host"
+                                : event.kind === "provider_exchange" ||
+                                    event.kind === "tool_call"
+                                  ? "Model-driven"
+                                  : "Host-observed"}
+                            </dd>
+                          </div>
+                          {event.provider || event.model ? (
+                            <div>
+                              <dt>Provider / model</dt>
+                              <dd>
+                                {event.provider ?? "not reported"} / {event.model ?? "not reported"}
+                                {event.round == null ? "" : ` · round ${event.round + 1}`}
+                              </dd>
+                            </div>
+                          ) : null}
+                          {event.offered_tools.length ? (
+                            <div>
+                              <dt>Tools offered</dt>
+                              <dd>{event.offered_tools.join(", ")}</dd>
+                            </div>
+                          ) : null}
+                        </dl>
+                        {event.request.map((payload, index) => (
+                          <div key={`request-${index}`} className="activity-developer-payload">
+                            <div>
+                              Request {index + 1} · {payload.retained_bytes.toLocaleString()} of{" "}
+                              {payload.original_bytes.toLocaleString()} bytes
+                              {payload.truncated ? " · truncated prefix" : " · complete"}
+                            </div>
+                            <pre>{payload.content}</pre>
+                          </div>
+                        ))}
+                        {event.response ? (
+                          <div className="activity-developer-payload">
+                            <div>
+                              Response · {event.response.retained_bytes.toLocaleString()} of{" "}
+                              {event.response.original_bytes.toLocaleString()} bytes
+                              {event.response.truncated ? " · truncated prefix" : " · complete"}
+                            </div>
+                            <pre>{event.response.content}</pre>
+                          </div>
+                        ) : null}
+                      </details>
+                    </li>
+                  ))}
+                </ol>
+              </section>
+            ) : null}
+
             <h4 className="activity-inspector__section-title">Model rounds</h4>
             {turn.requestRounds.length === 0 ? (
               <p className="activity-empty" role="status">

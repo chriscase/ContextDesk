@@ -27,10 +27,14 @@ const DESCRIPTION: Record<ActivityMode, string> = {
 export function ActivityToggle({
   mode,
   onChange,
+  developerDetail = false,
+  onDeveloperDetailChange,
   label = "Activity",
 }: {
   mode: ActivityMode;
   onChange: (mode: ActivityMode) => void;
+  developerDetail?: boolean;
+  onDeveloperDetailChange?: (enabled: boolean) => void;
   label?: string;
 }) {
   const [open, setOpen] = useState(false);
@@ -162,6 +166,24 @@ export function ActivityToggle({
                   </span>
                 </button>
               ))}
+              {onDeveloperDetailChange ? (
+                <button
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={developerDetail}
+                  className="activity-toggle__option activity-toggle__option--developer"
+                  data-testid="activity-toggle-developer-detail"
+                  onClick={() => onDeveloperDetailChange(!developerDetail)}
+                >
+                  <span className="activity-toggle__option-label">
+                    Developer detail · {developerDetail ? "On" : "Off"}
+                  </span>
+                  <span className="activity-toggle__option-desc">
+                    Sensitive: show redacted request, response, tool arguments,
+                    and results. Process lifetime only.
+                  </span>
+                </button>
+              ) : null}
             </div>,
             document.body,
           )

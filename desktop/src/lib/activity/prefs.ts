@@ -23,6 +23,40 @@ const DOCK_WIDTH_KEY = "cd-activity-inspector-dock-width";
  * same window would never learn about a change without this.
  */
 export const ACTIVITY_MODE_CHANGED_EVENT = "contextdesk:activity-mode-changed";
+export const DEVELOPER_ACTIVITY_CHANGED_EVENT =
+  "contextdesk:developer-activity-changed";
+
+// Intentionally module/process lifetime only. This sensitive toggle is never
+// written to localStorage and therefore returns Off after restart.
+let developerActivityDetail = false;
+
+export function loadDeveloperActivityDetail(): boolean {
+  return developerActivityDetail;
+}
+
+export function saveDeveloperActivityDetail(enabled: boolean): void {
+  developerActivityDetail = enabled;
+  try {
+    window.dispatchEvent(
+      new CustomEvent<boolean>(DEVELOPER_ACTIVITY_CHANGED_EVENT, {
+        detail: enabled,
+      }),
+    );
+  } catch {
+    /* no window (SSR / node test) */
+  }
+}
+
+export function subscribeDeveloperActivityDetail(
+  onChange: (enabled: boolean) => void,
+): () => void {
+  if (typeof window === "undefined") return () => undefined;
+  const handler = (event: Event) => {
+    onChange((event as CustomEvent<unknown>).detail === true);
+  };
+  window.addEventListener(DEVELOPER_ACTIVITY_CHANGED_EVENT, handler);
+  return () => window.removeEventListener(DEVELOPER_ACTIVITY_CHANGED_EVENT, handler);
+}
 
 /** Quiet by default: the inspector must not appear until asked for. */
 export const DEFAULT_ACTIVITY_MODE: ActivityMode = "off";

@@ -15,10 +15,13 @@ import {
   DEFAULT_DOCK_WIDTH,
   clampDockWidth,
   loadActivityMode,
+  loadDeveloperActivityDetail,
   loadDockWidth,
   saveActivityMode,
   saveDockWidth,
+  saveDeveloperActivityDetail,
   subscribeActivityMode,
+  subscribeDeveloperActivityDetail,
 } from "../lib/activity/prefs";
 import type { ActivityMode } from "../lib/activity/types";
 
@@ -37,6 +40,9 @@ export function useActivityInspector(selectionScope?: string | null) {
   const [dockWidth, setDockWidthState] = useState<number>(() => loadDockWidth());
   const [selectedTurnId, setSelectedTurnId] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [developerDetail, setDeveloperDetailState] = useState(() =>
+    loadDeveloperActivityDetail(),
+  );
   const [viewportWidth, setViewportWidth] = useState<number>(() =>
     readViewportWidth(),
   );
@@ -67,6 +73,11 @@ export function useActivityInspector(selectionScope?: string | null) {
     [],
   );
 
+  useEffect(
+    () => subscribeDeveloperActivityDetail(setDeveloperDetailState),
+    [],
+  );
+
   const setMode = useCallback((next: ActivityMode) => {
     setModeState(next);
     saveActivityMode(next);
@@ -79,6 +90,11 @@ export function useActivityInspector(selectionScope?: string | null) {
     const clamped = clampDockWidth(px);
     setDockWidthState(clamped);
     saveDockWidth(clamped);
+  }, []);
+
+  const setDeveloperDetail = useCallback((enabled: boolean) => {
+    setDeveloperDetailState(enabled);
+    saveDeveloperActivityDetail(enabled);
   }, []);
 
   const selectTurn = useCallback((turnId: string | null) => {
@@ -118,6 +134,8 @@ export function useActivityInspector(selectionScope?: string | null) {
     setMode,
     dockWidth: dockWidth || DEFAULT_DOCK_WIDTH,
     setDockWidth,
+    developerDetail,
+    setDeveloperDetail,
     selectedTurnId,
     selectTurn,
     drawerOpen,

@@ -108,6 +108,36 @@ even then they are the already-redacted, already-capped ones the trace
 produced. `ActivityRecorder::push` strips bodies below `Full`, so a caller
 cannot smuggle them in by hand-building an event.
 
+Evidence references in the ordinary Activity record are opaque SHA-256
+prefixes. Source ids and locators are never retained verbatim: an ordinary
+file citation may be a full local path, and treating that path as harmless
+metadata would leak it through the store and IPC. Kinds are secret-scrubbed
+and bounded; ids and locators are fixed-size opaque correlation values.
+
+### Explicit developer detail
+
+The Activity display mode (Off/Compact/Drawer/Docked) remains a presentation
+choice. A separate **Developer detail** checkbox is Off at every process
+start and is never written to local storage or config. When enabled for a
+new turn, the existing shared turn trace emits a live, causally sequenced
+developer stream containing:
+
+- provider/profile, model, round, offered tools, and redacted request messages;
+- the accumulated provider response and selected native tool calls;
+- parsed tool arguments, host results/errors, permission gates, host phases,
+  and cancellation metadata.
+
+Every content payload is recursively redacted for known secret fields,
+passed through the common credential scrubber, capped at 8 KiB of valid UTF-8,
+and accompanied by original/retained byte counts plus an explicit truncation
+flag. Debug formatting omits content. The host sends these events through a
+dedicated IPC event that never enters the ordinary transcript reducer.
+
+Developer payloads are held only in a bounded process-memory store keyed by
+the exact `(session_id, assistant_message_id)`. There is intentionally no
+serialization/filesystem API. Trash/delete/forget clears both ordinary and
+developer activity under the same session lifecycle boundary.
+
 Bounds are explicit: over `MAX_ACTIVITY_EVENTS` a record counts what it
 dropped and reports `is_truncated()`, so a UI cannot present a prefix as a
 whole turn.
@@ -233,3 +263,16 @@ live record cannot display every operation twice. The Explorer rail records
 the deterministic work it genuinely performs (corpus
 summary reads, cross-surface timezone refreshes); linked-chat turns inside
 the Explorer are not yet folded into that rail.
+
+Developer detail is currently strongest for ordinary/provider-backed chat.
+Provider responses are emitted after the streaming accumulator completes;
+individual token/SSE chunks are not retained. Context bodies show what was
+sent after preparation, but the record does not yet name which ambient
+memory, attachment, skill, connector context, ranking candidate, or
+compaction decision contributed each block. Package/demo installation,
+import/reanalysis `ProcessProgress`, timezone refresh failures, Explorer
+operations, and linked-chat activity inside the Explorer rail do not yet
+produce equivalent developer payload events. Permission decisions remain
+truthful in the ordinary Activity record, but an already-open renderer cache
+still needs explicit invalidation to show a decision made after the original
+turn record was fetched.

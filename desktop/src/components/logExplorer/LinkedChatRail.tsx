@@ -49,6 +49,7 @@ import {
   sessionToDto,
   type ChatMsg,
 } from "../../lib/session";
+import { loadDeveloperActivityDetail } from "../../lib/activity/prefs";
 import {
   extractAndCleanLogNav,
   extractLogNavFromText,
@@ -1156,6 +1157,9 @@ export function LinkedChatRail({
         {
           userMessageId: userMsg?.id ?? null,
           assistantMessageId: assistantId,
+          ...(loadDeveloperActivityDetail()
+            ? { developerActivityDetail: true }
+            : {}),
         },
       );
       terminalChatsRef.current.add(sessionId);

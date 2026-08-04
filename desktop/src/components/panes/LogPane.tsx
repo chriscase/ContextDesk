@@ -1509,6 +1509,8 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
             <ActivityToggle
               mode={activity.mode}
               onChange={activity.setMode}
+              developerDetail={activity.developerDetail}
+              onDeveloperDetailChange={activity.setDeveloperDetail}
               label="Show"
             />
           </div>

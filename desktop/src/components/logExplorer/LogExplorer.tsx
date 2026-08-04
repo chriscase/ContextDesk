@@ -8229,6 +8229,8 @@ export function LogExplorer({ corpusId }: Props) {
           log={activityLog}
           mode={activity.mode}
           onModeChange={activity.setMode}
+          developerDetail={activity.developerDetail}
+          onDeveloperDetailChange={activity.setDeveloperDetail}
           collapsed={breakpoint !== "narrow" && chatCollapsed}
           onToggleCollapsed={() =>
             setChatCollapsed((collapsed) => !collapsed)

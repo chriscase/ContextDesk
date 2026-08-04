@@ -15,7 +15,10 @@
  * All four are ordinary, and the UI's contract is to say "not recorded" rather
  * than invent an explanation of the turn.
  */
-import type { HostTurnActivityRecord } from "../activity/types";
+import type {
+  DeveloperDetailEvent,
+  HostTurnActivityRecord,
+} from "../activity/types";
 
 function isTauriHost(): boolean {
   return (
@@ -45,6 +48,25 @@ export async function fetchTurnActivity(
     return record ?? null;
   } catch {
     return null;
+  }
+}
+
+/** Read process-local developer detail only after the explicit UI opt-in. */
+export async function fetchDeveloperTurnActivity(
+  sessionId: string,
+  messageId: string,
+): Promise<DeveloperDetailEvent[]> {
+  if (!sessionId || !messageId || !isTauriHost()) return [];
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return (
+      (await invoke<DeveloperDetailEvent[]>("get_developer_turn_activity", {
+        sessionId,
+        messageId,
+      })) ?? []
+    );
+  } catch {
+    return [];
   }
 }
 

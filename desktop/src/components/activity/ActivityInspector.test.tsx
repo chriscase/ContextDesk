@@ -96,6 +96,24 @@ describe("the one Activity control offers exactly the four modes", () => {
     ).toBe("false");
   });
 
+  it("keeps sensitive developer detail a separate explicit checkbox", () => {
+    const onDeveloperDetailChange = vi.fn();
+    render(
+      <ActivityToggle
+        mode="off"
+        onChange={vi.fn()}
+        developerDetail={false}
+        onDeveloperDetailChange={onDeveloperDetailChange}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("activity-toggle-trigger"));
+    const developer = screen.getByTestId("activity-toggle-developer-detail");
+    expect(developer.getAttribute("aria-checked")).toBe("false");
+    expect(developer.textContent).toContain("Sensitive");
+    fireEvent.click(developer);
+    expect(onDeveloperDetailChange).toHaveBeenCalledWith(true);
+  });
+
   it("closes on Escape and returns focus to the trigger", () => {
     render(<ActivityToggle mode="off" onChange={vi.fn()} />);
     const trigger = screen.getByTestId("activity-toggle-trigger");
@@ -122,6 +140,51 @@ describe("the one Activity control offers exactly the four modes", () => {
     expect(container.contains(menu)).toBe(false);
     expect(menu.parentElement).toBe(document.body);
     expect(Number.parseFloat(menu.style.left)).toBeGreaterThanOrEqual(8);
+  });
+});
+
+describe("developer detail", () => {
+  it("prominently labels sensitive content and reports honest byte truncation", () => {
+    render(
+      <ActivityInspectorBody
+        turn={turn({
+          developerDetail: [
+            {
+              seq: 2,
+              elapsed_ms: 41,
+              kind: "provider_exchange",
+              label: "Model exchange (round 1)",
+              provider: "provider-a",
+              model: "model-a",
+              round: 0,
+              offered_tools: ["search_kb"],
+              request: [
+                {
+                  content: "redacted request prefix",
+                  retained_bytes: 23,
+                  original_bytes: 9000,
+                  truncated: true,
+                },
+              ],
+              response: {
+                content: "redacted response",
+                retained_bytes: 17,
+                original_bytes: 17,
+                truncated: false,
+              },
+              status: "completed",
+              sensitive: true,
+            },
+          ],
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("activity-tab-technical"));
+    expect(screen.getByText("Sensitive developer detail")).toBeTruthy();
+    expect(screen.getByText("Live developer trace")).toBeTruthy();
+    fireEvent.click(screen.getByText("Model exchange (round 1)"));
+    expect(screen.getByText(/9,000 bytes · truncated prefix/)).toBeTruthy();
+    expect(screen.getByText("redacted request prefix")).toBeTruthy();
   });
 });
 

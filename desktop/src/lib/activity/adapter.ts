@@ -21,6 +21,7 @@ import {
   type ActivityCitation,
   type ActivityEvent,
   type ActivityTurn,
+  type DeveloperDetailEvent,
   type HostTurnActivityRecord,
 } from "./types";
 import {
@@ -34,6 +35,7 @@ export type BuildActivityTurnOptions = {
   record?: HostTurnActivityRecord | null;
   /** Wall-clock turn duration if the caller tracked it; null when unknown. */
   elapsedMs?: number | null;
+  developerDetail?: DeveloperDetailEvent[];
 };
 
 function shortLabel(text: string, max = 64): string {
@@ -223,5 +225,8 @@ export function buildActivityTurn(
     liveRecord: record != null,
     droppedEvents: record?.dropped_events ?? 0,
     contractVersion: record?.version ?? null,
+    developerDetail: [...(opts.developerDetail ?? [])].sort(
+      (left, right) => left.seq - right.seq,
+    ),
   };
 }

@@ -350,9 +350,9 @@ function MessageRowImpl({
         </details>
       ) : null}
       {m.role === "assistant" &&
-      !m.streaming &&
       activityMode !== "off" &&
-      activityTurn ? (
+      activityTurn &&
+      (!m.streaming || (activityTurn.developerDetail?.length ?? 0) > 0) ? (
         <ActivityCompactLine
           turn={activityTurn}
           onOpenDetails={() => onOpenActivityDetails?.(m.id)}

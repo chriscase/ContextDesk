@@ -22,8 +22,16 @@ import { IconPin } from "../icons";
 import { MessageRow } from "./MessageRow";
 import { useActivityInspector } from "../../hooks/useActivityInspector";
 import { buildActivityTurn } from "../../lib/activity/adapter";
-import { fetchTurnActivity } from "../../lib/engine/turnActivity";
-import type { HostTurnActivityRecord } from "../../lib/activity/types";
+import {
+  fetchDeveloperTurnActivity,
+  fetchTurnActivity,
+} from "../../lib/engine/turnActivity";
+import type {
+  DeveloperDetailEvent,
+  HostTurnActivityRecord,
+} from "../../lib/activity/types";
+import { subscribeDeveloperDetail } from "../../lib/activity/developerDetailBridge";
+import { subscribeTurnActivityUpdate } from "../../lib/activity/turnActivityUpdateBridge";
 import { ActivityToggle } from "../activity/ActivityToggle";
 import { ActivityDrawer } from "../activity/ActivityDrawer";
 import { ActivityDock } from "../activity/ActivityDock";
@@ -249,6 +257,9 @@ export function ChatPane(props: ChatPaneProps) {
   const [activityRecords, setActivityRecords] = useState<
     Record<string, HostTurnActivityRecord | null>
   >({});
+  const [developerRecords, setDeveloperRecords] = useState<
+    Record<string, DeveloperDetailEvent[]>
+  >({});
   const chatBodyRef = useRef<HTMLDivElement>(null);
   const [chatBodyWidth, setChatBodyWidth] = useState<number | null>(null);
 
@@ -283,7 +294,48 @@ export function ChatPane(props: ChatPaneProps) {
   // session it was asked about.
   useEffect(() => {
     setActivityRecords({});
+    setDeveloperRecords({});
   }, [resolvedSessionId]);
+
+  useEffect(
+    () =>
+      subscribeDeveloperDetail((envelope) => {
+        if (envelope.sessionId !== resolvedSessionId) return;
+        setDeveloperRecords((current) => ({
+          ...current,
+          [envelope.messageId]: [
+            ...(current[envelope.messageId] ?? []),
+            envelope.event,
+          ].sort((left, right) => left.seq - right.seq),
+        }));
+      }),
+    [resolvedSessionId],
+  );
+
+  // A permission decision mutates the already-settled host record after the
+  // original turn. Refresh the exact open session immediately so an Allow or
+  // Deny cannot remain shown as merely pending until this pane is remounted.
+  useEffect(() => {
+    if (activity.mode === "off") return;
+    return subscribeTurnActivityUpdate((update) => {
+      if (update.sessionId !== resolvedSessionId) return;
+      const messageIds = messages
+        .filter((message) => message.role === "assistant" && !message.streaming)
+        .map((message) => message.id);
+      void (async () => {
+        const refreshed: Record<string, HostTurnActivityRecord> = {};
+        for (const messageId of messageIds) {
+          const record = await fetchTurnActivity(resolvedSessionId, messageId);
+          if (record) refreshed[messageId] = record;
+        }
+        if (Object.keys(refreshed).length > 0) {
+          // Refreshed host records are authoritative. In particular they must
+          // replace a cached null ("not recorded") or stale pending record.
+          setActivityRecords((current) => ({ ...current, ...refreshed }));
+        }
+      })();
+    });
+  }, [activity.mode, messages, resolvedSessionId]);
 
   // Settled assistant messages whose host record we have not asked for yet.
   // Keyed by message id, which is exactly how the host filed the record.
@@ -312,10 +364,38 @@ export function ChatPane(props: ChatPaneProps) {
     };
   }, [pendingRecordIds, resolvedSessionId]);
 
+  const pendingDeveloperIds = useMemo(() => {
+    if (!activity.developerDetail || !resolvedSessionId) return [] as string[];
+    return messages
+      .filter((message) => message.role === "assistant" && !message.streaming)
+      .map((message) => message.id)
+      .filter((id) => !(id in developerRecords));
+  }, [activity.developerDetail, resolvedSessionId, messages, developerRecords]);
+
+  useEffect(() => {
+    if (pendingDeveloperIds.length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      const loaded: Record<string, DeveloperDetailEvent[]> = {};
+      for (const id of pendingDeveloperIds) {
+        loaded[id] = await fetchDeveloperTurnActivity(resolvedSessionId, id);
+      }
+      if (!cancelled) setDeveloperRecords((current) => ({ ...loaded, ...current }));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pendingDeveloperIds, resolvedSessionId]);
+
   const buildTurnFor = useCallback(
     (msg: Msg) =>
-      buildActivityTurn(msg, { record: activityRecords[msg.id] ?? null }),
-    [activityRecords],
+      buildActivityTurn(msg, {
+        record: activityRecords[msg.id] ?? null,
+        developerDetail: activity.developerDetail
+          ? (developerRecords[msg.id] ?? [])
+          : [],
+      }),
+    [activityRecords, activity.developerDetail, developerRecords],
   );
 
   // Docked mode defaults to the latest settled assistant turn so the rail is
@@ -324,7 +404,11 @@ export function ChatPane(props: ChatPaneProps) {
     if (activity.mode !== "docked" || activity.selectedTurnId) return;
     const lastAssistant = [...messages]
       .reverse()
-      .find((m) => m.role === "assistant" && !m.streaming);
+      .find(
+        (m) =>
+          m.role === "assistant" &&
+          (activity.developerDetail || !m.streaming),
+      );
     if (lastAssistant) activity.selectTurn(lastAssistant.id);
   }, [activity, messages]);
 
@@ -362,7 +446,12 @@ export function ChatPane(props: ChatPaneProps) {
           </div>
         </div>
         <div className="chat-header__actions">
-          <ActivityToggle mode={activity.mode} onChange={activity.setMode} />
+          <ActivityToggle
+            mode={activity.mode}
+            onChange={activity.setMode}
+            developerDetail={activity.developerDetail}
+            onDeveloperDetailChange={activity.setDeveloperDetail}
+          />
           <div className="chat-new-split" title="New chat">
             <button
               type="button"

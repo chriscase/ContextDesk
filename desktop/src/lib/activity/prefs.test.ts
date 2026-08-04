@@ -6,9 +6,12 @@ import {
   coerceActivityMode,
   loadActivityMode,
   loadDockWidth,
+  loadDeveloperActivityDetail,
   saveActivityMode,
   saveDockWidth,
+  saveDeveloperActivityDetail,
   subscribeActivityMode,
+  subscribeDeveloperActivityDetail,
   MAX_DOCK_WIDTH,
   MIN_DOCK_WIDTH,
 } from "./prefs";
@@ -45,6 +48,20 @@ let storage: Map<string, string>;
 
 beforeEach(() => {
   storage = installMemoryStorage();
+  saveDeveloperActivityDetail(false);
+});
+
+describe("sensitive developer detail", () => {
+  it("is Off by default, process-only, and shared live without persistence", () => {
+    expect(loadDeveloperActivityDetail()).toBe(false);
+    const seen: boolean[] = [];
+    const stop = subscribeDeveloperActivityDetail((enabled) => seen.push(enabled));
+    saveDeveloperActivityDetail(true);
+    stop();
+    expect(loadDeveloperActivityDetail()).toBe(true);
+    expect(seen).toEqual([true]);
+    expect([...storage.keys()].some((key) => key.includes("developer"))).toBe(false);
+  });
 });
 
 describe("the shared activity display preference", () => {
