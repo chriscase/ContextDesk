@@ -830,6 +830,7 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint(
         turn_prelude_emitted,
         live,
         None,
+        &[],
     )
     .await
 }
@@ -860,6 +861,7 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
     turn_prelude_emitted: bool,
     mut live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
     trace_sink: Option<Arc<dyn TurnTraceSink>>,
+    applied_skill_ids: &[String],
 ) -> CoreResult<Vec<StreamEvent>> {
     if force_local {
         if linked_synthesis_retry.is_some() {
@@ -1040,6 +1042,7 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
     opts.turn_started_at = Some(turn_started_at);
     opts.turn_started_emitted = turn_prelude_emitted;
     opts.developer_trace = developer_trace_sink.map(crate::turn_trace::TurnTraceObserver::new);
+    opts.applied_skill_ids = applied_skill_ids.to_vec();
     // Ambient recall follows host config (set by attach_durable_memory / rebuild_host).
     opts.ambient_recall_enabled = host.ambient_recall_enabled() && host.durable_memory_active();
     // Per-model context budget (default / declared / learned).

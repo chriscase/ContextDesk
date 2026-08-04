@@ -4539,6 +4539,7 @@ async fn agent_turn(
     let cfg = state.config.lock().expect("config").clone();
     let skill_dirs = skill_dirs_for(&state, &cfg);
     let mut user_text = req.text.clone();
+    let mut applied_skill_ids = Vec::new();
     // Inject skill playbook (slash or session pin #343). Skills cannot elevate grants.
     if let Ok(skills) = cd_core::skills::discover_skills(&skill_dirs) {
         // Prefer pure helper so pin + slash share one path.
@@ -4551,6 +4552,7 @@ async fn agent_turn(
         if let Some((sid, rest)) = cd_core::skills::parse_skill_slash(&user_text) {
             if let Some(sk) = cd_core::skills::find_skill(&skills, &sid) {
                 if !sk.disabled {
+                    applied_skill_ids.push(sk.id.clone());
                     let ctx = cd_core::skills::skill_context(sk);
                     user_text = if rest.is_empty() {
                         format!("{ctx}\n\nApply this skill to the workspace context.")
@@ -4559,6 +4561,15 @@ async fn agent_turn(
                     };
                 }
             }
+        } else if let Some(pinned) = req
+            .pinned_skill_id
+            .as_deref()
+            .and_then(|id| cd_core::skills::find_skill(&skills, id))
+            .filter(|skill| !skill.disabled)
+        {
+            // `apply_pinned_skill_to_user_text` above used this exact resolved
+            // host object. Record the authoritative id, never wrapper text.
+            applied_skill_ids.push(pinned.id.clone());
         }
     }
     let admitted_turn = match admit_agent_turn(
@@ -5130,6 +5141,7 @@ async fn agent_turn(
             turn_prelude_emitted,
             Some(&mut sink),
             trace_sink,
+            &applied_skill_ids,
         )
         .await
         .map_err(|e| e.to_string())

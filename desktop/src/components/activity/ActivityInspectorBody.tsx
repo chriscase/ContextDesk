@@ -23,6 +23,34 @@ const TAB_LABEL: Record<ActivityTabId, string> = {
   technical: "Technical detail",
 };
 
+function developerAuthorityLabel(
+  event: NonNullable<ActivityTurn["developerDetail"]>[number],
+): string {
+  if (event.kind === "context_provenance") {
+    switch (event.authority) {
+      case "deterministic_host":
+        return "Deterministic host";
+      case "repeatable_heuristic":
+        return "Repeatable heuristic";
+      case "probabilistic_model":
+        return "Model-derived";
+      case "external_connector":
+        return "External connector";
+      case "client_evidence":
+        return "Client evidence";
+      case "human_approved":
+        return "Human-approved";
+      default:
+        return "Not reported";
+    }
+  }
+  if (event.kind === "deterministic_stage") return "Deterministic host";
+  if (event.kind === "provider_exchange" || event.kind === "tool_call") {
+    return "Model-driven";
+  }
+  return "Host-observed";
+}
+
 function formatElapsed(ms: number | null): string {
   if (ms == null) return "duration not reported";
   return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
@@ -238,13 +266,7 @@ export function ActivityInspectorBody({
                           <div>
                             <dt>Authority</dt>
                             <dd>
-                              {event.kind === "deterministic_stage" ||
-                              event.kind === "context_provenance"
-                                ? "Deterministic host"
-                                : event.kind === "provider_exchange" ||
-                                    event.kind === "tool_call"
-                                  ? "Model-driven"
-                                  : "Host-observed"}
+                              {developerAuthorityLabel(event)}
                             </dd>
                           </div>
                           {event.provider || event.model ? (

@@ -406,6 +406,14 @@ export type DeveloperDetailEvent = {
     | "deterministic_stage"
     | "context_provenance"
     | "cancellation";
+  authority?:
+    | "deterministic_host"
+    | "repeatable_heuristic"
+    | "probabilistic_model"
+    | "external_connector"
+    | "client_evidence"
+    | "human_approved"
+    | null;
   label: string;
   provider?: string | null;
   model?: string | null;

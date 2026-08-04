@@ -514,12 +514,37 @@ pub enum DeveloperDetailKind {
     Cancellation,
 }
 
+/// Authority for a live context-provenance observation.
+///
+/// This is separate from `DeveloperDetailKind`: a context assembly can mix
+/// host-defined selection, repeatable ranking, client evidence, and an
+/// explicitly human-approved skill in one provider request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextProvenanceAuthority {
+    /// A defined host operation or host-observed structural fact.
+    DeterministicHost,
+    /// A stable ranking/scoring rule; repeatable is not proof.
+    RepeatableHeuristic,
+    /// Content selected or synthesized by a model.
+    ProbabilisticModel,
+    /// Context supplied by an external connector.
+    ExternalConnector,
+    /// User/customer material carried into the request.
+    ClientEvidence,
+    /// A playbook the human explicitly selected for the session/turn.
+    HumanApproved,
+}
+
 /// Safe draft accepted by [`TurnTraceSink`]. Its constructors redact and
 /// bound content before a sink can observe it.
 #[derive(Clone)]
 pub struct DeveloperDetailDraft {
     /// Event category.
     pub kind: DeveloperDetailKind,
+    /// Truthful contributor authority for context provenance; absent for
+    /// developer-detail categories whose authority is expressed by `kind`.
+    pub authority: Option<ContextProvenanceAuthority>,
     /// Plain metadata label.
     pub label: String,
     /// Provider profile label/id when applicable.
@@ -560,6 +585,7 @@ impl DeveloperDetailDraft {
     pub fn tool_call(round: u32, name: &str, arguments: &serde_json::Value) -> Self {
         Self {
             kind: DeveloperDetailKind::ToolCall,
+            authority: None,
             label: format!("Selected tool: {name}"),
             provider: None,
             model: None,
@@ -576,6 +602,7 @@ impl DeveloperDetailDraft {
     pub fn tool_result(round: u32, name: &str, ok: bool, content: &str) -> Self {
         Self {
             kind: DeveloperDetailKind::ToolResult,
+            authority: None,
             label: format!("Tool result: {name}"),
             provider: None,
             model: None,
@@ -618,6 +645,7 @@ impl DeveloperDetailDraft {
     pub fn stage(label: impl Into<String>, status: impl Into<String>) -> Self {
         Self {
             kind: DeveloperDetailKind::DeterministicStage,
+            authority: None,
             label: label.into(),
             provider: None,
             model: None,
@@ -640,10 +668,11 @@ impl DeveloperDetailDraft {
         contributor: &str,
         status: impl Into<String>,
         facts: serde_json::Value,
-        authority: &str,
+        authority: ContextProvenanceAuthority,
     ) -> Self {
         Self {
             kind: DeveloperDetailKind::ContextProvenance,
+            authority: Some(authority),
             label: format!("Context: {contributor}"),
             provider: None,
             model: None,
@@ -672,6 +701,9 @@ pub struct DeveloperDetailEvent {
     pub elapsed_ms: Option<u64>,
     /// Event category.
     pub kind: DeveloperDetailKind,
+    /// Contributor authority for context provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<ContextProvenanceAuthority>,
     /// Plain metadata label.
     pub label: String,
     /// Provider profile label/id.
@@ -1088,6 +1120,7 @@ impl RecordingTurnTrace {
                     ..
                 } => Some(DeveloperDetailDraft {
                     kind: DeveloperDetailKind::Permission,
+                    authority: None,
                     label: format!("Permission required: {tool_name}"),
                     provider: None,
                     model: None,
@@ -1103,6 +1136,7 @@ impl RecordingTurnTrace {
                 {
                     Some(DeveloperDetailDraft {
                         kind: DeveloperDetailKind::Cancellation,
+                        authority: None,
                         label: "Turn cancelled".to_string(),
                         provider: None,
                         model: None,
@@ -1357,6 +1391,7 @@ fn bound_developer_event(
         seq,
         elapsed_ms,
         kind: detail.kind,
+        authority: detail.authority,
         label,
         provider,
         model,
@@ -1508,6 +1543,7 @@ fn reseal_event(event: DeveloperDetailEvent) -> DeveloperDetailEvent {
         seq: event.seq,
         elapsed_ms: event.elapsed_ms,
         kind: event.kind,
+        authority: event.authority,
         label,
         provider,
         model,
@@ -1550,6 +1586,7 @@ fn omitted_marker_event(next_seq: u64, omitted: usize) -> DeveloperDetailEvent {
         seq: next_seq,
         elapsed_ms: None,
         kind: DeveloperDetailKind::DeterministicStage,
+        authority: None,
         label: format!(
             "{omitted} developer-detail event{} omitted by the per-turn retention bound",
             if omitted == 1 { "" } else { "s" }
@@ -1826,6 +1863,7 @@ impl TracingChatBackend {
             };
             DeveloperDetailDraft {
                 kind: DeveloperDetailKind::ProviderExchange,
+                authority: None,
                 label: format!("Model exchange (round {})", seq + 1),
                 provider: self.developer_provider.clone(),
                 model: self.developer_model.clone(),
@@ -2305,6 +2343,7 @@ mod tests {
             seq: 1,
             elapsed_ms: Some(2),
             kind: DeveloperDetailKind::ToolResult,
+            authority: None,
             label: "Tool result".into(),
             provider: None,
             model: None,
@@ -2428,6 +2467,7 @@ mod tests {
             seq,
             elapsed_ms: None,
             kind: DeveloperDetailKind::ToolResult,
+            authority: None,
             label: label.to_string(),
             provider: None,
             model: None,
@@ -2446,6 +2486,7 @@ mod tests {
     fn bare_draft(label: &str) -> DeveloperDetailDraft {
         DeveloperDetailDraft {
             kind: DeveloperDetailKind::DeterministicStage,
+            authority: None,
             label: label.to_string(),
             provider: None,
             model: None,
@@ -2950,7 +2991,7 @@ mod tests {
                 "budget_chars_estimate": 120_000,
                 "used_chars_estimate": 40,
             }),
-            "deterministic",
+            ContextProvenanceAuthority::DeterministicHost,
         );
         assert_eq!(draft.kind, DeveloperDetailKind::ContextProvenance);
         assert!(draft.request[0].content.contains("characters_estimate"));

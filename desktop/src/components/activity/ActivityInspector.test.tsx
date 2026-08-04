@@ -196,6 +196,7 @@ describe("developer detail", () => {
               seq: 0,
               elapsed_ms: 5,
               kind: "context_provenance",
+              authority: "deterministic_host",
               label: "Context: context_budget",
               offered_tools: [],
               request: [
@@ -220,6 +221,53 @@ describe("developer detail", () => {
     expect(screen.getByText("Deterministic host")).toBeTruthy();
     expect(screen.getByText(/characters_estimate/)).toBeTruthy();
     expect(screen.getByText(/not_provider_tokens/)).toBeTruthy();
+  });
+
+  it("renders each context contributor's reported authority without guessing", () => {
+    const contextEvent = (
+      seq: number,
+      label: string,
+      authority:
+        | "repeatable_heuristic"
+        | "human_approved"
+        | "client_evidence"
+        | undefined,
+    ) => ({
+      seq,
+      elapsed_ms: seq,
+      kind: "context_provenance" as const,
+      authority,
+      label,
+      offered_tools: [],
+      request: [],
+      status: "present",
+      sensitive: true as const,
+    });
+    render(
+      <ActivityInspectorBody
+        turn={turn({
+          developerDetail: [
+            contextEvent(1, "Context: ambient_memory", "repeatable_heuristic"),
+            contextEvent(2, "Context: pinned_skills", "human_approved"),
+            contextEvent(3, "Context: linked_log_evidence", "client_evidence"),
+            contextEvent(4, "Context: legacy", undefined),
+          ],
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("activity-tab-technical"));
+    for (const label of [
+      "Context: ambient_memory",
+      "Context: pinned_skills",
+      "Context: linked_log_evidence",
+      "Context: legacy",
+    ]) {
+      fireEvent.click(screen.getByText(label));
+    }
+    expect(screen.getByText("Repeatable heuristic")).toBeTruthy();
+    expect(screen.getByText("Human-approved")).toBeTruthy();
+    expect(screen.getByText("Client evidence")).toBeTruthy();
+    expect(screen.getByText("Not reported")).toBeTruthy();
   });
 });
 

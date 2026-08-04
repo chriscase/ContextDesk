@@ -107,6 +107,10 @@ pub struct AgentOptions {
     pub linked_synthesis_retry: Option<LinkedSynthesisCheckpoint>,
     /// Optional process-local observer for redacted developer tool detail.
     pub developer_trace: Option<crate::turn_trace::TurnTraceObserver>,
+    /// Host-resolved skill ids that were actually injected for this turn.
+    /// Never derive this from model-facing message text: user content may
+    /// legitimately contain strings that resemble an injection wrapper.
+    pub applied_skill_ids: Vec<String>,
 }
 
 /// Host-only checkpoint retained after linked evidence succeeds but synthesis
@@ -1102,6 +1106,7 @@ impl Default for AgentOptions {
             log_explorer_context: None,
             linked_synthesis_retry: None,
             developer_trace: None,
+            applied_skill_ids: Vec::new(),
         }
     }
 }
@@ -1131,6 +1136,7 @@ impl AgentOptions {
             log_explorer_context: None,
             linked_synthesis_retry: None,
             developer_trace: None,
+            applied_skill_ids: Vec::new(),
         }
     }
 
@@ -1313,9 +1319,12 @@ fn emit_context_provenance_before_provider(
     round: u32,
     model_ctx: &[ChatMessage],
     source_history_len: usize,
+    retained_history_messages: usize,
+    omitted_history_messages: usize,
+    compact_summary_included: bool,
     keep: usize,
     prepared_compacted: bool,
-    prepared_truncated: bool,
+    bodies_truncated: bool,
     char_budget: usize,
     offered_tools: &[ToolSpec],
     ambient: Option<&AmbientProvenanceSnapshot>,
@@ -1331,16 +1340,15 @@ fn emit_context_provenance_before_provider(
     confluence_hint_present: bool,
     connector_tool_names: &[String],
     tools_disabled: bool,
+    applied_skill_ids: &[String],
 ) {
-    use crate::turn_trace::DeveloperDetailDraft;
+    use crate::turn_trace::{ContextProvenanceAuthority, DeveloperDetailDraft};
 
     let mut role_counts: std::collections::BTreeMap<&'static str, usize> =
         std::collections::BTreeMap::new();
     let mut role_chars: std::collections::BTreeMap<&'static str, usize> =
         std::collections::BTreeMap::new();
     let mut system_chars = 0usize;
-    let mut has_compact_summary = false;
-    let mut skill_ids: Vec<String> = Vec::new();
     let mut tool_role_messages = 0usize;
     let mut tool_role_chars = 0usize;
     for message in model_ctx {
@@ -1355,35 +1363,13 @@ fn emit_context_provenance_before_provider(
         if matches!(message.role, Role::System) {
             system_chars += message.content.len();
         }
-        if message.content.contains("[Compacted earlier conversation]") {
-            has_compact_summary = true;
-        }
         if matches!(message.role, Role::Tool) {
             tool_role_messages += 1;
             tool_role_chars += message.content.len();
         }
-        // Skill wrappers injected into the user turn text.
-        for cap in message.content.split("<<<SKILL:") {
-            if cap == message.content {
-                continue;
-            }
-            if let Some(id_part) = cap.split("id=\"").nth(1) {
-                if let Some(id) = id_part.split('"').next() {
-                    if !id.is_empty() && !skill_ids.iter().any(|s| s == id) {
-                        skill_ids.push(id.to_string());
-                    }
-                }
-            }
-        }
     }
     let retained_messages = model_ctx.len();
     let used_chars = estimate_context_chars(model_ctx);
-    let omitted_messages = source_history_len.saturating_sub(retained_messages);
-    let truncated_bodies = model_ctx.iter().any(|m| {
-        m.content
-            .contains(crate::sessions::MODEL_CONTEXT_TRUNCATE_MARKER)
-    }) || prepared_truncated;
-
     // 1. System instructions
     trace.record_developer(DeveloperDetailDraft::context_provenance(
         round,
@@ -1398,7 +1384,7 @@ fn emit_context_provenance_before_provider(
             "system_chars_estimate": system_chars,
             "bounded": true,
         }),
-        "deterministic",
+        ContextProvenanceAuthority::DeterministicHost,
     ));
 
     // 2. Prior chat / history selection
@@ -1408,33 +1394,34 @@ fn emit_context_provenance_before_provider(
         "selected",
         serde_json::json!({
             "source_history_messages": source_history_len,
-            "retained_messages": retained_messages,
-            "omitted_messages_estimate": omitted_messages,
+            "retained_history_messages": retained_history_messages,
+            "omitted_history_messages": omitted_history_messages,
+            "provider_request_messages": retained_messages,
             "keep_window": keep,
             "role_message_counts": role_counts,
             "role_chars_estimate": role_chars,
             "tool_role_messages_in_context": tool_role_messages,
             "tool_role_chars_estimate": tool_role_chars,
         }),
-        "deterministic",
+        ContextProvenanceAuthority::DeterministicHost,
     ));
 
     // 3. Compaction
     trace.record_developer(DeveloperDetailDraft::context_provenance(
         round,
         "compaction",
-        if prepared_compacted || has_compact_summary {
+        if prepared_compacted || compact_summary_included {
             "applied"
         } else {
             "not_needed"
         },
         serde_json::json!({
             "keep_reduced_for_budget": prepared_compacted,
-            "compacted_summary_included": has_compact_summary,
-            "bodies_truncated_for_budget": truncated_bodies,
+            "compacted_summary_included": compact_summary_included,
+            "bodies_truncated_for_budget": bodies_truncated,
             "algorithm": "deterministic_pairing_safe_window_plus_fit",
         }),
-        "deterministic",
+        ContextProvenanceAuthority::DeterministicHost,
     ));
 
     // 4. Ambient memory
@@ -1457,7 +1444,7 @@ fn emit_context_provenance_before_provider(
                     "context_block_chars_estimate": amb.context_block_chars,
                     "scoring": "host_hybrid_recall",
                 }),
-                "repeatable_heuristic",
+                ContextProvenanceAuthority::RepeatableHeuristic,
             ));
         } else {
             trace.record_developer(DeveloperDetailDraft::context_provenance(
@@ -1468,7 +1455,7 @@ fn emit_context_provenance_before_provider(
                     "enabled": ambient_enabled,
                     "note": "ambient path ran but no injection result was retained",
                 }),
-                "repeatable_heuristic",
+                ContextProvenanceAuthority::RepeatableHeuristic,
             ));
         }
     } else {
@@ -1489,7 +1476,7 @@ fn emit_context_provenance_before_provider(
                 "rejected_count": 0,
                 "rejected_reasons_reported": false,
             }),
-            "repeatable_heuristic",
+            ContextProvenanceAuthority::RepeatableHeuristic,
         ));
     }
 
@@ -1506,7 +1493,7 @@ fn emit_context_provenance_before_provider(
                     "note": "names only; absolute paths are never recorded",
                     "retrieval": "available_via_search_kb_overlay",
                 }),
-                "deterministic",
+                ContextProvenanceAuthority::DeterministicHost,
             ));
         }
         None => {
@@ -1518,22 +1505,22 @@ fn emit_context_provenance_before_provider(
                     "file_count": null,
                     "note": "no session context base bound for this host",
                 }),
-                "deterministic",
+                ContextProvenanceAuthority::DeterministicHost,
             ));
         }
     }
 
     // 6. Pinned skills
-    if skill_ids.is_empty() {
+    if applied_skill_ids.is_empty() {
         trace.record_developer(DeveloperDetailDraft::context_provenance(
             round,
             "pinned_skills",
             "not_present",
             serde_json::json!({
                 "skill_ids_in_context": [],
-                "note": "no <<<SKILL:…>>> wrapper observed in assembled context",
+                "note": "the host did not resolve and inject a pinned or slash-selected skill",
             }),
-            "human_approved",
+            ContextProvenanceAuthority::HumanApproved,
         ));
     } else {
         trace.record_developer(DeveloperDetailDraft::context_provenance(
@@ -1541,9 +1528,9 @@ fn emit_context_provenance_before_provider(
             "pinned_skills",
             "present",
             serde_json::json!({
-                "skill_ids_in_context": skill_ids,
+                "skill_ids_in_context": applied_skill_ids,
             }),
-            "human_approved",
+            ContextProvenanceAuthority::HumanApproved,
         ));
     }
 
@@ -1557,7 +1544,7 @@ fn emit_context_provenance_before_provider(
                 "confluence_hint_in_system": confluence_hint_present,
                 "connector_tool_names_offered": connector_tool_names,
             }),
-            "deterministic",
+            ContextProvenanceAuthority::DeterministicHost,
         ));
     } else {
         trace.record_developer(DeveloperDetailDraft::context_provenance(
@@ -1568,7 +1555,7 @@ fn emit_context_provenance_before_provider(
                 "confluence_hint_in_system": false,
                 "connector_tool_names_offered": [],
             }),
-            "deterministic",
+            ContextProvenanceAuthority::DeterministicHost,
         ));
     }
 
@@ -1589,7 +1576,7 @@ fn emit_context_provenance_before_provider(
                 "evidence_identities": linked_evidence_identities,
                 "corpus_id": corpus_id,
             }),
-            "deterministic",
+            ContextProvenanceAuthority::ClientEvidence,
         ));
     } else {
         trace.record_developer(DeveloperDetailDraft::context_provenance(
@@ -1600,7 +1587,7 @@ fn emit_context_provenance_before_provider(
                 "channel": "none",
                 "note": "ordinary chat has no linked log corpus for this turn",
             }),
-            "deterministic",
+            ContextProvenanceAuthority::ClientEvidence,
         ));
     }
 
@@ -1618,7 +1605,7 @@ fn emit_context_provenance_before_provider(
                 "viewport_snapshot_in_system": viewport_present,
                 "corpus_id": corpus_id,
             }),
-            "deterministic",
+            ContextProvenanceAuthority::ClientEvidence,
         ));
     } else {
         trace.record_developer(DeveloperDetailDraft::context_provenance(
@@ -1628,7 +1615,7 @@ fn emit_context_provenance_before_provider(
             serde_json::json!({
                 "viewport_snapshot_in_system": false,
             }),
-            "deterministic",
+            ContextProvenanceAuthority::ClientEvidence,
         ));
     }
 
@@ -1651,7 +1638,7 @@ fn emit_context_provenance_before_provider(
             "tools_disabled_by_gateway": tools_disabled,
             "note": "names only in provenance; full JSON schemas are not retained in developer detail",
         }),
-        "deterministic",
+        ContextProvenanceAuthority::DeterministicHost,
     ));
 
     // 11. Total context budget + truncation honesty
@@ -1660,7 +1647,7 @@ fn emit_context_provenance_before_provider(
         "context_budget",
         if used_chars > char_budget {
             "over_budget_blocked"
-        } else if truncated_bodies || prepared_compacted {
+        } else if bodies_truncated || prepared_compacted {
             "fitted"
         } else {
             "within_budget"
@@ -1669,12 +1656,13 @@ fn emit_context_provenance_before_provider(
             "budget_chars_estimate": char_budget,
             "used_chars_estimate": used_chars,
             "retained_messages": retained_messages,
-            "omitted_messages_estimate": omitted_messages,
-            "truncated": truncated_bodies,
+            "retained_history_messages": retained_history_messages,
+            "omitted_history_messages": omitted_history_messages,
+            "truncated": bodies_truncated,
             "unit": "characters_estimate",
             "not_provider_tokens": true,
         }),
-        "deterministic",
+        ContextProvenanceAuthority::DeterministicHost,
     ));
 
     // 12. Exact transition into provider request
@@ -1690,7 +1678,7 @@ fn emit_context_provenance_before_provider(
             "next_event": "provider_exchange",
             "note": "provider request begins immediately after this seam; no per-chunk streaming detail is claimed",
         }),
-        "deterministic",
+        ContextProvenanceAuthority::DeterministicHost,
     ));
 }
 
@@ -2693,10 +2681,15 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
         // Tool message and assistant tool-call envelope was removed at turn
         // admission, and current governed results enter only through the
         // dedicated bounded evidence buffer.
-        let (mut keep, mut model_ctx, prepared_compacted, prepared_truncated) = if let (
-            Some(context),
-            Some(prior_history),
-        ) = (
+        let (
+            mut keep,
+            mut model_ctx,
+            mut prepared_compacted,
+            mut prepared_truncated,
+            mut retained_history_messages,
+            mut omitted_history_messages,
+            mut compact_summary_included,
+        ) = if let (Some(context), Some(prior_history)) = (
             opts.log_explorer_context.as_ref(),
             linked_prior_history.as_ref(),
         ) {
@@ -2755,19 +2748,40 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                     );
                 }
             }
-            (messages.len().max(1), messages, false, false)
+            let source_history_len = prior_history.len();
+            let retained_history_messages = prior_history
+                .iter()
+                .filter(|message| !matches!(message.role, Role::System))
+                .count();
+            (
+                messages.len().max(1),
+                messages,
+                false,
+                false,
+                retained_history_messages,
+                source_history_len.saturating_sub(retained_history_messages),
+                false,
+            )
         } else {
             match crate::sessions::prepare_model_context(
                 history,
                 opts.compact_keep_last.max(1),
                 char_budget,
             ) {
-                Ok(prepared) => (
-                    prepared.keep,
-                    prepared.messages,
-                    prepared.compacted,
-                    prepared.truncated,
-                ),
+                Ok(prepared) => {
+                    let retained = prepared.retained_history_messages;
+                    let omitted = prepared.omitted_history_messages;
+                    let summary = prepared.compact_summary_included;
+                    (
+                        prepared.keep,
+                        prepared.messages,
+                        prepared.compacted,
+                        prepared.truncated,
+                        retained,
+                        omitted,
+                        summary,
+                    )
+                }
                 Err(e) => {
                     out.push(StreamEvent::Error {
                             code: "context_too_long".into(),
@@ -2842,6 +2856,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                             });
                         }
                         trail.push(format!("ambient_recall:{} hits", inj.count));
+                        let before_fit = estimate_context_chars(&model_ctx);
                         if let Err(e) = enforce_hard_context_budget(&mut model_ctx, char_budget) {
                             return terminal_context_too_long(
                                 out,
@@ -2850,6 +2865,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                 ),
                             );
                         }
+                        prepared_truncated |= estimate_context_chars(&model_ctx) < before_fit;
                     }
                 }
             }
@@ -2967,6 +2983,9 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                     u32::try_from(round).unwrap_or(u32::MAX),
                     &model_ctx,
                     source_history_len,
+                    retained_history_messages,
+                    omitted_history_messages,
+                    compact_summary_included,
                     keep,
                     prepared_compacted,
                     prepared_truncated,
@@ -2985,6 +3004,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                     confluence_hint_present,
                     &connector_tool_names,
                     tools_disabled,
+                    &opts.applied_skill_ids,
                 );
             }
             let result = match within_turn_deadline(
@@ -3069,6 +3089,7 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                                 tool_calls: None,
                             });
                             trail.push("prefetch:search_kb".into());
+                            let before_fit = estimate_context_chars(&model_ctx);
                             if let Err(e) = enforce_hard_context_budget(&mut model_ctx, char_budget)
                             {
                                 return terminal_context_too_long(
@@ -3078,6 +3099,7 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                                     ),
                                 );
                             }
+                            prepared_truncated |= estimate_context_chars(&model_ctx) < before_fit;
                         }
                     }
                     enter_phase(
@@ -3130,6 +3152,11 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                             }
                             keep = p.keep;
                             model_ctx = p.messages;
+                            prepared_compacted |= p.compacted;
+                            prepared_truncated |= p.truncated;
+                            retained_history_messages = p.retained_history_messages;
+                            omitted_history_messages = p.omitted_history_messages;
+                            compact_summary_included = p.compact_summary_included;
                         }
                         Err(_) => {
                             out.push(StreamEvent::Error {

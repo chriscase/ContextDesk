@@ -377,6 +377,16 @@ pub struct PreparedModelContext {
     pub compacted: bool,
     /// True when individual model-facing bodies were truncated with the marker.
     pub truncated: bool,
+    /// Number of distinct stored history messages represented directly in
+    /// `messages` (the synthetic compact summary is not counted).
+    pub retained_history_messages: usize,
+    /// Number of stored history messages not represented directly at the
+    /// provider seam. This is computed while selecting the pairing-safe tail,
+    /// never inferred later by subtracting unrelated injected messages.
+    pub omitted_history_messages: usize,
+    /// True only when this preparation inserted the host-authored compact
+    /// summary message. User text that resembles the marker cannot set it.
+    pub compact_summary_included: bool,
 }
 
 /// Failure when context cannot be forced under budget (budget smaller than
@@ -575,16 +585,32 @@ pub fn prepare_model_context(
 
     let before_fit = estimate_context_chars(&model_ctx);
     let fitted = fit_model_context_to_budget(&model_ctx, budget)?;
-    let truncated = estimate_context_chars(&fitted) < before_fit
-        || fitted
-            .iter()
-            .any(|m| m.content.contains(MODEL_CONTEXT_TRUNCATE_MARKER));
+    // A shorter fitted request is the authoritative proof that this call
+    // truncated a body. Never infer from marker-shaped message content: a
+    // user is allowed to type the marker literally.
+    let truncated = estimate_context_chars(&fitted) < before_fit;
     if estimate_context_chars(&fitted) > budget {
         return Err(ContextBudgetError {
             estimate: estimate_context_chars(&fitted),
             budget,
         });
     }
+    let compact_summary_included = summary.as_deref().is_some_and(|value| !value.is_empty());
+    let retained_history_messages = if history.len() <= keep {
+        history.len()
+    } else {
+        let start = pairing_safe_start(history, keep);
+        let tail = &history[start..];
+        let retained_head_system = usize::from(
+            !tail
+                .iter()
+                .any(|message| matches!(message.role, Role::System))
+                && history
+                    .iter()
+                    .any(|message| matches!(message.role, Role::System)),
+        );
+        tail.len().saturating_add(retained_head_system)
+    };
     Ok(PreparedModelContext {
         messages: fitted,
         keep,
@@ -592,6 +618,9 @@ pub fn prepare_model_context(
         // compact summary for long transcripts is normal and must not spam UI.
         compacted,
         truncated,
+        retained_history_messages,
+        omitted_history_messages: history.len().saturating_sub(retained_history_messages),
+        compact_summary_included,
     })
 }
 
