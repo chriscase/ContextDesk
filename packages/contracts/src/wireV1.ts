@@ -244,6 +244,10 @@ export type WireLogFacets = {
   services: Record<string, number>;
   hosts: Record<string, number>;
   timeQuality: TimeQuality;
+  /** Present when the host reports wall-clock vs order-only event totals. */
+  wallEventCount?: number;
+  /** Present when the host reports order-only event totals. */
+  orderOnlyEventCount?: number;
 };
 
 export type WireSharedTimelineSummary = {
@@ -761,6 +765,8 @@ const logFacetsShape: ObjectShape = {
   services: f.req(f.map(f.u64)),
   hosts: f.req(f.map(f.u64)),
   timeQuality: f.req(timeQuality),
+  wallEventCount: f.opt(f.u64),
+  orderOnlyEventCount: f.opt(f.u64),
 };
 
 const sharedTimelineSummaryShape: ObjectShape = {
