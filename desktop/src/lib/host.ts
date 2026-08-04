@@ -1916,6 +1916,7 @@ export type LogTimezoneResolutionPreviewDto = {
   dstFoldAmbiguities: number;
   unchangedOrderOnlyRecords: number;
   unsupportedTimestampRecords: number;
+  zoneAbbreviationMismatchRecords: number;
   outOfRangeRecords: number;
   precision: "whole_second";
 };

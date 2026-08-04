@@ -7,7 +7,7 @@
 
 use super::parse::{ActiveTimestampBasis, ParsedLine, TimestampProvenance};
 use chrono::{LocalResult, NaiveDateTime, Offset, TimeZone, Utc};
-use chrono_tz::Tz;
+use chrono_tz::{OffsetName, Tz};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::str::FromStr;
@@ -100,6 +100,9 @@ pub enum UnresolvedTimestampReason {
     AmbiguousDstFold,
     /// The local time does not exist when clocks move forward or rules skip it.
     NonexistentDstGap,
+    /// The retained source abbreviation contradicts the declared IANA rules
+    /// at this local date and time.
+    ZoneAbbreviationMismatch,
     /// The resolved instant falls outside the event store's documented range.
     ResolvedInstantOutOfRange,
 }
@@ -157,6 +160,9 @@ pub struct TimezoneResolutionPreview {
     pub dst_fold_count: u64,
     /// Recognized timestamp prefixes lacking enough precision for resolution.
     pub unsupported_timestamp_count: u64,
+    /// Complete source timestamps whose abbreviation contradicts the declared
+    /// IANA zone at that local date and time.
+    pub zone_abbreviation_mismatch_count: u64,
     /// Resolved instants rejected by the documented event-store range.
     pub out_of_range_count: u64,
 }
@@ -181,6 +187,7 @@ impl TimezoneResolutionPreview {
             dst_gap_count: 0,
             dst_fold_count: 0,
             unsupported_timestamp_count: 0,
+            zone_abbreviation_mismatch_count: 0,
             out_of_range_count: 0,
         }
     }
@@ -212,6 +219,10 @@ impl TimezoneResolutionPreview {
                 UnresolvedTimestampReason::UnsupportedLocalTimestampShape => {
                     self.unsupported_timestamp_count =
                         self.unsupported_timestamp_count.saturating_add(1);
+                }
+                UnresolvedTimestampReason::ZoneAbbreviationMismatch => {
+                    self.zone_abbreviation_mismatch_count =
+                        self.zone_abbreviation_mismatch_count.saturating_add(1);
                 }
                 UnresolvedTimestampReason::ResolvedInstantOutOfRange => {
                     self.out_of_range_count = self.out_of_range_count.saturating_add(1);
@@ -328,37 +339,64 @@ impl SourceTimezoneResolver {
             });
         };
 
-        let Some(local) = parse_complete_local_timestamp(local_text) else {
+        let Some((local, source_abbreviation)) = parse_complete_local_timestamp(local_text) else {
             return Ok(TimestampResolution::Unresolved {
                 reason: UnresolvedTimestampReason::UnsupportedLocalTimestampShape,
             });
         };
 
+        let abbreviation_matches = |resolved: &chrono::DateTime<Tz>| {
+            source_abbreviation.is_none_or(|source| {
+                resolved
+                    .offset()
+                    .abbreviation()
+                    .is_some_and(|actual| actual.eq_ignore_ascii_case(source))
+            })
+        };
+        let resolved_result = |resolved: chrono::DateTime<Tz>| {
+            let unix_seconds = resolved.timestamp();
+            if !(MIN_RESOLVED_WALL_SECONDS..=MAX_RESOLVED_WALL_SECONDS).contains(&unix_seconds) {
+                return TimestampResolution::Unresolved {
+                    reason: UnresolvedTimestampReason::ResolvedInstantOutOfRange,
+                };
+            }
+            TimestampResolution::Resolved {
+                unix_seconds,
+                provenance: TimestampResolutionProvenance {
+                    source: self.declaration.source.clone(),
+                    iana_timezone: self.declaration.iana_timezone.clone(),
+                    basis: self.declaration.basis,
+                    declared_at: self.declaration.declared_at,
+                    applied_revision: self.declaration.applied_revision,
+                    original_local_timestamp: local_text.to_string(),
+                    resolved_utc_offset_seconds: resolved.offset().fix().local_minus_utc(),
+                },
+            }
+        };
+
         match self.timezone.from_local_datetime(&local) {
             LocalResult::Single(resolved) => {
-                let unix_seconds = resolved.timestamp();
-                if !(MIN_RESOLVED_WALL_SECONDS..=MAX_RESOLVED_WALL_SECONDS).contains(&unix_seconds)
-                {
+                if !abbreviation_matches(&resolved) {
                     return Ok(TimestampResolution::Unresolved {
-                        reason: UnresolvedTimestampReason::ResolvedInstantOutOfRange,
+                        reason: UnresolvedTimestampReason::ZoneAbbreviationMismatch,
                     });
                 }
-                Ok(TimestampResolution::Resolved {
-                    unix_seconds,
-                    provenance: TimestampResolutionProvenance {
-                        source: self.declaration.source.clone(),
-                        iana_timezone: self.declaration.iana_timezone.clone(),
-                        basis: self.declaration.basis,
-                        declared_at: self.declaration.declared_at,
-                        applied_revision: self.declaration.applied_revision,
-                        original_local_timestamp: local_text.to_string(),
-                        resolved_utc_offset_seconds: resolved.offset().fix().local_minus_utc(),
-                    },
-                })
+                Ok(resolved_result(resolved))
             }
-            LocalResult::Ambiguous(_, _) => Ok(TimestampResolution::Unresolved {
-                reason: UnresolvedTimestampReason::AmbiguousDstFold,
-            }),
+            LocalResult::Ambiguous(first, second) => {
+                match (abbreviation_matches(&first), abbreviation_matches(&second)) {
+                    (true, false) => Ok(resolved_result(first)),
+                    (false, true) => Ok(resolved_result(second)),
+                    (false, false) if source_abbreviation.is_some() => {
+                        Ok(TimestampResolution::Unresolved {
+                            reason: UnresolvedTimestampReason::ZoneAbbreviationMismatch,
+                        })
+                    }
+                    _ => Ok(TimestampResolution::Unresolved {
+                        reason: UnresolvedTimestampReason::AmbiguousDstFold,
+                    }),
+                }
+            }
             LocalResult::None => Ok(TimestampResolution::Unresolved {
                 reason: UnresolvedTimestampReason::NonexistentDstGap,
             }),
@@ -486,8 +524,18 @@ fn valid_portable_source(source: &str) -> bool {
         .all(|component| !component.is_empty() && component != "." && component != "..")
 }
 
-fn parse_complete_local_timestamp(value: &str) -> Option<NaiveDateTime> {
-    let mut canonical = value.trim().to_string();
+fn parse_complete_local_timestamp(value: &str) -> Option<(NaiveDateTime, Option<&str>)> {
+    let value = value.trim();
+    let (calendar, abbreviation) = value
+        .rsplit_once(' ')
+        .filter(|(_, candidate)| {
+            (2..=8).contains(&candidate.len())
+                && candidate.bytes().all(|byte| byte.is_ascii_uppercase())
+        })
+        .map_or((value, None), |(calendar, abbreviation)| {
+            (calendar.trim_end(), Some(abbreviation))
+        });
+    let mut canonical = calendar.to_string();
 
     // WildFly/JBoss and classic Elasticsearch retain exactly three fractional
     // digits and accept comma or dot separators.
@@ -503,7 +551,9 @@ fn parse_complete_local_timestamp(value: &str) -> Option<NaiveDateTime> {
     {
         canonical.replace_range(10..11, " ");
         canonical.replace_range(19..20, ".");
-        return NaiveDateTime::parse_from_str(&canonical, "%Y-%m-%d %H:%M:%S%.3f").ok();
+        return NaiveDateTime::parse_from_str(&canonical, "%Y-%m-%d %H:%M:%S%.3f")
+            .ok()
+            .map(|local| (local, abbreviation));
     }
 
     // This also supports future parser-recognized offsetless RFC3339-shaped
@@ -511,6 +561,7 @@ fn parse_complete_local_timestamp(value: &str) -> Option<NaiveDateTime> {
     NaiveDateTime::parse_from_str(&canonical, "%Y-%m-%dT%H:%M:%S%.f")
         .ok()
         .or_else(|| NaiveDateTime::parse_from_str(&canonical, "%Y-%m-%d %H:%M:%S%.f").ok())
+        .map(|local| (local, abbreviation))
 }
 
 #[cfg(test)]
@@ -730,6 +781,87 @@ mod tests {
         assert_eq!(
             parsed.unresolved_local_timestamp.as_deref(),
             Some("2021-03-05T00:06,350 CET")
+        );
+    }
+
+    #[test]
+    fn complete_zone_abbreviation_resolves_only_when_iana_rules_agree() {
+        let winter = parse_line(
+            "2021-03-03T00:00:04,334 CET INFO: synthetic check complete",
+            None,
+            45,
+        );
+        let berlin = SourceTimezoneResolver::new(declaration("Europe/Berlin")).unwrap();
+        let resolved = berlin.resolve(SOURCE, &winter).unwrap();
+        assert_eq!(resolved_seconds(&resolved), 1_614_726_004);
+        let TimestampResolution::Resolved { provenance, .. } = resolved else {
+            unreachable!()
+        };
+        assert_eq!(
+            provenance.original_local_timestamp,
+            "2021-03-03T00:00:04,334 CET"
+        );
+        assert_eq!(provenance.resolved_utc_offset_seconds, 3_600);
+
+        let mismatched_declaration = SourceTimezoneResolver::new(declaration("UTC")).unwrap();
+        assert_eq!(
+            mismatched_declaration.resolve(SOURCE, &winter).unwrap(),
+            TimestampResolution::Unresolved {
+                reason: UnresolvedTimestampReason::ZoneAbbreviationMismatch
+            }
+        );
+        let mismatch_preview = mismatched_declaration
+            .preview(&scope(), [(SOURCE, &winter)])
+            .unwrap();
+        assert_eq!(mismatch_preview.zone_abbreviation_mismatch_count, 1);
+        assert_eq!(mismatch_preview.unsupported_timestamp_count, 0);
+        assert_eq!(mismatch_preview.affected_records, 0);
+
+        let impossible_season = parse_line(
+            "2021-12-03T00:00:04,334 CEST INFO: synthetic check complete",
+            None,
+            46,
+        );
+        assert_eq!(
+            berlin.resolve(SOURCE, &impossible_season).unwrap(),
+            TimestampResolution::Unresolved {
+                reason: UnresolvedTimestampReason::ZoneAbbreviationMismatch
+            }
+        );
+    }
+
+    #[test]
+    fn zone_abbreviation_safely_disambiguates_a_dst_fold() {
+        let resolver = SourceTimezoneResolver::new(declaration("America/New_York")).unwrap();
+        let daylight = parse_line(
+            "2021-11-07T01:30:00 EDT INFO: synthetic first occurrence",
+            None,
+            47,
+        );
+        let standard = parse_line(
+            "2021-11-07T01:30:00 EST INFO: synthetic second occurrence",
+            None,
+            48,
+        );
+        let unrelated = parse_line(
+            "2021-11-07T01:30:00 CET INFO: synthetic contradictory zone",
+            None,
+            49,
+        );
+
+        assert_eq!(
+            resolved_seconds(&resolver.resolve(SOURCE, &daylight).unwrap()),
+            1_636_263_000
+        );
+        assert_eq!(
+            resolved_seconds(&resolver.resolve(SOURCE, &standard).unwrap()),
+            1_636_266_600
+        );
+        assert_eq!(
+            resolver.resolve(SOURCE, &unrelated).unwrap(),
+            TimestampResolution::Unresolved {
+                reason: UnresolvedTimestampReason::ZoneAbbreviationMismatch
+            }
         );
     }
 

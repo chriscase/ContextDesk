@@ -215,6 +215,7 @@ export function TimeReviewCard({ engine, report, onChanged }: Props) {
             totals.remaining +
             preview.unchangedOrderOnlyRecords +
             preview.unsupportedTimestampRecords +
+            preview.zoneAbbreviationMismatchRecords +
             preview.dstGapRecords +
             preview.dstFoldAmbiguities +
             preview.outOfRangeRecords,

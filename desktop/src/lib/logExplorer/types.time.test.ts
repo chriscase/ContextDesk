@@ -55,6 +55,19 @@ describe("adaptive event time (#535)", () => {
     expect(formatEventTimeTitle(42, "order_only")).toContain("not calendar");
   });
 
+  it("shows retained source-local evidence instead of generic ord", () => {
+    const sourceLocal = "2021-03-03T00:00:04,334 CET";
+    expect(
+      formatEventTime(42, "order_only", {
+        unresolvedLocalTimestamp: sourceLocal,
+      }),
+    ).toBe(`local ${sourceLocal}`);
+    const title = formatEventTimeTitle(42, "order_only", sourceLocal);
+    expect(title).toContain(`source-local ${sourceLocal}`);
+    expect(title).toContain("timezone unresolved");
+    expect(title).not.toContain("1970");
+  });
+
   it("uses explicit wall-clock provenance rather than numeric magnitude", () => {
     expect(formatEventTime(42, "wall")).toBe("1970-01-01 00:00:42Z");
     const title = formatEventTimeTitle(42, "wall");

@@ -409,6 +409,7 @@ export class MockEngineClient implements EngineClient {
         dstFoldAmbiguities: 0,
         unchangedOrderOnlyRecords: 0,
         unsupportedTimestampRecords: 0,
+        zoneAbbreviationMismatchRecords: 0,
         outOfRangeRecords: 0,
         precision: "whole_second",
       };

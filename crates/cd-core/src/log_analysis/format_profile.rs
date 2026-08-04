@@ -7,7 +7,7 @@
 use super::parse::{
     looks_like_classic_syslog, looks_like_datetime_message, looks_like_elasticsearch,
     looks_like_json_object, looks_like_logfmt, looks_like_rfc5424, looks_like_wildfly,
-    looks_like_zone_abbreviated_incomplete_time, LogFormat,
+    looks_like_zone_abbreviated_datetime, looks_like_zone_abbreviated_incomplete_time, LogFormat,
 };
 use std::borrow::Cow;
 use std::path::Path;
@@ -27,6 +27,8 @@ pub enum BuiltInGrammar {
     DateLevelLoggerThread,
     /// Date/time, optional explicit zone, level, and message.
     DateTimeMessage,
+    /// Complete local date/time, unresolved zone abbreviation, level, and message.
+    DateTimeZoneAbbreviationLevel,
     /// Four bracketed fields: timestamp, level, component, node.
     BracketedTimestampLevelComponentNode,
     /// Local minute/fraction plus an unresolved zone abbreviation.
@@ -45,6 +47,7 @@ impl BuiltInGrammar {
             | Self::ClassicSyslog
             | Self::DateLevelLoggerThread
             | Self::DateTimeMessage
+            | Self::DateTimeZoneAbbreviationLevel
             | Self::BracketedTimestampLevelComponentNode
             | Self::LocalMinuteZoneLevel => LogFormat::Syslog,
             Self::PlainLine => LogFormat::Plain,
@@ -208,6 +211,16 @@ pub const BUILT_IN_FORMAT_PROFILES: &[BuiltInFormatProfile] = &[
         score: 80,
         fallback: false,
         matcher: looks_like_datetime_message,
+    },
+    BuiltInFormatProfile {
+        id: "datetime-zone-abbreviation-level-record",
+        version: 1,
+        grammar: BuiltInGrammar::DateTimeZoneAbbreviationLevel,
+        producer_hint: None,
+        decisive_clue_codes: &["content.datetime_zone_abbreviation_level"],
+        score: 95,
+        fallback: false,
+        matcher: looks_like_zone_abbreviated_datetime,
     },
     BuiltInFormatProfile {
         id: "bracketed-timestamp-level-component-node-record",

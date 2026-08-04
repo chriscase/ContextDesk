@@ -365,6 +365,10 @@ pub(super) fn looks_like_datetime_message(t: &str) -> bool {
     parse_datetime_message_parts(t).is_some()
 }
 
+pub(super) fn looks_like_zone_abbreviated_datetime(t: &str) -> bool {
+    parse_zone_abbreviated_datetime_parts(t).is_some()
+}
+
 pub(super) fn looks_like_elasticsearch(t: &str) -> bool {
     parse_elasticsearch_parts(t).is_some()
 }
@@ -423,6 +427,10 @@ pub fn parse_line_with_fingerprint(
         }
         Some(BuiltInGrammar::DateTimeMessage) => {
             parse_datetime_message(raw, ingest_seq).unwrap_or_else(|| parse_plain(raw, ingest_seq))
+        }
+        Some(BuiltInGrammar::DateTimeZoneAbbreviationLevel) => {
+            parse_zone_abbreviated_datetime(raw, ingest_seq)
+                .unwrap_or_else(|| parse_plain(raw, ingest_seq))
         }
         Some(BuiltInGrammar::BracketedTimestampLevelComponentNode) => {
             parse_elasticsearch(raw, ingest_seq).unwrap_or_else(|| parse_plain(raw, ingest_seq))
@@ -1614,6 +1622,90 @@ fn parse_datetime_message_parts(raw: &str) -> Option<DateTimeMessageParts<'_>> {
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ZoneAbbreviatedDateTimeParts<'a> {
+    source_timestamp: &'a str,
+    level: &'a str,
+    payload: &'a str,
+}
+
+/// Parse a complete source-local calendar followed by a recognized, but
+/// ambiguous, timezone abbreviation and a severity. The abbreviation is
+/// evidence, not an offset: it is retained with the local calendar so a later
+/// user declaration can validate it against IANA rules before resolving.
+fn parse_zone_abbreviated_datetime_parts(raw: &str) -> Option<ZoneAbbreviatedDateTimeParts<'_>> {
+    const SECOND_TIMESTAMP_BYTES: usize = 19;
+    let base = raw.get(..SECOND_TIMESTAMP_BYTES)?;
+    if !is_complete_local_timestamp(base) {
+        return None;
+    }
+
+    let mut timestamp_bytes = SECOND_TIMESTAMP_BYTES;
+    if raw
+        .as_bytes()
+        .get(timestamp_bytes)
+        .is_some_and(|byte| matches!(byte, b',' | b'.'))
+    {
+        timestamp_bytes += 1;
+        let fraction_start = timestamp_bytes;
+        while raw
+            .as_bytes()
+            .get(timestamp_bytes)
+            .is_some_and(u8::is_ascii_digit)
+            && timestamp_bytes - fraction_start < 9
+        {
+            timestamp_bytes += 1;
+        }
+        if timestamp_bytes == fraction_start
+            || raw
+                .as_bytes()
+                .get(timestamp_bytes)
+                .is_some_and(u8::is_ascii_digit)
+        {
+            return None;
+        }
+    }
+
+    let calendar = raw.get(..timestamp_bytes)?;
+    if !is_complete_local_timestamp(calendar) {
+        return None;
+    }
+    let tail = raw.get(timestamp_bytes..)?;
+    let separator_bytes = tail.len().saturating_sub(tail.trim_start().len());
+    if separator_bytes == 0 {
+        return None;
+    }
+    let (zone, rest) = take_token(tail)?;
+    if !AMBIGUOUS_LOCAL_ZONES.contains(&zone) {
+        return None;
+    }
+    let (level_token, payload) = take_token(rest)?;
+    let level = common_level_token(level_token)?;
+    let source_timestamp_end = timestamp_bytes + separator_bytes + zone.len();
+    Some(ZoneAbbreviatedDateTimeParts {
+        source_timestamp: raw.get(..source_timestamp_end)?,
+        level,
+        payload: strip_standalone_dash_delimiter(payload.trim_start()),
+    })
+}
+
+fn parse_zone_abbreviated_datetime(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
+    let parts = parse_zone_abbreviated_datetime_parts(raw.trim())?;
+    Some(ParsedLine {
+        ts: Some(ingest_seq as i64),
+        timestamp_provenance: TimestampProvenance::UnresolvedLocal,
+        active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
+        unresolved_local_timestamp: Some(parts.source_timestamp.to_string()),
+        level: normalize_level(parts.level),
+        service: None,
+        host: None,
+        trace_id: None,
+        message: parts.payload.to_string(),
+        raw: raw.to_string(),
+        format: LogFormat::Syslog,
+    })
+}
+
 fn datetime_message_after_zone<'a>(
     source_timestamp: &'a str,
     offset: &str,
@@ -2647,7 +2739,6 @@ mod tests {
             "2026-07-29 25:14:05 INFO - impossible hour",
             "2026-07-29 09:14:05,1234567890 INFO - overlong fraction",
             "2026-07-29 09:14:05 single-space-message",
-            "2026-07-29 09:14:05  EST INFO ambiguous abbreviation",
         ];
 
         for (index, line) in lines.into_iter().enumerate() {
@@ -2696,6 +2787,85 @@ mod tests {
                 TimestampProvenance::ExplicitWallClock,
                 "line={line}"
             );
+            assert_eq!(
+                parsed.parsed.unresolved_local_timestamp, None,
+                "line={line}"
+            );
+        }
+    }
+
+    #[test]
+    fn complete_datetime_with_ambiguous_zone_extracts_fields_without_guessing_an_instant() {
+        let cases = [
+            (
+                "2021-03-03T00:00:04,334 CET INFO: cached condition evaluated",
+                "2021-03-03T00:00:04,334 CET",
+                "info",
+                "cached condition evaluated",
+            ),
+            (
+                "2025-06-15 12:13:14.25  EST [WARNING] - queue delayed",
+                "2025-06-15 12:13:14.25  EST",
+                "warn",
+                "queue delayed",
+            ),
+            (
+                "2025-12-15T23:59:59 CEST ERROR: request rejected",
+                "2025-12-15T23:59:59 CEST",
+                "error",
+                "request rejected",
+            ),
+        ];
+
+        for (index, (line, source_timestamp, level, message)) in cases.into_iter().enumerate() {
+            let parsed = parse_line_with_fingerprint(line, None, 400 + index as u64);
+            assert_eq!(
+                parsed.fingerprint.format_id,
+                Some("datetime-zone-abbreviation-level-record"),
+                "line={line}"
+            );
+            assert_eq!(parsed.parsed.level, level, "line={line}");
+            assert_eq!(parsed.parsed.message, message, "line={line}");
+            assert_eq!(parsed.parsed.raw, line, "line={line}");
+            assert_eq!(
+                parsed.parsed.timestamp_provenance,
+                TimestampProvenance::UnresolvedLocal,
+                "line={line}"
+            );
+            assert_eq!(
+                parsed.parsed.active_timestamp_basis,
+                ActiveTimestampBasis::OrderOnly,
+                "line={line}"
+            );
+            assert_eq!(
+                parsed.parsed.unresolved_local_timestamp.as_deref(),
+                Some(source_timestamp),
+                "line={line}"
+            );
+        }
+    }
+
+    #[test]
+    fn complete_datetime_zone_near_matches_remain_whole_line_fallbacks() {
+        let lines = [
+            "2021-13-03T00:00:04,334 CET INFO: impossible date",
+            "2021-03-03T24:00:04,334 CET INFO: impossible hour",
+            "2021-03-03T00:00:61,334 CET INFO: impossible second",
+            "2021-03-03T00:00:04,334 XYZ INFO: unknown zone",
+            "2021-03-03T00:00:04,334 cet INFO: lowercase zone",
+            "2021-03-03T00:00:04,334 CET UNKNOWN: unknown level",
+            "prefix 2021-03-03T00:00:04,334 CET INFO: embedded timestamp",
+        ];
+
+        for (index, line) in lines.into_iter().enumerate() {
+            let parsed = parse_line_with_fingerprint(line, None, 500 + index as u64);
+            assert_eq!(
+                parsed.fingerprint.format_id,
+                Some("plain-line"),
+                "line={line}"
+            );
+            assert_eq!(parsed.parsed.format, LogFormat::Plain, "line={line}");
+            assert_eq!(parsed.parsed.message, line, "line={line}");
             assert_eq!(
                 parsed.parsed.unresolved_local_timestamp, None,
                 "line={line}"

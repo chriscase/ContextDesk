@@ -199,7 +199,10 @@ impl IngestConfidenceAggregator {
         }
 
         if let Some(prefix) = line.parsed.unresolved_local_timestamp.as_deref() {
-            let reason = if line.fingerprint.format_id == Some("local-minute-zone-level-record") {
+            let reason = if matches!(
+                line.fingerprint.format_id,
+                Some("local-minute-zone-level-record" | "datetime-zone-abbreviation-level-record")
+            ) {
                 UnresolvedTimeReason::ZoneAbbreviationNotResolved
             } else {
                 UnresolvedTimeReason::NoTimezone
@@ -427,6 +430,34 @@ mod tests {
         assert_eq!(
             report.sources[1].unresolved_reasons,
             vec![UnresolvedTimeReason::NoTimezone]
+        );
+    }
+
+    #[test]
+    fn complete_ambiguous_zone_publishes_stable_grammar_and_review_reason() {
+        let mut aggregator = IngestConfidenceAggregator::default();
+        observe(
+            &mut aggregator,
+            "scheduler/activity.log",
+            "2021-03-03T00:00:04,334 CET INFO: synthetic condition evaluated",
+            1,
+        );
+
+        let report = aggregator.finish();
+        let source = &report.sources[0];
+        assert_eq!(
+            source.format_id.as_deref(),
+            Some("datetime-zone-abbreviation-level-record")
+        );
+        assert_eq!(source.format_version, Some(1));
+        assert_eq!(source.time_quality, TimeQuality::OrderOnly);
+        assert_eq!(
+            source.unresolved_reasons,
+            vec![UnresolvedTimeReason::ZoneAbbreviationNotResolved]
+        );
+        assert_eq!(
+            source.timestamp_prefix_samples,
+            vec!["2021-03-03T00:00:04,334 CET"]
         );
     }
 

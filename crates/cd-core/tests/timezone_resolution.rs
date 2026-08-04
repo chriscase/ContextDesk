@@ -47,6 +47,7 @@ fn owner_jboss_and_elasticsearch_examples_resolve_from_user_iana_declaration() {
     assert_eq!(preview.dst_fold_count, 0);
     assert_eq!(preview.dst_gap_count, 0);
     assert_eq!(preview.unsupported_timestamp_count, 0);
+    assert_eq!(preview.zone_abbreviation_mismatch_count, 0);
 }
 
 #[test]

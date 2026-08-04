@@ -135,10 +135,17 @@ export function formatCanonicalUtc(ts: number): string {
 export function formatEventTime(
   ts: number,
   quality: TimeQuality,
-  opts?: { minTs?: number; maxTs?: number },
+  opts?: {
+    minTs?: number;
+    maxTs?: number;
+    unresolvedLocalTimestamp?: string | null;
+  },
 ): string {
   if (!Number.isFinite(ts)) return "invalid time";
   if (quality === "order_only") {
+    if (opts?.unresolvedLocalTimestamp) {
+      return `local ${opts.unresolvedLocalTimestamp}`;
+    }
     return `ord ${ts}`;
   }
   if (quality === "mixed" && ts < 946_684_800) {
@@ -174,12 +181,19 @@ export function formatEventTime(
 }
 
 /** Accessible full timestamp title including quality. */
-export function formatEventTimeTitle(ts: number, quality: TimeQuality): string {
+export function formatEventTimeTitle(
+  ts: number,
+  quality: TimeQuality,
+  unresolvedLocalTimestamp?: string | null,
+): string {
   if (!Number.isFinite(ts)) return "invalid timestamp (not calendar time)";
   if (
     quality === "order_only" ||
     (quality === "mixed" && ts < 946_684_800)
   ) {
+    if (unresolvedLocalTimestamp) {
+      return `source-local ${unresolvedLocalTimestamp} (timezone unresolved; not yet calendar-aligned)`;
+    }
     return `order-only seq-time ${ts} (not calendar time)`;
   }
   return `${formatCanonicalUtc(ts)} · ${timeQualityLabel(quality)} · UTC`;

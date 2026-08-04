@@ -30,6 +30,37 @@ function makeEvents(n: number): ExplorerEventDto[] {
 }
 
 describe("VirtualizedEventList", () => {
+  it("distinguishes unresolved source-local evidence from truly order-only rows", () => {
+    const events = makeEvents(2).map((event) => ({
+      ...event,
+      ts: event.seq,
+      timeQuality: "order_only" as const,
+    }));
+    events[0]!.unresolvedLocalTimestamp = "2021-03-03T00:00:04,334 CET";
+
+    render(
+      <VirtualizedEventList
+        events={events}
+        timeQuality="order_only"
+        selected={new Set()}
+        highlight={new Set()}
+        density="comfortable"
+        onRowClick={vi.fn()}
+      />,
+    );
+
+    const sourceLocal = screen.getByTestId("event-time-1");
+    expect(sourceLocal.textContent).toBe(
+      "local 2021-03-03T00:00:04,334 CET",
+    );
+    expect(sourceLocal.getAttribute("title")).toContain("timezone unresolved");
+    expect(sourceLocal.textContent).not.toContain("ord");
+
+    const orderOnly = screen.getByTestId("event-time-2");
+    expect(orderOnly.textContent).toBe("ord 2");
+    expect(orderOnly.getAttribute("title")).toContain("not calendar time");
+  });
+
   it("virtualizes: renders far fewer DOM rows than total events", () => {
     const events = makeEvents(500);
     render(

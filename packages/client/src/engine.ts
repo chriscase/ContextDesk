@@ -151,6 +151,7 @@ export type TimezonePreview = {
   dstFoldAmbiguities: number;
   unchangedOrderOnlyRecords: number;
   unsupportedTimestampRecords: number;
+  zoneAbbreviationMismatchRecords: number;
   outOfRangeRecords: number;
   precision: "whole_second";
 };

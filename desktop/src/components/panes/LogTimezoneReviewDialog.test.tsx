@@ -67,6 +67,7 @@ function preview(
     dstFoldAmbiguities: 2,
     unchangedOrderOnlyRecords: 3,
     unsupportedTimestampRecords: 1,
+    zoneAbbreviationMismatchRecords: 2,
     outOfRangeRecords: 0,
     precision: "whole_second",
   };
@@ -319,7 +320,7 @@ describe("LogTimezoneReviewDialog", () => {
     expect(result.textContent).toContain("2021-03-05 00:00:05Z");
     expect(result.textContent).toContain("2021-03-05 01:00:05Z");
     expect(result.textContent).toContain("21 records resolved");
-    expect(result.textContent).toContain("7 records remain order-only");
+    expect(result.textContent).toContain("9 records remain order-only");
     expect(result.textContent).toContain("Resulting source quality: mixed");
     expect(
       within(result).getByText("Already exact").nextElementSibling?.textContent,
@@ -335,6 +336,10 @@ describe("LogTimezoneReviewDialog", () => {
       within(result).getByText("Unchanged / order-only").nextElementSibling
         ?.textContent,
     ).toBe("3 records");
+    expect(
+      within(result).getByText("Zone abbreviation conflict")
+        .nextElementSibling?.textContent,
+    ).toBe("2 records");
     expect(result.textContent).toContain("coarse whole-second precision");
 
     const apply = within(dialog).getByRole("button", {

@@ -8835,6 +8835,7 @@ struct LogTimezonePreviewDto {
     dst_fold_ambiguities: u64,
     unchanged_order_only_records: u64,
     unsupported_timestamp_records: u64,
+    zone_abbreviation_mismatch_records: u64,
     out_of_range_records: u64,
     precision: &'static str,
 }
@@ -8855,6 +8856,7 @@ impl From<cd_core::log_analysis::TimezoneResolutionPreview> for LogTimezonePrevi
             dst_fold_ambiguities: value.dst_fold_count,
             unchanged_order_only_records: value.unchanged_order_only_records,
             unsupported_timestamp_records: value.unsupported_timestamp_count,
+            zone_abbreviation_mismatch_records: value.zone_abbreviation_mismatch_count,
             out_of_range_records: value.out_of_range_count,
             precision: "whole_second",
         }
@@ -12568,6 +12570,7 @@ mod log_timezone_host_tests {
             dst_fold_count: 2,
             unchanged_order_only_records: 4,
             unsupported_timestamp_count: 5,
+            zone_abbreviation_mismatch_count: 7,
             out_of_range_count: 6,
         };
         let wire =
@@ -12578,6 +12581,7 @@ mod log_timezone_host_tests {
         assert_eq!(wire["previewToken"], "preview-token");
         assert_eq!(wire["dstGapRecords"], 1);
         assert_eq!(wire["dstFoldAmbiguities"], 2);
+        assert_eq!(wire["zoneAbbreviationMismatchRecords"], 7);
         assert_eq!(wire["precision"], "whole_second");
         assert!(wire.get("event_revision").is_none());
     }

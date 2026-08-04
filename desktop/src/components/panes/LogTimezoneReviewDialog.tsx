@@ -246,6 +246,7 @@ export function LogTimezoneReviewDialog({
       preview.dstGapRecords +
       preview.dstFoldAmbiguities +
       preview.unsupportedTimestampRecords +
+      preview.zoneAbbreviationMismatchRecords +
       preview.outOfRangeRecords
     : 0;
   const resultingWallClockRecords = preview
@@ -608,6 +609,15 @@ export function LogTimezoneReviewDialog({
                   <dt>Unsupported shape</dt>
                   <dd>
                     {countLabel(preview.unsupportedTimestampRecords, "record")}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Zone abbreviation conflict</dt>
+                  <dd>
+                    {countLabel(
+                      preview.zoneAbbreviationMismatchRecords,
+                      "record",
+                    )}
                   </dd>
                 </div>
                 <div>

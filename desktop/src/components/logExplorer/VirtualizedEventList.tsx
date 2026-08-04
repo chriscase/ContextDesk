@@ -902,12 +902,23 @@ export function VirtualizedEventList({
             >
               <span
                 className="log-explorer__ts"
-                title={formatEventTimeTitle(e.ts, tq)}
-                aria-label={formatEventTimeTitle(e.ts, tq)}
+                title={formatEventTimeTitle(
+                  e.ts,
+                  tq,
+                  e.unresolvedLocalTimestamp,
+                )}
+                aria-label={formatEventTimeTitle(
+                  e.ts,
+                  tq,
+                  e.unresolvedLocalTimestamp,
+                )}
                 tabIndex={0}
                 data-testid={`event-time-${e.seq}`}
               >
-                {formatEventTime(e.ts, tq, timeRange)}
+                {formatEventTime(e.ts, tq, {
+                  ...timeRange,
+                  unresolvedLocalTimestamp: e.unresolvedLocalTimestamp,
+                })}
               </span>
               {metadataPresentation === "compact" ? (
                 <span
