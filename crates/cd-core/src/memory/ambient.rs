@@ -39,6 +39,35 @@ pub struct AmbientMemory {
     pub score: f32,
 }
 
+/// One selected ambient item with the host-computed rank/score that drove inclusion.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AmbientSelectedItem {
+    /// Citation source_id (`memory:{uuid}`).
+    pub source_id: String,
+    /// Short label.
+    pub label: String,
+    /// Hybrid score actually used for selection.
+    pub score: f32,
+    /// 1-based selection order among accepted items (not a model rank).
+    pub rank: usize,
+}
+
+/// One rejected ambient candidate with the real host rejection reason.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AmbientRejectedItem {
+    /// Citation source_id when known from the hit.
+    pub source_id: String,
+    /// Short label when known.
+    pub label: String,
+    /// Hybrid score from the hit (always present for recalled candidates).
+    pub score: f32,
+    /// Host decision that dropped this candidate.
+    ///
+    /// One of: `below_min_score`, `echo_suppressed_title`, `echo_suppressed_snippet`,
+    /// `char_budget`, `max_memories`.
+    pub reason: String,
+}
+
 /// Result of ambient injection (context block + citation payloads).
 #[derive(Debug, Clone, Default)]
 pub struct AmbientInjection {
@@ -48,6 +77,10 @@ pub struct AmbientInjection {
     pub citations: Vec<(String, String)>,
     /// How many memories included.
     pub count: usize,
+    /// Selected items with real host scores/ranks (empty when none).
+    pub selected: Vec<AmbientSelectedItem>,
+    /// Rejected candidates with real reasons (empty when none considered).
+    pub rejected: Vec<AmbientRejectedItem>,
 }
 
 /// Build ambient memory context for a user turn.
@@ -103,6 +136,14 @@ pub fn inject_memory_context_with_embed(
     select_ambient(&hits, visible_history_text, budget)
 }
 
+fn ambient_label(hit: &RecallHit) -> String {
+    if hit.record.title.is_empty() {
+        hit.record.kind.as_str().to_string()
+    } else {
+        hit.record.title.clone()
+    }
+}
+
 fn select_ambient(
     hits: &[RecallHit],
     visible_history_text: &str,
@@ -111,17 +152,48 @@ fn select_ambient(
     let history_l = visible_history_text.to_lowercase();
     let mut chars = 0usize;
     let mut items: Vec<AmbientMemory> = Vec::new();
+    let mut selected: Vec<AmbientSelectedItem> = Vec::new();
+    let mut rejected: Vec<AmbientRejectedItem> = Vec::new();
+    let mut stop_reason: Option<&'static str> = None;
     for h in hits {
+        if let Some(reason) = stop_reason {
+            rejected.push(AmbientRejectedItem {
+                source_id: h.source_id.clone(),
+                label: ambient_label(h),
+                score: h.score,
+                reason: reason.into(),
+            });
+            continue;
+        }
+        let label = ambient_label(h);
         if h.score < budget.min_score {
+            rejected.push(AmbientRejectedItem {
+                source_id: h.source_id.clone(),
+                label,
+                score: h.score,
+                reason: "below_min_score".into(),
+            });
             continue;
         }
         // Echo-suppress: skip if title or substantial content already in history.
         let title_l = h.record.title.to_lowercase();
         let snippet_l = h.snippet.to_lowercase();
         if !title_l.is_empty() && history_l.contains(&title_l) {
+            rejected.push(AmbientRejectedItem {
+                source_id: h.source_id.clone(),
+                label,
+                score: h.score,
+                reason: "echo_suppressed_title".into(),
+            });
             continue;
         }
         if snippet_l.len() > 24 && history_l.contains(&snippet_l) {
+            rejected.push(AmbientRejectedItem {
+                source_id: h.source_id.clone(),
+                label,
+                score: h.score,
+                reason: "echo_suppressed_snippet".into(),
+            });
             continue;
         }
         let line = format!(
@@ -131,25 +203,48 @@ fn select_ambient(
             h.snippet
         );
         if chars + line.len() > budget.max_chars && !items.is_empty() {
-            break;
+            rejected.push(AmbientRejectedItem {
+                source_id: h.source_id.clone(),
+                label,
+                score: h.score,
+                reason: "char_budget".into(),
+            });
+            stop_reason = Some("char_budget");
+            continue;
         }
         if items.len() >= budget.max_memories {
-            break;
+            rejected.push(AmbientRejectedItem {
+                source_id: h.source_id.clone(),
+                label,
+                score: h.score,
+                reason: "max_memories".into(),
+            });
+            stop_reason = Some("max_memories");
+            continue;
         }
         chars += line.len();
+        let rank = items.len() + 1;
         items.push(AmbientMemory {
             source_id: h.source_id.clone(),
-            label: if h.record.title.is_empty() {
-                h.record.kind.as_str().to_string()
-            } else {
-                h.record.title.clone()
-            },
+            label: label.clone(),
             text: line,
             score: h.score,
         });
+        selected.push(AmbientSelectedItem {
+            source_id: h.source_id.clone(),
+            label,
+            score: h.score,
+            rank,
+        });
     }
     if items.is_empty() {
-        return Ok(AmbientInjection::default());
+        return Ok(AmbientInjection {
+            context_block: String::new(),
+            citations: Vec::new(),
+            count: 0,
+            selected,
+            rejected,
+        });
     }
     let mut block = String::from(
         "Relevant memories (first-party durable store; already secret-redacted at write time):\n",
@@ -168,6 +263,8 @@ fn select_ambient(
         count: items.len(),
         context_block: block,
         citations,
+        selected,
+        rejected,
     })
 }
 

@@ -141,7 +141,7 @@ impl fmt::Debug for DeveloperPayload {
 impl DeveloperPayload {
     /// Redact and byte-bound arbitrary text before it can reach a sink.
     pub fn text(value: &str) -> Self {
-        let redacted = crate::redact::scrub_secrets(value);
+        let redacted = opaque_absolute_paths(&crate::redact::scrub_secrets(value));
         Self::from_redacted(redacted)
     }
 
@@ -161,7 +161,9 @@ impl DeveloperPayload {
         let redacted = redact_developer_json(&bounded);
         let encoded = serde_json::to_string_pretty(&redacted)
             .unwrap_or_else(|_| "[unavailable: JSON serialization failed]".to_string());
-        Self::from_redacted(crate::redact::scrub_secrets(&encoded))
+        Self::from_redacted(opaque_absolute_paths(&crate::redact::scrub_secrets(
+            &encoded,
+        )))
     }
 
     fn from_redacted(value: String) -> Self {
@@ -303,6 +305,130 @@ fn unique_bounded_key(
     }
 }
 
+/// Replace local absolute filesystem paths with an opaque marker so developer
+/// detail never ships home directories or other private path roots over IPC.
+///
+/// Matches POSIX absolute paths (`/…`) and Windows drive paths (`C:\…`).
+/// Relative path segments and basenames are left intact.
+///
+/// Path token scanning is ASCII-only (filesystem roots and separators). Indexing
+/// is always on a prior `char` boundary of `input`.
+#[allow(clippy::string_slice)]
+pub fn opaque_absolute_paths(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        // `i` advances by full UTF-8 char widths only.
+        let rest = &input[i..];
+        if let Some(end) = take_absolute_path_len(rest) {
+            out.push_str("[local-path]");
+            // Preserve trailing basename when the path is a file-like leaf.
+            let path = &rest[..end];
+            if let Some(base) = path_basename(path) {
+                if !base.is_empty() && base != path.trim_matches(|c| c == '/' || c == '\\') {
+                    out.push('/');
+                    out.push_str(base);
+                }
+            }
+            i += end;
+            continue;
+        }
+        let ch = rest.chars().next().expect("non-empty rest");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn path_basename(path: &str) -> Option<&str> {
+    path.rsplit(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty() && !s.contains(':'))
+}
+
+/// If `s` starts with an absolute path token, return its byte length.
+/// Path tokens are ASCII (drive letters, separators, known roots).
+#[allow(clippy::string_slice)]
+fn take_absolute_path_len(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    // Windows: C:\ or C:/
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
+        let mut end = 3;
+        while end < bytes.len() {
+            let c = bytes[end];
+            if c.is_ascii_whitespace()
+                || c == b'"'
+                || c == b'\''
+                || c == b','
+                || c == b')'
+                || c == b'}'
+                || c == b']'
+                || c == b'{'
+                || c == b'['
+            {
+                break;
+            }
+            end += 1;
+        }
+        return Some(end);
+    }
+    // POSIX absolute — require at least "/x" and a path-ish second char.
+    // Skip pure protocol-ish tokens like "//" and avoid matching lone "/".
+    if bytes[0] == b'/' {
+        // Do not treat // as a local path root (often URLs).
+        if bytes.len() > 1 && bytes[1] == b'/' {
+            return None;
+        }
+        // Common absolute roots we always opaque.
+        let known = [
+            "/Users/",
+            "/home/",
+            "/var/",
+            "/tmp/",
+            "/private/",
+            "/opt/",
+            "/etc/",
+            "/Library/",
+            "/System/",
+            "/Applications/",
+            "/Volumes/",
+            "/root/",
+        ];
+        let starts_known = known.iter().any(|p| s.starts_with(p));
+        // Also opaque any /… path with a multi-segment shape (at least one more /).
+        let mut end = 1;
+        while end < bytes.len() {
+            let c = bytes[end];
+            if c.is_ascii_whitespace()
+                || c == b'"'
+                || c == b'\''
+                || c == b','
+                || c == b')'
+                || c == b'}'
+                || c == b']'
+                || c == b'{'
+                || c == b'['
+            {
+                break;
+            }
+            end += 1;
+        }
+        let slash_count = bytes[..end].iter().filter(|&&b| b == b'/').count();
+        if end > 1 && (starts_known || slash_count >= 2) {
+            return Some(end);
+        }
+    }
+    None
+}
+
 fn is_secret_field(key: &str) -> bool {
     let normalized = key
         .chars()
@@ -379,6 +505,11 @@ pub enum DeveloperDetailKind {
     Permission,
     /// A deterministic host phase.
     DeterministicStage,
+    /// How the host assembled model-facing context before a provider round.
+    ///
+    /// Emitted only at live assembly seams while Developer detail is On.
+    /// Never reconstructed after the turn.
+    ContextProvenance,
     /// A cancellation observed by the host.
     Cancellation,
 }
@@ -494,6 +625,37 @@ impl DeveloperDetailDraft {
             tool_name: None,
             offered_tools: Vec::new(),
             request: Vec::new(),
+            response: None,
+            status: status.into(),
+        }
+    }
+
+    /// Build one context-assembly provenance fact set for a model round.
+    ///
+    /// `facts` must contain only host-computed values. Callers must not invent
+    /// scores, reasons, token counts, or selection decisions. Character
+    /// estimates must be labelled as characters/estimates in the payload.
+    pub fn context_provenance(
+        round: u32,
+        contributor: &str,
+        status: impl Into<String>,
+        facts: serde_json::Value,
+        authority: &str,
+    ) -> Self {
+        Self {
+            kind: DeveloperDetailKind::ContextProvenance,
+            label: format!("Context: {contributor}"),
+            provider: None,
+            model: None,
+            round: Some(round),
+            tool_name: None,
+            offered_tools: Vec::new(),
+            request: vec![DeveloperPayload::json(&serde_json::json!({
+                "contributor": contributor,
+                "authority": authority,
+                "unit": "characters_estimate",
+                "facts": facts,
+            }))],
             response: None,
             status: status.into(),
         }
@@ -2163,7 +2325,6 @@ mod tests {
         store.forget_session("session-a");
         assert!(store.get("session-a", "same-message").is_none());
     }
-
     // -- is_secret_field: header/secret key coverage (Blocker 2) ----------
 
     #[test]
@@ -2756,5 +2917,43 @@ mod tests {
             still_b[0].response.as_ref().unwrap().content,
             "session B's sensitive content"
         );
+    }
+    #[test]
+    fn absolute_paths_are_opaqued_in_developer_payloads() {
+        let payload = DeveloperPayload::text(
+            "loaded /Users/someone/Documents/private/report.log and C:\\Users\\someone\\secret.txt",
+        );
+        assert!(
+            !payload.content.contains("/Users/someone"),
+            "posix home path leaked: {}",
+            payload.content
+        );
+        assert!(
+            !payload.content.contains("C:\\Users\\someone"),
+            "windows path leaked: {}",
+            payload.content
+        );
+        assert!(
+            payload.content.contains("[local-path]"),
+            "expected opaque marker: {}",
+            payload.content
+        );
+    }
+
+    #[test]
+    fn context_provenance_draft_is_sensitive_and_character_labelled() {
+        let draft = DeveloperDetailDraft::context_provenance(
+            0,
+            "context_budget",
+            "within_budget",
+            serde_json::json!({
+                "budget_chars_estimate": 120_000,
+                "used_chars_estimate": 40,
+            }),
+            "deterministic",
+        );
+        assert_eq!(draft.kind, DeveloperDetailKind::ContextProvenance);
+        assert!(draft.request[0].content.contains("characters_estimate"));
+        assert!(!draft.request[0].content.contains("\"tokens\""));
     }
 }

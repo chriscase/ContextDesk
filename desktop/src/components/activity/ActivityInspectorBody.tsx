@@ -238,7 +238,8 @@ export function ActivityInspectorBody({
                           <div>
                             <dt>Authority</dt>
                             <dd>
-                              {event.kind === "deterministic_stage"
+                              {event.kind === "deterministic_stage" ||
+                              event.kind === "context_provenance"
                                 ? "Deterministic host"
                                 : event.kind === "provider_exchange" ||
                                     event.kind === "tool_call"

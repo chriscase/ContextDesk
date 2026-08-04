@@ -186,6 +186,41 @@ describe("developer detail", () => {
     expect(screen.getByText(/9,000 bytes · truncated prefix/)).toBeTruthy();
     expect(screen.getByText("redacted request prefix")).toBeTruthy();
   });
+
+  it("renders context provenance rows with sensitive labelling", () => {
+    render(
+      <ActivityInspectorBody
+        turn={turn({
+          developerDetail: [
+            {
+              seq: 0,
+              elapsed_ms: 5,
+              kind: "context_provenance",
+              label: "Context: context_budget",
+              offered_tools: [],
+              request: [
+                {
+                  content:
+                    '{"contributor":"context_budget","unit":"characters_estimate","facts":{"budget_chars_estimate":120000,"used_chars_estimate":40,"not_provider_tokens":true}}',
+                  retained_bytes: 160,
+                  original_bytes: 160,
+                  truncated: false,
+                },
+              ],
+              status: "within_budget",
+              sensitive: true,
+            },
+          ],
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("activity-tab-technical"));
+    expect(screen.getByText("Sensitive developer detail")).toBeTruthy();
+    fireEvent.click(screen.getByText("Context: context_budget"));
+    expect(screen.getByText("Deterministic host")).toBeTruthy();
+    expect(screen.getByText(/characters_estimate/)).toBeTruthy();
+    expect(screen.getByText(/not_provider_tokens/)).toBeTruthy();
+  });
 });
 
 describe("Drawer and Docked render the same body", () => {

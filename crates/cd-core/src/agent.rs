@@ -1260,6 +1260,440 @@ fn enforce_hard_context_budget(
     }
 }
 
+/// Host-observed ambient facts for developer provenance (real scores only).
+struct AmbientProvenanceSnapshot {
+    selected_count: usize,
+    rejected_count: usize,
+    selected: Vec<serde_json::Value>,
+    rejected: Vec<serde_json::Value>,
+    context_block_chars: usize,
+}
+
+impl AmbientProvenanceSnapshot {
+    fn from_injection(inj: &crate::memory::AmbientInjection) -> Self {
+        Self {
+            selected_count: inj.selected.len(),
+            rejected_count: inj.rejected.len(),
+            selected: inj
+                .selected
+                .iter()
+                .map(|item| {
+                    serde_json::json!({
+                        "source_id": item.source_id,
+                        "label": item.label,
+                        "score": item.score,
+                        "rank": item.rank,
+                    })
+                })
+                .collect(),
+            rejected: inj
+                .rejected
+                .iter()
+                .map(|item| {
+                    serde_json::json!({
+                        "source_id": item.source_id,
+                        "label": item.label,
+                        "score": item.score,
+                        "reason": item.reason,
+                    })
+                })
+                .collect(),
+            context_block_chars: inj.context_block.len(),
+        }
+    }
+}
+
+/// Emit ordered context-assembly provenance immediately before a provider call.
+///
+/// Only runs when Developer detail is On. Every fact is host-observed at this
+/// seam — missing contributors are labelled, never invented.
+#[allow(clippy::too_many_arguments)]
+fn emit_context_provenance_before_provider(
+    trace: &crate::turn_trace::TurnTraceObserver,
+    round: u32,
+    model_ctx: &[ChatMessage],
+    source_history_len: usize,
+    keep: usize,
+    prepared_compacted: bool,
+    prepared_truncated: bool,
+    char_budget: usize,
+    offered_tools: &[ToolSpec],
+    ambient: Option<&AmbientProvenanceSnapshot>,
+    ambient_attempted: bool,
+    ambient_enabled: bool,
+    linked_turn: bool,
+    linked_evidence_chars: usize,
+    linked_evidence_identities: usize,
+    viewport_present: bool,
+    corpus_id: Option<&str>,
+    session_pack_file_count: Option<usize>,
+    session_pack_names: &[String],
+    confluence_hint_present: bool,
+    connector_tool_names: &[String],
+    tools_disabled: bool,
+) {
+    use crate::turn_trace::DeveloperDetailDraft;
+
+    let mut role_counts: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
+    let mut role_chars: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
+    let mut system_chars = 0usize;
+    let mut has_compact_summary = false;
+    let mut skill_ids: Vec<String> = Vec::new();
+    let mut tool_role_messages = 0usize;
+    let mut tool_role_chars = 0usize;
+    for message in model_ctx {
+        let role = match message.role {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+        };
+        *role_counts.entry(role).or_default() += 1;
+        *role_chars.entry(role).or_default() += message.content.len();
+        if matches!(message.role, Role::System) {
+            system_chars += message.content.len();
+        }
+        if message.content.contains("[Compacted earlier conversation]") {
+            has_compact_summary = true;
+        }
+        if matches!(message.role, Role::Tool) {
+            tool_role_messages += 1;
+            tool_role_chars += message.content.len();
+        }
+        // Skill wrappers injected into the user turn text.
+        for cap in message.content.split("<<<SKILL:") {
+            if cap == message.content {
+                continue;
+            }
+            if let Some(id_part) = cap.split("id=\"").nth(1) {
+                if let Some(id) = id_part.split('"').next() {
+                    if !id.is_empty() && !skill_ids.iter().any(|s| s == id) {
+                        skill_ids.push(id.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let retained_messages = model_ctx.len();
+    let used_chars = estimate_context_chars(model_ctx);
+    let omitted_messages = source_history_len.saturating_sub(retained_messages);
+    let truncated_bodies = model_ctx.iter().any(|m| {
+        m.content
+            .contains(crate::sessions::MODEL_CONTEXT_TRUNCATE_MARKER)
+    }) || prepared_truncated;
+
+    // 1. System instructions
+    trace.record_developer(DeveloperDetailDraft::context_provenance(
+        round,
+        "system_instructions",
+        if system_chars > 0 {
+            "present"
+        } else {
+            "missing"
+        },
+        serde_json::json!({
+            "system_message_count": role_counts.get("system").copied().unwrap_or(0),
+            "system_chars_estimate": system_chars,
+            "bounded": true,
+        }),
+        "deterministic",
+    ));
+
+    // 2. Prior chat / history selection
+    trace.record_developer(DeveloperDetailDraft::context_provenance(
+        round,
+        "history_selection",
+        "selected",
+        serde_json::json!({
+            "source_history_messages": source_history_len,
+            "retained_messages": retained_messages,
+            "omitted_messages_estimate": omitted_messages,
+            "keep_window": keep,
+            "role_message_counts": role_counts,
+            "role_chars_estimate": role_chars,
+            "tool_role_messages_in_context": tool_role_messages,
+            "tool_role_chars_estimate": tool_role_chars,
+        }),
+        "deterministic",
+    ));
+
+    // 3. Compaction
+    trace.record_developer(DeveloperDetailDraft::context_provenance(
+        round,
+        "compaction",
+        if prepared_compacted || has_compact_summary {
+            "applied"
+        } else {
+            "not_needed"
+        },
+        serde_json::json!({
+            "keep_reduced_for_budget": prepared_compacted,
+            "compacted_summary_included": has_compact_summary,
+            "bodies_truncated_for_budget": truncated_bodies,
+            "algorithm": "deterministic_pairing_safe_window_plus_fit",
+        }),
+        "deterministic",
+    ));
+
+    // 4. Ambient memory
+    if ambient_attempted {
+        if let Some(amb) = ambient {
+            trace.record_developer(DeveloperDetailDraft::context_provenance(
+                round,
+                "ambient_memory",
+                if amb.selected_count > 0 {
+                    "injected"
+                } else {
+                    "no_hits"
+                },
+                serde_json::json!({
+                    "enabled": ambient_enabled,
+                    "selected_count": amb.selected_count,
+                    "rejected_count": amb.rejected_count,
+                    "selected": amb.selected,
+                    "rejected": amb.rejected,
+                    "context_block_chars_estimate": amb.context_block_chars,
+                    "scoring": "host_hybrid_recall",
+                }),
+                "repeatable_heuristic",
+            ));
+        } else {
+            trace.record_developer(DeveloperDetailDraft::context_provenance(
+                round,
+                "ambient_memory",
+                "not_reported",
+                serde_json::json!({
+                    "enabled": ambient_enabled,
+                    "note": "ambient path ran but no injection result was retained",
+                }),
+                "repeatable_heuristic",
+            ));
+        }
+    } else {
+        let reason = if !ambient_enabled {
+            "disabled"
+        } else if linked_turn {
+            "skipped_for_linked_turn"
+        } else {
+            "not_run"
+        };
+        trace.record_developer(DeveloperDetailDraft::context_provenance(
+            round,
+            "ambient_memory",
+            reason,
+            serde_json::json!({
+                "enabled": ambient_enabled,
+                "selected_count": 0,
+                "rejected_count": 0,
+                "rejected_reasons_reported": false,
+            }),
+            "repeatable_heuristic",
+        ));
+    }
+
+    // 5. Session packs / attached files
+    match session_pack_file_count {
+        Some(count) => {
+            trace.record_developer(DeveloperDetailDraft::context_provenance(
+                round,
+                "session_packs",
+                if count > 0 { "present" } else { "empty" },
+                serde_json::json!({
+                    "file_count": count,
+                    "names": session_pack_names,
+                    "note": "names only; absolute paths are never recorded",
+                    "retrieval": "available_via_search_kb_overlay",
+                }),
+                "deterministic",
+            ));
+        }
+        None => {
+            trace.record_developer(DeveloperDetailDraft::context_provenance(
+                round,
+                "session_packs",
+                "not_configured",
+                serde_json::json!({
+                    "file_count": null,
+                    "note": "no session context base bound for this host",
+                }),
+                "deterministic",
+            ));
+        }
+    }
+
+    // 6. Pinned skills
+    if skill_ids.is_empty() {
+        trace.record_developer(DeveloperDetailDraft::context_provenance(
+            round,
+            "pinned_skills",
+            "not_present",
+            serde_json::json!({
+                "skill_ids_in_context": [],
+                "note": "no <<<SKILL:…>>> wrapper observed in assembled context",
+            }),
+            "human_approved",
+        ));
+    } else {
+        trace.record_developer(DeveloperDetailDraft::context_provenance(
+            round,
+            "pinned_skills",
+            "present",
+            serde_json::json!({
+                "skill_ids_in_context": skill_ids,
+            }),
+            "human_approved",
+        ));
+    }
+
+    // 7. Connector-derived context
+    if confluence_hint_present || !connector_tool_names.is_empty() {
+        trace.record_developer(DeveloperDetailDraft::context_provenance(
+            round,
+            "connector_context",
+            "present",
+            serde_json::json!({
+                "confluence_hint_in_system": confluence_hint_present,
+                "connector_tool_names_offered": connector_tool_names,
+            }),
+            "deterministic",
+        ));
+    } else {
+        trace.record_developer(DeveloperDetailDraft::context_provenance(
+            round,
+            "connector_context",
+            "not_present",
+            serde_json::json!({
+                "confluence_hint_in_system": false,
+                "connector_tool_names_offered": [],
+            }),
+            "deterministic",
+        ));
+    }
+
+    // 8. Linked log corpus / evidence channel
+    if linked_turn {
+        trace.record_developer(DeveloperDetailDraft::context_provenance(
+            round,
+            "linked_log_evidence",
+            if linked_evidence_chars > 0 {
+                "present"
+            } else {
+                "awaiting_or_empty"
+            },
+            serde_json::json!({
+                "channel": "bounded_evidence_buffer",
+                "note": "linked turns do not re-inject prior Tool-role protocol messages; evidence is a host-owned buffer",
+                "evidence_chars_estimate": linked_evidence_chars,
+                "evidence_identities": linked_evidence_identities,
+                "corpus_id": corpus_id,
+            }),
+            "deterministic",
+        ));
+    } else {
+        trace.record_developer(DeveloperDetailDraft::context_provenance(
+            round,
+            "linked_log_evidence",
+            "not_present",
+            serde_json::json!({
+                "channel": "none",
+                "note": "ordinary chat has no linked log corpus for this turn",
+            }),
+            "deterministic",
+        ));
+    }
+
+    // 9. Explorer viewport
+    if linked_turn {
+        trace.record_developer(DeveloperDetailDraft::context_provenance(
+            round,
+            "explorer_viewport",
+            if viewport_present {
+                "present"
+            } else {
+                "corpus_only_no_viewport"
+            },
+            serde_json::json!({
+                "viewport_snapshot_in_system": viewport_present,
+                "corpus_id": corpus_id,
+            }),
+            "deterministic",
+        ));
+    } else {
+        trace.record_developer(DeveloperDetailDraft::context_provenance(
+            round,
+            "explorer_viewport",
+            "not_present",
+            serde_json::json!({
+                "viewport_snapshot_in_system": false,
+            }),
+            "deterministic",
+        ));
+    }
+
+    // 10. Tool schemas offered this round
+    let tool_names: Vec<String> = offered_tools.iter().map(|t| t.name.clone()).collect();
+    trace.record_developer(DeveloperDetailDraft::context_provenance(
+        round,
+        "tool_schemas_offered",
+        if tools_disabled {
+            "disabled"
+        } else if tool_names.is_empty() {
+            "none"
+        } else {
+            "offered"
+        },
+        serde_json::json!({
+            "count": tool_names.len(),
+            "names": tool_names,
+            "schemas_included_in_provider_request": !tools_disabled && !offered_tools.is_empty(),
+            "tools_disabled_by_gateway": tools_disabled,
+            "note": "names only in provenance; full JSON schemas are not retained in developer detail",
+        }),
+        "deterministic",
+    ));
+
+    // 11. Total context budget + truncation honesty
+    trace.record_developer(DeveloperDetailDraft::context_provenance(
+        round,
+        "context_budget",
+        if used_chars > char_budget {
+            "over_budget_blocked"
+        } else if truncated_bodies || prepared_compacted {
+            "fitted"
+        } else {
+            "within_budget"
+        },
+        serde_json::json!({
+            "budget_chars_estimate": char_budget,
+            "used_chars_estimate": used_chars,
+            "retained_messages": retained_messages,
+            "omitted_messages_estimate": omitted_messages,
+            "truncated": truncated_bodies,
+            "unit": "characters_estimate",
+            "not_provider_tokens": true,
+        }),
+        "deterministic",
+    ));
+
+    // 12. Exact transition into provider request
+    trace.record_developer(DeveloperDetailDraft::context_provenance(
+        round,
+        "provider_request_transition",
+        "ready",
+        serde_json::json!({
+            "round": round,
+            "message_count": retained_messages,
+            "used_chars_estimate": used_chars,
+            "offered_tool_count": offered_tools.len(),
+            "next_event": "provider_exchange",
+            "note": "provider request begins immediately after this seam; no per-chunk streaming detail is claimed",
+        }),
+        "deterministic",
+    ));
+}
+
 /// Terminal error events when the hard budget cannot be satisfied.
 fn terminal_context_too_long(
     mut out: EventCollector<'_>,
@@ -2367,8 +2801,11 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
         // Ambient memory injection (MEMORY.md §4) — after compaction, tight budget.
         // Must re-enforce the hard total budget: ambient can add ~1.5k and would
         // otherwise send an over-budget context when prepare left us near the ceiling.
+        let mut ambient_snapshot: Option<AmbientProvenanceSnapshot> = None;
+        let mut ambient_attempted = false;
         if !linked_turn && opts.ambient_recall_enabled && linked_required_evidence_satisfied {
             if let Some(store) = host.durable_memory_store() {
+                ambient_attempted = true;
                 let hist_text: String = model_ctx
                     .iter()
                     .map(|m| m.content.as_str())
@@ -2385,6 +2822,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                     crate::embed::now_unix_secs(),
                     host.embed_backend().as_deref(),
                 ) {
+                    ambient_snapshot = Some(AmbientProvenanceSnapshot::from_injection(&inj));
                     if !inj.context_block.is_empty() {
                         // First-party context — not wrap_untrusted (write-time redaction).
                         model_ctx.insert(
@@ -2471,6 +2909,83 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                 if let Err(error) = validate_linked_turn_snapshot(host, opts) {
                     return terminal_linked_snapshot_stale(out, &trail, error);
                 }
+            }
+            // Live assembly seam: record context provenance immediately before
+            // the provider call (only when explicit Developer detail is On).
+            if let Some(trace) = opts
+                .developer_trace
+                .as_ref()
+                .filter(|trace| trace.developer_detail_enabled())
+            {
+                let (session_pack_file_count, session_pack_names) =
+                    match host.active_session_context() {
+                        Ok(Some(store)) => match store.list() {
+                            Ok(entries) => {
+                                let names: Vec<String> =
+                                    entries.iter().take(32).map(|e| e.name.clone()).collect();
+                                (Some(entries.len()), names)
+                            }
+                            Err(_) => (Some(0), Vec::new()),
+                        },
+                        Ok(None) | Err(_) => (None, Vec::new()),
+                    };
+                let confluence_hint_present = (!linked_turn || confluence_is_offered)
+                    && host.confluence_agent_hint().is_some();
+                let connector_tool_names: Vec<String> = tool_arg
+                    .iter()
+                    .filter(|t| {
+                        t.name.starts_with("confluence_")
+                            || t.name.starts_with("sql_query__")
+                            || t.name.starts_with("http_")
+                            || t.name.contains("__")
+                    })
+                    .map(|t| t.name.clone())
+                    .collect();
+                let viewport_present = opts
+                    .log_explorer_context
+                    .as_ref()
+                    .is_some_and(|ctx| matches!(ctx.origin, LinkedLogTurnOrigin::Explorer { .. }));
+                let corpus_id = opts
+                    .log_explorer_context
+                    .as_ref()
+                    .map(|ctx| ctx.corpus_id.as_str());
+                let source_history_len = if linked_turn {
+                    linked_prior_history
+                        .as_ref()
+                        .map(|h| h.len())
+                        .unwrap_or(history.len())
+                } else {
+                    history.len()
+                };
+                let evidence_chars = if linked_turn {
+                    current_turn_evidence.render().len()
+                } else {
+                    0
+                };
+                emit_context_provenance_before_provider(
+                    trace,
+                    u32::try_from(round).unwrap_or(u32::MAX),
+                    &model_ctx,
+                    source_history_len,
+                    keep,
+                    prepared_compacted,
+                    prepared_truncated,
+                    char_budget,
+                    tool_arg,
+                    ambient_snapshot.as_ref(),
+                    ambient_attempted,
+                    opts.ambient_recall_enabled,
+                    linked_turn,
+                    evidence_chars,
+                    linked_log_evidence_identities.len(),
+                    viewport_present,
+                    corpus_id,
+                    session_pack_file_count,
+                    &session_pack_names,
+                    confluence_hint_present,
+                    &connector_tool_names,
+                    tools_disabled,
+                );
             }
             let result = match within_turn_deadline(
                 &clock,

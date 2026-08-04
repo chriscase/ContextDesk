@@ -404,6 +404,7 @@ export type DeveloperDetailEvent = {
     | "tool_result"
     | "permission"
     | "deterministic_stage"
+    | "context_provenance"
     | "cancellation";
   label: string;
   provider?: string | null;
