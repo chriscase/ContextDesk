@@ -54,7 +54,8 @@ import {
 // export every symbol the LogExplorer component graph imports — a missing
 // export throws at import time. hostPrepareLogDiagnosticReport is simplified
 // (the diagnostics flow is not exercised by this suite).
-vi.mock("../src/lib/host", () => {
+vi.mock("../src/lib/host", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../src/lib/host")>();
   // Real-browser ESM validates every module's named imports against this
   // mocked module across the whole static graph (the unit suite's happy-dom
   // transform does not), so the factory must export the full union of host
@@ -64,6 +65,9 @@ vi.mock("../src/lib/host", () => {
   const hostExportNames = [
     // Engine module (investigationReports) host imports — ae2e1a3.
     "hostLogAssembleInvestigationReport",
+    "hostLogPrepareInvestigationEvidence",
+    "hostLogCommitInvestigationEvidence",
+    "hostLogCancelInvestigationEvidencePrepare",
     "hostLogSetInvestigationReportSection",
     "hostLogAcceptProposedReportSection",
     "hostLogDismissProposedReportSection",
@@ -275,8 +279,14 @@ vi.mock("../src/lib/host", () => {
     "parseModelSelectionKey",
     "profileIdForKind",
   ] as const;
+  const loudStubNames = new Set([
+    ...hostExportNames,
+    ...Object.entries(original)
+      .filter(([, value]) => typeof value === "function")
+      .map(([name]) => name),
+  ]);
   const loudStubs = Object.fromEntries(
-    hostExportNames.map((name) => [
+    [...loudStubNames].map((name) => [
       name,
       vi.fn(() => {
         throw new Error(`host.${name} is not mocked in the visual suite`);
@@ -284,9 +294,10 @@ vi.mock("../src/lib/host", () => {
     ]),
   );
   return {
-  ...loudStubs,
-  modelSelectionKey: (providerId: string, modelId: string) =>
-    `${providerId}::${modelId}`,
+    ...original,
+    ...loudStubs,
+    modelSelectionKey: (providerId: string, modelId: string) =>
+      `${providerId}::${modelId}`,
   parseModelSelectionKey: (key: string) => {
     const split = key.indexOf("::");
     return split > 0

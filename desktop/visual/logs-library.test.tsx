@@ -44,10 +44,14 @@ import {
 // imported anywhere in reachable src/** — not only what LogPane itself calls.
 // Symbols outside the proven set are loud stubs so an unexpected call fails
 // visibly instead of silently.
-vi.mock("../src/lib/host", () => {
+vi.mock("../src/lib/host", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../src/lib/host")>();
   const hostExportNames = [
     // Engine module (investigationReports) host imports — ae2e1a3.
     "hostLogAssembleInvestigationReport",
+    "hostLogPrepareInvestigationEvidence",
+    "hostLogCommitInvestigationEvidence",
+    "hostLogCancelInvestigationEvidencePrepare",
     "hostLogSetInvestigationReportSection",
     "hostLogAcceptProposedReportSection",
     "hostLogDismissProposedReportSection",
@@ -259,8 +263,14 @@ vi.mock("../src/lib/host", () => {
     "parseModelSelectionKey",
     "profileIdForKind",
   ] as const;
+  const loudStubNames = new Set([
+    ...hostExportNames,
+    ...Object.entries(original)
+      .filter(([, value]) => typeof value === "function")
+      .map(([name]) => name),
+  ]);
   const loudStubs = Object.fromEntries(
-    hostExportNames.map((name) => [
+    [...loudStubNames].map((name) => [
       name,
       vi.fn(() => {
         throw new Error(`host.${name} is not mocked in the visual suite`);
@@ -268,6 +278,7 @@ vi.mock("../src/lib/host", () => {
     ]),
   );
   return {
+    ...original,
     ...loudStubs,
     modelSelectionKey: (providerId: string, modelId: string) =>
       `${providerId}::${modelId}`,
