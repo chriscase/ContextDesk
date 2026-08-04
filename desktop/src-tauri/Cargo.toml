@@ -30,6 +30,7 @@ dirs = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tauri-plugin-updater = "2"
+uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
 sha2 = "0.10"
 

@@ -3,6 +3,7 @@ import {
   composeLaneSources,
   defaultLanes,
   EVIDENCE_LANE_APPLY_EVENT,
+  evidenceLayoutFingerprint,
   loadEvidenceHighlights,
   loadLanes,
   loadVisibleLaneCount,
@@ -123,16 +124,19 @@ describe("laneCompose", () => {
     };
     window.addEventListener(EVIDENCE_LANE_APPLY_EVENT, handler);
     try {
-      const applied = applyEvidenceLanesToExplorer({
-        corpusId: "corpus-xyz-demo",
-        lanes: [
-          { id: "lane-0", label: "xyz-api", sources: ["xyz/api.log"] },
-          { id: "lane-1", label: "xyz-worker", sources: ["xyz/worker.log"] },
-        ],
-        visibleLaneCount: 2,
-        linkMode: "align_time",
-        highlightSeqs: [101, 202],
-      });
+      const applied = applyEvidenceLanesToExplorer(
+        {
+          corpusId: "corpus-xyz-demo",
+          lanes: [
+            { id: "lane-0", label: "xyz-api", sources: ["xyz/api.log"] },
+            { id: "lane-1", label: "xyz-worker", sources: ["xyz/worker.log"] },
+          ],
+          visibleLaneCount: 2,
+          linkMode: "align_time",
+          highlightSeqs: [101, 202],
+        },
+        evidenceLayoutFingerprint("corpus-xyz-demo"),
+      );
       expect(applied.visibleLaneCount).toBe(2);
       expect(loadVisibleLaneCount("corpus-xyz-demo")).toBe(2);
       expect(loadLanes("corpus-xyz-demo")?.map((l) => l.sources)).toEqual([

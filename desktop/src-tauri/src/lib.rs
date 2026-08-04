@@ -58,6 +58,7 @@ const AGENT_HOST_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const LINKED_CHECKPOINT_TTL: Duration = Duration::from_secs(30 * 60);
 const LINKED_CHECKPOINT_ENTRY_CAP: usize = 16;
 const LINKED_CHECKPOINT_TOTAL_BYTES: usize = 2 * 1024 * 1024;
+const PENDING_INVESTIGATION_EVIDENCE_CAP: usize = 64;
 
 #[derive(Clone)]
 struct StoredLinkedCheckpoint<T> {
@@ -65,6 +66,51 @@ struct StoredLinkedCheckpoint<T> {
     inserted_at: StdInstant,
     sequence: u64,
     bytes: usize,
+}
+
+#[cfg(test)]
+mod pending_investigation_evidence_tests {
+    use super::*;
+
+    fn pending(index: usize) -> PendingInvestigationEvidence {
+        PendingInvestigationEvidence {
+            corpus_id: format!("corpus-{index}"),
+            title: format!("Evidence {index}"),
+            event_refs: Vec::new(),
+            noise_lens: cd_core::investigations::InvestigationNoiseLens::Active,
+            target: PendingInvestigationTarget::Existing {
+                id: format!("investigation-{index}"),
+                expected_revision: index as u64 + 1,
+            },
+        }
+    }
+
+    #[test]
+    fn prepared_token_is_one_shot_and_preserves_exact_target() {
+        let mut store = PendingInvestigationEvidenceStore::default();
+        let token = store.insert(pending(4));
+        let first = store.take(&token).expect("prepared token");
+        assert_eq!(first.corpus_id, "corpus-4");
+        assert!(matches!(
+            first.target,
+            PendingInvestigationTarget::Existing {
+                ref id,
+                expected_revision: 5
+            } if id == "investigation-4"
+        ));
+        assert!(store.take(&token).is_none(), "token must be exactly once");
+    }
+
+    #[test]
+    fn prepared_token_store_evicts_oldest_at_bound() {
+        let mut store = PendingInvestigationEvidenceStore::default();
+        let oldest = store.insert(pending(0));
+        for index in 1..=PENDING_INVESTIGATION_EVIDENCE_CAP {
+            store.insert(pending(index));
+        }
+        assert!(store.take(&oldest).is_none());
+        assert_eq!(store.by_token.len(), PENDING_INVESTIGATION_EVIDENCE_CAP);
+    }
 }
 
 struct LinkedCheckpointStore<T = cd_core::agent::LinkedSynthesisCheckpoint> {
@@ -358,6 +404,9 @@ struct AppState {
     ///     running (`suppress_developer_activity_detail`) — delivery stops
     ///     immediately rather than continuing until the turn ends.
     developer_activity_suppressed: DeveloperDetailSuppressionMap,
+    /// Opaque, one-shot evidence commits prepared by an explicit renderer preview.
+    /// Payload and exact target stay host-only and are bounded in process memory.
+    pending_investigation_evidence: Mutex<PendingInvestigationEvidenceStore>,
     /// Per-session cooperative cancel flags for in-flight turns (#109).
     cancels: Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
     /// Owner generation for each admitted chat turn. A second window cannot
@@ -383,6 +432,53 @@ struct AppState {
     /// One-shot exact Log Explorer navigation targets (#698 exact-nav).
     /// Keyed by corpus id. `take` delivers once; cleared on take, discard, or window destroy.
     log_explorer_nav_targets: Mutex<LogExplorerNavTargetStore>,
+}
+
+#[derive(Debug, Clone)]
+enum PendingInvestigationTarget {
+    Existing { id: String, expected_revision: u64 },
+    CreateNew,
+}
+
+#[derive(Debug, Clone)]
+struct PendingInvestigationEvidence {
+    corpus_id: String,
+    title: String,
+    event_refs: Vec<cd_core::log_analysis::BookmarkEventRef>,
+    noise_lens: cd_core::investigations::InvestigationNoiseLens,
+    target: PendingInvestigationTarget,
+}
+
+#[derive(Debug, Default)]
+struct PendingInvestigationEvidenceStore {
+    by_token: HashMap<String, PendingInvestigationEvidence>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl PendingInvestigationEvidenceStore {
+    fn insert(&mut self, pending: PendingInvestigationEvidence) -> String {
+        while self.order.len() >= PENDING_INVESTIGATION_EVIDENCE_CAP {
+            if let Some(expired) = self.order.pop_front() {
+                self.by_token.remove(&expired);
+            }
+        }
+        let token = uuid::Uuid::new_v4().to_string();
+        self.by_token.insert(token.clone(), pending);
+        self.order.push_back(token.clone());
+        token
+    }
+
+    fn take(&mut self, token: &str) -> Option<PendingInvestigationEvidence> {
+        let pending = self.by_token.remove(token);
+        if pending.is_some() {
+            self.order.retain(|candidate| candidate != token);
+        }
+        pending
+    }
+
+    fn remove(&mut self, token: &str) -> bool {
+        self.take(token).is_some()
+    }
 }
 
 /// One-shot pending target for a Log Explorer window (process-local only).
@@ -10697,6 +10793,152 @@ struct LogAddInvestigationEvidenceArgs {
     noise_lens: cd_core::investigations::InvestigationNoiseLens,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LogPrepareInvestigationEvidenceArgs {
+    corpus_id: String,
+    title: String,
+    event_refs: Vec<cd_core::log_analysis::BookmarkEventRef>,
+    noise_lens: cd_core::investigations::InvestigationNoiseLens,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreparedInvestigationEvidenceTarget {
+    commit_token: String,
+    investigation_id: Option<String>,
+    expected_revision: Option<u64>,
+    creates_draft: bool,
+}
+
+/// Bind exact evidence payload and exact existing-or-new target to one host token.
+/// This is read-only with respect to durable investigation storage.
+#[tauri::command]
+fn log_prepare_investigation_evidence(
+    state: State<'_, AppState>,
+    args: LogPrepareInvestigationEvidenceArgs,
+) -> Result<PreparedInvestigationEvidenceTarget, String> {
+    if args.event_refs.is_empty()
+        || args.event_refs.len() > cd_core::log_analysis::MAX_BOOKMARK_EVENT_REFS
+    {
+        return Err("Investigation evidence selection is empty or too large".into());
+    }
+    if args.title.trim().is_empty()
+        || args.title.len() > cd_core::investigations::MAX_INVESTIGATION_TITLE_BYTES
+    {
+        return Err("Investigation evidence title is empty or too large".into());
+    }
+    let _mutation = state
+        .investigation_mutation
+        .lock()
+        .map_err(|_| "Investigation storage is temporarily unavailable".to_string())?;
+    let cache = log_cache_dir(&state)?;
+    let corpus = cd_core::log_analysis::LogCorpus::open(&cache, &args.corpus_id)
+        .map_err(|e| e.to_string())?;
+    let store = investigation_store(&state)?;
+    let target = if let Some(summary) = active_investigation_for_corpus(&store, corpus.id())? {
+        PendingInvestigationTarget::Existing {
+            id: summary.id,
+            expected_revision: summary.revision,
+        }
+    } else {
+        PendingInvestigationTarget::CreateNew
+    };
+    let response_target = target.clone();
+    let pending = PendingInvestigationEvidence {
+        corpus_id: args.corpus_id,
+        title: args.title,
+        event_refs: args.event_refs,
+        noise_lens: args.noise_lens,
+        target,
+    };
+    let commit_token = state
+        .pending_investigation_evidence
+        .lock()
+        .map_err(|_| "Investigation preparation is temporarily unavailable".to_string())?
+        .insert(pending);
+    let (investigation_id, expected_revision, creates_draft) = match response_target {
+        PendingInvestigationTarget::Existing {
+            id,
+            expected_revision,
+        } => (Some(id), Some(expected_revision), false),
+        PendingInvestigationTarget::CreateNew => (None, None, true),
+    };
+    Ok(PreparedInvestigationEvidenceTarget {
+        commit_token,
+        investigation_id,
+        expected_revision,
+        creates_draft,
+    })
+}
+
+/// Consume a prepared token exactly once. The renderer cannot substitute
+/// another corpus, target, title, or event reference at commit time.
+#[tauri::command]
+fn log_commit_investigation_evidence(
+    state: State<'_, AppState>,
+    commit_token: String,
+) -> Result<cd_core::investigations::ResolvedInvestigationDocument, String> {
+    if commit_token.len() > 128 {
+        return Err("Invalid investigation evidence commit token".into());
+    }
+    let _mutation = state
+        .investigation_mutation
+        .lock()
+        .map_err(|_| "Investigation storage is temporarily unavailable".to_string())?;
+    let pending = state
+        .pending_investigation_evidence
+        .lock()
+        .map_err(|_| "Investigation preparation is temporarily unavailable".to_string())?
+        .take(&commit_token)
+        .ok_or_else(|| {
+            "Unknown, expired, or already-used investigation evidence token".to_string()
+        })?;
+    let cache = log_cache_dir(&state)?;
+    let corpus = cd_core::log_analysis::LogCorpus::open(&cache, &pending.corpus_id)
+        .map_err(|e| e.to_string())?;
+    let store = investigation_store(&state)?;
+    let (investigation_id, expected_revision) = match pending.target {
+        PendingInvestigationTarget::Existing {
+            id,
+            expected_revision,
+        } => (id, expected_revision),
+        PendingInvestigationTarget::CreateNew => {
+            let created = store
+                .create(format!("Investigation · {}", corpus.name()), &corpus)
+                .map_err(|e| e.to_string())?;
+            (created.id, created.revision)
+        }
+    };
+    let updated = store
+        .add_exact_evidence(
+            &investigation_id,
+            expected_revision,
+            pending.title,
+            &corpus,
+            pending.event_refs,
+        )
+        .map_err(|e| e.to_string())?;
+    store
+        .load_with_policy_lens(&updated.document.id, &corpus, pending.noise_lens)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn log_cancel_investigation_evidence_prepare(
+    state: State<'_, AppState>,
+    commit_token: String,
+) -> Result<bool, String> {
+    if commit_token.len() > 128 {
+        return Ok(false);
+    }
+    state
+        .pending_investigation_evidence
+        .lock()
+        .map_err(|_| "Investigation preparation is temporarily unavailable".to_string())
+        .map(|mut pending| pending.remove(&commit_token))
+}
+
 fn investigation_mutation_target(
     store: &cd_core::investigations::InvestigationStore,
     corpus: &cd_core::log_analysis::LogCorpus,
@@ -12522,6 +12764,7 @@ pub fn run() {
         activity: Mutex::new(cd_core::activity::ActivityStore::default()),
         developer_activity: Mutex::new(cd_core::turn_trace::DeveloperDetailStore::default()),
         developer_activity_suppressed: Mutex::new(HashMap::new()),
+        pending_investigation_evidence: Mutex::new(PendingInvestigationEvidenceStore::default()),
         cancels: Mutex::new(HashMap::new()),
         active_turn_owners: Mutex::new(HashMap::new()),
         next_turn_owner: std::sync::atomic::AtomicU64::new(0),
@@ -12737,6 +12980,9 @@ pub fn run() {
             log_add_bookmark,
             log_delete_bookmark,
             log_load_active_investigation,
+            log_prepare_investigation_evidence,
+            log_commit_investigation_evidence,
+            log_cancel_investigation_evidence_prepare,
             log_add_investigation_evidence,
             log_add_investigation_finding,
             log_add_investigation_note,

@@ -7,6 +7,7 @@ import {
   applyLaneAssignment,
   applyLaneEdits,
   assignEvidenceToLanes,
+  bindPreparedInvestigationTarget,
   buildEvidenceSetFromHostCitations,
   cancelInvestigationAdd,
   confirmInvestigationAdd,
@@ -512,6 +513,12 @@ describe("add-to-investigation confirmation / undo", () => {
     expect(state.eventRefs[0]!.source).toBe("xyz/api.log");
     expect(state.createsDraft).toBe(true);
 
+    state = bindPreparedInvestigationTarget(state, {
+      commitToken: "token-new",
+      investigationId: null,
+      expectedRevision: null,
+      createsDraft: true,
+    });
     state = confirmInvestigationAdd(state);
     expect(state.status).toBe("confirmed");
 
@@ -537,6 +544,12 @@ describe("add-to-investigation confirmation / undo", () => {
       availableCorpusIds: ["corpus-xyz-demo"],
     });
     expect(markInvestigationApplied(state).status).not.toBe("applied");
+    state = bindPreparedInvestigationTarget(state, {
+      commitToken: "token-existing",
+      investigationId: "inv-xyz-1",
+      expectedRevision: 4,
+      createsDraft: false,
+    });
     state = confirmInvestigationAdd(state);
     expect(markInvestigationApplied(state).status).toBe("applied");
   });

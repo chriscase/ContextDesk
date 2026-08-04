@@ -14,6 +14,7 @@ import {
 import {
   loadLanes,
   loadVisibleLaneCount,
+  evidenceLayoutFingerprint,
   persistEvidenceLanesPlacement,
 } from "./laneCompose";
 
@@ -42,6 +43,7 @@ const xyzDetail = {
   visibleLaneCount: 2,
   linkMode: "align_time" as const,
   highlightSeqs: [101, 202],
+  revision: 1,
 };
 
 describe("evidencePlacementToExplorerState (LogExplorer adopt pure path)", () => {
@@ -61,7 +63,11 @@ describe("evidencePlacementToExplorerState (LogExplorer adopt pure path)", () =>
 describe("applyEvidenceLanesToExplorer cross-window", () => {
   it("persists and emits Tauri bus event (not CustomEvent-only)", async () => {
     const emit = vi.fn(async () => undefined);
-    const applied = applyEvidenceLanesToExplorer(xyzDetail, emit);
+    const applied = applyEvidenceLanesToExplorer(
+      xyzDetail,
+      evidenceLayoutFingerprint("corpus-xyz-demo"),
+      emit,
+    );
     expect(applied.visibleLaneCount).toBe(2);
     expect(loadVisibleLaneCount("corpus-xyz-demo")).toBe(2);
     expect(loadLanes("corpus-xyz-demo")?.length).toBe(2);
@@ -98,14 +104,14 @@ describe("applyEvidenceLanesToExplorer cross-window", () => {
     // Same-window CustomEvent
     window.dispatchEvent(
       new CustomEvent(EVIDENCE_LANE_APPLY_EVENT, {
-        detail: { ...xyzDetail, eventId: "e1" },
+        detail: { ...xyzDetail, eventId: "e1", revision: 1 },
       }),
     );
     expect(received).toHaveLength(1);
 
     // Cross-window Tauri payload (different eventId)
     tauriHandler!({
-      payload: { ...xyzDetail, eventId: "e2", visibleLaneCount: 3 },
+      payload: { ...xyzDetail, eventId: "e2", visibleLaneCount: 3, revision: 2 },
     });
     expect(received).toHaveLength(2);
     expect((received[1] as { visibleLaneCount: number }).visibleLaneCount).toBe(
@@ -115,15 +121,104 @@ describe("applyEvidenceLanesToExplorer cross-window", () => {
     // Dedupe same eventId (CustomEvent then Tauri)
     window.dispatchEvent(
       new CustomEvent(EVIDENCE_LANE_APPLY_EVENT, {
-        detail: { ...xyzDetail, eventId: "e3" },
+        detail: { ...xyzDetail, eventId: "e3", revision: 3 },
       }),
     );
     tauriHandler!({
-      payload: { ...xyzDetail, eventId: "e3" },
+      payload: { ...xyzDetail, eventId: "e3", revision: 3 },
     });
     expect(received).toHaveLength(3);
 
     stop();
+  });
+
+  it("rejects a delayed older corpus revision and oversized inbound sources", async () => {
+    const received: unknown[] = [];
+    let tauriHandler:
+      | ((event: { payload: typeof xyzDetail & { eventId?: string } }) => void)
+      | null = null;
+    const stop = subscribeEvidenceLanesApply(
+      (detail) => received.push(detail),
+      async (_name, handler) => {
+        tauriHandler = handler as typeof tauriHandler;
+        return () => {
+          tauriHandler = null;
+        };
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    tauriHandler!({
+      payload: { ...xyzDetail, revision: 9, eventId: "newer" },
+    });
+    tauriHandler!({
+      payload: { ...xyzDetail, revision: 8, eventId: "delayed-older" },
+    });
+    expect(received).toHaveLength(1);
+
+    tauriHandler!({
+      payload: {
+        ...xyzDetail,
+        revision: 10,
+        eventId: "oversized",
+        lanes: [
+          {
+            id: "lane-0",
+            label: "oversized",
+            sources: ["x".repeat(1_025)],
+          },
+        ],
+      },
+    });
+    expect(received).toHaveLength(1);
+    stop();
+  });
+
+  it("rolls every preference back and reports a partial storage failure", () => {
+    const prior = {
+      lanes: JSON.stringify([
+        { id: "lane-0", label: "Prior", sources: ["prior.log"] },
+      ]),
+      count: "1",
+      mode: "independent",
+    };
+    store.set("contextdesk.logExplorer.lanes.v1:corpus-xyz-demo", prior.lanes);
+    store.set(
+      "contextdesk.logExplorer.visibleLaneCount.v1:corpus-xyz-demo",
+      prior.count,
+    );
+    store.set(
+      "contextdesk.logExplorer.linkMode.v1:corpus-xyz-demo",
+      prior.mode,
+    );
+    let failed = false;
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        if (!failed && key.includes("evidenceHighlights")) {
+          failed = true;
+          throw new Error("quota");
+        }
+        store.set(key, value);
+      },
+      removeItem: (key: string) => store.delete(key),
+      clear: () => store.clear(),
+    });
+    const fingerprint = evidenceLayoutFingerprint("corpus-xyz-demo");
+    expect(() =>
+      applyEvidenceLanesToExplorer(xyzDetail, fingerprint),
+    ).toThrow(/could not save/i);
+    expect(store.get("contextdesk.logExplorer.lanes.v1:corpus-xyz-demo")).toBe(
+      prior.lanes,
+    );
+    expect(
+      store.get("contextdesk.logExplorer.visibleLaneCount.v1:corpus-xyz-demo"),
+    ).toBe(prior.count);
+    expect(
+      store.get("contextdesk.logExplorer.linkMode.v1:corpus-xyz-demo"),
+    ).toBe(prior.mode);
+    expect(
+      store.get("contextdesk.logExplorer.evidencePlacement.v2:corpus-xyz-demo"),
+    ).toBeUndefined();
   });
 
   it("broadcastEvidenceLanesApply uses injected emit for multi-window", async () => {
@@ -138,7 +233,10 @@ describe("applyEvidenceLanesToExplorer cross-window", () => {
 
 describe("focus / storage re-read path", () => {
   it("loadEvidencePlacementFromStorage rebuilds placement after main-window persist", () => {
-    persistEvidenceLanesPlacement(xyzDetail);
+    persistEvidenceLanesPlacement(
+      xyzDetail,
+      evidenceLayoutFingerprint("corpus-xyz-demo"),
+    );
     const stored = loadEvidencePlacementFromStorage("corpus-xyz-demo");
     expect(stored).not.toBeNull();
     const state = evidencePlacementToExplorerState(stored!);
@@ -147,7 +245,10 @@ describe("focus / storage re-read path", () => {
   });
 
   it("ignores other corpora (session isolation)", () => {
-    persistEvidenceLanesPlacement(xyzDetail);
+    persistEvidenceLanesPlacement(
+      xyzDetail,
+      evidenceLayoutFingerprint("corpus-xyz-demo"),
+    );
     expect(loadEvidencePlacementFromStorage("other-corpus")).toBeNull();
   });
 });

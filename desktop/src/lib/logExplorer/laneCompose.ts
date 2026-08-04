@@ -20,6 +20,10 @@ export const DEFAULT_LANE: LaneConfig = {
 };
 
 const STORAGE_PREFIX = "contextdesk.logExplorer.lanes.v1:";
+const EVIDENCE_SNAPSHOT_PREFIX =
+  "contextdesk.logExplorer.evidencePlacement.v2:";
+const EVIDENCE_REVISION_PREFIX =
+  "contextdesk.logExplorer.evidencePlacementRevision.v1:";
 
 export function defaultLanes(count: number): LaneConfig[] {
   const n = Math.max(1, Math.min(4, count));
@@ -154,6 +158,8 @@ export function loadLanes(corpusId: string): LaneConfig[] | null {
 export function saveLanes(corpusId: string, lanes: LaneConfig[]): void {
   try {
     localStorage.setItem(STORAGE_PREFIX + corpusId, JSON.stringify(lanes));
+    // An ordinary Explorer edit supersedes any older Evidence · N snapshot.
+    localStorage.removeItem(EVIDENCE_SNAPSHOT_PREFIX + corpusId);
   } catch {
     /* ignore */
   }
@@ -179,6 +185,7 @@ export function saveLinkMode(corpusId: string, mode: TimeLinkMode): void {
       `contextdesk.logExplorer.linkMode.v1:${corpusId}`,
       mode,
     );
+    localStorage.removeItem(EVIDENCE_SNAPSHOT_PREFIX + corpusId);
   } catch {
     /* ignore */
   }
@@ -196,6 +203,8 @@ export type EvidenceLaneApplyDetail = {
   visibleLaneCount: number;
   linkMode: TimeLinkMode;
   highlightSeqs: number[];
+  /** Corpus-scoped monotonic commit revision. Required on the cross-window wire. */
+  revision: number;
 };
 
 export function loadVisibleLaneCount(corpusId: string): number | null {
@@ -217,6 +226,7 @@ export function saveVisibleLaneCount(
   try {
     const n = Math.max(1, Math.min(4, Math.floor(count)));
     localStorage.setItem(VISIBLE_COUNT_PREFIX + corpusId, String(n));
+    localStorage.removeItem(EVIDENCE_SNAPSHOT_PREFIX + corpusId);
   } catch {
     /* ignore */
   }
@@ -247,6 +257,7 @@ export function saveEvidenceHighlights(
         seqs.filter((n) => Number.isSafeInteger(n) && n >= 0).slice(0, 64),
       ),
     );
+    localStorage.removeItem(EVIDENCE_SNAPSHOT_PREFIX + corpusId);
   } catch {
     /* ignore */
   }
@@ -257,9 +268,97 @@ export function saveEvidenceHighlights(
  * Cross-window notify is `broadcastEvidenceLanesApply` / full
  * `applyEvidenceLanesToExplorer` in evidenceLaneApplyBridge.
  */
+export type EvidenceLayoutSnapshot = Omit<EvidenceLaneApplyDetail, "revision">;
+
+function storageKeys(corpusId: string): string[] {
+  return [
+    STORAGE_PREFIX + corpusId,
+    VISIBLE_COUNT_PREFIX + corpusId,
+    `contextdesk.logExplorer.linkMode.v1:${corpusId}`,
+    HIGHLIGHT_PREFIX + corpusId,
+    EVIDENCE_SNAPSHOT_PREFIX + corpusId,
+    EVIDENCE_REVISION_PREFIX + corpusId,
+  ];
+}
+
+/** Stable current-layout identity used as a compare-and-swap precondition. */
+export function evidenceLayoutFingerprint(corpusId: string): string {
+  return JSON.stringify({
+    lanes: loadLanes(corpusId) ?? [],
+    visibleLaneCount: loadVisibleLaneCount(corpusId),
+    linkMode: loadLinkMode(corpusId),
+    highlightSeqs: loadEvidenceHighlights(corpusId),
+  });
+}
+
+function restoreStorage(
+  previous: ReadonlyMap<string, string | null>,
+): void {
+  for (const [key, value] of previous) {
+    if (value == null) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+  }
+}
+
+/** Read only a fully committed, versioned Evidence · N placement. */
+export function loadEvidencePlacementSnapshot(
+  corpusId: string,
+): EvidenceLaneApplyDetail | null {
+  try {
+    const raw = localStorage.getItem(EVIDENCE_SNAPSHOT_PREFIX + corpusId);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as EvidenceLaneApplyDetail;
+    if (
+      parsed?.corpusId !== corpusId ||
+      !Number.isSafeInteger(parsed.revision) ||
+      parsed.revision < 1 ||
+      !Array.isArray(parsed.lanes) ||
+      !Array.isArray(parsed.highlightSeqs)
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Commit all Evidence · N preferences as one versioned transaction. The single
+ * snapshot is written last and is the cross-window commit marker. Any storage
+ * failure restores every prior key and is reported to the caller.
+ */
 export function persistEvidenceLanesPlacement(
-  detail: EvidenceLaneApplyDetail,
+  detail: Omit<EvidenceLaneApplyDetail, "revision">,
+  expectedLayoutFingerprint: string,
 ): EvidenceLaneApplyDetail {
+  if (!detail.corpusId.trim() || [...detail.corpusId].length > 256) {
+    throw new Error("Explorer evidence corpus identity is invalid or too large.");
+  }
+  if (detail.lanes.length < 1 || detail.lanes.length > 4) {
+    throw new Error("Explorer evidence placement must contain one to four lanes.");
+  }
+  for (const lane of detail.lanes) {
+    if (
+      !lane.id.trim() ||
+      [...lane.id].length > 256 ||
+      !lane.label.trim() ||
+      [...lane.label].length > 256 ||
+      lane.sources.length > 256 ||
+      (lane.rememberedSources?.length ?? 0) > 256 ||
+      [...lane.sources, ...(lane.rememberedSources ?? [])].some(
+        (source) =>
+          !source.trim() || [...source].length > 1_024 || source.includes("\0"),
+      )
+    ) {
+      throw new Error("Explorer evidence lane identity or source set is invalid or too large.");
+    }
+  }
+  if (evidenceLayoutFingerprint(detail.corpusId) !== expectedLayoutFingerprint) {
+    throw new Error(
+      "Explorer layout changed after preview; review the current lanes and try again.",
+    );
+  }
   const lanes = detail.lanes.slice(0, 4).map((l) => ({
     ...l,
     sources: [...l.sources],
@@ -269,16 +368,64 @@ export function persistEvidenceLanesPlacement(
     Math.min(4, Math.floor(detail.visibleLaneCount)),
   );
   const highlightSeqs = [...detail.highlightSeqs];
+  const keys = storageKeys(detail.corpusId);
+  const previous = new Map(
+    keys.map((key) => [key, localStorage.getItem(key)] as const),
+  );
+  const priorRevision = Number(
+    localStorage.getItem(EVIDENCE_REVISION_PREFIX + detail.corpusId) ?? "0",
+  );
+  if (priorRevision >= Number.MAX_SAFE_INTEGER) {
+    throw new Error("Explorer evidence placement revision is exhausted.");
+  }
+  const revision = Number.isSafeInteger(priorRevision) && priorRevision >= 0
+    ? priorRevision + 1
+    : 1;
   const applied: EvidenceLaneApplyDetail = {
     corpusId: detail.corpusId,
     lanes,
     visibleLaneCount,
     linkMode: detail.linkMode,
     highlightSeqs,
+    revision,
   };
-  saveLanes(applied.corpusId, applied.lanes);
-  saveVisibleLaneCount(applied.corpusId, applied.visibleLaneCount);
-  saveLinkMode(applied.corpusId, applied.linkMode);
-  saveEvidenceHighlights(applied.corpusId, applied.highlightSeqs);
-  return applied;
+  try {
+    // Write legacy keys for the ordinary Explorer controls, then publish the
+    // versioned snapshot last. Do not use the forgiving save* helpers here.
+    localStorage.setItem(STORAGE_PREFIX + applied.corpusId, JSON.stringify(applied.lanes));
+    localStorage.setItem(
+      VISIBLE_COUNT_PREFIX + applied.corpusId,
+      String(applied.visibleLaneCount),
+    );
+    localStorage.setItem(
+      `contextdesk.logExplorer.linkMode.v1:${applied.corpusId}`,
+      applied.linkMode,
+    );
+    localStorage.setItem(
+      HIGHLIGHT_PREFIX + applied.corpusId,
+      JSON.stringify(applied.highlightSeqs.slice(0, 64)),
+    );
+    localStorage.setItem(
+      EVIDENCE_REVISION_PREFIX + applied.corpusId,
+      String(applied.revision),
+    );
+    localStorage.setItem(
+      EVIDENCE_SNAPSHOT_PREFIX + applied.corpusId,
+      JSON.stringify(applied),
+    );
+    return applied;
+  } catch (error) {
+    try {
+      restoreStorage(previous);
+    } catch (rollbackError) {
+      throw new Error(
+        "Could not save Explorer evidence lanes, and storage rollback also failed.",
+        { cause: rollbackError },
+      );
+    }
+    throw new Error(
+      `Could not save Explorer evidence lanes: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
 }

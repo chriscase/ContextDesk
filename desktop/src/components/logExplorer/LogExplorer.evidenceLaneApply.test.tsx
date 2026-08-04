@@ -22,6 +22,7 @@ describe("LogExplorer Evidence · N live adopt (shipped adoptEvidencePlacementFo
       visibleLaneCount: 3,
       linkMode: "align_time",
       highlightSeqs: [101, 202, 303],
+      revision: 1,
     });
     expect(result).not.toBeNull();
     expect(result!.preferredLaneCount).toBe(3);
@@ -42,6 +43,7 @@ describe("LogExplorer Evidence · N live adopt (shipped adoptEvidencePlacementFo
       visibleLaneCount: 2,
       linkMode: "independent",
       highlightSeqs: [],
+      revision: 1,
     });
     expect(result!.preferredLaneCount).toBe(2);
     expect(result!.laneCount).toBe(1);
@@ -54,6 +56,7 @@ describe("LogExplorer Evidence · N live adopt (shipped adoptEvidencePlacementFo
       visibleLaneCount: 1,
       linkMode: "independent",
       highlightSeqs: [1],
+      revision: 1,
     });
     expect(result).toBeNull();
   });
@@ -94,6 +97,7 @@ describe("LogExplorer Evidence · N live adopt (shipped adoptEvidencePlacementFo
         linkMode: "align_time",
         highlightSeqs: [101, 202],
         eventId: "cross-window-1",
+        revision: 1,
       },
     });
     expect(adopted).toHaveLength(1);
@@ -110,6 +114,7 @@ describe("LogExplorer Evidence · N live adopt (shipped adoptEvidencePlacementFo
           linkMode: "independent",
           highlightSeqs: [9],
           eventId: "same-window-1",
+          revision: 2,
         },
       }),
     );

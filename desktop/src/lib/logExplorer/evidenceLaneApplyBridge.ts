@@ -11,10 +11,7 @@
 
 import {
   EVIDENCE_LANE_APPLY_EVENT,
-  loadEvidenceHighlights,
-  loadLanes,
-  loadLinkMode,
-  loadVisibleLaneCount,
+  loadEvidencePlacementSnapshot,
   persistEvidenceLanesPlacement,
   type EvidenceLaneApplyDetail,
   type LaneConfig,
@@ -51,22 +48,59 @@ export type EvidenceLaneApplyWire = EvidenceLaneApplyDetail & {
   eventId?: string;
 };
 
+const MAX_WIRE_ID_CHARS = 256;
+const MAX_WIRE_LABEL_CHARS = 256;
+const MAX_WIRE_SOURCE_CHARS = 1_024;
+const MAX_WIRE_SOURCES_PER_LANE = 256;
+
+function boundedWireString(
+  value: unknown,
+  maxChars: number,
+): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed || [...trimmed].length > maxChars || trimmed.includes("\0")) {
+    return null;
+  }
+  return trimmed;
+}
+
 function normalizeDetail(
   raw: EvidenceLaneApplyWire | EvidenceLaneApplyDetail | null | undefined,
 ): EvidenceLaneApplyDetail | null {
   if (!raw || typeof raw !== "object") return null;
-  if (typeof raw.corpusId !== "string" || !raw.corpusId.trim()) return null;
+  const corpusId = boundedWireString(raw.corpusId, MAX_WIRE_ID_CHARS);
+  if (!corpusId) return null;
   if (!Array.isArray(raw.lanes)) return null;
-  const lanes: LaneConfig[] = raw.lanes.slice(0, 4).map((l, i) => ({
-    id: typeof l?.id === "string" ? l.id : `lane-${i}`,
-    label: typeof l?.label === "string" ? l.label : `Lane ${i + 1}`,
-    sources: Array.isArray(l?.sources)
-      ? l.sources.filter((s): s is string => typeof s === "string")
-      : [],
-    rememberedSources: Array.isArray(l?.rememberedSources)
-      ? l.rememberedSources.filter((s): s is string => typeof s === "string")
-      : undefined,
-  }));
+  if (raw.lanes.length < 1 || raw.lanes.length > 4) return null;
+  const lanes: LaneConfig[] = [];
+  for (let i = 0; i < raw.lanes.length; i += 1) {
+    const lane = raw.lanes[i];
+    const id = boundedWireString(lane?.id, MAX_WIRE_ID_CHARS);
+    const label = boundedWireString(lane?.label, MAX_WIRE_LABEL_CHARS);
+    if (!id || !label || !Array.isArray(lane?.sources)) return null;
+    if (lane.sources.length > MAX_WIRE_SOURCES_PER_LANE) return null;
+    const sources: string[] = [];
+    for (const rawSource of lane.sources) {
+      const source = boundedWireString(rawSource, MAX_WIRE_SOURCE_CHARS);
+      if (!source) return null;
+      sources.push(source);
+    }
+    let rememberedSources: string[] | undefined;
+    if (lane.rememberedSources != null) {
+      if (
+        !Array.isArray(lane.rememberedSources) ||
+        lane.rememberedSources.length > MAX_WIRE_SOURCES_PER_LANE
+      ) return null;
+      rememberedSources = [];
+      for (const rawSource of lane.rememberedSources) {
+        const source = boundedWireString(rawSource, MAX_WIRE_SOURCE_CHARS);
+        if (!source) return null;
+        rememberedSources.push(source);
+      }
+    }
+    lanes.push({ id, label, sources: [...new Set(sources)], rememberedSources });
+  }
   const visibleLaneCount = Math.max(
     1,
     Math.min(4, Math.floor(Number(raw.visibleLaneCount) || 1)),
@@ -81,12 +115,15 @@ function normalizeDetail(
         .filter((n) => Number.isSafeInteger(n) && n >= 0)
         .slice(0, 64)
     : [];
+  const revision = Number(raw.revision);
+  if (!Number.isSafeInteger(revision) || revision < 1) return null;
   return {
-    corpusId: raw.corpusId.trim(),
+    corpusId,
     lanes,
     visibleLaneCount,
     linkMode,
     highlightSeqs,
+    revision,
   };
 }
 
@@ -157,17 +194,7 @@ export function adoptEvidencePlacementForExplorer(
 export function loadEvidencePlacementFromStorage(
   corpusId: string,
 ): EvidenceLaneApplyDetail | null {
-  const lanes = loadLanes(corpusId);
-  if (!lanes || lanes.length === 0) return null;
-  const visible =
-    loadVisibleLaneCount(corpusId) ?? Math.min(4, Math.max(1, lanes.length));
-  return {
-    corpusId,
-    lanes,
-    visibleLaneCount: visible,
-    linkMode: loadLinkMode(corpusId),
-    highlightSeqs: loadEvidenceHighlights(corpusId),
-  };
+  return normalizeDetail(loadEvidencePlacementSnapshot(corpusId));
 }
 
 /**
@@ -205,10 +232,14 @@ export async function broadcastEvidenceLanesApply(
  * (main webview CustomEvent + Tauri cross-window emit for log-explorer-*).
  */
 export function applyEvidenceLanesToExplorer(
-  detail: EvidenceLaneApplyDetail,
+  detail: Omit<EvidenceLaneApplyDetail, "revision">,
+  expectedLayoutFingerprint: string,
   injectedEmit?: EvidenceLaneEmit,
 ): EvidenceLaneApplyDetail {
-  const applied = persistEvidenceLanesPlacement(detail);
+  const applied = persistEvidenceLanesPlacement(
+    detail,
+    expectedLayoutFingerprint,
+  );
   void broadcastEvidenceLanesApply(applied, injectedEmit);
   return applied;
 }
@@ -225,6 +256,7 @@ export function subscribeEvidenceLanesApply(
   let stopTauri: (() => void) | null = null;
   const seenEventIds = new Set<string>();
   const seenEventOrder: string[] = [];
+  const latestRevisionByCorpus = new Map<string, number>();
 
   const accept = (raw: EvidenceLaneApplyWire | EvidenceLaneApplyDetail | undefined) => {
     if (disposed) return;
@@ -241,6 +273,11 @@ export function subscribeEvidenceLanesApply(
     }
     const detail = normalizeDetail(raw);
     if (!detail) return;
+    const latest = latestRevisionByCorpus.get(detail.corpusId) ?? 0;
+    const committedRevision =
+      loadEvidencePlacementSnapshot(detail.corpusId)?.revision ?? 0;
+    if (detail.revision <= latest || detail.revision < committedRevision) return;
+    latestRevisionByCorpus.set(detail.corpusId, detail.revision);
     onApply(detail);
   };
 

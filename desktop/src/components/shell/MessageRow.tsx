@@ -23,7 +23,9 @@ import {
   hostOpenLogExplorer,
   hostOpenLogExplorerTarget,
   hostReadFile,
-  hostLogAddInvestigationEvidence,
+  hostLogCancelInvestigationEvidencePrepare,
+  hostLogCommitInvestigationEvidence,
+  hostLogPrepareInvestigationEvidence,
   hostLogQueryEventNeighborhood,
 } from "../../lib/host";
 import { classifyCompletedCitation } from "../../lib/citations";
@@ -364,13 +366,13 @@ function MessageRowImpl({
               await hostOpenLogExplorer(plan.corpusId);
             }
           }}
-          onAddToInvestigation={async (state: InvestigationAddState) => {
+          onPrepareInvestigation={async (state: InvestigationAddState) => {
             if (
-              state.status !== "confirmed" ||
+              state.status !== "preview" ||
               !state.corpusId ||
               state.eventRefs.length === 0
             ) {
-              throw new Error("Investigation add requires explicit confirm.");
+              throw new Error("Investigation preparation requires a valid preview.");
             }
             const eventRefs = state.eventRefs.map((r) => ({
               corpusId: r.corpusId,
@@ -379,12 +381,17 @@ function MessageRowImpl({
               timestampHint: r.timestampHint,
               timeQualityHint: r.timeQualityHint,
             }));
-            await hostLogAddInvestigationEvidence(state.corpusId, {
-              investigationId: state.investigationId,
+            return hostLogPrepareInvestigationEvidence(state.corpusId, {
               title: state.title,
               eventRefs,
             });
           }}
+          onCommitInvestigation={(token) =>
+            hostLogCommitInvestigationEvidence(token).then(() => undefined)
+          }
+          onCancelPreparedInvestigation={(token) =>
+            hostLogCancelInvestigationEvidencePrepare(token).then(() => undefined)
+          }
         />
       ) : null}
       <div className="msg__bubble">

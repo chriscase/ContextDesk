@@ -53,6 +53,25 @@ function hostCitations(): HostEvidenceCitation[] {
   ];
 }
 
+function preparedTarget(token = "prepared-token-1") {
+  return {
+    commitToken: token,
+    investigationId: "inv-xyz-1",
+    expectedRevision: 7,
+    createsDraft: false,
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("EvidenceSetPanel", () => {
   it("exposes Evidence · N from host citations only", () => {
     render(
@@ -197,12 +216,19 @@ describe("EvidenceSetPanel", () => {
   });
 
   it("investigation confirm then undo before write never hits host", async () => {
-    const onAdd = vi.fn().mockResolvedValue(undefined);
+    const onPrepare = vi
+      .fn()
+      .mockResolvedValueOnce(preparedTarget("token-cancel"))
+      .mockResolvedValueOnce(preparedTarget("token-undo"));
+    const onCommit = vi.fn().mockResolvedValue(undefined);
+    const onCancel = vi.fn().mockResolvedValue(undefined);
     render(
       <EvidenceSetPanel
         citations={hostCitations()}
         onOpenCitation={vi.fn()}
-        onAddToInvestigation={onAdd}
+        onPrepareInvestigation={onPrepare}
+        onCommitInvestigation={onCommit}
+        onCancelPreparedInvestigation={onCancel}
         availableCorpusIds={["corpus-xyz-demo"]}
       />,
     );
@@ -213,7 +239,8 @@ describe("EvidenceSetPanel", () => {
     );
     // Cancel path
     fireEvent.click(screen.getByTestId("evidence-investigation-cancel"));
-    expect(onAdd).not.toHaveBeenCalled();
+    expect(onCommit).not.toHaveBeenCalled();
+    expect(onCancel).toHaveBeenCalledWith("token-cancel");
 
     fireEvent.click(screen.getByTestId("evidence-add-to-investigation"));
     await waitFor(() =>
@@ -224,21 +251,24 @@ describe("EvidenceSetPanel", () => {
     await waitFor(() =>
       expect(screen.getByTestId("evidence-investigation-undo")).toBeTruthy(),
     );
-    expect(onAdd).not.toHaveBeenCalled();
+    expect(onCommit).not.toHaveBeenCalled();
     expect(screen.getByTestId("evidence-investigation-write")).toBeTruthy();
 
     // Undo before Write — still no host
     fireEvent.click(screen.getByTestId("evidence-investigation-undo"));
-    expect(onAdd).not.toHaveBeenCalled();
+    expect(onCommit).not.toHaveBeenCalled();
+    expect(onCancel).toHaveBeenCalledWith("token-undo");
   });
 
   it("investigation write after confirm invokes host once", async () => {
-    const onAdd = vi.fn().mockResolvedValue(undefined);
+    const onPrepare = vi.fn().mockResolvedValue(preparedTarget());
+    const onCommit = vi.fn().mockResolvedValue(undefined);
     render(
       <EvidenceSetPanel
         citations={hostCitations()}
         onOpenCitation={vi.fn()}
-        onAddToInvestigation={onAdd}
+        onPrepareInvestigation={onPrepare}
+        onCommitInvestigation={onCommit}
         availableCorpusIds={["corpus-xyz-demo"]}
       />,
     );
@@ -252,9 +282,10 @@ describe("EvidenceSetPanel", () => {
       expect(screen.getByTestId("evidence-investigation-write")).toBeTruthy(),
     );
     fireEvent.click(screen.getByTestId("evidence-investigation-write"));
-    await waitFor(() => expect(onAdd).toHaveBeenCalledTimes(1));
-    const state = onAdd.mock.calls[0]![0];
-    expect(state.status).toBe("confirmed");
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
+    expect(onCommit).toHaveBeenCalledWith("prepared-token-1");
+    const state = onPrepare.mock.calls[0]![0];
+    expect(state.status).toBe("preview");
     expect(state.eventRefs.length).toBe(2);
     expect(state.eventRefs[0].source).toBe("xyz/api.log");
   });
@@ -402,5 +433,175 @@ describe("EvidenceSetPanel", () => {
       "xyz/api.log",
       "xyz/worker.log",
     ]);
+  });
+
+  it("freezes controls during host resolution and CAS-blocks a changed occupied layout", async () => {
+    store.set(
+      "contextdesk.logExplorer.lanes.v1:corpus-xyz-demo",
+      JSON.stringify([
+        { id: "lane-0", label: "Original", sources: ["original.log"] },
+      ]),
+    );
+    const resolution = deferred<{
+      corpusId: string;
+      seq: number;
+      source: string;
+      ts: number;
+      timeQuality: "wall";
+    }[]>();
+    const onShow = vi.fn().mockResolvedValue(undefined);
+    render(
+      <EvidenceSetPanel
+        citations={[
+          { id: "log_event:101", label: "event", corpusId: "corpus-xyz-demo" },
+        ]}
+        onOpenCitation={vi.fn()}
+        resolveHostEvents={() => resolution.promise}
+        onShowInExplorer={onShow}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("evidence-set-toggle"));
+    fireEvent.click(screen.getByTestId("evidence-show-in-explorer"));
+    expect(
+      (screen.getByTestId("evidence-select-none") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByTestId("evidence-mode-one_lane") as HTMLInputElement).disabled,
+    ).toBe(true);
+    resolution.resolve([
+      {
+        corpusId: "corpus-xyz-demo",
+        seq: 101,
+        source: "resolved.log",
+        ts: 101,
+        timeQuality: "wall",
+      },
+    ]);
+    await waitFor(() =>
+      expect(screen.getByTestId("evidence-occupied-preview")).toBeTruthy(),
+    );
+    expect(document.activeElement).toBe(
+      screen.getByTestId("evidence-occupied-confirm"),
+    );
+
+    // Simulate another window editing the layout after this exact preview.
+    store.set(
+      "contextdesk.logExplorer.lanes.v1:corpus-xyz-demo",
+      JSON.stringify([
+        { id: "lane-0", label: "Other window", sources: ["newer.log"] },
+      ]),
+    );
+    fireEvent.click(screen.getByTestId("evidence-occupied-confirm"));
+    await waitFor(() =>
+      expect(screen.getByTestId("evidence-set-status").textContent).toMatch(
+        /changed after preview/i,
+      ),
+    );
+    expect(onShow).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(
+        store.get("contextdesk.logExplorer.lanes.v1:corpus-xyz-demo")!,
+      )[0].sources,
+    ).toEqual(["newer.log"]);
+  });
+
+  it("does not persist or broadcast lanes when host open fails", async () => {
+    const onShow = vi.fn().mockRejectedValue(new Error("open failed"));
+    render(
+      <EvidenceSetPanel
+        citations={hostCitations()}
+        onOpenCitation={vi.fn()}
+        onShowInExplorer={onShow}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("evidence-set-toggle"));
+    fireEvent.click(screen.getByTestId("evidence-show-in-explorer"));
+    await waitFor(() =>
+      expect(screen.getByTestId("evidence-set-status").textContent).toMatch(
+        /open failed/i,
+      ),
+    );
+    expect(
+      store.get("contextdesk.logExplorer.lanes.v1:corpus-xyz-demo"),
+    ).toBeUndefined();
+  });
+
+  it("explicitly refuses resolved overflow without omitting evidence", async () => {
+    const citations: HostEvidenceCitation[] = Array.from({ length: 5 }, (_, i) => ({
+      id: `log_event:${i + 1}`,
+      label: `event-${i + 1}`,
+      corpusId: "corpus-xyz-demo",
+      source: `xyz/source-${i + 1}.log`,
+      service: `service-${i + 1}`,
+      timestamp: i + 1,
+      timeQuality: "wall",
+    }));
+    const onShow = vi.fn().mockResolvedValue(undefined);
+    render(
+      <EvidenceSetPanel
+        citations={citations}
+        onOpenCitation={vi.fn()}
+        onShowInExplorer={onShow}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("evidence-set-toggle"));
+    fireEvent.click(screen.getByTestId("evidence-mode-one_source_per_lane"));
+    fireEvent.click(screen.getByTestId("evidence-show-in-explorer"));
+    await waitFor(() =>
+      expect(screen.getByTestId("evidence-set-status").textContent).toMatch(
+        /would be omitted.*no lane was changed/i,
+      ),
+    );
+    expect(onShow).not.toHaveBeenCalled();
+    expect(
+      store.get("contextdesk.logExplorer.lanes.v1:corpus-xyz-demo"),
+    ).toBeUndefined();
+  });
+
+  it("consumes one prepared token once even under duplicate write clicks", async () => {
+    const commit = deferred<void>();
+    const onCommit = vi.fn(() => commit.promise);
+    render(
+      <EvidenceSetPanel
+        citations={hostCitations()}
+        onOpenCitation={vi.fn()}
+        onPrepareInvestigation={() => Promise.resolve(preparedTarget("one-shot"))}
+        onCommitInvestigation={onCommit}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("evidence-set-toggle"));
+    fireEvent.click(screen.getByTestId("evidence-add-to-investigation"));
+    await waitFor(() =>
+      expect(screen.getByTestId("evidence-investigation-confirm")).toBeTruthy(),
+    );
+    fireEvent.click(screen.getByTestId("evidence-investigation-confirm"));
+    const write = await screen.findByTestId("evidence-investigation-write");
+    fireEvent.click(write);
+    fireEvent.click(write);
+    expect(onCommit).toHaveBeenCalledTimes(1);
+    expect(onCommit).toHaveBeenCalledWith("one-shot");
+    commit.resolve();
+  });
+
+  it("preserves selection across a semantic-identical parent rerender", () => {
+    const { rerender } = render(
+      <EvidenceSetPanel
+        citations={hostCitations()}
+        onOpenCitation={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("evidence-set-toggle"));
+    fireEvent.click(screen.getByTestId("evidence-select-none"));
+    rerender(
+      <EvidenceSetPanel
+        citations={hostCitations().map((citation) => ({ ...citation }))}
+        onOpenCitation={vi.fn()}
+      />,
+    );
+    expect(
+      screen
+        .getAllByRole("checkbox")
+        .every((checkbox) => !(checkbox as HTMLInputElement).checked),
+    ).toBe(true);
   });
 });

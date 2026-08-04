@@ -5156,6 +5156,7 @@ export function LogExplorer({ corpusId }: Props) {
       visibleLaneCount: number;
       linkMode: TimeLinkMode;
       highlightSeqs: number[];
+      revision: number;
     }) => {
       const next = adoptEvidencePlacementForExplorer(
         corpusId,

@@ -3681,6 +3681,54 @@ export async function hostLogLoadActiveInvestigation(
   );
 }
 
+export type PreparedInvestigationEvidenceTargetDto = {
+  commitToken: string;
+  investigationId: string | null;
+  expectedRevision: number | null;
+  createsDraft: boolean;
+};
+
+export async function hostLogPrepareInvestigationEvidence(
+  corpusId: string,
+  args: {
+    title: string;
+    eventRefs: LogBookmarkEventRefDto[];
+    noiseLens?: InvestigationNoiseLens;
+  },
+): Promise<PreparedInvestigationEvidenceTargetDto> {
+  if (!isTauri()) throw new Error("Investigation evidence requires Tauri host");
+  return invoke<PreparedInvestigationEvidenceTargetDto>(
+    "log_prepare_investigation_evidence",
+    {
+      args: {
+        corpusId,
+        title: args.title,
+        eventRefs: args.eventRefs,
+        noiseLens: args.noiseLens ?? "active",
+      },
+    },
+  );
+}
+
+export async function hostLogCommitInvestigationEvidence(
+  commitToken: string,
+): Promise<ResolvedInvestigationDocumentDto> {
+  if (!isTauri()) throw new Error("Investigation evidence requires Tauri host");
+  return invoke<ResolvedInvestigationDocumentDto>(
+    "log_commit_investigation_evidence",
+    { commitToken },
+  );
+}
+
+export async function hostLogCancelInvestigationEvidencePrepare(
+  commitToken: string,
+): Promise<boolean> {
+  if (!isTauri()) return false;
+  return invoke<boolean>("log_cancel_investigation_evidence_prepare", {
+    commitToken,
+  });
+}
+
 export async function hostLogAddInvestigationEvidence(
   corpusId: string,
   args: {

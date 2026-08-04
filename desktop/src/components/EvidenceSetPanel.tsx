@@ -16,6 +16,7 @@ import {
   applyLaneAssignment,
   applyLaneEdits,
   assignEvidenceToLanes,
+  bindPreparedInvestigationTarget,
   buildEvidenceSetFromHostCitations,
   cancelInvestigationAdd,
   confirmInvestigationAdd,
@@ -39,7 +40,10 @@ import {
   type TimeQualityHint,
 } from "../lib/evidenceLaneBridge";
 import type { LaneConfig } from "../lib/logExplorer/laneCompose";
-import { loadLanes } from "../lib/logExplorer/laneCompose";
+import {
+  evidenceLayoutFingerprint,
+  loadLanes,
+} from "../lib/logExplorer/laneCompose";
 import { applyEvidenceLanesToExplorer } from "../lib/logExplorer/evidenceLaneApplyBridge";
 
 export type HostEventResolution = {
@@ -70,11 +74,19 @@ export type EvidenceSetPanelProps = {
     highlightSeqs: number[];
     navTarget: { kind: "event" | "template"; id: string } | null;
   }) => Promise<void> | void;
-  /**
-   * Host investigation write — only invoked after explicit confirm.
-   * Return to mark applied; throw to keep confirmed for retry.
-   */
-  onAddToInvestigation?: (state: InvestigationAddState) => Promise<void> | void;
+  /** Host prepares one exact, one-shot payload + investigation target token. */
+  onPrepareInvestigation?: (
+    state: InvestigationAddState,
+  ) => Promise<{
+    commitToken: string;
+    investigationId: string | null;
+    expectedRevision: number | null;
+    createsDraft: boolean;
+  }>;
+  /** Host consumes the prepared token exactly once after explicit confirm. */
+  onCommitInvestigation?: (commitToken: string) => Promise<void> | void;
+  /** Best-effort retirement when the user cancels before commit. */
+  onCancelPreparedInvestigation?: (commitToken: string) => Promise<void> | void;
   /**
    * Resolve host-verified source/service/time for selected log events.
    * Never invent identity — return only host facts.
@@ -112,7 +124,9 @@ export function EvidenceSetPanel({
   onOpenCitation,
   onOpenWorkspace,
   onShowInExplorer,
-  onAddToInvestigation,
+  onPrepareInvestigation,
+  onCommitInvestigation,
+  onCancelPreparedInvestigation,
   resolveHostEvents,
   availableCorpusIds,
   compact = false,
@@ -133,9 +147,10 @@ export function EvidenceSetPanel({
   const [open, setOpen] = useState(false);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(() => new Set());
   const [mode, setMode] = useState<LaneAssignmentMode>("group_related");
-  const [occupiedPreview, setOccupiedPreview] = useState<ShowInExplorerPlan | null>(
-    null,
-  );
+  const [occupiedPreview, setOccupiedPreview] = useState<{
+    plan: ShowInExplorerPlan;
+    baseFingerprint: string;
+  } | null>(null);
   const [invState, setInvState] = useState<InvestigationAddState>(() =>
     idleInvestigationAdd(),
   );
@@ -148,6 +163,16 @@ export function EvidenceSetPanel({
   const [laneEdits, setLaneEdits] = useState<LaneEdit[]>([]);
   const panelRef = useRef<HTMLDivElement>(null);
   const toggleRef = useRef<HTMLButtonElement>(null);
+  const occupiedDialogRef = useRef<HTMLDivElement>(null);
+  const investigationDialogRef = useRef<HTMLDivElement>(null);
+  const showTriggerRef = useRef<HTMLButtonElement>(null);
+  const investigationTriggerRef = useRef<HTMLButtonElement>(null);
+  const showOperationRef = useRef(0);
+  const investigationOperationRef = useRef(0);
+  const investigationSubmittingRef = useRef(false);
+  const preparedTokenRef = useRef<string | null>(null);
+  const cancelPreparedRef = useRef(onCancelPreparedInvestigation);
+  cancelPreparedRef.current = onCancelPreparedInvestigation;
   const titleId = useId();
 
   // Reset selection when the host citation set identity changes.
@@ -155,14 +180,33 @@ export function EvidenceSetPanel({
     () => baseItems.map((i) => i.key).join("|"),
     [baseItems],
   );
+  const baseItemsRef = useRef(baseItems);
+  baseItemsRef.current = baseItems;
+  const retirePreparedToken = useCallback(() => {
+    const token = preparedTokenRef.current;
+    preparedTokenRef.current = null;
+    if (token) {
+      void Promise.resolve(cancelPreparedRef.current?.(token)).catch(() => {
+        // Bounded host token expires/evicts even if best-effort retirement fails.
+      });
+    }
+  }, []);
   useEffect(() => {
-    setSelectedKeys(selectAllLaneEligible(baseItems));
+    // Depend on semantic identity, not the parent's freshly mapped array.
+    // Linked-chat composer rerenders must not erase an in-progress selection.
+    setSelectedKeys(selectAllLaneEligible(baseItemsRef.current));
     setOccupiedPreview(null);
     setInvState(idleInvestigationAdd());
     setStatusMsg(null);
+    setBusy(false);
     setResolvedOverlay([]);
     setLaneEdits([]);
-  }, [citationSig, baseItems]);
+    showOperationRef.current += 1;
+    investigationOperationRef.current += 1;
+    retirePreparedToken();
+  }, [citationSig, retirePreparedToken]);
+
+  useEffect(() => () => retirePreparedToken(), [retirePreparedToken]);
 
   const selected = useMemo(
     () => selectionFromKeys(items, selectedKeys),
@@ -177,7 +221,12 @@ export function EvidenceSetPanel({
   );
   useEffect(() => {
     setLaneEdits([]);
-  }, [selectionEditKey]);
+    setOccupiedPreview(null);
+    showOperationRef.current += 1;
+    investigationOperationRef.current += 1;
+    retirePreparedToken();
+    setInvState(idleInvestigationAdd());
+  }, [selectionEditKey, retirePreparedToken]);
 
   /** Display draft: assign from current items, then apply edit log. */
   const displayLanes = useMemo((): LaneConfig[] => {
@@ -191,12 +240,14 @@ export function EvidenceSetPanel({
   }, [logSelected, mode, laneEdits]);
   const displayVisibleCount = Math.max(1, Math.min(4, displayLanes.length || 1));
 
-  const ensureResolved = useCallback(async (): Promise<EvidenceItem[]> => {
-    if (!resolveHostEvents) return logSelected;
-    const need = logSelected.filter(
+  const ensureResolved = useCallback(async (
+    selectedSnapshot: EvidenceItem[],
+  ): Promise<EvidenceItem[]> => {
+    if (!resolveHostEvents) return selectedSnapshot;
+    const need = selectedSnapshot.filter(
       (i) => !i.source || i.timestamp == null || !i.timeQuality,
     );
-    if (need.length === 0) return logSelected;
+    if (need.length === 0) return selectedSnapshot;
     const resolved = await resolveHostEvents(need);
     setResolvedOverlay((prev) => {
       const map = new Map(
@@ -206,15 +257,40 @@ export function EvidenceSetPanel({
       );
       return [...map.values()];
     });
-    return enrichWithHostEvents(logSelected, resolved);
-  }, [logSelected, resolveHostEvents]);
+    const enriched = enrichWithHostEvents(selectedSnapshot, resolved);
+    const unresolved = enriched.find(
+      (item) => !item.source?.trim() || item.timestamp == null || !item.timeQuality,
+    );
+    if (unresolved) {
+      throw new Error(
+        `Host did not resolve exact source/time identity for ${unresolved.id}.`,
+      );
+    }
+    return enriched;
+  }, [resolveHostEvents]);
 
   const close = useCallback(() => {
+    retirePreparedToken();
     setOpen(false);
     setOccupiedPreview(null);
     setInvState(idleInvestigationAdd());
     queueMicrotask(() => toggleRef.current?.focus());
-  }, []);
+  }, [retirePreparedToken]);
+
+  useEffect(() => {
+    const dialog = occupiedPreview
+      ? occupiedDialogRef.current
+      : invState.status === "preview" || invState.status === "confirmed"
+        ? investigationDialogRef.current
+        : null;
+    if (!dialog) return;
+    queueMicrotask(() => {
+      const first = dialog.querySelector<HTMLElement>(
+        "button:not(:disabled), input:not(:disabled), [tabindex='0']",
+      );
+      (first ?? dialog).focus();
+    });
+  }, [occupiedPreview, invState.status]);
 
   useEffect(() => {
     if (!open) return;
@@ -223,96 +299,172 @@ export function EvidenceSetPanel({
         e.preventDefault();
         if (occupiedPreview) {
           setOccupiedPreview(null);
+          queueMicrotask(() => showTriggerRef.current?.focus());
           return;
         }
         if (invState.status === "preview" || invState.status === "confirmed") {
+          retirePreparedToken();
           setInvState(cancelInvestigationAdd(invState));
+          queueMicrotask(() => investigationTriggerRef.current?.focus());
           return;
         }
         close();
+        return;
+      }
+      if (e.key === "Tab") {
+        const dialog = occupiedPreview
+          ? occupiedDialogRef.current
+          : invState.status === "preview" || invState.status === "confirmed"
+            ? investigationDialogRef.current
+            : null;
+        if (!dialog) return;
+        const focusable = [...dialog.querySelectorAll<HTMLElement>(
+          "button:not(:disabled), input:not(:disabled), [tabindex='0']",
+        )];
+        if (focusable.length === 0) {
+          e.preventDefault();
+          dialog.focus();
+          return;
+        }
+        const first = focusable[0]!;
+        const last = focusable.at(-1)!;
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, occupiedPreview, invState, close]);
+  }, [open, occupiedPreview, invState, close, retirePreparedToken]);
 
   if (count === 0) return null;
+
+  const modalActive =
+    occupiedPreview != null ||
+    invState.status === "preview" ||
+    invState.status === "confirmed";
 
   const onToggleKey = (e: ReactKeyboardEvent) => {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      setOpen((v) => !v);
+      if (open) close();
+      else setOpen(true);
     }
   };
 
-  const runShowInExplorer = async (confirmReplace: boolean) => {
+  const commitShowPlan = async (pending: {
+    plan: ShowInExplorerPlan;
+    baseFingerprint: string;
+  }) => {
+    const { plan, baseFingerprint } = pending;
+    if (!onShowInExplorer) {
+      throw new Error("Explorer host open is not wired in this surface.");
+    }
+    if (evidenceLayoutFingerprint(plan.corpusId) !== baseFingerprint) {
+      throw new Error(
+        "Explorer layout changed after preview; review the current lanes and try again.",
+      );
+    }
+    const applied = applyLaneAssignment(
+      plan.occupiedPreview.current,
+      plan.assignment,
+      true,
+    );
+    if (!applied.applied) {
+      throw new Error("Occupied-lane replacement was not confirmed.");
+    }
+    // Opening is read-only. Commit durable placement only after it succeeds.
+    const first = plan.navTargets[0] ?? null;
+    await onShowInExplorer({
+      corpusId: plan.corpusId,
+      lanes: applied.lanes,
+      visibleLaneCount: applied.visibleLaneCount,
+      linkMode: plan.assignment.linkMode,
+      highlightSeqs: plan.highlightSeqs,
+      navTarget: first,
+    });
+    const persisted = applyEvidenceLanesToExplorer(
+      {
+        corpusId: plan.corpusId,
+        lanes: applied.lanes,
+        visibleLaneCount: applied.visibleLaneCount,
+        linkMode: plan.assignment.linkMode,
+        highlightSeqs: plan.highlightSeqs,
+      },
+      baseFingerprint,
+    );
+    setOccupiedPreview(null);
+    setStatusMsg(
+      plan.assignment.alignmentRefuseReason
+        ? `Opened Explorer · ${plan.assignment.alignmentRefuseReason}`
+        : `Opened Explorer with ${persisted.visibleLaneCount} customer-evidence lane${
+            persisted.visibleLaneCount === 1 ? "" : "s"
+          }.`,
+    );
+  };
+
+  const runShowInExplorer = async () => {
     setStatusMsg(null);
     setBusy(true);
+    const operation = ++showOperationRef.current;
+    const selectedSnapshot = logSelected.map((item) => ({ ...item }));
+    const modeSnapshot = mode;
+    const editSnapshot = [...laneEdits];
+    const corpusId = selectedSnapshot[0]?.corpusId;
+    const existing = corpusId ? loadLanes(corpusId) ?? [] : [];
+    const baseFingerprint = corpusId
+      ? evidenceLayoutFingerprint(corpusId)
+      : "";
     try {
       // Host-resolve first, then finalize from *resolved* items only.
-      const resolvedSelected = await ensureResolved();
-      const existing =
-        resolvedSelected[0]?.corpusId != null
-          ? loadLanes(resolvedSelected[0].corpusId) ?? []
-          : [];
+      const resolvedSelected = await ensureResolved(selectedSnapshot);
+      if (operation !== showOperationRef.current) return;
       const plan = finalizeShowAssignment({
         resolved: resolvedSelected,
-        mode,
+        mode: modeSnapshot,
         existing,
-        laneEdits,
+        laneEdits: editSnapshot,
         availableCorpusIds,
       });
       if ("error" in plan) {
         setStatusMsg(plan.error);
         return;
       }
-      const assignmentLanes = plan.assignment;
-      const occ = plan.occupiedPreview;
-      const previewPlan: ShowInExplorerPlan = plan;
-
-      if (occ.needsConfirm && !confirmReplace) {
-        setOccupiedPreview(previewPlan);
+      if (plan.assignment.overflowKeys.length > 0) {
+        setStatusMsg(
+          `Not opened: ${plan.assignment.overflowKeys.length} selected event${
+            plan.assignment.overflowKeys.length === 1 ? "" : "s"
+          } would be omitted by the four-lane limit. Choose “One lane” or select fewer sources. No lane was changed.`,
+        );
         return;
       }
-      const applied = applyLaneAssignment(
-        existing,
-        assignmentLanes,
-        confirmReplace || !occ.needsConfirm,
-      );
-      if (!applied.applied) {
-        setStatusMsg("Lane change cancelled — existing layout kept.");
-        setOccupiedPreview(null);
+      const pending = { plan, baseFingerprint };
+      if (plan.occupiedPreview.needsConfirm) {
+        setOccupiedPreview(pending);
         return;
       }
-      // Persist + notify live Explorer (lanes, visible count, link mode, highlights).
-      const persisted = applyEvidenceLanesToExplorer({
-        corpusId: plan.corpusId,
-        lanes: applied.lanes,
-        visibleLaneCount: applied.visibleLaneCount,
-        linkMode: assignmentLanes.linkMode,
-        highlightSeqs: plan.highlightSeqs,
-      });
-      const first = plan.navTargets[0] ?? null;
-      await onShowInExplorer?.({
-        corpusId: persisted.corpusId,
-        lanes: persisted.lanes,
-        visibleLaneCount: persisted.visibleLaneCount,
-        linkMode: persisted.linkMode,
-        highlightSeqs: persisted.highlightSeqs,
-        navTarget: first,
-      });
-      setOccupiedPreview(null);
-      setStatusMsg(
-        assignmentLanes.alignmentRefuseReason
-          ? `Opened Explorer · ${assignmentLanes.alignmentRefuseReason}`
-          : `Opened Explorer with ${persisted.visibleLaneCount} customer-evidence lane${
-              persisted.visibleLaneCount === 1 ? "" : "s"
-            }.`,
-      );
+      await commitShowPlan(pending);
     } catch (err) {
       setStatusMsg(
         err instanceof Error ? err.message : "Show in Explorer failed.",
       );
+    } finally {
+      if (operation === showOperationRef.current) setBusy(false);
+    }
+  };
+
+  const confirmOccupiedShow = async () => {
+    const pending = occupiedPreview;
+    if (!pending) return;
+    setBusy(true);
+    try {
+      await commitShowPlan(pending);
+    } catch (err) {
+      setStatusMsg(err instanceof Error ? err.message : "Show in Explorer failed.");
     } finally {
       setBusy(false);
     }
@@ -321,11 +473,41 @@ export function EvidenceSetPanel({
   const beginInvestigation = async () => {
     setStatusMsg(null);
     setBusy(true);
+    retirePreparedToken();
+    const operation = ++investigationOperationRef.current;
+    const selectedSnapshot = logSelected.map((item) => ({ ...item }));
     try {
-      const resolvedSelected = await ensureResolved();
-      const preview = previewInvestigationAdd(resolvedSelected, {
+      const resolvedSelected = await ensureResolved(selectedSnapshot);
+      if (operation !== investigationOperationRef.current) return;
+      let preview = previewInvestigationAdd(resolvedSelected, {
         availableCorpusIds,
       });
+      if (preview.failReason) {
+        setInvState(preview);
+        return;
+      }
+      if (!onPrepareInvestigation) {
+        setStatusMsg(
+          "Investigation host preparation is not wired in this surface.",
+        );
+        return;
+      }
+      const prepared = await onPrepareInvestigation(preview);
+      if (operation !== investigationOperationRef.current) {
+        void Promise.resolve(
+          onCancelPreparedInvestigation?.(prepared.commitToken),
+        ).catch(() => {});
+        return;
+      }
+      preview = bindPreparedInvestigationTarget(preview, prepared);
+      if (preview.failReason) {
+        void Promise.resolve(
+          onCancelPreparedInvestigation?.(prepared.commitToken),
+        ).catch(() => {});
+      }
+      preparedTokenRef.current = preview.failReason
+        ? null
+        : preview.commitToken;
       setInvState(preview);
     } catch (err) {
       setStatusMsg(
@@ -334,7 +516,7 @@ export function EvidenceSetPanel({
           : "Could not resolve host evidence for investigation.",
       );
     } finally {
-      setBusy(false);
+      if (operation === investigationOperationRef.current) setBusy(false);
     }
   };
 
@@ -356,15 +538,18 @@ export function EvidenceSetPanel({
       setStatusMsg("Confirm the investigation preview before writing.");
       return;
     }
-    if (!onAddToInvestigation) {
+    if (!onCommitInvestigation || !invState.commitToken) {
       setStatusMsg(
-        "Investigation host write is not wired in this surface — preview only.",
+        "Investigation host commit is not wired in this surface — preview only.",
       );
       return;
     }
+    if (investigationSubmittingRef.current) return;
+    investigationSubmittingRef.current = true;
     setBusy(true);
     try {
-      await onAddToInvestigation(invState);
+      await onCommitInvestigation(invState.commitToken);
+      preparedTokenRef.current = null;
       setInvState(markInvestigationApplied(invState));
       setStatusMsg(
         invState.createsDraft
@@ -372,10 +557,13 @@ export function EvidenceSetPanel({
           : "Evidence added to investigation.",
       );
     } catch (err) {
+      preparedTokenRef.current = null;
+      setInvState(idleInvestigationAdd());
       setStatusMsg(
-        err instanceof Error ? err.message : "Add to investigation failed.",
+        `${err instanceof Error ? err.message : "Add to investigation failed."} Review and prepare the evidence again before retrying.`,
       );
     } finally {
+      investigationSubmittingRef.current = false;
       setBusy(false);
     }
   };
@@ -400,8 +588,9 @@ export function EvidenceSetPanel({
         className="evidence-set__toggle"
         data-testid="evidence-set-toggle"
         aria-expanded={open}
+        disabled={modalActive}
         aria-controls={open ? titleId : undefined}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => (open ? close() : setOpen(true))}
         onKeyDown={onToggleKey}
       >
         <span className="evidence-set__label">{evidenceControlLabel(count)}</span>
@@ -430,6 +619,7 @@ export function EvidenceSetPanel({
                 type="button"
                 className="evidence-set__btn evidence-set__btn--ghost"
                 data-testid="evidence-select-all-log"
+                disabled={busy || modalActive}
                 onClick={() => setSelectedKeys(selectAllLaneEligible(items))}
               >
                 Select all log
@@ -438,6 +628,7 @@ export function EvidenceSetPanel({
                 type="button"
                 className="evidence-set__btn evidence-set__btn--ghost"
                 data-testid="evidence-select-none"
+                disabled={busy || modalActive}
                 onClick={() => setSelectedKeys(new Set())}
               >
                 Clear
@@ -445,7 +636,7 @@ export function EvidenceSetPanel({
             </div>
           </div>
 
-          <ul className="evidence-set__list" role="listbox" aria-multiselectable>
+          <ul className="evidence-set__list" aria-label="Evidence citations">
             {items.map((item) => {
               const checked = selectedKeys.has(item.key);
               const isLog = item.laneEligible;
@@ -462,6 +653,7 @@ export function EvidenceSetPanel({
                       <input
                         type="checkbox"
                         checked={checked}
+                        disabled={busy || modalActive}
                         onChange={() =>
                           setSelectedKeys((prev) =>
                             toggleEvidenceSelection(prev, item.key),
@@ -481,6 +673,7 @@ export function EvidenceSetPanel({
                   <button
                     type="button"
                     className="evidence-set__open"
+                    disabled={busy || modalActive}
                     title={item.id}
                     onClick={() => {
                       if (item.laneEligible || item.kind === "log_template") {
@@ -517,6 +710,7 @@ export function EvidenceSetPanel({
                     name="evidence-lane-mode"
                     value={m.id}
                     checked={mode === m.id}
+                    disabled={busy || modalActive}
                     onChange={() => setMode(m.id)}
                     data-testid={`evidence-mode-${m.id}`}
                   />
@@ -562,7 +756,7 @@ export function EvidenceSetPanel({
                         className="evidence-set__btn evidence-set__btn--ghost"
                         data-testid={`evidence-lane-pin-${lane.id}`}
                         title="Pin to first lane"
-                        disabled={busy || index === 0}
+                        disabled={busy || modalActive || index === 0}
                         onClick={() =>
                           setLaneEdits((prev) => [
                             ...prev,
@@ -577,7 +771,7 @@ export function EvidenceSetPanel({
                         className="evidence-set__btn evidence-set__btn--ghost"
                         data-testid={`evidence-lane-up-${lane.id}`}
                         title="Move up"
-                        disabled={busy || index === 0}
+                        disabled={busy || modalActive || index === 0}
                         onClick={() =>
                           setLaneEdits((prev) => [
                             ...prev,
@@ -596,7 +790,7 @@ export function EvidenceSetPanel({
                         className="evidence-set__btn evidence-set__btn--ghost"
                         data-testid={`evidence-lane-down-${lane.id}`}
                         title="Move down"
-                        disabled={busy || index >= displayLanes.length - 1}
+                        disabled={busy || modalActive || index >= displayLanes.length - 1}
                         onClick={() =>
                           setLaneEdits((prev) => [
                             ...prev,
@@ -615,7 +809,7 @@ export function EvidenceSetPanel({
                         className="evidence-set__btn evidence-set__btn--ghost"
                         data-testid={`evidence-lane-remove-${lane.id}`}
                         title="Remove lane"
-                        disabled={busy || displayLanes.length <= 1}
+                        disabled={busy || modalActive || displayLanes.length <= 1}
                         onClick={() =>
                           setLaneEdits((prev) => [
                             ...prev,
@@ -634,14 +828,17 @@ export function EvidenceSetPanel({
 
           {occupiedPreview ? (
             <div
+              ref={occupiedDialogRef}
               className="evidence-set__preview"
               data-testid="evidence-occupied-preview"
               role="dialog"
+              aria-modal="true"
               aria-label="Occupied lane preview"
+              tabIndex={-1}
             >
               <strong>Occupied lanes would change</strong>
               <ul>
-                {occupiedPreview.occupiedPreview.explanation.map((line) => (
+                {occupiedPreview.plan.occupiedPreview.explanation.map((line) => (
                   <li key={line}>{line}</li>
                 ))}
               </ul>
@@ -651,7 +848,7 @@ export function EvidenceSetPanel({
                   className="evidence-set__btn"
                   data-testid="evidence-occupied-confirm"
                   disabled={busy}
-                  onClick={() => void runShowInExplorer(true)}
+                  onClick={() => void confirmOccupiedShow()}
                 >
                   Replace and open
                 </button>
@@ -663,6 +860,7 @@ export function EvidenceSetPanel({
                   onClick={() => {
                     setOccupiedPreview(null);
                     setStatusMsg("Lane change cancelled — existing layout kept.");
+                    queueMicrotask(() => showTriggerRef.current?.focus());
                   }}
                 >
                   Cancel
@@ -673,10 +871,13 @@ export function EvidenceSetPanel({
 
           {invState.status === "preview" || invState.status === "confirmed" ? (
             <div
+              ref={investigationDialogRef}
               className="evidence-set__preview"
               data-testid="evidence-investigation-preview"
               role="dialog"
+              aria-modal="true"
               aria-label="Add to investigation preview"
+              tabIndex={-1}
             >
               {invState.failReason ? (
                 <p className="evidence-set__error">{invState.failReason}</p>
@@ -691,6 +892,9 @@ export function EvidenceSetPanel({
                     {invState.title} · {invState.eventRefs.length} event
                     {invState.eventRefs.length === 1 ? "" : "s"} · corpus{" "}
                     {invState.corpusId}
+                    {invState.createsDraft
+                      ? " · exact new draft target"
+                      : ` · investigation ${invState.investigationId} at revision ${invState.expectedRevision}`}
                   </p>
                   <ul className="evidence-set__ref-list">
                     {invState.eventRefs.map((ref) => (
@@ -731,6 +935,7 @@ export function EvidenceSetPanel({
                       data-testid="evidence-investigation-undo"
                       disabled={busy}
                       onClick={() => {
+                        retirePreparedToken();
                         setInvState(undoInvestigationAdd(invState));
                         setStatusMsg(
                           "Investigation add undone before host write.",
@@ -747,8 +952,10 @@ export function EvidenceSetPanel({
                   data-testid="evidence-investigation-cancel"
                   disabled={busy}
                   onClick={() => {
+                    retirePreparedToken();
                     setInvState(cancelInvestigationAdd(invState));
                     setStatusMsg("Investigation add cancelled.");
+                    queueMicrotask(() => investigationTriggerRef.current?.focus());
                   }}
                 >
                   Cancel
@@ -768,19 +975,21 @@ export function EvidenceSetPanel({
             }
           >
             <button
+              ref={showTriggerRef}
               type="button"
               className="evidence-set__btn"
               data-testid="evidence-show-in-explorer"
-              disabled={busy || logSelected.length === 0}
-              onClick={() => void runShowInExplorer(false)}
+              disabled={busy || modalActive || logSelected.length === 0}
+              onClick={() => void runShowInExplorer()}
             >
               Show in Explorer
             </button>
             <button
+              ref={investigationTriggerRef}
               type="button"
               className="evidence-set__btn"
               data-testid="evidence-add-to-investigation"
-              disabled={busy || logSelected.length === 0}
+              disabled={busy || modalActive || logSelected.length === 0}
               onClick={() => void beginInvestigation()}
             >
               Add to investigation

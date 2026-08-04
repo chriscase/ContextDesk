@@ -140,6 +140,10 @@ export type InvestigationAddState = {
   failReason: string | null;
   /** Snapshot for undo before host apply. */
   priorStatus: InvestigationAddStatus | null;
+  /** Opaque, process-local host token binding exact payload + target. */
+  commitToken: string | null;
+  /** Exact existing target revision, null only for a host-bound create-new target. */
+  expectedRevision: number | null;
 };
 
 export type ShowInExplorerPlan = {
@@ -846,6 +850,8 @@ export function idleInvestigationAdd(): InvestigationAddState {
     citationKeys: [],
     failReason: null,
     priorStatus: null,
+    commitToken: null,
+    expectedRevision: null,
   };
 }
 
@@ -940,18 +946,54 @@ export function previewInvestigationAdd(
     citationKeys: eventRefs.map((r) => r.citationKey),
     failReason: null,
     priorStatus: "idle",
+    commitToken: null,
+    expectedRevision: null,
+  };
+}
+
+/** Attach the host's exact, one-shot investigation target to a preview. */
+export function bindPreparedInvestigationTarget(
+  state: InvestigationAddState,
+  prepared: {
+    commitToken: string;
+    investigationId: string | null;
+    expectedRevision: number | null;
+    createsDraft: boolean;
+  },
+): InvestigationAddState {
+  if (
+    state.status !== "preview" ||
+    state.failReason ||
+    !prepared.commitToken.trim() ||
+    (prepared.createsDraft
+      ? prepared.investigationId != null || prepared.expectedRevision != null
+      : !prepared.investigationId || prepared.expectedRevision == null)
+  ) {
+    return {
+      ...state,
+      failReason: "Host could not bind an exact investigation target.",
+    };
+  }
+  return {
+    ...state,
+    commitToken: prepared.commitToken,
+    investigationId: prepared.investigationId,
+    expectedRevision: prepared.expectedRevision,
+    createsDraft: prepared.createsDraft,
   };
 }
 
 export function confirmInvestigationAdd(
   state: InvestigationAddState,
 ): InvestigationAddState {
-  if (state.status !== "preview" || state.failReason) {
+  if (state.status !== "preview" || state.failReason || !state.commitToken) {
     return {
       ...state,
       failReason:
         state.failReason ??
-        "Nothing to confirm — open a valid preview first.",
+        (state.commitToken
+          ? "Nothing to confirm — open a valid preview first."
+          : "Wait for the host to bind the exact investigation target."),
     };
   }
   return {
@@ -1005,6 +1047,7 @@ export function markInvestigationApplied(
     ...state,
     status: "applied",
     priorStatus: "confirmed",
+    commitToken: null,
   };
 }
 

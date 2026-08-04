@@ -29,7 +29,9 @@ import {
   hostListChatModels,
   hostListChatSessionsForCorpus,
   hostLoadChatSession,
-  hostLogAddInvestigationEvidence,
+  hostLogCancelInvestigationEvidencePrepare,
+  hostLogCommitInvestigationEvidence,
+  hostLogPrepareInvestigationEvidence,
   hostLogQueryEventNeighborhood,
   hostOpenLogExplorer,
   hostOpenLogExplorerTarget,
@@ -420,16 +422,15 @@ function LinkedChatBubble({
               await hostOpenLogExplorer(plan.corpusId);
             }
           }}
-          onAddToInvestigation={async (state) => {
+          onPrepareInvestigation={async (state) => {
             if (
-              state.status !== "confirmed" ||
+              state.status !== "preview" ||
               !state.corpusId ||
               state.eventRefs.length === 0
             ) {
-              throw new Error("Investigation add requires explicit confirm.");
+              throw new Error("Investigation preparation requires a valid preview.");
             }
-            await hostLogAddInvestigationEvidence(state.corpusId, {
-              investigationId: state.investigationId,
+            return hostLogPrepareInvestigationEvidence(state.corpusId, {
               title: state.title,
               eventRefs: state.eventRefs.map((r) => ({
                 corpusId: r.corpusId,
@@ -440,6 +441,12 @@ function LinkedChatBubble({
               })),
             });
           }}
+          onCommitInvestigation={(token) =>
+            hostLogCommitInvestigationEvidence(token).then(() => undefined)
+          }
+          onCancelPreparedInvestigation={(token) =>
+            hostLogCancelInvestigationEvidencePrepare(token).then(() => undefined)
+          }
         />
       ) : null}
       <LinkedAssistantBody
