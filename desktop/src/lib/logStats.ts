@@ -54,15 +54,23 @@ export function statsBlurb(s: StatsLike): string {
     discovered == null || s.files == null
       ? ""
       : ` · ${s.files.toLocaleString()}/${discovered.toLocaleString()} files imported`;
-  const omissions = [
+  const actualOmissions = [
     ["excluded", s.excludedFiles ?? 0],
     ["failed", s.failedFiles ?? 0],
-    ["ignored", s.ignoredFiles ?? 0],
   ]
     .filter(([, count]) => Number(count) > 0)
     .map(([label, count]) => `${Number(count).toLocaleString()} ${label}`)
-    .join(", ");
-  return `${base}${groupingSummary}${fileSummary}${omissions ? ` · partial: ${omissions}` : ""}`;
+  const ignored = s.ignoredFiles ?? 0;
+  const omissionSummary =
+    actualOmissions.length > 0
+      ? ` · partial: ${[
+          ...actualOmissions,
+          ...(ignored > 0 ? [`${ignored.toLocaleString()} ignored`] : []),
+        ].join(", ")}`
+      : ignored > 0
+        ? ` · ${ignored.toLocaleString()} intentionally skipped`
+        : "";
+  return `${base}${groupingSummary}${fileSummary}${omissionSummary}`;
 }
 
 export function levelEntries(
