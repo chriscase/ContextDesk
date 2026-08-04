@@ -340,6 +340,25 @@ fn apply_sse_deltas<F: FnMut(StreamDelta)>(
     }
 }
 
+/// Replay one ordinary JSON completion through the same callback contract as
+/// an equivalent SSE response. Gateways that ignore `stream=true` must not
+/// make live consumers lose tool calls, finish state, or the terminal marker.
+fn emit_full_completion<F: FnMut(StreamDelta)>(completion: &ChatCompletion, on_delta: &mut F) {
+    if !completion.content.is_empty() {
+        on_delta(StreamDelta::Text(completion.content.clone()));
+    }
+    for (index, call) in completion.tool_calls.iter().enumerate() {
+        on_delta(StreamDelta::ToolCall {
+            index,
+            id: Some(call.id.clone()),
+            name: Some(call.function.name.clone()),
+            arguments: call.function.arguments.clone(),
+        });
+    }
+    on_delta(StreamDelta::Finish(completion.finish_reason.clone()));
+    on_delta(StreamDelta::Done);
+}
+
 /// Accumulate a full SSE body into [`ChatCompletion`] (offline fixture path).
 pub fn accumulate_openai_sse(body: &str) -> CoreResult<ChatCompletion> {
     let mut acc = StreamAccumulator::new();
@@ -579,24 +598,17 @@ impl OpenAiCompatibleClient {
             .unwrap_or_default()
             .to_ascii_lowercase();
         if content_type.contains("application/json") {
-            let text = resp
-                .text()
-                .await
-                .map_err(|e| CoreError::Message(format!("stream body: {e}")))?;
-            let completion = parse_openai_completion(&text)?;
-            if !completion.content.is_empty() {
-                on_delta(StreamDelta::Text(completion.content.clone()));
+            let mut full_body = BoundedBodyAccumulator::new();
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                if cancel.map(|c| c.load(Ordering::SeqCst)).unwrap_or(false) {
+                    return Err(CoreError::Message("cancelled".into()));
+                }
+                let bytes = chunk.map_err(|e| CoreError::Message(format!("stream body: {e}")))?;
+                full_body.push(&bytes)?;
             }
-            for (index, call) in completion.tool_calls.iter().enumerate() {
-                on_delta(StreamDelta::ToolCall {
-                    index,
-                    id: Some(call.id.clone()),
-                    name: Some(call.function.name.clone()),
-                    arguments: call.function.arguments.clone(),
-                });
-            }
-            on_delta(StreamDelta::Finish(completion.finish_reason.clone()));
-            on_delta(StreamDelta::Done);
+            let completion = parse_openai_completion(&full_body.finish()?)?;
+            emit_full_completion(&completion, &mut on_delta);
             return Ok(completion);
         }
 
@@ -636,9 +648,7 @@ impl OpenAiCompatibleClient {
         // lines and route the complete body through the non-stream parser.
         if !saw_sse_data {
             let completion = parse_openai_completion(full_body.finish()?.trim())?;
-            if !completion.content.is_empty() {
-                on_delta(StreamDelta::Text(completion.content.clone()));
-            }
+            emit_full_completion(&completion, &mut on_delta);
             return Ok(completion);
         }
         // A provider that closes the connection without a trailing newline

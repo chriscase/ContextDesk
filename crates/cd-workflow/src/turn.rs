@@ -434,7 +434,6 @@ mod tests {
     /// disappear from every captured request and the `MainChat` phrase
     /// appears in their place. Reverted; not present in the committed code.
     #[tokio::test]
-    #[ignore = "requires CLI-tip explorer-window system prompt wiring absent on activity base"]
     async fn run_linked_turn_forwards_the_callers_context_without_rebuilding_it() {
         const WINDOW_ID: &str = "mutation-proof-window-9f3a";
         const BRIEF: &str = "mutation-proof-viewport-brief-b7c2-three-filters-two-lanes";

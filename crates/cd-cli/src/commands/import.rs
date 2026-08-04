@@ -124,7 +124,7 @@ impl Render for ImportOutput {
         }
         if self.partial {
             out.push_str(
-                "\n  PARTIAL: not everything discovered was imported — see the counts above",
+                "\n  PARTIAL: some content intended for import was excluded or unreadable — see the counts above",
             );
         }
         if !self.reviewed_formats_applied.is_empty() {

@@ -381,6 +381,65 @@ async fn non_sse_json_fallback_decodes_multi_byte_utf8_content_correctly() {
     assert_eq!(completion.content, "café 🎉 日本語");
 }
 
+/// Some enterprise proxies strip or replace the upstream content type. A
+/// complete JSON response must still take the bounded whole-body fallback,
+/// while preserving the same live delta contract as the explicit
+/// `application/json` fast path (including tool call and terminal state).
+#[tokio::test]
+async fn non_sse_json_without_a_json_content_type_preserves_the_full_completion() {
+    let server = MockServer::start().await;
+    let body = r#"{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"checking","tool_calls":[{"id":"call_1","type":"function","function":{"name":"search_logs","arguments":"{}"}}]}}]}"#;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&server)
+        .await;
+
+    let mut live = Vec::new();
+    let completion = client(&server.uri())
+        .complete_stream_cb(
+            &one_user_message("hi"),
+            None,
+            |delta| live.push(delta),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(completion.content, "checking");
+    assert_eq!(completion.tool_calls.len(), 1);
+    assert_eq!(completion.tool_calls[0].function.name, "search_logs");
+    assert_eq!(completion.finish_reason, "tool_calls");
+    assert!(matches!(live.first(), Some(StreamDelta::Text(text)) if text == "checking"));
+    assert!(live.iter().any(
+        |delta| matches!(delta, StreamDelta::ToolCall { name: Some(name), .. } if name == "search_logs")
+    ));
+    assert!(live
+        .iter()
+        .any(|delta| matches!(delta, StreamDelta::Finish(reason) if reason == "tool_calls")));
+    assert!(matches!(live.last(), Some(StreamDelta::Done)));
+}
+
+/// The same no-content-type fallback is finite: a proxy cannot make the
+/// client retain an arbitrarily large ordinary body while it waits to decide
+/// whether the response was SSE or JSON.
+#[tokio::test]
+async fn oversized_non_sse_body_without_a_content_type_fails_closed() {
+    let server = MockServer::start().await;
+    let body = vec![b'x'; cd_core::sse::DEFAULT_MAX_BUFFERED_LINE_BYTES + 1];
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+        .mount(&server)
+        .await;
+
+    let error = client(&server.uri())
+        .complete_stream_cb(&one_user_message("hi"), None, |_| {}, None)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("exceeded"), "{error}");
+}
+
 /// Genuinely invalid UTF-8 (not a chunk-boundary artifact — this is the
 /// whole, complete SSE line, delivered as one HTTP response body) must fail
 /// closed rather than silently becoming replacement characters.

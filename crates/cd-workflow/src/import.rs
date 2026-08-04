@@ -131,10 +131,11 @@ pub struct DefaultImportOutcome {
     /// Counts by explicit timestamp provenance
     /// (`report.stats.timestamp_provenance_counts`).
     pub timestamp_provenance: std::collections::BTreeMap<String, u64>,
-    /// True when anything the preview discovered was not fully imported —
-    /// read straight from `report.stats.partial`, never re-derived. Covers
-    /// both "some sources were excluded/failed" and "the run was cancelled
-    /// before every selected source finished."
+    /// True when content intended for import was excluded or could not be
+    /// read — read straight from `report.stats.partial`, never re-derived.
+    /// Intentionally ignored metadata and unsupported content outside the
+    /// reviewed selection remain visible in their count buckets but do not
+    /// mislabel an otherwise complete selected corpus as partial.
     pub partial: bool,
     /// Sources whose local timestamps still have no resolvable timezone
     /// after this import — empty when every source is either wall-clock,

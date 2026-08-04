@@ -160,13 +160,12 @@ fn selection_drift_between_preview_and_verify_fails_closed() {
     );
 }
 
-/// A saved reviewed-format grammar for one source and ordinary default
-/// detection for a sibling source in the SAME import — proves reviewed
-/// bindings are applied per-source, not all-or-nothing, and the summary
-/// only lists what was actually bound.
+/// A mixed directory with one selected log, intentionally ignored metadata,
+/// and unsupported binary content. Every preview bucket must remain visible,
+/// while `partial` keeps its narrower persisted-corpus meaning: selected
+/// content was excluded, failed, or incompletely read.
 #[test]
-#[ignore = "partial-flag semantics differ on activity-tip ingest vs CLI tip; deferred"]
-fn mixed_source_import_reports_every_bucket_accurately_and_flags_partial() {
+fn mixed_source_import_reports_every_bucket_accurately_without_mislabeling_noise_as_partial() {
     let cache = tempfile::tempdir().unwrap();
     let source = tempfile::tempdir().unwrap();
     write_file(&source.path().join("app.log"), LOG_A);
@@ -181,6 +180,10 @@ fn mixed_source_import_reports_every_bucket_accurately_and_flags_partial() {
         outcome.sources_ignored >= 1,
         "the dot-file must be counted as ignored"
     );
+    assert!(
+        outcome.sources_unsupported >= 1,
+        "the binary payload must be counted as unsupported"
+    );
     assert_eq!(
         outcome.entries_examined,
         outcome.sources_selected
@@ -189,7 +192,10 @@ fn mixed_source_import_reports_every_bucket_accurately_and_flags_partial() {
             + outcome.sources_excluded,
         "buckets must exactly partition every examined entry, no silent drop, no double count"
     );
-    assert!(outcome.partial, "not everything discovered was imported");
+    assert!(
+        !outcome.partial,
+        "ignored metadata and unsupported, unselected content are honest preview buckets, not a failure to import selected content"
+    );
     assert_eq!(
         outcome.events_imported, 2,
         "only app.log's 2 lines become events"
