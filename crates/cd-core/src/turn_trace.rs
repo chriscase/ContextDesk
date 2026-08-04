@@ -35,7 +35,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -749,12 +749,79 @@ impl TurnTraceSink for NoopTurnTrace {
     fn record(&self, _call: TracedCall) {}
 }
 
+struct DeveloperDetailCaptureGateState {
+    enabled: AtomicBool,
+    observer_boundary: Mutex<()>,
+}
+
+/// Cloneable, process-local one-way permission for sensitive turn capture.
+#[derive(Clone)]
+pub struct DeveloperDetailCaptureGate(Arc<DeveloperDetailCaptureGateState>);
+
+impl DeveloperDetailCaptureGate {
+    /// Create a fresh, enabled gate for exactly one turn generation.
+    pub fn new() -> Self {
+        Self(Arc::new(DeveloperDetailCaptureGateState {
+            enabled: AtomicBool::new(true),
+            observer_boundary: Mutex::new(()),
+        }))
+    }
+
+    /// Whether this turn may still capture sensitive developer detail.
+    pub fn is_enabled(&self) -> bool {
+        self.0.enabled.load(Ordering::SeqCst)
+    }
+
+    /// Permanently stop sensitive capture for this turn generation.
+    pub fn suppress(&self) {
+        let _boundary = self
+            .0
+            .observer_boundary
+            .lock()
+            .expect("developer observer boundary");
+        self.0.enabled.store(false, Ordering::SeqCst);
+    }
+
+    fn observe_if_enabled(&self, observe: impl FnOnce()) {
+        let _boundary = self
+            .0
+            .observer_boundary
+            .lock()
+            .expect("developer observer boundary");
+        if self.is_enabled() {
+            observe();
+        }
+    }
+
+    /// Identity comparison used by lifecycle owners to avoid an older turn
+    /// removing a newer turn's entry for the same session.
+    pub fn is_same_generation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Default for DeveloperDetailCaptureGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for DeveloperDetailCaptureGate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeveloperDetailCaptureGate")
+            .field("enabled", &self.is_enabled())
+            .finish()
+    }
+}
+
 /// Captures every call in order, for a caller to render or assert on.
 pub struct RecordingTurnTrace {
     started_at: Instant,
     next_seq: AtomicU64,
     timeline: Mutex<Vec<TracedTimelineEntry>>,
     developer_enabled: bool,
+    developer_capture_gate: DeveloperDetailCaptureGate,
     developer: Mutex<Vec<DeveloperDetailEvent>>,
     developer_observer: Option<Arc<dyn Fn(DeveloperDetailEvent) + Send + Sync>>,
     /// Events the recorder itself never retained because the live
@@ -794,6 +861,7 @@ impl RecordingTurnTrace {
             next_seq: AtomicU64::new(0),
             timeline: Mutex::new(Vec::new()),
             developer_enabled: false,
+            developer_capture_gate: DeveloperDetailCaptureGate::new(),
             developer: Mutex::new(Vec::new()),
             developer_observer: None,
             developer_dropped: AtomicUsize::new(0),
@@ -805,11 +873,21 @@ impl RecordingTurnTrace {
         started_at: Instant,
         observer: Arc<dyn Fn(DeveloperDetailEvent) + Send + Sync>,
     ) -> Self {
+        Self::with_developer_detail_gate(started_at, observer, DeveloperDetailCaptureGate::new())
+    }
+
+    /// Start developer capture controlled by a shared, one-way turn gate.
+    pub fn with_developer_detail_gate(
+        started_at: Instant,
+        observer: Arc<dyn Fn(DeveloperDetailEvent) + Send + Sync>,
+        developer_capture_gate: DeveloperDetailCaptureGate,
+    ) -> Self {
         Self {
             started_at,
             next_seq: AtomicU64::new(0),
             timeline: Mutex::new(Vec::new()),
             developer_enabled: true,
+            developer_capture_gate,
             developer: Mutex::new(Vec::new()),
             developer_observer: Some(observer),
             developer_dropped: AtomicUsize::new(0),
@@ -835,7 +913,7 @@ impl RecordingTurnTrace {
         tool_kinds: &std::collections::HashMap<String, crate::activity::ToolActivityKind>,
     ) {
         use crate::events::StreamEvent;
-        if self.developer_enabled {
+        if self.developer_enabled && self.developer_capture_gate.is_enabled() {
             let detail = match event {
                 StreamEvent::TurnPhase { phase } => Some(DeveloperDetailDraft::stage(
                     format!("Host phase: {phase:?}"),
@@ -987,7 +1065,7 @@ impl RecordingTurnTrace {
 
 impl RecordingTurnTrace {
     fn push_developer(&self, detail: DeveloperDetailDraft) {
-        if !self.developer_enabled {
+        if !self.developer_enabled || !self.developer_capture_gate.is_enabled() {
             return;
         }
         let elapsed_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -999,7 +1077,9 @@ impl RecordingTurnTrace {
         let event = bound_developer_event(seq, Some(elapsed_ms), detail);
         let retained = {
             let mut events = self.developer.lock().expect("developer trace lock");
-            if events.len() >= MAX_DEVELOPER_EVENTS {
+            // Re-check at the retention boundary. Suppression is one-way, so
+            // no later re-enable can make a post-toggle draft observable.
+            if !self.developer_capture_gate.is_enabled() || events.len() >= MAX_DEVELOPER_EVENTS {
                 false
             } else {
                 events.push(event.clone());
@@ -1008,7 +1088,8 @@ impl RecordingTurnTrace {
         };
         if retained {
             if let Some(observer) = self.developer_observer.as_ref() {
-                observer(event);
+                self.developer_capture_gate
+                    .observe_if_enabled(|| observer(event));
             }
         } else {
             // Never a silent loss: this event never entered `developer` at
@@ -1135,7 +1216,7 @@ impl TurnTraceSink for RecordingTurnTrace {
     }
 
     fn developer_detail_enabled(&self) -> bool {
-        self.developer_enabled
+        self.developer_enabled && self.developer_capture_gate.is_enabled()
     }
 
     fn record_provider(&self, call: TracedCall, detail: Option<DeveloperDetailDraft>) {
@@ -1835,6 +1916,100 @@ mod tests {
             .unwrap();
         assert!(sink.developer_events().is_empty());
         assert!(!format!("{sink:?}").contains("private-default-off-sentinel"));
+    }
+
+    #[test]
+    fn suppressing_a_turn_gate_stops_retention_and_observation_permanently() {
+        let observed = Arc::new(AtomicUsize::new(0));
+        let observer_count = observed.clone();
+        let gate = DeveloperDetailCaptureGate::new();
+        let sink = RecordingTurnTrace::with_developer_detail_gate(
+            Instant::now(),
+            Arc::new(move |_| {
+                observer_count.fetch_add(1, Ordering::SeqCst);
+            }),
+            gate.clone(),
+        );
+
+        sink.record_developer(DeveloperDetailDraft::stage("before off", "running"));
+        gate.suppress();
+        sink.record_developer(DeveloperDetailDraft::stage(
+            "post-toggle private sentinel",
+            "running",
+        ));
+        sink.record_host_event(
+            &crate::events::StreamEvent::TurnCompleted {
+                reason: "stop".to_string(),
+            },
+            &HashMap::new(),
+        );
+
+        let events = sink.developer_events();
+        assert_eq!(events.len(), 1, "post-toggle detail must not be retained");
+        assert_eq!(events[0].label, "before off");
+        assert_eq!(observed.load(Ordering::SeqCst), 1);
+        assert!(!gate.is_enabled(), "the gate is deliberately one-way");
+    }
+
+    #[test]
+    fn suppress_waits_for_an_admitted_observer_and_blocks_every_later_callback() {
+        let observer_entered = Arc::new(std::sync::Barrier::new(2));
+        let release_observer = Arc::new(std::sync::Barrier::new(2));
+        let observer_calls = Arc::new(AtomicUsize::new(0));
+        let gate = DeveloperDetailCaptureGate::new();
+        let sink = Arc::new(RecordingTurnTrace::with_developer_detail_gate(
+            Instant::now(),
+            {
+                let observer_entered = observer_entered.clone();
+                let release_observer = release_observer.clone();
+                let observer_calls = observer_calls.clone();
+                Arc::new(move |_| {
+                    if observer_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        observer_entered.wait();
+                        release_observer.wait();
+                    }
+                })
+            },
+            gate.clone(),
+        ));
+
+        let recording = {
+            let sink = sink.clone();
+            std::thread::spawn(move || {
+                sink.record_developer(DeveloperDetailDraft::stage("before off", "running"));
+            })
+        };
+        observer_entered.wait();
+
+        let suppression_started = Arc::new(std::sync::Barrier::new(2));
+        let (suppressed_tx, suppressed_rx) = std::sync::mpsc::channel();
+        let suppressing = {
+            let gate = gate.clone();
+            let suppression_started = suppression_started.clone();
+            std::thread::spawn(move || {
+                suppression_started.wait();
+                gate.suppress();
+                suppressed_tx.send(()).unwrap();
+            })
+        };
+        suppression_started.wait();
+        assert!(
+            suppressed_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "suppress must not return while an admitted observer is still running"
+        );
+
+        release_observer.wait();
+        recording.join().unwrap();
+        suppressed_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("suppression returns after the admitted observer exits");
+        suppressing.join().unwrap();
+
+        sink.record_developer(DeveloperDetailDraft::stage("after off", "running"));
+        assert_eq!(observer_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(sink.developer_events().len(), 1);
     }
 
     #[test]

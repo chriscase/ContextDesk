@@ -261,6 +261,9 @@ export function ChatPane(props: ChatPaneProps) {
   const [developerRecords, setDeveloperRecords] = useState<
     Record<string, DeveloperDetailEvent[]>
   >({});
+  const developerDetailEnabledRef = useRef(activity.developerDetail);
+  const retiredSessionRef = useRef(false);
+  const suppressedDeveloperMessageIdsRef = useRef<Set<string>>(new Set());
   const chatBodyRef = useRef<HTMLDivElement>(null);
   const [chatBodyWidth, setChatBodyWidth] = useState<number | null>(null);
 
@@ -294,14 +297,28 @@ export function ChatPane(props: ChatPaneProps) {
   // life of the process, and a cached "no record" answer would outlive the
   // session it was asked about.
   useEffect(() => {
+    retiredSessionRef.current = false;
+    suppressedDeveloperMessageIdsRef.current.clear();
     setActivityRecords({});
     setDeveloperRecords({});
   }, [resolvedSessionId]);
+
+  useEffect(() => {
+    developerDetailEnabledRef.current = activity.developerDetail;
+    if (!activity.developerDetail) setDeveloperRecords({});
+  }, [activity.developerDetail]);
 
   useEffect(
     () =>
       subscribeDeveloperDetail((envelope) => {
         if (envelope.sessionId !== resolvedSessionId) return;
+        if (
+          !developerDetailEnabledRef.current ||
+          retiredSessionRef.current ||
+          suppressedDeveloperMessageIdsRef.current.has(envelope.messageId)
+        ) {
+          return;
+        }
         setDeveloperRecords((current) => ({
           ...current,
           [envelope.messageId]: [
@@ -336,10 +353,13 @@ export function ChatPane(props: ChatPaneProps) {
         // this pane) is now either wrong or forbidden to keep — clear both
         // caches wholesale rather than try to enumerate which message ids
         // might still be referenced.
+        retiredSessionRef.current = true;
         setActivityRecords({});
         setDeveloperRecords({});
         return;
       }
+
+      if (retiredSessionRef.current) return;
 
       const messageIds = messages
         .filter((message) => message.role === "assistant" && !message.streaming)
@@ -365,7 +385,7 @@ export function ChatPane(props: ChatPaneProps) {
           const record = await fetchTurnActivity(resolvedSessionId, messageId);
           if (record) refreshed[messageId] = record;
         }
-        if (Object.keys(refreshed).length > 0) {
+        if (!retiredSessionRef.current && Object.keys(refreshed).length > 0) {
           // Refreshed host records are authoritative. In particular they must
           // replace a cached null ("not recorded") or stale pending record.
           setActivityRecords((current) => ({ ...current, ...refreshed }));
@@ -394,7 +414,9 @@ export function ChatPane(props: ChatPaneProps) {
       }
       // A null result is cached deliberately: "the host has no record for
       // this turn" is an answer, and re-asking every render would hammer IPC.
-      if (!cancelled) setActivityRecords((prev) => ({ ...loaded, ...prev }));
+      if (!cancelled && !retiredSessionRef.current) {
+        setActivityRecords((prev) => ({ ...loaded, ...prev }));
+      }
     })();
     return () => {
       cancelled = true;
@@ -417,7 +439,13 @@ export function ChatPane(props: ChatPaneProps) {
       for (const id of pendingDeveloperIds) {
         loaded[id] = await fetchDeveloperTurnActivity(resolvedSessionId, id);
       }
-      if (!cancelled) setDeveloperRecords((current) => ({ ...loaded, ...current }));
+      if (
+        !cancelled &&
+        developerDetailEnabledRef.current &&
+        !retiredSessionRef.current
+      ) {
+        setDeveloperRecords((current) => ({ ...loaded, ...current }));
+      }
     })();
     return () => {
       cancelled = true;
@@ -435,24 +463,22 @@ export function ChatPane(props: ChatPaneProps) {
     [activityRecords, activity.developerDetail, developerRecords],
   );
 
-  // Turning Developer detail off while a turn is still streaming stops the
-  // host from delivering further sensitive events for THIS turn immediately
-  // (see `suppress_developer_activity_detail`) rather than continuing
-  // silently until the turn ends. Capture already in flight for the current
-  // round is not retroactively un-sent; the safest bound achievable without
-  // threading a live flag through the whole tool loop is "no further
-  // delivery from the moment the operator asks for it", which is what this
-  // gives. Turning it back on only ever affects a later turn.
+  // Off is a synchronous renderer boundary as well as a host request: evict
+  // sensitive cache immediately, reject queued/late events for each current
+  // streaming message, and close the host's one-way capture gate. Turning it
+  // back on affects later turns; it cannot reopen a suppressed generation.
   const handleDeveloperDetailChange = useCallback(
     (enabled: boolean) => {
+      developerDetailEnabledRef.current = enabled;
       activity.setDeveloperDetail(enabled);
       if (enabled || !resolvedSessionId) return;
-      const hasStreamingTurn = messages.some(
-        (message) => message.role === "assistant" && message.streaming,
-      );
-      if (hasStreamingTurn) {
-        void hostSuppressDeveloperActivityDetail(resolvedSessionId);
+      setDeveloperRecords({});
+      for (const message of messages) {
+        if (message.role === "assistant" && message.streaming) {
+          suppressedDeveloperMessageIdsRef.current.add(message.id);
+        }
       }
+      void hostSuppressDeveloperActivityDetail(resolvedSessionId);
     },
     [activity, resolvedSessionId, messages],
   );

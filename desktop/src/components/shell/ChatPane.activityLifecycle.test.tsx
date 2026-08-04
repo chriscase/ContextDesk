@@ -1,15 +1,31 @@
 import { createRef } from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { HostTurnActivityRecord } from "../../lib/activity/types";
-import { saveActivityMode, saveDeveloperActivityDetail } from "../../lib/activity/prefs";
+import type {
+  DeveloperDetailEvent,
+  HostTurnActivityRecord,
+} from "../../lib/activity/types";
+import { publishDeveloperDetail } from "../../lib/activity/developerDetailBridge";
+import {
+  saveActivityMode,
+  saveDeveloperActivityDetail,
+} from "../../lib/activity/prefs";
 import { publishTurnActivityUpdate } from "../../lib/activity/turnActivityUpdateBridge";
 import type { Msg } from "../../lib/session";
 import { ChatPane } from "./ChatPane";
 
 const engine = vi.hoisted(() => ({
   fetchTurnActivity: vi.fn(),
-  fetchDeveloperTurnActivity: vi.fn(async () => []),
+  fetchDeveloperTurnActivity: vi.fn(
+    async (): Promise<DeveloperDetailEvent[]> => [],
+  ),
 }));
 const hostMocks = vi.hoisted(() => ({
   suppressDeveloperActivityDetail: vi.fn(async () => undefined),
@@ -20,7 +36,8 @@ vi.mock("../../lib/host", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../lib/host")>();
   return {
     ...original,
-    hostSuppressDeveloperActivityDetail: hostMocks.suppressDeveloperActivityDetail,
+    hostSuppressDeveloperActivityDetail:
+      hostMocks.suppressDeveloperActivityDetail,
   };
 });
 vi.mock("./MessageRow", () => ({
@@ -32,12 +49,20 @@ vi.mock("./MessageRow", () => ({
     activityTurn: {
       liveRecord: boolean;
       events: Array<{ status: string; label: string }>;
+      developerDetail: DeveloperDetailEvent[];
     } | null;
   }) => (
-    <div data-testid={`activity-state-${msg.id}`}>
-      {activityTurn?.liveRecord ? "recorded by host" : "not recorded by host"}
-      {activityTurn?.events.map((event) => `${event.status}:${event.label}`).join("|")}
-    </div>
+    <>
+      <div data-testid={`activity-state-${msg.id}`}>
+        {activityTurn?.liveRecord ? "recorded by host" : "not recorded by host"}
+        {activityTurn?.events
+          .map((event) => `${event.status}:${event.label}`)
+          .join("|")}
+      </div>
+      <div data-testid={`developer-state-${msg.id}`}>
+        {activityTurn?.developerDetail.map((event) => event.label).join("|")}
+      </div>
+    </>
   ),
 }));
 
@@ -89,6 +114,24 @@ function permissionRecord(resolved: boolean): HostTurnActivityRecord {
           },
         ]
       : [pending],
+  };
+}
+
+function developerEvent(label: string, seq = 0): DeveloperDetailEvent {
+  return {
+    seq,
+    elapsed_ms: 1,
+    kind: "deterministic_stage",
+    label,
+    provider: null,
+    model: null,
+    round: null,
+    tool_name: null,
+    offered_tools: [],
+    request: [],
+    response: null,
+    status: "running",
+    sensitive: true,
   };
 }
 
@@ -159,6 +202,8 @@ beforeEach(() => {
   saveActivityMode("off");
   saveDeveloperActivityDetail(false);
   engine.fetchTurnActivity.mockReset();
+  engine.fetchDeveloperTurnActivity.mockReset();
+  engine.fetchDeveloperTurnActivity.mockResolvedValue([]);
   hostMocks.suppressDeveloperActivityDetail.mockClear();
 });
 
@@ -177,7 +222,9 @@ describe("ChatPane late activity lifecycle", () => {
     fireEvent.click(screen.getByTestId("activity-toggle-compact"));
 
     const state = await screen.findByTestId("activity-state-assistant-1");
-    await waitFor(() => expect(state.textContent).toContain("pending:Awaiting permission"));
+    await waitFor(() =>
+      expect(state.textContent).toContain("pending:Awaiting permission"),
+    );
 
     publishTurnActivityUpdate({ sessionId: "different-session" });
     expect(engine.fetchTurnActivity).toHaveBeenCalledTimes(1);
@@ -198,7 +245,9 @@ describe("ChatPane late activity lifecycle", () => {
     fireEvent.click(screen.getByTestId("activity-toggle-compact"));
 
     const state = await screen.findByTestId("activity-state-assistant-1");
-    await waitFor(() => expect(state.textContent).toContain("not recorded by host"));
+    await waitFor(() =>
+      expect(state.textContent).toContain("not recorded by host"),
+    );
     publishTurnActivityUpdate({ sessionId: "session-a" });
     await waitFor(() => expect(state.textContent).toMatch(/^recorded by host/));
     expect(state.textContent).not.toMatch(/^not recorded by host/);
@@ -216,7 +265,9 @@ describe("ChatPane late activity lifecycle", () => {
     fireEvent.click(screen.getByTestId("activity-toggle-compact"));
 
     const state = await screen.findByTestId("activity-state-assistant-1");
-    await waitFor(() => expect(state.textContent).toContain("pending:Awaiting permission"));
+    await waitFor(() =>
+      expect(state.textContent).toContain("pending:Awaiting permission"),
+    );
     expect(engine.fetchTurnActivity).toHaveBeenCalledTimes(1);
 
     // Turn Activity Off. The permission then resolves while Off — the
@@ -278,7 +329,10 @@ describe("ChatPane late activity lifecycle", () => {
     const state = await screen.findByTestId("activity-state-assistant-1");
     await waitFor(() => expect(state.textContent).toMatch(/^recorded by host/));
 
-    publishTurnActivityUpdate({ sessionId: "some-other-session", retired: true });
+    publishTurnActivityUpdate({
+      sessionId: "some-other-session",
+      retired: true,
+    });
     // Give any (incorrect) handler a turn to run before asserting nothing changed.
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(state.textContent).toMatch(/^recorded by host/);
@@ -291,7 +345,11 @@ describe("ChatPane late activity lifecycle", () => {
 describe("ChatPane developer detail mid-turn toggle", () => {
   it("suppresses the in-flight turn when turned off while a message is streaming", async () => {
     engine.fetchTurnActivity.mockResolvedValue(null);
-    const streamingMessage: Msg = { ...message, id: "assistant-2", streaming: true };
+    const streamingMessage: Msg = {
+      ...message,
+      id: "assistant-2",
+      streaming: true,
+    };
     const base = props();
     render(
       <ChatPane
@@ -310,12 +368,14 @@ describe("ChatPane developer detail mid-turn toggle", () => {
     fireEvent.click(screen.getByTestId("activity-toggle-developer-detail")); // Off, mid-stream
 
     await waitFor(() =>
-      expect(hostMocks.suppressDeveloperActivityDetail).toHaveBeenCalledWith("session-a"),
+      expect(hostMocks.suppressDeveloperActivityDetail).toHaveBeenCalledWith(
+        "session-a",
+      ),
     );
     expect(hostMocks.suppressDeveloperActivityDetail).toHaveBeenCalledTimes(1);
   });
 
-  it("does not call suppress when turned off with no streaming turn", async () => {
+  it("sends a harmless suppression request even when streaming state is stale", async () => {
     engine.fetchTurnActivity.mockResolvedValue(null);
     render(<ChatPane {...props()} />); // `message` here is not streaming
 
@@ -323,14 +383,20 @@ describe("ChatPane developer detail mid-turn toggle", () => {
     fireEvent.click(screen.getByTestId("activity-toggle-developer-detail")); // On
     fireEvent.click(screen.getByTestId("activity-toggle-developer-detail")); // Off
 
-    // Give the (would-be) call a turn to happen before asserting it did not.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(hostMocks.suppressDeveloperActivityDetail).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(hostMocks.suppressDeveloperActivityDetail).toHaveBeenCalledWith(
+        "session-a",
+      ),
+    );
   });
 
   it("does not call suppress when turning developer detail ON", async () => {
     engine.fetchTurnActivity.mockResolvedValue(null);
-    const streamingMessage: Msg = { ...message, id: "assistant-2", streaming: true };
+    const streamingMessage: Msg = {
+      ...message,
+      id: "assistant-2",
+      streaming: true,
+    };
     render(
       <ChatPane
         {...props()}
@@ -344,5 +410,97 @@ describe("ChatPane developer detail mid-turn toggle", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(hostMocks.suppressDeveloperActivityDetail).not.toHaveBeenCalled();
+  });
+
+  it("evicts cached detail on Off and rejects late events after re-enable", async () => {
+    engine.fetchTurnActivity.mockResolvedValue(null);
+    const streamingMessage: Msg = {
+      ...message,
+      id: "assistant-2",
+      streaming: true,
+    };
+    const base = props();
+    render(
+      <ChatPane
+        {...base}
+        messages={[streamingMessage]}
+        visibleMessages={[streamingMessage]}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("activity-toggle-trigger"));
+    fireEvent.click(screen.getByTestId("activity-toggle-compact"));
+    fireEvent.click(screen.getByTestId("activity-toggle-trigger"));
+    fireEvent.click(screen.getByTestId("activity-toggle-developer-detail"));
+    await waitFor(() =>
+      expect(
+        screen
+          .getByTestId("activity-toggle-developer-detail")
+          .getAttribute("aria-checked"),
+      ).toBe("true"),
+    );
+    act(() => {
+      publishDeveloperDetail({
+        sessionId: "session-a",
+        messageId: streamingMessage.id,
+        event: developerEvent("before off"),
+      });
+    });
+    const developerState = screen.getByTestId("developer-state-assistant-2");
+    await waitFor(() => expect(developerState.textContent).toBe("before off"));
+
+    fireEvent.click(screen.getByTestId("activity-toggle-developer-detail"));
+    expect(developerState.textContent).toBe("");
+    act(() => {
+      publishDeveloperDetail({
+        sessionId: "session-a",
+        messageId: streamingMessage.id,
+        event: developerEvent("during off", 1),
+      });
+    });
+    fireEvent.click(screen.getByTestId("activity-toggle-developer-detail"));
+    act(() => {
+      publishDeveloperDetail({
+        sessionId: "session-a",
+        messageId: streamingMessage.id,
+        event: developerEvent("late after re-enable", 2),
+      });
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(developerState.textContent).toBe("");
+  });
+
+  it("does not repopulate renderer detail after retirement wins a fetch race", async () => {
+    engine.fetchTurnActivity.mockResolvedValue(null);
+    let resolveDeveloperFetch!: (events: DeveloperDetailEvent[]) => void;
+    engine.fetchDeveloperTurnActivity.mockImplementation(
+      () =>
+        new Promise<DeveloperDetailEvent[]>((resolve) => {
+          resolveDeveloperFetch = resolve;
+        }),
+    );
+    render(<ChatPane {...props()} />);
+
+    fireEvent.click(screen.getByTestId("activity-toggle-trigger"));
+    fireEvent.click(screen.getByTestId("activity-toggle-compact"));
+    fireEvent.click(screen.getByTestId("activity-toggle-trigger"));
+    fireEvent.click(screen.getByTestId("activity-toggle-developer-detail"));
+    await waitFor(() =>
+      expect(engine.fetchDeveloperTurnActivity).toHaveBeenCalled(),
+    );
+    act(() => {
+      publishTurnActivityUpdate({ sessionId: "session-a", retired: true });
+      resolveDeveloperFetch([developerEvent("late fetched secret")]);
+      publishDeveloperDetail({
+        sessionId: "session-a",
+        messageId: message.id,
+        event: developerEvent("late live secret", 1),
+      });
+    });
+
+    const developerState = screen.getByTestId("developer-state-assistant-1");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(developerState.textContent).toBe("");
   });
 });
