@@ -6114,7 +6114,21 @@ mod tests {
         .unwrap();
 
         let events = sink.developer_events();
-        let kinds: Vec<DeveloperDetailKind> = events.iter().map(|e| e.kind).collect();
+        // Context-provenance rows now share this causal stream before each
+        // provider round. This oracle is specifically about the four
+        // pre-execution tool rejection rows, so select those without treating
+        // truthful context rows as an ordering regression.
+        let tool_events: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.kind,
+                    DeveloperDetailKind::ToolCall | DeveloperDetailKind::ToolResult
+                )
+            })
+            .collect();
+        let kinds: Vec<DeveloperDetailKind> =
+            tool_events.iter().map(|event| event.kind).collect();
         assert_eq!(
             kinds,
             vec![
@@ -6124,7 +6138,7 @@ mod tests {
                 DeveloperDetailKind::ToolResult, // search_logs: rejected-result draft
             ],
             "every rejection that used to vanish must now appear, in the exact \
-             order the model→tool exchange actually happened; got {events:?}"
+             order the model→tool exchange actually happened; got {tool_events:?}"
         );
 
         // Causal order: monotonic, and never fabricated (each entry's
@@ -6134,25 +6148,25 @@ mod tests {
         }
         assert!(events.iter().all(|e| e.elapsed_ms.is_some()));
 
-        assert_eq!(events[0].status, "rejected");
+        assert_eq!(tool_events[0].status, "rejected");
         assert!(
-            events[0].request[0].content.contains("{not json"),
+            tool_events[0].request[0].content.contains("{not json"),
             "the malformed request must retain the raw text as evidence: {:?}",
-            events[0]
+            tool_events[0]
         );
-        assert_eq!(events[1].status, "rejected");
-        assert!(events[1].request[0].content.contains("[1,2,3]"));
-        assert_eq!(events[2].status, "selected"); // the tool_call draft itself
-        assert_eq!(events[3].status, "failed"); // the rejection result
+        assert_eq!(tool_events[1].status, "rejected");
+        assert!(tool_events[1].request[0].content.contains("[1,2,3]"));
+        assert_eq!(tool_events[2].status, "selected"); // the tool_call draft itself
+        assert_eq!(tool_events[3].status, "failed"); // the rejection result
         assert!(
-            events[3]
+            tool_events[3]
                 .response
                 .as_ref()
                 .unwrap()
                 .content
                 .contains("not available to an ordinary chat"),
             "{:?}",
-            events[3]
+            tool_events[3]
         );
     }
 
