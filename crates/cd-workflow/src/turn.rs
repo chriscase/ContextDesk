@@ -33,6 +33,9 @@ use crate::provider::ResolvedTurnInputs;
 /// deadlines, tracing, and skill provenance cannot drift between hosts.
 #[derive(Default)]
 pub struct TurnExecutionOptions<'a> {
+    /// Stable host id for this concrete turn. `None` lets core allocate a
+    /// fresh fallback, never the session id.
+    pub turn_id: Option<String>,
     pub context: Option<LogExplorerTurnContext>,
     pub cancel: Option<Arc<AtomicBool>>,
     pub dry_run: bool,
@@ -75,6 +78,7 @@ pub async fn run_turn(
         options.dry_run,
         options.trace_sink,
         options.applied_skill_ids,
+        options.turn_id,
     )
     .await
 }
@@ -175,6 +179,7 @@ pub async fn run_linked_turn(
         history,
         session_id,
         TurnExecutionOptions {
+            turn_id: None,
             context: Some(context),
             cancel,
             dry_run,

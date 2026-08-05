@@ -107,6 +107,8 @@ pub struct ChatWorkflowRequest<'a> {
 pub struct ChatWorkflowOutcome {
     /// The session this turn ran against (existing or newly created).
     pub session_id: String,
+    /// Stable id for this concrete workflow turn.
+    pub turn_id: String,
     /// Every stream event across every internal permission round.
     pub events: Vec<StreamEvent>,
     /// Convenience: the concatenation of every `TextDelta` chunk.
@@ -232,6 +234,7 @@ pub async fn run_chat_workflow(
         None => None,
     };
 
+    let turn_id = format!("{}::{}", session_id, uuid::Uuid::new_v4());
     let mut all_events = Vec::new();
     let mut rounds = 0usize;
     // A concrete, always-present sink lets each loop iteration reborrow the
@@ -254,6 +257,7 @@ pub async fn run_chat_workflow(
             &mut history,
             &session_id,
             TurnExecutionOptions {
+                turn_id: Some(turn_id.clone()),
                 context: linked_context.clone(),
                 cancel: cancel.clone(),
                 dry_run: request.dry_run,
@@ -346,6 +350,7 @@ pub async fn run_chat_workflow(
 
     Ok(ChatWorkflowOutcome {
         session_id,
+        turn_id,
         events: all_events,
         provider_profile_id: resolved.profile.id.clone(),
         chat_model: resolved.profile.chat_model.clone(),
@@ -442,6 +447,11 @@ mod tests {
         .expect("chat workflow should complete against the mocked provider");
 
         assert_eq!(outcome.final_text, "hello from the mock model");
+        assert!(outcome
+            .turn_id
+            .starts_with(&format!("{}::", outcome.session_id)));
+        assert_ne!(outcome.turn_id, outcome.session_id);
+        assert_ne!(outcome.turn_id, format!("{}::cli", outcome.session_id));
         assert!(outcome.events.iter().any(
             |event| matches!(event, StreamEvent::TurnCompleted { reason } if reason == "stop")
         ));
@@ -644,6 +654,10 @@ mod tests {
         .expect("dry run must complete without a real provider request");
 
         assert_eq!(outcome.session_id, existing.id);
+        assert!(outcome
+            .turn_id
+            .starts_with(&format!("{}::", outcome.session_id)));
+        assert_ne!(outcome.turn_id, outcome.session_id);
         assert_eq!(
             outcome.final_text, "",
             "the dry-run backend never produces real content"

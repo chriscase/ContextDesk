@@ -1278,6 +1278,7 @@ mod tests {
     fn evaluate_continuity_passes_only_when_every_criterion_holds() {
         let outcome = ChatWorkflowOutcome {
             session_id: "sess-1".to_string(),
+            turn_id: "sess-1::turn-1".to_string(),
             events: vec![StreamEvent::TurnCompleted {
                 reason: "stop".to_string(),
             }],
@@ -1300,6 +1301,7 @@ mod tests {
     fn evaluate_continuity_names_every_failing_criterion() {
         let outcome = ChatWorkflowOutcome {
             session_id: "different-session".to_string(),
+            turn_id: "different-session::turn-1".to_string(),
             events: vec![
                 StreamEvent::Error {
                     code: "linked_no_tool".to_string(),

@@ -357,7 +357,7 @@ pub async fn run(
         None => None,
     };
 
-    let turn_id = format!("{}::cli", outcome.session_id);
+    let turn_id = outcome.turn_id.clone();
     let activity_record = args.activity.map(|level| {
         project_turn_activity(
             &outcome.session_id,

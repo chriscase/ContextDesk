@@ -837,6 +837,7 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint(
         false,
         None,
         &[],
+        None,
     )
     .await
 }
@@ -874,6 +875,7 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
     dry_run: bool,
     trace_sink: Option<Arc<dyn TurnTraceSink>>,
     applied_skill_ids: &[String],
+    turn_id: Option<String>,
 ) -> CoreResult<Vec<StreamEvent>> {
     if force_local {
         if linked_synthesis_retry.is_some() {
@@ -1059,6 +1061,7 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
         session_id,
         Some(profile.chat_model.clone()),
     );
+    opts.turn_id = turn_id.unwrap_or_default();
     opts.provider_profile_id = Some(profile.id.clone());
     opts.cancel = cancel;
     opts.log_explorer_context = log_explorer_context;

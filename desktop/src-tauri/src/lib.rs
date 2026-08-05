@@ -4960,6 +4960,13 @@ async fn agent_turn(
         let mut histories = state.histories.lock().expect("hist");
         histories.entry(req.session_id.clone()).or_default().clone()
     };
+    let turn_id = req
+        .client_assistant_message_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|message_id| !message_id.is_empty())
+        .map(|message_id| format!("{}::{message_id}", req.session_id))
+        .unwrap_or_else(|| format!("{}::{}", req.session_id, uuid::Uuid::new_v4()));
 
     // One capture object timestamps both provider completions and the live
     // host stream against the real turn origin. This preserves the causal
@@ -5152,6 +5159,7 @@ async fn agent_turn(
             &mut history,
             &req.session_id,
             cd_workflow::turn::TurnExecutionOptions {
+                turn_id: Some(turn_id.clone()),
                 context: log_explorer_context,
                 cancel: Some(cancel.clone()),
                 dry_run: false,
@@ -6100,7 +6108,12 @@ fn record_turn_activity(
     turn_started_at: tokio::time::Instant,
 ) -> bool {
     use cd_core::activity::{ActivityRecorder, ActivityStatus, DataScope, TurnActivityRecord};
-    let Some(message_id) = req.client_assistant_message_id.as_deref() else {
+    let Some(message_id) = req
+        .client_assistant_message_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|message_id| !message_id.is_empty())
+    else {
         // No durable message to hang the record off; storing it under a
         // synthesized key would make it unreachable anyway.
         return false;
@@ -6110,7 +6123,7 @@ fn record_turn_activity(
             Some(corpus_id) => DataScope::log_corpus(corpus_id),
             None => DataScope::conversation(),
         };
-        let turn_id = format!("{}::{}", req.session_id, message_id);
+        let turn_id = format!("{}::{message_id}", req.session_id);
         let mut recorder = ActivityRecorder::new(
             turn_id,
             req.session_id.clone(),
@@ -18101,6 +18114,10 @@ mod chat_session_host_tests {
         let agent_contract = &source[agent_start..agent_end];
         assert!(agent_contract.contains("histories.entry(req.session_id.clone())"));
         assert!(agent_contract.contains("cd_workflow::turn::run_turn"));
+        assert!(agent_contract.contains("client_assistant_message_id"));
+        assert!(agent_contract.contains("format!(\"{}::{message_id}\", req.session_id)"));
+        assert!(agent_contract.contains("uuid::Uuid::new_v4()"));
+        assert!(agent_contract.contains("turn_id: Some(turn_id.clone())"));
         assert!(!agent_contract
             .contains("research_turn_with_cancel_and_context_and_checkpoint_and_trace"));
 
