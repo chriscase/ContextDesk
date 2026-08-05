@@ -2939,6 +2939,22 @@ struct SaveConfluenceReq {
     /// HardWrite tools (#326 PR7). Default false when omitted.
     #[serde(default)]
     write_enabled: bool,
+    /// `bearer` (Server/DC) or `basic` (Cloud email+API token). Default bearer.
+    #[serde(default)]
+    auth_mode: Option<String>,
+    /// Account email for Basic auth (not secret).
+    #[serde(default)]
+    basic_email: Option<String>,
+}
+
+fn parse_confluence_auth_mode(raw: Option<&str>) -> Result<cd_core::config::ConfluenceAuthMode, String> {
+    match raw.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("bearer") {
+        "bearer" | "Bearer" => Ok(cd_core::config::ConfluenceAuthMode::Bearer),
+        "basic" | "Basic" => Ok(cd_core::config::ConfluenceAuthMode::Basic),
+        other => Err(format!(
+            "invalid Confluence auth_mode `{other}` (expected bearer or basic)"
+        )),
+    }
 }
 
 #[tauri::command]
@@ -2967,6 +2983,22 @@ fn save_confluence_settings(
         }
     }
 
+    let auth_mode = parse_confluence_auth_mode(req.auth_mode.as_deref())?;
+    let basic_email = req
+        .basic_email
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if matches!(auth_mode, cd_core::config::ConfluenceAuthMode::Basic)
+        && req.enabled
+        && basic_email.is_none()
+    {
+        return Err(
+            "Basic auth requires account email (Settings → Connectors → Confluence).".into(),
+        );
+    }
+
     let mut pat_ref = state
         .config
         .lock()
@@ -2992,6 +3024,8 @@ fn save_confluence_settings(
     cf.spaces = spaces;
     cf.pat_ref = pat_ref;
     cf.write_enabled = req.write_enabled;
+    cf.auth_mode = auth_mode;
+    cf.basic_email = basic_email;
 
     let mut cfg = state.config.lock().expect("config");
     cfg.confluence = cf.clone();
@@ -3113,7 +3147,10 @@ fn test_confluence_config(state: State<'_, AppState>) -> Result<String, String> 
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "PAT missing from keychain".to_string())?;
     let ro = cfg.to_ro_config();
-    let auth = cd_core::confluence_ro::ConfluenceAuth::bearer(pat);
+    // Honor auth_mode / basic_email from Settings (Bearer Server/DC, Basic Cloud).
+    let auth = cfg
+        .auth_from_pat(pat)
+        .map_err(|e| e.to_string())?;
     // Live probe (authenticated space list) — no PAT in returned message.
     let handle = tokio::runtime::Handle::try_current();
     let probe = if let Ok(h) = handle {
@@ -3161,7 +3198,10 @@ fn list_confluence_spaces(
         .ok_or_else(|| "PAT missing — save under Settings → Connectors → Confluence".to_string())?;
     let policy = SsrfPolicy::allow_private_networks();
     let ro = cfg.to_ro_config();
-    let auth = cd_core::confluence_ro::ConfluenceAuth::bearer(pat);
+    // Same auth_mode path as ToolHost / Test connection (not Bearer-only).
+    let auth = cfg
+        .auth_from_pat(pat)
+        .map_err(|e| e.to_string())?;
     let lim = limit.unwrap_or(50).min(100) as usize;
     let response = {
         let run = async {

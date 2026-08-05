@@ -1692,6 +1692,9 @@ export type ConfluenceSettingsDto = {
   spaces: string[];
   pat_ref: string | null;
   write_enabled?: boolean;
+  /** `bearer` | `basic` — serde rename_all snake_case from Rust. */
+  auth_mode?: "bearer" | "basic";
+  basic_email?: string | null;
 };
 
 export async function hostGetConfluence(): Promise<ConfluenceSettingsDto | null> {
@@ -1705,6 +1708,9 @@ export async function hostSaveConfluence(args: {
   spaces: string;
   pat?: string;
   writeEnabled?: boolean;
+  /** Server/DC Bearer PAT vs Cloud Basic email+token. */
+  authMode?: "bearer" | "basic";
+  basicEmail?: string;
 }): Promise<ConfluenceSettingsDto> {
   if (!isTauri()) {
     throw new Error("Confluence settings require Tauri host");
@@ -1716,6 +1722,8 @@ export async function hostSaveConfluence(args: {
       spaces: args.spaces,
       pat: args.pat ?? null,
       write_enabled: args.writeEnabled ?? false,
+      auth_mode: args.authMode ?? "bearer",
+      basic_email: args.basicEmail?.trim() || null,
     },
   });
 }

@@ -35,6 +35,10 @@ export type ConfluenceSetup = {
   hasToken: boolean;
   /** HardWrite Confluence create/update (default off). */
   writeEnabled?: boolean;
+  /** Server/DC Bearer vs Cloud Basic (email + API token). */
+  authMode?: "bearer" | "basic";
+  /** Account email for Basic auth (not secret). */
+  basicEmail?: string;
 };
 
 export type XSetup = {

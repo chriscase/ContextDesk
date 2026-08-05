@@ -8,7 +8,7 @@ import {
   type ConnectorDto,
   type NewsSourceDto,
 } from "../../lib/host";
-import type { AppSetupState } from "../../lib/preflight";
+import type { AppSetupState, ConfluenceSetup } from "../../lib/preflight";
 import {
   SecretField,
   SelectField,
@@ -16,6 +16,23 @@ import {
   ToggleField,
 } from "../forms";
 import { HelpTip, HelpTitle } from "../HelpTip";
+
+/** Preserve all Confluence draft fields when patching one control. */
+function mergeCf(
+  d: AppSetupState,
+  patch: Partial<ConfluenceSetup>,
+): ConfluenceSetup {
+  return {
+    enabled: d.confluence?.enabled ?? false,
+    baseUrl: d.confluence?.baseUrl ?? "",
+    spaces: d.confluence?.spaces ?? "",
+    hasToken: d.confluence?.hasToken ?? false,
+    writeEnabled: d.confluence?.writeEnabled ?? false,
+    authMode: d.confluence?.authMode ?? "bearer",
+    basicEmail: d.confluence?.basicEmail ?? "",
+    ...patch,
+  };
+}
 
 export type ConnectorsSectionProps = {
   baseId: string;
@@ -97,13 +114,7 @@ export function ConnectorsSection(props: ConnectorsSectionProps) {
     }
     setDraft((d) => ({
       ...d,
-      confluence: {
-        enabled: d.confluence?.enabled ?? true,
-        baseUrl: d.confluence?.baseUrl ?? "",
-        spaces: existing.join(", "),
-        hasToken: d.confluence?.hasToken ?? false,
-        writeEnabled: d.confluence?.writeEnabled ?? false,
-      },
+      confluence: mergeCf(d, { spaces: existing.join(", ") }),
     }));
   };
 
@@ -904,15 +915,42 @@ export function ConnectorsSection(props: ConnectorsSectionProps) {
     onChange={(enabled) =>
       setDraft((d) => ({
         ...d,
-        confluence: {
-          enabled,
-          baseUrl: d.confluence?.baseUrl ?? "",
-          spaces: d.confluence?.spaces ?? "",
-          hasToken: d.confluence?.hasToken ?? false,
-        },
+        confluence: mergeCf(d, { enabled }),
       }))
     }
   />
+  <SelectField
+    id={`${baseId}-cf-auth-mode`}
+    label="Auth mode"
+    hint="Server/DC: Bearer PAT. Cloud: Basic with account email + API token."
+    value={draft.confluence?.authMode ?? "bearer"}
+    onChange={(e) =>
+      setDraft((d) => ({
+        ...d,
+        confluence: mergeCf(d, {
+          authMode: e.target.value === "basic" ? "basic" : "bearer",
+        }),
+      }))
+    }
+  >
+    <option value="bearer">Bearer (Server/DC PAT)</option>
+    <option value="basic">Basic (Cloud email + API token)</option>
+  </SelectField>
+  {(draft.confluence?.authMode ?? "bearer") === "basic" ? (
+    <TextField
+      id={`${baseId}-cf-basic-email`}
+      label="Atlassian account email"
+      hint="Required for Basic auth — not a secret; stored in config."
+      value={draft.confluence?.basicEmail ?? ""}
+      onChange={(e) =>
+        setDraft((d) => ({
+          ...d,
+          confluence: mergeCf(d, { basicEmail: e.target.value }),
+        }))
+      }
+      placeholder="you@example.com"
+    />
+  ) : null}
   <TextField
     id={`${baseId}-cf-url`}
     label="Confluence base URL"
@@ -955,19 +993,14 @@ export function ConnectorsSection(props: ConnectorsSectionProps) {
     onChange={(e) =>
       setDraft((d) => ({
         ...d,
-        confluence: {
-          enabled: d.confluence?.enabled ?? true,
-          baseUrl: e.target.value,
-          spaces: d.confluence?.spaces ?? "",
-          hasToken: d.confluence?.hasToken ?? false,
-        },
+        confluence: mergeCf(d, { baseUrl: e.target.value }),
       }))
     }
     placeholder="https://your-confluence.example.com"
   />
   <SecretField
     id={`${baseId}-cf-pat`}
-    label="Personal access token"
+    label="Personal access token / API token"
     hint="Stored in keychain only."
     help={{
       label: "Confluence PAT",
@@ -1011,12 +1044,7 @@ export function ConnectorsSection(props: ConnectorsSectionProps) {
       if (v.trim()) {
         setDraft((d) => ({
           ...d,
-          confluence: {
-            enabled: d.confluence?.enabled ?? true,
-            baseUrl: d.confluence?.baseUrl ?? "",
-            spaces: d.confluence?.spaces ?? "",
-            hasToken: true,
-          },
+          confluence: mergeCf(d, { hasToken: true }),
         }));
       }
     }}
@@ -1030,13 +1058,7 @@ export function ConnectorsSection(props: ConnectorsSectionProps) {
     onChange={(e) =>
       setDraft((d) => ({
         ...d,
-        confluence: {
-          enabled: d.confluence?.enabled ?? true,
-          baseUrl: d.confluence?.baseUrl ?? "",
-          spaces: e.target.value,
-          hasToken: d.confluence?.hasToken ?? false,
-          writeEnabled: d.confluence?.writeEnabled ?? false,
-        },
+        confluence: mergeCf(d, { spaces: e.target.value }),
       }))
     }
     placeholder="ENG, DOCS"
@@ -1049,13 +1071,7 @@ export function ConnectorsSection(props: ConnectorsSectionProps) {
     onChange={(on) =>
       setDraft((d) => ({
         ...d,
-        confluence: {
-          enabled: d.confluence?.enabled ?? true,
-          baseUrl: d.confluence?.baseUrl ?? "",
-          spaces: d.confluence?.spaces ?? "",
-          hasToken: d.confluence?.hasToken ?? false,
-          writeEnabled: on,
-        },
+        confluence: mergeCf(d, { writeEnabled: on }),
       }))
     }
   />
@@ -1066,13 +1082,16 @@ export function ConnectorsSection(props: ConnectorsSectionProps) {
       onClick={() => {
         void (async () => {
           try {
-            // Save first so test sees latest URL/token
+            // Save first so test sees latest URL/token/auth mode
             await hostSaveConfluence({
               enabled: draft.confluence?.enabled ?? false,
               baseUrl: draft.confluence?.baseUrl ?? "",
               spaces: draft.confluence?.spaces ?? "",
               pat: cfTokenDraft.trim() || undefined,
               writeEnabled: draft.confluence?.writeEnabled ?? false,
+              authMode:
+                draft.confluence?.authMode === "basic" ? "basic" : "bearer",
+              basicEmail: draft.confluence?.basicEmail ?? "",
             });
             const msg = await hostTestConfluence();
             setCfStatus(msg);
@@ -1101,6 +1120,9 @@ export function ConnectorsSection(props: ConnectorsSectionProps) {
               spaces: draft.confluence?.spaces ?? "",
               pat: cfTokenDraft.trim() || undefined,
               writeEnabled: draft.confluence?.writeEnabled ?? false,
+              authMode:
+                draft.confluence?.authMode === "basic" ? "basic" : "bearer",
+              basicEmail: draft.confluence?.basicEmail ?? "",
             });
             const list = await hostListConfluenceSpaces(50);
             setCfDiscovered(list);

@@ -100,6 +100,40 @@ impl ConfluenceSettings {
             url_style: self.url_style,
         }
     }
+
+    /// Build HTTP auth from this settings profile + a host-resolved PAT/token.
+    ///
+    /// Shared by desktop Test/List Spaces, ToolHost, and CLI so Cloud Basic and
+    /// Server/DC Bearer cannot diverge. Never logs `pat`.
+    pub fn auth_from_pat(
+        &self,
+        pat: impl Into<String>,
+    ) -> crate::error::CoreResult<crate::confluence_ro::ConfluenceAuth> {
+        let pat = pat.into();
+        if pat.trim().is_empty() {
+            return Err(crate::error::CoreError::Policy(
+                "Confluence PAT/token is empty".into(),
+            ));
+        }
+        match self.auth_mode {
+            ConfluenceAuthMode::Bearer => Ok(crate::confluence_ro::ConfluenceAuth::bearer(pat)),
+            ConfluenceAuthMode::Basic => {
+                let email = self
+                    .basic_email
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|e| !e.is_empty())
+                    .ok_or_else(|| {
+                        crate::error::CoreError::Policy(
+                            "Confluence Basic auth requires account email (Settings → Connectors)"
+                                .into(),
+                        )
+                    })?
+                    .to_string();
+                Ok(crate::confluence_ro::ConfluenceAuth::Basic { email, token: pat })
+            }
+        }
+    }
 }
 
 /// On-disk application configuration (no raw API keys / PATs).
@@ -574,6 +608,77 @@ mod tests {
             ..ConfluenceSettings::default()
         };
         assert!(!c.is_configured());
+    }
+
+    #[test]
+    fn confluence_auth_from_pat_honors_basic_and_bearer() {
+        let bearer = ConfluenceSettings {
+            auth_mode: ConfluenceAuthMode::Bearer,
+            ..ConfluenceSettings::default()
+        };
+        let h = bearer
+            .auth_from_pat("server-pat")
+            .unwrap()
+            .authorization_header();
+        assert_eq!(h, "Bearer server-pat");
+
+        let basic_missing = ConfluenceSettings {
+            auth_mode: ConfluenceAuthMode::Basic,
+            basic_email: None,
+            ..ConfluenceSettings::default()
+        };
+        assert!(basic_missing.auth_from_pat("tok").is_err());
+
+        let basic = ConfluenceSettings {
+            auth_mode: ConfluenceAuthMode::Basic,
+            basic_email: Some("user@example.test".into()),
+            ..ConfluenceSettings::default()
+        };
+        let h = basic
+            .auth_from_pat("cloud-token")
+            .unwrap()
+            .authorization_header();
+        assert!(h.starts_with("Basic "), "{h}");
+        assert!(!h.contains("cloud-token"));
+        // Round-trip: decode would be email:token — header must not print token in Debug either.
+        let auth = basic.auth_from_pat("cloud-token").unwrap();
+        assert!(!format!("{auth:?}").contains("cloud-token"));
+    }
+
+    #[test]
+    #[allow(clippy::string_slice)] // ASCII-only include_str of host source; find offsets are char boundaries
+    fn desktop_test_and_list_spaces_use_auth_from_pat() {
+        // Structural proof: GUI host paths must not hardcode Bearer after Settings Basic.
+        let host = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../desktop/src-tauri/src/lib.rs"
+        ));
+        let test_fn = host
+            .find("fn test_confluence_config")
+            .expect("test_confluence_config");
+        let list_fn = host
+            .find("fn list_confluence_spaces")
+            .expect("list_confluence_spaces");
+        let save_fn = host
+            .find("struct SaveConfluenceReq")
+            .expect("SaveConfluenceReq");
+        let end = |start: usize, n: usize| (start + n).min(host.len());
+        // These host fns are ~40–60 lines; take a wide ASCII window past the auth build.
+        let test_body = &host[test_fn..end(test_fn, 2_800)];
+        let list_body = &host[list_fn..end(list_fn, 2_400)];
+        let save_body = &host[save_fn..end(save_fn, 1_200)];
+        assert!(
+            test_body.contains("auth_from_pat") && !test_body.contains("ConfluenceAuth::bearer"),
+            "test_confluence_config must use auth_from_pat, not hardcode Bearer"
+        );
+        assert!(
+            list_body.contains("auth_from_pat") && !list_body.contains("ConfluenceAuth::bearer"),
+            "list_confluence_spaces must use auth_from_pat, not hardcode Bearer"
+        );
+        assert!(
+            save_body.contains("auth_mode") && save_body.contains("basic_email"),
+            "SaveConfluenceReq must persist auth_mode and basic_email"
+        );
     }
 
     #[test]

@@ -174,6 +174,9 @@ export function useSettingsController({
               baseUrl: cf.base_url,
               spaces: cf.spaces.join(", "),
               hasToken: has ?? Boolean(cf.pat_ref),
+              writeEnabled: cf.write_enabled ?? false,
+              authMode: cf.auth_mode === "basic" ? "basic" : "bearer",
+              basicEmail: cf.basic_email ?? "",
             }
           : d.confluence,
         x: x
@@ -566,6 +569,8 @@ export function useSettingsController({
         spaces: draft.confluence?.spaces ?? "",
         pat: cfTokenDraft.trim() || undefined,
         writeEnabled: draft.confluence?.writeEnabled ?? false,
+        authMode: draft.confluence?.authMode === "basic" ? "basic" : "bearer",
+        basicEmail: draft.confluence?.basicEmail ?? "",
       });
       const has = await hostConfluenceHasToken();
       next = {
@@ -576,6 +581,8 @@ export function useSettingsController({
           spaces: saved.spaces.join(", "),
           hasToken: has ?? Boolean(saved.pat_ref),
           writeEnabled: saved.write_enabled ?? false,
+          authMode: saved.auth_mode === "basic" ? "basic" : "bearer",
+          basicEmail: saved.basic_email ?? "",
         },
       };
     } catch {
