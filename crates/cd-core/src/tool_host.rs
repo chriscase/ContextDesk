@@ -920,10 +920,15 @@ pub struct ToolHost {
     harvest_db_path: Option<PathBuf>,
     /// When true, register Confluence HardWrite tools (#326 PR7). Default false.
     confluence_write_enabled: bool,
-    /// Process-local create idempotency: identical create payloads reuse the
-    /// first successful remote response (no second POST). Cleared on host drop.
+    /// Process-local create idempotency keyed by **explicit** operation id +
+    /// tenant/config fingerprint + payload digest (Sha256). Cleared on
+    /// connector reconfiguration. Independent creates without an operation id
+    /// never hit this map.
     confluence_create_idempotency:
         std::collections::HashMap<String, confluence_ro::ConfluencePageMeta>,
+    /// Fingerprint of the currently attached Confluence config (for idempotency
+    /// keys + retirement when config changes).
+    confluence_config_fingerprint: Option<String>,
     /// Base dir for session context packs (`…/.contextdesk`). #341
     session_context_base: Option<PathBuf>,
     /// Active chat session id for session-scoped context search/read. #341
@@ -1097,6 +1102,7 @@ impl ToolHost {
             harvest_db_path: None,
             confluence_write_enabled: false,
             confluence_create_idempotency: std::collections::HashMap::new(),
+            confluence_config_fingerprint: None,
             session_context_base: None,
             active_session_id: None,
             durable_memory_enabled: false,
@@ -1526,15 +1532,19 @@ impl ToolHost {
     }
 
     /// Attach Confluence RO config + PAT (from host keychain only).
+    ///
+    /// Retires create-idempotency entries whenever the attached tenant/config changes.
     pub fn set_confluence(&mut self, cfg: Option<ConfluenceRoConfig>, pat: Option<String>) {
         self.confluence = cfg;
         self.confluence_pat = pat;
+        self.refresh_confluence_config_fingerprint();
     }
 
     /// Set Confluence HTTP auth mode (Bearer PAT vs Basic email+token).
     ///
     /// Must be called by the host after reading `ConfluenceSettings` — tools never
     /// invent Basic credentials and never read the keychain themselves.
+    /// Retires create-idempotency on mode/email change.
     pub fn set_confluence_auth_mode(
         &mut self,
         mode: crate::config::ConfluenceAuthMode,
@@ -1544,11 +1554,59 @@ impl ToolHost {
         self.confluence_basic_email = basic_email
             .map(|e| e.trim().to_string())
             .filter(|e| !e.is_empty());
+        self.refresh_confluence_config_fingerprint();
     }
 
     /// Enable Confluence HardWrite tools when settings.write_enabled (default false).
     pub fn set_confluence_write_enabled(&mut self, enabled: bool) {
         self.confluence_write_enabled = enabled;
+    }
+
+    fn refresh_confluence_config_fingerprint(&mut self) {
+        let fp = self.confluence.as_ref().map(|cfg| {
+            confluence_config_fingerprint(
+                cfg,
+                self.confluence_auth_mode,
+                self.confluence_basic_email.as_deref(),
+            )
+        });
+        if fp != self.confluence_config_fingerprint {
+            self.confluence_create_idempotency.clear();
+            self.confluence_config_fingerprint = fp;
+        }
+    }
+
+    /// Apply Confluence settings via the **production** host seam (desktop + CLI).
+    ///
+    /// Secret-store reads happen **only** when `pat_ref` is recorded. Keyless
+    /// profiles perform zero `secrets.get` / `secrets.has` calls.
+    pub fn apply_confluence_from_settings(
+        &mut self,
+        settings: &crate::config::ConfluenceSettings,
+        secrets: &dyn crate::keychain_store::SecretStore,
+    ) {
+        if settings.enabled && settings.is_configured() {
+            let pat = if settings.pat_ref.is_some() {
+                // Prefer the stable product ref; fall back to the stored ref string.
+                let primary = crate::config::CONFLUENCE_PAT_REF;
+                secrets.get(primary).ok().flatten().or_else(|| {
+                    settings
+                        .pat_ref
+                        .as_deref()
+                        .filter(|r| *r != primary)
+                        .and_then(|r| secrets.get(r).ok().flatten())
+                })
+            } else {
+                None
+            };
+            self.set_confluence(Some(settings.to_ro_config()), pat);
+            self.set_confluence_auth_mode(settings.auth_mode, settings.basic_email.clone());
+            self.set_confluence_write_enabled(settings.write_enabled);
+        } else {
+            self.set_confluence(None, None);
+            self.set_confluence_auth_mode(crate::config::ConfluenceAuthMode::Bearer, None);
+            self.set_confluence_write_enabled(false);
+        }
     }
 
     /// Build auth material for a Confluence HTTP call from host-supplied mode + PAT.
@@ -5635,35 +5693,59 @@ impl ToolHost {
                 CoreError::Message("confluence_create_page requires body_storage".into())
             })?;
         let parent_id = args.get("parent_id").and_then(|v| v.as_str());
-        let idem_key = confluence_create_idempotency_key(space, title, body_storage, parent_id);
-        if let Some(cached) = self.confluence_create_idempotency.get(&idem_key).cloned() {
-            let raw = serde_json::to_string_pretty(&cached).unwrap_or_else(|_| "{}".into());
-            return Ok((
-                true,
-                format!(
-                    "idempotent create reuse page {} (no second remote write)",
-                    cached.id
-                ),
-                raw,
-                cached
-                    .url
-                    .clone()
-                    .or(Some(format!("confluence:{}", cached.id))),
-            ));
-        }
+        // Explicit host operation/retry identity only. Independent creates with
+        // the same payload and no operation id always hit the remote (never
+        // silently suppressed).
+        let operation_id = args
+            .get("idempotency_key")
+            .or_else(|| args.get("operation_id"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         let cfg = self
             .confluence
             .as_ref()
             .ok_or_else(|| CoreError::Policy("Confluence not configured".into()))?
             .clone();
+        let config_fp = self
+            .confluence_config_fingerprint
+            .clone()
+            .unwrap_or_else(|| {
+                confluence_config_fingerprint(
+                    &cfg,
+                    self.confluence_auth_mode,
+                    self.confluence_basic_email.as_deref(),
+                )
+            });
+        let idem_key = operation_id.map(|op| {
+            confluence_create_idempotency_key(&config_fp, op, space, title, body_storage, parent_id)
+        });
+        if let Some(key) = idem_key.as_ref() {
+            if let Some(cached) = self.confluence_create_idempotency.get(key).cloned() {
+                let raw = serde_json::to_string_pretty(&cached).unwrap_or_else(|_| "{}".into());
+                return Ok((
+                    true,
+                    format!(
+                        "idempotent create reuse page {} (retry of operation; no second remote write)",
+                        cached.id
+                    ),
+                    raw,
+                    cached
+                        .url
+                        .clone()
+                        .or(Some(format!("confluence:{}", cached.id))),
+                ));
+            }
+        }
         let auth = self.resolve_confluence_auth()?;
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
         self.throttle_confluence().await?;
         let meta =
             confluence_ro::create_page(&cfg, space, title, body_storage, parent_id, &auth, &policy)
                 .await?;
-        self.confluence_create_idempotency
-            .insert(idem_key, meta.clone());
+        if let Some(key) = idem_key {
+            self.confluence_create_idempotency.insert(key, meta.clone());
+        }
         let raw = serde_json::to_string_pretty(&meta).unwrap_or_else(|_| "{}".into());
         if let Some(log) = &self.audit {
             let _ = log.log(
@@ -6270,21 +6352,57 @@ fn mcp_server_config_from_connector(
     })
 }
 
-/// Process-local create idempotency key (space + title + body + parent).
+/// Stable collision-resistant create-idempotency key (Sha256 hex).
+///
+/// Requires an **explicit** host `operation_id` / `idempotency_key` so an
+/// independently confirmed create with the same payload is never suppressed.
 fn confluence_create_idempotency_key(
+    config_fingerprint: &str,
+    operation_id: &str,
     space: &str,
     title: &str,
     body_storage: &str,
     parent_id: Option<&str>,
 ) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    space.hash(&mut hasher);
-    title.hash(&mut hasher);
-    body_storage.hash(&mut hasher);
-    parent_id.unwrap_or("").hash(&mut hasher);
-    format!("create:{:x}", hasher.finish())
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"cd.confluence.create.v1\0");
+    hasher.update(config_fingerprint.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(operation_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(space.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(title.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(parent_id.unwrap_or("").as_bytes());
+    hasher.update(b"\0");
+    hasher.update(body_storage.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Tenant/config namespace for create idempotency (base URL, spaces, path mode, auth).
+fn confluence_config_fingerprint(
+    cfg: &ConfluenceRoConfig,
+    auth_mode: crate::config::ConfluenceAuthMode,
+    basic_email: Option<&str>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"cd.confluence.cfg.v1\0");
+    hasher.update(cfg.base_url.as_bytes());
+    hasher.update(b"\0");
+    for space in &cfg.spaces {
+        hasher.update(space.as_bytes());
+        hasher.update(b",");
+    }
+    hasher.update(b"\0");
+    hasher.update(format!("{:?}", cfg.rest_path_mode).as_bytes());
+    hasher.update(b"\0");
+    hasher.update(format!("{auth_mode:?}").as_bytes());
+    hasher.update(b"\0");
+    hasher.update(basic_email.unwrap_or("").as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 fn risk_for(side: ToolSideEffect, name: &str) -> &'static str {

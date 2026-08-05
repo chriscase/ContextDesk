@@ -278,7 +278,11 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "space": { "type": "string" },
                     "title": { "type": "string" },
                     "body_storage": { "type": "string", "description": "Confluence storage format body" },
-                    "parent_id": { "type": "string" }
+                    "parent_id": { "type": "string" },
+                    "idempotency_key": {
+                        "type": "string",
+                        "description": "Optional host operation/retry identity. Same key+payload+tenant reuses the first successful create; omit for independent creates (always remote)."
+                    }
                 },
                 "required": ["space", "title", "body_storage"]
             }),

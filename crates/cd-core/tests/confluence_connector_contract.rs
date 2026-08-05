@@ -8,18 +8,125 @@ use cd_core::activity::{
     ActivityDetailLevel, ActivityRecorder, ActivityStatus, ActivityStore, DataScope,
     ToolActivityKind,
 };
-use cd_core::config::{ConfluenceSettings, CONFLUENCE_PAT_REF};
+use cd_core::config::{ConfluenceAuthMode, ConfluenceSettings, CONFLUENCE_PAT_REF};
 use cd_core::confluence_ro::{self, ConfluenceAuth, ConfluenceRestPathMode, ConfluenceRoConfig};
+use cd_core::error::{CoreError, CoreResult};
 use cd_core::events::StreamEvent;
 use cd_core::index::KeywordIndex;
+use cd_core::keychain_store::SecretStore;
 use cd_core::permissions::PermissionDecision;
 use cd_core::ssrf::{validate_provider_url, SsrfPolicy};
 use cd_core::tool_host::ToolHost;
 use cd_core::tools::names;
 use cd_core::workspace::Workspace;
 use serde_json::json;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// Counting secret store for production-seam keyless proofs.
+#[derive(Default)]
+struct CountingSecretStore {
+    get_calls: AtomicUsize,
+    has_calls: AtomicUsize,
+    set_calls: AtomicUsize,
+    delete_calls: AtomicUsize,
+    inner: Mutex<std::collections::HashMap<String, String>>,
+}
+
+impl CountingSecretStore {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn with_pat(pat: &str) -> Self {
+        let s = Self::new();
+        s.inner
+            .lock()
+            .unwrap()
+            .insert(CONFLUENCE_PAT_REF.to_string(), pat.to_string());
+        s
+    }
+
+    fn total_reads(&self) -> usize {
+        self.get_calls.load(Ordering::SeqCst) + self.has_calls.load(Ordering::SeqCst)
+    }
+}
+
+impl SecretStore for CountingSecretStore {
+    fn set(&self, ref_id: &str, secret: &str) -> CoreResult<()> {
+        self.set_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .lock()
+            .map_err(|_| CoreError::Message("lock".into()))?
+            .insert(ref_id.to_string(), secret.to_string());
+        Ok(())
+    }
+
+    fn get(&self, ref_id: &str) -> CoreResult<Option<String>> {
+        self.get_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|_| CoreError::Message("lock".into()))?
+            .get(ref_id)
+            .cloned())
+    }
+
+    fn delete(&self, ref_id: &str) -> CoreResult<()> {
+        self.delete_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .lock()
+            .map_err(|_| CoreError::Message("lock".into()))?
+            .remove(ref_id);
+        Ok(())
+    }
+
+    fn has(&self, ref_id: &str) -> CoreResult<bool> {
+        self.has_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|_| CoreError::Message("lock".into()))?
+            .get(ref_id)
+            .map(|s| !s.is_empty())
+            .unwrap_or(false))
+    }
+}
+
+/// Failing secret store — any read panics the test if invoked unexpectedly.
+struct FailingSecretStore;
+
+impl SecretStore for FailingSecretStore {
+    fn set(&self, _ref_id: &str, _secret: &str) -> CoreResult<()> {
+        panic!("FailingSecretStore::set must not be called on keyless path");
+    }
+    fn get(&self, _ref_id: &str) -> CoreResult<Option<String>> {
+        panic!("FailingSecretStore::get must not be called on keyless path");
+    }
+    fn delete(&self, _ref_id: &str) -> CoreResult<()> {
+        panic!("FailingSecretStore::delete must not be called on keyless path");
+    }
+    fn has(&self, _ref_id: &str) -> CoreResult<bool> {
+        panic!("FailingSecretStore::has must not be called on keyless path");
+    }
+}
+
+async fn confirm_create(
+    host: &mut ToolHost,
+    args: &serde_json::Value,
+) -> cd_core::tool_host::ToolResult {
+    let pending = host
+        .execute(names::CONFLUENCE_CREATE_PAGE, args, None)
+        .await
+        .unwrap();
+    let req_id = permission_request_id(&pending.events);
+    grant_once(host, &req_id).await;
+    host.execute(names::CONFLUENCE_CREATE_PAGE, args, Some(&req_id))
+        .await
+        .unwrap()
+}
 
 fn empty_host() -> (tempfile::TempDir, ToolHost) {
     let dir = tempfile::tempdir().unwrap();
@@ -94,26 +201,64 @@ fn disabled_or_keyless_config_registers_no_tools_and_zero_secret_semantics() {
     assert!(settings.is_configured());
     assert!(settings.pat_ref.is_none());
     let (_d, mut host) = empty_host();
-    host.set_confluence(Some(settings.to_ro_config()), None);
+    // Production seam + counting store: keyless must perform zero secret reads.
+    let counter = CountingSecretStore::new();
+    host.apply_confluence_from_settings(&settings, &counter);
+    assert_eq!(
+        counter.total_reads(),
+        0,
+        "keyless apply must not call secrets.get/has (gets={} has={})",
+        counter.get_calls.load(Ordering::SeqCst),
+        counter.has_calls.load(Ordering::SeqCst)
+    );
+    // Failing store panics on any read — proves the production gate never touches it.
+    host.apply_confluence_from_settings(&settings, &FailingSecretStore);
     let names: Vec<_> = host.specs_for_model().into_iter().map(|s| s.name).collect();
     assert!(
         names.iter().all(|n| !n.starts_with("confluence_")),
         "keyless Confluence must not offer tools: {names:?}"
     );
-    // Structural: host apply path must gate secret get on pat_ref.
-    let host_src = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../desktop/src-tauri/src/lib.rs"
-    ));
-    let apply = host_src
-        .find("fn apply_host_connectors")
-        .expect("apply_host_connectors");
-    let body = &host_src[apply..apply + 1_200.min(host_src.len() - apply)];
-    assert!(
-        body.contains("pat_ref.is_some()"),
-        "keyless profiles must skip secret-store reads: {body}"
-    );
     assert_eq!(CONFLUENCE_PAT_REF, "confluence/default/pat");
+}
+
+#[test]
+fn production_seam_reads_secret_only_when_pat_ref_present() {
+    let with_ref = ConfluenceSettings {
+        enabled: true,
+        base_url: "https://wiki.example.test".into(),
+        spaces: vec!["ENG".into()],
+        pat_ref: Some(CONFLUENCE_PAT_REF.into()),
+        write_enabled: false,
+        ..ConfluenceSettings::default()
+    };
+    let counter = CountingSecretStore::with_pat("live-pat");
+    let (_d, mut host) = empty_host();
+    host.apply_confluence_from_settings(&with_ref, &counter);
+    assert!(
+        counter.get_calls.load(Ordering::SeqCst) >= 1,
+        "pat_ref present must attempt secret get"
+    );
+    let names: Vec<_> = host.specs_for_model().into_iter().map(|s| s.name).collect();
+    assert!(
+        names.iter().any(|n| n.starts_with("confluence_")),
+        "valid secret must enable tools: {names:?}"
+    );
+
+    // Disabled connector: zero reads even if store has a secret.
+    let disabled = ConfluenceSettings {
+        enabled: false,
+        base_url: "https://wiki.example.test".into(),
+        spaces: vec!["ENG".into()],
+        pat_ref: Some(CONFLUENCE_PAT_REF.into()),
+        ..ConfluenceSettings::default()
+    };
+    let counter2 = CountingSecretStore::with_pat("live-pat");
+    host.apply_confluence_from_settings(&disabled, &counter2);
+    assert_eq!(
+        counter2.total_reads(),
+        0,
+        "disabled connector must not read secrets"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -394,7 +539,7 @@ async fn malformed_html_and_malicious_links_are_sanitized() {
             "space": {"key": "ENG"},
             "version": {"number": 1},
             "body": {"storage": {"value":
-                "<p>ok</p><script>steal()</script><a href=\"javascript:evil()\">click</a>"
+                r#"<p>ok</p><SCRIPT>steal()</SCRIPT><a href="  JavaScript:evil() ">click</a><img onerror="x" src=x><div onclick="y">z</div>"#
             }}
         })))
         .mount(&server)
@@ -410,15 +555,23 @@ async fn malformed_html_and_malicious_links_are_sanitized() {
         .await
         .unwrap();
     assert!(page.ok, "{page:?}");
+    let lower = page.detail_raw.to_ascii_lowercase();
+    assert!(!lower.contains("<script"), "{}", page.detail_raw);
     assert!(
-        !page.detail_raw.to_ascii_lowercase().contains("<script"),
+        !lower.contains("steal"),
+        "script body must not leak: {}",
+        page.detail_raw
+    );
+    assert!(!lower.contains("javascript"), "{}", page.detail_raw);
+    assert!(
+        !lower.contains("onerror") && !lower.contains("onclick"),
         "{}",
         page.detail_raw
     );
     assert!(
-        !page.detail_raw.to_ascii_lowercase().contains("javascript:"),
-        "{}",
-        page.detail_raw
+        page.detail_raw.contains("ok")
+            || page.detail_raw.contains("click")
+            || page.detail_raw.contains('z')
     );
 }
 
@@ -477,7 +630,7 @@ async fn write_tools_absent_when_write_disabled() {
 }
 
 #[tokio::test]
-async fn hardwrite_requires_confirm_preview_create_and_idempotent_retry() {
+async fn hardwrite_requires_confirm_preview_create_deny_and_op_id_retry() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/rest/api/content"))
@@ -496,7 +649,8 @@ async fn hardwrite_requires_confirm_preview_create_and_idempotent_retry() {
     let args = json!({
         "space": "ENG",
         "title": "New Page",
-        "body_storage": "<p>Hello body</p>"
+        "body_storage": "<p>Hello body</p>",
+        "idempotency_key": "host-op-create-1"
     });
 
     // No grant → permission required, zero POSTs.
@@ -520,16 +674,7 @@ async fn hardwrite_requires_confirm_preview_create_and_idempotent_retry() {
     assert_eq!(server.received_requests().await.unwrap().len(), 0);
 
     // AllowOnce + WRITE → one create.
-    let pending2 = host
-        .execute(names::CONFLUENCE_CREATE_PAGE, &args, None)
-        .await
-        .unwrap();
-    let req_id2 = permission_request_id(&pending2.events);
-    grant_once(&mut host, &req_id2).await;
-    let done = host
-        .execute(names::CONFLUENCE_CREATE_PAGE, &args, Some(&req_id2))
-        .await
-        .unwrap();
+    let done = confirm_create(&mut host, &args).await;
     assert!(done.ok, "{done:?}");
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
     assert!(
@@ -540,17 +685,8 @@ async fn hardwrite_requires_confirm_preview_create_and_idempotent_retry() {
         done.citation_path
     );
 
-    // Duplicate identical create → idempotent reuse, no second POST.
-    let pending3 = host
-        .execute(names::CONFLUENCE_CREATE_PAGE, &args, None)
-        .await
-        .unwrap();
-    let req_id3 = permission_request_id(&pending3.events);
-    grant_once(&mut host, &req_id3).await;
-    let again = host
-        .execute(names::CONFLUENCE_CREATE_PAGE, &args, Some(&req_id3))
-        .await
-        .unwrap();
+    // Explicit same operation id + same payload → idempotent reuse, no second POST.
+    let again = confirm_create(&mut host, &args).await;
     assert!(again.ok, "{again:?}");
     assert!(
         again.summary.contains("idempotent") || again.summary.contains("reuse"),
@@ -560,7 +696,147 @@ async fn hardwrite_requires_confirm_preview_create_and_idempotent_retry() {
     assert_eq!(
         server.received_requests().await.unwrap().len(),
         1,
-        "duplicate create must not POST again"
+        "same operation id must not POST again"
+    );
+}
+
+#[tokio::test]
+async fn independent_same_payload_create_always_hits_remote() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rest/api/content"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "200",
+            "title": "Same Title",
+            "space": {"key": "ENG"},
+            "version": {"number": 1}
+        })))
+        .mount(&server)
+        .await;
+
+    let (_d, mut host) = empty_host();
+    host.set_confluence(Some(eng_cfg(&server.uri())), Some("pat".into()));
+    host.set_confluence_write_enabled(true);
+    // No idempotency_key → independently confirmed creates always remote.
+    let args = json!({
+        "space": "ENG",
+        "title": "Same Title",
+        "body_storage": "<p>identical payload</p>"
+    });
+    let a = confirm_create(&mut host, &args).await;
+    assert!(a.ok, "{a:?}");
+    let b = confirm_create(&mut host, &args).await;
+    assert!(b.ok, "{b:?}");
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        2,
+        "independent same-payload creates without op id must not be suppressed"
+    );
+}
+
+#[tokio::test]
+async fn different_operation_ids_do_not_collide_on_same_payload() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rest/api/content"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "300",
+            "title": "T",
+            "space": {"key": "ENG"},
+            "version": {"number": 1}
+        })))
+        .mount(&server)
+        .await;
+
+    let (_d, mut host) = empty_host();
+    host.set_confluence(Some(eng_cfg(&server.uri())), Some("pat".into()));
+    host.set_confluence_write_enabled(true);
+    let body = "<p>same body</p>";
+    let a = confirm_create(
+        &mut host,
+        &json!({
+            "space": "ENG",
+            "title": "T",
+            "body_storage": body,
+            "idempotency_key": "op-alpha"
+        }),
+    )
+    .await;
+    let b = confirm_create(
+        &mut host,
+        &json!({
+            "space": "ENG",
+            "title": "T",
+            "body_storage": body,
+            "idempotency_key": "op-beta"
+        }),
+    )
+    .await;
+    assert!(a.ok && b.ok, "{a:?} {b:?}");
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        2,
+        "distinct operation ids must not share create cache entries"
+    );
+}
+
+#[tokio::test]
+async fn tenant_reconfig_retires_create_idempotency() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rest/api/content"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "400",
+            "title": "T",
+            "space": {"key": "ENG"},
+            "version": {"number": 1}
+        })))
+        .mount(&server)
+        .await;
+
+    let (_d, mut host) = empty_host();
+    host.set_confluence(Some(eng_cfg(&server.uri())), Some("pat".into()));
+    host.set_confluence_write_enabled(true);
+    let args = json!({
+        "space": "ENG",
+        "title": "T",
+        "body_storage": "<p>x</p>",
+        "idempotency_key": "tenant-op-1"
+    });
+    let first = confirm_create(&mut host, &args).await;
+    assert!(first.ok, "{first:?}");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+
+    // Same base URL but auth mode/email change → config fingerprint retires cache.
+    host.set_confluence_auth_mode(ConfluenceAuthMode::Basic, Some("other@example.test".into()));
+    let second = confirm_create(&mut host, &args).await;
+    assert!(second.ok, "{second:?}");
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        2,
+        "reconfiguration must retire create idempotency"
+    );
+
+    // Tenant base URL change also retires.
+    let server2 = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rest/api/content"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "401",
+            "title": "T",
+            "space": {"key": "ENG"},
+            "version": {"number": 1}
+        })))
+        .mount(&server2)
+        .await;
+    host.set_confluence(Some(eng_cfg(&server2.uri())), Some("pat".into()));
+    host.set_confluence_write_enabled(true);
+    let third = confirm_create(&mut host, &args).await;
+    assert!(third.ok, "{third:?}");
+    assert_eq!(
+        server2.received_requests().await.unwrap().len(),
+        1,
+        "new tenant must not reuse prior tenant cache"
     );
 }
 
@@ -752,7 +1028,7 @@ async fn activity_events_from_real_confluence_execute_omit_bodies_and_secrets() 
 
 #[test]
 fn invalid_credential_ref_misses_secret_and_offers_no_tools() {
-    // Simulate host apply path: pat_ref recorded but secret-store miss → None pat.
+    // Production seam: pat_ref recorded but secret-store miss → None pat, zero tools.
     let settings = ConfluenceSettings {
         enabled: true,
         base_url: "https://wiki.example.test".into(),
@@ -762,23 +1038,17 @@ fn invalid_credential_ref_misses_secret_and_offers_no_tools() {
         ..ConfluenceSettings::default()
     };
     assert!(settings.pat_ref.is_some());
-    // Secret miss → host attaches cfg with None pat (apply_host_connectors).
+    let empty = CountingSecretStore::new(); // no secret stored
     let (_d, mut host) = empty_host();
-    host.set_confluence(Some(settings.to_ro_config()), None);
-    host.set_confluence_auth_mode(settings.auth_mode, settings.basic_email.clone());
+    host.apply_confluence_from_settings(&settings, &empty);
+    assert!(
+        empty.get_calls.load(Ordering::SeqCst) >= 1,
+        "miss path still attempts get when pat_ref is set"
+    );
     let names: Vec<_> = host.specs_for_model().into_iter().map(|s| s.name).collect();
     assert!(
         names.iter().all(|n| !n.starts_with("confluence_")),
         "invalid/missing secret must fail closed with zero tools: {names:?}"
-    );
-    // Structural: desktop apply gates secret get on pat_ref and uses None when absent.
-    let host_src = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../desktop/src-tauri/src/lib.rs"
-    ));
-    assert!(
-        host_src.contains("pat_ref.is_some()") && host_src.contains("set_confluence_auth_mode"),
-        "host must gate secret reads and apply auth_mode"
     );
 }
 

@@ -1468,26 +1468,8 @@ fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), S
 }
 
 fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState) {
-    // Attach Confluence RO when enabled. Secret-store reads happen only when a
-    // credential *reference* is recorded — keyless profiles never touch the keychain.
-    if cfg.confluence.enabled && cfg.confluence.is_configured() {
-        // pat_ref present but secret missing → tools stay off (None pat).
-        let pat = if cfg.confluence.pat_ref.is_some() {
-            state.secrets.get(&key_ref_confluence_pat()).ok().flatten()
-        } else {
-            None
-        };
-        host.set_confluence(Some(cfg.confluence.to_ro_config()), pat);
-        host.set_confluence_auth_mode(cfg.confluence.auth_mode, cfg.confluence.basic_email.clone());
-        host.set_confluence_write_enabled(cfg.confluence.write_enabled);
-    } else {
-        host.set_confluence(None, None);
-        host.set_confluence_auth_mode(
-            cd_core::config::ConfluenceAuthMode::Bearer,
-            None,
-        );
-        host.set_confluence_write_enabled(false);
-    }
+    // Production Confluence seam (shared with CLI): keyless → zero secret reads.
+    host.apply_confluence_from_settings(&cfg.confluence, &state.secrets);
     host.set_web_research(cfg.web_research_enabled);
     host.set_web_research_sources(&cfg.web_research_sources);
     // Log Phase-1: disposable corpora under app cache (LOG_ANALYSIS.md §10 keep-until-discarded).

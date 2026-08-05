@@ -314,14 +314,16 @@ pub fn parse_search_hits(cfg: &ConfluenceRoConfig, v: &Value) -> Vec<ConfluenceH
     hits
 }
 
-/// Hard cap on storage-format body bytes retained for model-facing context.
-/// Oversized remote HTML is truncated with an explicit marker (not silently dropped).
+/// Hard cap on **input** storage-format bytes before any further work.
+/// Enforced first so sanitization never allocates proportional to attacker size.
 pub const MAX_PAGE_STORAGE_BYTES: usize = 256 * 1024;
 
-/// Hard cap on plain-text after strip_tags for tool results.
+/// Hard cap on plain-text retained for model-facing tool results.
 pub const MAX_PAGE_PLAIN_CHARS: usize = 48_000;
 
 /// Extract page text after space gate; pure for offline tests (#132).
+///
+/// Model-facing path is **bounded plain text only** — not retained storage HTML.
 pub fn parse_page_body(cfg: &ConfluenceRoConfig, v: &Value) -> CoreResult<String> {
     let space = v
         .pointer("/space/key")
@@ -336,11 +338,13 @@ pub fn parse_page_body(cfg: &ConfluenceRoConfig, v: &Value) -> CoreResult<String
         .pointer("/body/storage/value")
         .and_then(|s| s.as_str())
         .unwrap_or("");
-    let bounded = bound_storage_body(storage);
-    Ok(bound_plain_text(&strip_tags(&bounded)))
+    Ok(storage_to_safe_plain(storage))
 }
 
 /// Parse expanded content JSON into [`ConfluencePageBody`] (offline-testable).
+///
+/// `plain` is the safe model-facing representation. `storage` is a **byte-capped**
+/// prefix of the remote body for diagnostics only — never treated as sanitized HTML.
 pub fn parse_page_expanded(
     cfg: &ConfluenceRoConfig,
     v: &Value,
@@ -351,8 +355,16 @@ pub fn parse_page_expanded(
         .pointer("/body/storage/value")
         .and_then(|s| s.as_str())
         .unwrap_or("");
-    let storage = bound_storage_body(storage_raw);
-    let plain = bound_plain_text(&strip_tags(&storage));
+    let original_len = storage_raw.len();
+    let storage_capped = take_utf8_prefix(storage_raw, MAX_PAGE_STORAGE_BYTES);
+    let storage = if storage_capped.len() < original_len {
+        format!(
+            "{storage_capped}…[truncated for Confluence page body budget; original_bytes={original_len}]"
+        )
+    } else {
+        storage_capped.to_string()
+    };
+    let plain = storage_to_safe_plain(storage_raw);
     Ok(ConfluencePageBody {
         meta,
         storage,
@@ -360,22 +372,43 @@ pub fn parse_page_expanded(
     })
 }
 
-/// Bound storage XHTML and defang obvious script/handler payloads before strip.
-#[allow(clippy::string_slice)] // end always on a char boundary after the walk-back loop
-fn bound_storage_body(storage: &str) -> String {
-    let scrubbed = sanitize_storage_html(storage);
-    if scrubbed.len() <= MAX_PAGE_STORAGE_BYTES {
-        return scrubbed;
+/// Convert Confluence storage HTML to safe plain text for model context.
+///
+/// 1. Cap input **bytes** first (no full-string lowercasing of unbounded input).
+/// 2. Stream-strip tags; drop `script`/`style` element **contents** (case-insensitive
+///    open/close match without allocating a second full buffer).
+/// 3. Cap plain-text character budget.
+///
+/// Attribute-borne schemes (`javascript:`, `onerror=`) never reach the output
+/// because tags are discarded entirely — plain text only.
+pub fn storage_to_safe_plain(input: &str) -> String {
+    let capped = take_utf8_prefix(input, MAX_PAGE_STORAGE_BYTES);
+    let plain = html_to_plain_streaming(capped);
+    // Collapse incidental block-tag spacing at the edges.
+    let plain = plain.trim();
+    bound_plain_text(plain)
+}
+
+/// Legacy name kept for callers; now an alias of [`storage_to_safe_plain`].
+#[inline]
+pub fn sanitize_storage_html(input: &str) -> String {
+    storage_to_safe_plain(input)
+}
+
+/// UTF-8-safe prefix of at most `max_bytes` (never mid-codepoint).
+fn take_utf8_prefix(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
     }
-    let mut end = MAX_PAGE_STORAGE_BYTES;
-    while end > 0 && !scrubbed.is_char_boundary(end) {
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
-    format!(
-        "{}…[truncated for Confluence page body budget; original_bytes={}]",
-        &scrubbed[..end],
-        storage.len()
-    )
+    // Clippy: boundary is verified above; slice is never mid-codepoint.
+    #[allow(clippy::string_slice)]
+    {
+        &s[..end]
+    }
 }
 
 fn bound_plain_text(plain: &str) -> String {
@@ -387,41 +420,134 @@ fn bound_plain_text(plain: &str) -> String {
     format!("{body}…[truncated for Confluence plain-text budget; original_chars={count}]")
 }
 
-/// Remove script blocks and obvious event-handler attributes from storage HTML.
-/// Pure, offline-testable sanitizer — not a full HTML security parser.
+/// Stream HTML → plain text without allocating a lowercased copy of the input.
 ///
-/// Operates on ASCII tags/attributes; multi-byte body text is preserved via
-/// char-boundary-safe advancement.
-#[allow(clippy::string_slice)] // indices advance on UTF-8 char boundaries only
-pub fn sanitize_storage_html(input: &str) -> String {
-    // Normalize by removing script elements and javascript: schemes case-insensitively.
-    let without_scripts = strip_script_elements(input);
-    without_scripts
-        .replace("javascript:", "[blocked-scheme]")
-        .replace("JAVASCRIPT:", "[blocked-scheme]")
-        .replace("Javascript:", "[blocked-scheme]")
+/// Drops tags (and thus event handlers / href schemes). Skips content of
+/// `script` and `style` elements using case-insensitive tag matching.
+///
+/// Index `i` always advances by full UTF-8 characters or whole tags, so string
+/// slices from `i` are always on char boundaries.
+#[allow(clippy::string_slice)]
+fn html_to_plain_streaming(html: &str) -> String {
+    let bytes = html.as_bytes();
+    let mut out = String::with_capacity(html.len().min(MAX_PAGE_PLAIN_CHARS.saturating_mul(4)));
+    let mut i = 0usize;
+    let mut skip_depth: u8 = 0; // >0 while inside script/style
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            // Parse a tag name starting at i.
+            let (tag_end, is_close, name) = peek_html_tag(bytes, i);
+            if skip_element_kind(&name) {
+                if is_close {
+                    skip_depth = skip_depth.saturating_sub(1);
+                } else if !name_self_closing(bytes, i, tag_end) {
+                    skip_depth = skip_depth.saturating_add(1);
+                }
+            }
+            // Emit a space for block-ish tags when not skipping, so words don't glue.
+            if skip_depth == 0
+                && is_blockish_tag(&name)
+                && !out.ends_with(|c: char| c.is_whitespace())
+            {
+                out.push(' ');
+            }
+            i = tag_end;
+            continue;
+        }
+        if skip_depth > 0 {
+            // Advance one char inside skipped element.
+            let ch = html[i..].chars().next().expect("non-empty");
+            i += ch.len_utf8();
+            continue;
+        }
+        let ch = html[i..].chars().next().expect("non-empty");
+        // Collapse runs of whitespace slightly for readability.
+        if ch.is_whitespace() {
+            if !out.ends_with(|c: char| c.is_whitespace()) {
+                out.push(' ');
+            }
+        } else {
+            out.push(ch);
+        }
+        i += ch.len_utf8();
+    }
+    out
 }
 
-#[allow(clippy::string_slice)] // indices from ASCII marker finds on both strings
-fn strip_script_elements(input: &str) -> String {
-    let lower = input.to_ascii_lowercase();
-    let mut out = String::with_capacity(input.len());
-    let mut rest = input;
-    let mut rest_lower = lower.as_str();
-    while let Some(start) = rest_lower.find("<script") {
-        out.push_str(&rest[..start]);
-        let after = &rest_lower[start..];
-        if let Some(end_rel) = after.find("</script>") {
-            let skip = end_rel + "</script>".len();
-            rest = &rest[start + skip..];
-            rest_lower = &rest_lower[start + skip..];
+/// Returns (byte index after tag, is_close, ascii-lower tag name).
+fn peek_html_tag(bytes: &[u8], at: usize) -> (usize, bool, String) {
+    let mut i = at + 1; // skip '<'
+    if i >= bytes.len() {
+        return (bytes.len(), false, String::new());
+    }
+    let is_close = bytes[i] == b'/';
+    if is_close {
+        i += 1;
+    }
+    // Skip bang/doctype/comment-ish.
+    if i < bytes.len() && (bytes[i] == b'!' || bytes[i] == b'?') {
+        while i < bytes.len() && bytes[i] != b'>' {
+            i += 1;
+        }
+        if i < bytes.len() {
+            i += 1;
+        }
+        return (i, is_close, String::new());
+    }
+    let name_start = i;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b.is_ascii_alphanumeric() || b == b'-' || b == b':' {
+            i += 1;
         } else {
-            // Unclosed script: drop the remainder.
-            return out;
+            break;
         }
     }
-    out.push_str(rest);
-    out
+    let name = bytes[name_start..i]
+        .iter()
+        .map(|b| b.to_ascii_lowercase() as char)
+        .collect::<String>();
+    while i < bytes.len() && bytes[i] != b'>' {
+        i += 1;
+    }
+    if i < bytes.len() {
+        i += 1; // consume '>'
+    }
+    (i, is_close, name)
+}
+
+fn skip_element_kind(name: &str) -> bool {
+    matches!(name, "script" | "style" | "noscript")
+}
+
+fn name_self_closing(bytes: &[u8], tag_start: usize, tag_end: usize) -> bool {
+    if tag_end <= tag_start + 1 {
+        return false;
+    }
+    // Look for "/>" before tag_end
+    let slice = &bytes[tag_start..tag_end];
+    slice.windows(2).any(|w| w == b"/>")
+}
+
+fn is_blockish_tag(name: &str) -> bool {
+    matches!(
+        name,
+        "p" | "div"
+            | "br"
+            | "li"
+            | "tr"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "table"
+            | "ul"
+            | "ol"
+            | "hr"
+            | "blockquote"
+    )
 }
 
 /// Parse a single content object into meta (space-gated).
@@ -1595,12 +1721,78 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_blocks_script_and_javascript_scheme() {
-        let dirty = r#"<p>hi</p><script>alert(1)</script><a href="javascript:alert(2)">x</a>"#;
-        let clean = sanitize_storage_html(dirty);
-        assert!(!clean.to_ascii_lowercase().contains("<script"));
-        assert!(!clean.to_ascii_lowercase().contains("javascript:"));
-        assert!(clean.contains("[blocked-scheme]") || clean.contains("hi"));
+    fn plain_conversion_drops_script_style_handlers_and_js_schemes() {
+        let dirty = r#"<p>hi</p><SCRIPT>alert(1)</SCRIPT><a href=" JavaScript:alert(2) ">x</a><img onerror="evil()" src=x>"#;
+        let clean = storage_to_safe_plain(dirty);
+        let lower = clean.to_ascii_lowercase();
+        assert!(!lower.contains("<script") && !lower.contains("alert(1)"));
+        assert!(!lower.contains("javascript:"));
+        assert!(!lower.contains("onerror"));
+        assert!(clean.contains("hi"));
+        assert!(clean.contains('x'));
+    }
+
+    #[test]
+    fn plain_conversion_mixed_case_and_whitespace_schemes_do_not_appear() {
+        for payload in [
+            r#"<a href="javascript:1">t</a>"#,
+            r#"<a href="JAVASCRIPT:1">t</a>"#,
+            r#"<a href="  javaSCRIPT:1">t</a>"#,
+            r#"<a href='vbscript:msgbox(1)'>t</a>"#,
+            r#"<div onclick="steal()">click</div>"#,
+            r#"<img src=x onerror = 'x'>"#,
+        ] {
+            let out = storage_to_safe_plain(payload);
+            let l = out.to_ascii_lowercase();
+            assert!(!l.contains("javascript"), "{payload} → {out}");
+            assert!(!l.contains("vbscript"), "{payload} → {out}");
+            assert!(
+                !l.contains("onclick") && !l.contains("onerror"),
+                "{payload} → {out}"
+            );
+            assert!(!l.contains('<'), "tags must be gone: {out}");
+        }
+    }
+
+    #[test]
+    fn plain_conversion_malformed_unclosed_and_multibyte() {
+        let unclosed = "<p>before</p><script>steal forever";
+        let out = storage_to_safe_plain(unclosed);
+        assert!(out.contains("before"));
+        assert!(!out.contains("steal"));
+
+        let multi = "<p>日本語 café 🚀</p><b>ok</b>";
+        let out = storage_to_safe_plain(multi);
+        assert!(out.contains("日本語"));
+        assert!(out.contains("café"));
+        assert!(out.contains('🚀'));
+        assert!(out.contains("ok"));
+    }
+
+    #[test]
+    fn plain_conversion_caps_before_allocating_on_enormous_input() {
+        let huge = format!(
+            "<p>{}</p><script>{}</script>",
+            "A".repeat(400_000),
+            "B".repeat(400_000)
+        );
+        let out = storage_to_safe_plain(&huge);
+        assert!(out.chars().count() <= MAX_PAGE_PLAIN_CHARS + 80);
+        assert!(
+            !out.contains('B'),
+            "script body must not appear in plain: len={}",
+            out.len()
+        );
+        assert!(out.contains('A'));
+    }
+
+    #[test]
+    fn plain_conversion_preserves_benign_prose_false_positives() {
+        let prose = "Discuss javascript: best practices and the onclick UX pattern in ENG.";
+        let out = storage_to_safe_plain(prose);
+        assert!(out.contains("javascript"));
+        assert!(out.contains("onclick"));
+        assert!(out.contains("ENG"));
     }
 
     #[test]
