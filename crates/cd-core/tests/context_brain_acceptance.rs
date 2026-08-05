@@ -25,6 +25,7 @@ use cd_core::turn_trace::{DeveloperDetailKind, RecordingTurnTrace, TurnTraceObse
 use cd_core::workspace::Workspace;
 use std::fs;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 fn final_answer(text: &str) -> ChatCompletion {
     ChatCompletion {
@@ -266,6 +267,19 @@ async fn ordinary_turn_surfaces_context_plan_trail_and_preference() {
         "Developer detail must include context_plan provenance: {:?}",
         dev.iter().map(|e| &e.label).collect::<Vec<_>>()
     );
+    let plan_event = dev
+        .iter()
+        .find(|event| event.label == "Context: context_plan")
+        .expect("ordinary context-plan provenance");
+    let plan_payload: serde_json::Value = serde_json::from_str(&plan_event.request[0].content)
+        .expect("ordinary context-plan provenance JSON");
+    assert_ne!(
+        plan_payload["facts"]["turn_id"], "brain-sess",
+        "a defaulted turn id must be freshly allocated, never copied from session id"
+    );
+    assert_eq!(plan_payload["facts"]["application"], "model_facing");
+    assert_eq!(plan_payload["facts"]["model_facing"], true);
+    assert_eq!(plan_event.status, "model_facing");
 
     // Activity projection retains context_used / plan steps in label or detail.
     let mut rec = ActivityRecorder::new(
@@ -652,6 +666,10 @@ async fn disproof_replaces_stale_hypothesis_with_fresh_tool_evidence() {
     ]);
     let ctx =
         LogExplorerTurnContext::new("w", report.corpus_id.as_str(), "sources=worker.log").unwrap();
+    let trace = Arc::new(RecordingTurnTrace::with_developer_detail(
+        Instant::now(),
+        Arc::new(|_| {}),
+    ));
     let events = run_agent_turn(
         backend.as_ref(),
         &mut host,
@@ -659,9 +677,11 @@ async fn disproof_replaces_stale_hypothesis_with_fresh_tool_evidence() {
         &mut history,
         &AgentOptions {
             session_id: "disproof".into(),
+            turn_id: "turn-disproof-001".into(),
             log_explorer_context: Some(ctx),
             max_rounds: 6,
             ambient_recall_enabled: false,
+            developer_trace: Some(TurnTraceObserver::new(trace.clone())),
             ..Default::default()
         },
     )
@@ -681,7 +701,71 @@ async fn disproof_replaces_stale_hypothesis_with_fresh_tool_evidence() {
         history.iter().any(|m| m.content.contains("HYPOTHESIS_H1")),
         "prior H1 remains in history"
     );
-    let _ = events;
+
+    let trail = events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::SearchTrail { steps } => Some(steps.join("|")),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("||");
+    assert!(
+        trail.contains("context_inventory_only:not_model_facing"),
+        "linked candidate scan must be explicitly inventory-only: {trail}"
+    );
+    assert!(
+        !trail.contains("context_plan_inject:"),
+        "linked turns must not inject ordinary context plan content: {trail}"
+    );
+    assert!(
+        !trail.contains("context_used:"),
+        "inventory-only linked candidates must never be called Context used: {trail}"
+    );
+    assert!(
+        !backend.all_blob().contains("Host context inventory"),
+        "linked provider request must use its evidence-gated path, not plan injection"
+    );
+
+    let developer_events = trace.developer_events();
+    let context_plan = developer_events
+        .iter()
+        .find(|event| {
+            event.kind == DeveloperDetailKind::ContextProvenance
+                && event.label == "Context: context_plan"
+        })
+        .expect("linked context-plan developer event");
+    assert_eq!(context_plan.status, "inventory_only_not_model_facing");
+    let payload: serde_json::Value = serde_json::from_str(&context_plan.request[0].content)
+        .expect("context-plan provenance JSON");
+    let facts = &payload["facts"];
+    assert_eq!(facts["turn_id"], "turn-disproof-001");
+    assert_ne!(facts["turn_id"], "disproof");
+    assert_eq!(facts["application"], "inventory_only");
+    assert_eq!(facts["model_facing"], false);
+    assert!(facts.get("inventory_summary").is_some());
+    assert!(facts.get("context_used_summary").is_none());
+
+    // This shared projection feeds both desktop Activity and CLI Activity.
+    let mut recorder = ActivityRecorder::new(
+        "turn-disproof-001",
+        "disproof",
+        DataScope::log_corpus(report.corpus_id),
+        ActivityDetailLevel::Summary,
+    );
+    recorder.record_stream_events(&events);
+    let record = recorder.finish(ActivityStatus::Ok, 10);
+    assert!(record
+        .events
+        .iter()
+        .any(|event| event.label == "Context inventory only (not model-facing)"));
+    assert!(record.events.iter().all(|event| {
+        !event.label.contains("Context used")
+            && !event
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("context_used:"))
+    }));
 }
 
 #[tokio::test]

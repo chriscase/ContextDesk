@@ -850,7 +850,8 @@ pub enum TracedHostEvent {
     ///
     /// Full free-form step text is omitted for privacy. Host-authored
     /// **context plan** metadata steps (`context_plan:`, `context_used:`,
-    /// `context_included:`, `context_plan_preference_inject:`) and stable host
+    /// `context_included:`, `context_inventoried:`,
+    /// `context_inventory_only:`, `context_plan_preference_inject:`) and stable host
     /// policy codes are retained bounded so Activity / CLI can project both
     /// truthful context use and deterministic search bounds without a second
     /// plan build.
@@ -1255,6 +1256,8 @@ impl RecordingTurnTrace {
                         s.starts_with("context_plan:")
                             || s.starts_with("context_used:")
                             || s.starts_with("context_included:")
+                            || s.starts_with("context_inventoried:")
+                            || s.starts_with("context_inventory_only:")
                             || s.starts_with("context_plan_preference_inject:")
                     })
                     .take(32)

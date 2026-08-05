@@ -28,6 +28,35 @@ pub enum RelevanceStrategy {
     MultiStepBounded,
 }
 
+/// Whether this plan's selected inventory was actually eligible to become
+/// model-facing context through the context-plan seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextPlanApplication {
+    /// Ordinary-chat plan content was already present or eligible for bounded
+    /// injection into the provider request.
+    #[default]
+    ModelFacing,
+    /// The host inventoried candidates for visibility only. Linked turns use
+    /// their separate, evidence-gated context path and never inject this plan.
+    InventoryOnly,
+}
+
+impl ContextPlanApplication {
+    /// Stable wire label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ModelFacing => "model_facing",
+            Self::InventoryOnly => "inventory_only",
+        }
+    }
+
+    /// Whether this plan can truthfully be described as context used.
+    pub const fn is_model_facing(self) -> bool {
+        matches!(self, Self::ModelFacing)
+    }
+}
+
 /// Eligible source families for ordinary-chat inventory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -73,7 +102,8 @@ impl ContextSourceFamily {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CandidateDisposition {
-    /// Selected into model-facing context (or ambient injection).
+    /// Selected by the plan. This is model-facing only when the enclosing
+    /// [`ContextPlan::application`] is [`ContextPlanApplication::ModelFacing`].
     Included,
     /// Considered but dropped with a host reason.
     Excluded,
@@ -193,6 +223,9 @@ pub struct ContextPlan {
     pub session_id: String,
     /// Turn / correlation id when known.
     pub turn_id: String,
+    /// Whether selected candidates are model-facing or inventory-only.
+    #[serde(default)]
+    pub application: ContextPlanApplication,
     /// Strategy used.
     pub strategy: RelevanceStrategy,
     /// True when optional model relevance ran successfully.
@@ -214,7 +247,9 @@ pub struct ContextPlan {
     pub candidates: Vec<ContextCandidate>,
     /// Side-effect ledger: inventory must never trigger these.
     pub side_effects_forbidden: Vec<String>,
-    /// Concise user-facing “Context used” summary.
+    /// Concise selected-context summary. It is user-facing “Context used” only
+    /// for [`ContextPlanApplication::ModelFacing`]; inventory-only plans label
+    /// it as inventory instead.
     pub context_used_summary: String,
 }
 
@@ -237,9 +272,17 @@ impl ContextPlan {
             .any(|c| c.memory_kind.as_deref() == Some(kind))
     }
 
+    /// Whether this plan may truthfully emit a user-facing “Context used”.
+    pub const fn is_model_facing(&self) -> bool {
+        self.application.is_model_facing()
+    }
+
     /// JSON for developer detail / CLI envelopes (hard-capped; may strip snippets).
     pub fn to_developer_json(&self) -> serde_json::Value {
-        let compact = serde_json::json!({
+        let mut compact = serde_json::json!({
+            "turn_id": self.turn_id,
+            "application": self.application,
+            "model_facing": self.is_model_facing(),
             "strategy": self.strategy,
             "model_relevance_used": self.model_relevance_used,
             "relevance_failed_closed": self.relevance_failed_closed,
@@ -248,7 +291,6 @@ impl ContextPlan {
             "candidates_discovered": self.candidates_discovered,
             "candidates_omitted_by_cap": self.candidates_omitted_by_cap,
             "candidate_count": self.candidates.len(),
-            "context_used_summary": self.context_used_summary,
             "side_effects_forbidden": self.side_effects_forbidden,
             "included": self.included().take(32).map(|c| serde_json::json!({
                 "id": c.id,
@@ -272,27 +314,39 @@ impl ContextPlan {
                 .filter(|c| c.disposition == CandidateDisposition::Excluded)
                 .count(),
         });
+        let summary_key = if self.is_model_facing() {
+            "context_used_summary"
+        } else {
+            "inventory_summary"
+        };
+        compact[summary_key] = serde_json::Value::String(self.context_used_summary.clone());
         let s = serde_json::to_string(&compact).unwrap_or_default();
         if s.chars().count() <= MAX_DEVELOPER_PLAN_JSON_CHARS {
             return compact;
         }
-        serde_json::json!({
+        let mut truncated = serde_json::json!({
+            "turn_id": self.turn_id,
+            "application": self.application,
+            "model_facing": self.is_model_facing(),
             "strategy": self.strategy,
-            "context_used_summary": self.context_used_summary,
             "candidates_discovered": self.candidates_discovered,
             "candidates_omitted_by_cap": self.candidates_omitted_by_cap,
             "candidate_count": self.candidates.len(),
             "included_chars": self.included_chars,
             "developer_payload_truncated": true,
             "note": "plan JSON truncated under MAX_DEVELOPER_PLAN_JSON_CHARS",
-        })
+        });
+        truncated[summary_key] = serde_json::Value::String(self.context_used_summary.clone());
+        truncated
     }
 
     /// Search-trail style steps (CLI / UI).
     pub fn trail_steps(&self) -> Vec<String> {
         let mut steps = vec![format!(
-            "context_plan:strategy={:?};included={};excluded={};deferred={};truncated={};chars={}/{};discovered={};omitted_by_cap={}",
+            "context_plan:strategy={:?};application={};model_facing={};included={};excluded={};deferred={};truncated={};chars={}/{};discovered={};omitted_by_cap={}",
             self.strategy,
+            self.application.as_str(),
+            self.is_model_facing(),
             self.included().count(),
             self.candidates
                 .iter()
@@ -324,20 +378,37 @@ impl ContextPlan {
             ));
         }
         for c in self.included().take(24) {
+            let prefix = if self.is_model_facing() {
+                "context_included"
+            } else {
+                "context_inventoried"
+            };
             steps.push(format!(
-                "context_included:{}:{}:{}",
+                "{prefix}:{}:{}:{}",
                 c.family.as_str(),
                 c.id,
                 c.reasons.first().map(|r| r.as_str()).unwrap_or("included")
             ));
         }
-        steps.push(format!("context_used:{}", self.context_used_summary));
+        if self.is_model_facing() {
+            steps.push(format!("context_used:{}", self.context_used_summary));
+        } else {
+            steps.push(format!(
+                "context_inventory_only:not_model_facing;selected={};summary={}",
+                self.included().count(),
+                self.context_used_summary
+            ));
+        }
         steps
     }
 
     /// Build a bounded system message body from **included** non-history candidates
-    /// so they actually reach the provider (not trail-only).
+    /// so they actually reach the provider (not trail-only). Inventory-only
+    /// plans fail closed here even if a caller accidentally attempts injection.
     pub fn format_injection_block(&self) -> Option<String> {
+        if !self.is_model_facing() {
+            return None;
+        }
         let mut lines: Vec<String> = Vec::new();
         for c in self.included() {
             if c.family == ContextSourceFamily::ConversationHistory {
@@ -835,6 +906,11 @@ pub fn build_context_plan(
     let mut plan = ContextPlan {
         session_id: snap.session_id.clone(),
         turn_id: snap.turn_id.clone(),
+        application: if snap.linked_turn {
+            ContextPlanApplication::InventoryOnly
+        } else {
+            ContextPlanApplication::ModelFacing
+        },
         strategy,
         model_relevance_used: false,
         relevance_failed_closed: false,
@@ -1356,6 +1432,35 @@ mod tests {
                 .any(|c| c.memory_kind.as_deref() == Some("preference")),
             "inventory must still consider Preference despite model kinds filter"
         );
+    }
+
+    #[test]
+    fn linked_plan_is_inventory_only_and_cannot_format_injection() {
+        let plan = build_context_plan(
+            &ContextInventorySnapshot {
+                session_id: "same-session".into(),
+                turn_id: "real-turn-42".into(),
+                user_text: "investigate the linked logs".into(),
+                linked_corpus_id: Some("corpus-1".into()),
+                explorer_viewport: Some("source=worker.log seq=42".into()),
+                linked_turn: true,
+                ..Default::default()
+            },
+            ContextPlanBudget::default(),
+            RelevanceStrategy::DeterministicOnly,
+        );
+        assert_eq!(plan.turn_id, "real-turn-42");
+        assert_eq!(plan.application, ContextPlanApplication::InventoryOnly);
+        assert!(!plan.is_model_facing());
+        assert_eq!(plan.format_injection_block(), None);
+        let trail = plan.trail_steps().join("|");
+        assert!(trail.contains("context_inventory_only:not_model_facing"));
+        assert!(!trail.contains("context_used:"));
+        let developer = plan.to_developer_json();
+        assert_eq!(developer["turn_id"], "real-turn-42");
+        assert_eq!(developer["model_facing"], false);
+        assert!(developer.get("inventory_summary").is_some());
+        assert!(developer.get("context_used_summary").is_none());
     }
 
     #[test]

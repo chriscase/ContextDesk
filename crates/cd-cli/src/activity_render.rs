@@ -444,6 +444,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn inventory_only_context_is_never_rendered_as_context_used() {
+        let events = vec![
+            StreamEvent::SearchTrail {
+                steps: vec![
+                    "context_plan:strategy=DeterministicOnly;application=inventory_only;model_facing=false;included=1".into(),
+                    "context_inventoried:linked_log_evidence:corpus:demo:included_by_rank".into(),
+                    "context_inventory_only:not_model_facing;selected=1;summary=linked_log_evidence:1".into(),
+                ],
+            },
+            StreamEvent::TurnCompleted {
+                reason: "stop".into(),
+            },
+        ];
+        assert_eq!(context_used_from_events(&events), None);
+
+        let record = project_turn_activity(
+            "s1",
+            "t-linked",
+            Some("corpus-1"),
+            ActivityLevel::Summary,
+            None,
+            &events,
+            5,
+        );
+        assert!(record
+            .events
+            .iter()
+            .any(|event| { event.label == "Context inventory only (not model-facing)" }));
+        assert!(record.events.iter().all(|event| {
+            !event.label.contains("Context used")
+                && !event
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("context_used:"))
+        }));
+
+        let lines = activity_lines(&record);
+        assert!(lines
+            .iter()
+            .any(|line| line.label == "Context inventory only (not model-facing)"));
+        assert!(lines.iter().all(|line| {
+            !line.label.contains("Context used")
+                && !line
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("context_used:"))
+        }));
+    }
+
     /// Compaction signal on the shipped projection path: agent emits
     /// `StreamEvent::Error { code: "context_compacted" }` after
     /// `fit_model_context_to_budget` / reactive compact; CLI activity must

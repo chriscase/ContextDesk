@@ -89,6 +89,9 @@ pub struct AgentOptions {
     pub max_results_per_source: usize,
     /// Session id for events.
     pub session_id: String,
+    /// Host correlation id for this concrete turn. Empty means the core must
+    /// allocate a fresh process-unique fallback rather than reuse session id.
+    pub turn_id: String,
     /// Model label.
     pub model: Option<String>,
     /// Provider profile identity. Model ids are not globally unique.
@@ -1100,6 +1103,7 @@ impl Default for AgentOptions {
             turn_started_emitted: false,
             max_results_per_source: b.max_results_per_source,
             session_id: "session".into(),
+            turn_id: String::new(),
             model: None,
             provider_profile_id: None,
             cancel: None,
@@ -1131,6 +1135,7 @@ impl AgentOptions {
             turn_started_emitted: false,
             max_results_per_source: b.max_results_per_source,
             session_id: session_id.into(),
+            turn_id: String::new(),
             model,
             provider_profile_id: None,
             cancel: None,
@@ -1432,25 +1437,39 @@ fn emit_context_provenance_before_provider(
 
     // 3b. Deterministic multi-source context plan (before provider).
     if let Some(plan) = context_plan {
+        let selected_ids = plan.included().map(|c| c.id.clone()).collect::<Vec<_>>();
+        let mut facts = serde_json::json!({
+            "turn_id": plan.turn_id,
+            "application": plan.application,
+            "model_facing": plan.is_model_facing(),
+            "strategy": plan.strategy,
+            "model_relevance_used": plan.model_relevance_used,
+            "relevance_failed_closed": plan.relevance_failed_closed,
+            "included_chars": plan.included_chars,
+            "global_char_budget": plan.global_char_budget,
+            "candidates_discovered": plan.candidates_discovered,
+            "candidates_omitted_by_cap": plan.candidates_omitted_by_cap,
+            "developer_payload_truncated": plan.developer_payload_truncated,
+            "candidate_count": plan.candidates.len(),
+            "plan": plan.to_developer_json(),
+            "side_effects_forbidden": plan.side_effects_forbidden,
+        });
+        let status = if plan.is_model_facing() {
+            facts["context_used_summary"] =
+                serde_json::Value::String(plan.context_used_summary.clone());
+            facts["included_ids"] = serde_json::json!(selected_ids);
+            "model_facing"
+        } else {
+            facts["inventory_summary"] =
+                serde_json::Value::String(plan.context_used_summary.clone());
+            facts["selected_inventory_ids"] = serde_json::json!(selected_ids);
+            "inventory_only_not_model_facing"
+        };
         trace.record_developer(DeveloperDetailDraft::context_provenance(
             round,
             "context_plan",
-            "ready",
-            serde_json::json!({
-                "strategy": plan.strategy,
-                "model_relevance_used": plan.model_relevance_used,
-                "relevance_failed_closed": plan.relevance_failed_closed,
-                "included_chars": plan.included_chars,
-                "global_char_budget": plan.global_char_budget,
-                "context_used_summary": plan.context_used_summary,
-                "candidates_discovered": plan.candidates_discovered,
-                "candidates_omitted_by_cap": plan.candidates_omitted_by_cap,
-                "developer_payload_truncated": plan.developer_payload_truncated,
-                "candidate_count": plan.candidates.len(),
-                "included_ids": plan.included().map(|c| c.id.clone()).collect::<Vec<_>>(),
-                "plan": plan.to_developer_json(),
-                "side_effects_forbidden": plan.side_effects_forbidden,
-            }),
+            status,
+            facts,
             ContextProvenanceAuthority::DeterministicHost,
         ));
     }
@@ -2300,6 +2319,11 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
     live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
     mut checkpoint_out: Option<&mut Option<LinkedSynthesisCheckpoint>>,
 ) -> CoreResult<Vec<StreamEvent>> {
+    let effective_turn_id = if opts.turn_id.trim().is_empty() {
+        format!("turn-{}", uuid::Uuid::new_v4())
+    } else {
+        opts.turn_id.clone()
+    };
     if let Some(checkpoint) = checkpoint_out.as_deref_mut() {
         *checkpoint = None;
     }
@@ -2927,7 +2951,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                 .map(|s| s.chars().take(2_000).collect::<String>());
             let plan_snap = crate::context_plan::ContextInventorySnapshot {
                 session_id: opts.session_id.clone(),
-                turn_id: opts.session_id.clone(),
+                turn_id: effective_turn_id.clone(),
                 user_text: user_text.to_string(),
                 history_text: hist_text.clone(),
                 history_message_count: history.len(),

@@ -913,6 +913,8 @@ impl ActivityRecorder {
                             s.starts_with("context_plan:")
                                 || s.starts_with("context_used:")
                                 || s.starts_with("context_included:")
+                                || s.starts_with("context_inventoried:")
+                                || s.starts_with("context_inventory_only:")
                                 || s.starts_with("context_plan_preference_inject:")
                         })
                         .take(32)
@@ -1129,13 +1131,18 @@ impl ActivityRecorder {
                     .iter()
                     .find_map(|s| s.strip_prefix("context_used:"))
                     .map(|s| s.to_string());
+                let inventory_only = context_plan_steps
+                    .iter()
+                    .any(|s| s.starts_with("context_inventory_only:not_model_facing"));
                 let has_plan = context_plan_steps
                     .iter()
                     .any(|s| s.starts_with("context_plan:"));
                 let has_bound = host_policy_codes
                     .iter()
                     .any(|c| c.contains("non_progress") || c.contains("forced_synthesis"));
-                let label = if let Some(summary) = context_used.as_ref() {
+                let label = if inventory_only {
+                    "Context inventory only (not model-facing)".to_string()
+                } else if let Some(summary) = context_used.as_ref() {
                     format!("Context used: {summary}")
                 } else if has_plan {
                     format!("Context plan ({step_count} trail step(s))")
