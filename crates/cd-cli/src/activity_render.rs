@@ -477,4 +477,87 @@ mod tests {
         // No pending-only record after cancel.
         assert_ne!(record.status, ActivityStatus::Pending);
     }
+
+    #[test]
+    fn projects_failed_and_withheld_statuses_are_terminal() {
+        let kinds = empty_kinds();
+        // Match shipped status_for_turn_reason / status_for_turn_events:
+        // cancel→Cancelled, error→Failed, budget_time→Withheld (deadline),
+        // stop→Ok. Permission await alone is Pending until the turn settles.
+        for (reason, expected) in [
+            ("error", ActivityStatus::Failed),
+            ("cancel", ActivityStatus::Cancelled),
+            ("budget_time", ActivityStatus::Withheld),
+            ("stop", ActivityStatus::Ok),
+        ] {
+            let sink = Arc::new(RecordingTurnTrace::new());
+            let events = vec![
+                StreamEvent::TurnStarted {
+                    session_id: "s".into(),
+                    model: Some("m".into()),
+                },
+                StreamEvent::TurnCompleted {
+                    reason: reason.into(),
+                },
+            ];
+            for e in &events {
+                sink.record_host_event(e, &kinds);
+            }
+            let record = project_turn_activity(
+                "s",
+                "s::t",
+                None,
+                ActivityLevel::Summary,
+                Some(sink.as_ref()),
+                &events,
+                5,
+            );
+            assert_eq!(
+                record.status, expected,
+                "reason={reason} expected {expected:?} got {:?}",
+                record.status
+            );
+            // Terminal outcomes for these reasons are never "still streaming".
+            if reason != "awaiting_permission" {
+                assert!(
+                    matches!(
+                        record.status,
+                        ActivityStatus::Ok
+                            | ActivityStatus::Failed
+                            | ActivityStatus::Cancelled
+                            | ActivityStatus::Withheld
+                    ),
+                    "non-pending terminal expected for {reason}"
+                );
+            }
+        }
+        // Linked grounded-refusal path: Error code + TurnCompleted stop → Withheld
+        let sink = Arc::new(RecordingTurnTrace::new());
+        let events = vec![
+            StreamEvent::TurnStarted {
+                session_id: "s".into(),
+                model: Some("m".into()),
+            },
+            StreamEvent::Error {
+                code: "linked_no_tool".into(),
+                message: "no tool evidence".into(),
+            },
+            StreamEvent::TurnCompleted {
+                reason: "stop".into(),
+            },
+        ];
+        for e in &events {
+            sink.record_host_event(e, &kinds);
+        }
+        let record = project_turn_activity(
+            "s",
+            "s::t",
+            None,
+            ActivityLevel::Summary,
+            Some(sink.as_ref()),
+            &events,
+            8,
+        );
+        assert_eq!(record.status, ActivityStatus::Withheld);
+    }
 }
