@@ -422,12 +422,16 @@ contextdesk corpus delete <id> --yes
 contextdesk corpus use <id>
 contextdesk timezone status [--corpus <id>]
 contextdesk timezone apply <source> <iana-timezone> [--corpus <id>] --yes
+contextdesk timezone apply-all <iana-timezone> [--corpus <id>] --yes
 contextdesk timezone clear <source> [--corpus <id>]
 contextdesk explore <query> [--corpus <id>] [--k N]
 contextdesk context <query> [--corpus <id>] [--k N]
 contextdesk session list
 contextdesk session show <id>
 contextdesk chat <question> [--corpus <id>] [--session <id>] [--new] [--auto-approve]
+            [--context-selection <text>] [--dry-run]
+            [--trace summary|context|full] [--trace-ack]
+            [--activity summary|full] [--activity-ack]
 contextdesk config init [--project] [--interactive|--non-interactive] [--force]
                         [--format <fmt>] [--color <mode>] [--default-provider-profile <id>]
                         [--skip-provider] [--provider-kind <kind>] [--base-url <url>]
@@ -501,6 +505,30 @@ credential.
 
 ```json
 {"type":"trace_summary","provider_profile_id":"ollama-local","chat_model":"mistral","corpus_id":null,"corpus_revision":null,"dry_run":true,"history_messages":3,"retrieved_evidence":0,"evidence_ids":[],"context_budget_chars":120000,"context_used_chars":828,"tool_names":["search_kb"],"elapsed_ms":2,"grounding":"not_applicable"}
+```
+
+## `chat --activity` / `--context-selection`
+
+`--activity {summary,full}` projects the **shared** Activity Inspector
+contract (`cd_core::activity`) for this turn — the same model the desktop
+inspector uses, not a CLI-only reimplementation. Summary retains counts,
+phases, origins, tool names, and timings (never message bodies). Full
+adds opt-in redacted, hard-bounded provider message bodies already
+scrubbed by `cd_core::turn_trace` and requires `--activity-ack`.
+
+Activity capture is **process-lifetime** for the turn: it is not a durable
+session transcript. Durable state after quit is corpus/session/investigation
+only (see [`DEMO_ACCEPTANCE.md`](DEMO_ACCEPTANCE.md)).
+
+`--context-selection <text>` attaches explicit one-turn client evidence for
+an **ordinary** (unlinked) chat. It is not saved as transcript text and is
+never inferred from ambient or corpus state. Linked-log turns must use
+host-resolved corpus evidence instead.
+
+```bash
+contextdesk chat "summarize selection" --new \
+  --context-selection "host-pasted evidence for this turn only" \
+  --activity summary --trace summary
 ```
 
 ## Permission prompts (`chat`)
