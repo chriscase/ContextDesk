@@ -406,11 +406,23 @@ impl ContextPlan {
     /// so they actually reach the provider (not trail-only). Inventory-only
     /// plans fail closed here even if a caller accidentally attempts injection.
     pub fn format_injection_block(&self) -> Option<String> {
+        self.format_injection_block_excluding(&HashSet::new())
+    }
+
+    /// Build the provider block while excluding candidate ids already injected
+    /// by another host-owned context path (for example ambient memory recall).
+    pub fn format_injection_block_excluding(
+        &self,
+        excluded_ids: &HashSet<String>,
+    ) -> Option<String> {
         if !self.is_model_facing() {
             return None;
         }
         let mut lines: Vec<String> = Vec::new();
         for c in self.included() {
+            if excluded_ids.contains(&c.id) {
+                continue;
+            }
             if c.family == ContextSourceFamily::ConversationHistory {
                 continue; // already in model_ctx via prepare_model_context
             }
@@ -1500,6 +1512,39 @@ mod tests {
         let ids1: Vec<_> = p1.included().map(|c| c.id.as_str()).collect();
         let ids2: Vec<_> = p2.included().map(|c| c.id.as_str()).collect();
         assert_eq!(ids1, ids2, "shuffle-stable included ids");
+    }
+
+    #[test]
+    fn injection_block_excludes_context_already_injected_by_source_id() {
+        let snap = ContextInventorySnapshot {
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            user_text: "release dashboard preference".into(),
+            memory_records: vec![MemoryRecordSnapshot {
+                id: "memory:one".into(),
+                kind: Kind::Preference,
+                title: "release dashboard preference".into(),
+                content: "saffron ambient plan dedup".into(),
+                status: Status::Active,
+            }],
+            user_selection: Some("retain this explicit selection".into()),
+            ..Default::default()
+        };
+        let plan = build_context_plan(
+            &snap,
+            ContextPlanBudget::default(),
+            RelevanceStrategy::DeterministicOnly,
+        );
+        let full = plan.format_injection_block().expect("full block");
+        assert!(full.contains("saffron ambient plan dedup"));
+        assert!(full.contains("retain this explicit selection"));
+
+        let excluded = HashSet::from(["memory:one".to_string()]);
+        let filtered = plan
+            .format_injection_block_excluding(&excluded)
+            .expect("selection remains");
+        assert!(!filtered.contains("saffron ambient plan dedup"));
+        assert!(filtered.contains("retain this explicit selection"));
     }
 
     #[test]

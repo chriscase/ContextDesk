@@ -2466,6 +2466,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
         }
     }
     let linked_prior_history = linked_turn.then(|| linked_safe_prior_history(history));
+    let current_user_history_index = history.len();
     history.push(ChatMessage {
         role: Role::User,
         content: user_text.into(),
@@ -2880,9 +2881,17 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
         let mut ambient_snapshot: Option<AmbientProvenanceSnapshot> = None;
         let mut ambient_attempted = false;
         let turn_context_plan: Option<crate::context_plan::ContextPlan> = {
-            let hist_text: String = model_ctx
+            // Echo suppression must compare against prior conversation and any
+            // tool results produced in this turn, never against the current
+            // question itself. Otherwise asking for a memory by its title
+            // incorrectly suppresses the content needed to answer it.
+            let echo_history_text: String = history
                 .iter()
-                .map(|m| m.content.as_str())
+                .enumerate()
+                .filter(|(index, message)| {
+                    *index != current_user_history_index && message.role != Role::System
+                })
+                .map(|(_, message)| message.content.as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
             let now = crate::embed::now_unix_secs();
@@ -2953,7 +2962,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                 session_id: opts.session_id.clone(),
                 turn_id: effective_turn_id.clone(),
                 user_text: user_text.to_string(),
-                history_text: hist_text.clone(),
+                history_text: echo_history_text.clone(),
                 history_message_count: history.len(),
                 history_keep: keep,
                 history_compacted: prepared_compacted
@@ -2983,6 +2992,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
             // Ordinary chat: optional hybrid ambient memory, then plan-Included
             // families into model_ctx (trail alone is insufficient).
             if !linked_turn && linked_required_evidence_satisfied {
+                let mut ambient_source_ids = HashSet::new();
                 if opts.ambient_recall_enabled {
                     if let Some(store) = host.durable_memory_store() {
                         ambient_attempted = true;
@@ -2990,7 +3000,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                         if let Ok(inj) = crate::memory::inject_memory_context_with_embed(
                             store.as_ref(),
                             user_text,
-                            &hist_text,
+                            &echo_history_text,
                             true,
                             budget,
                             crate::embed::HybridWeights::default(),
@@ -2999,6 +3009,8 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                         ) {
                             ambient_snapshot =
                                 Some(AmbientProvenanceSnapshot::from_injection(&inj));
+                            ambient_source_ids
+                                .extend(inj.selected.iter().map(|item| item.source_id.clone()));
                             if !inj.context_block.is_empty() {
                                 model_ctx.insert(
                                     0,
@@ -3037,7 +3049,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                 }
                 // Inject plan-Included families (memory, workspace, attachment,
                 // skill, selection, …) regardless of ambient_recall toggle.
-                if let Some(block) = plan.format_injection_block() {
+                if let Some(block) = plan.format_injection_block_excluding(&ambient_source_ids) {
                     let already = model_ctx
                         .iter()
                         .map(|m| m.content.as_str())
