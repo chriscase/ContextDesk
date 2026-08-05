@@ -42,6 +42,7 @@ synthesis only after required deterministic steps succeed.
 | Tools-disabled profile fails honestly                          | **Shipped** | [`research.rs`](../../../crates/cd-core/src/research.rs) capability gate                                         | User must select/configure a tools-enabled profile for a real loop                                 |
 | Structured evidence identity, not rendered-text reconstruction | **Shipped** | [`tool_host.rs`](../../../crates/cd-core/src/tool_host.rs) `ToolResult.log_evidence`                             | Other source types have source-specific citation contracts                                         |
 | Viewport snapshot is bounded and treated as data               | **Shipped** | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs)                                    | Snapshot is a hint, not authoritative event content                                                |
+| Explicit one-turn selected text                                | **Local integration** | Main-chat Composer and CLI `chat --context-selection` pass a bounded value through `cd-workflow` to `AgentOptions.user_selection` | Ordinary chat only; linked-log turns must use host-resolved corpus evidence                         |
 | Session file packs are scoped and bounded                      | **Shipped** | [`session_context.rs`](../../../crates/cd-core/src/session_context.rs)                                           | Not the path for multi-million-line log corpora                                                    |
 | Broad linked-log triage brief                                  | **Shipped (agent-testable)** | [`tool_host.rs`](../../../crates/cd-core/src/tool_host.rs) `build_broad_log_triage_brief` and [`agent.rs`](../../../crates/cd-core/src/agent.rs) broad-turn admission | Exact generated 250,000+ event acceptance with a tools-enabled provider remains #745 |
 | Slow-provider phase lifecycle and synthesis-only retry         | **Shipped (agent-testable)** | One monotonic turn ceiling, bounded phases, immediate cancellation, host-only evidence checkpoint, and tool-closed retry | Native cold/slow tools-enabled provider acceptance remains on #649                                 |
@@ -185,6 +186,7 @@ ContextDesk APIs.
 | `conversation_id`      | Durable transcript identity                      | Does not imply source access                 |
 | `binding`              | Ordinary or an explicit source/corpus identity   | Absent means no ambient corpus inheritance   |
 | `user_request`         | User text                                        | Data, never a permission grant               |
+| `user_selection`       | Text explicitly selected for this ordinary turn | Maximum 2,000 characters; never inferred     |
 | `view_hint`            | Current filters, lanes, selection, visible range | Bounded, untrusted hint                      |
 | `profile_capabilities` | Native tools, context size, provider behavior    | Host-observed/configured, not model-asserted |
 | `deadline` / `cancel`  | Turn lifecycle controls                          | Bounded and effective in every phase         |
@@ -288,11 +290,16 @@ string found in untrusted content into trusted evidence.
 12. **Cancellation stops deterministic work.** A cancelled or expired broad
     scan interrupts the database operation and joins its worker; it does not
     leave a detached corpus scan consuming resources.
-13. **Transcript publication is revisioned.** A renderer autosave names the
+13. **Explicit selection is its own channel.** A viewport brief, attachment,
+    workspace hit, or ambient-memory result never becomes `user_selection`.
+    The bounded selection is labelled as untrusted client evidence, appears
+    once after the established system block, and is refused for linked-log
+    turns rather than broadening their evidence policy.
+14. **Transcript publication is revisioned.** A renderer autosave names the
     last host revision it observed. The host rejects an older whole-session
     snapshot, and only the newest still-relevant client mutation may reconcile
     exact message identities with the winning durable revision.
-14. **Governed citation identity includes provenance.** Equal event/template
+15. **Governed citation identity includes provenance.** Equal event/template
     ids from different corpora remain distinct. Activation carries the exact
     citation object; an ambiguous bare inline id fails closed rather than using
     the first matching corpus.
@@ -513,6 +520,8 @@ The user should see:
 - citations or navigation proposals separate from prose;
 - explicit partial/unavailable/timeout states; and
 - an opt-in action before a proposed navigation changes the investigation view.
+- an explicit, one-turn selected-text control in ordinary chat, separate from
+  automatically eligible context and unavailable while a log corpus is linked.
 
 Small models benefit from the same UX as users: fewer simultaneous choices,
 shorter grounding instructions, typed result contracts, and an explicit final

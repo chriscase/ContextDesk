@@ -3339,6 +3339,10 @@ struct AgentTurnReq {
     /// Per-turn opt-in for sensitive, redacted developer payload inspection.
     #[serde(default)]
     developer_activity_detail: bool,
+    /// Explicit one-turn context selected by the user. Never synthesized from
+    /// Explorer viewport, ambient memory, or other host observations.
+    #[serde(default)]
+    user_selection: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -5168,6 +5172,7 @@ async fn agent_turn(
                 turn_started_at: Some(turn_started_at),
                 turn_prelude_emitted,
                 applied_skill_ids: &applied_skill_ids,
+                user_selection: req.user_selection.as_deref(),
             },
             Some(&mut sink),
             Some(&mut next_synthesis_checkpoint),

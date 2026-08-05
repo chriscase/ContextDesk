@@ -876,7 +876,28 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
     trace_sink: Option<Arc<dyn TurnTraceSink>>,
     applied_skill_ids: &[String],
     turn_id: Option<String>,
+    user_selection: Option<&str>,
 ) -> CoreResult<Vec<StreamEvent>> {
+    let user_selection = match user_selection.map(str::trim) {
+        Some("") | None => None,
+        Some(selection)
+            if selection.chars().count() <= crate::context_plan::MAX_USER_SELECTION_CHARS =>
+        {
+            Some(selection.to_string())
+        }
+        Some(_) => {
+            return Err(CoreError::Policy(format!(
+                "explicit user selection exceeds {} characters",
+                crate::context_plan::MAX_USER_SELECTION_CHARS
+            )))
+        }
+    };
+    if log_explorer_context.is_some() && user_selection.is_some() {
+        return Err(CoreError::Policy(
+            "explicit text selection is available only for ordinary chat; linked-log turns must use host-resolved corpus evidence"
+                .into(),
+        ));
+    }
     if force_local {
         if linked_synthesis_retry.is_some() {
             return Ok(emit_provider_error(
@@ -1071,6 +1092,7 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
     opts.turn_started_emitted = turn_prelude_emitted;
     opts.developer_trace = developer_trace_sink.map(crate::turn_trace::TurnTraceObserver::new);
     opts.applied_skill_ids = applied_skill_ids.to_vec();
+    opts.user_selection = user_selection;
     // Ambient recall follows host config (set by attach_durable_memory / rebuild_host).
     opts.ambient_recall_enabled =
         !dry_run && host.ambient_recall_enabled() && host.durable_memory_active();

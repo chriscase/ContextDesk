@@ -229,6 +229,7 @@ pub async fn run(
                 chat_model_override: model_override,
                 dry_run: args.dry_run,
                 trace_sink,
+                user_selection: args.user_selection.as_deref(),
             },
             Some(cancel.clone()),
             Some(&mut live_sink),

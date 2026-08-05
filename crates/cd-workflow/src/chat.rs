@@ -101,6 +101,9 @@ pub struct ChatWorkflowRequest<'a> {
     /// level it wants. `None` costs nothing extra: no wrapping backend is
     /// constructed at all.
     pub trace_sink: Option<Arc<dyn TurnTraceSink>>,
+    /// Text explicitly selected by the user for this turn only. This is not
+    /// inferred from linked corpus, viewport, ambient memory, or attachments.
+    pub user_selection: Option<&'a str>,
 }
 
 /// Outcome of one workflow call.
@@ -262,6 +265,7 @@ pub async fn run_chat_workflow(
                 cancel: cancel.clone(),
                 dry_run: request.dry_run,
                 trace_sink: request.trace_sink.clone(),
+                user_selection: request.user_selection,
                 ..TurnExecutionOptions::default()
             },
             Some(&mut *live_sink),
@@ -438,6 +442,7 @@ mod tests {
                 chat_model_override: None,
                 dry_run: false,
                 trace_sink: None,
+                user_selection: None,
             },
             None,
             None,
@@ -474,6 +479,132 @@ mod tests {
         assert_eq!(saved.messages[1].content, "hi there");
         assert_eq!(saved.messages[2].role, "assistant");
         assert_eq!(saved.messages[2].content, "hello from the mock model");
+    }
+
+    #[tokio::test]
+    async fn explicit_user_selection_reaches_provider_only_when_supplied() {
+        const TOKEN: &str = "WORKFLOW_USER_SELECTION_8ZP4_ONLY";
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_raw(SSE_BODY, "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new("t", vec![workspace_dir.path().to_path_buf()]);
+        let index = KeywordIndex::build(&workspace).unwrap();
+        let mut host = ToolHost::new(workspace, index, None);
+        let secrets = MemorySecretStore::new();
+        let mut profile = ProviderProfile::ollama_local();
+        profile.kind = ProviderKind::OpenAiCompatible;
+        profile.base_url = server.uri();
+        profile.local_only = true;
+        profile.chat_model = "test-model".into();
+        profile.capabilities.tools = false;
+        let cfg = AppConfig {
+            providers: ProviderConfig {
+                active_id: Some(profile.id.clone()),
+                profiles: vec![profile],
+            },
+            ..AppConfig::default()
+        };
+        let sessions_dir = tempfile::tempdir().unwrap();
+        let sessions = SessionStore::new(sessions_dir.path());
+
+        for selection in [Some(TOKEN), None] {
+            run_chat_workflow(
+                &mut host,
+                &secrets,
+                &cfg,
+                &sessions,
+                workspace_dir.path(),
+                None,
+                "same neutral question",
+                ChatWorkflowRequest {
+                    corpus_id: None,
+                    explicit_profile_id: None,
+                    chat_model_override: None,
+                    dry_run: false,
+                    trace_sink: None,
+                    user_selection: selection,
+                },
+                None,
+                None,
+                |_tool, _target, _reason, _preview, _risk| PermissionDecision::Deny,
+            )
+            .await
+            .expect("production workflow turn");
+        }
+
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 2);
+        let bodies: Vec<String> = requests
+            .iter()
+            .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+            .collect();
+        assert!(
+            bodies[0].contains(TOKEN),
+            "explicit selection missing: {}",
+            bodies[0]
+        );
+        assert_eq!(
+            bodies[0].matches(TOKEN).count(),
+            1,
+            "selection must have one model-facing injection source: {}",
+            bodies[0]
+        );
+        assert!(
+            bodies[0].contains("<user_selected_context>"),
+            "selection must be visibly delimited as untrusted client evidence"
+        );
+        let selected_body: Value = serde_json::from_str(&bodies[0]).expect("provider JSON");
+        let messages = selected_body["messages"].as_array().expect("messages");
+        let selection_index = messages
+            .iter()
+            .position(|message| message.to_string().contains(TOKEN))
+            .expect("selection message");
+        assert!(
+            selection_index > 0,
+            "untrusted selection must not precede the primary system instruction: {messages:?}"
+        );
+        assert!(
+            !bodies[1].contains(TOKEN) && !bodies[1].contains("<user_selected_context>"),
+            "ordinary turn fabricated selection context: {}",
+            bodies[1]
+        );
+
+        let resolved = resolve_turn_inputs(&secrets, &cfg, None, None).expect("resolved");
+        let mut linked_history = Vec::new();
+        let linked_error = run_turn(
+            &mut host,
+            &resolved,
+            "linked question",
+            &mut linked_history,
+            "linked-selection-policy",
+            TurnExecutionOptions {
+                context: Some(
+                    LogExplorerTurnContext::for_main_chat("synthetic-corpus")
+                        .expect("linked context"),
+                ),
+                user_selection: Some(TOKEN),
+                ..TurnExecutionOptions::default()
+            },
+            None,
+            None,
+        )
+        .await
+        .expect_err("linked selection must fail closed");
+        assert!(linked_error.to_string().contains("linked-log turns"));
+        assert_eq!(
+            server.received_requests().await.expect("requests").len(),
+            2,
+            "linked selection policy must fail before provider I/O"
+        );
     }
 
     /// The same shared `ChatWorkflow` path, this time proving the
@@ -553,6 +684,7 @@ mod tests {
                 chat_model_override: None,
                 dry_run: false,
                 trace_sink: None,
+                user_selection: None,
             },
             None,
             None,
@@ -645,6 +777,7 @@ mod tests {
                 chat_model_override: None,
                 dry_run: true,
                 trace_sink: None,
+                user_selection: None,
             },
             None,
             None,

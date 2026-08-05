@@ -153,7 +153,7 @@ export type ChatPaneProps = {
   modelOptions: ModelOptionDto[];
   setSessionModel: (key: string) => void;
   setAppDefaultModel: (key: string) => void;
-  onSubmit: (text: string) => Promise<boolean>;
+  onSubmit: (text: string, userSelection?: string) => Promise<boolean>;
   onStop: () => void;
   preflightBlocking: boolean;
   /**
@@ -1006,6 +1006,7 @@ export function ChatPane(props: ChatPaneProps) {
           draft={draft}
           onDraftChange={onDraftChange}
           onRetryModelTools={onRetryModelTools}
+          allowUserSelection={!linkedCorpusId}
         />
       </div>
       </div>

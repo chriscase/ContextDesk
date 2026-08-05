@@ -37,4 +37,49 @@ describe("Composer keyboard interactions", () => {
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(input.value).toBe("keep my draft"));
   });
+
+  it("sends explicit one-turn context only when the user selected it", async () => {
+    const onSubmit = vi.fn(async () => true);
+    render(<Composer onSubmit={onSubmit} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Context" }));
+    const selected = screen.getByLabelText(
+      "Selected context for the next message",
+    ) as HTMLTextAreaElement;
+    fireEvent.change(selected, {
+      target: { value: "GUI_SELECTION_TOKEN_7QK9" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Message ContextDesk…"), {
+      target: { value: "use my selected text" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith(
+        "use my selected text",
+        "GUI_SELECTION_TOKEN_7QK9",
+      ),
+    );
+    expect(selected.value).toBe("");
+  });
+
+  it("does not invent selected context for an ordinary send", async () => {
+    const onSubmit = vi.fn(async () => true);
+    render(<Composer onSubmit={onSubmit} />);
+    fireEvent.change(screen.getByPlaceholderText("Message ContextDesk…"), {
+      target: { value: "ordinary message" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith("ordinary message"),
+    );
+  });
+
+  it("does not offer free-form selection for host-resolved linked-log turns", () => {
+    render(<Composer onSubmit={vi.fn()} allowUserSelection={false} />);
+    expect(screen.queryByRole("button", { name: "Context" })).toBeNull();
+    expect(
+      screen.queryByLabelText("Selected context for the next message"),
+    ).toBeNull();
+  });
 });

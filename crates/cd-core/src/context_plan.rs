@@ -213,6 +213,11 @@ pub struct ContextCandidate {
 /// Hard cap on candidates retained in the plan vector (after selection).
 pub const MAX_PLAN_CANDIDATES: usize = 128;
 
+/// Hard character bound for context text a user explicitly selects for one
+/// turn. Hosts must reject larger values rather than silently treating an
+/// arbitrary viewport, attachment, or ambient recall result as a selection.
+pub const MAX_USER_SELECTION_CHARS: usize = 2_000;
+
 /// Hard cap on serialized Developer-detail plan JSON (characters).
 pub const MAX_DEVELOPER_PLAN_JSON_CHARS: usize = 6_000;
 
@@ -425,6 +430,9 @@ impl ContextPlan {
             }
             if c.family == ContextSourceFamily::ConversationHistory {
                 continue; // already in model_ctx via prepare_model_context
+            }
+            if c.family == ContextSourceFamily::UserSelection {
+                continue; // injected separately without preview truncation
             }
             if c.family == ContextSourceFamily::OptionalConnector {
                 continue; // never inject connector content without authorize+invoke
@@ -863,7 +871,9 @@ pub fn build_context_plan(
             privacy: PrivacyClass::UserVisibleContent,
             scope: DataScope::conversation(),
             memory_kind: None,
-            snippet: Some(sel.chars().take(80).collect()),
+            // Keep the full bounded selection so it can reach the provider;
+            // Developer JSON still omits every snippet body.
+            snippet: Some(sel.chars().take(MAX_USER_SELECTION_CHARS).collect()),
             score: Some(1.0),
             provenance: "client_selection".into(),
         });

@@ -44,6 +44,9 @@ pub struct TurnExecutionOptions<'a> {
     pub turn_started_at: Option<Instant>,
     pub turn_prelude_emitted: bool,
     pub applied_skill_ids: &'a [String],
+    /// Text the user explicitly selected for this turn. Never derive from a
+    /// viewport, ambient recall, or attachment inventory.
+    pub user_selection: Option<&'a str>,
 }
 
 /// Drive the shared provider/tool kernel for either an ordinary or a linked
@@ -79,6 +82,7 @@ pub async fn run_turn(
         options.trace_sink,
         options.applied_skill_ids,
         options.turn_id,
+        options.user_selection,
     )
     .await
 }
@@ -188,6 +192,7 @@ pub async fn run_linked_turn(
             turn_started_at,
             turn_prelude_emitted,
             applied_skill_ids: &[],
+            user_selection: None,
         },
         live,
         checkpoint_out,

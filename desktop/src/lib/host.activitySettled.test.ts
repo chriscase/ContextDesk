@@ -47,6 +47,24 @@ beforeEach(() => {
 });
 
 describe("agentTurn activity_settled (real host emit path)", () => {
+  it("puts explicit selection on the Tauri request only when supplied", async () => {
+    const { agentTurn } = await import("./host");
+    invokeMock.mockResolvedValue(undefined);
+
+    await agentTurn("session-a", "selected", false, null, null, undefined, null, null, false, {
+      assistantMessageId: "assistant-1",
+      userSelection: "DESKTOP_SELECTION_TOKEN_P4M2",
+    });
+    await agentTurn("session-b", "ordinary", false, null, null, undefined, null, null, false, {
+      assistantMessageId: "assistant-2",
+    });
+
+    const firstReq = invokeMock.mock.calls[0]![1].req;
+    const secondReq = invokeMock.mock.calls[1]![1].req;
+    expect(firstReq.user_selection).toBe("DESKTOP_SELECTION_TOKEN_P4M2");
+    expect(secondReq.user_selection).toBeNull();
+  });
+
   it("republishes the turn-activity-update bridge when the host emits activity_settled for this exact session", async () => {
     const { agentTurn } = await import("./host");
 

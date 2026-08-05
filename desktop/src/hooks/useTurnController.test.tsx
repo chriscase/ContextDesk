@@ -130,6 +130,30 @@ describe("useTurnController completed citation routing (#701)", () => {
     host.hostReadFile.mockResolvedValue("file body");
   });
 
+  it("forwards explicit one-turn selection without inventing it for ordinary sends", async () => {
+    const selected = renderCompletedTurn("help://log-analysis-pipeline#pipeline");
+    await act(async () => {
+      await selected.result.current.startTurn(
+        "Use this context.",
+        "  CONTROLLER_SELECTION_TOKEN_2M7Q  ",
+      );
+    });
+    expect(host.agentTurn.mock.calls[0]?.[9]).toEqual(
+      expect.objectContaining({
+        userSelection: "CONTROLLER_SELECTION_TOKEN_2M7Q",
+      }),
+    );
+
+    host.agentTurn.mockClear();
+    const ordinary = renderCompletedTurn("help://log-analysis-pipeline#pipeline");
+    await act(async () => {
+      await ordinary.result.current.startTurn("Ordinary turn.");
+    });
+    expect(host.agentTurn.mock.calls[0]?.[9]).not.toHaveProperty(
+      "userSelection",
+    );
+  });
+
   it.each(["log_template:7", "log_event:42"])(
     "keeps governed evidence %s out of the workspace file reader",
     async (citationId) => {

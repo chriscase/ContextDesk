@@ -275,6 +275,11 @@ pub enum ActivityLevel {
 #[derive(Debug, clap::Args)]
 pub struct ChatArgs {
     pub question: String,
+    /// Explicit text to include as one-turn client evidence in ordinary chat.
+    /// It is not saved as transcript text and is never inferred from ambient
+    /// or corpus state. Linked-log turns must use host-resolved corpus evidence.
+    #[arg(long = "context-selection")]
+    pub user_selection: Option<String>,
     /// Ground this turn in a corpus (default: the corpus set by
     /// `corpus use`, if any; otherwise an ordinary, unlinked turn).
     #[arg(long)]

@@ -12,7 +12,10 @@ import { curateModels } from "../lib/modelCuration";
 
 type Props = {
   /** Return `false` to reject the send (draft is preserved). */
-  onSubmit: (text: string) => boolean | Promise<boolean> | void;
+  onSubmit: (
+    text: string,
+    userSelection?: string,
+  ) => boolean | Promise<boolean> | void;
   disabled?: boolean;
   busy?: boolean;
   onStop?: () => void;
@@ -46,7 +49,11 @@ type Props = {
    * changed in Settings.
    */
   onRetryModelTools?: (model: ModelOptionDto) => Promise<void> | void;
+  /** Linked-log turns must use host-resolved corpus evidence instead. */
+  allowUserSelection?: boolean;
 };
+
+export const MAX_USER_SELECTION_CHARS = 2_000;
 
 export function Composer({
   onSubmit,
@@ -63,15 +70,25 @@ export function Composer({
   onDraftChange,
   disabledReason,
   onRetryModelTools,
+  allowUserSelection = true,
 }: Props) {
   const [retryingTools, setRetryingTools] = useState(false);
   const [localValue, setLocalValue] = useState("");
   const [expanded, setExpanded] = useState(false);
+  const [selectionOpen, setSelectionOpen] = useState(false);
+  const [userSelection, setUserSelection] = useState("");
   const id = useId();
   const taRef = useRef<HTMLTextAreaElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   /** Synchronous latch — two Enters in one frame must submit once. */
   const submittingRef = useRef(false);
+
+  useEffect(() => {
+    if (!allowUserSelection) {
+      setSelectionOpen(false);
+      setUserSelection("");
+    }
+  }, [allowUserSelection]);
 
   const controlled = draft !== undefined;
   const wasControlledRef = useRef(controlled);
@@ -137,12 +154,14 @@ export function Composer({
     // resolves, clicking Send has already disabled that button and dropped
     // focus to <body>, which is indistinguishable from the user clicking away.
     const hadFocus = Boolean(rootRef.current?.contains(document.activeElement));
+    const selected = userSelection.trim();
     submittingRef.current = true;
     // Clear immediately on submit so the draft does not sit through the whole
     // agent turn (startTurn awaits network/tools). Restore only if rejected.
     setValue("");
+    setUserSelection("");
     setExpanded(false);
-    const res = onSubmit(t);
+    const res = selected ? onSubmit(t, selected) : onSubmit(t);
     // Release at the end of *this task*, not at turn completion. The race the
     // latch guards is two handlers running against one pre-clear render, which
     // is confined to a single task; holding it across the awaited turn left the
@@ -158,12 +177,14 @@ export function Composer({
       const accepted = res instanceof Promise ? await res : res;
       if (accepted === false) {
         setValue(t);
+        setUserSelection(selected);
       }
     } catch {
       // Parent threw before accepting — put the draft back.
       setValue(t);
+      setUserSelection(selected);
     }
-  }, [value, disabled, busy, onSubmit, setValue]);
+  }, [value, userSelection, disabled, busy, onSubmit, setValue]);
 
   const insertSnippet = (snippet: string) => {
     setValue((v) => (v ? `${v}\n${snippet}` : snippet));
@@ -246,6 +267,31 @@ export function Composer({
           }
         }}
       />
+
+      {selectionOpen ? (
+        <div className="composer__selection" data-testid="composer-user-selection">
+          <label htmlFor={`${id}-selection`}>
+            Selected context for the next message
+          </label>
+          <textarea
+            id={`${id}-selection`}
+            value={userSelection}
+            maxLength={MAX_USER_SELECTION_CHARS}
+            rows={3}
+            disabled={disabled || busy}
+            placeholder="Paste or type the exact text to include for this turn…"
+            onChange={(event) => setUserSelection(event.target.value)}
+          />
+          <div className="composer__selection-meta">
+            <span>
+              Explicit client evidence · one turn only · not inferred from the viewport
+            </span>
+            <span>
+              {userSelection.length.toLocaleString()} / {MAX_USER_SELECTION_CHARS.toLocaleString()}
+            </span>
+          </div>
+        </div>
+      ) : null}
 
       <div className="composer__bar">
         <div className="composer__bar-left">
@@ -344,6 +390,19 @@ export function Composer({
             </span>
           ) : null}
 
+          {allowUserSelection ? (
+            <button
+              type="button"
+              className={`composer__chip${selectionOpen || userSelection ? " is-on" : ""}`}
+              aria-expanded={selectionOpen}
+              aria-controls={`${id}-selection`}
+              disabled={busy}
+              title="Explicitly include selected text in the next ordinary turn"
+              onClick={() => setSelectionOpen((open) => !open)}
+            >
+              Context{userSelection ? " · selected" : ""}
+            </button>
+          ) : null}
           <button
             type="button"
             className="composer__chip"

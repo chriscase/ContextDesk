@@ -350,6 +350,8 @@ export async function agentTurn(
     assistantMessageId?: string | null;
     /** Sensitive, process-lifetime activity detail for this turn only. */
     developerActivityDetail?: boolean;
+    /** Explicit one-turn context selected by the user. */
+    userSelection?: string | null;
   },
 ): Promise<EventDto[]> {
   const req = {
@@ -366,6 +368,7 @@ export async function agentTurn(
       transcriptIds?.assistantMessageId?.trim() || null,
     developer_activity_detail:
       transcriptIds?.developerActivityDetail === true,
+    user_selection: transcriptIds?.userSelection?.trim() || null,
   };
 
   if (!isTauri()) {
@@ -379,6 +382,7 @@ export async function agentTurn(
           query: text,
           session_id: sessionId,
           force_local: true,
+          user_selection: req.user_selection,
         }),
       });
       if (r.ok) {

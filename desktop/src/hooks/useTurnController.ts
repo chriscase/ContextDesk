@@ -105,7 +105,7 @@ export function useTurnController(args: Args) {
   const turnInFlightRef = useRef(false);
 
   const startTurn = useCallback(
-    async (text: string): Promise<boolean> => {
+    async (text: string, userSelection?: string): Promise<boolean> => {
       if (preflightBlocking) {
         onNeedPreflight();
         return false;
@@ -325,6 +325,9 @@ export function useTurnController(args: Args) {
             assistantMessageId: assistantId,
             ...(loadDeveloperActivityDetail()
               ? { developerActivityDetail: true }
+              : {}),
+            ...(userSelection?.trim()
+              ? { userSelection: userSelection.trim() }
               : {}),
           },
         );

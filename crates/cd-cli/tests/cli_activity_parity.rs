@@ -844,7 +844,62 @@ fn no_color_and_term_dumb_are_honored_by_help() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("--activity"));
     assert!(stdout.contains("--trace"));
+    assert!(stdout.contains("--context-selection"));
     assert!(!stdout.as_bytes().contains(&0x1b));
+}
+
+#[tokio::test]
+async fn cli_context_selection_reaches_provider_only_when_explicit() {
+    const TOKEN: &str = "CLI_USER_SELECTION_TOKEN_6NR3";
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(SSE_BODY, "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+    let home = tempfile::tempdir().unwrap();
+    let app_config_path = write_profile(home.path(), &server.uri(), false);
+
+    for selection in [Some(TOKEN), None] {
+        let mut command = cli(home.path());
+        command.args([
+            "--app-config",
+            app_config_path.to_str().unwrap(),
+            "--json",
+            "chat",
+            "--new",
+        ]);
+        if let Some(selection) = selection {
+            command.args(["--context-selection", selection]);
+        }
+        let output = command
+            .arg("same neutral question")
+            .output()
+            .expect("run chat");
+        assert!(
+            output.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(requests.len(), 2);
+    let selected = String::from_utf8_lossy(&requests[0].body);
+    let ordinary = String::from_utf8_lossy(&requests[1].body);
+    assert!(
+        selected.contains(TOKEN),
+        "explicit CLI selection missing: {selected}"
+    );
+    assert!(
+        !ordinary.contains(TOKEN),
+        "selection leaked into ordinary CLI turn: {ordinary}"
+    );
+    assert!(!ordinary.contains("<user_selected_context>"));
 }
 
 #[test]
