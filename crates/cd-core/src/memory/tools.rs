@@ -154,18 +154,10 @@ pub const DOCUMENTED_MEMORY_KINDS: &[&str] = &[
 /// Normalize a save/recall kind string: case-insensitive, hyphen→underscore,
 /// known aliases map to closed taxonomy; unknown → [`Kind::Other`] (backward compatible).
 pub fn normalize_memory_kind(raw: &str) -> Kind {
-    let t = raw.trim().to_ascii_lowercase().replace(['-', ' '], "_");
-    match t.as_str() {
-        "fact" | "facts" => Kind::Fact,
-        "decision" | "decisions" => Kind::Decision,
-        "bookmark" | "bookmarks" | "link" | "url" => Kind::Bookmark,
-        "preference" | "preferences" | "pref" => Kind::Preference,
-        "project_note" | "projectnote" | "note" | "notes" => Kind::ProjectNote,
-        "contact" | "contacts" | "person" => Kind::Contact,
-        "term" | "terms" | "glossary" => Kind::Term,
-        "task" | "tasks" | "todo" => Kind::Task,
-        "" => Kind::ProjectNote,
-        other => Kind::Other(other.to_string()),
+    if raw.trim().is_empty() {
+        Kind::ProjectNote
+    } else {
+        Kind::parse(raw)
     }
 }
 
@@ -409,6 +401,29 @@ mod tests {
             normalize_memory_kind("legacy_custom"),
             Kind::Other(_)
         ));
+        assert_eq!(
+            normalize_memory_kind("Future_Custom"),
+            Kind::Other("Future_Custom".into()),
+            "unknown kinds must retain their stored wire value"
+        );
+        for alias in [
+            "facts",
+            "decisions",
+            "link",
+            "PREFERENCES",
+            "project-note",
+            "person",
+            "glossary",
+            "todo",
+        ] {
+            assert_eq!(
+                normalize_memory_kind(alias),
+                Kind::parse(alias),
+                "tool and storage normalization drifted for {alias}"
+            );
+        }
+        assert_eq!(normalize_memory_kind("  "), Kind::ProjectNote);
+        assert_eq!(Kind::parse("  "), Kind::Other("  ".into()));
         for k in DOCUMENTED_MEMORY_KINDS {
             assert_eq!(
                 normalize_memory_kind(k).as_str().replace('-', "_"),
