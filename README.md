@@ -115,8 +115,8 @@ valid samples under
 
 | Platform | How to get `contextdesk` today |
 | -------- | ------------------------------ |
-| **macOS / Linux** | From source: `cargo build -p cd-cli --release` → `target/release/contextdesk`. Optional draft release archives when CI runs (see [CLI_PACKAGING.md](docs/CLI_PACKAGING.md)). |
-| **Windows** | Same Cargo path → `target/release/contextdesk.exe`. Draft ZIP archives when CI runs. |
+| **macOS / Linux** | Run `./scripts/cli-release/build_cli_release.sh` for a tested binary and local archive. See [CLI_PACKAGING.md](docs/CLI_PACKAGING.md). |
+| **Windows** | Run `.\scripts\cli-release\build_cli_release.ps1` for a tested `contextdesk.exe` and ZIP. Draft GitHub ZIPs are also produced by CI. |
 | **All** | Prefer absolute path or `CONTEXTDESK_BIN`; isolate automation with `--data-dir`. |
 
 Release downloads: draft GitHub Releases from workflow **`cli-release`** (never

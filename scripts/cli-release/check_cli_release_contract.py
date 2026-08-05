@@ -27,6 +27,8 @@ ROOT = Path(__file__).resolve().parents[2]
 WF = ROOT / ".github" / "workflows" / "cli-release.yml"
 PKG = ROOT / "scripts" / "cli-release" / "package_cli_release.py"
 SMOKE = ROOT / "scripts" / "cli-release" / "smoke_cli_artifact.sh"
+LOCAL_PS1 = ROOT / "scripts" / "cli-release" / "build_cli_release.ps1"
+LOCAL_SH = ROOT / "scripts" / "cli-release" / "build_cli_release.sh"
 REQUIRED = ("macos-arm64", "macos-x64", "linux-x64", "windows-x64")
 
 failures: list[str] = []
@@ -72,11 +74,23 @@ def main() -> int:
     print("== structural: scripts + docs ==")
     check("package_cli_release.py", PKG.is_file())
     check("smoke_cli_artifact.sh", SMOKE.is_file())
+    check("PowerShell local release builder", LOCAL_PS1.is_file())
+    check("POSIX local release builder", LOCAL_SH.is_file())
     check("CLI_PACKAGING.md", (ROOT / "docs" / "CLI_PACKAGING.md").is_file())
     check("CLI_CLIENT_PROTOCOL.md", (ROOT / "docs" / "CLI_CLIENT_PROTOCOL.md").is_file())
     check("QUICKSTART.md", (ROOT / "docs" / "cli-release" / "QUICKSTART.md").is_file())
     check("THIRD_PARTY_NOTICES.md", (ROOT / "docs" / "cli-release" / "THIRD_PARTY_NOTICES.md").is_file())
     check("synthetic demo", (ROOT / "fixtures" / "cli-release-demo" / "app.log").is_file())
+    ps1 = LOCAL_PS1.read_text(encoding="utf-8") if LOCAL_PS1.is_file() else ""
+    shell = LOCAL_SH.read_text(encoding="utf-8") if LOCAL_SH.is_file() else ""
+    for label, script in (("PowerShell", ps1), ("POSIX", shell)):
+        check(f"{label} builds locked release", "--release" in script and "--locked" in script)
+        check(f"{label} embeds Git identity", "CD_GIT_SHA" in script)
+        check(
+            f"{label} exercises normalize",
+            "normalize" in script or "smoke_cli_artifact.sh" in script,
+        )
+        check(f"{label} packages archive", "package_cli_release.py" in script)
 
     print("== mutation: packaging identity ==")
     sys.path.insert(0, str(PKG.parent))

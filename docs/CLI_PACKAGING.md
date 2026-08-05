@@ -47,10 +47,9 @@ Structural tests fail if the workflow drops the smoke step.
 
 ### Normalized output
 
-When the product **normalize** branch is integrated and capabilities advertise
-normalize surfaces, smoke will require normalized-output validation.
-At base `ade184b1` that surface is **not** required; the smoke script residual-skips
-with an explicit message rather than inventing green normalize checks.
+The smoke gate runs the shipped `normalize` command and validates its manifest,
+report, per-source JSONL files, event-count parity, and contiguous `sourceSeq`
+values. A release candidate cannot pass with a placeholder normalize check.
 
 ## Archive layout
 
@@ -104,7 +103,32 @@ GitHub Actions secrets when a future signing job is added.
 
 Publishing is always a **manual** operator step in the GitHub UI.
 
-## Local packaging dry-run
+## One-command local build
+
+From the repository root:
+
+```powershell
+# Windows PowerShell 5.1+ or PowerShell 7
+.\scripts\cli-release\build_cli_release.ps1
+```
+
+```bash
+# macOS or Linux
+./scripts/cli-release/build_cli_release.sh
+```
+
+Both scripts embed the exact Git identity, build the release binary, exercise
+offline import/explore/normalize, and create an unsigned teammate-ready archive
+under `dist/cli-local/`. Windows produces a ZIP; macOS/Linux produce a
+`tar.gz`. Use PowerShell `-NoPackage` to build and smoke without requiring
+Python, or `-SkipSmoke` only for local iteration (never release acceptance).
+
+Prerequisites: Git, the stable Rust toolchain, and platform C/C++ build tools.
+Archive creation also needs Python 3. On Windows, install Visual Studio Build
+Tools with **Desktop development with C++**, then run the PowerShell script from
+a Developer PowerShell or a shell where `cargo`, `git`, and `python` are on PATH.
+
+## Manual local packaging dry-run
 
 ```bash
 export CD_GIT_SHA=$(git rev-parse HEAD)
@@ -130,9 +154,7 @@ python3 scripts/cli-release/check_cli_release_contract.py
 These fail closed on: missing platform, empty identity, skipped smoke,
 missing checksums, or claiming a published release pass from draft-only CI.
 
-## Integration order (with other lanes)
+## Remaining release work
 
-1. Land this CLI release/protocol lane (low conflict: workflows, scripts, docs, clients).
-2. Integrate normalize-grammar when ready → extend smoke for normalized-output validation.
-3. Optional later: macOS notarization job, Windows Authenticode job (secrets + residual docs).
-4. Desktop `release.yml` remains independent; do not merge draft semantics into auto-publish.
+1. Optional later: macOS notarization and Windows Authenticode jobs.
+2. Desktop `release.yml` remains independent; do not merge draft semantics into auto-publish.
