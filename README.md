@@ -42,7 +42,7 @@ normative contract: [`docs/specs/NORMALIZED_LOG_EVENTS_V1.md`](docs/specs/NORMAL
 
 The **ContextDesk CLI** (`contextdesk`) is the headless adapter over the same
 production engine the desktop uses: import logs, explore a corpus, assemble
-context, chat with grounding, and (when present on your build) **normalize**
+context, chat with grounding, and **normalize**
 raw files/folders/ZIPs into portable `contextdesk.normalized_log_events.v1`
 JSONL — offline, with no provider or keychain reads.
 
@@ -63,7 +63,7 @@ JSONL — offline, with no provider or keychain reads.
 | Two-command happy path: `import` → `chat` | **Shipped** |
 | `corpus`, `timezone`, `explore`, `context`, `session`, `config`, `capabilities`, `doctor` | **Shipped** |
 | `contextdesk.normalized_log_events.v1` contract + JSON Schema + producer examples | **Shipped** (portable handoff; ordinary raw import still applies) |
-| Offline `contextdesk normalize` (raw file/folder/ZIP → JSONL + manifest + report) | **Planned / integrating** — grammar and output layout documented in [NORMALIZATION.md](docs/NORMALIZATION.md); confirm with `contextdesk normalize --help` on your binary |
+| Offline `contextdesk normalize` (raw file/folder/ZIP → JSONL + manifest + report) | **Shipped** — grammar and output layout documented in [NORMALIZATION.md](docs/NORMALIZATION.md) |
 | Multi-platform CLI release workflow (draft archives) | **Shipped in repo** (`.github/workflows/cli-release.yml`); published signed downloads are **not** claimed until a real draft/publish run exists |
 | Language SDKs that re-parse logs / Parquet export | **Not shipped** — adapters spawn the binary only; Parquet is not claimed |
 | macOS notarization / Windows Authenticode for CLI | **Not shipped** (unsigned RC only — see [CLI_PACKAGING.md](docs/CLI_PACKAGING.md)) |
@@ -97,11 +97,7 @@ $BIN --data-dir "$DATA" --json explore "timeout"
 
 ### Raw-log normalization example
 
-When your build includes the `normalize` subcommand (check with
-`contextdesk normalize --help`):
-
 ```bash
-# Executable only if `normalize` is present on the binary.
 contextdesk normalize ./fixtures/cli-release-demo --output ./out-normalize --json
 # Writes exactly:
 #   out-normalize/manifest.json
@@ -109,10 +105,11 @@ contextdesk normalize ./fixtures/cli-release-demo --output ./out-normalize --jso
 #   out-normalize/sources/<source-id>.jsonl
 ```
 
-If `normalize` is missing on this tip, use the **producer contract** path (emit
-conforming JSONL yourself) — [SDK guide](docs/specs/normalized-log-events/SDK.md) —
-or wait for the normalize CLI integration. Representative valid JSONL samples
-live under [`fixtures/cli-docs/normalize-examples/`](fixtures/cli-docs/normalize-examples/).
+Applications that already understand their logs can instead use the **producer
+contract** path and emit conforming JSONL themselves. See the
+[SDK guide](docs/specs/normalized-log-events/SDK.md) and the representative
+valid samples under
+[`fixtures/cli-docs/normalize-examples/`](fixtures/cli-docs/normalize-examples/).
 
 ### Install summary (macOS / Linux / Windows)
 

@@ -6,7 +6,7 @@ Checks:
   2. README has prominent "CLI and log normalization" section with required links
   3. Internal markdown links from hub docs resolve on disk
   4. When CONTEXTDESK_BIN is set, --help command list matches docs/CLI.md shipped set
-  5. normalize status honesty: if binary lacks normalize, docs must label it planned
+  5. normalize status honesty: the shipped command must exist in the checked binary
   6. One-click proof: README links to docs/NORMALIZATION.md
 
 Exit 0 only if all pass.
@@ -40,6 +40,7 @@ REQUIRED_DOCS = [
 
 SHIPPED_COMMANDS = {
     "import",
+    "normalize",
     "corpus",
     "timezone",
     "explore",
@@ -214,11 +215,7 @@ def check_command_drift() -> None:
 
     if not bin_path:
         ok("CONTEXTDESK_BIN unset — skip live --help drift (static checks only)")
-        # Honesty: normalize must be labeled planned if we can't prove presence
-        if re.search(r"Planned|integrating|planned", norm_md, re.I):
-            ok("NORMALIZATION.md labels normalize planned/integrating")
-        else:
-            fail("NORMALIZATION.md must label normalize status when binary not checked")
+        ok("live normalize presence requires CONTEXTDESK_BIN; static documentation checks passed")
         return
 
     if not Path(bin_path).exists():

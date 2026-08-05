@@ -45,6 +45,7 @@ contextdesk [OPTIONS] <COMMAND>
 | Command | Role |
 | ------- | ---- |
 | `import <source>` | Import archive/dir into a durable corpus |
+| `normalize <source> --output <dir>` | Offline raw → `normalized_log_events.v1` JSONL, manifest, and report (no durable corpus). See [NORMALIZATION.md](NORMALIZATION.md). |
 | `corpus list\|show\|rename\|delete\|use` | Corpus management |
 | `timezone status\|apply\|clear\|apply-all` | Ambiguous local time declarations |
 | `explore <query>` | Template-level search |
@@ -55,12 +56,6 @@ contextdesk [OPTIONS] <COMMAND>
 | `confluence …` | Optional Confluence connector |
 | `capabilities` | Machine-readable build surface |
 | `doctor` | Demo readiness |
-
-### Planned / integrating
-
-| Command | Role |
-| ------- | ---- |
-| `normalize <source> --output <dir>` | Offline raw → `normalized_log_events.v1` JSONL (no corpus persist). See [NORMALIZATION.md](NORMALIZATION.md). Confirm with `contextdesk normalize --help`. |
 
 Drift check: `python3 scripts/cli-release/check_cli_docs.py` compares this list
 to a live binary when `CONTEXTDESK_BIN` is set.
@@ -475,7 +470,7 @@ Verified by comparing to `contextdesk --help` / subcommand `--help` (see
 contextdesk import <source> [--name NAME] [--embed] [--explain-selection]
 contextdesk normalize <source> --output <dir> [--output-format jsonl]
             [--source-timezone <iana>] [--timezone-map '<json>'] [--strict-time]
-            # Planned/integrating — only if `normalize --help` succeeds
+            # Shipped; use `normalize --help` for the exact installed contract
 contextdesk corpus list
 contextdesk corpus show <id>
 contextdesk corpus rename <id> <name>

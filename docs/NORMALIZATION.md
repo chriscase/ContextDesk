@@ -18,11 +18,8 @@ timestamp model (no invented instants).
 | ----- | ------ |
 | Normative JSONL event contract + schema + producer examples | **Shipped** |
 | Ordinary import of raw logs (including JSONL that happens to conform) | **Shipped** — no special “fast path” claim |
-| Offline CLI `contextdesk normalize` | **Planned / integrating** — document grammar and outputs here; run `contextdesk normalize --help` to see if your binary has it |
+| Offline CLI `contextdesk normalize` | **Shipped** — raw file/folder/ZIP to validated JSONL, manifest, and report |
 | Parquet output | **Not shipped** (`--output-format` defaults to `jsonl` only) |
-
-Commands marked **(requires normalize subcommand)** are not executable on builds
-that omit `normalize`. Everything else uses synthetic public fixtures only.
 
 ## What normalize is (and is not)
 
@@ -39,7 +36,7 @@ inside the process. You do **not** install, configure, or run a database
 server for normalization or CLI import. Normalize publishes plain files under
 the `--output` directory; consumers read those files with any JSONL tool.
 
-## Command grammar (candidate; verify with `--help`)
+## Command grammar
 
 ```text
 contextdesk normalize [OPTIONS] --output <OUTPUT> <SOURCE>
@@ -56,7 +53,7 @@ contextdesk normalize [OPTIONS] --output <OUTPUT> <SOURCE>
 | Global `--json` / `--jsonl` / `--format` | **Command rendering** (envelope), not the data format |
 | `CONTEXTDESK_WORKING_DIR` | When set to a directory, relative `<SOURCE>` paths resolve under it |
 
-**(requires normalize subcommand)** Example:
+Example:
 
 ```bash
 contextdesk normalize ./fixtures/cli-release-demo \
@@ -198,10 +195,10 @@ are process-local; a stuck disk-full run fails closed without publishing.
 cargo build -p cd-cli --release
 BIN=./target/release/contextdesk
 
-# 2) Confirm normalize exists (skip section if "unrecognized subcommand")
+# 2) Inspect the installed command contract
 $BIN normalize --help
 
-# 3) Normalize synthetic demo (requires normalize)
+# 3) Normalize synthetic demo
 rm -rf ./out-normalize
 $BIN normalize ./fixtures/cli-release-demo --output ./out-normalize --json
 
@@ -214,7 +211,6 @@ python3 -c 'import json;print(json.load(open("out-normalize/normalization-report
 ## Walkthrough: PowerShell (Windows)
 
 ```powershell
-# Executable when normalize is present on contextdesk.exe
 cargo build -p cd-cli --release
 $bin = ".\target\release\contextdesk.exe"
 & $bin normalize --help
@@ -241,7 +237,7 @@ until a dedicated normalized fast-import ships.
 
 | Symptom | Interpretation |
 | ------- | -------------- |
-| `unrecognized subcommand 'normalize'` | Build/tip without normalize CLI — use producer path or integrate normalize lane |
+| `unrecognized subcommand 'normalize'` | Stale binary — rebuild or install a current CLI artifact |
 | `overwrite` / `non-empty` | Pick empty `--output` or remove prior tree |
 | High `timeUnresolved` | Supply `--source-timezone` or `--timezone-map`, or accept unresolved honesty |
 | `--strict-time` fails | Some local timestamps still lack zones — fix map or drop strict |
