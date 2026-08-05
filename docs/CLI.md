@@ -374,13 +374,16 @@ commands, only that every line always parses independently and the last
 line is always the terminal one.
 
 `chat`: `text_delta`, `tool`, `permission_required`, `turn_completed`,
-`error`, `trace_summary`, `trace_context`, `trace_tool`, `done`. The line
+`error`, `trace_summary`, `trace_context`, `trace_tool`, `activity`,
+`context_used`, `done`. The line
 tagged `done` is always last and appears exactly once — that holds on a
 successful turn and on a failed one alike. On failure, the last two lines
 are always `error` (the failure, `code`/`message`) then `done` with
 `ok:false`; nothing else on stdout is ever a bare, untagged JSON object
 under `--jsonl`. `trace_summary`/`trace_context`/`trace_tool` only appear
-when `chat` was run with `--dry-run` and/or `--trace` — see below.
+when `chat` was run with `--dry-run` and/or `--trace`; `activity` appears
+when Activity projection is requested; and `context_used` is the bounded
+host-computed context-plan summary when one was emitted — see below.
 
 `doctor`: `check` (one per completed check), then exactly one terminal
 line — `verdict` on completion, `interrupted` on Ctrl-C. See

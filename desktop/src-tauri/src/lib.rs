@@ -2929,8 +2929,14 @@ struct SaveConfluenceReq {
     basic_email: Option<String>,
 }
 
-fn parse_confluence_auth_mode(raw: Option<&str>) -> Result<cd_core::config::ConfluenceAuthMode, String> {
-    match raw.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("bearer") {
+fn parse_confluence_auth_mode(
+    raw: Option<&str>,
+) -> Result<cd_core::config::ConfluenceAuthMode, String> {
+    match raw
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("bearer")
+    {
         "bearer" | "Bearer" => Ok(cd_core::config::ConfluenceAuthMode::Bearer),
         "basic" | "Basic" => Ok(cd_core::config::ConfluenceAuthMode::Basic),
         other => Err(format!(
@@ -3130,9 +3136,7 @@ fn test_confluence_config(state: State<'_, AppState>) -> Result<String, String> 
         .ok_or_else(|| "PAT missing from keychain".to_string())?;
     let ro = cfg.to_ro_config();
     // Honor auth_mode / basic_email from Settings (Bearer Server/DC, Basic Cloud).
-    let auth = cfg
-        .auth_from_pat(pat)
-        .map_err(|e| e.to_string())?;
+    let auth = cfg.auth_from_pat(pat).map_err(|e| e.to_string())?;
     // Live probe (authenticated space list) — no PAT in returned message.
     let handle = tokio::runtime::Handle::try_current();
     let probe = if let Ok(h) = handle {
@@ -3181,9 +3185,7 @@ fn list_confluence_spaces(
     let policy = SsrfPolicy::allow_private_networks();
     let ro = cfg.to_ro_config();
     // Same auth_mode path as ToolHost / Test connection (not Bearer-only).
-    let auth = cfg
-        .auth_from_pat(pat)
-        .map_err(|e| e.to_string())?;
+    let auth = cfg.auth_from_pat(pat).map_err(|e| e.to_string())?;
     let lim = limit.unwrap_or(50).min(100) as usize;
     let response = {
         let run = async {
@@ -3966,18 +3968,27 @@ fn event_to_dto_with_linked_corpus(
     linked_corpus_id: Option<&str>,
 ) -> EventDto {
     let mut dto = cd_core::research::event_to_dto(event);
-    let is_log_citation = matches!(
-        event,
-        cd_core::events::StreamEvent::Citation { source_id, ..
-                }
-            if source_id.starts_with("log_template:") || source_id.starts_with("log_event:")
-    );
+    let (is_log_citation, event_corpus_id) = match event {
+        cd_core::events::StreamEvent::Citation {
+            source_id,
+            corpus_id,
+            ..
+        } if source_id.starts_with("log_template:") || source_id.starts_with("log_event:") => {
+            (true, corpus_id.as_deref())
+        }
+        _ => (false, None),
+    };
     if is_log_citation {
-        if let (Some(corpus_id), Some(payload)) = (linked_corpus_id, dto.payload.as_object_mut()) {
-            payload.insert(
-                "corpus_id".into(),
-                serde_json::Value::String(corpus_id.to_string()),
-            );
+        let Some(payload) = dto.payload.as_object_mut() else {
+            return dto;
+        };
+        if payload.get("corpus_id").is_none() {
+            if let Some(corpus_id) = event_corpus_id.or(linked_corpus_id) {
+                payload.insert(
+                    "corpus_id".into(),
+                    serde_json::Value::String(corpus_id.to_string()),
+                );
+            }
         }
     }
     dto
@@ -4368,15 +4379,19 @@ fn persist_host_terminal_turn_at(
             source_id,
             label,
             locator,
-                    corpus_id: None,
-                } = event
+            corpus_id,
+        } = event
         else {
             continue;
         };
-        let event_corpus = linked_corpus_id.as_deref();
+        let is_log_citation =
+            source_id.starts_with("log_template:") || source_id.starts_with("log_event:");
+        let resolved_corpus = is_log_citation
+            .then(|| corpus_id.as_deref().or(linked_corpus_id.as_deref()))
+            .flatten();
         if citations.iter().any(|citation| {
             citation["id"].as_str() == Some(source_id.as_str())
-                && citation.get("corpusId").and_then(|value| value.as_str()) == event_corpus
+                && citation.get("corpusId").and_then(|value| value.as_str()) == resolved_corpus
         }) {
             continue;
         }
@@ -4385,10 +4400,8 @@ fn persist_host_terminal_turn_at(
             "label": label,
             "title": locator
         });
-        if source_id.starts_with("log_template:") || source_id.starts_with("log_event:") {
-            if let Some(corpus_id) = linked_corpus_id.as_ref() {
-                citation["corpusId"] = serde_json::Value::String(corpus_id.clone());
-            }
+        if let Some(corpus_id) = resolved_corpus {
+            citation["corpusId"] = serde_json::Value::String(corpus_id.to_string());
         }
         citations.push(citation);
     }
@@ -16176,8 +16189,8 @@ mod startup_host_tests {
                 source_id: "log_event:42".into(),
                 label: "worker.log · seq 42".into(),
                 locator: Some("seq=42 source=worker.log".into()),
-                    corpus_id: None,
-                },
+                corpus_id: None,
+            },
             StreamEvent::SearchTrail {
                 steps: vec![
                     "phase:retrieving_evidence".into(),
@@ -16367,8 +16380,8 @@ mod startup_host_tests {
             source_id: "log_template:7".into(),
             label: "template 7".into(),
             locator: None,
-                    corpus_id: None,
-                };
+            corpus_id: None,
+        };
         let stamped = event_to_dto_with_linked_corpus(&log, Some("trusted-corpus"));
         assert_eq!(
             stamped
@@ -16382,8 +16395,8 @@ mod startup_host_tests {
             source_id: "runbook.md".into(),
             label: "runbook".into(),
             locator: None,
-                    corpus_id: None,
-                };
+            corpus_id: None,
+        };
         assert!(
             event_to_dto_with_linked_corpus(&file, Some("trusted-corpus"))
                 .payload
@@ -16394,6 +16407,76 @@ mod startup_host_tests {
             .payload
             .get("corpus_id")
             .is_none());
+
+        let authoritative = cd_core::events::StreamEvent::Citation {
+            source_id: "log_event:42".into(),
+            label: "event 42".into(),
+            locator: Some("seq=42".into()),
+            corpus_id: Some("event-corpus".into()),
+        };
+        assert_eq!(
+            event_to_dto_with_linked_corpus(&authoritative, Some("session-fallback"))
+                .payload
+                .get("corpus_id")
+                .and_then(|value| value.as_str()),
+            Some("event-corpus"),
+            "host-stamped event identity must outrank the linked-session fallback"
+        );
+    }
+
+    #[test]
+    fn host_stamped_log_citation_survives_terminal_chat_persistence() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let session = cd_core::sessions::Session::new("Ordinary chat");
+        store.save(&session).expect("save session");
+        let events = vec![
+            StreamEvent::Citation {
+                source_id: "log_event:42".into(),
+                label: "worker.log · seq 42".into(),
+                locator: Some("seq=42 source=worker.log".into()),
+                corpus_id: Some("host-corpus".into()),
+            },
+            StreamEvent::Citation {
+                source_id: "runbook.md".into(),
+                label: "runbook".into(),
+                locator: None,
+                corpus_id: None,
+            },
+            StreamEvent::TurnCompleted {
+                reason: "stop".into(),
+            },
+        ];
+        let saved = persist_host_terminal_turn_at(
+            &store,
+            &session.id,
+            "What happened?",
+            Some("user-1"),
+            Some("assistant-1"),
+            &events,
+            (None, None, None),
+        )
+        .expect("persist terminal turn");
+        let citations = saved.messages[1]
+            .citations
+            .as_ref()
+            .and_then(|value| value.as_array())
+            .expect("persisted citations");
+        assert_eq!(
+            citations.len(),
+            2,
+            "non-log citations must also be retained"
+        );
+        let log = citations
+            .iter()
+            .find(|citation| citation["id"] == "log_event:42")
+            .expect("host log citation");
+        assert_eq!(log["corpusId"], "host-corpus");
+        let file = citations
+            .iter()
+            .find(|citation| citation["id"] == "runbook.md")
+            .expect("non-log citation");
+        assert!(file.get("corpusId").is_none());
     }
 
     #[test]

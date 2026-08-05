@@ -61,6 +61,8 @@ fn assert_pure_jsonl(stdout: &[u8]) -> Vec<Value> {
         "trace_summary",
         "trace_context",
         "trace_tool",
+        "activity",
+        "context_used",
         "done",
     ];
     let mut lines = Vec::new();
