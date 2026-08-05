@@ -838,6 +838,7 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint(
         None,
         &[],
         None,
+        None,
     )
     .await
 }
