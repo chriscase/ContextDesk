@@ -257,6 +257,9 @@ pub struct TraceSummaryLine {
     /// derived from whether the turn completed cleanly or ended with one of
     /// the `linked_*` evidence-validation error codes.
     pub grounding: String,
+    /// Host deterministic context-plan "Context used" summary when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_used: Option<String>,
 }
 
 /// `--trace context` / `--trace full`: one line per provider call this turn
@@ -364,6 +367,11 @@ pub enum StreamLine<'a> {
     TraceTool(TraceToolLine),
     /// Shared activity projection. See [`ActivityLine`].
     Activity(ActivityLine),
+    /// Host "Context used" summary from the deterministic context plan trail.
+    ContextUsed {
+        /// Concise summary (no bodies); same text as Text-mode stderr line.
+        summary: String,
+    },
     Done {
         ok: bool,
         session_id: &'a str,

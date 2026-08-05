@@ -418,6 +418,30 @@ mod tests {
         ];
         let summary = context_used_from_events(&events).expect("summary");
         assert!(summary.contains("cobalt-window"), "{summary}");
+
+        // --activity projection must retain plan metadata (not step_count-only).
+        let record =
+            project_turn_activity("s1", "t1", None, ActivityLevel::Summary, None, &events, 5);
+        assert!(
+            record.events.iter().any(|e| {
+                e.label.contains("Context used")
+                    || e.detail
+                        .as_deref()
+                        .is_some_and(|d| d.contains("context_used:") || d.contains("context_plan:"))
+            }),
+            "activity detail must keep plan steps: {:?}",
+            record.events
+        );
+        let lines = activity_lines(&record);
+        assert!(
+            lines.iter().any(|l| {
+                l.label.contains("Context used")
+                    || l.detail
+                        .as_deref()
+                        .is_some_and(|d| d.contains("context_used:"))
+            }),
+            "CLI activity lines must project Context used: {lines:?}"
+        );
     }
 
     /// Compaction signal on the shipped projection path: agent emits

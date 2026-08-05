@@ -870,6 +870,24 @@ impl ActivityRecorder {
                 }),
                 StreamEvent::SearchTrail { steps } => Some(TracedHostEvent::SearchTrail {
                     step_count: steps.len(),
+                    context_plan_steps: steps
+                        .iter()
+                        .filter(|s| {
+                            s.starts_with("context_plan:")
+                                || s.starts_with("context_used:")
+                                || s.starts_with("context_included:")
+                                || s.starts_with("context_plan_preference_inject:")
+                        })
+                        .take(32)
+                        .map(|s| {
+                            let mut t = (*s).clone();
+                            if t.len() > 240 {
+                                t.truncate(240);
+                                t.push('…');
+                            }
+                            t
+                        })
+                        .collect(),
                 }),
                 StreamEvent::Citation { source_id, .. } => Some(TracedHostEvent::Citation {
                     source_id: source_id.clone(),
@@ -1054,23 +1072,47 @@ impl ActivityRecorder {
                     context: None,
                 });
             }
-            TracedHostEvent::SearchTrail { step_count } => self.push(ActivityEvent {
-                turn_id: String::new(),
-                operation_id: format!("retrieval-trail-{}", self.seq),
-                seq: 0,
-                elapsed_ms,
-                phase: ActivityPhase::Completed,
-                status: ActivityStatus::Ok,
-                origin: ActivityOrigin::RepeatableHeuristic,
-                determinism: Determinism::Repeatable,
-                label: format!("Retrieval trail ({step_count} step(s))"),
-                detail: None,
-                trigger: ActivityTrigger::HostPolicy,
-                scope: self.scope.clone(),
-                evidence: Vec::new(),
-                privacy: PrivacyClass::Metadata,
-                context: None,
-            }),
+            TracedHostEvent::SearchTrail {
+                step_count,
+                context_plan_steps,
+            } => {
+                let context_used = context_plan_steps
+                    .iter()
+                    .find_map(|s| s.strip_prefix("context_used:"))
+                    .map(|s| s.to_string());
+                let has_plan = context_plan_steps
+                    .iter()
+                    .any(|s| s.starts_with("context_plan:"));
+                let label = if let Some(summary) = context_used.as_ref() {
+                    format!("Context used: {summary}")
+                } else if has_plan {
+                    format!("Context plan ({step_count} trail step(s))")
+                } else {
+                    format!("Retrieval trail ({step_count} step(s))")
+                };
+                let detail = if context_plan_steps.is_empty() {
+                    None
+                } else {
+                    Some(context_plan_steps.join(" | "))
+                };
+                self.push(ActivityEvent {
+                    turn_id: String::new(),
+                    operation_id: format!("retrieval-trail-{}", self.seq),
+                    seq: 0,
+                    elapsed_ms,
+                    phase: ActivityPhase::Completed,
+                    status: ActivityStatus::Ok,
+                    origin: ActivityOrigin::RepeatableHeuristic,
+                    determinism: Determinism::Repeatable,
+                    label,
+                    detail,
+                    trigger: ActivityTrigger::HostPolicy,
+                    scope: self.scope.clone(),
+                    evidence: Vec::new(),
+                    privacy: PrivacyClass::Metadata,
+                    context: None,
+                });
+            }
             TracedHostEvent::Citation { source_id } => self.push(ActivityEvent {
                 turn_id: String::new(),
                 operation_id: format!("citation-{}", opaque_evidence_value(source_id)),

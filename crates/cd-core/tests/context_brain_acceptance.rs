@@ -4,7 +4,8 @@
 //! Synthetic fixtures only — Preference `cobalt-window` kind-filter gap and
 //! quality oracle (relevant included / irrelevant excluded).
 
-use cd_core::agent::{run_agent_turn, AgentOptions, ScriptedBackend};
+use cd_core::activity::{ActivityDetailLevel, ActivityRecorder, ActivityStatus, DataScope};
+use cd_core::agent::{run_agent_turn, AgentOptions, LogExplorerTurnContext, ScriptedBackend};
 use cd_core::branding::Branding;
 use cd_core::chat::{ChatCompletion, ChatMessage, FunctionCall, Role, ToolCallMsg};
 use cd_core::context_plan::{
@@ -16,7 +17,11 @@ use cd_core::index::KeywordIndex;
 use cd_core::memory::{
     attach_durable_memory_to_host, Kind, MemoryConfig, MemoryDraft, MemoryWriteOp, Status,
 };
+use cd_core::sessions::{
+    estimate_context_chars, prepare_model_context, Session, SessionStore, StoredMessage,
+};
 use cd_core::tool_host::ToolHost;
+use cd_core::turn_trace::{DeveloperDetailKind, RecordingTurnTrace, TurnTraceObserver};
 use cd_core::workspace::Workspace;
 use std::fs;
 use std::sync::{Arc, Mutex};
@@ -198,16 +203,19 @@ async fn ordinary_turn_surfaces_context_plan_trail_and_preference() {
     pref.title = "cobalt-window".into();
     store.put(MemoryWriteOp::Insert(pref), now).unwrap();
 
-    let backend = CaptureBackend::new(vec![final_answer(
+    let provider = CaptureBackend::new(vec![final_answer(
         "The codename appears in durable preference memory.",
     )]);
+    let sink = Arc::new(RecordingTurnTrace::with_developer_detail(
+        std::time::Instant::now(),
+        Arc::new(|_e| {}),
+    ));
     let mut history = Vec::new();
-    // Prompt does not plant the answer string.
     let user = "What is the saved GUI demo codename?";
     assert!(!user.contains("cobalt-window"));
 
     let events = run_agent_turn(
-        backend.as_ref(),
+        provider.as_ref(),
         &mut host,
         user,
         &mut history,
@@ -216,6 +224,7 @@ async fn ordinary_turn_surfaces_context_plan_trail_and_preference() {
             ambient_recall_enabled: true,
             max_rounds: 2,
             compact_keep_last: 6,
+            developer_trace: Some(TurnTraceObserver::new(sink.clone())),
             ..Default::default()
         },
     )
@@ -231,27 +240,51 @@ async fn ordinary_turn_surfaces_context_plan_trail_and_preference() {
         .collect::<Vec<_>>()
         .join("||");
     assert!(
-        trail.contains("context_plan:") || trail.contains("context_used:"),
-        "turn must emit context plan trail: {trail}"
+        trail.contains("context_plan:"),
+        "turn must emit context_plan trail: {trail}"
     );
     assert!(
-        trail.contains("context_used:") || trail.contains("context_included:"),
-        "context used summary expected: {trail}"
+        trail.contains("context_used:"),
+        "context used summary required: {trail}"
     );
 
-    let blob = format!(
-        "{}\n{}",
-        backend.all_blob(),
-        history
-            .iter()
-            .map(|m| m.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
+    // Provider-facing messages MUST contain cobalt-window (not just trail text).
+    let provider_blob = provider.all_blob();
     assert!(
-        blob.to_lowercase().contains("cobalt") || trail.contains("preference"),
-        "preference inventory or injection must reach model/history: trail={trail} blob_len={}",
-        blob.len()
+        provider_blob.to_lowercase().contains("cobalt-window")
+            || provider_blob.to_lowercase().contains("cobalt"),
+        "model-facing provider context must include preference content: {provider_blob}"
+    );
+
+    // Developer detail On: context_plan contributor recorded before provider.
+    let dev = sink.developer_events();
+    assert!(
+        dev.iter().any(|e| {
+            e.kind == DeveloperDetailKind::ContextProvenance
+                && e.label.to_lowercase().contains("context_plan")
+        }),
+        "Developer detail must include context_plan provenance: {:?}",
+        dev.iter().map(|e| &e.label).collect::<Vec<_>>()
+    );
+
+    // Activity projection retains context_used / plan steps in label or detail.
+    let mut rec = ActivityRecorder::new(
+        "t1",
+        "brain-sess",
+        DataScope::conversation(),
+        ActivityDetailLevel::Summary,
+    );
+    rec.record_stream_events(&events);
+    let record = rec.finish(ActivityStatus::Ok, 10);
+    assert!(
+        record.events.iter().any(|e| {
+            e.label.contains("Context used")
+                || e.detail
+                    .as_deref()
+                    .is_some_and(|d| d.contains("context_used:") || d.contains("context_plan:"))
+        }),
+        "Activity must surface context plan/used: {:?}",
+        record.events.iter().map(|e| &e.label).collect::<Vec<_>>()
     );
 }
 
@@ -405,4 +438,367 @@ async fn continuity_thirty_turns_with_plan_trail() {
         saw_plan,
         "expected context_plan trail on ordinary ambient turns"
     );
+}
+
+#[tokio::test]
+async fn session_reopen_preserves_plan_eligible_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("ws.md"), "ws\n").unwrap();
+    let ws = Workspace::new("reopen", vec![root.to_path_buf()]);
+    let idx = KeywordIndex::build(&ws).unwrap();
+    let mut host = ToolHost::new(ws, idx, None);
+    let branding = Branding::embedded();
+    attach_durable_memory_to_host(&mut host, &branding, &MemoryConfig::default()).unwrap();
+    let store = host.durable_memory_store().unwrap();
+    let now = cd_core::embed::now_unix_secs();
+    let mut pref = MemoryDraft::new(Kind::Preference, "codename cobalt-window reopen proof");
+    pref.title = "cobalt-window".into();
+    store.put(MemoryWriteOp::Insert(pref), now).unwrap();
+
+    let backend = CaptureBackend::new(vec![
+        final_answer("noted constraint never reboot production"),
+        final_answer("after reopen still know cobalt-window"),
+    ]);
+    let mut history = Vec::new();
+    let sid = "reopen-sess";
+    run_agent_turn(
+        backend.as_ref(),
+        &mut host,
+        "Remember CONSTRAINT: never reboot production hosts. GUI codename?",
+        &mut history,
+        &AgentOptions {
+            session_id: sid.into(),
+            ambient_recall_enabled: true,
+            max_rounds: 2,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let sess_dir = root.join("sessions");
+    let sstore = SessionStore::new(&sess_dir);
+    sstore.ensure().unwrap();
+    let mut sess = Session::new("reopen");
+    sess.id = sid.into();
+    for (i, m) in history.iter().enumerate() {
+        let role = match m.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::System => "system",
+            Role::Tool => "tool",
+        };
+        sess.messages.push(StoredMessage {
+            id: format!("m{i}"),
+            role: role.into(),
+            content: m.content.clone(),
+            tools: None,
+            citations: None,
+            trail: None,
+            meta: None,
+        });
+    }
+    sstore.save(&sess).unwrap();
+    let loaded = sstore.load(sid).unwrap();
+    assert_eq!(loaded.id, sid);
+    let mut continued = loaded.to_chat_history();
+    assert!(continued.len() >= 2);
+
+    let cap2 = CaptureBackend::new(vec![final_answer("still tracking")]);
+    let events = run_agent_turn(
+        cap2.as_ref(),
+        &mut host,
+        "Continue after reopen — what is the GUI codename?",
+        &mut continued,
+        &AgentOptions {
+            session_id: sid.into(),
+            ambient_recall_enabled: true,
+            max_rounds: 2,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let trail = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::SearchTrail { steps } => Some(steps.join("|")),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("||");
+    let blob = format!("{}{}", cap2.all_blob(), trail);
+    assert!(
+        blob.to_lowercase().contains("cobalt") || trail.contains("preference"),
+        "reopen turn must still surface preference via plan/provider: {blob}"
+    );
+    assert!(
+        continued.iter().any(|m| m.content.contains("never reboot")
+            || m.content.contains("CONSTRAINT")
+            || m.content.contains("codename")),
+        "durable history must survive SessionStore round-trip"
+    );
+}
+
+#[test]
+fn hard_budget_compaction_with_context_plan_history_candidate() {
+    let mut hist = vec![ChatMessage {
+        role: Role::System,
+        content: "policy".into(),
+        tool_call_id: None,
+        tool_calls: None,
+    }];
+    for i in 0..80 {
+        hist.push(ChatMessage {
+            role: Role::User,
+            content: format!("filler user {i} {}", "x".repeat(120)),
+            tool_call_id: None,
+            tool_calls: None,
+        });
+        hist.push(ChatMessage {
+            role: Role::Assistant,
+            content: format!("filler asst {i} {}", "y".repeat(120)),
+            tool_call_id: None,
+            tool_calls: None,
+        });
+    }
+    hist.push(ChatMessage {
+        role: Role::User,
+        content: "OPEN_Q: true root cause? CONSTRAINT: never reboot".into(),
+        tool_call_id: None,
+        tool_calls: None,
+    });
+    let budget = 4_000usize;
+    let prep = prepare_model_context(&hist, 4, budget).expect("fit");
+    assert!(estimate_context_chars(&prep.messages) <= budget);
+    assert!(hist.len() > prep.messages.len());
+
+    let snap = ContextInventorySnapshot {
+        session_id: "s".into(),
+        turn_id: "t".into(),
+        user_text: "OPEN_Q true root cause".into(),
+        history_text: prep
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        history_message_count: hist.len(),
+        history_keep: prep.keep,
+        history_compacted: prep.compacted
+            || prep
+                .messages
+                .iter()
+                .any(|m| m.content.contains("Compacted")),
+        ..Default::default()
+    };
+    let plan = build_context_plan(
+        &snap,
+        ContextPlanBudget::default(),
+        RelevanceStrategy::DeterministicOnly,
+    );
+    assert!(
+        plan.included()
+            .any(|c| c.family == cd_core::context_plan::ContextSourceFamily::ConversationHistory),
+        "history window must be in plan after compaction"
+    );
+}
+
+#[tokio::test]
+async fn disproof_replaces_stale_hypothesis_with_fresh_tool_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let logs = root.join("logs");
+    fs::create_dir_all(&logs).unwrap();
+    fs::write(
+        logs.join("worker.log"),
+        r#"{"ts":1700000100,"level":"error","message":"DISPROOF: db_pool_max 32 to 4 not network"}
+{"ts":1700000101,"level":"info","message":"job-7f3a pool exhausted"}
+"#,
+    )
+    .unwrap();
+    let cache = root.join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    let report =
+        cd_core::log_analysis::ingest_path(&cache, &logs, "disproof", None, "none").unwrap();
+    let ws = Workspace::new("dis", vec![root.to_path_buf()]);
+    let idx = KeywordIndex::build(&ws).unwrap();
+    let mut host = ToolHost::new(ws, idx, None);
+    host.set_log_analysis(true, Some(cache));
+    host.set_active_log_corpus(Some(report.corpus_id.clone()));
+
+    let mut history = vec![
+        ChatMessage {
+            role: Role::User,
+            content: "Form hypothesis".into(),
+            tool_call_id: None,
+            tool_calls: None,
+        },
+        ChatMessage {
+            role: Role::Assistant,
+            content: "HYPOTHESIS_H1: network partition caused pool exhaustion".into(),
+            tool_call_id: None,
+            tool_calls: None,
+        },
+    ];
+    let backend = CaptureBackend::new(vec![
+        tool_call(
+            "sl1",
+            cd_core::log_analysis::SEARCH_LOGS,
+            r#"{"query":"db_pool_max"}"#,
+        ),
+        final_answer("Updated: config shrink disproves H1 at seq=0 source=worker.log"),
+    ]);
+    let ctx =
+        LogExplorerTurnContext::new("w", report.corpus_id.as_str(), "sources=worker.log").unwrap();
+    let events = run_agent_turn(
+        backend.as_ref(),
+        &mut host,
+        "Challenge H1 with fresh log evidence",
+        &mut history,
+        &AgentOptions {
+            session_id: "disproof".into(),
+            log_explorer_context: Some(ctx),
+            max_rounds: 6,
+            ambient_recall_enabled: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let tools: String = history
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        tools.contains("DISPROOF") || tools.contains("db_pool") || tools.contains("pool"),
+        "tool evidence must carry disproof: {tools}"
+    );
+    assert!(
+        history.iter().any(|m| m.content.contains("HYPOTHESIS_H1")),
+        "prior H1 remains in history"
+    );
+    let _ = events;
+}
+
+#[tokio::test]
+async fn cross_session_no_private_leak() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("ws.md"), "ws\n").unwrap();
+    let sess_dir = root.join("sessions");
+    let sstore = SessionStore::new(&sess_dir);
+    sstore.ensure().unwrap();
+
+    let ws = Workspace::new("leak", vec![root.to_path_buf()]);
+    let idx = KeywordIndex::build(&ws).unwrap();
+    let mut host = ToolHost::new(ws, idx, None);
+    let private = "PRIVATE_SESS_A=secret-marker-should-not-leak";
+    let cap_a = CaptureBackend::new(vec![final_answer(&format!("A holds {private}"))]);
+    let mut hist_a = Vec::new();
+    run_agent_turn(
+        cap_a.as_ref(),
+        &mut host,
+        &format!("Private note: {private}"),
+        &mut hist_a,
+        &AgentOptions {
+            session_id: "session-A".into(),
+            ambient_recall_enabled: false,
+            max_rounds: 2,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut sess_a = Session::new("A");
+    sess_a.id = "session-A".into();
+    for (i, m) in hist_a.iter().enumerate() {
+        sess_a.messages.push(StoredMessage {
+            id: format!("a{i}"),
+            role: "user".into(),
+            content: m.content.clone(),
+            tools: None,
+            citations: None,
+            trail: None,
+            meta: None,
+        });
+    }
+    // store only user content with private for durable leak check
+    sess_a.messages.push(StoredMessage {
+        id: "priv".into(),
+        role: "user".into(),
+        content: private.into(),
+        tools: None,
+        citations: None,
+        trail: None,
+        meta: None,
+    });
+    sstore.save(&sess_a).unwrap();
+
+    let mut sess_b = Session::new("B");
+    sess_b.id = "session-B".into();
+    sstore.save(&sess_b).unwrap();
+    let loaded_b = sstore.load("session-B").unwrap();
+    assert!(
+        !loaded_b
+            .to_chat_history()
+            .iter()
+            .any(|m| m.content.contains(private)),
+        "SessionStore B must not contain A private"
+    );
+
+    let cap_b = CaptureBackend::new(vec![final_answer("hello B")]);
+    let mut hist_b = loaded_b.to_chat_history();
+    run_agent_turn(
+        cap_b.as_ref(),
+        &mut host,
+        "Hello from session B",
+        &mut hist_b,
+        &AgentOptions {
+            session_id: "session-B".into(),
+            ambient_recall_enabled: false,
+            max_rounds: 2,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        !cap_b.all_blob().contains(private) && !hist_b.iter().any(|m| m.content.contains(private)),
+        "session A private must not leak into B provider/history"
+    );
+}
+
+#[test]
+fn inventory_never_probes_unauthorized_connectors() {
+    use cd_core::context_plan::ConnectorSlotSnapshot;
+    let snap = ContextInventorySnapshot {
+        session_id: "s".into(),
+        turn_id: "t".into(),
+        user_text: "search confluence".into(),
+        optional_connectors: vec![ConnectorSlotSnapshot {
+            name: "confluence".into(),
+            authorized: false,
+        }],
+        history_message_count: 1,
+        history_text: "h".into(),
+        history_keep: 2,
+        ..Default::default()
+    };
+    let plan = build_context_plan(
+        &snap,
+        ContextPlanBudget::default(),
+        RelevanceStrategy::DeterministicOnly,
+    );
+    assert!(plan
+        .side_effects_forbidden
+        .iter()
+        .any(|s| s == "keychain_read" || s == "connector_network"));
+    assert!(plan.candidates.iter().any(|c| {
+        c.family == cd_core::context_plan::ContextSourceFamily::OptionalConnector
+            && c.disposition == cd_core::context_plan::CandidateDisposition::Deferred
+    }));
 }

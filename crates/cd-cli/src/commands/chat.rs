@@ -433,6 +433,11 @@ pub async fn run(
                     seq = seq.saturating_add(1);
                 }
             }
+            if let Some(summary) = context_used_from_events(&outcome.events) {
+                let cu = StreamLine::ContextUsed { summary };
+                emit_meta(&outcome.session_id, &turn_id, "context_used", seq, &cu);
+                seq = seq.saturating_add(1);
+            }
             let done = crate::envelope::StreamLine::Done {
                 ok: true,
                 session_id: &outcome.session_id,
@@ -445,16 +450,21 @@ pub async fn run(
             struct ChatSummaryWithActivity<'a> {
                 session_id: &'a str,
                 final_text: &'a str,
+                /// Host deterministic context-plan summary when the turn emitted one.
+                #[serde(skip_serializing_if = "Option::is_none")]
+                context_used: Option<String>,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 trace: Option<Vec<StreamLine<'static>>>,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 activity: Option<&'a cd_core::activity::TurnActivityRecord>,
             }
+            let context_used = context_used_from_events(&outcome.events);
             let envelope = Envelope::ok(
                 "chat",
                 ChatSummaryWithActivity {
                     session_id: &outcome.session_id,
                     final_text: &outcome.final_text,
+                    context_used,
                     trace: trace_lines,
                     activity: activity_record.as_ref(),
                 },
@@ -762,6 +772,7 @@ fn build_trace_lines(
             elapsed_ms
         },
         grounding: grounding_status(corpus_id, &outcome.events).to_string(),
+        context_used: context_used_from_events(&outcome.events),
     };
     lines.push(StreamLine::TraceSummary(summary));
 

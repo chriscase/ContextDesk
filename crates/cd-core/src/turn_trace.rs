@@ -846,10 +846,18 @@ pub enum TracedHostEvent {
         /// Host-known authority classification of the requested action.
         kind: crate::activity::ToolActivityKind,
     },
-    /// Count-only retrieval trail observation.
+    /// Retrieval trail observation.
+    ///
+    /// Full free-form step text is omitted for privacy. Host-authored
+    /// **context plan** metadata steps (`context_plan:`, `context_used:`,
+    /// `context_included:`, `context_plan_preference_inject:`) are retained
+    /// bounded so Activity / CLI can project truthful Context used without a
+    /// second plan build.
     SearchTrail {
-        /// Number of host-reported steps; step text is omitted.
+        /// Number of host-reported steps (all steps, including omitted text).
         step_count: usize,
+        /// Bounded host context-plan metadata steps only (no free-form tool prose).
+        context_plan_steps: Vec<String>,
     },
     /// Citation identity without display/source content.
     Citation {
@@ -1237,6 +1245,25 @@ impl RecordingTurnTrace {
             },
             StreamEvent::SearchTrail { steps } => TracedHostEvent::SearchTrail {
                 step_count: steps.len(),
+                context_plan_steps: steps
+                    .iter()
+                    .filter(|s| {
+                        s.starts_with("context_plan:")
+                            || s.starts_with("context_used:")
+                            || s.starts_with("context_included:")
+                            || s.starts_with("context_plan_preference_inject:")
+                    })
+                    .take(32)
+                    .map(|s| {
+                        // Bound length — plan labels only, never raw bodies.
+                        let mut t = s.clone();
+                        if t.len() > 240 {
+                            t.truncate(240);
+                            t.push('…');
+                        }
+                        t
+                    })
+                    .collect(),
             },
             StreamEvent::Citation { source_id, .. } => TracedHostEvent::Citation {
                 source_id: source_id.clone(),
