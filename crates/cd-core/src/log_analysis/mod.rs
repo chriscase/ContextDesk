@@ -110,8 +110,8 @@ pub use lanes::{
     LaneEventRef, LinkScrubResult, PeerPosition, MAX_LANES,
 };
 pub use linked_search_bound::{
-    citations_from_search_evidence, BoundDecision, CiteableEvidenceSet, LinkedSearchProgressTracker,
-    SearchIntentKey, MAX_CONSECUTIVE_NO_PROGRESS_SEARCHES,
+    citations_from_search_evidence, BoundDecision, CiteableEvidenceSet,
+    LinkedSearchProgressTracker, SearchIntentKey, MAX_MATERIAL_NO_PROGRESS_REFINEMENTS,
 };
 pub use noise_candidates::{
     propose_noise_candidates, propose_noise_candidates_with_cancel, score_noise_candidate_facts,

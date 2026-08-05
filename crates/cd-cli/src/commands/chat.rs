@@ -848,6 +848,7 @@ mod grounding_tests {
             source_id: source_id.to_string(),
             label: "label".to_string(),
             locator: None,
+            corpus_id: None,
         }
     }
 

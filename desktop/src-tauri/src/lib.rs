@@ -3968,7 +3968,8 @@ fn event_to_dto_with_linked_corpus(
     let mut dto = cd_core::research::event_to_dto(event);
     let is_log_citation = matches!(
         event,
-        cd_core::events::StreamEvent::Citation { source_id, .. }
+        cd_core::events::StreamEvent::Citation { source_id, ..
+                }
             if source_id.starts_with("log_template:") || source_id.starts_with("log_event:")
     );
     if is_log_citation {
@@ -4367,7 +4368,8 @@ fn persist_host_terminal_turn_at(
             source_id,
             label,
             locator,
-        } = event
+                    corpus_id: None,
+                } = event
         else {
             continue;
         };
@@ -16174,7 +16176,8 @@ mod startup_host_tests {
                 source_id: "log_event:42".into(),
                 label: "worker.log · seq 42".into(),
                 locator: Some("seq=42 source=worker.log".into()),
-            },
+                    corpus_id: None,
+                },
             StreamEvent::SearchTrail {
                 steps: vec![
                     "phase:retrieving_evidence".into(),
@@ -16364,7 +16367,8 @@ mod startup_host_tests {
             source_id: "log_template:7".into(),
             label: "template 7".into(),
             locator: None,
-        };
+                    corpus_id: None,
+                };
         let stamped = event_to_dto_with_linked_corpus(&log, Some("trusted-corpus"));
         assert_eq!(
             stamped
@@ -16378,7 +16382,8 @@ mod startup_host_tests {
             source_id: "runbook.md".into(),
             label: "runbook".into(),
             locator: None,
-        };
+                    corpus_id: None,
+                };
         assert!(
             event_to_dto_with_linked_corpus(&file, Some("trusted-corpus"))
                 .payload

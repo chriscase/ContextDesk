@@ -36,6 +36,8 @@ import {
   type LaneAssignmentMode,
 } from "./evidenceLaneBridge";
 import type { LaneConfig } from "./logExplorer/laneCompose";
+import type { EventDto } from "./host";
+import { applyEventsToMessage } from "./turn";
 
 const store = new Map<string, string>();
 
@@ -689,6 +691,154 @@ describe("host log_event citations from search_logs stream", () => {
     const forged = filterToHostEvidenceSet(set, ["log_event:999", "log_event:1"]);
     expect(forged.rejected).toContain("log_event:999");
     expect(forged.accepted.map((a) => a.id)).toEqual(["log_event:1"]);
+  });
+});
+
+/**
+ * Live-shaped acceptance: host stream citations (as main-chat attach + linked
+ * Explorer would emit) → Evidence panel eligibility → Select all log → Show in
+ * Explorer → 1–4 lane assignment preserves host sources.
+ *
+ * Uses the same EventDto fold as chat UI (`applyEventsToMessage`) so corpus_id
+ * provenance is host-stream only — not a frontend label heuristic.
+ */
+describe("live-shaped main chat + linked chat evidence acceptance", () => {
+  function streamToCitations(events: EventDto[]): HostEvidenceCitation[] {
+    const { msg } = applyEventsToMessage(
+      { id: "asst", role: "assistant", content: "" },
+      events,
+    );
+    return (msg.citations ?? []) as HostEvidenceCitation[];
+  }
+
+  function hostSearchLogEvents(corpusId: string) {
+    return [
+      {
+        kind: "citation",
+        payload: {
+          source_id: "log_event:101",
+          label: "xyz/api.log",
+          locator: "log_template:1",
+          corpus_id: corpusId,
+        },
+      },
+      {
+        kind: "citation",
+        payload: {
+          source_id: "log_event:202",
+          label: "xyz/worker.log",
+          locator: "log_template:2",
+          corpus_id: corpusId,
+        },
+      },
+      {
+        kind: "citation",
+        payload: {
+          source_id: "docs/runbook.md",
+          label: "runbook",
+          locator: null,
+          // Model/malicious payload must not apply to non-log citations.
+          corpus_id: "must-not-apply",
+        },
+      },
+    ];
+  }
+
+  it.each([
+    ["main chat attachment", "corpus-main-attach"],
+    ["linked Log Explorer", "corpus-linked-explorer"],
+  ] as const)(
+    "%s: Select all log enables Show in Explorer and lanes keep host sources",
+    (_label, corpusId) => {
+      const citations = streamToCitations(hostSearchLogEvents(corpusId));
+      // Governed log rows carry host corpus_id; workspace does not.
+      expect(citations.find((c) => c.id === "log_event:101")?.corpusId).toBe(
+        corpusId,
+      );
+      expect(citations.find((c) => c.id === "docs/runbook.md")?.corpusId).toBe(
+        undefined,
+      );
+
+      const set = buildEvidenceSetFromHostCitations(citations);
+      const eligible = laneEligibleItems(set);
+      expect(eligible).toHaveLength(2);
+      expect(eligible.every((e) => e.corpusId === corpusId)).toBe(true);
+      expect(eligible.every((e) => e.laneEligible)).toBe(true);
+      // Path-like host labels become source without trusting model prose.
+      expect(eligible.map((e) => e.source).sort()).toEqual([
+        "xyz/api.log",
+        "xyz/worker.log",
+      ]);
+
+      const selectedKeys = selectAllLaneEligible(set);
+      expect(selectedKeys.size).toBe(2);
+      const selected = set.filter((i) => selectedKeys.has(i.key));
+      expect(selected.every((s) => s.laneEligible)).toBe(true);
+
+      const plan = planShowInExplorer(
+        selected,
+        "one_source_per_lane",
+        freeLanes(4),
+        { availableCorpusIds: new Set([corpusId]) },
+      );
+      expect("error" in plan).toBe(false);
+      if ("error" in plan) return;
+      expect(plan.corpusId).toBe(corpusId);
+      expect(plan.openMode).toBe("open_or_focus_existing");
+
+      const resolved = enrichWithHostEvents(selected, [
+        {
+          corpusId,
+          seq: 101,
+          source: "xyz/api.log",
+          ts: 1,
+          timeQuality: "wall",
+          service: "api",
+        },
+        {
+          corpusId,
+          seq: 202,
+          source: "xyz/worker.log",
+          ts: 2,
+          timeQuality: "wall",
+          service: "worker",
+        },
+      ]);
+      const finalized = finalizeShowAssignment({
+        resolved,
+        mode: "one_source_per_lane",
+        existing: freeLanes(4),
+        availableCorpusIds: new Set([corpusId]),
+      });
+      expect("error" in finalized).toBe(false);
+      if ("error" in finalized) return;
+      expect(finalized.assignment.lanes.length).toBeGreaterThanOrEqual(1);
+      expect(finalized.assignment.lanes.length).toBeLessThanOrEqual(
+        MAX_EVIDENCE_LANES,
+      );
+      const sources = finalized.assignment.lanes
+        .flatMap((l) => l.sources)
+        .sort();
+      expect(sources).toEqual(["xyz/api.log", "xyz/worker.log"]);
+    },
+  );
+
+  it("forged model citation without host corpus_id is not lane-eligible", () => {
+    const citations = streamToCitations([
+      {
+        kind: "citation",
+        payload: {
+          source_id: "log_event:999",
+          label: "forged/path.log",
+          locator: null,
+          // no corpus_id — host never attached provenance
+        },
+      },
+    ]);
+    const set = buildEvidenceSetFromHostCitations(citations);
+    expect(laneEligibleItems(set)).toHaveLength(0);
+    const plan = planShowInExplorer(set, "one_lane", freeLanes(1));
+    expect("error" in plan).toBe(true);
   });
 });
 

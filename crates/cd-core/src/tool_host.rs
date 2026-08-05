@@ -3595,6 +3595,7 @@ impl ToolHost {
                     source_id: url,
                     label,
                     locator: title,
+                    corpus_id: None,
                 });
             }
         } else if let Some(ref path) = citation {
@@ -3603,12 +3604,19 @@ impl ToolHost {
                 source_id: path.clone(),
                 label,
                 locator: Some(path.clone()),
+                corpus_id: None,
             });
         }
         // Host-verified log event identities from search_logs — never model prose.
-        // Labels are corpus source paths; UI maps log_event:seq + corpus_id for Evidence.
+        // Labels are corpus source paths; attach host-owned corpus_id so Evidence
+        // (main chat + linked) can resolve without trusting model labels/paths.
         if !log_evidence.is_empty() {
-            let max_cites = self.max_results_per_source.saturating_mul(4).max(8).min(32);
+            let max_cites = self.max_results_per_source.saturating_mul(4).clamp(8, 32);
+            let host_corpus = self
+                .scoped_log_corpus
+                .as_deref()
+                .or(self.active_log_corpus.as_deref())
+                .map(str::to_string);
             for (source_id, label, locator) in
                 crate::log_analysis::citations_from_search_evidence(&log_evidence, max_cites)
             {
@@ -3616,6 +3624,7 @@ impl ToolHost {
                     source_id,
                     label,
                     locator,
+                    corpus_id: host_corpus.clone(),
                 });
             }
         }
@@ -7025,7 +7034,8 @@ mod tests {
         assert!(result.events.iter().any(|event| {
             matches!(
                 event,
-                StreamEvent::Citation { source_id, label, .. }
+                StreamEvent::Citation { source_id, label, ..
+                }
                     if source_id.starts_with("help://log-analysis-pipeline")
                         && label == "How log analysis works"
             )
@@ -7065,7 +7075,8 @@ mod tests {
         assert!(result.events.iter().any(|event| {
             matches!(
                 event,
-                StreamEvent::Citation { source_id, label, .. }
+                StreamEvent::Citation { source_id, label, ..
+                }
                     if source_id == "help://log-analysis-pipeline#pipeline"
                         && label == "How log analysis works"
             )

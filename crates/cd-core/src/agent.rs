@@ -2220,6 +2220,7 @@ fn hold_web_search_citations(
                 source_id,
                 label,
                 locator,
+                corpus_id: _,
             } if source_id.starts_with("https://") || source_id.starts_with("http://") => {
                 if !pending
                     .iter()
@@ -2257,6 +2258,7 @@ fn cited_web_search_events(markdown: &str, pending: &[PendingWebCitation]) -> Ve
                     source_id: candidate.source_id.clone(),
                     label: candidate.label.clone(),
                     locator: candidate.locator.clone(),
+                    corpus_id: None,
                 })
         })
         .collect()
@@ -2503,8 +2505,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
     let mut broad_triage_optional_deepening_offered = false;
     // Host bound: stop further search_logs after non-progress (no new citeable events).
     let mut search_non_progress_stop = false;
-    let mut linked_search_progress =
-        crate::log_analysis::LinkedSearchProgressTracker::new();
+    let mut linked_search_progress = crate::log_analysis::LinkedSearchProgressTracker::new();
 
     // Broad triage starts with one host-owned deterministic brief. Large or
     // noisy corpora must not depend on a model correctly inventing the first
@@ -2989,6 +2990,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                         source_id,
                                         label,
                                         locator: Some("memory".into()),
+                                        corpus_id: None,
                                     });
                                 }
                                 trail.push(format!("ambient_recall:{} hits", inj.count));
@@ -3093,11 +3095,35 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
             } else {
                 Vec::new()
             };
-            let tool_arg: &[ToolSpec] = if tools_disabled
-                || linked_tool_closed_synthesis_ready
-                || search_non_progress_stop
-            {
+            // Non-progress bound removes only search_logs; workspace/memory/help
+            // and every other unrelated tool stay available.
+            let specs_without_search_logs = if search_non_progress_stop {
+                specs
+                    .iter()
+                    .filter(|spec| spec.name != crate::log_analysis::SEARCH_LOGS)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            let required_without_search_logs =
+                if search_non_progress_stop && linked_turn && !required_specs.is_empty() {
+                    required_specs
+                        .iter()
+                        .filter(|spec| spec.name != crate::log_analysis::SEARCH_LOGS)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+            let tool_arg: &[ToolSpec] = if tools_disabled || linked_tool_closed_synthesis_ready {
                 &[]
+            } else if search_non_progress_stop {
+                if linked_turn && !required_specs.is_empty() {
+                    &required_without_search_logs
+                } else {
+                    &specs_without_search_logs
+                }
             } else if broad_triage_optional_deepening {
                 &optional_deepening_specs
             } else if linked_turn && !required_specs.is_empty() {
@@ -3411,17 +3437,28 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
             }
             Vec::new()
         } else if search_non_progress_stop {
-            // HOST BOUND already fired this turn: do not execute further model
-            // tool_calls even when required evidence is still unsatisfied (e.g.
-            // zero-hit Stop). Empty tool schemas alone are insufficient — scripted
-            // / stubborn providers still return tool_calls.
-            if !completion.tool_calls.is_empty() {
+            // HOST BOUND removes only search_logs. Other tool_calls (workspace,
+            // memory, help, …) still execute. Scripted/stubborn providers may
+            // still request search_logs — drop those only.
+            let mut kept = Vec::new();
+            let mut dropped = 0usize;
+            for tc in completion.tool_calls.clone() {
+                let name = host.resolve_execute_name(&tc.function.name);
+                if name == crate::log_analysis::SEARCH_LOGS {
+                    dropped = dropped.saturating_add(1);
+                } else {
+                    kept.push(tc);
+                }
+            }
+            if dropped > 0 {
                 trail.push(format!(
-                    "linked_search_non_progress_ignored_tool_calls:{}",
-                    completion.tool_calls.len()
+                    "linked_search_non_progress_ignored_tool_calls:{dropped}"
                 ));
             }
-            Vec::new()
+            if dropped > 0 && !kept.is_empty() {
+                trail.push("linked_search_non_progress_other_tools_preserved".into());
+            }
+            kept
         } else {
             completion.tool_calls.clone()
         };
@@ -3434,19 +3471,20 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
         }
 
         // JSON fallback if no native tools
-        if tool_calls.is_empty()
-            && !linked_tool_closed_synthesis_ready
-            && !search_non_progress_stop
-        {
+        if tool_calls.is_empty() && !linked_tool_closed_synthesis_ready {
             if let Some((name, args)) = parse_json_tool_fallback(&completion.content) {
-                tool_calls.push(ToolCallMsg {
-                    id: format!("fallback_{round}"),
-                    kind: "function".into(),
-                    function: FunctionCall {
-                        name,
-                        arguments: args.to_string(),
-                    },
-                });
+                if search_non_progress_stop && name == crate::log_analysis::SEARCH_LOGS {
+                    trail.push("linked_search_non_progress_ignored_json_fallback".into());
+                } else {
+                    tool_calls.push(ToolCallMsg {
+                        id: format!("fallback_{round}"),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name,
+                            arguments: args.to_string(),
+                        },
+                    });
+                }
             }
         }
 
@@ -3645,9 +3683,7 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
             let resolved_tool_name = host.resolve_execute_name(&tc.function.name);
             // Mid-batch: once non-progress Stop fires, remaining search_logs in
             // the same tool_calls batch must not re-enter host.execute.
-            if search_non_progress_stop
-                && resolved_tool_name == crate::log_analysis::SEARCH_LOGS
-            {
+            if search_non_progress_stop && resolved_tool_name == crate::log_analysis::SEARCH_LOGS {
                 let detail = "HOST BOUND: search_logs was not executed because this turn already \
                      reached a no-new-citeable-events bound. Synthesize from evidence already \
                      retrieved, or refuse if it is insufficient."
@@ -3967,25 +4003,22 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                         search_non_progress_stop = true;
                         trail.push(trail_step);
                         trail.push(format!("linked_search_forced_synthesis:{reason_code}"));
+                        trail.push("linked_search_non_progress_search_logs_removed".into());
                         // Visible host-policy signal for Activity (GUI + CLI share this stream).
                         out.push(StreamEvent::Error {
                             code: reason_code.to_string(),
                             message: "Host bound: further search_logs blocked for this turn — \
-                                      no new host-verified citeable events."
+                                      no new host-verified citeable events. Other tools remain \
+                                      available when offered."
                                 .into(),
                         });
                         // Surface stop reason to the model in the tool channel.
-                        let augmented = format!(
-                            "{}\n\n---\n{model_message}",
-                            result.detail_raw
-                        );
+                        let augmented = format!("{}\n\n---\n{model_message}", result.detail_raw);
                         result.detail_raw = augmented.clone();
                         result.detail_for_model =
                             wrap_untrusted(&format!("tool:{resolved_tool_name}"), &augmented);
-                        result.summary = format!(
-                            "{} · host bound (no new citeable events)",
-                            result.summary
-                        );
+                        result.summary =
+                            format!("{} · host bound (no new citeable events)", result.summary);
                     }
                     crate::log_analysis::BoundDecision::Allow { .. } => {}
                 }
@@ -4037,6 +4070,7 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                         source_id: path.clone(),
                         label: path.clone(),
                         locator: None,
+                        corpus_id: None,
                     });
                 }
             }
@@ -5144,9 +5178,9 @@ mod tests {
         let log_event_cites: Vec<_> = events
             .iter()
             .filter_map(|e| match e {
-                StreamEvent::Citation { source_id, label, .. }
-                    if source_id.starts_with("log_event:") =>
-                {
+                StreamEvent::Citation {
+                    source_id, label, ..
+                } if source_id.starts_with("log_event:") => {
                     Some((source_id.as_str(), label.as_str()))
                 }
                 _ => None,
@@ -5157,7 +5191,9 @@ mod tests {
             "expected host log_event citations from search evidence: {events:?}"
         );
         assert!(
-            log_event_cites.iter().any(|(_, label)| label.contains("worker.log")),
+            log_event_cites
+                .iter()
+                .any(|(_, label)| label.contains("worker.log")),
             "citation labels must be host source paths: {log_event_cites:?}"
         );
     }
@@ -5257,8 +5293,8 @@ mod tests {
                 || trail.contains("linked_search_non_progress_skipped_mid_batch"),
             "post-bound tool_calls must be host-ignored, not executed: {trail}"
         );
-        // Only the two zero-hit observations that fed the bound should finish as
-        // real host.execute results (ok true with empty evidence still Finished).
+        // First zero-hit + one material refinement + third that Stops = 3 host
+        // executes; further scripted search_logs must not re-enter host.execute.
         let search_host_finished = events
             .iter()
             .filter(|e| {
@@ -5275,8 +5311,12 @@ mod tests {
             })
             .count();
         assert_eq!(
-            search_host_finished, 2,
-            "exactly two host search_logs executions before bound; got {search_host_finished}; trail={trail}"
+            search_host_finished, 3,
+            "exactly three host search_logs (first + one material + stop); got {search_host_finished}; trail={trail}"
+        );
+        assert!(
+            trail.contains("linked_search_non_progress_search_logs_removed"),
+            "trail must record search_logs removal: {trail}"
         );
         assert!(
             events.iter().any(|e| matches!(
@@ -5427,6 +5467,233 @@ mod tests {
         );
     }
 
+    /// Production path: after search_logs is host-bounded, a required workspace
+    /// (search_kb) tool must still be offered and execute successfully.
+    #[tokio::test]
+    async fn linked_search_bound_preserves_workspace_tool_after_stalled_log_search() {
+        use std::io::Write;
+        let dir = tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let mut f = fs::File::create(logs.join("api.log")).unwrap();
+        writeln!(
+            f,
+            r#"{{"ts":1700000100,"level":"info","service":"api","message":"healthy only"}}"#
+        )
+        .unwrap();
+        // Workspace runbook the model must still reach after log bound.
+        fs::write(
+            dir.path().join("runbook.md"),
+            "# Checkout runbook\n\nCheck pool sizing when checkout fails for job-7f3a.\n",
+        )
+        .unwrap();
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        let report =
+            crate::log_analysis::ingest_path(&cache, &logs, "xyz-ws", None, "none").unwrap();
+
+        let ws = Workspace::new("bound-ws", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        host.set_log_analysis(true, Some(cache));
+        host.set_active_log_corpus(Some(report.corpus_id.clone()));
+
+        let zero = |id: &str, q: &str| ChatCompletion {
+            content: String::new(),
+            tool_calls: vec![ToolCallMsg {
+                id: id.into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: crate::log_analysis::SEARCH_LOGS.into(),
+                    arguments: format!(r#"{{"query":"{q}","level":"fatal"}}"#),
+                },
+            }],
+            finish_reason: "tool_calls".into(),
+        };
+        let backend = ScriptedBackend::new(vec![
+            zero("s1", "missing-a"),
+            zero("s2", "missing-b"),
+            // Third search_logs Stops the bound; model then calls search_kb.
+            zero("s3", "missing-c"),
+            ChatCompletion {
+                content: String::new(),
+                tool_calls: vec![
+                    // Stubborn model still requests search_logs — must be dropped.
+                    ToolCallMsg {
+                        id: "s4".into(),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name: crate::log_analysis::SEARCH_LOGS.into(),
+                            arguments: r#"{"query":"missing-d"}"#.into(),
+                        },
+                    },
+                    ToolCallMsg {
+                        id: "kb1".into(),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name: crate::tools::names::SEARCH_KB.into(),
+                            arguments: r#"{"query":"checkout runbook"}"#.into(),
+                        },
+                    },
+                ],
+                finish_reason: "tool_calls".into(),
+            },
+            ChatCompletion {
+                content: "Workspace runbook covers pool sizing for job-7f3a.".into(),
+                tool_calls: vec![],
+                finish_reason: "stop".into(),
+            },
+        ]);
+        let mut history = vec![];
+        let context = LogExplorerTurnContext::new(
+            "win-ws",
+            report.corpus_id.as_str(),
+            format!("corpusId={}", report.corpus_id),
+        )
+        .unwrap();
+        let events = run_agent_turn(
+            &backend,
+            &mut host,
+            "Find missing marker for job-7f3a and cross-check the workspace runbook.",
+            &mut history,
+            &AgentOptions {
+                session_id: "bound-ws".into(),
+                log_explorer_context: Some(context),
+                max_rounds: 12,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let trail = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::SearchTrail { steps } => Some(steps.join("|")),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("||");
+        assert!(
+            trail.contains("linked_search_non_progress"),
+            "expected bound: {trail}"
+        );
+        assert!(
+            trail.contains("tool:search_kb") || trail.contains("linked_requested_workspace"),
+            "workspace tool path must remain open: {trail}"
+        );
+        let kb_finished = events.iter().any(|e| {
+            matches!(
+                e,
+                StreamEvent::Tool {
+                    name,
+                    phase: crate::events::ToolPhase::Finished,
+                    ok: Some(true),
+                    ..
+                } if name == crate::tools::names::SEARCH_KB
+            )
+        });
+        assert!(
+            kb_finished,
+            "search_kb must execute after search_logs bound: trail={trail}"
+        );
+        assert!(
+            history
+                .iter()
+                .any(|m| m.role == Role::Tool && m.content.contains("HOST BOUND")),
+            "model must see HOST BOUND"
+        );
+    }
+
+    /// Main-chat attachment (`for_main_chat`) must emit host corpus_id on
+    /// log_event citations — never model-authored provenance.
+    #[tokio::test]
+    async fn main_chat_search_logs_citations_include_host_corpus_id() {
+        use std::io::Write;
+        let dir = tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let mut f = fs::File::create(logs.join("api.log")).unwrap();
+        writeln!(
+            f,
+            r#"{{"ts":1700000100,"level":"error","service":"api","message":"xyz timeout code=1"}}"#
+        )
+        .unwrap();
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        let report =
+            crate::log_analysis::ingest_path(&cache, &logs, "main-chat-xyz", None, "none").unwrap();
+
+        let ws = Workspace::new("main-chat-bound", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        host.set_log_analysis(true, Some(cache));
+        host.set_active_log_corpus(Some(report.corpus_id.clone()));
+        // Main-chat attachment scopes tools to the attached corpus.
+        host.set_log_corpus_scope(Some(report.corpus_id.clone()));
+
+        let r = host
+            .execute(
+                crate::log_analysis::SEARCH_LOGS,
+                &serde_json::json!({"query": "xyz timeout", "k": 8}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(r.ok);
+        let cites: Vec<_> = r
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::Citation {
+                    source_id,
+                    label,
+                    corpus_id,
+                    ..
+                } if source_id.starts_with("log_event:") => {
+                    Some((source_id.as_str(), label.as_str(), corpus_id.as_deref()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !cites.is_empty(),
+            "expected log_event citations: {:?}",
+            r.events
+        );
+        for (id, label, corpus) in &cites {
+            assert_eq!(
+                *corpus,
+                Some(report.corpus_id.as_str()),
+                "host corpus_id required on {id} label={label}"
+            );
+            assert!(
+                label.contains("api.log") || label.contains('/'),
+                "label should be host source path, got {label}"
+            );
+        }
+        // DTO purity: corpus_id present only on governed log citations.
+        let dtos = crate::research::events_to_dto(&r.events);
+        let cite_dto = dtos
+            .iter()
+            .find(|d| {
+                d.kind == "citation"
+                    && d.payload
+                        .get("source_id")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| s.starts_with("log_event:"))
+            })
+            .expect("citation dto");
+        assert_eq!(
+            cite_dto.payload.get("corpus_id").and_then(|v| v.as_str()),
+            Some(report.corpus_id.as_str())
+        );
+        // CLI/JSONL: payload is plain JSON object fields, not nested JSON string.
+        let line = serde_json::to_string(cite_dto).unwrap();
+        assert!(line.contains("\"corpus_id\""));
+        assert!(!line.contains("\\\"corpus_id\\\""));
+    }
+
     /// Missing/cleared corpus: search_logs fails closed (Err); empty-evidence
     /// observations still feed the bound so a second empty attempt Stops.
     #[tokio::test]
@@ -5451,27 +5718,35 @@ mod tests {
         let d1 = tracker.observe_search_logs(&args, &[], false);
         assert!(matches!(
             d1,
-            crate::log_analysis::BoundDecision::Allow { new_event_count: 0, .. }
+            crate::log_analysis::BoundDecision::Allow {
+                new_event_count: 0,
+                ..
+            }
         ));
-        let err2 = host
+        // One material zero-hit refinement still allowed.
+        let d2 = tracker.observe_search_logs(&serde_json::json!({"query": "retry"}), &[], false);
+        assert!(matches!(
+            d2,
+            crate::log_analysis::BoundDecision::Allow {
+                new_event_count: 0,
+                ..
+            }
+        ));
+        let err3 = host
             .execute(
                 crate::log_analysis::SEARCH_LOGS,
-                &serde_json::json!({"query": "retry"}),
+                &serde_json::json!({"query": "retry-2"}),
                 None,
             )
             .await
-            .expect_err("second missing-corpus call still fails closed");
-        assert!(err2.to_string().contains("corpus"));
-        let d2 = tracker.observe_search_logs(
-            &serde_json::json!({"query": "retry"}),
-            &[],
-            false,
-        );
-        match d2 {
+            .expect_err("missing-corpus still fails closed");
+        assert!(err3.to_string().contains("corpus"));
+        let d3 = tracker.observe_search_logs(&serde_json::json!({"query": "retry-2"}), &[], false);
+        match d3 {
             crate::log_analysis::BoundDecision::Stop { reason_code, .. } => {
                 assert!(reason_code.contains("non_progress") || reason_code.contains("zero"));
             }
-            other => panic!("second empty fail-closed search must Stop: {other:?}"),
+            other => panic!("third empty fail-closed search must Stop: {other:?}"),
         }
     }
 
@@ -5513,11 +5788,7 @@ mod tests {
         let (ok1, _, _, _, evidence1, _) = {
             // Use host.execute path for real evidence
             let r = host
-                .execute(
-                    crate::log_analysis::SEARCH_LOGS,
-                    &args1,
-                    None,
-                )
+                .execute(crate::log_analysis::SEARCH_LOGS, &args1, None)
                 .await
                 .unwrap();
             assert!(r.ok);
@@ -5526,7 +5797,8 @@ mod tests {
             assert!(
                 r.events.iter().any(|e| matches!(
                     e,
-                    StreamEvent::Citation { source_id, .. } if source_id.starts_with("log_event:")
+                    StreamEvent::Citation { source_id, ..
+                } if source_id.starts_with("log_event:")
                 )),
                 "tool events must emit log_event citations: {:?}",
                 r.events
@@ -6872,11 +7144,13 @@ mod tests {
                     source_id: "https://example.com/used".into(),
                     label: "Used".into(),
                     locator: Some("Used story".into()),
+                    corpus_id: None,
                 },
                 StreamEvent::Citation {
                     source_id: "https://example.com/unused".into(),
                     label: "Unused".into(),
                     locator: Some("Unused story".into()),
+                    corpus_id: None,
                 },
             ],
             &mut pending,
@@ -6895,7 +7169,7 @@ mod tests {
                 source_id,
                 label,
                 ..
-            } if source_id == "https://example.com/used" && label == "Used"
+                } if source_id == "https://example.com/used" && label == "Used"
         ));
     }
 
@@ -7144,7 +7418,8 @@ mod tests {
         assert!(events.iter().any(|event| {
             matches!(
                 event,
-                StreamEvent::Citation { source_id, label, .. }
+                StreamEvent::Citation { source_id, label, ..
+                }
                     if source_id == "help://log-analysis-pipeline#pipeline"
                         && label == "How log analysis works"
             )
@@ -9070,7 +9345,8 @@ mod tests {
             "provider est {est} over budget"
         );
         let ambient_signal = events.iter().any(|e| {
-            matches!(e, StreamEvent::Citation { locator: Some(l), .. } if l == "memory")
+            matches!(e, StreamEvent::Citation { locator: Some(l), ..
+                } if l == "memory")
                 || matches!(e, StreamEvent::SearchTrail { steps } if steps.iter().any(|s| s.contains("ambient_recall")))
         });
         assert!(

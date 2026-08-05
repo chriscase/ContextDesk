@@ -83,12 +83,16 @@ pub fn event_to_dto(e: &StreamEvent) -> EventDto {
             source_id,
             label,
             locator,
-        } => (
-            "citation",
-            serde_json::json!({
+            corpus_id,
+        } => {
+            let mut payload = serde_json::json!({
                 "source_id": source_id, "label": label, "locator": locator
-            }),
-        ),
+            });
+            if let Some(corpus) = corpus_id {
+                payload["corpus_id"] = serde_json::json!(corpus);
+            }
+            ("citation", payload)
+        }
         StreamEvent::SearchTrail { steps } => {
             ("search_trail", serde_json::json!({ "steps": steps }))
         }
@@ -302,6 +306,7 @@ pub async fn research_local_with_skills(
             source_id: path.clone(),
             label: path.clone(),
             locator: None,
+            corpus_id: None,
         });
     }
 
@@ -2064,6 +2069,7 @@ mod tests {
                 source_id: "c".into(),
                 label: "l".into(),
                 locator: None,
+                corpus_id: None,
             },
             StreamEvent::SearchTrail {
                 steps: vec!["x".into()],

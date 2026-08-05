@@ -90,7 +90,10 @@ pub fn host_policy_codes_from_trail_steps(steps: &[String]) -> Vec<String> {
             // `linked_search_non_progress_*:attempts=…` → reason code only
             step.split(':').next().unwrap_or(step).to_string()
         } else if step == "linked_search_non_progress_skipped_mid_batch"
+            || step == "linked_search_non_progress_search_logs_removed"
+            || step == "linked_search_non_progress_other_tools_preserved"
             || step.starts_with("linked_search_non_progress_ignored_tool_calls")
+            || step.starts_with("linked_search_non_progress_ignored_json_fallback")
         {
             step.split(':').next().unwrap_or(step).to_string()
         } else if step == "linked_search_logs_zero_results" {
@@ -1555,7 +1558,9 @@ mod tests {
             "{codes:?}"
         );
         assert!(
-            codes.iter().any(|c| c.starts_with("linked_search_forced_synthesis:")),
+            codes
+                .iter()
+                .any(|c| c.starts_with("linked_search_forced_synthesis:")),
             "{codes:?}"
         );
         let joined = codes.join("|");

@@ -79,6 +79,10 @@ pub enum StreamEvent {
         label: String,
         /// Optional locator (lines, URL fragment).
         locator: Option<String>,
+        /// Host-verified log corpus for governed `log_event:` / `log_template:`
+        /// identities. Never model-authored; omitted for non-log citations.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        corpus_id: Option<String>,
     },
     /// Where the router looked.
     SearchTrail {

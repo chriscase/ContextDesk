@@ -1521,7 +1521,8 @@ async fn lab_ambient_memory_match_reaches_model_context() {
     .unwrap();
 
     let ambient_signal = events.iter().any(|e| {
-        matches!(e, StreamEvent::Citation { locator: Some(l), .. } if l == "memory")
+        matches!(e, StreamEvent::Citation { locator: Some(l), ..
+                } if l == "memory")
             || matches!(e, StreamEvent::SearchTrail { steps } if steps.iter().any(|s| s.contains("ambient_recall")))
     });
     assert!(

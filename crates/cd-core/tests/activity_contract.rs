@@ -711,6 +711,7 @@ fn stream_tools_and_permissions_are_recorded_as_metadata_only() {
             ),
             label: "private file".into(),
             locator: Some("/Users/private/work/secret.txt:42".into()),
+            corpus_id: None,
         },
     ]);
     // The current citation stream carries only a source id. Exercise the
