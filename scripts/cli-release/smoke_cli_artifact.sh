@@ -152,12 +152,75 @@ if not doc.get("ok"):
 print("explore: ok")
 PY
 
-# Normalized-output validation is staged until the normalize branch is integrated.
-if "$BIN" --data-dir "$DATA" capabilities --json 2>/dev/null | python3 -c 'import json,sys; d=json.loads(sys.stdin.read()); data=d.get("data",d); print("normalize" in json.dumps(data).lower())' | grep -q True; then
-  echo "== smoke: normalized-output validation (normalize surface present) =="
-  echo "NOTE: run additional normalize checks when product surface is wired."
-else
-  echo "== smoke: normalized-output validation SKIPPED (normalize branch not integrated) =="
-fi
+echo "== smoke: normalize =="
+NORMALIZED="$WORK/normalized"
+NORMALIZE_OUT="$("$BIN" --json normalize "$WORK/demo" --output "$NORMALIZED" --output-format jsonl 2>"$WORK/normalize.err" || true)"
+echo "$NORMALIZE_OUT" | head -c 2000
+echo
+python3 - <<'PY' "$NORMALIZE_OUT" "$NORMALIZED" "$WORK/normalize.err"
+import json
+import pathlib
+import sys
+
+raw, normalized_raw, err_path = sys.argv[1:4]
+normalized = pathlib.Path(normalized_raw)
+try:
+    envelope = json.loads(raw)
+except Exception as exc:
+    err = pathlib.Path(err_path).read_text(encoding="utf-8", errors="replace")
+    raise SystemExit(
+        f"normalize JSON parse failed: {exc}; stderr={err[:800]!r}; stdout={raw[:800]!r}"
+    )
+if not envelope.get("ok"):
+    err = pathlib.Path(err_path).read_text(encoding="utf-8", errors="replace")
+    raise SystemExit(f"normalize not ok: {envelope}; stderr={err[:800]!r}")
+
+manifest_path = normalized / "manifest.json"
+report_path = normalized / "normalization-report.json"
+if not manifest_path.is_file() or not report_path.is_file():
+    raise SystemExit("normalize omitted manifest.json or normalization-report.json")
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+report = json.loads(report_path.read_text(encoding="utf-8"))
+if manifest.get("schemaId") != "contextdesk.normalization_manifest.v1":
+    raise SystemExit(f"unexpected manifest schema: {manifest.get('schemaId')!r}")
+if report.get("schemaId") != "contextdesk.normalization_report.v1":
+    raise SystemExit(f"unexpected report schema: {report.get('schemaId')!r}")
+
+sources = manifest.get("sources") or []
+if not sources:
+    raise SystemExit("normalize manifest has no sources")
+event_total = 0
+for source in sources:
+    rel = source.get("relativePath")
+    path = normalized / rel if isinstance(rel, str) else None
+    if path is None or not path.is_file():
+        raise SystemExit(f"missing normalized source file: {rel!r}")
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line]
+    if len(lines) < 2:
+        raise SystemExit(f"normalized source has no events: {rel}")
+    header = json.loads(lines[0])
+    if header.get("schemaId") != "contextdesk.normalized_log_events.v1":
+        raise SystemExit(f"unexpected JSONL schema in {rel}: {header.get('schemaId')!r}")
+    events = [json.loads(line) for line in lines[1:]]
+    seqs = [event.get("sourceSeq") for event in events]
+    if seqs != list(range(len(events))):
+        raise SystemExit(f"non-contiguous sourceSeq in {rel}: {seqs[:10]!r}")
+    if source.get("events") != len(events):
+        raise SystemExit(
+            f"manifest event mismatch for {rel}: {source.get('events')!r} vs {len(events)}"
+        )
+    event_total += len(events)
+
+if report.get("events") != event_total:
+    raise SystemExit(
+        f"report event mismatch: {report.get('events')!r} vs on-disk {event_total}"
+    )
+data = envelope.get("data") or {}
+if data.get("events") != event_total:
+    raise SystemExit(
+        f"CLI event mismatch: {data.get('events')!r} vs on-disk {event_total}"
+    )
+print(f"normalize: ok ({event_total} events across {len(sources)} sources)")
+PY
 
 echo "smoke_cli_artifact: ALL PASSED"
