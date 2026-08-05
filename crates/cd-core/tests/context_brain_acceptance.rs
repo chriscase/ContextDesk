@@ -720,6 +720,88 @@ async fn run_agent_turn_compacts_then_injects_without_crossing_hard_budget() {
 }
 
 #[tokio::test]
+async fn compacted_away_history_does_not_echo_suppress_needed_memory() {
+    const MEMORY_TOKEN: &str = "lavender horizon memory m83";
+    const BUDGET: usize = cd_core::model_context::MIN_CONTEXT_CHAR_BUDGET;
+    const QUESTION: &str = "What is the archived release code?";
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("notes.md"), "release notes placeholder\n").unwrap();
+    let ws = Workspace::new("compacted-echo", vec![dir.path().to_path_buf()]);
+    let idx = KeywordIndex::build(&ws).unwrap();
+    let mut host = ToolHost::new(ws, idx, None);
+    attach_hermetic_memory(&mut host, "compacted-echo");
+    let store = host.durable_memory_store().unwrap();
+    let mut memory = MemoryDraft::new(
+        Kind::Decision,
+        format!("the archived release code is {MEMORY_TOKEN}"),
+    );
+    memory.title = "archived release code".into();
+    store
+        .put(
+            MemoryWriteOp::Insert(memory),
+            cd_core::embed::now_unix_secs(),
+        )
+        .unwrap();
+
+    let mut history = near_hard_budget_history();
+    history[1].content = format!(
+        "ancient chat-only mention that will leave model context: the archived release code is {MEMORY_TOKEN}"
+    );
+    let mut preflight_history = history.clone();
+    preflight_history.push(ChatMessage {
+        role: Role::User,
+        content: QUESTION.into(),
+        tool_call_id: None,
+        tool_calls: None,
+    });
+    let prepared = prepare_model_context(&preflight_history, 100, BUDGET).unwrap();
+    let prepared_blob = prepared
+        .messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(prepared.compacted || prepared.truncated);
+    assert!(
+        !prepared_blob.contains(MEMORY_TOKEN),
+        "fixture must place the ancient mention outside provider-visible context: {prepared_blob}"
+    );
+
+    let backend = CaptureBackend::new(vec![final_answer("recalled after compaction")]);
+    run_agent_turn(
+        backend.as_ref(),
+        &mut host,
+        QUESTION,
+        &mut history,
+        &AgentOptions {
+            session_id: "compacted-echo-session".into(),
+            ambient_recall_enabled: true,
+            compact_keep_last: 100,
+            context_char_budget: BUDGET,
+            max_rounds: 2,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let rounds = backend.rounds();
+    assert_eq!(rounds.len(), 1);
+    let provider_blob = rounds[0]
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        provider_blob.matches(MEMORY_TOKEN).count(),
+        1,
+        "compacted-away text must not suppress needed recall or cause duplicate injection: {provider_blob}"
+    );
+    assert!(estimate_context_chars(&rounds[0]) <= BUDGET);
+}
+
+#[tokio::test]
 async fn tool_result_round_retains_plan_injection_under_the_same_hard_budget() {
     const MEMORY_TOKEN: &str = "indigo second round memory v73";
     const SELECTION_TOKEN: &str = "copper second round selection n19";
