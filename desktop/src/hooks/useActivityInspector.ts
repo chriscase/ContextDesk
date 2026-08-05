@@ -111,9 +111,18 @@ export function useActivityInspector(
     setDrawerOpen(true);
   }, []);
 
-  const closeDrawer = useCallback(() => setDrawerOpen(false), []);
-
   const isNarrowViewport = viewportWidth < NARROW_VIEWPORT_PX;
+
+  const closeDrawer = useCallback(() => {
+    setDrawerOpen(false);
+    // A Docked preference renders as a drawer when the viewport or host
+    // container cannot fit a dock. That fallback is driven by selection, not
+    // drawerOpen, so closing it must also clear the selected turn. Otherwise
+    // Close/Escape immediately re-renders an impossible-to-dismiss overlay.
+    if (mode === "docked" && (isNarrowViewport || !dockAllowed)) {
+      setSelectedTurnId(null);
+    }
+  }, [dockAllowed, isNarrowViewport, mode]);
 
   /**
    * What should actually render right now.

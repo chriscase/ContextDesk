@@ -47,6 +47,10 @@ describe("useActivityInspector selection scope", () => {
     act(() => result.current.selectTurn("turn-a"));
     expect(result.current.isNarrowViewport).toBe(false);
     expect(result.current.surface).toBe("drawer");
+
+    act(() => result.current.closeDrawer());
+    expect(result.current.selectedTurnId).toBeNull();
+    expect(result.current.surface).toBe("none");
   });
 
   it("keeps Docked on a wide viewport when the measured container can fit it", () => {
