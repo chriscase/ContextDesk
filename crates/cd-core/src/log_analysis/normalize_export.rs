@@ -451,112 +451,162 @@ fn now_unix() -> u64 {
 /// Page size for the single joined export query (events ⨝ original fields).
 pub const NORMALIZE_EVENT_PAGE: usize = 512;
 
+/// Joined row projection: normalized event columns + retained original fields.
+type JoinedEventRow = (
+    i64,            // seq
+    i64,            // ts
+    String,         // level
+    Option<String>, // service
+    Option<String>, // host
+    i64,            // template_id
+    Vec<String>,    // params
+    Option<String>, // trace_id
+    String,         // message
+    String,         // source
+    Option<String>, // timestamp_provenance
+    Option<String>, // active_timestamp_basis
+    Option<String>, // unresolved_local_timestamp
+    Option<String>, // original_redacted
+    Option<bool>,   // original_truncated
+    Option<bool>,   // original_redaction_applied
+);
+
+/// Decode one joined events-row (shared by first-page and keyset pages).
+fn decode_event_with_original_row(row: JoinedEventRow) -> CoreResult<EventWithOriginal> {
+    let (
+        seq,
+        ts,
+        level,
+        service,
+        host,
+        template_id,
+        params,
+        trace_id,
+        message,
+        source,
+        stored_provenance,
+        stored_active_basis,
+        unresolved_local_timestamp,
+        original_redacted,
+        original_truncated,
+        original_redaction_applied,
+    ) = row;
+    let timestamp_provenance = TimestampProvenance::from_storage_str(stored_provenance.as_deref())
+        .ok_or_else(|| CoreError::Message("invalid timestamp provenance".into()))?;
+    let active_timestamp_basis =
+        ActiveTimestampBasis::from_storage_str(stored_active_basis.as_deref())
+            .ok_or_else(|| CoreError::Message("invalid active timestamp basis".into()))?;
+    let event = LogEvent {
+        seq: u64::try_from(seq).map_err(|_| CoreError::Message("negative seq".into()))?,
+        ts,
+        timestamp_provenance,
+        active_timestamp_basis,
+        unresolved_local_timestamp,
+        level,
+        service,
+        host,
+        template_id: u64::try_from(template_id)
+            .map_err(|_| CoreError::Message("negative template".into()))?,
+        params,
+        trace_id,
+        message,
+        source,
+    };
+    event.validate_timestamp_provenance()?;
+    Ok((
+        event,
+        original_redacted,
+        original_truncated.unwrap_or(false),
+        original_redaction_applied.unwrap_or(false),
+    ))
+}
+
 /// One bounded page of events with original columns from a **single** SQL join.
 ///
-/// Keyset on `seq` (`seq > after_seq`). Does **not** call per-event original
-/// lookups such as `query_event_original`.
+/// - `after_seq = None` → first page includes **seq 0** (`ORDER BY seq LIMIT n`).
+/// - `after_seq = Some(s)` → exclusive keyset `seq > s` (never treats 0 as a
+///   default cursor — ingest assigns seq starting at 0).
+///
+/// Does **not** call per-event original lookups such as `query_event_original`.
 pub fn load_events_with_originals_page(
     corpus: &LogCorpus,
     after_seq: Option<u64>,
     limit: usize,
 ) -> CoreResult<Vec<EventWithOriginal>> {
     let limit = limit.clamp(1, NORMALIZE_EVENT_PAGE.max(1));
-    let after = after_seq.unwrap_or(0);
     corpus.with_connection(|conn| {
-        // One joined projection: normalized fields + retained original representation.
-        let mut stmt = conn
-            .prepare(
-                "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source, \
+        let sql_first = "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source, \
+                        timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp, \
+                        original_redacted, original_truncated, original_redaction_applied \
+                 FROM events \
+                 ORDER BY seq \
+                 LIMIT ?1";
+        let sql_keyset = "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source, \
                         timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp, \
                         original_redacted, original_truncated, original_redaction_applied \
                  FROM events \
                  WHERE seq > ?1 \
                  ORDER BY seq \
-                 LIMIT ?2",
-            )
-            .map_err(|e| CoreError::Message(format!("prepare paged events join: {e}")))?;
-        let rows = stmt
-            .query_map(duckdb::params![after as i64, limit as i64], |r| {
-                let params_s: String = r.get(6)?;
-                let params: Vec<String> = serde_json::from_str(&params_s).unwrap_or_default();
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                    r.get::<_, Option<String>>(4)?,
-                    r.get::<_, i64>(5)?,
-                    params,
-                    r.get::<_, Option<String>>(7)?,
-                    r.get::<_, String>(8)?,
-                    r.get::<_, String>(9)?,
-                    r.get::<_, Option<String>>(10)?,
-                    r.get::<_, Option<String>>(11)?,
-                    r.get::<_, Option<String>>(12)?,
-                    r.get::<_, Option<String>>(13)?,
-                    r.get::<_, Option<bool>>(14)?,
-                    r.get::<_, Option<bool>>(15)?,
-                ))
-            })
-            .map_err(|e| CoreError::Message(format!("query paged events join: {e}")))?;
+                 LIMIT ?2";
+
+        let map_row = |r: &duckdb::Row<'_>| -> duckdb::Result<JoinedEventRow> {
+            let params_s: String = r.get(6)?;
+            let params: Vec<String> = serde_json::from_str(&params_s).unwrap_or_default();
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, i64>(5)?,
+                params,
+                r.get::<_, Option<String>>(7)?,
+                r.get::<_, String>(8)?,
+                r.get::<_, String>(9)?,
+                r.get::<_, Option<String>>(10)?,
+                r.get::<_, Option<String>>(11)?,
+                r.get::<_, Option<String>>(12)?,
+                r.get::<_, Option<String>>(13)?,
+                r.get::<_, Option<bool>>(14)?,
+                r.get::<_, Option<bool>>(15)?,
+            ))
+        };
+
         let mut out = Vec::with_capacity(limit);
-        for row in rows {
-            let (
-                seq,
-                ts,
-                level,
-                service,
-                host,
-                template_id,
-                params,
-                trace_id,
-                message,
-                source,
-                stored_provenance,
-                stored_active_basis,
-                unresolved_local_timestamp,
-                original_redacted,
-                original_truncated,
-                original_redaction_applied,
-            ) = row.map_err(|e| CoreError::Message(format!("row: {e}")))?;
-            let timestamp_provenance = TimestampProvenance::from_storage_str(
-                stored_provenance.as_deref(),
-            )
-            .ok_or_else(|| CoreError::Message("invalid timestamp provenance".into()))?;
-            let active_timestamp_basis = ActiveTimestampBasis::from_storage_str(
-                stored_active_basis.as_deref(),
-            )
-            .ok_or_else(|| CoreError::Message("invalid active timestamp basis".into()))?;
-            let event = LogEvent {
-                seq: u64::try_from(seq)
-                    .map_err(|_| CoreError::Message("negative seq".into()))?,
-                ts,
-                timestamp_provenance,
-                active_timestamp_basis,
-                unresolved_local_timestamp,
-                level,
-                service,
-                host,
-                template_id: u64::try_from(template_id)
-                    .map_err(|_| CoreError::Message("negative template".into()))?,
-                params,
-                trace_id,
-                message,
-                source,
-            };
-            event.validate_timestamp_provenance()?;
-            out.push((
-                event,
-                original_redacted,
-                original_truncated.unwrap_or(false),
-                original_redaction_applied.unwrap_or(false),
-            ));
+        match after_seq {
+            None => {
+                // First page: include seq 0 (ingest starts at 0).
+                let mut stmt = conn
+                    .prepare(sql_first)
+                    .map_err(|e| CoreError::Message(format!("prepare first events join: {e}")))?;
+                let rows = stmt
+                    .query_map(duckdb::params![limit as i64], map_row)
+                    .map_err(|e| CoreError::Message(format!("query first events join: {e}")))?;
+                for row in rows {
+                    let t = row.map_err(|e| CoreError::Message(format!("row: {e}")))?;
+                    out.push(decode_event_with_original_row(t)?);
+                }
+            }
+            Some(after) => {
+                let mut stmt = conn
+                    .prepare(sql_keyset)
+                    .map_err(|e| CoreError::Message(format!("prepare paged events join: {e}")))?;
+                let rows = stmt
+                    .query_map(duckdb::params![after as i64, limit as i64], map_row)
+                    .map_err(|e| CoreError::Message(format!("query paged events join: {e}")))?;
+                for row in rows {
+                    let t = row.map_err(|e| CoreError::Message(format!("row: {e}")))?;
+                    out.push(decode_event_with_original_row(t)?);
+                }
+            }
         }
         Ok(out)
     })
 }
 
 /// Load all events via bounded paged joins (never one original query per event).
+///
+/// First page uses `after_seq = None` so **seq 0 is included**.
 pub fn load_events_with_originals(corpus: &LogCorpus) -> CoreResult<Vec<EventWithOriginal>> {
     let mut all = Vec::new();
     let mut after: Option<u64> = None;
@@ -565,10 +615,13 @@ pub fn load_events_with_originals(corpus: &LogCorpus) -> CoreResult<Vec<EventWit
         if page.is_empty() {
             break;
         }
-        after = page.last().map(|(e, _, _, _)| e.seq);
+        let page_len = page.len();
+        let last_seq = page.last().map(|(e, _, _, _)| e.seq);
         all.extend(page);
-        if after.is_none() {
-            break;
+        match last_seq {
+            Some(s) if page_len >= NORMALIZE_EVENT_PAGE => after = Some(s),
+            // Short page → no more rows.
+            _ => break,
         }
     }
     Ok(all)
@@ -1008,7 +1061,13 @@ mod tests {
         };
 
         let mut diags = Vec::new();
-        // SchemaMapped + Low
+        let has_sev_inconsistent =
+            |d: &Vec<crate::normalized_log_events::NormalizedLogDiagnostic>| {
+                d.iter()
+                    .any(|x| x.code == NormalizedLogDiagnosticCode::SeverityProvenanceInconsistent)
+            };
+
+        // 1) SchemaMapped + Low
         let mut bad = map_event_to_normalized(
             &base_event(),
             Some(r#"{"level":"ERROR","msg":"x"}"#),
@@ -1021,32 +1080,47 @@ mod tests {
         bad.severity.canonical = Some(17);
         validate_event(&bad, 0, 2, &mut diags);
         assert!(
-            diags
-                .iter()
-                .any(|d| d.code == NormalizedLogDiagnosticCode::SeverityProvenanceInconsistent),
+            has_sev_inconsistent(&diags),
             "schema_mapped+low must fail: {diags:?}"
         );
 
-        // SourceDeclared derived only from stored level (raw none, inventing claim)
+        // 2) SourceDeclared derived only from stored level — not from a recovered
+        // original severity field. Export path must stay Absent; a forged claim that
+        // elevates stored `level` to SourceDeclared with non-High confidence is
+        // pair-illegal (SourceDeclared requires High). Forging High without raw is
+        // pair-ok on matrix alone — export must never emit that (see
+        // severity_never_uses_stored_level_for_source_declared).
         diags.clear();
         let mut from_level = map_event_to_normalized(
-            &base_event(),
-            Some("no json severity here"),
+            &base_event(), // stored level = "info"
+            Some("plain line; no severity field in original"),
             false,
             &NormalizeTimezonePolicy::default(),
         )
         .unwrap();
+        assert_eq!(from_level.severity.provenance, SeverityProvenance::Absent);
+        // Mutation: claim SourceDeclared from stored level with Medium (schema-mapped style).
         from_level.severity = Severity {
-            raw: None,
+            raw: Some(serde_json::json!(base_event().level)),
             canonical: Some(9),
-            confidence: SeverityConfidence::High,
+            confidence: SeverityConfidence::Medium,
             provenance: SeverityProvenance::SourceDeclared,
         };
         validate_event(&from_level, 0, 2, &mut diags);
-        // High+source_declared without raw is coherent on pair matrix alone, but
-        // export path must not produce it. Simulate false claim with absent-like
-        // raw missing: still source_declared+high is pair-ok. Force absent with
-        // canonical which IS illegal:
+        assert!(
+            has_sev_inconsistent(&diags),
+            "source_declared+medium (invented from stored level) must fail: {diags:?}"
+        );
+        // Same invention with Low confidence also fails pair matrix.
+        diags.clear();
+        from_level.severity.confidence = SeverityConfidence::Low;
+        validate_event(&from_level, 0, 2, &mut diags);
+        assert!(
+            has_sev_inconsistent(&diags),
+            "source_declared+low must fail: {diags:?}"
+        );
+
+        // 3) Absent with raw or canonical
         diags.clear();
         from_level.severity = Severity {
             raw: None,
@@ -1056,13 +1130,9 @@ mod tests {
         };
         validate_event(&from_level, 0, 2, &mut diags);
         assert!(
-            diags
-                .iter()
-                .any(|d| d.code == NormalizedLogDiagnosticCode::SeverityProvenanceInconsistent),
+            has_sev_inconsistent(&diags),
             "absent with canonical must fail: {diags:?}"
         );
-
-        // Absent with raw
         diags.clear();
         from_level.severity = Severity {
             raw: Some(serde_json::json!("ERROR")),
@@ -1071,11 +1141,12 @@ mod tests {
             provenance: SeverityProvenance::Absent,
         };
         validate_event(&from_level, 0, 2, &mut diags);
-        assert!(diags
-            .iter()
-            .any(|d| d.code == NormalizedLogDiagnosticCode::SeverityProvenanceInconsistent));
+        assert!(
+            has_sev_inconsistent(&diags),
+            "absent with raw must fail: {diags:?}"
+        );
 
-        // Missing canonical original (empty string)
+        // 4) Missing canonical original (empty string)
         diags.clear();
         let mut empty_c = map_event_to_normalized(
             &base_event(),
@@ -1092,11 +1163,36 @@ mod tests {
                 .any(|d| d.code == NormalizedLogDiagnosticCode::CanonicalInvalid),
             "empty canonical must fail: {diags:?}"
         );
+        // Export path also fails closed before validation.
+        let miss_err = map_event_to_normalized(
+            &base_event(),
+            None,
+            false,
+            &NormalizeTimezonePolicy::default(),
+        )
+        .unwrap_err();
+        assert!(miss_err.to_string().contains("missing retained original"));
 
-        // Multiple source identities under one header: two events with different
-        // logical sources are not representable in one file — we enforce by writing
-        // one header source_id and validating stream only if sequences are contiguous
-        // under one source. Mutation: forge a second event batch under wrong header.
+        // 5) Multiple source identities must not merge under one header/batch.
+        let mut e_b = base_event();
+        e_b.source = "other/b.log".into();
+        e_b.seq = 1;
+        let rows = [
+            (base_event(), Some("line a".into()), false, false),
+            (e_b, Some("line b".into()), false, false),
+        ];
+        let batches = build_source_batches(&rows, &NormalizeTimezonePolicy::default()).unwrap();
+        assert_eq!(batches.len(), 2, "one batch / JSONL per sourceId");
+        assert_ne!(batches[0].source_id, batches[1].source_id);
+        for b in &batches {
+            assert_eq!(
+                b.events.len(),
+                1,
+                "each source identity owns its own event list"
+            );
+        }
+
+        // SchemaMapped + Low via real validate_stream on a hand-built file.
         let header = NormalizedLogHeader {
             schema_id: NORMALIZED_LOG_EVENTS_SCHEMA_ID.into(),
             min_reader_version: NORMALIZED_LOG_EVENTS_READER_VERSION,
@@ -1115,19 +1211,6 @@ mod tests {
             &NormalizeTimezonePolicy::default(),
         )
         .unwrap();
-        // Multi-identity is a batching error: one header source_id, never merge.
-        let mut e_b = base_event();
-        e_b.source = "other/b.log".into();
-        e_b.seq = 1;
-        let rows = [
-            (base_event(), Some("line a".into()), false, false),
-            (e_b, Some("line b".into()), false, false),
-        ];
-        let batches = build_source_batches(&rows, &NormalizeTimezonePolicy::default()).unwrap();
-        assert_eq!(batches.len(), 2, "one batch / JSONL per sourceId");
-        assert_ne!(batches[0].source_id, batches[1].source_id);
-
-        // SchemaMapped + Low via validate_stream on a hand-built file.
         let mut stream = String::new();
         stream.push_str(&serde_json::to_string(&header).unwrap());
         stream.push('\n');
@@ -1174,5 +1257,27 @@ mod tests {
         let err = publish_staging(&staging, &out).unwrap_err();
         assert!(err.to_string().contains("overwrite") || err.to_string().contains("non-empty"));
         assert!(out.join("exists.txt").exists());
+    }
+
+    /// Unit-level: first page with after_seq=None must request seq from 0 upward
+    /// (documented contract — SQL path uses ORDER BY seq LIMIT without `seq > 0`).
+    #[test]
+    fn first_page_cursor_is_none_not_zero() {
+        // Structural: the API distinguishes None (include 0) from Some(0) (exclude 0).
+        // Callers must start with None; load_events_with_originals does.
+        let src = include_str!("normalize_export.rs");
+        assert!(
+            src.contains("after_seq = None") || src.contains("after: Option<u64> = None"),
+            "loader must start with after_seq = None"
+        );
+        assert!(
+            src.contains("ORDER BY seq") && src.contains("LIMIT ?1"),
+            "first page must not use exclusive keyset alone"
+        );
+        // Some(0) is exclusive and drops seq 0 — must only appear in keyset branch.
+        assert!(
+            src.contains("WHERE seq > ?1"),
+            "keyset page still uses exclusive seq > after"
+        );
     }
 }

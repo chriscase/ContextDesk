@@ -165,6 +165,15 @@ pub fn normalize_offline(
         );
         let corpus = LogCorpus::open(&cache_root, &ingest.corpus_id)?;
         let rows = load_events_with_originals(&corpus)?;
+        // Fail closed on silent partial export (e.g. keyset dropping seq 0).
+        let ingested_lines = ingest.stats.lines;
+        if rows.len() as u64 != ingested_lines {
+            return Err(CoreError::Policy(format!(
+                "export event count mismatch: loaded {} rows but ingest reported {} lines (seq-0 drop?)",
+                rows.len(),
+                ingested_lines
+            )));
+        }
         drop(corpus);
         // Discard ephemeral corpus directory under cache (best-effort).
         let _ = LogCorpus::discard(&cache_root, &ingest.corpus_id);
@@ -174,6 +183,12 @@ pub fn normalize_offline(
             return Err(CoreError::Policy(
                 "no events produced from selected sources".into(),
             ));
+        }
+        let exported_events: u64 = batches.iter().map(|b| b.events.len() as u64).sum();
+        if exported_events != ingested_lines {
+            return Err(CoreError::Policy(format!(
+                "export batch event count mismatch: {exported_events} mapped vs {ingested_lines} ingested"
+            )));
         }
 
         let preview = PreviewCountSnapshot {
@@ -317,6 +332,16 @@ mod tests {
         assert!(output.join("normalization-report.json").is_file());
         assert!(output.join("sources").is_dir());
         assert!(outcome.report.events >= 2);
+        // Count events on disk: must match report (no silent seq-0 drop).
+        let mut on_disk = 0u64;
+        for entry in fs::read_dir(output.join("sources")).unwrap() {
+            let text = fs::read_to_string(entry.unwrap().path()).unwrap();
+            on_disk += text.lines().count().saturating_sub(1) as u64; // minus header
+        }
+        assert_eq!(
+            on_disk, outcome.report.events,
+            "on-disk JSONL events must equal report.events (caught seq-0 drop)"
+        );
         // Ephemeral work root cleaned.
         let leftovers: Vec<_> = fs::read_dir(tmp.path())
             .unwrap()
@@ -328,6 +353,42 @@ mod tests {
             })
             .collect();
         assert!(leftovers.is_empty(), "ephemeral staging must be cleaned");
+    }
+
+    /// Single one-line source must publish (seq 0 is the only event).
+    #[test]
+    fn single_line_source_includes_seq_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("in");
+        fs::create_dir_all(input.join("only")).unwrap();
+        fs::write(
+            input.join("only/one.jsonl"),
+            r#"{"ts":"2026-06-01T00:00:00Z","level":"INFO","msg":"solo"}"#.to_string() + "\n",
+        )
+        .unwrap();
+        let output = tmp.path().join("out");
+        let opts = NormalizeOptions {
+            input,
+            output: output.clone(),
+            output_format: "jsonl".into(),
+            timezone: NormalizeTimezonePolicy::default(),
+        };
+        let outcome = normalize_offline_quiet(&opts).expect("single-line must not fail on seq 0");
+        assert_eq!(outcome.report.events, 1, "exactly one logical event");
+        let files: Vec<_> = fs::read_dir(output.join("sources"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(files.len(), 1);
+        let text = fs::read_to_string(&files[0]).unwrap();
+        assert_eq!(
+            text.lines().count(),
+            2,
+            "header + one event (seq 0 must be present)"
+        );
+        let ev: serde_json::Value = serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
+        assert_eq!(ev["sourceSeq"], 0);
+        assert!(ev["message"].as_str().unwrap_or("").contains("solo"));
     }
 
     #[test]
@@ -386,7 +447,10 @@ mod tests {
             timezone: NormalizeTimezonePolicy::default(),
         };
         let outcome = normalize_offline_quiet(&opts).expect("normalize");
-        assert!(outcome.report.sources_unsupported >= 1 || outcome.report.sources_examined > outcome.report.sources_selected);
+        assert!(
+            outcome.report.sources_unsupported >= 1
+                || outcome.report.sources_examined > outcome.report.sources_selected
+        );
 
         let mut saw_continuation = false;
         let mut saw_unresolved_without_instant = false;
@@ -402,17 +466,13 @@ mod tests {
                 source_ids.insert(sid.clone()),
                 "duplicate sourceId file for {sid}"
             );
-            assert_eq!(
-                header["schemaId"],
-                "contextdesk.normalized_log_events.v1"
-            );
+            assert_eq!(header["schemaId"], "contextdesk.normalized_log_events.v1");
             for line in lines {
                 let ev: serde_json::Value = serde_json::from_str(line).unwrap();
                 let res = ev["time"]["resolution"].as_str().unwrap_or("");
                 if res == "unresolved" {
                     assert!(
-                        ev["time"].get("instant").is_none()
-                            || ev["time"]["instant"].is_null(),
+                        ev["time"].get("instant").is_none() || ev["time"]["instant"].is_null(),
                         "guessed UTC forbidden: {line}"
                     );
                     saw_unresolved_without_instant = true;
