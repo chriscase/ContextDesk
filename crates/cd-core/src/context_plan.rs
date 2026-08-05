@@ -1525,7 +1525,7 @@ mod tests {
     }
 
     #[test]
-    fn injection_block_excludes_context_already_injected_by_source_id() {
+    fn injection_block_excludes_source_id_and_skips_separate_user_selection() {
         let snap = ContextInventorySnapshot {
             session_id: "s".into(),
             turn_id: "t".into(),
@@ -1537,7 +1537,12 @@ mod tests {
                 content: "saffron ambient plan dedup".into(),
                 status: Status::Active,
             }],
-            user_selection: Some("retain this explicit selection".into()),
+            workspace_hits: vec![WorkspaceHitSnapshot {
+                path: "dashboard.md".into(),
+                snippet: "release dashboard retained workspace context".into(),
+                score: 1.0,
+            }],
+            user_selection: Some("client selection uses its separate envelope".into()),
             ..Default::default()
         };
         let plan = build_context_plan(
@@ -1547,14 +1552,16 @@ mod tests {
         );
         let full = plan.format_injection_block().expect("full block");
         assert!(full.contains("saffron ambient plan dedup"));
-        assert!(full.contains("retain this explicit selection"));
+        assert!(full.contains("retained workspace context"));
+        assert!(!full.contains("client selection uses its separate envelope"));
 
         let excluded = HashSet::from(["memory:one".to_string()]);
         let filtered = plan
             .format_injection_block_excluding(&excluded)
-            .expect("selection remains");
+            .expect("workspace context remains");
         assert!(!filtered.contains("saffron ambient plan dedup"));
-        assert!(filtered.contains("retain this explicit selection"));
+        assert!(filtered.contains("retained workspace context"));
+        assert!(!filtered.contains("client selection uses its separate envelope"));
     }
 
     #[test]
