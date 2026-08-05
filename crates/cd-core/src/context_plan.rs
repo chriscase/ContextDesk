@@ -180,6 +180,12 @@ pub struct ContextCandidate {
     pub provenance: String,
 }
 
+/// Hard cap on candidates retained in the plan vector (after selection).
+pub const MAX_PLAN_CANDIDATES: usize = 128;
+
+/// Hard cap on serialized Developer-detail plan JSON (characters).
+pub const MAX_DEVELOPER_PLAN_JSON_CHARS: usize = 6_000;
+
 /// Complete plan for one ordinary-chat turn (or linked inventory view).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextPlan {
@@ -197,7 +203,14 @@ pub struct ContextPlan {
     pub global_char_budget: usize,
     /// Estimated chars of included candidates.
     pub included_chars: usize,
-    /// All candidates after selection (included + excluded + deferred + truncated).
+    /// Candidates discovered before the hard vector cap.
+    pub candidates_discovered: usize,
+    /// Candidates dropped solely by [`MAX_PLAN_CANDIDATES`] (honest omit count).
+    pub candidates_omitted_by_cap: usize,
+    /// True when developer JSON was truncated to the payload cap.
+    pub developer_payload_truncated: bool,
+    /// All candidates after selection (included + excluded + deferred + truncated),
+    /// capped at [`MAX_PLAN_CANDIDATES`].
     pub candidates: Vec<ContextCandidate>,
     /// Side-effect ledger: inventory must never trigger these.
     pub side_effects_forbidden: Vec<String>,
@@ -224,15 +237,61 @@ impl ContextPlan {
             .any(|c| c.memory_kind.as_deref() == Some(kind))
     }
 
-    /// JSON for developer detail / CLI envelopes.
+    /// JSON for developer detail / CLI envelopes (hard-capped; may strip snippets).
     pub fn to_developer_json(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+        let compact = serde_json::json!({
+            "strategy": self.strategy,
+            "model_relevance_used": self.model_relevance_used,
+            "relevance_failed_closed": self.relevance_failed_closed,
+            "included_chars": self.included_chars,
+            "global_char_budget": self.global_char_budget,
+            "candidates_discovered": self.candidates_discovered,
+            "candidates_omitted_by_cap": self.candidates_omitted_by_cap,
+            "candidate_count": self.candidates.len(),
+            "context_used_summary": self.context_used_summary,
+            "side_effects_forbidden": self.side_effects_forbidden,
+            "included": self.included().take(32).map(|c| serde_json::json!({
+                "id": c.id,
+                "family": c.family,
+                "label": c.label,
+                "memory_kind": c.memory_kind,
+                "reasons": c.reasons,
+                "estimated_chars": c.estimated_chars,
+                "score": c.score,
+                // Snippets omitted from developer compact form (bodies stay in model ctx only).
+            })).collect::<Vec<_>>(),
+            "deferred": self.candidates.iter()
+                .filter(|c| c.disposition == CandidateDisposition::Deferred)
+                .take(16)
+                .map(|c| serde_json::json!({"id": c.id, "family": c.family, "label": c.label}))
+                .collect::<Vec<_>>(),
+            "truncated_count": self.candidates.iter()
+                .filter(|c| c.disposition == CandidateDisposition::Truncated)
+                .count(),
+            "excluded_count": self.candidates.iter()
+                .filter(|c| c.disposition == CandidateDisposition::Excluded)
+                .count(),
+        });
+        let s = serde_json::to_string(&compact).unwrap_or_default();
+        if s.chars().count() <= MAX_DEVELOPER_PLAN_JSON_CHARS {
+            return compact;
+        }
+        serde_json::json!({
+            "strategy": self.strategy,
+            "context_used_summary": self.context_used_summary,
+            "candidates_discovered": self.candidates_discovered,
+            "candidates_omitted_by_cap": self.candidates_omitted_by_cap,
+            "candidate_count": self.candidates.len(),
+            "included_chars": self.included_chars,
+            "developer_payload_truncated": true,
+            "note": "plan JSON truncated under MAX_DEVELOPER_PLAN_JSON_CHARS",
+        })
     }
 
     /// Search-trail style steps (CLI / UI).
     pub fn trail_steps(&self) -> Vec<String> {
         let mut steps = vec![format!(
-            "context_plan:strategy={:?};included={};excluded={};deferred={};truncated={};chars={}/{}",
+            "context_plan:strategy={:?};included={};excluded={};deferred={};truncated={};chars={}/{};discovered={};omitted_by_cap={}",
             self.strategy,
             self.included().count(),
             self.candidates
@@ -249,6 +308,8 @@ impl ContextPlan {
                 .count(),
             self.included_chars,
             self.global_char_budget,
+            self.candidates_discovered,
+            self.candidates_omitted_by_cap,
         )];
         if self.relevance_failed_closed {
             steps.push("context_plan:relevance_failed_closed".into());
@@ -256,7 +317,13 @@ impl ContextPlan {
         if self.model_relevance_used {
             steps.push("context_plan:model_relevance_applied".into());
         }
-        for c in self.included() {
+        if self.candidates_omitted_by_cap > 0 {
+            steps.push(format!(
+                "context_plan:candidates_omitted_by_cap={}",
+                self.candidates_omitted_by_cap
+            ));
+        }
+        for c in self.included().take(24) {
             steps.push(format!(
                 "context_included:{}:{}:{}",
                 c.family.as_str(),
@@ -266,6 +333,59 @@ impl ContextPlan {
         }
         steps.push(format!("context_used:{}", self.context_used_summary));
         steps
+    }
+
+    /// Build a bounded system message body from **included** non-history candidates
+    /// so they actually reach the provider (not trail-only).
+    pub fn format_injection_block(&self) -> Option<String> {
+        let mut lines: Vec<String> = Vec::new();
+        for c in self.included() {
+            if c.family == ContextSourceFamily::ConversationHistory {
+                continue; // already in model_ctx via prepare_model_context
+            }
+            if c.family == ContextSourceFamily::OptionalConnector {
+                continue; // never inject connector content without authorize+invoke
+            }
+            let snip = c.snippet.as_deref().unwrap_or("").trim();
+            if snip.is_empty() && c.family != ContextSourceFamily::PinnedSkill {
+                continue;
+            }
+            let kind = c
+                .memory_kind
+                .as_deref()
+                .map(|k| format!("/{k}"))
+                .unwrap_or_default();
+            if snip.is_empty() {
+                lines.push(format!(
+                    "- [{}{}] {} ({})",
+                    c.family.as_str(),
+                    kind,
+                    c.label,
+                    c.id
+                ));
+            } else {
+                let body: String = snip.chars().take(200).collect();
+                lines.push(format!(
+                    "- [{}{}] {} — {} ({})",
+                    c.family.as_str(),
+                    kind,
+                    c.label,
+                    body,
+                    c.id
+                ));
+            }
+            if lines.len() >= 24 {
+                break;
+            }
+        }
+        if lines.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "Host context inventory (deterministic; already-open sources only):\n{}",
+                lines.join("\n")
+            ))
+        }
     }
 }
 
@@ -690,7 +810,19 @@ pub fn build_context_plan(
     }
 
     // Apply per-source quotas + global budget on Included set.
-    let selected = apply_quotas_and_budget(deduped, budget);
+    let mut selected = apply_quotas_and_budget(deduped, budget);
+    let discovered = selected.len();
+    let omitted_by_cap = selected.len().saturating_sub(MAX_PLAN_CANDIDATES);
+    if selected.len() > MAX_PLAN_CANDIDATES {
+        // Prefer keeping Included, then Deferred, then Truncated, then Excluded.
+        selected.sort_by_key(|c| match c.disposition {
+            CandidateDisposition::Included => 0u8,
+            CandidateDisposition::Deferred => 1,
+            CandidateDisposition::Truncated => 2,
+            CandidateDisposition::Excluded => 3,
+        });
+        selected.truncate(MAX_PLAN_CANDIDATES);
+    }
 
     let included_chars: usize = selected
         .iter()
@@ -700,7 +832,7 @@ pub fn build_context_plan(
 
     let summary = build_context_used_summary(&selected);
 
-    ContextPlan {
+    let mut plan = ContextPlan {
         session_id: snap.session_id.clone(),
         turn_id: snap.turn_id.clone(),
         strategy,
@@ -708,6 +840,9 @@ pub fn build_context_plan(
         relevance_failed_closed: false,
         global_char_budget: budget.global_chars,
         included_chars,
+        candidates_discovered: discovered,
+        candidates_omitted_by_cap: omitted_by_cap,
+        developer_payload_truncated: false,
         candidates: selected,
         side_effects_forbidden: vec![
             "keychain_read".into(),
@@ -717,7 +852,14 @@ pub fn build_context_plan(
             "soft_write".into(),
         ],
         context_used_summary: summary,
-    }
+    };
+    // Detect developer JSON truncation without mutating semantics of selection.
+    let dev = plan.to_developer_json();
+    plan.developer_payload_truncated = dev
+        .get("developer_payload_truncated")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    plan
 }
 
 /// Optional single-shot model relevance: ranks known ids only; fail-closed.
@@ -852,6 +994,70 @@ pub fn attachments_from_entries(entries: &[SessionContextEntry]) -> Vec<Attachme
             name: e.name.clone(),
             size: e.size,
             body_preview: None,
+        })
+        .collect()
+}
+
+/// Load small previews for already-listed session-context files under an open store root.
+///
+/// Local filesystem only (no network). Skips files larger than `max_file_bytes`.
+pub fn attachments_with_previews(
+    store: &crate::session_context::SessionContextStore,
+    entries: &[SessionContextEntry],
+    max_file_bytes: u64,
+    max_preview_chars: usize,
+) -> Vec<AttachmentSnapshot> {
+    use std::fs;
+    let root = store.root();
+    entries
+        .iter()
+        .map(|e| {
+            let mut att = AttachmentSnapshot {
+                rel_path: e.rel_path.clone(),
+                name: e.name.clone(),
+                size: e.size,
+                body_preview: None,
+            };
+            if e.size > 0 && e.size <= max_file_bytes {
+                let path = root.join(&e.rel_path);
+                if let Ok(raw) = fs::read_to_string(&path) {
+                    att.body_preview = Some(raw.chars().take(max_preview_chars).collect());
+                }
+            }
+            att
+        })
+        .collect()
+}
+
+/// Workspace hits from an already-built local [`crate::index::KeywordIndex`] (no network).
+pub fn workspace_hits_from_index(
+    index: &crate::index::KeywordIndex,
+    query: &str,
+    limit: usize,
+) -> Vec<WorkspaceHitSnapshot> {
+    index
+        .search(query, limit.clamp(1, 16))
+        .into_iter()
+        .map(|(score, chunk)| WorkspaceHitSnapshot {
+            path: chunk.path.display().to_string(),
+            snippet: chunk.text.chars().take(220).collect(),
+            // Normalize TF-IDF-ish scores into a soft 0..1 band for lexical mix.
+            score: (score / 20.0).clamp(0.0, 1.0),
+        })
+        .collect()
+}
+
+/// Connector **availability metadata** only — never opens keychain or network.
+pub fn connector_slots_from_configs(
+    configs: &[crate::connectors::ConnectorConfig],
+) -> Vec<ConnectorSlotSnapshot> {
+    configs
+        .iter()
+        .map(|c| ConnectorSlotSnapshot {
+            // Availability flag from config, not a secret probe.
+            name: c.id.clone(),
+            // "authorized" here means "enabled in config"; still Deferred until invoke.
+            authorized: c.enabled,
         })
         .collect()
 }
@@ -1229,9 +1435,27 @@ mod tests {
             ..Default::default()
         };
         let plan = build_context_plan(&snap, budget, RelevanceStrategy::DeterministicOnly);
-        assert!(plan.candidates.len() >= 3000);
+        assert_eq!(plan.candidates_discovered, 3001); // history + 3000 memory
+        assert!(
+            plan.candidates.len() <= MAX_PLAN_CANDIDATES,
+            "plan must hard-cap retained candidates, got {}",
+            plan.candidates.len()
+        );
+        assert!(
+            plan.candidates_omitted_by_cap > 0,
+            "honest omit count required when discovered >> cap"
+        );
         assert!(plan.included().count() <= 20);
         assert!(plan.included_chars <= budget.global_chars + 500);
+        let dev = plan.to_developer_json();
+        let s = serde_json::to_string(&dev).unwrap();
+        assert!(
+            s.chars().count() <= MAX_DEVELOPER_PLAN_JSON_CHARS + 200,
+            "developer JSON must stay near hard cap, got {}",
+            s.chars().count()
+        );
+        // Full plan must not serialize 3k snippets into developer detail.
+        assert!(!s.contains("zzzz filler 2999") || plan.developer_payload_truncated);
     }
 
     #[test]

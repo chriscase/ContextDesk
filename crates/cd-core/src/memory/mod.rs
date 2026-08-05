@@ -50,8 +50,9 @@ pub use import::{
 pub use score::{kind_half_life_days, recency_boost_kind, score_candidate, ScorePair};
 pub use sqlite_store::{embed_blocking, SqliteMemoryStore, MEMORY_EMBED_TIMEOUT_MS};
 pub use tools::{
-    format_recall_hits, is_destructive_memory_tool, memory_tool_specs, permission_target_for_write,
-    write_op_from_retract_args, write_op_from_save_args, write_op_from_supersede_args,
+    format_recall_hits, is_destructive_memory_tool, memory_tool_specs, normalize_memory_kind,
+    permission_target_for_write, write_op_from_retract_args, write_op_from_save_args,
+    write_op_from_supersede_args, DOCUMENTED_MEMORY_KINDS,
 };
 pub use types::*;
 

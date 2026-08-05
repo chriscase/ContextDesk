@@ -238,10 +238,13 @@ async fn developer_detail_on_emits_causal_pre_provider_provenance() {
 
     // Contributors appear in causal assembly order before provider_exchange.
     let labels: Vec<&str> = prov.iter().map(|e| e.label.as_str()).collect();
+    // Causal assembly: inventory plan is recorded before ambient inject so
+    // multi-source selection is visible even when ambient yields no hits.
     let expected_prefix = [
         "Context: system_instructions",
         "Context: history_selection",
         "Context: compaction",
+        "Context: context_plan",
         "Context: ambient_memory",
         "Context: session_packs",
         "Context: pinned_skills",

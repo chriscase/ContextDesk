@@ -802,3 +802,131 @@ fn inventory_never_probes_unauthorized_connectors() {
             && c.disposition == cd_core::context_plan::CandidateDisposition::Deferred
     }));
 }
+
+#[tokio::test]
+async fn multi_source_unique_tokens_reach_provider_not_prompt() {
+    // Tokens appear ONLY in their source artifacts — not user prompt, not final answer.
+    const MEM_TOKEN: &str = "MEMONLY_token_q7x9";
+    const WS_TOKEN: &str = "WSONLY_token_m3k2";
+    const ATT_TOKEN: &str = "ATTONLY_token_p8n4";
+    const SEL_TOKEN: &str = "SELONLY_token_r5v6";
+    const NOISE_TOKEN: &str = "NOISEONLY_token_z1z1";
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("runbook.md"),
+        format!("workspace note mentions {WS_TOKEN} for allowlisted search\n"),
+    )
+    .unwrap();
+    let ws = Workspace::new("multi", vec![root.to_path_buf()]);
+    let idx = KeywordIndex::build(&ws).unwrap();
+    let mut host = ToolHost::new(ws, idx, None);
+    let branding = Branding::embedded();
+    attach_durable_memory_to_host(&mut host, &branding, &MemoryConfig::default()).unwrap();
+    let store = host.durable_memory_store().unwrap();
+    let now = cd_core::embed::now_unix_secs();
+    let mut pref = MemoryDraft::new(
+        Kind::Preference,
+        format!("relevant preference for investigation pack body {MEM_TOKEN}"),
+    );
+    pref.title = "investigation preference".into();
+    store.put(MemoryWriteOp::Insert(pref), now).unwrap();
+    let mut noise = MemoryDraft::new(Kind::Fact, format!("unrelated {NOISE_TOKEN} coffee"));
+    noise.title = "coffee-noise".into();
+    store.put(MemoryWriteOp::Insert(noise), now).unwrap();
+
+    let base = root.join(".contextdesk");
+    host.set_session_context_base(Some(base.clone()));
+    host.set_active_session_id(Some("multi-sess".into()));
+    let sess = cd_core::session_context::SessionContextStore::open(
+        &base,
+        "multi-sess",
+        cd_core::session_context::SessionContextCaps::default(),
+    )
+    .unwrap();
+    sess.import_bytes(
+        "pack-note.txt",
+        format!("attachment pack carries {ATT_TOKEN}\n").as_bytes(),
+    )
+    .unwrap();
+
+    let provider = CaptureBackend::new(vec![final_answer("I will answer from host context only.")]);
+    // Prompt contains NONE of the unique tokens.
+    // Query shares topical terms with sources but never the unique tokens.
+    let user = "Summarize relevant preference, workspace, and pack notes for this investigation.";
+    assert!(!user.contains(MEM_TOKEN) && !user.contains(WS_TOKEN) && !user.contains(ATT_TOKEN));
+    assert!(!user.contains(NOISE_TOKEN) && !user.contains(SEL_TOKEN));
+
+    let mut history = Vec::new();
+    let events = run_agent_turn(
+        provider.as_ref(),
+        &mut host,
+        user,
+        &mut history,
+        &AgentOptions {
+            session_id: "multi-sess".into(),
+            ambient_recall_enabled: true,
+            max_rounds: 2,
+            applied_skill_ids: vec!["triage-skill".into()],
+            user_selection: Some(format!(
+                "client highlight for investigation mentions {SEL_TOKEN}"
+            )),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let trail = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::SearchTrail { steps } => Some(steps.join("|")),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("||");
+    assert!(
+        trail.contains("context_plan:"),
+        "plan trail required: {trail}"
+    );
+    assert!(
+        trail.contains("context_included:") || trail.contains("context_used:"),
+        "included/used steps: {trail}"
+    );
+    assert!(
+        trail.contains("context_plan_inject:") || trail.contains("context_included:"),
+        "injection or inclusion required: {trail}"
+    );
+
+    let blob = provider.all_blob();
+    // Relevant tokens from memory / workspace / attachment / selection must reach provider.
+    assert!(
+        blob.contains(MEM_TOKEN),
+        "memory token must reach provider: {blob}"
+    );
+    assert!(
+        blob.contains(WS_TOKEN),
+        "workspace token must reach provider: {blob}"
+    );
+    assert!(
+        blob.contains(ATT_TOKEN),
+        "attachment token must reach provider: {blob}"
+    );
+    assert!(
+        blob.contains(SEL_TOKEN),
+        "user_selection token must reach provider: {blob}"
+    );
+    // Skill pin should appear in plan trail or provider as skill id.
+    assert!(
+        trail.contains("pinned_skill")
+            || trail.contains("triage-skill")
+            || blob.contains("triage-skill"),
+        "pinned skill must be inventoried: trail={trail}"
+    );
+    // Irrelevant noise should not be forced into provider context.
+    assert!(
+        !blob.contains(NOISE_TOKEN),
+        "irrelevant noise token must not appear in provider context: {blob}"
+    );
+}

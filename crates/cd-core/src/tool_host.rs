@@ -3902,7 +3902,7 @@ impl ToolHost {
             q.kinds = Some(
                 kinds
                     .iter()
-                    .filter_map(|x| x.as_str().map(crate::memory::Kind::parse))
+                    .filter_map(|x| x.as_str().map(crate::memory::tools::normalize_memory_kind))
                     .collect(),
             );
         }

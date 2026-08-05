@@ -35,12 +35,15 @@ pub fn memory_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: tool_names::SAVE_MEMORY.into(),
-            description: "Propose saving a durable memory (SoftWrite — requires user Accept). When `id` is supplied, updates metadata only; content changes should use supersede_memory.".into(),
+            description: "Propose saving a durable memory (SoftWrite — requires user Accept). When `id` is supplied, updates metadata only; content changes should use supersede_memory. Kind uses the same taxonomy as recall_memory (fact, decision, bookmark, preference, project_note, contact, term, task).".into(),
             side_effect: ToolSideEffect::SoftWrite,
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "kind": { "type": "string" },
+                    "kind": {
+                        "type": "string",
+                        "description": "Memory kind (same taxonomy as recall_memory): fact, decision, bookmark, preference, project_note, contact, term, task. Case-insensitive; unknown values store as Other for backward compatibility."
+                    },
                     "content": { "type": "string" },
                     "title": { "type": "string" },
                     "body_markdown": { "type": "string", "description": "Legacy alias for content (memory_fs path)" },
@@ -136,6 +139,37 @@ pub fn audit_target_for_record(rec: &MemoryRecord) -> String {
 }
 
 /// Parse save_memory args into a write op (insert or update-meta).
+/// Documented kind strings shared by `save_memory` and `recall_memory`.
+pub const DOCUMENTED_MEMORY_KINDS: &[&str] = &[
+    "fact",
+    "decision",
+    "bookmark",
+    "preference",
+    "project_note",
+    "contact",
+    "term",
+    "task",
+];
+
+/// Normalize a save/recall kind string: case-insensitive, hyphen→underscore,
+/// known aliases map to closed taxonomy; unknown → [`Kind::Other`] (backward compatible).
+pub fn normalize_memory_kind(raw: &str) -> Kind {
+    let t = raw.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+    match t.as_str() {
+        "fact" | "facts" => Kind::Fact,
+        "decision" | "decisions" => Kind::Decision,
+        "bookmark" | "bookmarks" | "link" | "url" => Kind::Bookmark,
+        "preference" | "preferences" | "pref" => Kind::Preference,
+        "project_note" | "projectnote" | "note" | "notes" => Kind::ProjectNote,
+        "contact" | "contacts" | "person" => Kind::Contact,
+        "term" | "terms" | "glossary" => Kind::Term,
+        "task" | "tasks" | "todo" => Kind::Task,
+        "" => Kind::ProjectNote,
+        other => Kind::Other(other.to_string()),
+    }
+}
+
+/// Parse `save_memory` arguments into a write op.
 pub fn write_op_from_save_args(args: &Value) -> CoreResult<MemoryWriteOp> {
     if let Some(id_s) = args.get("id").and_then(|v| v.as_str()) {
         let id = Uuid::parse_str(id_s)
@@ -170,7 +204,7 @@ pub fn write_op_from_save_args(args: &Value) -> CoreResult<MemoryWriteOp> {
     let kind = args
         .get("kind")
         .and_then(|v| v.as_str())
-        .map(Kind::parse)
+        .map(normalize_memory_kind)
         .unwrap_or(Kind::ProjectNote);
     let mut draft = MemoryDraft::new(kind, content);
     if let Some(t) = args.get("title").and_then(|v| v.as_str()) {
@@ -363,5 +397,92 @@ mod tests {
         assert!(is_destructive_memory_tool("retract_memory"));
         assert!(is_destructive_memory_tool("purge_memory"));
         assert!(!is_destructive_memory_tool("save_memory"));
+    }
+
+    #[test]
+    fn normalize_memory_kind_case_and_aliases() {
+        assert_eq!(normalize_memory_kind("PREFERENCE"), Kind::Preference);
+        assert_eq!(normalize_memory_kind("Preference"), Kind::Preference);
+        assert_eq!(normalize_memory_kind("project-note"), Kind::ProjectNote);
+        assert_eq!(normalize_memory_kind("fact"), Kind::Fact);
+        assert!(matches!(
+            normalize_memory_kind("legacy_custom"),
+            Kind::Other(_)
+        ));
+        for k in DOCUMENTED_MEMORY_KINDS {
+            assert_eq!(
+                normalize_memory_kind(k).as_str().replace('-', "_"),
+                (*k).replace('-', "_")
+            );
+        }
+    }
+
+    #[test]
+    fn save_preference_then_filtered_recall_round_trip() {
+        let store = SqliteMemoryStore::open_in_memory().unwrap();
+        let op = write_op_from_save_args(&json!({
+            "content": "GUI demo codename is cobalt-window",
+            "kind": "PREFERENCE",
+            "title": "cobalt-window"
+        }))
+        .unwrap();
+        let rec = store.put(op, 100).unwrap();
+        assert_eq!(rec.kind, Kind::Preference);
+
+        // Filtered recall with only fact/project_note/term must miss Preference.
+        let mut q = RecallQuery::new("cobalt-window codename");
+        q.kinds = Some(vec![Kind::Fact, Kind::ProjectNote, Kind::Term]);
+        let filtered = store
+            .recall(&q, None, HybridWeights::default(), 100)
+            .unwrap();
+        assert!(
+            !filtered.iter().any(|h| h.record.kind == Kind::Preference),
+            "narrow kinds hide Preference"
+        );
+
+        // Filtered recall including preference finds it.
+        q.kinds = Some(vec![Kind::Preference]);
+        let pref_hits = store
+            .recall(&q, None, HybridWeights::default(), 100)
+            .unwrap();
+        assert!(
+            pref_hits.iter().any(|h| h.record.kind == Kind::Preference
+                && (h.record.title.contains("cobalt") || h.snippet.contains("cobalt-window"))),
+            "preference kinds filter must find saved Preference"
+        );
+
+        // Unfiltered inventory path finds it.
+        q.kinds = None;
+        let all = store
+            .recall(&q, None, HybridWeights::default(), 100)
+            .unwrap();
+        assert!(all.iter().any(|h| h.record.kind == Kind::Preference));
+    }
+
+    #[test]
+    fn save_invalid_kind_other_still_recallable_unfiltered() {
+        let store = SqliteMemoryStore::open_in_memory().unwrap();
+        let op = write_op_from_save_args(&json!({
+            "content": "legacy_other_token_xyz body",
+            "kind": "NotARealKind",
+            "title": "legacy"
+        }))
+        .unwrap();
+        let rec = store.put(op, 50).unwrap();
+        assert!(matches!(rec.kind, Kind::Other(_)));
+        let hits = store
+            .recall(
+                &RecallQuery::new("legacy_other_token_xyz"),
+                None,
+                HybridWeights::default(),
+                50,
+            )
+            .unwrap();
+        assert!(
+            hits.iter()
+                .any(|h| h.snippet.contains("legacy_other_token_xyz")
+                    || h.record.content.contains("legacy_other_token_xyz")),
+            "Other kinds remain in unfiltered recall for compatibility"
+        );
     }
 }
