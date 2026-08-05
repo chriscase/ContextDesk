@@ -73,6 +73,10 @@ run() {
 
 # --- Mock provider (local only) ---
 log "mock provider start"
+# In-flight flag path must be known to the mock process env (not the CLI env).
+export ACCEPT_CANCEL_INFLIGHT_PATH="$OUT/steps/10-provider-inflight.flag"
+export ACCEPT_CANCEL_SLEEP_SECS="${ACCEPT_CANCEL_SLEEP_SECS:-30}"
+rm -f "$ACCEPT_CANCEL_INFLIGHT_PATH"
 cp "$ROOT/scripts/cli-activity-parity-mock-server.py" "$DEMO_HOME/mock/server.py"
 ( cd "$DEMO_HOME/mock" && python3 server.py ) &
 MOCK_PID=$!
@@ -364,14 +368,13 @@ assert sid in blob, (sid, blob[:400])
 print("session_continuity_ok", sid)
 PY
 
-# --- Honest cancellation (SIGINT) — not a faked success ---
-log "10 honest SIGINT cancellation"
-# Mock sleeps 30s when the prompt contains "slow path" / "cancel demo"
-# (scripts/cli-activity-parity-mock-server.py) so SIGINT lands mid-turn —
-# same idea as crates/cd-cli/tests/chat_cancellation.rs.
-set +e
-# Ordinary chat (no corpus) so the first provider call is the slow mock path
-# without a fast search_logs tool round finishing first.
+# --- Honest cancellation (SIGINT → exit 130) — not faked success / not TERM ---
+log "10 honest SIGINT cancellation (documented exit 130)"
+# Prompt marker has no substring "cancel" so oracles cannot pass on prompt echo.
+CANCEL_PROMPT="ACCEPT_SLOW_PROVIDER_HANG probe for interrupt acceptance"
+INFLIGHT="$OUT/steps/10-provider-inflight.flag"
+rm -f "$INFLIGHT" "$OUT/steps/10-cancel.rc" "$OUT/steps/10-cancel.pid"
+# Ordinary chat (no corpus) so the first provider call is the slow mock path.
 python3 - <<'PY' "$DEMO_HOME/cd/cli/cli-state.json"
 import json
 from pathlib import Path
@@ -380,65 +383,55 @@ st=json.loads(p.read_text()) if p.exists() else {"schema_version":1}
 st["current_corpus_id"]=None
 p.write_text(json.dumps(st, indent=2)+"\n")
 PY
-run --jsonl chat \
-  "slow path cancel demo — hang until interrupted" \
-  --new --auto-approve \
-  >"$OUT/steps/10-cancel.jsonl" 2>"$OUT/steps/10-cancel.err" &
-CHAT_PID=$!
-# Wait for process to enter the provider wait (mock sleep).
-for _ in $(seq 1 100); do
-  kill -0 "$CHAT_PID" 2>/dev/null || break
-  if grep -q -i "connect\|provider\|waiting\|chat" "$OUT/steps/10-cancel.err" 2>/dev/null; then
-    break
-  fi
-  sleep 0.1
-done
-sleep 0.75
-kill -INT "$CHAT_PID" 2>/dev/null || true
-# Allow graceful cancel; escalate if needed.
-for _ in $(seq 1 40); do
-  kill -0 "$CHAT_PID" 2>/dev/null || break
-  sleep 0.25
-done
-if kill -0 "$CHAT_PID" 2>/dev/null; then
-  kill -TERM "$CHAT_PID" 2>/dev/null || true
+export ACCEPT_CANCEL_INFLIGHT_PATH="$INFLIGHT"
+export ACCEPT_CANCEL_SLEEP_SECS=30
+# Controlled launcher: waits for mock in-flight, SIGINT CLI process group,
+# TERM only as cleanup (oracle BLOCKs if forced_escalation=1).
+python3 "$ROOT/scripts/lib/exact_head_cancel_run.py" \
+  --bin "$BIN" \
+  --app-config "$APP_CFG" \
+  --data-dir "$DEMO_HOME/cd" \
+  --prompt "$CANCEL_PROMPT" \
+  --stdout-file "$OUT/steps/10-cancel.jsonl" \
+  --stderr-file "$OUT/steps/10-cancel.err" \
+  --rc-file "$OUT/steps/10-cancel.rc" \
+  --pid-file "$OUT/steps/10-cancel.pid" \
+  --inflight-file "$INFLIGHT" \
+  --grace-secs 8 \
+  --inflight-timeout-secs 25 \
+  | tee "$OUT/steps/10-cancel.launcher"
+test -f "$OUT/steps/10-cancel.rc" || fail "cancel launcher did not write rc file"
+# Parse launcher result
+cancel_rc="$(grep -E '^cancel_rc=' "$OUT/steps/10-cancel.rc" | head -1 | cut -d= -f2)"
+forced_esc="$(grep -E '^forced_escalation=' "$OUT/steps/10-cancel.rc" | head -1 | cut -d= -f2)"
+inflight_ok="$(grep -E '^inflight=' "$OUT/steps/10-cancel.rc" | head -1 | cut -d= -f2)"
+if [[ "$inflight_ok" != "1" ]]; then
+  fail "provider in-flight marker missing — cancel not exercised on real hang"
 fi
-wait "$CHAT_PID"
-cancel_rc=$?
-set -e
-echo "cancel_rc=$cancel_rc" | tee "$OUT/steps/10-cancel.rc"
-python3 - <<'PY' "$OUT/steps/10-cancel.jsonl" "$OUT/steps/10-cancel.err" "$OUT/steps/10-cancel.rc"
-import sys
-from pathlib import Path
-raw=Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace") if Path(sys.argv[1]).exists() else ""
-err=Path(sys.argv[2]).read_text(encoding="utf-8", errors="replace") if Path(sys.argv[2]).exists() else ""
-rc=int(Path(sys.argv[3]).read_text().split("=",1)[-1].strip() or "0")
-blob=(raw+err).lower()
-# Documented cancelled category is exit 130; also accept signal death (128+SIGINT=130).
-honest_cancel = (
-    rc in (130, 143, 2)
-    or "cancel" in blob
-    or "interrupt" in blob
-    or "signal" in blob
+echo "provider_in_flight_ok cli_pid=$(cat "$OUT/steps/10-cancel.pid" 2>/dev/null || echo '?')" \
+  | tee "$OUT/steps/10-provider-inflight.ok"
+# Strict oracle — rejects rc 0 / 143 / 2, prompt-only "cancel", forced TERM.
+ORACLE_ARGS=(
+  --rc "$cancel_rc"
+  --stdout-file "$OUT/steps/10-cancel.jsonl"
+  --stderr-file "$OUT/steps/10-cancel.err"
+  --prompt "$CANCEL_PROMPT"
 )
-# Must NOT look like a clean success-only completion without cancel signal.
-fake_success = (
-    rc == 0
-    and '"ok":true' in raw.replace(" ", "")
-    and "cancel" not in blob
-)
-assert honest_cancel and not fake_success, (rc, raw[:400], err[:400])
-print("honest_cancel_ok rc", rc)
-PY
+if [[ "$forced_esc" == "1" ]]; then
+  ORACLE_ARGS+=(--forced-escalation)
+fi
+PYTHONPATH="$ROOT/scripts/lib${PYTHONPATH:+:$PYTHONPATH}" \
+  python3 "$ROOT/scripts/lib/exact_head_cancel_oracle.py" "${ORACLE_ARGS[@]}" \
+  | tee "$OUT/steps/10-cancel.oracle"
+echo "honest_cancel_ok rc=$cancel_rc" | tee -a "$OUT/steps/progress.log"
 
 # Recovery: a subsequent dry-run still works (CLI not wedged after cancel).
-run --jsonl chat "recovery probe after cancel" --new --dry-run --trace summary \
+run --jsonl chat "recovery probe after interrupt" --new --dry-run --trace summary \
   >"$OUT/steps/10-recovery.jsonl" 2>"$OUT/steps/10-recovery.err"
 python3 - <<'PY' "$OUT/steps/10-recovery.jsonl"
 import json,sys
 lines=[json.loads(l) for l in open(sys.argv[1]) if l.strip()]
 assert lines[-1].get("type")=="done"
-assert lines[-1].get("ok") is not False or lines[-1].get("type")=="done"
 print("recovery_ok")
 PY
 

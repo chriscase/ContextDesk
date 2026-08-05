@@ -7,6 +7,10 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 state = {"fail_once": True}
+# When set by exact-head acceptance, write IN_FLIGHT marker then sleep so SIGINT
+# can land after the provider request is confirmed (not on shell startup).
+ACCEPT_SLOW_MARKER = "ACCEPT_SLOW_PROVIDER_HANG"
+IN_FLIGHT_PATH = None  # set from env by consolidator
 
 
 class H(BaseHTTPRequestHandler):
@@ -14,6 +18,8 @@ class H(BaseHTTPRequestHandler):
         pass
 
     def do_POST(self):
+        import os
+
         n = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(n)
         try:
@@ -34,9 +40,20 @@ class H(BaseHTTPRequestHandler):
         want_stream = bool(req.get("stream"))
 
         raw_txt = body.decode(errors="replace")
-        # Slow path for exact-head cancel acceptance (SIGINT while provider waits).
-        if "slow path" in raw_txt.lower() or "cancel demo" in raw_txt.lower():
-            time.sleep(30)
+        # Slow path for exact-head cancel acceptance: confirm request in-flight,
+        # then block so the CLI's cooperative SIGINT path can wind down.
+        # Marker deliberately avoids the substring "cancel" so oracles cannot
+        # pass by matching the user prompt echo.
+        if ACCEPT_SLOW_MARKER in raw_txt:
+            inflight = os.environ.get("ACCEPT_CANCEL_INFLIGHT_PATH") or IN_FLIGHT_PATH
+            if inflight:
+                try:
+                    with open(inflight, "w", encoding="utf-8") as f:
+                        f.write("provider_request_in_flight\n")
+                        f.flush()
+                except OSError:
+                    pass
+            time.sleep(float(os.environ.get("ACCEPT_CANCEL_SLEEP_SECS", "30")))
         # Hard failure: every request with this marker fails (no client retry can succeed).
         if "FORCE_FAIL_ALWAYS" in raw_txt:
             self.send_response(500)
