@@ -1,0 +1,6 @@
+2024-06-01T12:00:00.000Z INFO service=demo-api event_id=boot starting synthetic demo service
+2024-06-01T12:00:01.100Z INFO service=demo-api event_id=ready listening on :8080
+2024-06-01T12:00:05.200Z WARN service=demo-api event_id=slow path=/health latency_ms=240
+2024-06-01T12:00:08.300Z ERROR service=demo-api event_id=timeout path=/orders request_id=req-demo-1 deadline exceeded
+2024-06-01T12:00:09.400Z INFO service=demo-api event_id=retry path=/orders request_id=req-demo-1 attempt=2
+2024-06-01T12:00:10.500Z INFO service=demo-api event_id=ok path=/orders request_id=req-demo-1 status=200

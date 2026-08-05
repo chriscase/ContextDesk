@@ -105,3 +105,8 @@ npx @tauri-apps/cli signer generate -w ./cd.key
 ```
 
 If you lose the private key, generate a new pair, update the committed pubkey, and cut a fresh release — prior installers cannot verify new signatures until they ship with the new pubkey (or users reinstall).
+
+## CLI multi-platform archives
+
+See [CLI_PACKAGING.md](./CLI_PACKAGING.md) and `.github/workflows/cli-release.yml`.
+Desktop installers above remain separate; CLI draft releases never auto-publish.

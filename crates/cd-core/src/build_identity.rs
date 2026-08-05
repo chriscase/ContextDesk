@@ -122,16 +122,25 @@ pub fn build_identity_from(
     }
 }
 
-/// Current process identity (uses compile-time git env when present).
+/// Current process identity (uses compile-time git/channel env when present).
+///
+/// Channel resolution order: runtime `CD_CHANNEL` (operator override) →
+/// compile-time `CD_CHANNEL` embedded by `build.rs` / release CI → default
+/// via [`resolve_channel`].
 pub fn current() -> BuildIdentity {
-    let channel_env = std::env::var("CD_CHANNEL").ok();
+    let channel_runtime = std::env::var("CD_CHANNEL").ok();
+    let channel_compile = option_env!("CD_CHANNEL");
+    let channel_env = channel_runtime
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .or(channel_compile);
     let git_sha = option_env!("CD_GIT_SHA");
     let git_describe = option_env!("CD_GIT_DESCRIBE");
     build_identity_from(
         VERSION,
         PROTOCOL_VERSION,
         cfg!(debug_assertions),
-        channel_env.as_deref(),
+        channel_env,
         git_sha,
         git_describe,
     )

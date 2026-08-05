@@ -27,6 +27,13 @@ fn main() {
     if let Some(d) = describe {
         println!("cargo:rustc-env=CD_GIT_DESCRIBE={d}");
     }
+    // Embed release channel when CI/packaging sets CD_CHANNEL so binaries
+    // report the channel without requiring a runtime env override.
+    if let Ok(ch) = std::env::var("CD_CHANNEL") {
+        if !ch.is_empty() {
+            println!("cargo:rustc-env=CD_CHANNEL={ch}");
+        }
+    }
 }
 
 fn git_output(args: &[&str]) -> Option<String> {

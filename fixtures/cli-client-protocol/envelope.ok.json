@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "command": "corpus",
+  "data": {
+    "corpora": [
+      {"id": "demo-corpus", "name": "demo"}
+    ]
+  }
+}

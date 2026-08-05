@@ -1,0 +1,8 @@
+{
+  "schema": "contextdesk.cli.stream.v1",
+  "version": 1,
+  "type": "terminal",
+  "status": "done",
+  "operation": "import",
+  "seq": 12
+}

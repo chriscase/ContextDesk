@@ -1,0 +1,10 @@
+[package]
+name = "contextdesk-cli-client-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Thin reference client: spawns the contextdesk binary (not a product crate)"
+
+[[bin]]
+name = "contextdesk-cli-client-example"
+path = "src/main.rs"

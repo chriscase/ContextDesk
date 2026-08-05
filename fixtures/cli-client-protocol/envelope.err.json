@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "ok": false,
+  "command": "explore",
+  "error": {
+    "kind": "not_found",
+    "message": "no corpus demo-missing"
+  }
+}

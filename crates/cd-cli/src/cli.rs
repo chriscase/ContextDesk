@@ -9,7 +9,9 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(
     name = "contextdesk",
-    version,
+    version = env!("CARGO_PKG_VERSION"),
+    // build.rs embeds git SHA / describe / channel (CD_GIT_* / CD_CHANNEL).
+    long_version = env!("CD_CLI_LONG_VERSION"),
     about = "ContextDesk CLI — import evidence, then ask questions grounded in it",
     long_about = "The configured happy path is two commands:\n\n  contextdesk import <archive>\n  contextdesk chat \"<question>\"\n\nEverything else (corpus management, timezone review, exploration) is an\nescape hatch for when the defaults aren't enough — never required for the\nhappy path."
 )]

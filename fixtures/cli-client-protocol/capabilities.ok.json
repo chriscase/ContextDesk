@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "command": "capabilities",
+  "data": {
+    "product_name": "ContextDesk",
+    "cli_version": "0.1.0",
+    "envelope_schema_version": 1,
+    "git_sha": "ade184b1ccd64f36d2faecaa74ec0b1d4018f68a",
+    "git_describe": "v0.1.0-test",
+    "build_channel": "installed",
+    "exit_categories": [
+      {"code": 0, "kind": "success"},
+      {"code": 1, "kind": "user_error"},
+      {"code": 3, "kind": "not_found"},
+      {"code": 4, "kind": "conflict"},
+      {"code": 5, "kind": "permission_denied"},
+      {"code": 6, "kind": "provider_error"},
+      {"code": 7, "kind": "not_implemented"},
+      {"code": 8, "kind": "not_ready"},
+      {"code": 70, "kind": "internal"},
+      {"code": 130, "kind": "cancelled"}
+    ],
+    "commands": [
+      "import",
+      "corpus list",
+      "explore",
+      "capabilities",
+      "doctor"
+    ]
+  }
+}

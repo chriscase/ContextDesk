@@ -99,6 +99,9 @@ logs/
 !fixtures/incident-evidence/**/logs/
 !fixtures/incident-evidence/**/logs/**
 !fixtures/incident-evidence/**/*.log
+# CLI release packaging demo (public synthetic sample).
+!fixtures/cli-release-demo/**
+!fixtures/cli-release-demo/**/*.log
 
 # Python bytecode from the reference producer examples.
 __pycache__/

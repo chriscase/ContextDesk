@@ -1,0 +1,283 @@
+# Multi-platform CLI release matrix.
+# Builds locked `contextdesk` binaries with embedded git identity, smokes each
+# artifact, packages version+platform archives (binary + docs + demo + build-info),
+# produces SHA256SUMS + SBOM, and attaches only to a **draft** GitHub Release.
+# Never auto-publishes. Signing/notarization are residual (see docs/CLI_PACKAGING.md).
+#
+# Coexists with `.github/workflows/release.yml` (desktop installers) — this path
+# only ships the headless CLI binary archives.
+name: cli-release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag name for the draft CLI release (e.g. v0.1.0-rc1)"
+        required: true
+        type: string
+      channel:
+        description: "Release channel embedded into the binary (installed|dev)"
+        required: false
+        default: "installed"
+        type: string
+
+permissions:
+  contents: write
+  id-token: write  # provenance / attestation when supported
+
+env:
+  CARGO_TERM_COLOR: always
+  # Required platforms (mutation tests assert this set).
+  CLI_RELEASE_PLATFORMS: "macos-arm64,macos-x64,linux-x64,windows-x64"
+
+jobs:
+  build-cli:
+    name: build-${{ matrix.target.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - platform: macos-arm64
+            os: macos-14
+            triple: aarch64-apple-darwin
+            exe: contextdesk
+            archive_ext: tar.gz
+          - platform: macos-x64
+            os: macos-13
+            triple: x86_64-apple-darwin
+            exe: contextdesk
+            archive_ext: tar.gz
+          - platform: linux-x64
+            os: ubuntu-22.04
+            triple: x86_64-unknown-linux-gnu
+            exe: contextdesk
+            archive_ext: tar.gz
+          - platform: windows-x64
+            os: windows-2022
+            triple: x86_64-pc-windows-msvc
+            exe: contextdesk.exe
+            archive_ext: zip
+    runs-on: ${{ matrix.target.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target.triple }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+          key: cli-${{ matrix.target.triple }}
+
+      - name: Resolve identity
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            echo "tag is required (push v* or workflow_dispatch input)" >&2
+            exit 1
+          fi
+          SHA="$(git rev-parse HEAD)"
+          DESCRIBE="$(git describe --always --dirty --tags 2>/dev/null || echo "$SHA")"
+          CHANNEL="${{ inputs.channel || 'installed' }}"
+          VERSION="${TAG#v}"
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "git_sha=$SHA"
+            echo "git_describe=$DESCRIBE"
+            echo "channel=$CHANNEL"
+          } >> "$GITHUB_OUTPUT"
+          echo "CLI identity: tag=$TAG sha=$SHA describe=$DESCRIBE channel=$CHANNEL"
+
+      - name: Fail closed if identity empty
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${{ steps.identity.outputs.git_sha }}"
+          test -n "${{ steps.identity.outputs.git_describe }}"
+          test -n "${{ steps.identity.outputs.channel }}"
+          test -n "${{ steps.identity.outputs.version }}"
+
+      - name: Build contextdesk (locked)
+        shell: bash
+        env:
+          CD_GIT_SHA: ${{ steps.identity.outputs.git_sha }}
+          CD_GIT_DESCRIBE: ${{ steps.identity.outputs.git_describe }}
+          CD_CHANNEL: ${{ steps.identity.outputs.channel }}
+        run: |
+          set -euo pipefail
+          cargo build -p cd-cli --release --locked --target ${{ matrix.target.triple }}
+
+      - name: Locate binary
+        id: bin
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target.triple }}/release/${{ matrix.target.exe }}"
+          test -f "$BIN"
+          echo "path=$BIN" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test artifact
+        shell: bash
+        env:
+          CONTEXTDESK_BIN: ${{ steps.bin.outputs.path }}
+          EXPECT_GIT_SHA: ${{ steps.identity.outputs.git_sha }}
+          EXPECT_CHANNEL: ${{ steps.identity.outputs.channel }}
+          EXPECT_DESCRIBE: ${{ steps.identity.outputs.git_describe }}
+          # Smoke is mandatory — do not set CLI_SMOKE_SKIP in release.
+          CLI_SMOKE_REQUIRED: "1"
+        run: |
+          set -euo pipefail
+          bash scripts/cli-release/smoke_cli_artifact.sh
+
+      - name: Package archive
+        id: package
+        shell: bash
+        env:
+          CONTEXTDESK_BIN: ${{ steps.bin.outputs.path }}
+          CLI_VERSION: ${{ steps.identity.outputs.version }}
+          CLI_PLATFORM: ${{ matrix.target.platform }}
+          CLI_GIT_SHA: ${{ steps.identity.outputs.git_sha }}
+          CLI_GIT_DESCRIBE: ${{ steps.identity.outputs.git_describe }}
+          CLI_CHANNEL: ${{ steps.identity.outputs.channel }}
+          CLI_TRIPLE: ${{ matrix.target.triple }}
+          CLI_OUT_DIR: dist/cli
+        run: |
+          set -euo pipefail
+          python3 scripts/cli-release/package_cli_release.py package
+          ARCHIVE=$(ls dist/cli/contextdesk-*-${{ matrix.target.platform }}.${{ matrix.target.archive_ext }} | head -1)
+          test -f "$ARCHIVE"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "archive_name=$(basename "$ARCHIVE")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload platform artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target.platform }}
+          path: |
+            dist/cli/contextdesk-*-${{ matrix.target.platform }}.*
+            dist/cli/build-info-${{ matrix.target.platform }}.json
+          if-no-files-found: error
+
+  # Aggregate checksums + SBOM and attach everything to a draft release only.
+  draft-release:
+    name: draft-release
+    needs: build-cli
+    runs-on: ubuntu-22.04
+    # Draft only — never flip draft off / never call publish APIs.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/download
+          pattern: cli-*
+          merge-multiple: false
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}"
+          test -n "$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble release assets
+        id: assemble
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/release
+          # Collect every platform archive
+          found=0
+          for platform in macos-arm64 macos-x64 linux-x64 windows-x64; do
+            dir="dist/download/cli-${platform}"
+            if [ ! -d "$dir" ]; then
+              echo "MISSING platform artifact dir: $platform" >&2
+              exit 1
+            fi
+            count=$(find "$dir" -type f \( -name 'contextdesk-*.tar.gz' -o -name 'contextdesk-*.zip' \) | wc -l | tr -d ' ')
+            if [ "$count" -lt 1 ]; then
+              echo "MISSING archive for platform: $platform" >&2
+              exit 1
+            fi
+            cp -a "$dir"/* dist/release/ || true
+            found=$((found + 1))
+          done
+          if [ "$found" -ne 4 ]; then
+            echo "expected 4 platforms, found $found" >&2
+            exit 1
+          fi
+          python3 scripts/cli-release/package_cli_release.py aggregate \
+            --dir dist/release \
+            --version "${{ steps.tag.outputs.version }}" \
+            --git-sha "$(git rev-parse HEAD)" \
+            --git-describe "$(git describe --always --dirty --tags 2>/dev/null || git rev-parse HEAD)" \
+            --channel "${{ inputs.channel || 'installed' }}"
+          test -f dist/release/SHA256SUMS
+          test -f dist/release/sbom.cdx.json
+          # Fail closed: must not claim published
+          python3 scripts/cli-release/package_cli_release.py assert-draft-only \
+            --manifest dist/release/release-manifest.json
+          ls -la dist/release | tee dist/release/inventory.txt
+
+      - name: Attest build provenance (when supported)
+        continue-on-error: true
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: |
+            dist/release/contextdesk-*.tar.gz
+            dist/release/contextdesk-*.zip
+            dist/release/SHA256SUMS
+            dist/release/sbom.cdx.json
+
+      - name: Create draft GitHub Release and attach assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: CLI ${{ steps.tag.outputs.tag }}
+          draft: true
+          prerelease: ${{ contains(steps.tag.outputs.tag, 'rc') || contains(steps.tag.outputs.tag, 'alpha') || contains(steps.tag.outputs.tag, 'beta') }}
+          fail_on_unmatched_files: true
+          body: |
+            **Draft** ContextDesk CLI multi-platform release (not published).
+
+            Archives: `contextdesk-<version>-<platform>.tar.gz|.zip` for
+            macOS arm64/x64, Linux x64, Windows x64.
+
+            Each archive contains the `contextdesk` binary, QUICKSTART.md,
+            CLI reference, LICENSE, third-party notices, `build-info.json`,
+            and a small synthetic demo.
+
+            Also attached: `SHA256SUMS`, `sbom.cdx.json`.
+
+            **Unsigned RC:** binaries are not Apple-notarized and not Windows
+            Authenticode-signed in this workflow. See `docs/CLI_PACKAGING.md`.
+
+            Operators must smoke-test and **manually publish** this draft.
+            This workflow never auto-publishes (draft remains true).
+          files: |
+            dist/release/contextdesk-*.tar.gz
+            dist/release/contextdesk-*.zip
+            dist/release/SHA256SUMS
+            dist/release/sbom.cdx.json
+            dist/release/release-manifest.json
+            dist/release/inventory.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

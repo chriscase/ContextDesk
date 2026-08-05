@@ -1,0 +1,8 @@
+{
+  "type": "progress",
+  "schema_version": 1,
+  "phase": "ingest",
+  "fraction": 0.42,
+  "files_processed": 3,
+  "message": "reading sources"
+}
