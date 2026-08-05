@@ -97,6 +97,8 @@ import {
   appendActivities,
   createActivityLog,
 } from "../../lib/activity/activityLog";
+import { timezoneActivityEvent } from "../../lib/activity/timezoneActivity";
+import type { ActivityEventInput } from "../../lib/activity/types";
 
 function hostProgressToWizard(p: ProcessProgressDto): WizardProgressDto {
   return {
@@ -308,13 +310,16 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const [progress, setProgress] = useState<ProcessProgressDto | null>(null);
   const [failedIngestDiagnostic, setFailedIngestDiagnostic] =
     useState<FailedLogIngestDiagnosticDto | null>(null);
+  const [timezoneActivityEvents, setTimezoneActivityEvents] = useState<
+    ActivityEventInput[]
+  >([]);
   const importActivityLog = useMemo(
     () =>
-      appendActivities(
-        createActivityLog(),
-        importActivityAttempt?.events ?? [],
-      ),
-    [importActivityAttempt],
+      appendActivities(createActivityLog(), [
+        ...(importActivityAttempt?.events ?? []),
+        ...timezoneActivityEvents,
+      ]),
+    [importActivityAttempt, timezoneActivityEvents],
   );
   /** In-app Explorer escape hatch when multi-window fails (#503). */
   const [inAppExplorerId, setInAppExplorerId] = useState<string | null>(null);
@@ -690,7 +695,32 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
 
   const applyTimezone = useCallback(
     async (request: LogTimezoneApplyRequestDto) => {
-      await hostApplyLogSourceTimezone(request);
+      try {
+        await hostApplyLogSourceTimezone(request);
+        setTimezoneActivityEvents((current) => [
+          ...current,
+          timezoneActivityEvent({
+            corpusId: request.corpusId,
+            correlationId: `import:${request.corpusId}:tz`,
+            outcome: "applied",
+            zone: request.ianaZone,
+            sourceCount: 1,
+            seq: current.length,
+          }),
+        ]);
+      } catch (error) {
+        setTimezoneActivityEvents((current) => [
+          ...current,
+          timezoneActivityEvent({
+            corpusId: request.corpusId,
+            correlationId: `import:${request.corpusId}:tz`,
+            outcome: "failed",
+            zone: request.ianaZone,
+            seq: current.length,
+          }),
+        ]);
+        throw error;
+      }
       // Any open Explorer (in-app or its own window) may be showing this
       // corpus regardless of what is active in this pane right now (#875).
       void broadcastTimeRevisionChanged(request.corpusId);
@@ -705,7 +735,30 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
 
   const clearTimezone = useCallback(
     async (request: LogTimezoneClearRequestDto) => {
-      await hostClearLogSourceTimezone(request);
+      try {
+        await hostClearLogSourceTimezone(request);
+        setTimezoneActivityEvents((current) => [
+          ...current,
+          timezoneActivityEvent({
+            corpusId: request.corpusId,
+            correlationId: `import:${request.corpusId}:tz`,
+            outcome: "undone",
+            sourceCount: 1,
+            seq: current.length,
+          }),
+        ]);
+      } catch (error) {
+        setTimezoneActivityEvents((current) => [
+          ...current,
+          timezoneActivityEvent({
+            corpusId: request.corpusId,
+            correlationId: `import:${request.corpusId}:tz`,
+            outcome: "failed",
+            seq: current.length,
+          }),
+        ]);
+        throw error;
+      }
       void broadcastTimeRevisionChanged(request.corpusId);
       if (activeIdRef.current !== request.corpusId) return;
       setImportConfidence((current) =>

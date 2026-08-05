@@ -29,6 +29,7 @@ import {
   requestRoundsFromRecord,
   summaryFromRecord,
 } from "./turnRecord";
+import { settleTurnLifecycle } from "./turnLifecycle";
 
 export type BuildActivityTurnOptions = {
   /** The host's record for this turn, when one exists. */
@@ -37,12 +38,6 @@ export type BuildActivityTurnOptions = {
   elapsedMs?: number | null;
   developerDetail?: DeveloperDetailEvent[];
 };
-
-function shortLabel(text: string, max = 64): string {
-  const t = text.replace(/\s+/g, " ").trim();
-  if (!t) return "(empty)";
-  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
-}
 
 /**
  * Events the renderer observed directly.
@@ -159,9 +154,17 @@ export function buildActivityTurn(
   const rounds = record ? requestRoundsFromRecord(record) : [];
   const recordSummary = record ? summaryFromRecord(record) : null;
 
+  // One settle for every surface: host terminal status beats a stale
+  // streaming flag so the drawer title cannot say "(streaming…)" after cancel.
+  const lifecycle = settleTurnLifecycle({
+    streaming: msg.streaming,
+    content: msg.content,
+    recordStatus: recordSummary?.status ?? record?.status ?? null,
+  });
+
   // Grounding is a statement about the delivered answer, so it is only
-  // knowable once the turn has settled. A streaming turn is `null`, not false.
-  const grounded = msg.streaming
+  // knowable once the turn has settled. A live turn is `null`, not false.
+  const grounded = lifecycle.live
     ? null
     : record
       ? record.status === "withheld"
@@ -173,7 +176,7 @@ export function buildActivityTurn(
 
   return {
     turnId: msg.id,
-    label: shortLabel(msg.content || "(streaming…)"),
+    label: lifecycle.titleLabel,
     summary: {
       modelRounds: recordSummary?.modelRounds ?? null,
       toolCalls: record
@@ -194,7 +197,9 @@ export function buildActivityTurn(
             : null,
       contextUsedChars: recordSummary?.contextUsedChars ?? null,
       grounded,
-      status: recordSummary?.status ?? null,
+      // Prefer settled lifecycle status so pending never outlives a terminal
+      // host record when the summary field is missing for any reason.
+      status: lifecycle.status ?? recordSummary?.status ?? null,
     },
     budget: {
       usedChars: recordSummary?.contextUsedChars ?? null,

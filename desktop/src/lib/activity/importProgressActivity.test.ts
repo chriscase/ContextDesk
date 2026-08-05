@@ -147,11 +147,11 @@ describe("live import Activity projection", () => {
 
     expect(events.map((event) => event.label)).toEqual([
       "Import started",
-      "Discovering and reading sources",
+      "Archive discovery and source scan",
       "Reading, parsing, normalizing, and indexing",
-      "Validating staged corpus",
+      "Safety limits and staged corpus validation",
       "Publishing corpus atomically",
-      "Corpus published",
+      "Corpus published — Explorer can refresh",
     ]);
     expect(events.map((event) => event.clock)).toEqual(
       [0, 8, 21, 34, 55, 89].map((elapsedMs) => ({

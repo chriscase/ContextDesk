@@ -229,9 +229,9 @@ describe("deterministic and model work are distinguishable", () => {
   it("labels the import pipeline's fixed stages as deterministic host work", () => {
     const entries = importActivities(IMPORT_RUN);
     for (const label of [
-      "Discovering and reading sources",
+      "Archive discovery and source scan",
       "Reading, parsing, normalizing, and indexing",
-      "Validating staged corpus",
+      "Safety limits and staged corpus validation",
     ]) {
       const step = entries.find((e) => e.label.startsWith(label))!;
       expect(step, label).toBeDefined();

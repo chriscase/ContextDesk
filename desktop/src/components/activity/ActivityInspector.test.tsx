@@ -532,3 +532,66 @@ describe("the compact line stays quiet and never pads itself out", () => {
     expect(onOpenDetails).toHaveBeenCalled();
   });
 });
+
+describe("terminal lifecycle labels (no stale streaming)", () => {
+  it("drawer title and chip show cancelled, never streaming", () => {
+    const cancelled = buildActivityTurn(
+      {
+        id: "m-cancel",
+        role: "assistant",
+        content: "",
+        streaming: true,
+      },
+      {
+        record: {
+          version: 1,
+          turn_id: "s::m-cancel",
+          session_id: "s",
+          message_id: "m-cancel",
+          scope: { kind: "conversation", label: "Conversation" },
+          status: "cancelled",
+          total_elapsed_ms: 41027,
+          detail_level: "summary",
+          dropped_events: 0,
+          events: [],
+        },
+      },
+    );
+    render(<ActivityDrawer turn={cancelled} onClose={vi.fn()} />);
+    const label = screen.getByTestId("activity-turn-label");
+    expect(label.textContent).toBe("(cancelled)");
+    expect(label.textContent).not.toMatch(/streaming/i);
+    expect(label.getAttribute("data-status")).toBe("cancelled");
+    expect(screen.getByTestId("activity-status-chip").textContent).toBe(
+      "cancelled",
+    );
+    expect(screen.getByTestId("activity-terminal-summary").textContent).toMatch(
+      /cancelled/i,
+    );
+    fireEvent.click(screen.getByTestId("activity-tab-technical"));
+    expect(screen.getByTestId("activity-panel-technical").textContent).toMatch(
+      /cancelled/,
+    );
+  });
+
+  it("compact line names cancelled status", () => {
+    render(
+      <ActivityCompactLine
+        turn={turn({
+          label: "(cancelled)",
+          summary: {
+            modelRounds: 7,
+            toolCalls: 2,
+            contextUsedChars: 41027,
+            grounded: null,
+            status: "cancelled",
+          },
+        })}
+        onOpenDetails={vi.fn()}
+      />,
+    );
+    const line = screen.getByTestId("activity-compact-line");
+    expect(line.textContent).toMatch(/cancelled/i);
+    expect(line.textContent).not.toMatch(/streaming/i);
+  });
+});

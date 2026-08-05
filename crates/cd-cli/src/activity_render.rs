@@ -436,4 +436,45 @@ mod tests {
         assert_eq!(compact.phase, ActivityPhase::Completed);
         assert_eq!(compact.status, ActivityStatus::Failed);
     }
+
+    /// Cancelled host status must project terminal — never leave CLI surfaces
+    /// looking live/pending after `TurnCompleted { reason: cancel }`.
+    #[test]
+    fn projects_cancelled_status_is_terminal() {
+        let sink = Arc::new(RecordingTurnTrace::new());
+        let kinds = empty_kinds();
+        let events = vec![
+            StreamEvent::TurnStarted {
+                session_id: "s".into(),
+                model: Some("m".into()),
+            },
+            StreamEvent::TurnCompleted {
+                reason: "cancel".into(),
+            },
+        ];
+        for e in &events {
+            sink.record_host_event(e, &kinds);
+        }
+        let record = project_turn_activity(
+            "s",
+            "s::t",
+            None,
+            ActivityLevel::Summary,
+            Some(sink.as_ref()),
+            &events,
+            12,
+        );
+        assert_eq!(record.status, ActivityStatus::Cancelled);
+        assert!(
+            record
+                .events
+                .iter()
+                .any(|e| e.label.contains("Turn completed (cancel)")
+                    || e.operation_id == "turn-completed"),
+            "expected cancel terminal lifecycle on timeline: {:?}",
+            record.events.iter().map(|e| &e.label).collect::<Vec<_>>()
+        );
+        // No pending-only record after cancel.
+        assert_ne!(record.status, ActivityStatus::Pending);
+    }
 }

@@ -82,11 +82,32 @@ const IMPORT_LABEL_TUPLES: ReadonlyMap<
     { origin: "user_decision", phases: new Set<ActivityPhase>(["started"]), statuses: PENDING_ONLY },
   ],
   [
+    "Archive discovery and source scan",
+    { origin: "deterministic_host", phases: NON_TERMINAL_PHASES, statuses: PENDING_ONLY },
+  ],
+  // Legacy label kept so older in-memory attempts still validate.
+  [
     "Discovering and reading sources",
     { origin: "deterministic_host", phases: NON_TERMINAL_PHASES, statuses: PENDING_ONLY },
   ],
   [
     "Reading, parsing, normalizing, and indexing",
+    { origin: "deterministic_host", phases: NON_TERMINAL_PHASES, statuses: PENDING_ONLY },
+  ],
+  [
+    "Parsing and framing records",
+    { origin: "deterministic_host", phases: NON_TERMINAL_PHASES, statuses: PENDING_ONLY },
+  ],
+  [
+    "Candidate template classification",
+    { origin: "repeatable_heuristic", phases: NON_TERMINAL_PHASES, statuses: PENDING_ONLY },
+  ],
+  [
+    "Safety redaction of secrets and PII",
+    { origin: "deterministic_host", phases: NON_TERMINAL_PHASES, statuses: PENDING_ONLY },
+  ],
+  [
+    "Normalization and indexing into the store",
     { origin: "deterministic_host", phases: NON_TERMINAL_PHASES, statuses: PENDING_ONLY },
   ],
   [
@@ -99,12 +120,20 @@ const IMPORT_LABEL_TUPLES: ReadonlyMap<
     },
   ],
   [
+    "Safety limits and staged corpus validation",
+    { origin: "deterministic_host", phases: NON_TERMINAL_PHASES, statuses: PENDING_ONLY },
+  ],
+  [
     "Validating staged corpus",
     { origin: "deterministic_host", phases: NON_TERMINAL_PHASES, statuses: PENDING_ONLY },
   ],
   [
     "Publishing corpus atomically",
     { origin: "governed_write", phases: NON_TERMINAL_PHASES, statuses: PENDING_ONLY },
+  ],
+  [
+    "Corpus published — Explorer can refresh",
+    { origin: "governed_write", phases: TERMINAL_PHASE, statuses: new Set<ActivityStatus>(["ok"]) },
   ],
   [
     "Corpus published",
@@ -125,6 +154,18 @@ const IMPORT_LABEL_TUPLES: ReadonlyMap<
       phases: TERMINAL_PHASE,
       statuses: new Set<ActivityStatus>(["failed"]),
     },
+  ],
+  [
+    "Reading selected source bytes",
+    { origin: "deterministic_host", phases: NON_TERMINAL_PHASES, statuses: PENDING_ONLY },
+  ],
+  [
+    "Extracting archive contents",
+    { origin: "deterministic_host", phases: NON_TERMINAL_PHASES, statuses: PENDING_ONLY },
+  ],
+  [
+    "Writing session context material",
+    { origin: "deterministic_host", phases: NON_TERMINAL_PHASES, statuses: PENDING_ONLY },
   ],
   [
     "Import processing",

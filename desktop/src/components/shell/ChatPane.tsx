@@ -23,6 +23,7 @@ import { IconPin } from "../icons";
 import { MessageRow } from "./MessageRow";
 import { useActivityInspector } from "../../hooks/useActivityInspector";
 import { buildActivityTurn } from "../../lib/activity/adapter";
+import { mergeSettledActivityRecord } from "../../lib/activity/turnLifecycle";
 import {
   fetchDeveloperTurnActivity,
   fetchTurnActivity,
@@ -414,9 +415,16 @@ export function ChatPane(props: ChatPaneProps) {
           if (record) refreshed[messageId] = record;
         }
         if (!retiredSessionRef.current && Object.keys(refreshed).length > 0) {
-          // Refreshed host records are authoritative. In particular they must
-          // replace a cached null ("not recorded") or stale pending record.
-          setActivityRecords((current) => ({ ...current, ...refreshed }));
+          // Refreshed host records are authoritative for unsettled turns.
+          // A terminal record never reverts to pending/streaming via a late
+          // refetch (cancel-vs-provider-final race).
+          setActivityRecords((current) => {
+            const next = { ...current };
+            for (const [id, record] of Object.entries(refreshed)) {
+              next[id] = mergeSettledActivityRecord(current[id], record);
+            }
+            return next;
+          });
         }
       })();
     });

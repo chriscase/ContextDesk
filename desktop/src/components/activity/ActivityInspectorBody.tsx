@@ -108,6 +108,19 @@ export function ActivityInspectorBody({
         ? "The answer cited no resolvable source."
         : "Grounding is not known for this turn.";
 
+  const terminalText =
+    turn.summary.status === "cancelled"
+      ? "This turn was cancelled."
+      : turn.summary.status === "failed"
+        ? "This turn failed."
+        : turn.summary.status === "withheld"
+          ? "The answer was withheld."
+          : turn.summary.status === "ok"
+            ? "This turn completed."
+            : turn.summary.status === "pending"
+              ? "This turn is still in progress."
+              : null;
+
   return (
     <div className="activity-inspector" data-testid="activity-inspector">
       <header className="activity-inspector__head">
@@ -115,6 +128,15 @@ export function ActivityInspectorBody({
           <span className="activity-inspector__eyebrow">
             ContextDesk activity
           </span>
+          {turn.summary.status ? (
+            <span
+              className="activity-inspector__status-chip"
+              data-testid="activity-status-chip"
+              data-status={turn.summary.status}
+            >
+              {turn.summary.status}
+            </span>
+          ) : null}
           {!turn.liveRecord ? (
             <span
               className="activity-inspector__unrecorded"
@@ -135,7 +157,12 @@ export function ActivityInspectorBody({
             </button>
           ) : null}
         </div>
-        <div id={titleId} className="activity-inspector__turn-label">
+        <div
+          id={titleId}
+          className="activity-inspector__turn-label"
+          data-testid="activity-turn-label"
+          data-status={turn.summary.status ?? "unknown"}
+        >
           {turn.label}
         </div>
         <div
@@ -177,6 +204,9 @@ export function ActivityInspectorBody({
             data-testid="activity-panel-summary"
           >
             <ul className="activity-plain-summary">
+              {terminalText ? (
+                <li data-testid="activity-terminal-summary">{terminalText}</li>
+              ) : null}
               <li>
                 This turn took {formatElapsed(turn.elapsedMs)} and made{" "}
                 {fact(turn.summary.modelRounds, "model request")}.

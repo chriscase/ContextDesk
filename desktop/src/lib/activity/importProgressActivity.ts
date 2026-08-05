@@ -53,31 +53,40 @@ function countLabel(value: number, singular: string, plural = `${singular}s`) {
   return `${IMPORT_COUNT_FORMAT.format(value)} ${value === 1 ? singular : plural}`;
 }
 
+/**
+ * Collapse only the interleaved stream bookends when the host still emits
+ * legacy parse/template/redact/store in rapid succession without distinct
+ * work — but prefer specific labels when those phases arrive as dedicated
+ * progress rows so Activity is as truthful as ProcessProgress chrome.
+ */
 function normalizedPhase(phase: ImportProgressPhase): ImportProgressPhase {
-  return phase === "parse" ||
-    phase === "template" ||
-    phase === "redact" ||
-    phase === "store"
-    ? "stream"
-    : phase;
+  return phase;
 }
 
 function phaseLabel(phase: ImportProgressPhase): string {
-  switch (normalizedPhase(phase)) {
+  switch (phase) {
     case "starting":
       return "Import started";
     case "scan":
-      return "Discovering and reading sources";
+      return "Archive discovery and source scan";
     case "stream":
       return "Reading, parsing, normalizing, and indexing";
+    case "parse":
+      return "Parsing and framing records";
+    case "template":
+      return "Candidate template classification";
+    case "redact":
+      return "Safety redaction of secrets and PII";
+    case "store":
+      return "Normalization and indexing into the store";
     case "embed":
       return "Running optional local embedding";
     case "validate":
-      return "Validating staged corpus";
+      return "Safety limits and staged corpus validation";
     case "publish":
       return "Publishing corpus atomically";
     case "completed":
-      return "Corpus published";
+      return "Corpus published — Explorer can refresh";
     case "cancelled":
       return "Import cancelled — nothing published";
     case "failed":
@@ -85,9 +94,11 @@ function phaseLabel(phase: ImportProgressPhase): string {
     // Session-context phases cannot belong to a log_ingest update, but keep a
     // truthful generic label for compatibility with an older/malformed host.
     case "read":
+      return "Reading selected source bytes";
     case "extract":
+      return "Extracting archive contents";
     case "write":
-      return "Import processing";
+      return "Writing session context material";
     default:
       return "Import processing";
   }
@@ -96,11 +107,15 @@ function phaseLabel(phase: ImportProgressPhase): string {
 function originForPhase(
   phase: ImportProgressPhase,
 ): Exclude<ActivityOrigin, "external_connector"> {
-  switch (normalizedPhase(phase)) {
+  switch (phase) {
     case "starting":
       return "user_decision";
     case "embed":
+      // Local embedding is model/heuristic material — never claim deterministic.
       return "probabilistic_model";
+    case "template":
+      // Template clustering is a repeatable host heuristic, not a model call.
+      return "repeatable_heuristic";
     case "publish":
     case "completed":
       return "governed_write";
@@ -334,7 +349,9 @@ export function recordImportProgress(
 }
 
 function terminalLabel(run: ImportRunInput): string {
-  if (run.outcome === "completed") return "Corpus published";
+  if (run.outcome === "completed") {
+    return "Corpus published — Explorer can refresh";
+  }
   if (run.outcome === "cancelled") {
     return "Import cancelled — nothing published";
   }

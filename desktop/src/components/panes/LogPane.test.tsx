@@ -3146,7 +3146,7 @@ describe("LogPane reviewed-import progress ownership (defect: duplicated panel)"
     await waitFor(() =>
       expect(loadCorpusImportActivity("mock-corpus-0001").events).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ label: "Corpus published" }),
+          expect.objectContaining({ label: "Corpus published — Explorer can refresh" }),
         ]),
       ),
     );

@@ -180,6 +180,29 @@
   color: var(--text-secondary);
 }
 
+.activity-inspector__status-chip {
+  font-size: 0.68rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 0.3rem;
+  border: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.35));
+  color: var(--text-secondary);
+  text-transform: lowercase;
+}
+
+.activity-inspector__status-chip[data-status="cancelled"],
+.activity-inspector__status-chip[data-status="failed"] {
+  color: var(--danger, #c45c5c);
+  border-color: color-mix(in srgb, var(--danger, #c45c5c) 40%, transparent);
+}
+
+.activity-inspector__status-chip[data-status="ok"] {
+  color: var(--success, #4a9b6e);
+}
+
+.activity-inspector__status-chip[data-status="pending"] {
+  color: var(--warning, #c9a227);
+}
+
 .activity-inspector__close {
   margin-left: auto;
   border: 0;

@@ -32,7 +32,12 @@ export function ActivityCompactLine({
     );
   }
   if (turn.summary.grounded === false) parts.push("no sources cited");
+  // Terminal status is always named so compact never looks "still running"
+  // after cancel/fail/withhold (drawer title + compact share one settle).
   if (turn.summary.status === "withheld") parts.push("answer withheld");
+  else if (turn.summary.status === "cancelled") parts.push("cancelled");
+  else if (turn.summary.status === "failed") parts.push("failed");
+  else if (turn.summary.status === "pending") parts.push("in progress");
 
   const text =
     parts.length > 0

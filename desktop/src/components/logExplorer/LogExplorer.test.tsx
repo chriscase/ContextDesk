@@ -3717,7 +3717,7 @@ describe("LogExplorer shell", () => {
         async () => undefined,
       );
     });
-    expect(await screen.findByText("Corpus published")).toBeTruthy();
+    expect(await screen.findByText(/Corpus published/)).toBeTruthy();
     expect(screen.getByText(/100 events · 10 templates/)).toBeTruthy();
 
     vi.mocked(host.hostGetLogCorpus).mockResolvedValue({
@@ -3741,7 +3741,7 @@ describe("LogExplorer shell", () => {
     });
     view.rerender(<LogExplorer corpusId="c2" />);
     await waitFor(() =>
-      expect(screen.queryByText("Corpus published")).toBeNull(),
+      expect(screen.queryByText(/Corpus published/)).toBeNull(),
     );
 
     await act(async () => {
@@ -3753,7 +3753,7 @@ describe("LogExplorer shell", () => {
         async () => undefined,
       );
     });
-    expect(screen.queryByText("Corpus published")).toBeNull();
+    expect(screen.queryByText(/Corpus published/)).toBeNull();
 
     await act(async () => {
       const run = importActivityRun("c2");
@@ -3764,7 +3764,7 @@ describe("LogExplorer shell", () => {
         async () => undefined,
       );
     });
-    expect(await screen.findByText("Corpus published")).toBeTruthy();
+    expect(await screen.findByText(/Corpus published/)).toBeTruthy();
   });
 
   it("keeps narrow logs primary with keyboard-safe filter and chat drawers", async () => {

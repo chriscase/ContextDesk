@@ -127,6 +127,15 @@ describe("the adapter reports live facts, never invented ones", () => {
     expect(turn.summary.grounded).toBeNull();
   });
 
+  it("never titles cancelled empty content as streaming", () => {
+    const turn = buildActivityTurn(msg({ content: "", streaming: true }), {
+      record: record({ status: "cancelled" }),
+    });
+    expect(turn.summary.status).toBe("cancelled");
+    expect(turn.label).toBe("(cancelled)");
+    expect(turn.label).not.toMatch(/streaming/i);
+  });
+
   it("surfaces the host's per-turn truncation rather than hiding it", () => {
     const turn = buildActivityTurn(msg(), {
       record: record({ dropped_events: 12 }),

@@ -122,7 +122,7 @@ describe("corpus import activity bridge", () => {
       true,
     );
     expect(
-      loaded.events.some((event) => event.label === "Corpus published"),
+      loaded.events.some((event) => event.label === "Corpus published — Explorer can refresh" || event.label === "Corpus published"),
     ).toBe(true);
     expect(JSON.stringify(loaded.events)).not.toContain("/sensitive/tenant-a");
     expect(
@@ -218,7 +218,7 @@ describe("corpus import activity bridge", () => {
       index === events.length - 1
         ? ({
             ...event,
-            label: "Corpus published",
+            label: "Corpus published — Explorer can refresh",
             origin: "deterministic_host",
             status: "ok",
           } as ActivityEventInput)
@@ -284,7 +284,7 @@ describe("corpus import activity bridge", () => {
     expect(received).toHaveBeenCalledWith(
       "corpus-a",
       expect.arrayContaining([
-        expect.objectContaining({ label: "Corpus published" }),
+        expect.objectContaining({ label: "Corpus published — Explorer can refresh" }),
       ]),
       0,
     );
