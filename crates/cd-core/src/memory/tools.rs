@@ -255,7 +255,7 @@ pub fn write_op_from_supersede_args(args: &Value) -> CoreResult<MemoryWriteOp> {
     let kind = args
         .get("kind")
         .and_then(|v| v.as_str())
-        .map(Kind::parse)
+        .map(normalize_memory_kind)
         .unwrap_or(Kind::Fact);
     let mut draft = MemoryDraft::new(kind, content);
     if let Some(t) = args.get("title").and_then(|v| v.as_str()) {
@@ -415,6 +415,20 @@ mod tests {
                 (*k).replace('-', "_")
             );
         }
+    }
+
+    #[test]
+    fn supersede_uses_the_same_kind_aliases_as_save() {
+        let op = write_op_from_supersede_args(&json!({
+            "old_id": Uuid::now_v7(),
+            "content": "updated preference",
+            "kind": "pref"
+        }))
+        .unwrap();
+        let MemoryWriteOp::Supersede { new, .. } = op else {
+            panic!("expected supersede");
+        };
+        assert_eq!(new.kind, Kind::Preference);
     }
 
     #[test]

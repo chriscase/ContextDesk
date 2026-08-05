@@ -48,16 +48,17 @@ impl Kind {
 
     /// Parse a stored kind; unknown → [`Kind::Other`].
     pub fn parse(s: &str) -> Self {
-        match s {
-            "fact" => Kind::Fact,
-            "decision" => Kind::Decision,
-            "bookmark" => Kind::Bookmark,
-            "preference" => Kind::Preference,
-            "project_note" => Kind::ProjectNote,
-            "contact" => Kind::Contact,
-            "term" => Kind::Term,
-            "task" => Kind::Task,
-            other => Kind::Other(other.to_string()),
+        let normalized = s.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+        match normalized.as_str() {
+            "fact" | "facts" => Kind::Fact,
+            "decision" | "decisions" => Kind::Decision,
+            "bookmark" | "bookmarks" | "link" | "url" => Kind::Bookmark,
+            "preference" | "preferences" | "pref" => Kind::Preference,
+            "project_note" | "projectnote" | "note" | "notes" => Kind::ProjectNote,
+            "contact" | "contacts" | "person" => Kind::Contact,
+            "term" | "terms" | "glossary" => Kind::Term,
+            "task" | "tasks" | "todo" => Kind::Task,
+            _ => Kind::Other(s.to_string()),
         }
     }
 }
@@ -312,6 +313,23 @@ impl MemoryDraft {
             url: None,
             due_at: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod kind_tests {
+    use super::Kind;
+
+    #[test]
+    fn stored_kind_aliases_normalize_but_unknown_values_round_trip() {
+        assert_eq!(Kind::parse("PREF"), Kind::Preference);
+        assert_eq!(Kind::parse("preferences"), Kind::Preference);
+        assert_eq!(Kind::parse("project-note"), Kind::ProjectNote);
+        assert_eq!(Kind::parse("Project Note"), Kind::ProjectNote);
+        assert_eq!(
+            Kind::parse("Future_Custom"),
+            Kind::Other("Future_Custom".into())
+        );
     }
 }
 
