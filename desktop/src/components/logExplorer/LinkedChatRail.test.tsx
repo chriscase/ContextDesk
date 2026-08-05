@@ -12,7 +12,12 @@ import {
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as host from "../../lib/host";
-import { saveDeveloperActivityDetail } from "../../lib/activity/prefs";
+import * as turnActivity from "../../lib/engine/turnActivity";
+import {
+  saveActivityMode,
+  saveDeveloperActivityDetail,
+} from "../../lib/activity/prefs";
+import { publishTurnActivityUpdate } from "../../lib/activity/turnActivityUpdateBridge";
 import {
   hasHostLinkedSynthesisRetry,
   LinkedChatRail,
@@ -129,6 +134,12 @@ vi.mock("../../lib/host", () => ({
     target,
   })),
   agentTurn: vi.fn(async () => []),
+}));
+
+vi.mock("../../lib/engine/turnActivity", () => ({
+  fetchTurnActivity: vi.fn(async () => null),
+  fetchDeveloperTurnActivity: vi.fn(async () => []),
+  forgetSessionActivity: vi.fn(async () => undefined),
 }));
 
 const defaultModels: host.ModelOptionDto[] = [
@@ -3586,5 +3597,253 @@ describe("linked-chat per-turn Activity parity", () => {
     expect(screen.getByTestId("activity-terminal-summary").textContent).toMatch(
       /cancelled/i,
     );
+  });
+});
+
+describe("linked-chat full-rail Activity (session-scoped host path)", () => {
+  const chatId = "linked-activity-chat";
+  const asstId = "asst-activity-1";
+
+  function mountRailWithSettledAssistant() {
+    const stored = sessionDto(chatId, "Activity parity chat", [
+      { id: "u1", role: "user", content: "what failed?" },
+      { id: asstId, role: "assistant", content: "" },
+    ]);
+    vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([
+      {
+        id: stored.id,
+        title: stored.title,
+        archived: false,
+        pinned: false,
+        created_at: stored.created_at,
+        updated_at: stored.updated_at,
+        message_count: stored.messages.length,
+        preview: "",
+        linked_corpus_id: "c1",
+      },
+    ]);
+    vi.mocked(host.hostLoadChatSession).mockResolvedValue(stored);
+    return render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+  }
+
+  beforeEach(() => {
+    saveActivityMode("off");
+    vi.mocked(turnActivity.fetchTurnActivity).mockReset();
+    vi.mocked(turnActivity.fetchTurnActivity).mockResolvedValue(null);
+  });
+
+  it("uses ActivityToggle + fetchTurnActivity and updates pending → cancelled without streaming", async () => {
+    let hostStatus: "pending" | "cancelled" = "pending";
+    vi.mocked(turnActivity.fetchTurnActivity).mockImplementation(
+      async (sessionId, messageId) => {
+        if (sessionId !== chatId || messageId !== asstId) return null;
+        return {
+          version: 1,
+          turn_id: `${chatId}::${asstId}`,
+          session_id: chatId,
+          message_id: asstId,
+          scope: { kind: "conversation", label: "Conversation" },
+          status: hostStatus,
+          total_elapsed_ms: 41027,
+          detail_level: "summary",
+          dropped_events: 0,
+          events: [],
+        };
+      },
+    );
+
+    mountRailWithSettledAssistant();
+
+    // Open existing linked chat so messages (and activity fetch) mount.
+    fireEvent.click(await screen.findByTestId("linked-chat-switcher-toggle"));
+    fireEvent.click(
+      within(screen.getByTestId("linked-chat-switcher")).getByText(
+        "Activity parity chat",
+      ),
+    );
+    await screen.findByTestId("linked-chat-msg-assistant");
+
+    // Full rail must expose the shared ActivityToggle (not only corpus ActivityRail).
+    const toggle = await screen.findByTestId("activity-toggle-trigger");
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByTestId("activity-toggle-compact"));
+
+    await waitFor(() =>
+      expect(turnActivity.fetchTurnActivity).toHaveBeenCalledWith(
+        chatId,
+        asstId,
+      ),
+    );
+
+    // Compact line present for the assistant; still pending host status.
+    await waitFor(() => {
+      expect(screen.getByTestId("activity-compact-line")).toBeTruthy();
+    });
+    expect(
+      screen.getByTestId("linked-chat-msg-assistant").textContent,
+    ).not.toMatch(/streaming/i);
+
+    // Host settles cancelled; session-scoped bridge refreshes with mergeSettled.
+    hostStatus = "cancelled";
+    await act(async () => {
+      await publishTurnActivityUpdate({ sessionId: chatId });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("activity-compact-line").textContent).toMatch(
+        /cancelled/i,
+      );
+    });
+    expect(
+      screen.getByTestId("linked-chat-msg-assistant").textContent,
+    ).not.toMatch(/streaming/i);
+
+    // Open drawer surface via Details on the compact line.
+    fireEvent.click(
+      within(screen.getByTestId("activity-compact-line")).getByRole("button", {
+        name: /Activity details/i,
+      }),
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("activity-turn-label").textContent).toBe(
+        "(cancelled)",
+      );
+    });
+    expect(screen.getByTestId("activity-turn-label").textContent).not.toMatch(
+      /streaming/i,
+    );
+    expect(screen.getByTestId("activity-status-chip").textContent).toBe(
+      "cancelled",
+    );
+  });
+
+  it("ignores late activity_settled updates from a prior chat after switch", async () => {
+    const otherChat = "other-linked-chat";
+    vi.mocked(turnActivity.fetchTurnActivity).mockImplementation(
+      async (sessionId, messageId) => {
+        if (messageId !== asstId) return null;
+        return {
+          version: 1,
+          turn_id: `${sessionId}::${asstId}`,
+          session_id: sessionId,
+          message_id: asstId,
+          scope: { kind: "conversation", label: "Conversation" },
+          status: sessionId === chatId ? "cancelled" : "ok",
+          total_elapsed_ms: 10,
+          detail_level: "summary",
+          dropped_events: 0,
+          events: [],
+        };
+      },
+    );
+
+    const storedA = sessionDto(chatId, "Chat A", [
+      { id: asstId, role: "assistant", content: "" },
+    ]);
+    const storedB = sessionDto(otherChat, "Chat B", [
+      { id: asstId, role: "assistant", content: "done" },
+    ]);
+    const sessions = [
+      {
+        id: storedA.id,
+        title: storedA.title,
+        archived: false,
+        pinned: false,
+        created_at: storedA.created_at,
+        updated_at: storedA.updated_at,
+        message_count: 1,
+        preview: "",
+        linked_corpus_id: "c1",
+      },
+      {
+        id: storedB.id,
+        title: storedB.title,
+        archived: false,
+        pinned: false,
+        created_at: storedB.created_at,
+        updated_at: storedB.updated_at,
+        message_count: 1,
+        preview: "",
+        linked_corpus_id: "c1",
+      },
+    ];
+    vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue(sessions);
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async (id) =>
+      id === chatId ? storedA : id === otherChat ? storedB : null,
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+
+    // Enable Activity via the full-rail toggle (same control ordinary users use).
+    fireEvent.click(await screen.findByTestId("activity-toggle-trigger"));
+    fireEvent.click(screen.getByTestId("activity-toggle-compact"));
+
+    fireEvent.click(screen.getByTestId("linked-chat-switcher-toggle"));
+    fireEvent.click(
+      within(await screen.findByTestId("linked-chat-switcher")).getByText(
+        "Chat A",
+      ),
+    );
+    await screen.findByTestId("linked-chat-msg-assistant");
+    await waitFor(() =>
+      expect(turnActivity.fetchTurnActivity).toHaveBeenCalledWith(
+        chatId,
+        asstId,
+      ),
+    );
+
+    // Switch away before a late settle for Chat A arrives.
+    fireEvent.click(screen.getByTestId("linked-chat-switcher-toggle"));
+    fireEvent.click(
+      within(await screen.findByTestId("linked-chat-switcher")).getByText(
+        "Chat B",
+      ),
+    );
+    await screen.findByText("done");
+
+    const callsForA = () =>
+      vi
+        .mocked(turnActivity.fetchTurnActivity)
+        .mock.calls.filter((c) => c[0] === chatId).length;
+    const aCallsAtSwitch = callsForA();
+
+    await act(async () => {
+      // Late settle for the prior session must not re-query Chat A while B is active.
+      await publishTurnActivityUpdate({ sessionId: chatId });
+    });
+    // Allow microtasks from the subscriber to flush.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(callsForA()).toBe(aCallsAtSwitch);
+
+    // Same-session update for B still refreshes B only.
+    await act(async () => {
+      await publishTurnActivityUpdate({ sessionId: otherChat });
+    });
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(turnActivity.fetchTurnActivity)
+          .mock.calls.some((c) => c[0] === otherChat),
+      ).toBe(true),
+    );
+    expect(screen.getByText("done")).toBeTruthy();
+    // No drawer opened for Chat A's cancelled title.
+    expect(screen.queryByTestId("activity-turn-label")).toBeNull();
   });
 });

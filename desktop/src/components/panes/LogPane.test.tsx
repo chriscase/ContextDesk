@@ -2614,6 +2614,130 @@ describe("LogPane", () => {
     expect(await screen.findByText(/Local re-analysis complete:/)).toBeTruthy();
   });
 
+  it("discloses omitted timezone rows after the real 64-entry process-local cap", async () => {
+    const { saveActivityMode } = await import("../../lib/activity/prefs");
+    const tz = await import("../../lib/activity/timezoneActivity");
+    saveActivityMode("compact");
+
+    // Seed the exact LogPane initial state: createTimezoneActivityLog() then
+    // fill to the production TIMEZONE_ACTIVITY_CAP via recordTimezoneActivity
+    // (same functions applyTimezone uses). One more apply via the real UI
+    // path increments omitted and surfaces the merged ledger note.
+    let seed = tz.createTimezoneActivityLog(tz.TIMEZONE_ACTIVITY_CAP);
+    expect(tz.TIMEZONE_ACTIVITY_CAP).toBe(64);
+    for (let i = 0; i < tz.TIMEZONE_ACTIVITY_CAP; i++) {
+      seed = tz.recordTimezoneActivity(seed, {
+        corpusId: "timezone-corpus",
+        outcome: "applied",
+        zone: "America/Chicago",
+        sourceCount: 1,
+      });
+    }
+    expect(seed.entries.length).toBe(64);
+    expect(seed.omitted).toBe(0);
+
+    const createSpy = vi
+      .spyOn(tz, "createTimezoneActivityLog")
+      .mockReturnValue(seed);
+
+    const item = corpus("timezone-corpus", "Timezone review corpus");
+    hostMocks.listCorpora.mockResolvedValue([item]);
+    const unresolvedState = {
+      corpusId: item.id,
+      eventRevision: 4,
+      declarations: {},
+      sources: [
+        {
+          source: "app/server.log",
+          unresolvedLocalRecords: 12,
+          resolvedLocalRecords: 0,
+          explicitWallClockRecords: 0,
+          otherOrderOnlyRecords: 0,
+        },
+      ],
+    };
+    const resolvedState = {
+      corpusId: item.id,
+      eventRevision: 5,
+      declarations: {
+        "app/server.log": {
+          source: "app/server.log",
+          ianaZone: "America/Chicago",
+          basis: "user_declared",
+          declaredAt: 1_700_000_000,
+          appliedRevision: 5,
+        },
+      },
+      sources: [
+        {
+          source: "app/server.log",
+          unresolvedLocalRecords: 0,
+          resolvedLocalRecords: 12,
+          explicitWallClockRecords: 0,
+          otherOrderOnlyRecords: 0,
+        },
+      ],
+    };
+    let stateRead = 0;
+    hostMocks.loadTimezoneState.mockImplementation(async () => {
+      const states = [unresolvedState, resolvedState];
+      return states[Math.min(stateRead++, states.length - 1)];
+    });
+
+    try {
+      render(<LogPane />);
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: corpusButtonName(item.name),
+        }),
+      );
+      const status = await screen.findByTestId("log-timezone-status");
+      fireEvent.click(
+        within(status).getByRole("button", { name: "Review 1 source" }),
+      );
+      fireEvent.click(
+        within(status).getByRole("button", { name: "Resolve time…" }),
+      );
+      const dialog = await screen.findByRole("dialog", {
+        name: "Review timezone",
+      });
+      fireEvent.click(
+        within(dialog).getByRole("radio", { name: /Use an IANA timezone/ }),
+      );
+      fireEvent.change(
+        within(dialog).getByRole("combobox", { name: /^IANA timezone/ }),
+        { target: { value: "America/Chicago" } },
+      );
+      fireEvent.click(within(dialog).getByRole("button", { name: "Preview" }));
+      expect(await screen.findByText("12 records resolved")).toBeTruthy();
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "Apply declaration" }),
+      );
+      await waitFor(() => expect(hostMocks.applyTimezone).toHaveBeenCalled());
+
+      // 65th event dropped oldest → omitted >= 1; LogPane merged ledger discloses it.
+      await waitFor(() => {
+        const region = screen.getByTestId("log-pane-activity");
+        expect(region.textContent).toMatch(/Live trace/i);
+      });
+      // Expand the live-trace details if present
+      const summary = screen.getByText(/Live trace/i);
+      const details = summary.closest("details");
+      if (details && !details.open) {
+        fireEvent.click(summary);
+      }
+      await waitFor(() => {
+        const note = screen.getByTestId("activity-omitted-note");
+        expect(note.textContent).toMatch(/omitted/i);
+        expect(note.textContent).toMatch(/64-entry retention bound/i);
+        // At least one intermediate update omitted (the 65th push).
+        expect(note.textContent).toMatch(/\d+ intermediate/);
+      });
+    } finally {
+      createSpy.mockRestore();
+    }
+  });
+
   it("restores, applies, and clears revision-bound source timezone declarations", async () => {
     const { saveActivityMode } = await import("../../lib/activity/prefs");
     saveActivityMode("compact");

@@ -317,3 +317,31 @@ describe("live import Activity projection", () => {
     expect(terminal.detail).toBe("12,345 events · 42 templates · 7 files");
   });
 });
+
+describe("redact phase label is secrets/credentials only", () => {
+  it('labels the redact host phase exactly "Safety redaction of secrets and credentials"', () => {
+    let attempt = beginImportActivityAttempt("import:redact-label", "zip");
+    attempt = recordImportProgress(
+      attempt,
+      progress("starting", {
+        correlation_id: "import:redact-label",
+        operation_id: "host-redact-op",
+      }),
+    );
+    attempt = recordImportProgress(
+      attempt,
+      progress("redact", {
+        correlation_id: "import:redact-label",
+        operation_id: "host-redact-op",
+        elapsed_ms: 12,
+      }),
+    );
+    const redact = attempt.events.find((e) =>
+      e.label.toLowerCase().includes("redaction"),
+    );
+    expect(redact).toBeDefined();
+    expect(redact!.label).toBe("Safety redaction of secrets and credentials");
+    expect(redact!.label.toLowerCase()).not.toContain("pii");
+    expect(JSON.stringify(attempt.events)).not.toMatch(/\bPII\b/i);
+  });
+});

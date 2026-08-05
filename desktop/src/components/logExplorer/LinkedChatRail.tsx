@@ -61,7 +61,11 @@ import {
   subscribeDeveloperActivityDetail,
 } from "../../lib/activity/prefs";
 import { buildActivityTurn } from "../../lib/activity/adapter";
-import { settleTurnLifecycle } from "../../lib/activity/turnLifecycle";
+import {
+  mergeSettledActivityRecord,
+  settleTurnLifecycle,
+} from "../../lib/activity/turnLifecycle";
+import { subscribeTurnActivityUpdate } from "../../lib/activity/turnActivityUpdateBridge";
 import type {
   ActivityMode,
   ActivityTurn,
@@ -648,8 +652,13 @@ export function LinkedChatRail({
   const [activityRecords, setActivityRecords] = useState<
     Record<string, HostTurnActivityRecord | null>
   >({});
+  /** True after trash/delete/retire for the active chat; blocks late fills. */
+  const retiredActivitySessionRef = useRef(false);
 
+  // Drop cached records on chat switch; a prior session's late fetch must not
+  // repopulate the new chat's map (ChatPane uses the same scope rule).
   useEffect(() => {
+    retiredActivitySessionRef.current = false;
     setActivityRecords({});
   }, [activeChatId]);
 
@@ -662,21 +671,88 @@ export function LinkedChatRail({
   }, [activity.mode, activeChatId, messages, activityRecords]);
 
   useEffect(() => {
-    if (!activeChatId || pendingActivityIds.length === 0) return;
+    if (
+      !activeChatId ||
+      pendingActivityIds.length === 0 ||
+      retiredActivitySessionRef.current
+    ) {
+      return;
+    }
     let cancelled = false;
+    const sessionAtStart = activeChatId;
     void (async () => {
       const loaded: Record<string, HostTurnActivityRecord | null> = {};
       for (const id of pendingActivityIds) {
-        loaded[id] = await fetchTurnActivity(activeChatId, id);
+        loaded[id] = await fetchTurnActivity(sessionAtStart, id);
       }
-      if (!cancelled) {
-        setActivityRecords((prev) => ({ ...loaded, ...prev }));
+      // Late resolution after a chat switch or session retire is discarded.
+      if (
+        cancelled ||
+        retiredActivitySessionRef.current ||
+        activeChatIdRef.current !== sessionAtStart
+      ) {
+        return;
       }
+      // Existing cache wins for already-known ids (pending fill only).
+      setActivityRecords((prev) => ({ ...loaded, ...prev }));
     })();
     return () => {
       cancelled = true;
     };
   }, [pendingActivityIds, activeChatId]);
+
+  // Session-scoped bridge: permission decisions and host activity_settled
+  // refresh records without remount. Same mergeSettled gate as ChatPane so a
+  // late pending/tool row never resurrects streaming chrome after cancel.
+  useEffect(() => {
+    return subscribeTurnActivityUpdate((update) => {
+      if (!activeChatId || update.sessionId !== activeChatId) return;
+
+      if (update.retired) {
+        retiredActivitySessionRef.current = true;
+        setActivityRecords({});
+        return;
+      }
+      if (retiredActivitySessionRef.current) return;
+
+      const messageIds = messages
+        .filter((message) => message.role === "assistant" && !message.streaming)
+        .map((message) => message.id);
+
+      if (activity.mode === "off") {
+        // Evict so re-enable re-fetches instead of showing a stale pending map.
+        setActivityRecords((current) => {
+          const next = { ...current };
+          for (const id of messageIds) delete next[id];
+          return next;
+        });
+        return;
+      }
+
+      const sessionAtStart = activeChatId;
+      void (async () => {
+        const refreshed: Record<string, HostTurnActivityRecord> = {};
+        for (const messageId of messageIds) {
+          const record = await fetchTurnActivity(sessionAtStart, messageId);
+          if (record) refreshed[messageId] = record;
+        }
+        if (
+          retiredActivitySessionRef.current ||
+          activeChatIdRef.current !== sessionAtStart ||
+          Object.keys(refreshed).length === 0
+        ) {
+          return;
+        }
+        setActivityRecords((current) => {
+          const next = { ...current };
+          for (const [id, record] of Object.entries(refreshed)) {
+            next[id] = mergeSettledActivityRecord(current[id], record);
+          }
+          return next;
+        });
+      })();
+    });
+  }, [activity.mode, messages, activeChatId]);
 
   const buildTurnFor = useCallback(
     (msg: ChatMsg) =>

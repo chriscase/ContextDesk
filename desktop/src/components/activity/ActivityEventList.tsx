@@ -196,7 +196,11 @@ export function ActivityEventList({
   return (
     <>
       {omittedNote ? (
-        <p className="activity-feed__omitted" role="note">
+        <p
+          className="activity-feed__omitted"
+          role="note"
+          data-testid="activity-omitted-note"
+        >
           {omittedNote}
         </p>
       ) : null}

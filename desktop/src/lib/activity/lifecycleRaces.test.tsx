@@ -188,8 +188,9 @@ describe("cancel-vs-provider-final", () => {
 describe("criterion-2 terminal classes — drawer/compact/dock titles", () => {
   /**
    * Map of product terminal class → host ActivityStatus the surfaces settle on.
-   * Host deadline / provider failure → failed; permission denial → withheld;
-   * user cancel / teardown → cancelled; success / post-compaction ok → ok.
+   * Host deadline (budget_time) → withheld on the shared contract; provider
+   * failure → failed; permission denial → withheld; user cancel / teardown →
+   * cancelled; success / post-compaction ok → ok.
    */
   const cases: Array<{
     name: string;
@@ -216,10 +217,12 @@ describe("criterion-2 terminal classes — drawer/compact/dock titles", () => {
       summary: /failed/i,
     },
     {
-      name: "host deadline",
-      status: "failed",
-      title: "(failed)",
-      summary: /failed/i,
+      // Host deadline (budget_time) maps via status_for_turn_reason → Withheld
+      // on the shared activity contract; UI titles use the same status field.
+      name: "host deadline (budget_time → withheld)",
+      status: "withheld",
+      title: "(answer withheld)",
+      summary: /withheld/i,
     },
     {
       name: "user cancellation",
@@ -280,6 +283,17 @@ describe("criterion-2 terminal classes — drawer/compact/dock titles", () => {
     expect(
       screen.getByTestId("activity-compact-line").textContent?.toLowerCase(),
     ).not.toContain("streaming");
+  });
+
+  it("host deadline status withheld settles like budget_time (never streaming)", () => {
+    // Mirrors CLI status_for_turn_reason("budget_time") → Withheld.
+    const turn = buildActivityTurn(
+      msg({ streaming: true, content: "" }),
+      { record: hostRecord("withheld") },
+    );
+    expect(turn.summary.status).toBe("withheld");
+    expect(turn.label).toBe("(answer withheld)");
+    expect(turn.label.toLowerCase()).not.toContain("streaming");
   });
 
   it("permission-denial record with decision events stays withheld and non-live", () => {
