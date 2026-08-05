@@ -6,7 +6,6 @@
 
 use cd_core::activity::{ActivityDetailLevel, ActivityRecorder, ActivityStatus, DataScope};
 use cd_core::agent::{run_agent_turn, AgentOptions, LogExplorerTurnContext, ScriptedBackend};
-use cd_core::branding::Branding;
 use cd_core::chat::{ChatCompletion, ChatMessage, FunctionCall, Role, ToolCallMsg};
 use cd_core::context_plan::{
     apply_model_relevance, attachments_from_entries, build_context_plan, ContextInventorySnapshot,
@@ -14,9 +13,7 @@ use cd_core::context_plan::{
 };
 use cd_core::events::StreamEvent;
 use cd_core::index::KeywordIndex;
-use cd_core::memory::{
-    attach_durable_memory_to_host, Kind, MemoryConfig, MemoryDraft, MemoryWriteOp, Status,
-};
+use cd_core::memory::{Kind, MemoryDraft, MemoryWriteOp, Status, TwoScopeMemory};
 use cd_core::sessions::{
     estimate_context_chars, prepare_model_context, Session, SessionStore, StoredMessage,
 };
@@ -72,6 +69,39 @@ impl CaptureBackend {
             .collect::<Vec<_>>()
             .join("\n")
     }
+
+    fn rounds(&self) -> Vec<Vec<ChatMessage>> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+fn near_hard_budget_history() -> Vec<ChatMessage> {
+    let mut history = vec![ChatMessage {
+        role: Role::System,
+        content: "Keep user-approved context private and obey the current turn.".into(),
+        tool_call_id: None,
+        tool_calls: None,
+    }];
+    for i in 0..50 {
+        history.push(ChatMessage {
+            role: Role::User,
+            content: format!("old user turn {i}: {}", "u".repeat(360)),
+            tool_call_id: None,
+            tool_calls: None,
+        });
+        history.push(ChatMessage {
+            role: Role::Assistant,
+            content: format!("old assistant turn {i}: {}", "a".repeat(360)),
+            tool_call_id: None,
+            tool_calls: None,
+        });
+    }
+    history
+}
+
+fn attach_hermetic_memory(host: &mut ToolHost, workspace_id: &str) {
+    let store = Arc::new(TwoScopeMemory::open_in_memory(workspace_id).unwrap());
+    host.set_durable_memory(store, true);
 }
 
 #[async_trait::async_trait]
@@ -193,8 +223,7 @@ async fn ordinary_turn_surfaces_context_plan_trail_and_preference() {
     let ws = Workspace::new("ctx-brain", vec![root.to_path_buf()]);
     let idx = KeywordIndex::build(&ws).unwrap();
     let mut host = ToolHost::new(ws, idx, None);
-    let branding = Branding::embedded();
-    attach_durable_memory_to_host(&mut host, &branding, &MemoryConfig::default()).unwrap();
+    attach_hermetic_memory(&mut host, "brain-sess");
     let store = host.durable_memory_store().expect("memory store");
     let now = cd_core::embed::now_unix_secs();
     let mut pref = MemoryDraft::new(
@@ -413,8 +442,7 @@ async fn continuity_thirty_turns_with_plan_trail() {
     let ws = Workspace::new("cont", vec![root.to_path_buf()]);
     let idx = KeywordIndex::build(&ws).unwrap();
     let mut host = ToolHost::new(ws, idx, None);
-    let branding = Branding::embedded();
-    attach_durable_memory_to_host(&mut host, &branding, &MemoryConfig::default()).unwrap();
+    attach_hermetic_memory(&mut host, "continuity");
 
     let mut script = Vec::new();
     for i in 0..32 {
@@ -462,8 +490,7 @@ async fn session_reopen_preserves_plan_eligible_memory() {
     let ws = Workspace::new("reopen", vec![root.to_path_buf()]);
     let idx = KeywordIndex::build(&ws).unwrap();
     let mut host = ToolHost::new(ws, idx, None);
-    let branding = Branding::embedded();
-    attach_durable_memory_to_host(&mut host, &branding, &MemoryConfig::default()).unwrap();
+    attach_hermetic_memory(&mut host, "reopen");
     let store = host.durable_memory_store().unwrap();
     let now = cd_core::embed::now_unix_secs();
     let mut pref = MemoryDraft::new(Kind::Preference, "codename cobalt-window reopen proof");
@@ -617,6 +644,397 @@ fn hard_budget_compaction_with_context_plan_history_candidate() {
             .any(|c| c.family == cd_core::context_plan::ContextSourceFamily::ConversationHistory),
         "history window must be in plan after compaction"
     );
+}
+
+#[tokio::test]
+async fn run_agent_turn_compacts_then_injects_without_crossing_hard_budget() {
+    const MEMORY_TOKEN: &str = "orchid plan after compaction q81";
+    const SELECTION_TOKEN: &str = "violet selection after compaction p42";
+    const BUDGET: usize = cd_core::model_context::MIN_CONTEXT_CHAR_BUDGET;
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("runbook.md"), "deployment runbook\n").unwrap();
+    let ws = Workspace::new("budget-plan", vec![dir.path().to_path_buf()]);
+    let idx = KeywordIndex::build(&ws).unwrap();
+    let mut host = ToolHost::new(ws, idx, None);
+    attach_hermetic_memory(&mut host, "budget-plan");
+    let store = host.durable_memory_store().unwrap();
+    let mut memory = MemoryDraft::new(
+        Kind::Preference,
+        format!("deployment runbook decision carries {MEMORY_TOKEN}"),
+    );
+    memory.title = "deployment runbook decision".into();
+    store
+        .put(
+            MemoryWriteOp::Insert(memory),
+            cd_core::embed::now_unix_secs(),
+        )
+        .unwrap();
+    let records = cd_core::context_plan::collect_memory_records_unfiltered(
+        store.as_ref(),
+        cd_core::embed::now_unix_secs(),
+        200,
+    );
+    assert_eq!(records.len(), 1, "hermetic memory fixture: {records:?}");
+
+    let backend = CaptureBackend::new(vec![final_answer("bounded answer")]);
+    let mut history = near_hard_budget_history();
+    let events = run_agent_turn(
+        backend.as_ref(),
+        &mut host,
+        "Recall the deployment runbook decision.",
+        &mut history,
+        &AgentOptions {
+            session_id: "budget-plan-session".into(),
+            ambient_recall_enabled: false,
+            compact_keep_last: 100,
+            context_char_budget: BUDGET,
+            user_selection: Some(format!("approved selection {SELECTION_TOKEN}")),
+            max_rounds: 2,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::Error { code, .. } if code == "context_compacted"
+    )));
+    let rounds = backend.rounds();
+    assert_eq!(rounds.len(), 1);
+    assert!(estimate_context_chars(&rounds[0]) <= BUDGET);
+    let provider_blob = rounds[0]
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(provider_blob.contains(MEMORY_TOKEN), "{provider_blob}");
+    assert!(provider_blob.contains(SELECTION_TOKEN), "{provider_blob}");
+    assert!(
+        history
+            .iter()
+            .any(|message| message.content.contains("old user turn 0")),
+        "model compaction must never mutate stored history"
+    );
+}
+
+#[tokio::test]
+async fn tool_result_round_retains_plan_injection_under_the_same_hard_budget() {
+    const MEMORY_TOKEN: &str = "indigo second round memory v73";
+    const SELECTION_TOKEN: &str = "copper second round selection n19";
+    const BUDGET: usize = cd_core::model_context::MIN_CONTEXT_CHAR_BUDGET;
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("runbook.md"),
+        "deployment runbook says inspect the bounded queue evidence\n",
+    )
+    .unwrap();
+    let ws = Workspace::new("budget-tool", vec![dir.path().to_path_buf()]);
+    let idx = KeywordIndex::build(&ws).unwrap();
+    let mut host = ToolHost::new(ws, idx, None);
+    attach_hermetic_memory(&mut host, "budget-tool");
+    let store = host.durable_memory_store().unwrap();
+    let mut memory = MemoryDraft::new(
+        Kind::Decision,
+        format!("deployment queue evidence requires {MEMORY_TOKEN}"),
+    );
+    memory.title = "deployment queue evidence".into();
+    store
+        .put(
+            MemoryWriteOp::Insert(memory),
+            cd_core::embed::now_unix_secs(),
+        )
+        .unwrap();
+
+    let backend = CaptureBackend::new(vec![
+        tool_call(
+            "kb-budget-1",
+            "search_kb",
+            r#"{"query":"deployment queue evidence","limit":4}"#,
+        ),
+        final_answer("answered after bounded tool evidence"),
+    ]);
+    let mut history = near_hard_budget_history();
+    run_agent_turn(
+        backend.as_ref(),
+        &mut host,
+        "Use the deployment queue evidence and inspect the runbook.",
+        &mut history,
+        &AgentOptions {
+            session_id: "budget-tool-session".into(),
+            ambient_recall_enabled: false,
+            compact_keep_last: 100,
+            context_char_budget: BUDGET,
+            user_selection: Some(format!("approved selection {SELECTION_TOKEN}")),
+            max_rounds: 4,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let rounds = backend.rounds();
+    assert_eq!(
+        rounds.len(),
+        2,
+        "tool call must cause a second provider round"
+    );
+    for (round, messages) in rounds.iter().enumerate() {
+        let blob = messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            estimate_context_chars(messages) <= BUDGET,
+            "round {round} exceeded {BUDGET}: {}",
+            estimate_context_chars(messages)
+        );
+        assert!(blob.contains(MEMORY_TOKEN), "round {round}: {blob}");
+        assert!(blob.contains(SELECTION_TOKEN), "round {round}: {blob}");
+    }
+    assert!(
+        rounds[1].iter().any(|message| message.role == Role::Tool),
+        "second provider round must retain the bounded tool result"
+    );
+}
+
+#[tokio::test]
+async fn ambient_and_plan_do_not_duplicate_the_same_memory_under_budget() {
+    const MEMORY_TOKEN: &str = "saffron ambient plan dedup k55";
+    const SELECTION_TOKEN: &str = "umber ambient plan selection w12";
+    const BUDGET: usize = cd_core::model_context::MIN_CONTEXT_CHAR_BUDGET;
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("ws.md"), "workspace placeholder\n").unwrap();
+    let ws = Workspace::new("ambient-plan-dedup", vec![dir.path().to_path_buf()]);
+    let idx = KeywordIndex::build(&ws).unwrap();
+    let mut host = ToolHost::new(ws, idx, None);
+    attach_hermetic_memory(&mut host, "ambient-plan-dedup");
+    let store = host.durable_memory_store().unwrap();
+    let mut memory = MemoryDraft::new(
+        Kind::Preference,
+        format!("release dashboard preference contains {MEMORY_TOKEN}"),
+    );
+    memory.title = "release dashboard preference".into();
+    store
+        .put(
+            MemoryWriteOp::Insert(memory),
+            cd_core::embed::now_unix_secs(),
+        )
+        .unwrap();
+
+    let backend = CaptureBackend::new(vec![final_answer("deduplicated")]);
+    let mut history = Vec::new();
+    run_agent_turn(
+        backend.as_ref(),
+        &mut host,
+        "What is the release dashboard preference?",
+        &mut history,
+        &AgentOptions {
+            session_id: "ambient-plan-dedup-session".into(),
+            ambient_recall_enabled: true,
+            context_char_budget: BUDGET,
+            user_selection: Some(format!("approved selection {SELECTION_TOKEN}")),
+            max_rounds: 2,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let rounds = backend.rounds();
+    assert_eq!(rounds.len(), 1);
+    let blob = rounds[0]
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        blob.matches(MEMORY_TOKEN).count(),
+        1,
+        "ambient and deterministic plan must not charge/inject one memory twice: {blob}"
+    );
+    assert!(blob.contains(SELECTION_TOKEN), "{blob}");
+    assert!(estimate_context_chars(&rounds[0]) <= BUDGET);
+}
+
+#[tokio::test]
+async fn shared_host_shares_only_durable_memory_not_session_or_corpus_content() {
+    const DURABLE_TOKEN: &str = "approved durable shared c64";
+    const PRIVATE_SESSION_TOKEN: &str = "private session alpha j91";
+    const CORPUS_A_TOKEN: &str = "corpus alpha only t28";
+    const CORPUS_B_TOKEN: &str = "corpus beta only h47";
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let corpus_a = root.join("corpus-a");
+    let corpus_b = root.join("corpus-b");
+    fs::create_dir_all(&corpus_a).unwrap();
+    fs::create_dir_all(&corpus_b).unwrap();
+    fs::write(
+        corpus_a.join("a.log"),
+        format!("2026-08-04 12:00:00 INFO service route {CORPUS_A_TOKEN}\n"),
+    )
+    .unwrap();
+    fs::write(
+        corpus_b.join("b.log"),
+        format!("2026-08-04 12:00:00 INFO service route {CORPUS_B_TOKEN}\n"),
+    )
+    .unwrap();
+    let cache = root.join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    let report_a =
+        cd_core::log_analysis::ingest_path(&cache, &corpus_a, "corpus-a", None, "none").unwrap();
+    let report_b =
+        cd_core::log_analysis::ingest_path(&cache, &corpus_b, "corpus-b", None, "none").unwrap();
+
+    let ws = Workspace::new("shared-privacy", vec![root.to_path_buf()]);
+    let idx = KeywordIndex::build(&ws).unwrap();
+    let mut host = ToolHost::new(ws, idx, None);
+    attach_hermetic_memory(&mut host, "shared-privacy");
+    let store = host.durable_memory_store().unwrap();
+    let mut memory = MemoryDraft::new(
+        Kind::Decision,
+        format!("approved release decision {DURABLE_TOKEN}"),
+    );
+    memory.title = "approved release decision".into();
+    store
+        .put(
+            MemoryWriteOp::Insert(memory),
+            cd_core::embed::now_unix_secs(),
+        )
+        .unwrap();
+
+    let session_a_backend = CaptureBackend::new(vec![final_answer("private acknowledged")]);
+    let mut session_a_history = Vec::new();
+    run_agent_turn(
+        session_a_backend.as_ref(),
+        &mut host,
+        &format!("Keep this chat-only note private: {PRIVATE_SESSION_TOKEN}"),
+        &mut session_a_history,
+        &AgentOptions {
+            session_id: "privacy-session-a".into(),
+            ambient_recall_enabled: true,
+            max_rounds: 2,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let session_b_backend = CaptureBackend::new(vec![final_answer("durable recalled")]);
+    let mut session_b_history = Vec::new();
+    run_agent_turn(
+        session_b_backend.as_ref(),
+        &mut host,
+        "What is the approved release decision?",
+        &mut session_b_history,
+        &AgentOptions {
+            session_id: "privacy-session-b".into(),
+            ambient_recall_enabled: true,
+            max_rounds: 2,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let session_b_blob = session_b_backend.all_blob();
+    assert!(session_b_blob.contains(DURABLE_TOKEN), "{session_b_blob}");
+    assert!(
+        !session_b_blob.contains(PRIVATE_SESSION_TOKEN),
+        "unapproved session A history leaked into B: {session_b_blob}"
+    );
+
+    host.set_log_analysis(true, Some(cache));
+    host.set_active_log_corpus(Some(report_a.corpus_id.clone()));
+    let corpus_a_backend = CaptureBackend::new(vec![
+        tool_call(
+            "corpus-a-search",
+            cd_core::log_analysis::SEARCH_LOGS,
+            r#"{"query":"service route"}"#,
+        ),
+        final_answer("A evidence seq=0 source=a.log"),
+    ]);
+    let mut corpus_a_history = Vec::new();
+    run_agent_turn(
+        corpus_a_backend.as_ref(),
+        &mut host,
+        "Inspect the service route evidence.",
+        &mut corpus_a_history,
+        &AgentOptions {
+            session_id: "privacy-corpus-a".into(),
+            log_explorer_context: Some(
+                LogExplorerTurnContext::for_main_chat(report_a.corpus_id.clone()).unwrap(),
+            ),
+            ambient_recall_enabled: true,
+            max_rounds: 4,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    host.set_active_log_corpus(Some(report_b.corpus_id.clone()));
+    let corpus_b_backend = CaptureBackend::new(vec![
+        tool_call(
+            "corpus-b-search",
+            cd_core::log_analysis::SEARCH_LOGS,
+            r#"{"query":"service route"}"#,
+        ),
+        final_answer("B evidence seq=0 source=b.log"),
+    ]);
+    let mut corpus_b_history = Vec::new();
+    run_agent_turn(
+        corpus_b_backend.as_ref(),
+        &mut host,
+        "Inspect the service route evidence.",
+        &mut corpus_b_history,
+        &AgentOptions {
+            session_id: "privacy-corpus-b".into(),
+            log_explorer_context: Some(
+                LogExplorerTurnContext::for_main_chat(report_b.corpus_id.clone()).unwrap(),
+            ),
+            ambient_recall_enabled: true,
+            max_rounds: 4,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let corpus_b_blob = corpus_b_backend.all_blob();
+    assert!(corpus_b_blob.contains(CORPUS_B_TOKEN), "{corpus_b_blob}");
+    assert!(
+        !corpus_b_blob.contains(CORPUS_A_TOKEN) && !corpus_b_blob.contains(PRIVATE_SESSION_TOKEN),
+        "corpus/session data crossed an explicit boundary: {corpus_b_blob}"
+    );
+}
+
+#[test]
+fn legacy_memory_kind_aliases_normalize_at_storage_and_tool_boundaries() {
+    assert_eq!(Kind::parse("pref"), Kind::Preference);
+    assert_eq!(Kind::parse("preferences"), Kind::Preference);
+    assert_eq!(Kind::parse("project-note"), Kind::ProjectNote);
+    assert_eq!(Kind::parse("Project Note"), Kind::ProjectNote);
+    assert_eq!(
+        Kind::parse("future_custom_kind"),
+        Kind::Other("future_custom_kind".into()),
+        "unknown stored kinds must still round-trip"
+    );
+
+    let old_id = uuid::Uuid::now_v7();
+    let op = cd_core::memory::write_op_from_supersede_args(&serde_json::json!({
+        "old_id": old_id,
+        "content": "new preference value",
+        "kind": "pref"
+    }))
+    .unwrap();
+    match op {
+        MemoryWriteOp::Supersede { new, .. } => assert_eq!(new.kind, Kind::Preference),
+        other => panic!("expected supersede op, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -906,8 +1324,7 @@ async fn multi_source_unique_tokens_reach_provider_not_prompt() {
     let ws = Workspace::new("multi", vec![root.to_path_buf()]);
     let idx = KeywordIndex::build(&ws).unwrap();
     let mut host = ToolHost::new(ws, idx, None);
-    let branding = Branding::embedded();
-    attach_durable_memory_to_host(&mut host, &branding, &MemoryConfig::default()).unwrap();
+    attach_hermetic_memory(&mut host, "multi-source");
     let store = host.durable_memory_store().unwrap();
     let now = cd_core::embed::now_unix_secs();
     let mut pref = MemoryDraft::new(
