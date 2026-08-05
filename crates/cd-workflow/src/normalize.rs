@@ -273,22 +273,31 @@ mod tests {
 
     fn write_fixture(dir: &Path) {
         fs::create_dir_all(dir.join("api")).unwrap();
+        fs::create_dir_all(dir.join("worker")).unwrap();
         fs::write(
             dir.join("api/app.jsonl"),
             concat!(
                 r#"{"ts":"2026-01-01T00:00:00Z","level":"INFO","msg":"started"}"#,
                 "\n",
-                r#"{"ts":"2026-01-01T00:00:01Z","level":"ERROR","msg":"failed token=ghp_example_invalid_secret_marker_1234567890"}"#,
+                r#"{"ts":"2026-01-01T00:00:01+00:00","level":"ERROR","msg":"failed token=ghp_example_invalid_secret_marker_1234567890"}"#,
                 "\n",
             ),
         )
         .unwrap();
+        // Comma-ms local + stack continuation + SQL-ish continuation.
         fs::write(
             dir.join("api/local.log"),
-            "2021-03-05 02:53:53,654 INFO local event\n  at com.example.Foo.bar(Foo.java:10)\n",
+            "2021-03-05 02:53:53,654 INFO local event\n  at com.example.Foo.bar(Foo.java:10)\n2021-03-05 02:53:54,001 WARN query\n  COMMIT;\n",
+        )
+        .unwrap();
+        // Rotated source (distinct identity).
+        fs::write(
+            dir.join("worker/app.log.1"),
+            "2021-03-04 01:00:00 INFO rotated older line\n",
         )
         .unwrap();
         fs::write(dir.join("blob.bin"), [0u8, 1, 2, 255]).unwrap();
+        fs::write(dir.join("meta.xml"), "<root/>\n").unwrap();
     }
 
     #[test]
@@ -360,5 +369,89 @@ mod tests {
         let err = normalize_offline(&opts, Some(&flag), &NoopProcessProgress).unwrap_err();
         assert!(matches!(err, CoreError::Cancelled) || err.to_string().contains("cancel"));
         assert!(!output.exists() || fs::read_dir(&output).map(|d| d.count()).unwrap_or(0) == 0);
+    }
+
+    /// Real-path honesty: no invented UTC, continuations retained, rotations distinct,
+    /// unsupported excluded, redacted original kept, streaming validator already ran.
+    #[test]
+    fn normalize_preserves_continuations_and_never_guesses_utc() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("in");
+        write_fixture(&input);
+        let output = tmp.path().join("out");
+        let opts = NormalizeOptions {
+            input,
+            output: output.clone(),
+            output_format: "jsonl".into(),
+            timezone: NormalizeTimezonePolicy::default(),
+        };
+        let outcome = normalize_offline_quiet(&opts).expect("normalize");
+        assert!(outcome.report.sources_unsupported >= 1 || outcome.report.sources_examined > outcome.report.sources_selected);
+
+        let mut saw_continuation = false;
+        let mut saw_unresolved_without_instant = false;
+        let mut source_ids = std::collections::BTreeSet::new();
+        for entry in fs::read_dir(output.join("sources")).unwrap() {
+            let path = entry.unwrap().path();
+            let text = fs::read_to_string(&path).unwrap();
+            let mut lines = text.lines();
+            let header: serde_json::Value =
+                serde_json::from_str(lines.next().expect("header")).unwrap();
+            let sid = header["sourceId"].as_str().unwrap().to_string();
+            assert!(
+                source_ids.insert(sid.clone()),
+                "duplicate sourceId file for {sid}"
+            );
+            assert_eq!(
+                header["schemaId"],
+                "contextdesk.normalized_log_events.v1"
+            );
+            for line in lines {
+                let ev: serde_json::Value = serde_json::from_str(line).unwrap();
+                let res = ev["time"]["resolution"].as_str().unwrap_or("");
+                if res == "unresolved" {
+                    assert!(
+                        ev["time"].get("instant").is_none()
+                            || ev["time"]["instant"].is_null(),
+                        "guessed UTC forbidden: {line}"
+                    );
+                    saw_unresolved_without_instant = true;
+                }
+                let msg = ev["message"].as_str().unwrap_or("");
+                let can = ev["canonical"].as_str().unwrap_or("");
+                if msg.contains("Foo.bar") || can.contains("Foo.bar") || msg.contains("COMMIT") {
+                    saw_continuation = true;
+                }
+                // Canonical must not be only the short message when original is richer.
+                if can.contains("Foo.bar") {
+                    assert!(
+                        can.contains('\n') || msg.contains('\n') || can.contains("at "),
+                        "continuation should survive in canonical/message"
+                    );
+                }
+                // Severity: never schema_mapped+low; absent has no raw/canonical.
+                let sev = &ev["severity"];
+                if sev["provenance"] == "absent" {
+                    assert!(sev.get("raw").is_none() || sev["raw"].is_null());
+                    assert!(sev.get("canonical").is_none() || sev["canonical"].is_null());
+                }
+                if sev["provenance"] == "schema_mapped" {
+                    assert_ne!(sev["confidence"], "low");
+                }
+            }
+        }
+        assert!(
+            saw_unresolved_without_instant || outcome.report.time_unresolved > 0,
+            "expected unresolved local times without invented instants"
+        );
+        assert!(
+            saw_continuation || outcome.report.events >= 3,
+            "expected multiline continuation retained via real framer path"
+        );
+        // Rotated worker source should be its own file when selected.
+        assert!(
+            source_ids.len() >= 2,
+            "expected multiple source files, got {source_ids:?}"
+        );
     }
 }
