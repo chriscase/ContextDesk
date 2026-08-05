@@ -5114,6 +5114,146 @@ mod tests {
         );
     }
 
+    /// Full agent loop: model issues two search_logs in one tool batch with
+    /// different args but the same host citeable set. Linked turns normally
+    /// close tools after the first productive hit, so sequential re-issue is
+    /// ignored at synthesis — the production multi-call batch is the path that
+    /// still executes a second identical-evidence search and must host-bound it.
+    #[tokio::test]
+    async fn linked_search_non_progress_bounds_multi_round_agent_loop() {
+        use std::io::Write;
+        let dir = tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let mut f = fs::File::create(logs.join("api.log")).unwrap();
+        for i in 0..5 {
+            writeln!(
+                f,
+                r#"{{"ts":{},"level":"error","service":"api","message":"xyz checkout failure code={}"}}"#,
+                1_700_000_100 + i,
+                i
+            )
+            .unwrap();
+        }
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        let report =
+            crate::log_analysis::ingest_path(&cache, &logs, "xyz-loop", None, "none").unwrap();
+
+        let ws = Workspace::new("bound-loop", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        host.set_log_analysis(true, Some(cache));
+        host.set_active_log_corpus(Some(report.corpus_id.clone()));
+
+        // One completion with two parallel search_logs (changed args, same hits).
+        // A later round may still try more searches; host must close tools after Stop.
+        let backend = ScriptedBackend::new(vec![
+            ChatCompletion {
+                content: String::new(),
+                tool_calls: vec![
+                    ToolCallMsg {
+                        id: "c1".into(),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name: crate::log_analysis::SEARCH_LOGS.into(),
+                            arguments: r#"{"query":"checkout failure","k":8}"#.into(),
+                        },
+                    },
+                    ToolCallMsg {
+                        id: "c2".into(),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name: crate::log_analysis::SEARCH_LOGS.into(),
+                            arguments: r#"{"query":"checkout failure refined","k":16}"#.into(),
+                        },
+                    },
+                ],
+                finish_reason: "tool_calls".into(),
+            },
+            // After bound, tools are closed — any further search is not offered.
+            ChatCompletion {
+                content: String::new(),
+                tool_calls: vec![ToolCallMsg {
+                    id: "c3".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: crate::log_analysis::SEARCH_LOGS.into(),
+                        arguments: r#"{"query":"checkout again"}"#.into(),
+                    },
+                }],
+                finish_reason: "tool_calls".into(),
+            },
+            ChatCompletion {
+                content: "Bounded synthesis from host evidence.".into(),
+                tool_calls: vec![],
+                finish_reason: "stop".into(),
+            },
+        ]);
+        let mut history = vec![];
+        let context = LogExplorerTurnContext::new(
+            "win-loop",
+            report.corpus_id.as_str(),
+            format!("corpusId={}", report.corpus_id),
+        )
+        .unwrap();
+        // Focused cue (job id / digits) must NOT engage broad triage — that path
+        // truncates parallel deepening to a single search_logs and never reaches
+        // a second same-evidence observation.
+        let events = run_agent_turn(
+            &backend,
+            &mut host,
+            "What caused the xyz checkout failure for job-7f3a?",
+            &mut history,
+            &AgentOptions {
+                session_id: "bound-loop".into(),
+                log_explorer_context: Some(context),
+                max_rounds: 12,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let trail = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::SearchTrail { steps } => Some(steps.join("|")),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("||");
+        assert!(
+            trail.contains("linked_search_non_progress")
+                || trail.contains("linked_search_forced_synthesis"),
+            "expected non-progress bound in trail: {trail}"
+        );
+        let search_finished = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    StreamEvent::Tool {
+                        name,
+                        phase: crate::events::ToolPhase::Finished,
+                        ok: Some(true),
+                        ..
+                    } if name == crate::log_analysis::SEARCH_LOGS
+                )
+            })
+            .count();
+        assert!(
+            search_finished <= 3,
+            "search_logs must be host-bounded, got {search_finished}; trail={trail}"
+        );
+        assert!(
+            history
+                .iter()
+                .any(|m| m.role == Role::Tool && m.content.contains("HOST BOUND")),
+            "model must see HOST BOUND stop reason"
+        );
+    }
+
     /// Productive search then a second search with the same citeable set (changed
     /// args) is host-stopped. Uses host.execute (real tool path) + tracker so we
     /// do not depend on synthesis closing tools after the first hit.
