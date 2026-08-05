@@ -1341,6 +1341,7 @@ fn emit_context_provenance_before_provider(
     connector_tool_names: &[String],
     tools_disabled: bool,
     applied_skill_ids: &[String],
+    context_plan: Option<&crate::context_plan::ContextPlan>,
 ) {
     use crate::turn_trace::{ContextProvenanceAuthority, DeveloperDetailDraft};
 
@@ -1423,6 +1424,28 @@ fn emit_context_provenance_before_provider(
         }),
         ContextProvenanceAuthority::DeterministicHost,
     ));
+
+    // 3b. Deterministic multi-source context plan (before provider).
+    if let Some(plan) = context_plan {
+        trace.record_developer(DeveloperDetailDraft::context_provenance(
+            round,
+            "context_plan",
+            "ready",
+            serde_json::json!({
+                "strategy": plan.strategy,
+                "model_relevance_used": plan.model_relevance_used,
+                "relevance_failed_closed": plan.relevance_failed_closed,
+                "included_chars": plan.included_chars,
+                "global_char_budget": plan.global_char_budget,
+                "context_used_summary": plan.context_used_summary,
+                "candidate_count": plan.candidates.len(),
+                "included_ids": plan.included().map(|c| c.id.clone()).collect::<Vec<_>>(),
+                "plan": plan.to_developer_json(),
+                "side_effects_forbidden": plan.side_effects_forbidden,
+            }),
+            ContextProvenanceAuthority::DeterministicHost,
+        ));
+    }
 
     // 4. Ambient memory
     if ambient_attempted {
@@ -2815,8 +2838,14 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
         // Ambient memory injection (MEMORY.md §4) — after compaction, tight budget.
         // Must re-enforce the hard total budget: ambient can add ~1.5k and would
         // otherwise send an over-budget context when prepare left us near the ceiling.
+        //
+        // Deterministic context plan runs first for ordinary chat: inventory
+        // considers **all** eligible memory kinds (including Preference) and never
+        // applies model-chosen `recall_memory` kinds filters. Plan trail steps are
+        // host-authored; optional model relevance is not applied on this path.
         let mut ambient_snapshot: Option<AmbientProvenanceSnapshot> = None;
         let mut ambient_attempted = false;
+        let mut turn_context_plan: Option<crate::context_plan::ContextPlan> = None;
         if !linked_turn && opts.ambient_recall_enabled && linked_required_evidence_satisfied {
             if let Some(store) = host.durable_memory_store() {
                 ambient_attempted = true;
@@ -2825,6 +2854,56 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                     .map(|m| m.content.as_str())
                     .collect::<Vec<_>>()
                     .join("\n");
+                let now = crate::embed::now_unix_secs();
+                let memory_hits = crate::context_plan::collect_memory_hits_unfiltered(
+                    store.as_ref(),
+                    user_text,
+                    24,
+                    now,
+                );
+                let memory_records = crate::context_plan::collect_memory_records_unfiltered(
+                    store.as_ref(),
+                    now,
+                    200,
+                );
+                let pack_entries = host
+                    .active_session_context()
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.list().ok())
+                    .unwrap_or_default();
+                let plan_snap = crate::context_plan::ContextInventorySnapshot {
+                    session_id: opts.session_id.clone(),
+                    turn_id: opts.session_id.clone(),
+                    user_text: user_text.to_string(),
+                    history_text: hist_text.clone(),
+                    history_message_count: history.len(),
+                    history_keep: keep,
+                    history_compacted: prepared_compacted
+                        || model_ctx
+                            .iter()
+                            .any(|m| m.content.contains("Compacted earlier conversation")),
+                    memory_hits,
+                    memory_records,
+                    attachments: crate::context_plan::attachments_from_entries(&pack_entries),
+                    workspace_hits: Vec::new(),
+                    pinned_skills: Vec::new(),
+                    optional_connectors: Vec::new(),
+                    linked_corpus_id: None,
+                    explorer_viewport: None,
+                    user_selection: None,
+                    linked_turn: false,
+                };
+                let plan = crate::context_plan::build_context_plan(
+                    &plan_snap,
+                    crate::context_plan::ContextPlanBudget::default(),
+                    crate::context_plan::RelevanceStrategy::DeterministicOnly,
+                );
+                for step in plan.trail_steps() {
+                    trail.push(step);
+                }
+                turn_context_plan = Some(plan);
+
                 let budget = crate::memory::AmbientBudget::default();
                 if let Ok(inj) = crate::memory::inject_memory_context_with_embed(
                     store.as_ref(),
@@ -2833,7 +2912,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                     true,
                     budget,
                     crate::embed::HybridWeights::default(),
-                    crate::embed::now_unix_secs(),
+                    now,
                     host.embed_backend().as_deref(),
                 ) {
                     ambient_snapshot = Some(AmbientProvenanceSnapshot::from_injection(&inj));
@@ -2862,6 +2941,68 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                 out,
                                 format!(
                                     "Model context exceeds the hard budget after ambient recall ({e})."
+                                ),
+                            );
+                        }
+                        prepared_truncated |= estimate_context_chars(&model_ctx) < before_fit;
+                    }
+                }
+
+                // If ambient hybrid recall missed a plan-Included Preference but
+                // the deterministic plan selected it, inject a bounded host note
+                // so ordinary chat is not silent on eligible kinds.
+                if let Some(plan) = turn_context_plan.as_ref() {
+                    let already = model_ctx
+                        .iter()
+                        .map(|m| m.content.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        .to_lowercase();
+                    let mut extra_lines: Vec<String> = Vec::new();
+                    for c in plan.included().filter(|c| {
+                        c.family == crate::context_plan::ContextSourceFamily::DurableMemory
+                            && c.memory_kind.as_deref() == Some("preference")
+                    }) {
+                        let snip = c.snippet.clone().unwrap_or_default();
+                        if snip.is_empty() {
+                            continue;
+                        }
+                        if already.contains(&snip.to_lowercase())
+                            || already.contains(&c.label.to_lowercase())
+                        {
+                            continue;
+                        }
+                        extra_lines.push(format!(
+                            "- [preference] {} — {} ({})",
+                            c.label,
+                            snip.chars().take(160).collect::<String>(),
+                            c.id
+                        ));
+                    }
+                    if !extra_lines.is_empty() {
+                        let block = format!(
+                            "Relevant durable preferences (host inventory; all kinds eligible):\n{}",
+                            extra_lines.join("\n")
+                        );
+                        model_ctx.insert(
+                            0,
+                            ChatMessage {
+                                role: Role::System,
+                                content: block,
+                                tool_call_id: None,
+                                tool_calls: None,
+                            },
+                        );
+                        trail.push(format!(
+                            "context_plan_preference_inject:{}",
+                            extra_lines.len()
+                        ));
+                        let before_fit = estimate_context_chars(&model_ctx);
+                        if let Err(e) = enforce_hard_context_budget(&mut model_ctx, char_budget) {
+                            return terminal_context_too_long(
+                                out,
+                                format!(
+                                    "Model context exceeds the hard budget after preference inventory inject ({e})."
                                 ),
                             );
                         }
@@ -3005,6 +3146,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                     &connector_tool_names,
                     tools_disabled,
                     &opts.applied_skill_ids,
+                    turn_context_plan.as_ref(),
                 );
             }
             let result = match within_turn_deadline(

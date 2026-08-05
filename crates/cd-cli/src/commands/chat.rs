@@ -9,7 +9,9 @@
 //! `cd_core::turn_trace` data the workflow call already produced rather
 //! than deriving anything of its own.
 
-use crate::activity_render::{activity_lines, project_turn_activity, render_human_summary};
+use crate::activity_render::{
+    activity_lines, context_used_from_events, project_turn_activity, render_human_summary,
+};
 use crate::cli::{ActivityLevel, ChatArgs, TraceLevel};
 use crate::config::{ColorMode, OutputFormat};
 use crate::envelope::{
@@ -393,6 +395,10 @@ pub async fn run(
             if let Some(record) = &activity_record {
                 // Keep answer stdout clean; activity summary on stderr.
                 eprint!("{}", render_human_summary(record));
+            }
+            // User-facing “Context used” from host SearchTrail (ordinary chat plan).
+            if let Some(summary) = context_used_from_events(&outcome.events) {
+                eprintln!("Context used: {summary}");
             }
         }
         OutputFormat::Jsonl => {

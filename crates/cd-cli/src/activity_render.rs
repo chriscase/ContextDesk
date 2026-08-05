@@ -128,6 +128,22 @@ pub fn causal_phase_labels(record: &TurnActivityRecord) -> Vec<String> {
     record.events.iter().map(|e| e.label.clone()).collect()
 }
 
+/// Extract the host "Context used" summary line from stream events (SearchTrail).
+///
+/// Pure projection over the same trail `run_agent_turn` emits — no second plan.
+pub fn context_used_from_events(events: &[StreamEvent]) -> Option<String> {
+    for event in events {
+        if let StreamEvent::SearchTrail { steps } = event {
+            for step in steps {
+                if let Some(rest) = step.strip_prefix("context_used:") {
+                    return Some(rest.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +401,23 @@ mod tests {
         let human = render_human_summary(&record);
         assert!(human.contains("activity:"));
         assert!(!human.contains("sk-"));
+    }
+
+    #[test]
+    fn context_used_summary_is_projected_from_search_trail() {
+        let events = vec![
+            StreamEvent::SearchTrail {
+                steps: vec![
+                    "context_plan:strategy=DeterministicOnly;included=1".into(),
+                    "context_used:durable_memory/preference:cobalt-window".into(),
+                ],
+            },
+            StreamEvent::TurnCompleted {
+                reason: "stop".into(),
+            },
+        ];
+        let summary = context_used_from_events(&events).expect("summary");
+        assert!(summary.contains("cobalt-window"), "{summary}");
     }
 
     /// Compaction signal on the shipped projection path: agent emits

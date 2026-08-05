@@ -20,3 +20,10 @@ pub mod session;
 pub mod timezone;
 pub mod tools;
 pub mod turn;
+
+/// Re-export core context plan types at the shared workflow boundary.
+pub use cd_core::context_plan::{
+    apply_model_relevance, build_context_plan, CandidateDisposition, ContextCandidate,
+    ContextInventorySnapshot, ContextPlan, ContextPlanBudget, ContextReasonCode,
+    ContextSourceFamily, RelevanceStrategy,
+};
