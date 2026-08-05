@@ -427,4 +427,52 @@ mod tests {
         assert_eq!(cites.len(), 3);
         assert!(cites.iter().all(|c| c.0.starts_with("log_event:")));
     }
+
+    #[test]
+    fn host_bound_model_message_is_plain_text_not_json_envelope() {
+        let mut t = LinkedSearchProgressTracker::new();
+        let evidence = vec![ev(1, "a.log")];
+        t.observe_search_logs(&json!({"query": "a"}), &evidence, true);
+        match t.observe_search_logs(&json!({"query": "b"}), &evidence, true) {
+            BoundDecision::Stop {
+                model_message,
+                reason_code,
+                trail_step,
+            } => {
+                // Tool channel appends this as plain prose after `---` — must not
+                // be a JSON/JSONL object that would poison structured parsers.
+                assert!(model_message.starts_with("HOST BOUND:"));
+                assert!(!model_message.trim_start().starts_with('{'));
+                assert!(!model_message.contains("\n{"));
+                assert!(reason_code.starts_with("linked_search_non_progress"));
+                // Trail step may include fingerprint metadata for host audit; the
+                // model-facing message must not embed raw source paths as JSON keys.
+                assert!(trail_step.starts_with(reason_code));
+            }
+            other => panic!("expected Stop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cross_source_union_grows_when_new_source_appears() {
+        let mut t = LinkedSearchProgressTracker::new();
+        let api = vec![ev(1, "api.log"), ev(2, "api.log")];
+        assert!(matches!(
+            t.observe_search_logs(&json!({"query": "timeout"}), &api, true),
+            BoundDecision::Allow { .. }
+        ));
+        // Same seq numbers on a different source are new citeable identities.
+        let worker = vec![ev(1, "worker.log"), ev(2, "worker.log")];
+        match t.observe_search_logs(&json!({"query": "timeout", "service": "worker"}), &worker, true)
+        {
+            BoundDecision::Allow {
+                new_event_count,
+                union_size,
+            } => {
+                assert_eq!(new_event_count, 2);
+                assert_eq!(union_size, 4);
+            }
+            other => panic!("cross-source refinement must continue: {other:?}"),
+        }
+    }
 }

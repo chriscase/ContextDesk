@@ -71,6 +71,40 @@ pub const MAX_ACTIVITY_EVIDENCE_KIND_CHARS: usize = 64;
 /// Opaque evidence identifiers are fixed-size digests, never source paths.
 const OPAQUE_EVIDENCE_ID_HEX_CHARS: usize = 24;
 
+/// Extract stable host-policy codes from a search trail for Activity projection.
+///
+/// Keeps only known host bound / forced-synthesis prefixes. Free-form step text,
+/// fingerprints, and source paths are dropped (metadata-only audit).
+pub fn host_policy_codes_from_trail_steps(steps: &[String]) -> Vec<String> {
+    let mut codes = Vec::new();
+    for step in steps {
+        let code = if let Some(rest) = step.strip_prefix("linked_search_forced_synthesis:") {
+            // Keep the forced-synthesis marker + stable reason code (before any ';').
+            let reason = rest.split(';').next().unwrap_or(rest).trim();
+            if reason.is_empty() {
+                "linked_search_forced_synthesis".into()
+            } else {
+                format!("linked_search_forced_synthesis:{reason}")
+            }
+        } else if step.starts_with("linked_search_non_progress") {
+            // `linked_search_non_progress_*:attempts=…` → reason code only
+            step.split(':').next().unwrap_or(step).to_string()
+        } else if step == "linked_search_non_progress_skipped_mid_batch"
+            || step.starts_with("linked_search_non_progress_ignored_tool_calls")
+        {
+            step.split(':').next().unwrap_or(step).to_string()
+        } else if step == "linked_search_logs_zero_results" {
+            step.clone()
+        } else {
+            continue;
+        };
+        if !codes.iter().any(|c| c == &code) {
+            codes.push(code);
+        }
+    }
+    codes
+}
+
 /// Where a step's authority comes from.
 ///
 /// This is the distinction the inspector exists to make visible: a reader
@@ -888,6 +922,7 @@ impl ActivityRecorder {
                             t
                         })
                         .collect(),
+                    host_policy_codes: host_policy_codes_from_trail_steps(steps),
                 }),
                 StreamEvent::Citation { source_id, .. } => Some(TracedHostEvent::Citation {
                     source_id: source_id.clone(),
@@ -941,16 +976,26 @@ impl ActivityRecorder {
                 }
                 StreamEvent::Error { code, message } => {
                     let redacted = crate::redact::scrub_secrets(message);
+                    let is_search_bound = code.starts_with("linked_search_non_progress");
                     self.push(ActivityEvent {
                         turn_id: String::new(),
                         operation_id: format!("error-{code}"),
                         seq: 0,
                         elapsed_ms: None,
                         phase: ActivityPhase::Completed,
-                        status: ActivityStatus::Failed,
+                        // Non-progress bound is a successful host policy gate, not a turn failure.
+                        status: if is_search_bound {
+                            ActivityStatus::Ok
+                        } else {
+                            ActivityStatus::Failed
+                        },
                         origin: ActivityOrigin::DeterministicHost,
                         determinism: Determinism::Deterministic,
-                        label: format!("Error: {code}"),
+                        label: if is_search_bound {
+                            format!("Host search bound: {code}")
+                        } else {
+                            format!("Error: {code}")
+                        },
                         detail: Some(bound_chars(&redacted, MAX_ACTIVITY_DETAIL_CHARS)),
                         trigger: ActivityTrigger::HostPolicy,
                         scope: self.scope.clone(),
@@ -1075,6 +1120,7 @@ impl ActivityRecorder {
             TracedHostEvent::SearchTrail {
                 step_count,
                 context_plan_steps,
+                host_policy_codes,
             } => {
                 let context_used = context_plan_steps
                     .iter()
@@ -1083,17 +1129,32 @@ impl ActivityRecorder {
                 let has_plan = context_plan_steps
                     .iter()
                     .any(|s| s.starts_with("context_plan:"));
+                let has_bound = host_policy_codes
+                    .iter()
+                    .any(|c| c.contains("non_progress") || c.contains("forced_synthesis"));
                 let label = if let Some(summary) = context_used.as_ref() {
                     format!("Context used: {summary}")
                 } else if has_plan {
                     format!("Context plan ({step_count} trail step(s))")
+                } else if has_bound {
+                    format!("Host search bound ({step_count} trail step(s))")
                 } else {
                     format!("Retrieval trail ({step_count} step(s))")
                 };
-                let detail = if context_plan_steps.is_empty() {
+                let mut detail_parts = Vec::new();
+                if !context_plan_steps.is_empty() {
+                    detail_parts.push(context_plan_steps.join(" | "));
+                }
+                if !host_policy_codes.is_empty() {
+                    detail_parts.push(format!("host_policy={}", host_policy_codes.join(",")));
+                }
+                let detail = if detail_parts.is_empty() {
                     None
                 } else {
-                    Some(context_plan_steps.join(" | "))
+                    Some(bound_chars(
+                        &detail_parts.join(" | "),
+                        MAX_ACTIVITY_DETAIL_CHARS,
+                    ))
                 };
                 self.push(ActivityEvent {
                     turn_id: String::new(),
@@ -1102,8 +1163,16 @@ impl ActivityRecorder {
                     elapsed_ms,
                     phase: ActivityPhase::Completed,
                     status: ActivityStatus::Ok,
-                    origin: ActivityOrigin::RepeatableHeuristic,
-                    determinism: Determinism::Repeatable,
+                    origin: if has_bound {
+                        ActivityOrigin::DeterministicHost
+                    } else {
+                        ActivityOrigin::RepeatableHeuristic
+                    },
+                    determinism: if has_bound {
+                        Determinism::Deterministic
+                    } else {
+                        Determinism::Repeatable
+                    },
                     label,
                     detail,
                     trigger: ActivityTrigger::HostPolicy,
@@ -1168,23 +1237,34 @@ impl ActivityRecorder {
                 privacy: PrivacyClass::Metadata,
                 context: None,
             }),
-            TracedHostEvent::Error { code, message } => self.push(ActivityEvent {
-                turn_id: String::new(),
-                operation_id: format!("error-{code}"),
-                seq: 0,
-                elapsed_ms,
-                phase: ActivityPhase::Completed,
-                status: ActivityStatus::Failed,
-                origin: ActivityOrigin::DeterministicHost,
-                determinism: Determinism::Deterministic,
-                label: format!("Error: {code}"),
-                detail: Some(bound_chars(message, MAX_ACTIVITY_DETAIL_CHARS)),
-                trigger: ActivityTrigger::HostPolicy,
-                scope: self.scope.clone(),
-                evidence: Vec::new(),
-                privacy: PrivacyClass::Metadata,
-                context: None,
-            }),
+            TracedHostEvent::Error { code, message } => {
+                let is_search_bound = code.starts_with("linked_search_non_progress");
+                self.push(ActivityEvent {
+                    turn_id: String::new(),
+                    operation_id: format!("error-{code}"),
+                    seq: 0,
+                    elapsed_ms,
+                    phase: ActivityPhase::Completed,
+                    status: if is_search_bound {
+                        ActivityStatus::Ok
+                    } else {
+                        ActivityStatus::Failed
+                    },
+                    origin: ActivityOrigin::DeterministicHost,
+                    determinism: Determinism::Deterministic,
+                    label: if is_search_bound {
+                        format!("Host search bound: {code}")
+                    } else {
+                        format!("Error: {code}")
+                    },
+                    detail: Some(bound_chars(message, MAX_ACTIVITY_DETAIL_CHARS)),
+                    trigger: ActivityTrigger::HostPolicy,
+                    scope: self.scope.clone(),
+                    evidence: Vec::new(),
+                    privacy: PrivacyClass::Metadata,
+                    context: None,
+                });
+            }
             TracedHostEvent::TurnCompleted { reason } => {
                 let status = status_for_turn_reason(reason);
                 self.push(ActivityEvent {
@@ -1457,6 +1537,97 @@ mod tests {
         assert_eq!(record.detail_level, ActivityDetailLevel::Summary);
         assert_eq!(record.dropped_events, 0);
         assert!(!record.is_truncated());
+    }
+
+    #[test]
+    fn host_policy_codes_extract_bound_without_fingerprints_or_paths() {
+        let steps = vec![
+            "started".into(),
+            "tool:search_logs".into(),
+            "linked_search_non_progress_same_evidence_changed_args:attempts=2;union=7;fp=1\u{1f}/tmp/secret.log".into(),
+            "linked_search_forced_synthesis:linked_search_non_progress_same_evidence_changed_args".into(),
+        ];
+        let codes = host_policy_codes_from_trail_steps(&steps);
+        assert!(
+            codes
+                .iter()
+                .any(|c| c == "linked_search_non_progress_same_evidence_changed_args"),
+            "{codes:?}"
+        );
+        assert!(
+            codes.iter().any(|c| c.starts_with("linked_search_forced_synthesis:")),
+            "{codes:?}"
+        );
+        let joined = codes.join("|");
+        assert!(
+            !joined.contains("secret") && !joined.contains("/tmp") && !joined.contains("fp="),
+            "activity codes must not carry path/fingerprint payload: {joined}"
+        );
+    }
+
+    #[test]
+    fn activity_projects_search_bound_error_and_trail_policy_codes() {
+        let mut rec = ActivityRecorder::new(
+            "turn-bound",
+            "session-bound",
+            DataScope::conversation(),
+            ActivityDetailLevel::Summary,
+        );
+        rec.record_stream_events(&[
+            StreamEvent::Error {
+                code: "linked_search_non_progress_zero_hits".into(),
+                message: "Host bound: further search_logs blocked for this turn — no new host-verified citeable events.".into(),
+            },
+            StreamEvent::SearchTrail {
+                steps: vec![
+                    "started".into(),
+                    "linked_search_non_progress_zero_hits:attempts=2;union=0;fp=empty".into(),
+                    "linked_search_forced_synthesis:linked_search_non_progress_zero_hits".into(),
+                ],
+            },
+            StreamEvent::TurnCompleted {
+                reason: "stop".into(),
+            },
+        ]);
+        let record = rec.finish(ActivityStatus::Ok, 10);
+        let labels: Vec<_> = record.events.iter().map(|e| e.label.as_str()).collect();
+        assert!(
+            labels
+                .iter()
+                .any(|l| l.contains("Host search bound: linked_search_non_progress_zero_hits")),
+            "expected bound Error activity row: {labels:?}"
+        );
+        let trail = record
+            .events
+            .iter()
+            .find(|e| {
+                e.detail
+                    .as_deref()
+                    .is_some_and(|d| d.starts_with("host_policy="))
+            })
+            .expect("trail with host_policy= detail");
+        let detail = trail.detail.as_deref().unwrap_or("");
+        assert!(
+            trail.label.contains("Host search bound"),
+            "label={}",
+            trail.label
+        );
+        assert!(
+            detail.contains("linked_search_non_progress_zero_hits"),
+            "detail={detail}"
+        );
+        assert!(
+            detail.contains("linked_search_forced_synthesis"),
+            "detail={detail}"
+        );
+        assert!(
+            !detail.contains("fp=empty") && !detail.contains("attempts="),
+            "must not leak trail payload into activity detail: {detail}"
+        );
+        // Shared contract JSON (GUI + CLI both consume TurnActivityRecord).
+        let json = serde_json::to_string(&record).expect("serialize activity");
+        assert!(json.contains("linked_search_non_progress_zero_hits"));
+        assert!(json.contains("host_policy="));
     }
 }
 

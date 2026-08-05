@@ -850,14 +850,18 @@ pub enum TracedHostEvent {
     ///
     /// Full free-form step text is omitted for privacy. Host-authored
     /// **context plan** metadata steps (`context_plan:`, `context_used:`,
-    /// `context_included:`, `context_plan_preference_inject:`) are retained
-    /// bounded so Activity / CLI can project truthful Context used without a
-    /// second plan build.
+    /// `context_included:`, `context_plan_preference_inject:`) and stable host
+    /// policy codes are retained bounded so Activity / CLI can project both
+    /// truthful context use and deterministic search bounds without a second
+    /// plan build.
     SearchTrail {
         /// Number of host-reported steps (all steps, including omitted text).
         step_count: usize,
         /// Bounded host context-plan metadata steps only (no free-form tool prose).
         context_plan_steps: Vec<String>,
+        /// Stable host-policy codes extracted from steps (no search text / paths).
+        /// Examples: `linked_search_non_progress_zero_hits`, `linked_search_forced_synthesis`.
+        host_policy_codes: Vec<String>,
     },
     /// Citation identity without display/source content.
     Citation {
@@ -1264,6 +1268,7 @@ impl RecordingTurnTrace {
                         t
                     })
                     .collect(),
+                host_policy_codes: crate::activity::host_policy_codes_from_trail_steps(steps),
             },
             StreamEvent::Citation { source_id, .. } => TracedHostEvent::Citation {
                 source_id: source_id.clone(),
