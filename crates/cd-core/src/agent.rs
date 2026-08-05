@@ -2466,7 +2466,6 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
         }
     }
     let linked_prior_history = linked_turn.then(|| linked_safe_prior_history(history));
-    let current_user_history_index = history.len();
     history.push(ChatMessage {
         role: Role::User,
         content: user_text.into(),
@@ -2885,12 +2884,13 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
             // tool results produced in this turn, never against the current
             // question itself. Otherwise asking for a memory by its title
             // incorrectly suppresses the content needed to answer it.
-            let echo_history_text: String = history
+            let current_user_model_index = model_ctx
+                .iter()
+                .rposition(|message| message.role == Role::User);
+            let echo_history_text: String = model_ctx
                 .iter()
                 .enumerate()
-                .filter(|(index, message)| {
-                    *index != current_user_history_index && message.role != Role::System
-                })
+                .filter(|(index, _)| Some(*index) != current_user_model_index)
                 .map(|(_, message)| message.content.as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
