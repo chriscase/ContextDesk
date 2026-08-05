@@ -94,14 +94,24 @@ Synthetic / public fixtures only. No private or company corpora.
 
 ---
 
-## Exact-head CLI consolidator
+## Exact-head CLI consolidator vs full gate
+
+| Verdict | Meaning |
+|---------|---------|
+| `REHEARSAL_PASS` | Consolidator (`exact_head_cli_acceptance.sh`) alone succeeded |
+| `FULL_GATE_PASS` | Top-level gate: unit tests + cargo labs + consolidator all ok |
 
 ```bash
-# From this worktree
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}"  # shared target OK
-export EXACT_HEAD_OUT=/path/to/scratch/cli-accept   # capture steps
+# Full fail-closed gate (stops on first failure) — preferred CI/accept entry
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}"
+export EXACT_HEAD_OUT=/path/to/scratch/cli-accept
 export EXACT_HEAD_KEEP=1
+./scripts/exact_head_full_gate.sh
+# → FULL_GATE_PASS  (never upgrades REHEARSAL_PASS alone)
+
+# Consolidator only (narrower)
 ./scripts/exact_head_cli_acceptance.sh
+# → REHEARSAL_PASS
 ```
 
 The script:
