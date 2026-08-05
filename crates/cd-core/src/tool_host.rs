@@ -916,6 +916,10 @@ pub struct ToolHost {
     harvest_db_path: Option<PathBuf>,
     /// When true, register Confluence HardWrite tools (#326 PR7). Default false.
     confluence_write_enabled: bool,
+    /// Process-local create idempotency: identical create payloads reuse the
+    /// first successful remote response (no second POST). Cleared on host drop.
+    confluence_create_idempotency:
+        std::collections::HashMap<String, confluence_ro::ConfluencePageMeta>,
     /// Base dir for session context packs (`…/.contextdesk`). #341
     session_context_base: Option<PathBuf>,
     /// Active chat session id for session-scoped context search/read. #341
@@ -1086,6 +1090,7 @@ impl ToolHost {
             edge_store: None,
             harvest_db_path: None,
             confluence_write_enabled: false,
+            confluence_create_idempotency: std::collections::HashMap::new(),
             session_context_base: None,
             active_session_id: None,
             durable_memory_enabled: false,
@@ -5605,6 +5610,22 @@ impl ToolHost {
                 CoreError::Message("confluence_create_page requires body_storage".into())
             })?;
         let parent_id = args.get("parent_id").and_then(|v| v.as_str());
+        let idem_key = confluence_create_idempotency_key(space, title, body_storage, parent_id);
+        if let Some(cached) = self.confluence_create_idempotency.get(&idem_key).cloned() {
+            let raw = serde_json::to_string_pretty(&cached).unwrap_or_else(|_| "{}".into());
+            return Ok((
+                true,
+                format!(
+                    "idempotent create reuse page {} (no second remote write)",
+                    cached.id
+                ),
+                raw,
+                cached
+                    .url
+                    .clone()
+                    .or(Some(format!("confluence:{}", cached.id))),
+            ));
+        }
         let cfg = self
             .confluence
             .as_ref()
@@ -5621,6 +5642,8 @@ impl ToolHost {
         let meta =
             confluence_ro::create_page(&cfg, space, title, body_storage, parent_id, &auth, &policy)
                 .await?;
+        self.confluence_create_idempotency
+            .insert(idem_key, meta.clone());
         let raw = serde_json::to_string_pretty(&meta).unwrap_or_else(|_| "{}".into());
         if let Some(log) = &self.audit {
             let _ = log.log(
@@ -6232,6 +6255,23 @@ fn mcp_server_config_from_connector(
     })
 }
 
+/// Process-local create idempotency key (space + title + body + parent).
+fn confluence_create_idempotency_key(
+    space: &str,
+    title: &str,
+    body_storage: &str,
+    parent_id: Option<&str>,
+) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    space.hash(&mut hasher);
+    title.hash(&mut hasher);
+    body_storage.hash(&mut hasher);
+    parent_id.unwrap_or("").hash(&mut hasher);
+    format!("create:{:x}", hasher.finish())
+}
+
 fn risk_for(side: ToolSideEffect, name: &str) -> &'static str {
     match side {
         ToolSideEffect::Read => "local",
@@ -6377,6 +6417,68 @@ fn resolve_write_target(name: &str, args: &Value, memory_dir: &std::path::Path) 
     }
 }
 
+/// Human-readable preview for Confluence create/update HardWrite confirmation.
+fn confluence_write_preview(tool_name: &str, args: &Value) -> String {
+    let op = if tool_name == names::CONFLUENCE_CREATE_PAGE {
+        "create"
+    } else {
+        "update"
+    };
+    let space = args
+        .get("space")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(from page)");
+    let title = args
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(unchanged)");
+    let page_id = args.get("page_id").and_then(|v| v.as_str());
+    let version = args.get("version").and_then(|v| v.as_i64());
+    let parent_id = args.get("parent_id").and_then(|v| v.as_str());
+    let body = args
+        .get("body_storage")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let plain = crate::confluence_ro::strip_tags(body);
+    let plain_preview: String = plain.chars().take(1_200).collect();
+    let truncated = plain.chars().count() > 1_200;
+    let mut out = String::from("--- Confluence write preview (type WRITE to confirm) ---\n");
+    out.push_str(&format!("operation: {op}\n"));
+    out.push_str(&format!("classification: {op}_page\n"));
+    if let Some(id) = page_id {
+        out.push_str(&format!("page_id: {id}\n"));
+    }
+    out.push_str(&format!("space: {space}\n"));
+    out.push_str(&format!("title: {title}\n"));
+    if let Some(v) = version {
+        out.push_str(&format!(
+            "optimistic_version: {v} → next {}\n",
+            v.saturating_add(1)
+        ));
+    }
+    if let Some(p) = parent_id {
+        out.push_str(&format!("parent_id: {p}\n"));
+    }
+    out.push_str(&format!(
+        "body_storage_bytes: {}\nbody_plain_chars: {}\n",
+        body.len(),
+        plain.chars().count()
+    ));
+    out.push_str("--- proposed body (plain, truncated) ---\n");
+    out.push_str(&plain_preview);
+    if truncated {
+        out.push_str("\n…[preview truncated]");
+    }
+    out.push_str(
+        "\n---\nRemote HardWrite: no session grant; cancel or Deny performs zero network writes.\n",
+    );
+    if out.len() > 4_000 {
+        format!("{}…", crate::text::truncate_bytes(&out, 4_000))
+    } else {
+        out
+    }
+}
+
 /// Human-readable draft shown in the permission modal for SoftWrite tools.
 fn skill_draft_preview(args: &Value) -> String {
     let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("skill");
@@ -6399,6 +6501,11 @@ fn skill_draft_preview(args: &Value) -> String {
 }
 
 fn preview_args(tool_name: &str, args: &Value, host_investigation_id: Option<&str>) -> String {
+    // Human-readable Confluence HardWrite preview: create vs update classified
+    // from the tool name + arguments (never from model prose alone).
+    if tool_name == names::CONFLUENCE_CREATE_PAGE || tool_name == names::CONFLUENCE_UPDATE_PAGE {
+        return confluence_write_preview(tool_name, args);
+    }
     // Dedicated propose_report_section SoftWrite preview (#532) — never the
     // memory formatter and never the finding preview.
     if tool_name == crate::investigations::PROPOSE_REPORT_SECTION_TOOL {

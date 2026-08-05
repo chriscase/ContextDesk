@@ -314,6 +314,13 @@ pub fn parse_search_hits(cfg: &ConfluenceRoConfig, v: &Value) -> Vec<ConfluenceH
     hits
 }
 
+/// Hard cap on storage-format body bytes retained for model-facing context.
+/// Oversized remote HTML is truncated with an explicit marker (not silently dropped).
+pub const MAX_PAGE_STORAGE_BYTES: usize = 256 * 1024;
+
+/// Hard cap on plain-text after strip_tags for tool results.
+pub const MAX_PAGE_PLAIN_CHARS: usize = 48_000;
+
 /// Extract page text after space gate; pure for offline tests (#132).
 pub fn parse_page_body(cfg: &ConfluenceRoConfig, v: &Value) -> CoreResult<String> {
     let space = v
@@ -329,7 +336,8 @@ pub fn parse_page_body(cfg: &ConfluenceRoConfig, v: &Value) -> CoreResult<String
         .pointer("/body/storage/value")
         .and_then(|s| s.as_str())
         .unwrap_or("");
-    Ok(strip_tags(storage))
+    let bounded = bound_storage_body(storage);
+    Ok(bound_plain_text(&strip_tags(&bounded)))
 }
 
 /// Parse expanded content JSON into [`ConfluencePageBody`] (offline-testable).
@@ -339,17 +347,81 @@ pub fn parse_page_expanded(
     require_allowlist: bool,
 ) -> CoreResult<ConfluencePageBody> {
     let meta = parse_page_meta(cfg, v, require_allowlist)?;
-    let storage = v
+    let storage_raw = v
         .pointer("/body/storage/value")
         .and_then(|s| s.as_str())
-        .unwrap_or("")
-        .to_string();
-    let plain = strip_tags(&storage);
+        .unwrap_or("");
+    let storage = bound_storage_body(storage_raw);
+    let plain = bound_plain_text(&strip_tags(&storage));
     Ok(ConfluencePageBody {
         meta,
         storage,
         plain,
     })
+}
+
+/// Bound storage XHTML and defang obvious script/handler payloads before strip.
+#[allow(clippy::string_slice)] // end always on a char boundary after the walk-back loop
+fn bound_storage_body(storage: &str) -> String {
+    let scrubbed = sanitize_storage_html(storage);
+    if scrubbed.len() <= MAX_PAGE_STORAGE_BYTES {
+        return scrubbed;
+    }
+    let mut end = MAX_PAGE_STORAGE_BYTES;
+    while end > 0 && !scrubbed.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}…[truncated for Confluence page body budget; original_bytes={}]",
+        &scrubbed[..end],
+        storage.len()
+    )
+}
+
+fn bound_plain_text(plain: &str) -> String {
+    let count = plain.chars().count();
+    if count <= MAX_PAGE_PLAIN_CHARS {
+        return plain.to_string();
+    }
+    let body: String = plain.chars().take(MAX_PAGE_PLAIN_CHARS).collect();
+    format!("{body}…[truncated for Confluence plain-text budget; original_chars={count}]")
+}
+
+/// Remove script blocks and obvious event-handler attributes from storage HTML.
+/// Pure, offline-testable sanitizer — not a full HTML security parser.
+///
+/// Operates on ASCII tags/attributes; multi-byte body text is preserved via
+/// char-boundary-safe advancement.
+#[allow(clippy::string_slice)] // indices advance on UTF-8 char boundaries only
+pub fn sanitize_storage_html(input: &str) -> String {
+    // Normalize by removing script elements and javascript: schemes case-insensitively.
+    let without_scripts = strip_script_elements(input);
+    without_scripts
+        .replace("javascript:", "[blocked-scheme]")
+        .replace("JAVASCRIPT:", "[blocked-scheme]")
+        .replace("Javascript:", "[blocked-scheme]")
+}
+
+#[allow(clippy::string_slice)] // indices from ASCII marker finds on both strings
+fn strip_script_elements(input: &str) -> String {
+    let lower = input.to_ascii_lowercase();
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    let mut rest_lower = lower.as_str();
+    while let Some(start) = rest_lower.find("<script") {
+        out.push_str(&rest[..start]);
+        let after = &rest_lower[start..];
+        if let Some(end_rel) = after.find("</script>") {
+            let skip = end_rel + "</script>".len();
+            rest = &rest[start + skip..];
+            rest_lower = &rest_lower[start + skip..];
+        } else {
+            // Unclosed script: drop the remainder.
+            return out;
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Parse a single content object into meta (space-gated).
@@ -1520,6 +1592,34 @@ mod tests {
     #[test]
     fn strip_basic_html() {
         assert_eq!(strip_tags("<p>Hello</p>"), "Hello");
+    }
+
+    #[test]
+    fn sanitize_blocks_script_and_javascript_scheme() {
+        let dirty = r#"<p>hi</p><script>alert(1)</script><a href="javascript:alert(2)">x</a>"#;
+        let clean = sanitize_storage_html(dirty);
+        assert!(!clean.to_ascii_lowercase().contains("<script"));
+        assert!(!clean.to_ascii_lowercase().contains("javascript:"));
+        assert!(clean.contains("[blocked-scheme]") || clean.contains("hi"));
+    }
+
+    #[test]
+    fn oversized_storage_is_bounded_with_marker() {
+        let cfg = cfg_eng();
+        let huge = "A".repeat(MAX_PAGE_STORAGE_BYTES + 5_000);
+        let v = serde_json::json!({
+            "id": "1",
+            "title": "Huge",
+            "space": {"key": "ENG"},
+            "version": {"number": 1},
+            "body": {"storage": {"value": format!("<p>{huge}</p>")}}
+        });
+        let body = parse_page_expanded(&cfg, &v, false).unwrap();
+        assert!(body.storage.len() <= MAX_PAGE_STORAGE_BYTES + 120);
+        assert!(body
+            .storage
+            .contains("truncated for Confluence page body budget"));
+        assert!(body.plain.chars().count() <= MAX_PAGE_PLAIN_CHARS + 80);
     }
 
     #[test]
