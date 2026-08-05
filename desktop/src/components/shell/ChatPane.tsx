@@ -268,9 +268,10 @@ export function ChatPane(props: ChatPaneProps) {
   // with the mode Off no surface mounts at all.
   const chatBodyRef = useRef<HTMLDivElement>(null);
   const [chatBodyWidth, setChatBodyWidth] = useState<number | null>(null);
+  const activityDockAllowed = canDockActivityInWidth(chatBodyWidth);
   const activity = useActivityInspector(
     resolvedSessionId,
-    canDockActivityInWidth(chatBodyWidth),
+    activityDockAllowed,
   );
   const [activityRecords, setActivityRecords] = useState<
     Record<string, HostTurnActivityRecord | null>
@@ -519,9 +520,18 @@ export function ChatPane(props: ChatPaneProps) {
   );
 
   // Docked mode defaults to the latest settled assistant turn so the rail is
-  // never blank the moment a user opts in.
+  // never blank the moment a user opts in. Do not auto-select while Docked is
+  // rendering through its drawer fallback: clearing that selection is how an
+  // explicit Close/Escape dismissal remains closed on a narrow host.
   useEffect(() => {
-    if (activity.mode !== "docked" || activity.selectedTurnId) return;
+    if (
+      activity.mode !== "docked" ||
+      activity.selectedTurnId ||
+      activity.isNarrowViewport ||
+      !activityDockAllowed
+    ) {
+      return;
+    }
     const lastAssistant = [...messages]
       .reverse()
       .find(
@@ -530,7 +540,7 @@ export function ChatPane(props: ChatPaneProps) {
           (activity.developerDetail || !m.streaming),
       );
     if (lastAssistant) activity.selectTurn(lastAssistant.id);
-  }, [activity, messages]);
+  }, [activity, activityDockAllowed, messages]);
 
   const selectedActivityTurn = useMemo(() => {
     if (!activity.selectedTurnId) return null;

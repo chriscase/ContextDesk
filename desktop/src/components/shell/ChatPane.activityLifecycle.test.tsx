@@ -540,6 +540,56 @@ describe("ChatPane developer detail mid-turn toggle", () => {
 });
 
 describe("ChatPane measured dock eligibility", () => {
+  it("does not immediately reopen a dismissed docked drawer fallback", async () => {
+    let measuredWidth = 1_300;
+    const originalResizeObserver = globalThis.ResizeObserver;
+    Object.defineProperty(globalThis, "ResizeObserver", {
+      configurable: true,
+      value: undefined,
+    });
+    const rect = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(
+        () =>
+          ({
+            width: measuredWidth,
+            height: 700,
+            top: 0,
+            right: measuredWidth,
+            bottom: 700,
+            left: 0,
+            x: 0,
+            y: 0,
+            toJSON: () => ({}),
+          }) as DOMRect,
+      );
+
+    try {
+      render(<ChatPane {...props()} />);
+      fireEvent.click(screen.getByTestId("activity-toggle-trigger"));
+      fireEvent.click(screen.getByTestId("activity-toggle-docked"));
+      expect(await screen.findByTestId("activity-dock")).toBeTruthy();
+
+      measuredWidth = 620;
+      fireEvent(window, new Event("resize"));
+      expect(await screen.findByRole("dialog")).toBeTruthy();
+
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+      // The auto-select effect must not immediately repopulate the selection
+      // that closeDrawer intentionally cleared for the fallback surface.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(screen.queryByRole("dialog")).toBeNull();
+    } finally {
+      rect.mockRestore();
+      Object.defineProperty(globalThis, "ResizeObserver", {
+        configurable: true,
+        value: originalResizeObserver,
+      });
+    }
+  });
+
   it("falls back at a 620px body even when the window itself is 900px wide", () => {
     expect(900).toBeGreaterThan(880);
     expect(canDockActivityInWidth(620)).toBe(false);
