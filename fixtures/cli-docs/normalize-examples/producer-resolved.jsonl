@@ -1,0 +1,2 @@
+{"schemaId":"contextdesk.normalized_log_events.v1","minReaderVersion":1,"sourceId":"demo-worker","producer":{"name":"contextdesk-normalize","version":"0.1.0"}}
+{"sourceSeq":0,"time":{"resolution":"producer_resolved","instant":"2024-06-01T17:00:00Z","localText":"2024-06-01 12:00:00","resolvedTimezone":"America/Chicago","basis":"wall"},"severity":{"raw":"INFO","canonical":9,"confidence":"high","provenance":"schema_mapped"},"message":"job started","canonical":"job started"}

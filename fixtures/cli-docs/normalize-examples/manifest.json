@@ -1,0 +1,20 @@
+{
+  "schemaId": "contextdesk.normalization_manifest.v1",
+  "generatedAt": 1717250000,
+  "input": "fixtures/cli-release-demo",
+  "outputFormat": "jsonl",
+  "producer": {"name": "contextdesk-normalize", "version": "0.1.0"},
+  "sources": [
+    {
+      "sourceId": "demo-api",
+      "relativePath": "sources/demo-api.jsonl",
+      "events": 6,
+      "timeSourceExplicit": 6,
+      "timeProducerResolved": 0,
+      "timeUnresolved": 0,
+      "timeOrderOnly": 0,
+      "redactions": 0,
+      "truncations": 0
+    }
+  ]
+}

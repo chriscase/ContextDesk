@@ -1,0 +1,68 @@
+The configured happy path is two commands:
+
+  contextdesk import <archive>
+  contextdesk chat "<question>"
+
+Everything else (corpus management, timezone review, exploration) is an
+escape hatch for when the defaults aren't enough — never required for the
+happy path.
+
+Usage: contextdesk [OPTIONS] <COMMAND>
+
+Commands:
+  import        Import an archive or directory of logs into a new corpus — no per-file selection required for a normal import
+  corpus        Manage imported corpora
+  timezone      Review and declare source timezones for ambiguous local timestamps
+  explore       Search an imported corpus
+  context       Assemble grounded evidence + citations for a question without running a model turn
+  session       Durable chat sessions
+  chat          Ask a question, grounded in the current (or given) corpus
+  config        CLI configuration
+  confluence    Optional Confluence connector (status / search / get-page)
+  capabilities  Machine-readable description of this build: supported commands, envelope schema version, exit-code categories
+  doctor        Readiness check: is everything ready for a demonstration right now? Checks configuration, provider connectivity, native tool calling, grounding, writable isolated state, tracing, and session continuity — the last four by actually running one real, disposable two-turn chat exercise against the configured provider, over a synthetic corpus created and destroyed for this check alone. Exit code reflects the verdict, not just whether the command itself ran
+  help          Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <FORMAT>
+          Output shape: human-readable text, one JSON envelope, or (for streaming commands) one JSON object per line
+          
+          [env: CONTEXTDESK_FORMAT=]
+          [possible values: text, json, jsonl]
+
+      --json
+          Shorthand for `--format json`
+
+      --jsonl
+          Shorthand for `--format jsonl`
+
+      --color <COLOR>
+          [env: CONTEXTDESK_COLOR=]
+          [possible values: auto, always, never]
+
+      --config <CONFIG>
+          Project config path — takes the place of the auto-discovered `.contextdesk.toml` in the current directory (see `docs/CLI.md` precedence). Does not affect the shared `AppConfig` path; use `--app-config` for that
+          
+          [env: CONTEXTDESK_CONFIG=]
+
+      --app-config <APP_CONFIG>
+          Override the shared `AppConfig` file (provider profiles, configured default timezone) instead of the default `~/.contextdesk/config.json` both hosts otherwise share (or, when `--data-dir` is also given, `<data-dir>/config.json`) — used as an exact path, not joined with `--data-dir`
+          
+          [env: CONTEXTDESK_APP_CONFIG=]
+
+      --data-dir <DATA_DIR>
+          Isolate every piece of state this process touches — the shared `AppConfig`, this CLI's own `cli.toml`, the corpus cache, durable sessions, and CLI state — under this directory instead of the default `~/.contextdesk` the desktop app otherwise shares. Setting this skips the `$HOME` lookup entirely, so an isolated profile is deterministic and testable without overriding `HOME`. Omit to keep the default: state shared with the desktop app
+          
+          [env: CONTEXTDESK_DATA_DIR=]
+
+      --profile <PROFILE>
+          [env: CONTEXTDESK_PROVIDER_PROFILE=]
+
+      --model <MODEL>
+          [env: CONTEXTDESK_CHAT_MODEL=]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version

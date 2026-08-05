@@ -1,0 +1,36 @@
+{
+  "schemaId": "contextdesk.normalization_report.v1",
+  "generatedAt": 1717250000,
+  "input": "fixtures/cli-release-demo",
+  "output": "./out-normalize",
+  "outputFormat": "jsonl",
+  "sourcesExamined": 1,
+  "sourcesSelected": 1,
+  "sourcesIgnored": 0,
+  "sourcesUnsupported": 0,
+  "sourcesExcluded": 0,
+  "sourcesFailed": 0,
+  "events": 6,
+  "timeSourceExplicit": 6,
+  "timeProducerResolved": 0,
+  "timeUnresolved": 0,
+  "timeOrderOnly": 0,
+  "redactions": 0,
+  "truncations": 0,
+  "formats": {"syslog": 6},
+  "partial": false,
+  "sources": [
+    {
+      "sourceId": "demo-api",
+      "relativePath": "sources/demo-api.jsonl",
+      "events": 6,
+      "timeSourceExplicit": 6,
+      "timeProducerResolved": 0,
+      "timeUnresolved": 0,
+      "timeOrderOnly": 0,
+      "redactions": 0,
+      "truncations": 0
+    }
+  ],
+  "warnings": []
+}

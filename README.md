@@ -35,6 +35,107 @@ the product remains rename-friendly through [`branding.toml`](branding.toml).
 | **Identity**    | Rename via [`branding.toml`](branding.toml) (full runtime slug paths tracked in [#179](https://github.com/chriscase/ContextDesk/issues/179))                |
 | **Phase 1 DoD** | [Issue #65](https://github.com/chriscase/ContextDesk/issues/65) · [Roadmap](docs/ROADMAP.md) · [Backlog audit](docs/BACKLOG_AUDIT.md)                       |
 
+## CLI and log normalization
+
+**One-click path to normalize:** [Normalization guide](docs/NORMALIZATION.md) ·
+normative contract: [`docs/specs/NORMALIZED_LOG_EVENTS_V1.md`](docs/specs/NORMALIZED_LOG_EVENTS_V1.md)
+
+The **ContextDesk CLI** (`contextdesk`) is the headless adapter over the same
+production engine the desktop uses: import logs, explore a corpus, assemble
+context, chat with grounding, and (when present on your build) **normalize**
+raw files/folders/ZIPs into portable `contextdesk.normalized_log_events.v1`
+JSONL — offline, with no provider or keychain reads.
+
+| Guide | What it covers |
+| ----- | -------------- |
+| **[CLI guide](docs/CLI.md)** | Grammar (verified against `--help`), config, `--data-dir`, JSON/JSONL envelopes, exit codes, examples |
+| **[Normalization guide](docs/NORMALIZATION.md)** | Raw → normalized walkthrough, time resolutions, output layout, privacy, demos |
+| **[Normalized events specification](docs/specs/NORMALIZED_LOG_EVENTS_V1.md)** | Normative contract (not the human guide) |
+| **[JSON Schema](docs/specs/normalized-log-events/schemas/normalized-log-events.v1.json)** | Machine schema for the JSONL events |
+| **[Language integration](docs/LANGUAGE_INTEGRATION.md)** | Subprocess protocol; thin clients for Python, Node, Java, C#, Go, C, C++, Rust |
+| **[CLI packaging / releases](docs/CLI_PACKAGING.md)** | Multi-platform archives, draft GitHub Releases, unsigned RC notes |
+| **[CLI client protocol](docs/CLI_CLIENT_PROTOCOL.md)** | Compact protocol reference (same contracts as language integration) |
+
+### Status labels (honest)
+
+| Capability | Status on this product line |
+| ---------- | --------------------------- |
+| Two-command happy path: `import` → `chat` | **Shipped** |
+| `corpus`, `timezone`, `explore`, `context`, `session`, `config`, `capabilities`, `doctor` | **Shipped** |
+| `contextdesk.normalized_log_events.v1` contract + JSON Schema + producer examples | **Shipped** (portable handoff; ordinary raw import still applies) |
+| Offline `contextdesk normalize` (raw file/folder/ZIP → JSONL + manifest + report) | **Planned / integrating** — grammar and output layout documented in [NORMALIZATION.md](docs/NORMALIZATION.md); confirm with `contextdesk normalize --help` on your binary |
+| Multi-platform CLI release workflow (draft archives) | **Shipped in repo** (`.github/workflows/cli-release.yml`); published signed downloads are **not** claimed until a real draft/publish run exists |
+| Language SDKs that re-parse logs / Parquet export | **Not shipped** — adapters spawn the binary only; Parquet is not claimed |
+| macOS notarization / Windows Authenticode for CLI | **Not shipped** (unsigned RC only — see [CLI_PACKAGING.md](docs/CLI_PACKAGING.md)) |
+
+### Two-command happy path (executable)
+
+```bash
+# Build once (from a checkout):
+cargo build -p cd-cli --release
+export PATH="$(pwd)/target/release:$PATH"   # or use target/release/contextdesk
+
+# Isolated profile — never touches ~/.contextdesk
+contextdesk --data-dir ./cd-demo-data import ./fixtures/cli-release-demo
+contextdesk --data-dir ./cd-demo-data chat "what timed out?"
+```
+
+Requires a configured provider for `chat` (see `contextdesk config init` or
+`contextdesk doctor`). For a **network-free** five-minute path, use import →
+explore instead (below).
+
+### Five-minute offline demo (no provider)
+
+```bash
+cargo build -p cd-cli --release
+BIN=./target/release/contextdesk
+DATA=$(mktemp -d)
+$BIN --data-dir "$DATA" --json import ./fixtures/cli-release-demo
+$BIN --data-dir "$DATA" --json corpus list
+$BIN --data-dir "$DATA" --json explore "timeout"
+```
+
+### Raw-log normalization example
+
+When your build includes the `normalize` subcommand (check with
+`contextdesk normalize --help`):
+
+```bash
+# Executable only if `normalize` is present on the binary.
+contextdesk normalize ./fixtures/cli-release-demo --output ./out-normalize --json
+# Writes exactly:
+#   out-normalize/manifest.json
+#   out-normalize/normalization-report.json
+#   out-normalize/sources/<source-id>.jsonl
+```
+
+If `normalize` is missing on this tip, use the **producer contract** path (emit
+conforming JSONL yourself) — [SDK guide](docs/specs/normalized-log-events/SDK.md) —
+or wait for the normalize CLI integration. Representative valid JSONL samples
+live under [`fixtures/cli-docs/normalize-examples/`](fixtures/cli-docs/normalize-examples/).
+
+### Install summary (macOS / Linux / Windows)
+
+| Platform | How to get `contextdesk` today |
+| -------- | ------------------------------ |
+| **macOS / Linux** | From source: `cargo build -p cd-cli --release` → `target/release/contextdesk`. Optional draft release archives when CI runs (see [CLI_PACKAGING.md](docs/CLI_PACKAGING.md)). |
+| **Windows** | Same Cargo path → `target/release/contextdesk.exe`. Draft ZIP archives when CI runs. |
+| **All** | Prefer absolute path or `CONTEXTDESK_BIN`; isolate automation with `--data-dir`. |
+
+Release downloads: draft GitHub Releases from workflow **`cli-release`** (never
+auto-published). Do not assume notarized or Authenticode-signed CLI builds.
+
+### Automation / CI path
+
+```bash
+export CONTEXTDESK_BIN=./target/release/contextdesk
+export CONTEXTDESK_DATA_DIR="$RUNNER_TEMP/cd-ci"
+"$CONTEXTDESK_BIN" --json capabilities
+"$CONTEXTDESK_BIN" --json import ./fixtures/cli-release-demo
+# Language clients: packages/cli-clients/ — argv only, never shell strings.
+# Protocol: docs/LANGUAGE_INTEGRATION.md
+```
+
 ### Product gallery (packaged app)
 
 ![ContextDesk Logs library showing an installed synthetic demonstration corpus](docs/media/gallery/logs-library-demo.png)

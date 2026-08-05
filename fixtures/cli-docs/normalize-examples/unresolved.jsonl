@@ -1,0 +1,2 @@
+{"schemaId":"contextdesk.normalized_log_events.v1","minReaderVersion":1,"sourceId":"demo-legacy","producer":{"name":"contextdesk-normalize","version":"0.1.0"}}
+{"sourceSeq":0,"time":{"resolution":"unresolved","localText":"Jun 1 12:00:00","basis":"order"},"severity":{"confidence":"low","provenance":"absent"},"message":"legacy line without zone","canonical":"legacy line without zone"}

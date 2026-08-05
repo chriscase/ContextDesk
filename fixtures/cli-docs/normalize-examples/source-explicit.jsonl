@@ -1,0 +1,2 @@
+{"schemaId":"contextdesk.normalized_log_events.v1","minReaderVersion":1,"sourceId":"demo-api","producer":{"name":"contextdesk-normalize","version":"0.1.0"}}
+{"sourceSeq":0,"time":{"resolution":"source_explicit","instant":"2024-06-01T12:00:08.300Z","basis":"wall"},"severity":{"raw":"ERROR","canonical":17,"confidence":"high","provenance":"source_explicit"},"message":"path=/orders request_id=req-demo-1 deadline exceeded","canonical":"path=/orders request_id=req-demo-1 deadline exceeded"}

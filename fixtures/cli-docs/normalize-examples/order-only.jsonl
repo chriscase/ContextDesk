@@ -1,0 +1,3 @@
+{"schemaId":"contextdesk.normalized_log_events.v1","minReaderVersion":1,"sourceId":"demo-stream","producer":{"name":"contextdesk-normalize","version":"0.1.0"}}
+{"sourceSeq":0,"time":{"resolution":"order_only","basis":"order"},"severity":{"confidence":"low","provenance":"absent"},"message":"first","canonical":"first"}
+{"sourceSeq":1,"time":{"resolution":"order_only","basis":"order"},"severity":{"confidence":"low","provenance":"absent"},"message":"second","canonical":"second"}

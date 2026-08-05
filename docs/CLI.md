@@ -10,6 +10,61 @@ and call `cd_core` directly. See [Architecture](#architecture) for the exact
 boundary; the hosts share the behavior kernel, but not yet every workflow
 wrapper.
 
+**Related guides:** [Normalization](NORMALIZATION.md) ·
+[Language integration](LANGUAGE_INTEGRATION.md) ·
+[CLI packaging](CLI_PACKAGING.md) ·
+[Normative normalized events](specs/NORMALIZED_LOG_EVENTS_V1.md) ·
+[README: CLI and log normalization](../README.md#cli-and-log-normalization)
+
+## Command grammar (verified against `--help`)
+
+Top-level shape (regenerate any time with `contextdesk --help`):
+
+```text
+contextdesk [OPTIONS] <COMMAND>
+```
+
+### Global options
+
+| Flag | Env | Purpose |
+| ---- | --- | ------- |
+| `--format text\|json\|jsonl` | `CONTEXTDESK_FORMAT` | Output shape |
+| `--json` | | Shorthand for `--format json` |
+| `--jsonl` | | Shorthand for `--format jsonl` |
+| `--color auto\|always\|never` | `CONTEXTDESK_COLOR` | Color on stderr progress |
+| `--config <path>` | `CONTEXTDESK_CONFIG` | Project CLI TOML (`.contextdesk.toml`) |
+| `--app-config <path>` | `CONTEXTDESK_APP_CONFIG` | Shared `AppConfig` JSON path |
+| `--data-dir <path>` | `CONTEXTDESK_DATA_DIR` | Isolate all process state (alias `--profile-dir`) |
+| `--profile <id>` | `CONTEXTDESK_PROVIDER_PROFILE` | Provider profile |
+| `--model <id>` | `CONTEXTDESK_CHAT_MODEL` | Chat model override |
+| `-h` / `--help` | | Help |
+| `-V` / `--version` | | Version (long form embeds git/channel when built with identity) |
+
+### Subcommands on shipped tips
+
+| Command | Role |
+| ------- | ---- |
+| `import <source>` | Import archive/dir into a durable corpus |
+| `corpus list\|show\|rename\|delete\|use` | Corpus management |
+| `timezone status\|apply\|clear\|apply-all` | Ambiguous local time declarations |
+| `explore <query>` | Template-level search |
+| `context` | Grounded evidence assembly without a model turn |
+| `session list\|show` | Durable chat sessions |
+| `chat <question>` | Grounded model turn |
+| `config init\|validate\|show\|path` | CLI + shared config |
+| `confluence …` | Optional Confluence connector |
+| `capabilities` | Machine-readable build surface |
+| `doctor` | Demo readiness |
+
+### Planned / integrating
+
+| Command | Role |
+| ------- | ---- |
+| `normalize <source> --output <dir>` | Offline raw → `normalized_log_events.v1` JSONL (no corpus persist). See [NORMALIZATION.md](NORMALIZATION.md). Confirm with `contextdesk normalize --help`. |
+
+Drift check: `python3 scripts/cli-release/check_cli_docs.py` compares this list
+to a live binary when `CONTEXTDESK_BIN` is set.
+
 ## Happy path
 
 ```bash
@@ -402,7 +457,7 @@ line — `verdict` on completion, `interrupted` on Ctrl-C. See
 | 7 | `not_implemented` | Grammar accepted, behavior intentionally not implemented yet. Never conflated with success. |
 | 8 | `not_ready` | `contextdesk doctor` completed its full check but the verdict was "not ready" — this is not a bug, the command did exactly what it promised. |
 | 70 | `internal` | Unexpected failure — a bug, not an expected branch. |
-| 130 | `cancelled` | The operation was interrupted by Ctrl-C before it finished (`import`, `doctor`). |
+| 130 | `cancelled` | The operation was interrupted by Ctrl-C before it finished (`import`, `normalize`, `doctor`, `chat`). |
 
 Clap's own usage errors (bad flags, missing required args) use clap's
 default exit code (2) and are not part of this table.
@@ -411,10 +466,16 @@ default exit code (2) and are not part of this table.
 
 See also the import command: phase transitions and a final result object form the documented JSONL stream contract.
 
-## Command grammar
+## Command grammar (compact reference)
+
+Verified by comparing to `contextdesk --help` / subcommand `--help` (see
+`scripts/cli-release/check_cli_docs.py`).
 
 ```
 contextdesk import <source> [--name NAME] [--embed] [--explain-selection]
+contextdesk normalize <source> --output <dir> [--output-format jsonl]
+            [--source-timezone <iana>] [--timezone-map '<json>'] [--strict-time]
+            # Planned/integrating — only if `normalize --help` succeeds
 contextdesk corpus list
 contextdesk corpus show <id>
 contextdesk corpus rename <id> <name>
@@ -448,6 +509,32 @@ Global flags (available on every subcommand): `--format`, `--json`,
 `--jsonl`, `--color`, `--config <path>`, `--app-config <path>`,
 `--data-dir <path>` (alias `--profile-dir`), `--profile <id>`, `--model
 <id>`.
+
+## Quick examples (synthetic data only)
+
+```bash
+# Executable offline path
+DATA=$(mktemp -d)
+contextdesk --data-dir "$DATA" --json import ./fixtures/cli-release-demo
+contextdesk --data-dir "$DATA" --json corpus list
+contextdesk --data-dir "$DATA" --json corpus use <corpus-id-from-list>
+contextdesk --data-dir "$DATA" --json explore "timeout" --k 10
+contextdesk --data-dir "$DATA" --json context "what failed?" --k 10
+contextdesk --data-dir "$DATA" --json capabilities
+contextdesk --data-dir "$DATA" doctor --skip-live-turn   # exit 8 expected without live checks
+
+# Timezone (after import of ambiguous local logs)
+contextdesk --data-dir "$DATA" timezone status --corpus <id>
+contextdesk --data-dir "$DATA" timezone apply-all America/Chicago --corpus <id> --yes
+
+# Chat (requires provider — not offline)
+contextdesk --data-dir "$DATA" chat "summarize timeouts" --corpus <id>
+
+# Normalize (requires normalize subcommand on binary)
+# contextdesk normalize ./fixtures/cli-release-demo --output ./out-norm --json
+# Exact files: out-norm/manifest.json, normalization-report.json, sources/*.jsonl
+# Full guide: docs/NORMALIZATION.md
+```
 
 ## `chat --dry-run` / `--trace` (inspecting a turn without sending it, or alongside sending it)
 
