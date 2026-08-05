@@ -192,6 +192,10 @@ async fn dispatch(
             .await;
             emit(format, "config", result)
         }
+        Command::Confluence { action } => {
+            let result = commands::confluence_cmd::run(action, paths, app_cfg).await;
+            emit(format, "confluence", result)
+        }
         Command::Capabilities => emit(
             format,
             "capabilities",

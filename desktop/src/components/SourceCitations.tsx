@@ -22,6 +22,19 @@ function isHttpUrl(s: string): boolean {
   return /^https?:\/\//i.test(s.trim());
 }
 
+/**
+ * Resolve a reopenable URL for a citation. Prefer https id (host now emits
+ * absolute Confluence webui URLs as source_id when constructable). For legacy
+ * `confluence:{id}` identities, fall back to title/locator when absolute.
+ */
+function reopenUrl(c: SourceCitation): string | null {
+  if (isHttpUrl(c.id)) return c.id.trim();
+  if (c.id.startsWith("confluence:")) {
+    if (c.title && isHttpUrl(c.title)) return c.title.trim();
+  }
+  return null;
+}
+
 /** Stable pastel hue from a string (for monogram backgrounds). */
 function hueFromString(s: string): number {
   let h = 0;
@@ -63,10 +76,20 @@ export function SourceCitations({ citations, onOpenFile }: Props) {
   if (items.length === 0) return null;
 
   const activate = (c: SourceCitation) => {
-    if (isHttpUrl(c.id)) {
-      void hostOpenExternalUrl(c.id).catch((err) => {
+    const url = reopenUrl(c);
+    if (url) {
+      void hostOpenExternalUrl(url).catch((err) => {
         console.error("open external url failed", err);
       });
+      return;
+    }
+    // confluence:{id} without a resolvable absolute URL cannot open in-browser;
+    // still surface as a source chip (label/title) without inventing a host.
+    if (c.id.startsWith("confluence:")) {
+      console.warn(
+        "confluence citation has no reopenable URL; host should emit absolute webui link",
+        c.id,
+      );
       return;
     }
     onOpenFile?.(c);

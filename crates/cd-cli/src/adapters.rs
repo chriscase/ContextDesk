@@ -136,3 +136,41 @@ pub fn tool_host(cache_root: &Path) -> CliResult<ToolHost> {
     host.set_log_analysis(true, Some(cache_root.to_path_buf()));
     Ok(host)
 }
+
+/// Apply optional connectors from the shared `AppConfig` (same contract as
+/// desktop `apply_host_connectors`). Secret-store reads happen only when a
+/// credential **reference** is recorded — keyless profiles perform zero
+/// secret-store reads.
+pub fn apply_app_connectors(
+    host: &mut ToolHost,
+    app_cfg: &AppConfig,
+    secrets: &dyn cd_core::keychain_store::SecretStore,
+) {
+    use cd_core::config::{ConfluenceAuthMode, CONFLUENCE_PAT_REF};
+    let cf = &app_cfg.confluence;
+    if cf.enabled && cf.is_configured() {
+        let pat = if cf.pat_ref.is_some() {
+            secrets.get(CONFLUENCE_PAT_REF).ok().flatten()
+        } else {
+            None
+        };
+        host.set_confluence(Some(cf.to_ro_config()), pat);
+        host.set_confluence_auth_mode(cf.auth_mode, cf.basic_email.clone());
+        host.set_confluence_write_enabled(cf.write_enabled);
+    } else {
+        host.set_confluence(None, None);
+        host.set_confluence_auth_mode(ConfluenceAuthMode::Bearer, None);
+        host.set_confluence_write_enabled(false);
+    }
+}
+
+/// ToolHost with log analysis + optional Confluence from shared AppConfig.
+pub fn tool_host_with_app_config(
+    cache_root: &Path,
+    app_cfg: &AppConfig,
+    secrets: &dyn cd_core::keychain_store::SecretStore,
+) -> CliResult<ToolHost> {
+    let mut host = tool_host(cache_root)?;
+    apply_app_connectors(&mut host, app_cfg, secrets);
+    Ok(host)
+}

@@ -129,7 +129,7 @@ pub async fn run(
         chat_renderer.start();
     }
 
-    let mut host = match crate::adapters::tool_host(cache_root) {
+    let mut host = match crate::adapters::tool_host_with_app_config(cache_root, cfg, secrets) {
         Ok(host) => host,
         Err(error) => {
             if jsonl {

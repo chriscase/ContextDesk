@@ -874,6 +874,10 @@ pub struct ToolHost {
     confluence: Option<ConfluenceRoConfig>,
     /// Confluence PAT for RO tools (host keychain).
     confluence_pat: Option<String>,
+    /// Auth scheme for the PAT (Bearer vs Basic+email). From settings; default Bearer.
+    confluence_auth_mode: crate::config::ConfluenceAuthMode,
+    /// Email for Basic auth (Cloud). Never a secret; token remains in keychain.
+    confluence_basic_email: Option<String>,
     /// Rate-limit: min interval between Confluence HTTP calls.
     confluence_min_interval: Duration,
     last_confluence_call: Option<Instant>,
@@ -1065,6 +1069,8 @@ impl ToolHost {
             approved_once: std::collections::HashMap::new(),
             confluence: None,
             confluence_pat: None,
+            confluence_auth_mode: crate::config::ConfluenceAuthMode::Bearer,
+            confluence_basic_email: None,
             // Rate-limit friendly: ≥400ms between Confluence HTTP calls
             confluence_min_interval: Duration::from_millis(400),
             last_confluence_call: None,
@@ -1525,9 +1531,60 @@ impl ToolHost {
         self.confluence_pat = pat;
     }
 
+    /// Set Confluence HTTP auth mode (Bearer PAT vs Basic email+token).
+    ///
+    /// Must be called by the host after reading `ConfluenceSettings` — tools never
+    /// invent Basic credentials and never read the keychain themselves.
+    pub fn set_confluence_auth_mode(
+        &mut self,
+        mode: crate::config::ConfluenceAuthMode,
+        basic_email: Option<String>,
+    ) {
+        self.confluence_auth_mode = mode;
+        self.confluence_basic_email = basic_email
+            .map(|e| e.trim().to_string())
+            .filter(|e| !e.is_empty());
+    }
+
     /// Enable Confluence HardWrite tools when settings.write_enabled (default false).
     pub fn set_confluence_write_enabled(&mut self, enabled: bool) {
         self.confluence_write_enabled = enabled;
+    }
+
+    /// Build auth material for a Confluence HTTP call from host-supplied mode + PAT.
+    fn resolve_confluence_auth(&self) -> CoreResult<confluence_ro::ConfluenceAuth> {
+        let pat = self
+            .confluence_pat
+            .as_ref()
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
+            .clone();
+        match self.confluence_auth_mode {
+            crate::config::ConfluenceAuthMode::Bearer => {
+                Ok(confluence_ro::ConfluenceAuth::bearer(pat))
+            }
+            crate::config::ConfluenceAuthMode::Basic => {
+                let email = self
+                    .confluence_basic_email
+                    .clone()
+                    .filter(|e| !e.is_empty())
+                    .ok_or_else(|| {
+                        CoreError::Policy(
+                            "Confluence Basic auth requires basic_email in Settings → Connectors"
+                                .into(),
+                        )
+                    })?;
+                Ok(confluence_ro::ConfluenceAuth::Basic { email, token: pat })
+            }
+        }
+    }
+
+    /// Citation identity that chat can reopen: prefer absolute web URL, else
+    /// stable `confluence:{id}` (UI may still resolve the latter via locator).
+    fn confluence_citation_id(cfg: &ConfluenceRoConfig, page_id: &str, space: &str) -> String {
+        confluence_ro::construct_page_url(cfg, page_id, space, None)
+            .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+            .unwrap_or_else(|| format!("confluence:{page_id}"))
     }
 
     /// Bounded agent system hint when Confluence is configured (#452 / #458). No PAT.
@@ -4916,11 +4973,7 @@ impl ToolHost {
             .as_ref()
             .ok_or_else(|| CoreError::Policy(CONFLUENCE_NOT_CONFIGURED.into()))?
             .clone();
-        let pat = self
-            .confluence_pat
-            .as_ref()
-            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
-            .clone();
+        let auth = self.resolve_confluence_auth()?;
         let q = args
             .get("query")
             .and_then(|v| v.as_str())
@@ -4943,13 +4996,15 @@ impl ToolHost {
             format!("text ~ \"{}\"", q.replace('"', "\\\""))
         };
         self.throttle_confluence().await?;
-        let response = confluence_ro::cql_search(&cfg, &cql, &pat, limit).await?;
+        let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
+        let response = confluence_ro::cql_search_auth(&cfg, &cql, &auth, limit, 0, &policy).await?;
         let hits = response.value;
         let mut lines = Vec::new();
         let mut first = None;
         for h in &hits {
             if first.is_none() {
-                first = Some(format!("confluence:{}", h.id));
+                // Prefer reopenable absolute URL so chat Sources can open the page.
+                first = Some(Self::confluence_citation_id(&cfg, &h.id, &h.space));
             }
             lines.push(format!(
                 "- [{}] {} (space {}) — {}",
@@ -4984,11 +5039,6 @@ impl ToolHost {
             .as_ref()
             .ok_or_else(|| CoreError::Policy(CONFLUENCE_NOT_CONFIGURED.into()))?
             .clone();
-        let pat = self
-            .confluence_pat
-            .as_ref()
-            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
-            .clone();
         let page_id = args
             .get("page_id")
             .and_then(|v| v.as_str())
@@ -5006,12 +5056,22 @@ impl ToolHost {
             .trim()
             .to_ascii_lowercase();
         self.throttle_confluence().await?;
-        let auth = confluence_ro::ConfluenceAuth::bearer(pat);
+        let auth = self.resolve_confluence_auth()?;
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
         let response =
             confluence_ro::fetch_page_expanded(&cfg, page_id, &auth, &policy, false).await?;
         let expanded = response.value;
-        let cite = Some(format!("confluence:{page_id}"));
+        // Prefer absolute web URL so Sources chips can reopen the exact page.
+        let cite = Some(
+            expanded
+                .meta
+                .url
+                .clone()
+                .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+                .unwrap_or_else(|| {
+                    Self::confluence_citation_id(&cfg, page_id, &expanded.meta.space)
+                }),
+        );
         let mut raw = match format.as_str() {
             "meta" => serde_json::to_string_pretty(&expanded.meta)
                 .unwrap_or_else(|_| format!("{:?}", expanded.meta)),
@@ -5035,18 +5095,13 @@ impl ToolHost {
             .as_ref()
             .ok_or_else(|| CoreError::Policy(CONFLUENCE_NOT_CONFIGURED.into()))?
             .clone();
-        let pat = self
-            .confluence_pat
-            .as_ref()
-            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
-            .clone();
         let limit = args
             .get("limit")
             .and_then(|v| v.as_u64())
             .unwrap_or(50)
             .min(100) as usize;
         self.throttle_confluence().await?;
-        let auth = confluence_ro::ConfluenceAuth::bearer(pat);
+        let auth = self.resolve_confluence_auth()?;
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
         let response = confluence_ro::list_spaces(&cfg, &auth, &policy, limit).await?;
         let spaces = response.value;
@@ -5080,11 +5135,6 @@ impl ToolHost {
             .as_ref()
             .ok_or_else(|| CoreError::Policy(CONFLUENCE_NOT_CONFIGURED.into()))?
             .clone();
-        let pat = self
-            .confluence_pat
-            .as_ref()
-            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
-            .clone();
         let page_id = args
             .get("page_id")
             .and_then(|v| v.as_str())
@@ -5107,7 +5157,7 @@ impl ToolHost {
             ));
         }
         self.throttle_confluence().await?;
-        let auth = confluence_ro::ConfluenceAuth::bearer(pat);
+        let auth = self.resolve_confluence_auth()?;
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
         let response = if !page_id.is_empty() {
             confluence_ro::list_child_pages(&cfg, page_id, start, limit, &auth, &policy, false)
@@ -5121,7 +5171,7 @@ impl ToolHost {
         let mut first = None;
         for p in &pages {
             if first.is_none() {
-                first = Some(format!("confluence:{}", p.id));
+                first = Some(Self::confluence_citation_id(&cfg, &p.id, &p.space));
             }
             let ver = p.version.map(|v| format!(" v{v}")).unwrap_or_default();
             lines.push(format!("- [{}] {} (space {}){ver}", p.id, p.title, p.space));
@@ -5145,11 +5195,6 @@ impl ToolHost {
             .as_ref()
             .ok_or_else(|| CoreError::Policy(CONFLUENCE_NOT_CONFIGURED.into()))?
             .clone();
-        let pat = self
-            .confluence_pat
-            .as_ref()
-            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
-            .clone();
         let page_id = args
             .get("page_id")
             .and_then(|v| v.as_str())
@@ -5161,7 +5206,7 @@ impl ToolHost {
             ));
         }
         self.throttle_confluence().await?;
-        let auth = confluence_ro::ConfluenceAuth::bearer(pat);
+        let auth = self.resolve_confluence_auth()?;
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
         let response = confluence_ro::list_ancestors(&cfg, page_id, &auth, &policy, false).await?;
         let ancestors = response.value;
@@ -5188,11 +5233,6 @@ impl ToolHost {
             .as_ref()
             .ok_or_else(|| CoreError::Policy(CONFLUENCE_NOT_CONFIGURED.into()))?
             .clone();
-        let pat = self
-            .confluence_pat
-            .as_ref()
-            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
-            .clone();
         let page_id = args
             .get("page_id")
             .and_then(|v| v.as_str())
@@ -5204,7 +5244,7 @@ impl ToolHost {
             ));
         }
         self.throttle_confluence().await?;
-        let auth = confluence_ro::ConfluenceAuth::bearer(pat);
+        let auth = self.resolve_confluence_auth()?;
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
         let response =
             confluence_ro::list_attachments_meta(&cfg, page_id, &auth, &policy, false).await?;
@@ -5250,11 +5290,6 @@ impl ToolHost {
                 "Confluence harvest needs a space allowlist. Open Settings → Connectors → Confluence and add space keys (e.g. ENG, DOCS), then try again.".into(),
             ));
         }
-        let pat = self
-            .confluence_pat
-            .as_ref()
-            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
-            .clone();
         let store = self
             .durable_memory
             .as_ref()
@@ -5266,7 +5301,7 @@ impl ToolHost {
             )
         })?;
         let harvest_store = crate::harvest::HarvestStore::open(&harvest_path)?;
-        let auth = confluence_ro::ConfluenceAuth::bearer(pat);
+        let auth = self.resolve_confluence_auth()?;
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
         let now = crate::embed::now_unix_secs();
         let mut results = Vec::new();
@@ -5423,12 +5458,7 @@ impl ToolHost {
             .as_ref()
             .ok_or_else(|| CoreError::Policy("Confluence not configured".into()))?
             .clone();
-        let pat = self
-            .confluence_pat
-            .as_ref()
-            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
-            .clone();
-        let auth = confluence_ro::ConfluenceAuth::bearer(pat);
+        let auth = self.resolve_confluence_auth()?;
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
         self.throttle_confluence().await?;
         let (remote, retry_notes) = match confluence_ro::fetch_page_expanded(
@@ -5511,12 +5541,7 @@ impl ToolHost {
             .as_ref()
             .ok_or_else(|| CoreError::Policy("Confluence not configured".into()))?
             .clone();
-        let pat = self
-            .confluence_pat
-            .as_ref()
-            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
-            .clone();
-        let auth = confluence_ro::ConfluenceAuth::bearer(pat);
+        let auth = self.resolve_confluence_auth()?;
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
         self.throttle_confluence().await?;
         let body = confluence_ro::fetch_page_expanded(
@@ -5631,12 +5656,7 @@ impl ToolHost {
             .as_ref()
             .ok_or_else(|| CoreError::Policy("Confluence not configured".into()))?
             .clone();
-        let pat = self
-            .confluence_pat
-            .as_ref()
-            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
-            .clone();
-        let auth = confluence_ro::ConfluenceAuth::bearer(pat);
+        let auth = self.resolve_confluence_auth()?;
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
         self.throttle_confluence().await?;
         let meta =
@@ -5692,12 +5712,7 @@ impl ToolHost {
             .as_ref()
             .ok_or_else(|| CoreError::Policy("Confluence not configured".into()))?
             .clone();
-        let pat = self
-            .confluence_pat
-            .as_ref()
-            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
-            .clone();
-        let auth = confluence_ro::ConfluenceAuth::bearer(pat);
+        let auth = self.resolve_confluence_auth()?;
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
         self.throttle_confluence().await?;
         let meta =

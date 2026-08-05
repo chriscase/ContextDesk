@@ -176,10 +176,18 @@ async fn hermetic_search_and_get_page_with_provenance_and_citation() {
         search.detail_raw.contains("Auth Runbook") || search.summary.contains("hit"),
         "{search:?}"
     );
-    assert_eq!(
-        search.citation_path.as_deref(),
-        Some("confluence:42"),
-        "search citation must reopen exact page identity"
+    let search_cite = search.citation_path.as_deref().expect("search citation");
+    assert!(
+        search_cite.contains("42")
+            && (search_cite.starts_with("http://")
+                || search_cite.starts_with("https://")
+                || search_cite.starts_with("confluence:")),
+        "search citation must reopen exact page identity: {search_cite}"
+    );
+    // Prefer absolute URL so chat Sources can open the page in a browser.
+    assert!(
+        search_cite.starts_with("http://") || search_cite.starts_with("https://"),
+        "host must emit reopenable absolute URL when constructable: {search_cite}"
     );
 
     let page = host
@@ -202,7 +210,12 @@ async fn hermetic_search_and_get_page_with_provenance_and_citation() {
         "space provenance required: {}",
         page.detail_raw
     );
-    assert_eq!(page.citation_path.as_deref(), Some("confluence:42"));
+    let page_cite = page.citation_path.as_deref().expect("page citation");
+    assert!(
+        page_cite.contains("42")
+            && (page_cite.starts_with("http://") || page_cite.starts_with("https://")),
+        "page citation must be reopenable absolute URL: {page_cite}"
+    );
     // Shared untrusted-data seam used by files/tools/memory results.
     assert!(
         page.detail_for_model.contains("UNTRUSTED_DATA")
@@ -665,35 +678,145 @@ async fn read_tools_cannot_self_grant_write() {
 // Activity parity + session deletion + SSRF
 // ---------------------------------------------------------------------------
 
-#[test]
-fn activity_scope_for_confluence_is_external_connector_metadata_only() {
+#[tokio::test]
+async fn activity_events_from_real_confluence_execute_omit_bodies_and_secrets() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/content/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{
+                "id": "77",
+                "title": "Public Title",
+                "space": {"key": "ENG"},
+                "excerpt": "no-secret-here"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
     let (_d, mut host) = empty_host();
-    host.set_confluence(
-        Some(eng_cfg("https://wiki.example.test")),
-        Some("pat".into()),
-    );
-    let kinds = host.activity_tool_kinds();
+    let secret_pat = "activity-secret-pat-should-not-leak";
+    host.set_confluence(Some(eng_cfg(&server.uri())), Some(secret_pat.into()));
     assert_eq!(
-        kinds.get(names::CONFLUENCE_SEARCH).copied(),
+        host.activity_tool_kinds()
+            .get(names::CONFLUENCE_SEARCH)
+            .copied(),
         Some(ToolActivityKind::ExternalConnector)
     );
-    host.set_confluence_write_enabled(true);
-    let kinds = host.activity_tool_kinds();
-    assert_eq!(
-        kinds.get(names::CONFLUENCE_CREATE_PAGE).copied(),
-        Some(ToolActivityKind::GovernedWrite)
-    );
 
-    let rec = ActivityRecorder::new(
+    let result = host
+        .execute(
+            names::CONFLUENCE_SEARCH,
+            &json!({"query": "Public", "limit": 3}),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(result.ok, "{result:?}");
+
+    // Project the real tool events through the activity recorder (shipped path).
+    let mut rec = ActivityRecorder::new(
         "turn-cf",
         "sess-cf",
         DataScope::conversation(),
         ActivityDetailLevel::Summary,
     );
-    let record = rec.finish(ActivityStatus::Ok, 10);
+    rec.record_stream_events(&result.events);
+    let record = rec.finish(ActivityStatus::Ok, 12);
     let json = serde_json::to_string(&record).unwrap();
-    assert!(!json.contains("body_storage"));
-    assert!(!json.contains("Bearer "));
+    assert!(
+        !json.contains(secret_pat),
+        "activity must not journal PAT: {json}"
+    );
+    assert!(
+        !json.contains("body_storage") && !json.contains("<p>"),
+        "activity summary must not journal page bodies: {json}"
+    );
+    assert!(
+        !record.events.is_empty(),
+        "expected activity events from real confluence execute events={:?} record={:?}",
+        result.events,
+        record.events
+    );
+    let has_external = record.events.iter().any(|e| {
+        e.origin == cd_core::activity::ActivityOrigin::ExternalConnector
+            || e.label.to_ascii_lowercase().contains("confluence")
+            || e.operation_id.contains("confluence")
+            || e.label.to_ascii_lowercase().contains("search")
+    });
+    assert!(
+        has_external,
+        "activity parity: expected external/tool signal in {record:?}"
+    );
+}
+
+#[test]
+fn invalid_credential_ref_misses_secret_and_offers_no_tools() {
+    // Simulate host apply path: pat_ref recorded but secret-store miss → None pat.
+    let settings = ConfluenceSettings {
+        enabled: true,
+        base_url: "https://wiki.example.test".into(),
+        spaces: vec!["ENG".into()],
+        pat_ref: Some(CONFLUENCE_PAT_REF.into()),
+        write_enabled: false,
+        ..ConfluenceSettings::default()
+    };
+    assert!(settings.pat_ref.is_some());
+    // Secret miss → host attaches cfg with None pat (apply_host_connectors).
+    let (_d, mut host) = empty_host();
+    host.set_confluence(Some(settings.to_ro_config()), None);
+    host.set_confluence_auth_mode(settings.auth_mode, settings.basic_email.clone());
+    let names: Vec<_> = host.specs_for_model().into_iter().map(|s| s.name).collect();
+    assert!(
+        names.iter().all(|n| !n.starts_with("confluence_")),
+        "invalid/missing secret must fail closed with zero tools: {names:?}"
+    );
+    // Structural: desktop apply gates secret get on pat_ref and uses None when absent.
+    let host_src = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../desktop/src-tauri/src/lib.rs"
+    ));
+    assert!(
+        host_src.contains("pat_ref.is_some()") && host_src.contains("set_confluence_auth_mode"),
+        "host must gate secret reads and apply auth_mode"
+    );
+}
+
+#[tokio::test]
+async fn basic_auth_mode_sends_basic_header_not_bearer() {
+    let server = MockServer::start().await;
+    let expected = cd_core::confluence_ro::ConfluenceAuth::Basic {
+        email: "user@example.test".into(),
+        token: "cloud-api-token".into(),
+    }
+    .authorization_header();
+    Mock::given(method("GET"))
+        .and(path("/rest/api/content/search"))
+        .and(header("Authorization", expected.as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{
+                "id": "1",
+                "title": "Cloud Page",
+                "space": {"key": "ENG"},
+                "excerpt": "ok"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let (_d, mut host) = empty_host();
+    host.set_confluence(Some(eng_cfg(&server.uri())), Some("cloud-api-token".into()));
+    host.set_confluence_auth_mode(
+        cd_core::config::ConfluenceAuthMode::Basic,
+        Some("user@example.test".into()),
+    );
+    let r = host
+        .execute(names::CONFLUENCE_SEARCH, &json!({"query": "Cloud"}), None)
+        .await
+        .unwrap();
+    assert!(r.ok, "Basic auth must authenticate: {r:?}");
+    assert!(r.detail_raw.contains("Cloud Page") || r.summary.contains("hit"));
+    // Bearer-only bug would fail the Authorization matcher (no matching mock → error).
 }
 
 #[test]

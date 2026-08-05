@@ -913,7 +913,8 @@ async fn execute_live_turns(
     let trace_sink: Arc<dyn TurnTraceSink> = recorder.clone();
     let cancel = Arc::new(AtomicBool::new(false));
 
-    let mut host = match crate::adapters::tool_host(&paths.cache_root) {
+    let mut host = match crate::adapters::tool_host_with_app_config(&paths.cache_root, cfg, secrets)
+    {
         Ok(host) => host,
         Err(e) => return LiveTurnOutcome::SetupFailed(format!("could not build tool host: {e}")),
     };
@@ -1026,22 +1027,23 @@ async fn execute_live_turns(
 
     let question_two =
         "What correlation id did that event reference? Answer using only what we already found.";
-    let mut host_two = match crate::adapters::tool_host(&paths.cache_root) {
-        Ok(host) => host,
-        Err(e) => {
-            return LiveTurnOutcome::Completed {
-                session_id,
-                tool_called,
-                tool_summary,
-                grounded,
-                grounding_detail,
-                trace_captured,
-                continuity: ContinuityOutcome::SecondTurnFailed(format!(
-                    "could not build tool host for the second turn: {e}"
-                )),
-            };
-        }
-    };
+    let mut host_two =
+        match crate::adapters::tool_host_with_app_config(&paths.cache_root, cfg, secrets) {
+            Ok(host) => host,
+            Err(e) => {
+                return LiveTurnOutcome::Completed {
+                    session_id,
+                    tool_called,
+                    tool_summary,
+                    grounded,
+                    grounding_detail,
+                    trace_captured,
+                    continuity: ContinuityOutcome::SecondTurnFailed(format!(
+                        "could not build tool host for the second turn: {e}"
+                    )),
+                };
+            }
+        };
     // The second turn gets its own trace capture — separate from turn
     // one's `recorder` above — so `session_continuity` can inspect exactly
     // what request the second call actually sent, not infer it from turn

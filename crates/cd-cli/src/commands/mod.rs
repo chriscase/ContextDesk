@@ -1,6 +1,7 @@
 pub mod capabilities;
 pub mod chat;
 pub mod config_cmd;
+pub mod confluence_cmd;
 pub mod context;
 pub mod corpus;
 pub mod doctor;

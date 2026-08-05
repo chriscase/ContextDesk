@@ -99,6 +99,15 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Optional Confluence connector (status / search / get-page).
+    ///
+    /// Uses the shared AppConfig + keychain ref only — same contract as the
+    /// desktop host. Disabled / keyless profiles perform zero secret-store
+    /// reads and offer no tools.
+    Confluence {
+        #[command(subcommand)]
+        action: ConfluenceAction,
+    },
     /// Machine-readable description of this build: supported commands,
     /// envelope schema version, exit-code categories.
     Capabilities,
@@ -307,6 +316,28 @@ pub struct ChatArgs {
     /// retains bounded, redacted message bodies (never credentials).
     #[arg(long)]
     pub activity_ack: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfluenceAction {
+    /// Report connector configuration status (no secrets, no network).
+    Status,
+    /// CQL / free-text search via the real ToolHost path (network to configured base URL).
+    Search {
+        /// Free-text query (or CQL when it contains `space` / `=`).
+        query: String,
+        /// Max hits (1–25).
+        #[arg(long, default_value_t = 10)]
+        limit: u64,
+    },
+    /// Fetch one page by id via the real ToolHost path.
+    GetPage {
+        /// Confluence content id.
+        page_id: String,
+        /// `plain` | `meta` | `storage` | `all`.
+        #[arg(long, default_value = "plain")]
+        format: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
