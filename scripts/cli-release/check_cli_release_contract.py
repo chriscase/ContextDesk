@@ -52,6 +52,10 @@ def main() -> int:
     for p in REQUIRED:
         check(f"platform {p} in matrix", p in text)
     check("cargo build --locked", "--locked" in text)
+    check(
+        "Linux dbus build dependency installed",
+        "libdbus-1-dev" in text and "pkg-config" in text and "runner.os == 'Linux'" in text,
+    )
     check("CD_GIT_SHA embed", "CD_GIT_SHA" in text)
     check("CD_GIT_DESCRIBE embed", "CD_GIT_DESCRIBE" in text)
     check("CD_CHANNEL embed", "CD_CHANNEL" in text)

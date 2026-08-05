@@ -67,6 +67,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The CLI uses the shared keychain-backed credential layer. On Linux its
+      # transitive dbus binding needs the system development metadata; without
+      # this, the release build fails before the artifact smoke gate can run.
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes pkg-config libdbus-1-dev
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
