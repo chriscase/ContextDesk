@@ -74,6 +74,7 @@ const CATEGORIES: &[ExitCategory] = &[
 
 const COMMANDS: &[&str] = &[
     "import",
+    "normalize",
     "corpus list",
     "corpus show",
     "corpus rename",

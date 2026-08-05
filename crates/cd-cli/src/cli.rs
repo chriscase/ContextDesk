@@ -72,6 +72,9 @@ pub enum Command {
     /// Import an archive or directory of logs into a new corpus — no
     /// per-file selection required for a normal import.
     Import(ImportArgs),
+    /// Offline normalize selected sources to `contextdesk.normalized_log_events.v1`
+    /// JSONL (zero provider / keychain). Does not persist a durable corpus.
+    Normalize(NormalizeArgs),
     /// Manage imported corpora.
     Corpus {
         #[command(subcommand)]
@@ -153,6 +156,33 @@ pub struct ImportArgs {
     /// preview considered and why each was selected or excluded.
     #[arg(long)]
     pub explain_selection: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct NormalizeArgs {
+    /// File, folder, or zip of logs to normalize.
+    pub source: PathBuf,
+    /// Destination directory for JSONL + manifest + report (must be empty/absent).
+    #[arg(long, env = "CONTEXTDESK_NORMALIZE_OUTPUT")]
+    pub output: PathBuf,
+    /// Normalized data format (not command rendering — use global --format for that).
+    #[arg(
+        long = "output-format",
+        env = "CONTEXTDESK_NORMALIZE_FORMAT",
+        default_value = "jsonl"
+    )]
+    pub output_format: String,
+    /// IANA timezone applied to zone-less local timestamps for every source
+    /// without a map entry.
+    #[arg(long, env = "CONTEXTDESK_SOURCE_TIMEZONE")]
+    pub source_timezone: Option<String>,
+    /// JSON object mapping portable source identity → IANA zone
+    /// (e.g. `{"api/app.log":"America/Chicago"}`).
+    #[arg(long, env = "CONTEXTDESK_TIMEZONE_MAP")]
+    pub timezone_map: Option<String>,
+    /// Fail closed when any unresolved local timestamp lacks a resolvable zone.
+    #[arg(long, env = "CONTEXTDESK_STRICT_TIME")]
+    pub strict_time: bool,
 }
 
 #[derive(Debug, Subcommand)]

@@ -15,6 +15,7 @@
 
 pub mod chat;
 pub mod import;
+pub mod normalize;
 pub mod provider;
 pub mod session;
 pub mod timezone;

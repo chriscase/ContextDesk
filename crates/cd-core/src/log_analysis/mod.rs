@@ -24,6 +24,7 @@ mod ingest_confidence;
 pub mod lanes;
 pub mod linked_search_bound;
 pub mod noise_candidates;
+pub mod normalize_export;
 pub mod operational_metrics;
 pub mod package;
 pub mod parse;
@@ -123,6 +124,13 @@ pub use noise_candidates::{
     MAX_NOISE_REPORT_BYTES, MAX_NOISE_REPRESENTATIVES, MAX_NOISE_REPRESENTATIVE_EXCERPT_BYTES,
     MAX_TEMPLATES_SCANNED, MIN_CORPUS_EVENTS_FOR_CANDIDATES, MIN_PROPOSAL_SCORE,
     MIN_TEMPLATE_EVENTS_FOR_CANDIDATE,
+};
+pub use normalize_export::{
+    build_source_batches, load_events_with_originals, map_event_to_normalized, map_level_severity,
+    publish_staging, source_jsonl_relative_path, unix_secs_to_rfc3339_z, validate_jsonl_file,
+    write_and_validate_staging, write_source_jsonl, NormalizationManifest, NormalizationReport,
+    NormalizationSourceReport, NormalizeTimezonePolicy, PreviewCountSnapshot, SourceExportBatch,
+    NORMALIZE_PRODUCER_NAME, NORMALIZE_PRODUCER_VERSION,
 };
 pub use operational_metrics::{
     load_operational_metrics_attachment, remove_operational_metrics_attachment,

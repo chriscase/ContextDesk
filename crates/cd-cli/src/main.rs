@@ -108,6 +108,10 @@ async fn dispatch(
             }
             emit(format, "import", result)
         }
+        Command::Normalize(args) => {
+            let result = commands::normalize::run(args, format).await;
+            emit(format, "normalize", result)
+        }
         Command::Corpus { action } => {
             let result = commands::corpus::run(action, &paths.cache_root);
             if matches!(action, cli::CorpusAction::Use { .. }) {
