@@ -97,8 +97,10 @@ import {
   appendActivities,
   createActivityLog,
 } from "../../lib/activity/activityLog";
-import { timezoneActivityEvent } from "../../lib/activity/timezoneActivity";
-import type { ActivityEventInput } from "../../lib/activity/types";
+import {
+  createTimezoneActivityLog,
+  recordTimezoneActivity,
+} from "../../lib/activity/timezoneActivity";
 
 function hostProgressToWizard(p: ProcessProgressDto): WizardProgressDto {
   return {
@@ -310,17 +312,26 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const [progress, setProgress] = useState<ProcessProgressDto | null>(null);
   const [failedIngestDiagnostic, setFailedIngestDiagnostic] =
     useState<FailedLogIngestDiagnosticDto | null>(null);
-  const [timezoneActivityEvents, setTimezoneActivityEvents] = useState<
-    ActivityEventInput[]
-  >([]);
-  const importActivityLog = useMemo(
-    () =>
-      appendActivities(createActivityLog(), [
-        ...(importActivityAttempt?.events ?? []),
-        ...timezoneActivityEvents,
-      ]),
-    [importActivityAttempt, timezoneActivityEvents],
+  /** Bounded process-local log for timezone apply/undo (not an unbounded array). */
+  const [timezoneActivityLog, setTimezoneActivityLog] = useState(() =>
+    createTimezoneActivityLog(),
   );
+  const importActivityLog = useMemo(() => {
+    const importPart = appendActivities(
+      createActivityLog(),
+      importActivityAttempt?.events ?? [],
+    );
+    return {
+      entries: [...importPart.entries, ...timezoneActivityLog.entries],
+      omitted: importPart.omitted + timezoneActivityLog.omitted,
+      // Disclose the tighter timezone cap when its omitted count is non-zero.
+      cap:
+        timezoneActivityLog.omitted > 0
+          ? timezoneActivityLog.cap
+          : importPart.cap,
+      nextId: importPart.nextId + timezoneActivityLog.nextId,
+    };
+  }, [importActivityAttempt, timezoneActivityLog]);
   /** In-app Explorer escape hatch when multi-window fails (#503). */
   const [inAppExplorerId, setInAppExplorerId] = useState<string | null>(null);
   /** Chrome-row status for the embed (window-open failures stay visible). */
@@ -697,28 +708,22 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     async (request: LogTimezoneApplyRequestDto) => {
       try {
         await hostApplyLogSourceTimezone(request);
-        setTimezoneActivityEvents((current) => [
-          ...current,
-          timezoneActivityEvent({
+        setTimezoneActivityLog((log) =>
+          recordTimezoneActivity(log, {
             corpusId: request.corpusId,
-            correlationId: `import:${request.corpusId}:tz`,
             outcome: "applied",
             zone: request.ianaZone,
             sourceCount: 1,
-            seq: current.length,
           }),
-        ]);
+        );
       } catch (error) {
-        setTimezoneActivityEvents((current) => [
-          ...current,
-          timezoneActivityEvent({
+        setTimezoneActivityLog((log) =>
+          recordTimezoneActivity(log, {
             corpusId: request.corpusId,
-            correlationId: `import:${request.corpusId}:tz`,
             outcome: "failed",
             zone: request.ianaZone,
-            seq: current.length,
           }),
-        ]);
+        );
         throw error;
       }
       // Any open Explorer (in-app or its own window) may be showing this
@@ -737,26 +742,20 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     async (request: LogTimezoneClearRequestDto) => {
       try {
         await hostClearLogSourceTimezone(request);
-        setTimezoneActivityEvents((current) => [
-          ...current,
-          timezoneActivityEvent({
+        setTimezoneActivityLog((log) =>
+          recordTimezoneActivity(log, {
             corpusId: request.corpusId,
-            correlationId: `import:${request.corpusId}:tz`,
             outcome: "undone",
             sourceCount: 1,
-            seq: current.length,
           }),
-        ]);
+        );
       } catch (error) {
-        setTimezoneActivityEvents((current) => [
-          ...current,
-          timezoneActivityEvent({
+        setTimezoneActivityLog((log) =>
+          recordTimezoneActivity(log, {
             corpusId: request.corpusId,
-            correlationId: `import:${request.corpusId}:tz`,
             outcome: "failed",
-            seq: current.length,
           }),
-        ]);
+        );
         throw error;
       }
       void broadcastTimeRevisionChanged(request.corpusId);
@@ -1683,7 +1682,10 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
           the corpus metadata above. Quiet by default: one line plus an
           opt-in ledger, and nothing at all when the shared preference is
           Off — which changes the display only, not the import. */}
-      {lastImportRun || importActivityAttempt ? (
+      {lastImportRun ||
+      importActivityAttempt ||
+      timezoneActivityLog.entries.length > 0 ||
+      timezoneActivityLog.omitted > 0 ? (
         <div
           className="log-pane__activity"
           data-testid="log-pane-activity"

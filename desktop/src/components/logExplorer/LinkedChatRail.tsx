@@ -60,6 +60,15 @@ import {
   loadDeveloperActivityDetail,
   subscribeDeveloperActivityDetail,
 } from "../../lib/activity/prefs";
+import { buildActivityTurn } from "../../lib/activity/adapter";
+import { settleTurnLifecycle } from "../../lib/activity/turnLifecycle";
+import type {
+  ActivityMode,
+  ActivityTurn,
+  HostTurnActivityRecord,
+} from "../../lib/activity/types";
+import { fetchTurnActivity } from "../../lib/engine/turnActivity";
+import { useActivityInspector } from "../../hooks/useActivityInspector";
 import {
   extractAndCleanLogNav,
   extractLogNavFromText,
@@ -81,6 +90,9 @@ import { MarkdownBody } from "../MarkdownBody";
 import { SourceCitations } from "../SourceCitations";
 import { EvidenceSetPanel } from "../EvidenceSetPanel";
 import { ToolCallList } from "../ToolCallList";
+import { ActivityCompactLine } from "../activity/ActivityCompactLine";
+import { ActivityDrawer } from "../activity/ActivityDrawer";
+import { ActivityToggle } from "../activity/ActivityToggle";
 
 export function hasHostLinkedSynthesisRetry(
   events: EventDto[],
@@ -296,13 +308,17 @@ function selectionForSession(
   return fallback;
 }
 
-function LinkedChatBubble({
+/** Exported for component tests of linked-chat Activity parity. */
+export function LinkedChatBubble({
   message,
   developerMode,
   onHeightChange,
   virtualized,
   top,
   onOpenCitation,
+  activityMode = "off",
+  activityTurn = null,
+  onOpenActivityDetails,
 }: {
   message: ChatMsg;
   developerMode: boolean;
@@ -310,6 +326,9 @@ function LinkedChatBubble({
   virtualized: boolean;
   top: number;
   onOpenCitation?: (sourceId: string, corpusId?: string) => void;
+  activityMode?: ActivityMode;
+  activityTurn?: ActivityTurn | null;
+  onOpenActivityDetails?: (messageId: string) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -332,8 +351,16 @@ function LinkedChatBubble({
     message.streaming,
     message.tools,
     message.citations,
+    activityTurn,
     onHeightChange,
   ]);
+
+  // Host terminal status beats a stale streaming flag (same settle as ordinary chat).
+  const showStreamingBadge = settleTurnLifecycle({
+    streaming: message.streaming,
+    content: message.content,
+    recordStatus: activityTurn?.summary.status ?? null,
+  }).live;
 
   return (
     <div
@@ -354,7 +381,7 @@ function LinkedChatBubble({
     >
       <div className="log-explorer__chat-role">
         {message.role}
-        {message.streaming ? " · streaming" : ""}
+        {showStreamingBadge ? " · streaming" : ""}
       </div>
       {message.tools && message.tools.length > 0 ? (
         <ToolCallList tools={message.tools} collapseAfter={4} />
@@ -472,6 +499,16 @@ function LinkedChatBubble({
             {message.trail.join(" → ")}
           </div>
         </details>
+      ) : null}
+      {message.role === "assistant" &&
+      activityMode !== "off" &&
+      activityTurn &&
+      (!showStreamingBadge ||
+        (activityTurn.developerDetail?.length ?? 0) > 0) ? (
+        <ActivityCompactLine
+          turn={activityTurn}
+          onOpenDetails={() => onOpenActivityDetails?.(message.id)}
+        />
       ) : null}
     </div>
   );
@@ -604,6 +641,56 @@ export function LinkedChatRail({
   );
 
   const windowed = useMessageWindow(messages, threadRef);
+
+  // Per-turn Activity Inspector (same shared contract as ordinary ChatPane).
+  // Corpus/import ActivityRail is separate — this is chat-turn activity.
+  const activity = useActivityInspector(activeChatId, false);
+  const [activityRecords, setActivityRecords] = useState<
+    Record<string, HostTurnActivityRecord | null>
+  >({});
+
+  useEffect(() => {
+    setActivityRecords({});
+  }, [activeChatId]);
+
+  const pendingActivityIds = useMemo(() => {
+    if (activity.mode === "off" || !activeChatId) return [] as string[];
+    return messages
+      .filter((m) => m.role === "assistant" && !m.streaming)
+      .map((m) => m.id)
+      .filter((id) => !(id in activityRecords));
+  }, [activity.mode, activeChatId, messages, activityRecords]);
+
+  useEffect(() => {
+    if (!activeChatId || pendingActivityIds.length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      const loaded: Record<string, HostTurnActivityRecord | null> = {};
+      for (const id of pendingActivityIds) {
+        loaded[id] = await fetchTurnActivity(activeChatId, id);
+      }
+      if (!cancelled) {
+        setActivityRecords((prev) => ({ ...loaded, ...prev }));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pendingActivityIds, activeChatId]);
+
+  const buildTurnFor = useCallback(
+    (msg: ChatMsg) =>
+      buildActivityTurn(msg, {
+        record: activityRecords[msg.id] ?? null,
+      }),
+    [activityRecords],
+  );
+
+  const selectedActivityTurn = useMemo(() => {
+    if (!activity.selectedTurnId) return null;
+    const msg = messages.find((m) => m.id === activity.selectedTurnId);
+    return msg ? buildTurnFor(msg) : null;
+  }, [activity.selectedTurnId, messages, buildTurnFor]);
 
   /**
    * Selections the rail must keep offered even when curated away, so a linked
@@ -1734,6 +1821,12 @@ export function LinkedChatRail({
           </div>
         </div>
         <div className="log-explorer__chat-header-actions">
+          <ActivityToggle
+            mode={activity.mode}
+            onChange={activity.setMode}
+            developerDetail={activity.developerDetail}
+            onDeveloperDetailChange={activity.setDeveloperDetail}
+          />
           {!compactLayout && onToggleCollapsed ? (
             <button
               ref={collapseToggleRef}
@@ -2073,6 +2166,13 @@ export function LinkedChatRail({
                     windowed.virtualized ? windowed.onHeightChange : undefined
                   }
                   onOpenCitation={openLinkedCitation}
+                  activityMode={activity.mode}
+                  activityTurn={
+                    activity.mode !== "off" && msg.role === "assistant"
+                      ? buildTurnFor(msg)
+                      : null
+                  }
+                  onOpenActivityDetails={activity.openDrawerFor}
                 />
               ))}
             </div>
@@ -2361,6 +2461,12 @@ export function LinkedChatRail({
           {busy ? (cancellationRequested ? "Stopping…" : "Stop") : "Send"}
         </button>
       </div>
+      {activity.surface === "drawer" ? (
+        <ActivityDrawer
+          turn={selectedActivityTurn}
+          onClose={activity.closeDrawer}
+        />
+      ) : null}
     </aside>
   );
 }

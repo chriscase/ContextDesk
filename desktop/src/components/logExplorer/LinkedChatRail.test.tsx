@@ -3504,3 +3504,87 @@ describe("LinkedChatRail", () => {
     vi.useRealTimers();
   });
 });
+
+describe("linked-chat per-turn Activity parity", () => {
+  it("opens Activity for a cancelled empty assistant turn and never shows streaming", async () => {
+    const { buildActivityTurn } = await import("../../lib/activity/adapter");
+    const { ActivityDrawer } = await import("../activity/ActivityDrawer");
+    const { LinkedChatBubble } = await import("./LinkedChatRail");
+    const { saveActivityMode } = await import("../../lib/activity/prefs");
+
+    saveActivityMode("drawer");
+
+    const cancelledRecord = {
+      version: 1,
+      turn_id: "linked-chat::asst-1",
+      session_id: "linked-chat",
+      message_id: "asst-1",
+      scope: { kind: "conversation" as const, label: "Conversation" },
+      status: "cancelled" as const,
+      total_elapsed_ms: 41027,
+      detail_level: "summary" as const,
+      dropped_events: 0,
+      events: [],
+    };
+    // Stale streaming:true + empty content + host cancelled — packaged-GUI bug class.
+    const message = {
+      id: "asst-1",
+      role: "assistant" as const,
+      content: "",
+      streaming: true,
+    };
+    const turn = buildActivityTurn(message, { record: cancelledRecord });
+    expect(turn.label).toBe("(cancelled)");
+    expect(turn.label.toLowerCase()).not.toContain("streaming");
+    expect(turn.summary.status).toBe("cancelled");
+
+    const onOpen = vi.fn();
+    const { rerender } = render(
+      <LinkedChatBubble
+        message={message}
+        developerMode={false}
+        virtualized={false}
+        top={0}
+        activityMode="drawer"
+        activityTurn={turn}
+        onOpenActivityDetails={onOpen}
+      />,
+    );
+
+    // Role chrome must not claim streaming once host terminal status is known.
+    expect(screen.getByTestId("linked-chat-msg-assistant").textContent).not.toMatch(
+      /streaming/i,
+    );
+    const details = screen.getByRole("button", {
+      name: /Activity details/i,
+    });
+    fireEvent.click(details);
+    expect(onOpen).toHaveBeenCalledWith("asst-1");
+
+    // Open the shared Activity drawer surface with the settled turn.
+    rerender(
+      <>
+        <LinkedChatBubble
+          message={message}
+          developerMode={false}
+          virtualized={false}
+          top={0}
+          activityMode="drawer"
+          activityTurn={turn}
+          onOpenActivityDetails={onOpen}
+        />
+        <ActivityDrawer turn={turn} onClose={vi.fn()} />
+      </>,
+    );
+
+    const label = screen.getByTestId("activity-turn-label");
+    expect(label.textContent).toBe("(cancelled)");
+    expect(label.textContent?.toLowerCase()).not.toContain("streaming");
+    expect(screen.getByTestId("activity-status-chip").textContent).toBe(
+      "cancelled",
+    );
+    expect(screen.getByTestId("activity-terminal-summary").textContent).toMatch(
+      /cancelled/i,
+    );
+  });
+});

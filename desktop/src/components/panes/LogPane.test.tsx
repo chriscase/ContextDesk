@@ -2615,6 +2615,8 @@ describe("LogPane", () => {
   });
 
   it("restores, applies, and clears revision-bound source timezone declarations", async () => {
+    const { saveActivityMode } = await import("../../lib/activity/prefs");
+    saveActivityMode("compact");
     const item = corpus("timezone-corpus", "Timezone review corpus");
     hostMocks.listCorpora.mockResolvedValue([item]);
     const unresolvedState = {
@@ -2700,6 +2702,12 @@ describe("LogPane", () => {
         previewToken: "timezone-preview",
       }),
     );
+    // Real LogPane applyTimezone path → recordTimezoneActivity → live trace.
+    await waitFor(() => {
+      const region = screen.getByTestId("log-pane-activity");
+      expect(region.textContent).toMatch(/Timezone applied/i);
+    });
+
     const restored = await screen.findByTestId("log-timezone-status");
     expect(restored.textContent).toContain("America/Chicago is active");
     fireEvent.click(

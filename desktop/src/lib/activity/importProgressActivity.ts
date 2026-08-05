@@ -76,7 +76,8 @@ function phaseLabel(phase: ImportProgressPhase): string {
     case "template":
       return "Candidate template classification";
     case "redact":
-      return "Safety redaction of secrets and PII";
+      // Standing import contract: secret/credential scrub only — not general PII.
+      return "Safety redaction of secrets and credentials";
     case "store":
       return "Normalization and indexing into the store";
     case "embed":

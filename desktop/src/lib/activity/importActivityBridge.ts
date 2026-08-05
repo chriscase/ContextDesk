@@ -103,7 +103,7 @@ const IMPORT_LABEL_TUPLES: ReadonlyMap<
     { origin: "repeatable_heuristic", phases: NON_TERMINAL_PHASES, statuses: PENDING_ONLY },
   ],
   [
-    "Safety redaction of secrets and PII",
+    "Safety redaction of secrets and credentials",
     { origin: "deterministic_host", phases: NON_TERMINAL_PHASES, statuses: PENDING_ONLY },
   ],
   [
