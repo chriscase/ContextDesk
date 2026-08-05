@@ -22,6 +22,7 @@ pub mod import_profile;
 pub mod ingest;
 mod ingest_confidence;
 pub mod lanes;
+pub mod linked_search_bound;
 pub mod noise_candidates;
 pub mod operational_metrics;
 pub mod package;
@@ -107,6 +108,10 @@ pub use ingest_confidence::{
 pub use lanes::{
     clamp_lane_count, compute_gaps, link_allowed, nearest_at_or_after, scrub_linked, GapRegion,
     LaneEventRef, LinkScrubResult, PeerPosition, MAX_LANES,
+};
+pub use linked_search_bound::{
+    citations_from_search_evidence, BoundDecision, CiteableEvidenceSet, LinkedSearchProgressTracker,
+    SearchIntentKey, MAX_CONSECUTIVE_NO_PROGRESS_SEARCHES,
 };
 pub use noise_candidates::{
     propose_noise_candidates, propose_noise_candidates_with_cancel, score_noise_candidate_facts,

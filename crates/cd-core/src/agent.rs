@@ -2501,6 +2501,10 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
     let mut linked_allow_empty_evidence = false;
     let mut broad_triage_brief_complete = false;
     let mut broad_triage_optional_deepening_offered = false;
+    // Host bound: stop further search_logs after non-progress (no new citeable events).
+    let mut search_non_progress_stop = false;
+    let mut linked_search_progress =
+        crate::log_analysis::LinkedSearchProgressTracker::new();
 
     // Broad triage starts with one host-owned deterministic brief. Large or
     // noisy corpora must not depend on a model correctly inventing the first
@@ -3089,7 +3093,10 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
             } else {
                 Vec::new()
             };
-            let tool_arg: &[ToolSpec] = if tools_disabled || linked_tool_closed_synthesis_ready {
+            let tool_arg: &[ToolSpec] = if tools_disabled
+                || linked_tool_closed_synthesis_ready
+                || search_non_progress_stop
+            {
                 &[]
             } else if broad_triage_optional_deepening {
                 &optional_deepening_specs
@@ -3903,16 +3910,48 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                 ));
             }
             let mut governed_evidence_success = result.ok;
-            if resolved_tool_name == crate::log_analysis::SEARCH_LOGS && result.ok {
-                if result.log_result_count.unwrap_or(0) > 0 && !result.log_evidence.is_empty() {
-                    successful_log_tools = successful_log_tools.saturating_add(1);
-                    extend_linked_log_identities(
-                        &mut linked_log_evidence_identities,
-                        &result.log_evidence,
-                    );
-                } else {
-                    governed_evidence_success = false;
-                    trail.push("linked_search_logs_zero_results".into());
+            if resolved_tool_name == crate::log_analysis::SEARCH_LOGS {
+                // Host non-progress bound (linked and ordinary chat with log tools).
+                let bound = linked_search_progress.observe_search_logs(
+                    &args,
+                    &result.log_evidence,
+                    result.ok,
+                );
+                match bound {
+                    crate::log_analysis::BoundDecision::Stop {
+                        reason_code,
+                        model_message,
+                        trail_step,
+                    } => {
+                        search_non_progress_stop = true;
+                        trail.push(trail_step);
+                        trail.push(format!("linked_search_forced_synthesis:{reason_code}"));
+                        // Surface stop reason to the model in the tool channel.
+                        let augmented = format!(
+                            "{}\n\n---\n{model_message}",
+                            result.detail_raw
+                        );
+                        result.detail_raw = augmented.clone();
+                        result.detail_for_model =
+                            wrap_untrusted(&format!("tool:{resolved_tool_name}"), &augmented);
+                        result.summary = format!(
+                            "{} · host bound (no new citeable events)",
+                            result.summary
+                        );
+                    }
+                    crate::log_analysis::BoundDecision::Allow { .. } => {}
+                }
+                if result.ok {
+                    if result.log_result_count.unwrap_or(0) > 0 && !result.log_evidence.is_empty() {
+                        successful_log_tools = successful_log_tools.saturating_add(1);
+                        extend_linked_log_identities(
+                            &mut linked_log_evidence_identities,
+                            &result.log_evidence,
+                        );
+                    } else {
+                        governed_evidence_success = false;
+                        trail.push("linked_search_logs_zero_results".into());
+                    }
                 }
             }
             if governed_evidence_success {
@@ -5053,6 +5092,114 @@ mod tests {
             history.iter().any(|m| m.role == Role::Tool),
             "expected tool result in history"
         );
+        // Host must emit governed log_event citations (not only template labels).
+        let log_event_cites: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::Citation { source_id, label, .. }
+                    if source_id.starts_with("log_event:") =>
+                {
+                    Some((source_id.as_str(), label.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !log_event_cites.is_empty(),
+            "expected host log_event citations from search evidence: {events:?}"
+        );
+        assert!(
+            log_event_cites.iter().any(|(_, label)| label.contains("worker.log")),
+            "citation labels must be host source paths: {log_event_cites:?}"
+        );
+    }
+
+    /// Productive search then a second search with the same citeable set (changed
+    /// args) is host-stopped. Uses host.execute (real tool path) + tracker so we
+    /// do not depend on synthesis closing tools after the first hit.
+    #[tokio::test]
+    async fn linked_search_non_progress_stops_same_evidence_under_changed_args() {
+        use std::io::Write;
+        let dir = tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let mut f = fs::File::create(logs.join("api.log")).unwrap();
+        writeln!(
+            f,
+            r#"{{"ts":1700000100,"level":"error","service":"api","message":"xyz timeout code=1"}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"ts":1700000101,"level":"error","service":"api","message":"xyz timeout code=2"}}"#
+        )
+        .unwrap();
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        let report =
+            crate::log_analysis::ingest_path(&cache, &logs, "xyz-same", None, "none").unwrap();
+
+        let ws = Workspace::new("bound-same", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        host.set_log_analysis(true, Some(cache));
+        host.set_active_log_corpus(Some(report.corpus_id.clone()));
+
+        // Exercise pure bound on the real search evidence from the host tool.
+        let mut tracker = crate::log_analysis::LinkedSearchProgressTracker::new();
+        let args1 = serde_json::json!({"query": "xyz timeout", "k": 8});
+        let args2 = serde_json::json!({"query": "xyz timeout refined", "k": 16});
+        let (ok1, _, _, _, evidence1, _) = {
+            // Use host.execute path for real evidence
+            let r = host
+                .execute(
+                    crate::log_analysis::SEARCH_LOGS,
+                    &args1,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(r.ok);
+            assert!(!r.log_evidence.is_empty(), "expected citeable evidence");
+            // Citations must include log_event: identities
+            assert!(
+                r.events.iter().any(|e| matches!(
+                    e,
+                    StreamEvent::Citation { source_id, .. } if source_id.starts_with("log_event:")
+                )),
+                "tool events must emit log_event citations: {:?}",
+                r.events
+            );
+            (
+                r.ok,
+                r.summary,
+                r.detail_raw,
+                r.citation_path,
+                r.log_evidence,
+                r.log_result_count,
+            )
+        };
+        let d1 = tracker.observe_search_logs(&args1, &evidence1, ok1);
+        assert!(matches!(
+            d1,
+            crate::log_analysis::BoundDecision::Allow { new_event_count, .. } if new_event_count > 0
+        ));
+        let r2 = host
+            .execute(crate::log_analysis::SEARCH_LOGS, &args2, None)
+            .await
+            .unwrap();
+        let d2 = tracker.observe_search_logs(&args2, &r2.log_evidence, r2.ok);
+        match d2 {
+            crate::log_analysis::BoundDecision::Stop {
+                model_message,
+                reason_code,
+                ..
+            } => {
+                assert!(model_message.contains("HOST BOUND"));
+                assert!(reason_code.contains("non_progress"));
+            }
+            other => panic!("expected Stop on same evidence, got {other:?}"),
+        }
     }
 
     #[tokio::test]

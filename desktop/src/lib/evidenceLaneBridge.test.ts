@@ -635,6 +635,63 @@ describe("opening evidence never mutates corpus", () => {
   });
 });
 
+describe("host log_event citations from search_logs stream", () => {
+  it("treats host source-path labels as source for lane eligibility", () => {
+    // Shape after tool_host citations_from_search_evidence + Tauri corpus_id inject.
+    const set = buildEvidenceSetFromHostCitations([
+      {
+        id: "log_event:42",
+        label: "xyz/api.log",
+        corpusId: "corpus-xyz-demo",
+      },
+      {
+        id: "log_event:43",
+        label: "xyz/worker.log",
+        corpusId: "corpus-xyz-demo",
+      },
+      {
+        id: "log_template:9",
+        label: "log_template:9",
+        corpusId: "corpus-xyz-demo",
+      },
+    ]);
+    const eligible = laneEligibleItems(set);
+    expect(eligible).toHaveLength(2);
+    expect(eligible.map((e) => e.source).sort()).toEqual([
+      "xyz/api.log",
+      "xyz/worker.log",
+    ]);
+    const plan = finalizeShowAssignment({
+      resolved: eligible.map((e) => ({
+        ...e,
+        timestamp: 1,
+        timeQuality: "wall" as const,
+      })),
+      mode: "one_source_per_lane",
+      existing: freeLanes(2),
+      availableCorpusIds: ["corpus-xyz-demo"],
+    });
+    expect("error" in plan).toBe(false);
+    if ("error" in plan) return;
+    expect(
+      plan.assignment.lanes.flatMap((l) => l.sources).sort(),
+    ).toEqual(["xyz/api.log", "xyz/worker.log"]);
+  });
+
+  it("rejects malicious prose-only log_event without host attachment", () => {
+    const set = buildEvidenceSetFromHostCitations([
+      {
+        id: "log_event:1",
+        label: "xyz/api.log",
+        corpusId: "corpus-xyz-demo",
+      },
+    ]);
+    const forged = filterToHostEvidenceSet(set, ["log_event:999", "log_event:1"]);
+    expect(forged.rejected).toContain("log_event:999");
+    expect(forged.accepted.map((a) => a.id)).toEqual(["log_event:1"]);
+  });
+});
+
 describe("finalizeShowAssignment (resolved path — never pre-resolve override)", () => {
   it("builds one_source_per_lane from host-resolved sources, not unresolved draft", () => {
     // Chat-shaped base: no source until host resolve

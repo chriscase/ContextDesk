@@ -184,6 +184,23 @@ export function classifyHostCitation(
     kind === "other" ||
     (kind === "log_template" && !laneEligible);
 
+  // Host stream puts verified source paths in `label` for search_logs event
+  // citations (e.g. "xyz/api.log"). Only promote path-like labels — never
+  // generic display names or model prose.
+  const labelTrim = citation.label?.trim() ?? "";
+  const labelLooksLikeHostSource =
+    kind === "log_event" &&
+    labelTrim.length > 0 &&
+    labelTrim !== citation.id &&
+    !labelTrim.startsWith("log_event:") &&
+    !labelTrim.startsWith("log_template:") &&
+    (labelTrim.includes("/") ||
+      labelTrim.includes("\\") ||
+      /\.(log|jsonl?|txt|out)$/i.test(labelTrim));
+  const hostSource =
+    citation.source?.trim() ||
+    (labelLooksLikeHostSource ? labelTrim : undefined);
+
   return {
     key,
     id: citation.id,
@@ -193,7 +210,7 @@ export function classifyHostCitation(
     kind,
     laneEligible,
     workspaceOnly: workspaceOnly && !laneEligible,
-    source: citation.source,
+    source: hostSource || undefined,
     service: citation.service ?? undefined,
     timestamp: citation.timestamp,
     timeQuality: citation.timeQuality,

@@ -3605,6 +3605,20 @@ impl ToolHost {
                 locator: Some(path.clone()),
             });
         }
+        // Host-verified log event identities from search_logs — never model prose.
+        // Labels are corpus source paths; UI maps log_event:seq + corpus_id for Evidence.
+        if !log_evidence.is_empty() {
+            let max_cites = self.max_results_per_source.saturating_mul(4).max(8).min(32);
+            for (source_id, label, locator) in
+                crate::log_analysis::citations_from_search_evidence(&log_evidence, max_cites)
+            {
+                events.push(StreamEvent::Citation {
+                    source_id,
+                    label,
+                    locator,
+                });
+            }
+        }
         if name == crate::help::SEARCH_HELP {
             let query = arguments
                 .get("query")
