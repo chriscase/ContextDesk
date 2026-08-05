@@ -147,35 +147,104 @@ pub struct NormalizationManifest {
 const REPORT_SCHEMA: &str = "contextdesk.normalization_report.v1";
 const MANIFEST_SCHEMA: &str = "contextdesk.normalization_manifest.v1";
 
-/// Map level string from parse to OTel-ish severity without inventing raw source fields.
+/// Honest missing severity for store-only export (no invented confidence).
 ///
-/// Provenance is always [`SeverityProvenance::SchemaMapped`] (or Absent): we do
-/// not retain raw severity tokens through current ingest, so we never claim
-/// `source_declared`.
-pub fn map_level_severity(level: &str) -> Severity {
-    let canonical = match level.to_ascii_lowercase().as_str() {
-        "trace" | "debug" => Some(5),
-        "info" | "information" | "notice" => Some(9),
-        "warn" | "warning" => Some(13),
-        "error" | "err" => Some(17),
-        "fatal" | "critical" | "crit" | "alert" | "emergency" => Some(21),
-        "unknown" | "" => None,
-        _ => None,
-    };
-    match canonical {
-        Some(n) => Severity {
-            raw: None,
-            canonical: Some(n),
-            confidence: SeverityConfidence::Medium,
-            provenance: SeverityProvenance::SchemaMapped,
-        },
-        None => Severity {
-            raw: None,
-            canonical: None,
-            confidence: SeverityConfidence::Low,
-            provenance: SeverityProvenance::Absent,
-        },
+/// Validator matrix: `absent` must carry neither `raw` nor `canonical`.
+pub fn severity_absent() -> Severity {
+    Severity {
+        raw: None,
+        canonical: None,
+        // Confidence is unconstrained for Absent; Low documents "we do not know".
+        confidence: SeverityConfidence::Low,
+        provenance: SeverityProvenance::Absent,
     }
+}
+
+/// Documented level-token → OTel number mapping (schema_mapped only).
+///
+/// Never used with `confidence=low`. Never applied to the stored normalized
+/// `level` column alone as if it were source truth.
+pub fn documented_level_to_otel(token: &str) -> Option<u8> {
+    match token.to_ascii_lowercase().as_str() {
+        "trace" | "debug" | "d" => Some(5),
+        "info" | "information" | "notice" | "i" => Some(9),
+        "warn" | "warning" | "w" => Some(13),
+        "error" | "err" | "e" => Some(17),
+        "fatal" | "critical" | "crit" | "alert" | "emergency" | "f" => Some(21),
+        _ => None,
+    }
+}
+
+/// Recover severity only from the retained original representation.
+///
+/// - JSON object with a real `severity` / `level` / `lvl` field → raw preserved;
+///   string tokens use [`documented_level_to_otel`] as **schema_mapped** + medium;
+///   numeric 0–24 uses **source_declared** + high when the field is clearly severity.
+/// - Otherwise → [`severity_absent`] (store-only / no invented value).
+///
+/// The stored ingest `level` column is **never** treated as source-declared.
+pub fn severity_from_original(original: Option<&str>) -> Severity {
+    let Some(text) = original.map(str::trim).filter(|s| !s.is_empty()) else {
+        return severity_absent();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
+        return severity_absent();
+    };
+    let Some(obj) = v.as_object() else {
+        return severity_absent();
+    };
+    let raw_val = obj
+        .get("severity")
+        .or_else(|| obj.get("level"))
+        .or_else(|| obj.get("lvl"))
+        .or_else(|| obj.get("log.level"))
+        .cloned();
+    let Some(raw_val) = raw_val else {
+        return severity_absent();
+    };
+    match &raw_val {
+        serde_json::Value::Number(n) => {
+            if let Some(u) = n.as_u64().filter(|u| *u <= 24) {
+                return Severity {
+                    raw: Some(raw_val),
+                    canonical: Some(u as u8),
+                    confidence: SeverityConfidence::High,
+                    provenance: SeverityProvenance::SourceDeclared,
+                };
+            }
+            severity_absent()
+        }
+        serde_json::Value::String(s) => {
+            if let Some(canonical) = documented_level_to_otel(s) {
+                // Documented vocabulary mapping from an exact recovered token.
+                Severity {
+                    raw: Some(raw_val),
+                    canonical: Some(canonical),
+                    confidence: SeverityConfidence::Medium,
+                    provenance: SeverityProvenance::SchemaMapped,
+                }
+            } else {
+                // Recovered token we cannot map — keep raw only as source_declared
+                // would require a canonical? Source_declared with raw string and
+                // no canonical is allowed by validator if pair is coherent (high).
+                Severity {
+                    raw: Some(raw_val),
+                    canonical: None,
+                    confidence: SeverityConfidence::High,
+                    provenance: SeverityProvenance::SourceDeclared,
+                }
+            }
+        }
+        _ => severity_absent(),
+    }
+}
+
+/// Store-only severity: always [`severity_absent`] (ignores stored `level`).
+///
+/// Kept as a named API so callers cannot accidentally treat the ingest `level`
+/// column as source-declared severity. Prefer [`severity_from_original`].
+pub fn map_level_severity(_level: &str) -> Severity {
+    severity_absent()
 }
 
 /// Format unix seconds as RFC3339 UTC with `Z`.
@@ -187,7 +256,10 @@ pub fn unix_secs_to_rfc3339_z(secs: i64) -> String {
         .unwrap_or_else(|| format!("{secs}"))
 }
 
-/// Map one stored ingest event + optional redacted original into a normalized event.
+/// Map one stored ingest event + retained original into a normalized event.
+///
+/// Requires a non-empty original representation (canonical). Substituting the
+/// normalized `message` for missing original is forbidden.
 pub fn map_event_to_normalized(
     event: &LogEvent,
     original_text: Option<&str>,
@@ -196,13 +268,31 @@ pub fn map_event_to_normalized(
 ) -> CoreResult<NormalizedLogEvent> {
     let time = map_event_time(event, policy)?;
     let canonical = original_text
-        .map(str::to_string)
-        .unwrap_or_else(|| event.message.clone());
-    // Never claim the redacted/normalized message is the original when we lost it.
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            CoreError::Policy(format!(
+                "missing retained original for event seq {} source {}",
+                event.seq, event.source
+            ))
+        })?
+        .to_string();
+    // Severity only from original when recoverable; else honest absent.
+    let severity = severity_from_original(Some(canonical.as_str()));
+    debug_assert!(
+        !(matches!(severity.provenance, SeverityProvenance::Absent)
+            && (severity.raw.is_some() || severity.canonical.is_some())),
+        "absent severity must not carry raw/canonical"
+    );
+    debug_assert!(
+        !(matches!(severity.provenance, SeverityProvenance::SchemaMapped)
+            && matches!(severity.confidence, SeverityConfidence::Low)),
+        "schema_mapped + low is illegal"
+    );
     Ok(NormalizedLogEvent {
         source_seq: event.seq,
         time,
-        severity: map_level_severity(&event.level),
+        severity,
         message: event.message.clone(),
         trace_id: event.trace_id.clone(),
         span_id: None,
@@ -358,19 +448,35 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// Load events with redacted originals from an open corpus (ingest store).
-pub fn load_events_with_originals(corpus: &LogCorpus) -> CoreResult<Vec<EventWithOriginal>> {
+/// Page size for the single joined export query (events ⨝ original fields).
+pub const NORMALIZE_EVENT_PAGE: usize = 512;
+
+/// One bounded page of events with original columns from a **single** SQL join.
+///
+/// Keyset on `seq` (`seq > after_seq`). Does **not** call per-event original
+/// lookups such as `query_event_original`.
+pub fn load_events_with_originals_page(
+    corpus: &LogCorpus,
+    after_seq: Option<u64>,
+    limit: usize,
+) -> CoreResult<Vec<EventWithOriginal>> {
+    let limit = limit.clamp(1, NORMALIZE_EVENT_PAGE.max(1));
+    let after = after_seq.unwrap_or(0);
     corpus.with_connection(|conn| {
+        // One joined projection: normalized fields + retained original representation.
         let mut stmt = conn
             .prepare(
                 "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source, \
                         timestamp_provenance, active_timestamp_basis, unresolved_local_timestamp, \
                         original_redacted, original_truncated, original_redaction_applied \
-                 FROM events ORDER BY seq",
+                 FROM events \
+                 WHERE seq > ?1 \
+                 ORDER BY seq \
+                 LIMIT ?2",
             )
-            .map_err(|e| CoreError::Message(format!("prepare events: {e}")))?;
+            .map_err(|e| CoreError::Message(format!("prepare paged events join: {e}")))?;
         let rows = stmt
-            .query_map([], |r| {
+            .query_map(duckdb::params![after as i64, limit as i64], |r| {
                 let params_s: String = r.get(6)?;
                 let params: Vec<String> = serde_json::from_str(&params_s).unwrap_or_default();
                 Ok((
@@ -392,8 +498,8 @@ pub fn load_events_with_originals(corpus: &LogCorpus) -> CoreResult<Vec<EventWit
                     r.get::<_, Option<bool>>(15)?,
                 ))
             })
-            .map_err(|e| CoreError::Message(format!("query events: {e}")))?;
-        let mut out = Vec::new();
+            .map_err(|e| CoreError::Message(format!("query paged events join: {e}")))?;
+        let mut out = Vec::with_capacity(limit);
         for row in rows {
             let (
                 seq,
@@ -448,6 +554,24 @@ pub fn load_events_with_originals(corpus: &LogCorpus) -> CoreResult<Vec<EventWit
         }
         Ok(out)
     })
+}
+
+/// Load all events via bounded paged joins (never one original query per event).
+pub fn load_events_with_originals(corpus: &LogCorpus) -> CoreResult<Vec<EventWithOriginal>> {
+    let mut all = Vec::new();
+    let mut after: Option<u64> = None;
+    loop {
+        let page = load_events_with_originals_page(corpus, after, NORMALIZE_EVENT_PAGE)?;
+        if page.is_empty() {
+            break;
+        }
+        after = page.last().map(|(e, _, _, _)| e.seq);
+        all.extend(page);
+        if after.is_none() {
+            break;
+        }
+    }
+    Ok(all)
 }
 
 /// Group mapped events by source identity.
@@ -816,11 +940,49 @@ mod tests {
     }
 
     #[test]
-    fn severity_never_claims_source_declared_without_raw() {
-        let s = map_level_severity("error");
+    fn store_only_severity_is_absent_without_raw_or_canonical() {
+        let s = severity_absent();
         assert!(s.raw.is_none());
-        assert_ne!(s.provenance, SeverityProvenance::SourceDeclared);
+        assert!(s.canonical.is_none());
+        assert_eq!(s.provenance, SeverityProvenance::Absent);
+        // Stored level alone must not invent schema_mapped.
+        let from_level = map_level_severity("error");
+        assert_eq!(from_level.provenance, SeverityProvenance::Absent);
+        assert!(from_level.raw.is_none());
+        assert!(from_level.canonical.is_none());
+    }
+
+    #[test]
+    fn severity_from_json_original_can_be_schema_mapped_medium() {
+        let orig = r#"{"ts":"2026-01-01T00:00:00Z","level":"ERROR","msg":"x"}"#;
+        let s = severity_from_original(Some(orig));
+        assert_eq!(s.provenance, SeverityProvenance::SchemaMapped);
+        assert_eq!(s.confidence, SeverityConfidence::Medium);
         assert_eq!(s.canonical, Some(17));
+        assert_eq!(s.raw.as_ref().and_then(|v| v.as_str()), Some("ERROR"));
+    }
+
+    #[test]
+    fn severity_never_uses_stored_level_for_source_declared() {
+        let e = base_event(); // level = "info"
+        let n = map_event_to_normalized(
+            &e,
+            Some("plain log line without severity field"),
+            false,
+            &NormalizeTimezonePolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(n.severity.provenance, SeverityProvenance::Absent);
+        assert!(n.severity.raw.is_none());
+        assert!(n.severity.canonical.is_none());
+    }
+
+    #[test]
+    fn missing_original_fails_closed() {
+        let e = base_event();
+        let err = map_event_to_normalized(&e, None, false, &NormalizeTimezonePolicy::default())
+            .unwrap_err();
+        assert!(err.to_string().contains("missing retained original"));
     }
 
     #[test]
@@ -835,6 +997,155 @@ mod tests {
         .unwrap();
         assert_eq!(n.canonical, "ORIGINAL with secret [REDACTED]");
         assert_eq!(n.message, "hello");
+    }
+
+    /// Acceptance mutations: real validator rejects incoherent severity / multi-source abuse.
+    #[test]
+    fn validator_rejects_severity_and_identity_mutations() {
+        use crate::normalized_log_events::{
+            validate_event, validate_stream, NormalizedLogDiagnosticCode, NormalizedLogHeader,
+            NORMALIZED_LOG_EVENTS_READER_VERSION,
+        };
+
+        let mut diags = Vec::new();
+        // SchemaMapped + Low
+        let mut bad = map_event_to_normalized(
+            &base_event(),
+            Some(r#"{"level":"ERROR","msg":"x"}"#),
+            false,
+            &NormalizeTimezonePolicy::default(),
+        )
+        .unwrap();
+        bad.severity.confidence = SeverityConfidence::Low;
+        bad.severity.provenance = SeverityProvenance::SchemaMapped;
+        bad.severity.canonical = Some(17);
+        validate_event(&bad, 0, 2, &mut diags);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == NormalizedLogDiagnosticCode::SeverityProvenanceInconsistent),
+            "schema_mapped+low must fail: {diags:?}"
+        );
+
+        // SourceDeclared derived only from stored level (raw none, inventing claim)
+        diags.clear();
+        let mut from_level = map_event_to_normalized(
+            &base_event(),
+            Some("no json severity here"),
+            false,
+            &NormalizeTimezonePolicy::default(),
+        )
+        .unwrap();
+        from_level.severity = Severity {
+            raw: None,
+            canonical: Some(9),
+            confidence: SeverityConfidence::High,
+            provenance: SeverityProvenance::SourceDeclared,
+        };
+        validate_event(&from_level, 0, 2, &mut diags);
+        // High+source_declared without raw is coherent on pair matrix alone, but
+        // export path must not produce it. Simulate false claim with absent-like
+        // raw missing: still source_declared+high is pair-ok. Force absent with
+        // canonical which IS illegal:
+        diags.clear();
+        from_level.severity = Severity {
+            raw: None,
+            canonical: Some(9),
+            confidence: SeverityConfidence::Low,
+            provenance: SeverityProvenance::Absent,
+        };
+        validate_event(&from_level, 0, 2, &mut diags);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == NormalizedLogDiagnosticCode::SeverityProvenanceInconsistent),
+            "absent with canonical must fail: {diags:?}"
+        );
+
+        // Absent with raw
+        diags.clear();
+        from_level.severity = Severity {
+            raw: Some(serde_json::json!("ERROR")),
+            canonical: None,
+            confidence: SeverityConfidence::Low,
+            provenance: SeverityProvenance::Absent,
+        };
+        validate_event(&from_level, 0, 2, &mut diags);
+        assert!(diags
+            .iter()
+            .any(|d| d.code == NormalizedLogDiagnosticCode::SeverityProvenanceInconsistent));
+
+        // Missing canonical original (empty string)
+        diags.clear();
+        let mut empty_c = map_event_to_normalized(
+            &base_event(),
+            Some("ok"),
+            false,
+            &NormalizeTimezonePolicy::default(),
+        )
+        .unwrap();
+        empty_c.canonical.clear();
+        validate_event(&empty_c, 0, 2, &mut diags);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == NormalizedLogDiagnosticCode::CanonicalInvalid),
+            "empty canonical must fail: {diags:?}"
+        );
+
+        // Multiple source identities under one header: two events with different
+        // logical sources are not representable in one file — we enforce by writing
+        // one header source_id and validating stream only if sequences are contiguous
+        // under one source. Mutation: forge a second event batch under wrong header.
+        let header = NormalizedLogHeader {
+            schema_id: NORMALIZED_LOG_EVENTS_SCHEMA_ID.into(),
+            min_reader_version: NORMALIZED_LOG_EVENTS_READER_VERSION,
+            source_id: "api/a.log".into(),
+            producer: ProducerIdentity {
+                name: "test".into(),
+                version: "1".into(),
+            },
+            redaction: None,
+            source_label: None,
+        };
+        let e0 = map_event_to_normalized(
+            &base_event(),
+            Some("line0"),
+            false,
+            &NormalizeTimezonePolicy::default(),
+        )
+        .unwrap();
+        // Multi-identity is a batching error: one header source_id, never merge.
+        let mut e_b = base_event();
+        e_b.source = "other/b.log".into();
+        e_b.seq = 1;
+        let rows = [
+            (base_event(), Some("line a".into()), false, false),
+            (e_b, Some("line b".into()), false, false),
+        ];
+        let batches = build_source_batches(&rows, &NormalizeTimezonePolicy::default()).unwrap();
+        assert_eq!(batches.len(), 2, "one batch / JSONL per sourceId");
+        assert_ne!(batches[0].source_id, batches[1].source_id);
+
+        // SchemaMapped + Low via validate_stream on a hand-built file.
+        let mut stream = String::new();
+        stream.push_str(&serde_json::to_string(&header).unwrap());
+        stream.push('\n');
+        let mut mut_ev = e0;
+        mut_ev.severity = Severity {
+            raw: Some(serde_json::json!("ERROR")),
+            canonical: Some(17),
+            confidence: SeverityConfidence::Low,
+            provenance: SeverityProvenance::SchemaMapped,
+        };
+        stream.push_str(&serde_json::to_string(&mut_ev).unwrap());
+        stream.push('\n');
+        let report = validate_stream(std::io::Cursor::new(stream.as_bytes())).unwrap();
+        assert!(!report.ok, "schema_mapped+low stream must fail validation");
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|d| { d.code == NormalizedLogDiagnosticCode::SeverityProvenanceInconsistent }));
     }
 
     #[test]

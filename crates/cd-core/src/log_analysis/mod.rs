@@ -126,11 +126,13 @@ pub use noise_candidates::{
     MIN_TEMPLATE_EVENTS_FOR_CANDIDATE,
 };
 pub use normalize_export::{
-    build_source_batches, load_events_with_originals, map_event_to_normalized, map_level_severity,
-    publish_staging, source_jsonl_relative_path, unix_secs_to_rfc3339_z, validate_jsonl_file,
-    write_and_validate_staging, write_source_jsonl, NormalizationManifest, NormalizationReport,
-    NormalizationSourceReport, NormalizeTimezonePolicy, PreviewCountSnapshot, SourceExportBatch,
-    NORMALIZE_PRODUCER_NAME, NORMALIZE_PRODUCER_VERSION,
+    build_source_batches, documented_level_to_otel, load_events_with_originals,
+    load_events_with_originals_page, map_event_to_normalized, map_level_severity, publish_staging,
+    severity_absent, severity_from_original, source_jsonl_relative_path, unix_secs_to_rfc3339_z,
+    validate_jsonl_file, write_and_validate_staging, write_source_jsonl, EventWithOriginal,
+    NormalizationManifest, NormalizationReport, NormalizationSourceReport, NormalizeTimezonePolicy,
+    PreviewCountSnapshot, SourceExportBatch, NORMALIZE_EVENT_PAGE, NORMALIZE_PRODUCER_NAME,
+    NORMALIZE_PRODUCER_VERSION,
 };
 pub use operational_metrics::{
     load_operational_metrics_attachment, remove_operational_metrics_attachment,
