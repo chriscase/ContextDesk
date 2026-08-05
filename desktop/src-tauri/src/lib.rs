@@ -3978,10 +3978,11 @@ fn event_to_dto_with_linked_corpus(
         }
         _ => (false, None),
     };
-    if is_log_citation {
-        let Some(payload) = dto.payload.as_object_mut() else {
+    if let Some(payload) = dto.payload.as_object_mut() {
+        if !is_log_citation {
+            payload.remove("corpus_id");
             return dto;
-        };
+        }
         if payload.get("corpus_id").is_none() {
             if let Some(corpus_id) = event_corpus_id.or(linked_corpus_id) {
                 payload.insert(
@@ -16395,7 +16396,7 @@ mod startup_host_tests {
             source_id: "runbook.md".into(),
             label: "runbook".into(),
             locator: None,
-            corpus_id: None,
+            corpus_id: Some("must-not-apply".into()),
         };
         assert!(
             event_to_dto_with_linked_corpus(&file, Some("trusted-corpus"))
@@ -16441,7 +16442,7 @@ mod startup_host_tests {
                 source_id: "runbook.md".into(),
                 label: "runbook".into(),
                 locator: None,
-                corpus_id: None,
+                corpus_id: Some("must-not-apply".into()),
             },
             StreamEvent::TurnCompleted {
                 reason: "stop".into(),
