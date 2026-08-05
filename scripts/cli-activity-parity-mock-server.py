@@ -34,6 +34,9 @@ class H(BaseHTTPRequestHandler):
         want_stream = bool(req.get("stream"))
 
         raw_txt = body.decode(errors="replace")
+        # Slow path for exact-head cancel acceptance (SIGINT while provider waits).
+        if "slow path" in raw_txt.lower() or "cancel demo" in raw_txt.lower():
+            time.sleep(30)
         # Hard failure: every request with this marker fails (no client retry can succeed).
         if "FORCE_FAIL_ALWAYS" in raw_txt:
             self.send_response(500)

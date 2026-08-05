@@ -175,6 +175,67 @@ def require_matching_identity(
     return info
 
 
+def embedded_git_sha_matches(
+    embedded: Optional[str],
+    expected_full_sha: str,
+) -> bool:
+    """True when runtime-embedded git id is a prefix of the full worktree SHA.
+
+    `cd_core` build.rs embeds `rev-parse --short=12` (or full `CD_GIT_SHA`).
+    """
+    expected = normalize_full_sha(expected_full_sha)
+    if embedded is None:
+        return False
+    emb = embedded.strip().lower()
+    if not SHORT_SHA_RE.match(emb):
+        return False
+    # Accept short (7–12) or full SHA equality as prefix match.
+    return expected.startswith(emb) or emb.startswith(expected[:12])
+
+
+def require_embedded_runtime_identity(
+    *,
+    embedded_git_sha: Optional[str],
+    expected_full_sha: str,
+) -> str:
+    """Fail closed unless capabilities/runtime reports a matching git_sha."""
+    expected = normalize_full_sha(expected_full_sha)
+    if not embedded_git_sha or not str(embedded_git_sha).strip():
+        raise IdentityError(
+            "embedded runtime git_sha missing — binary was not built with "
+            "CD_GIT_SHA / build.rs git identity; refusing exact-head acceptance"
+        )
+    if not embedded_git_sha_matches(embedded_git_sha, expected):
+        raise IdentityError(
+            f"STALE/MISMATCHED EMBEDDED GIT: runtime git_sha={embedded_git_sha!r} "
+            f"worktree={expected[:12]}… — refusing to qualify acceptance"
+        )
+    return str(embedded_git_sha).strip().lower()
+
+
+def parse_capabilities_git_sha(capabilities_json: str) -> Optional[str]:
+    """Extract `data.git_sha` from `contextdesk --json capabilities` stdout."""
+    import json
+
+    try:
+        doc = json.loads(capabilities_json)
+    except json.JSONDecodeError as e:
+        raise IdentityError(f"capabilities stdout is not JSON: {e}") from e
+    data = doc.get("data") if isinstance(doc, dict) else None
+    if not isinstance(data, dict):
+        # Some envelopes nest differently; also allow top-level.
+        data = doc if isinstance(doc, dict) else {}
+    sha = data.get("git_sha")
+    if sha is None and isinstance(doc, dict):
+        # Envelope: {"ok":true,"data":{...}}
+        inner = doc.get("data")
+        if isinstance(inner, dict):
+            sha = inner.get("git_sha")
+    if sha is None:
+        return None
+    return str(sha)
+
+
 def claim_success_without_identity(
     binary: Path,
     expected_full_sha: str,
@@ -227,6 +288,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_git = sub.add_parser("git-sha", help="print full HEAD SHA for a repo")
     p_git.add_argument("--repo-root", type=Path, required=True)
 
+    p_emb = sub.add_parser(
+        "check-embedded",
+        help="require capabilities git_sha matches expected full SHA",
+    )
+    p_emb.add_argument("--capabilities-json", required=True)
+    p_emb.add_argument("--expected-sha", required=True)
+
     args = p.parse_args(argv)
     try:
         if args.cmd == "check":
@@ -241,6 +309,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 0
         if args.cmd == "git-sha":
             print(git_full_sha(args.repo_root))
+            return 0
+        if args.cmd == "check-embedded":
+            emb = parse_capabilities_git_sha(args.capabilities_json)
+            got = require_embedded_runtime_identity(
+                embedded_git_sha=emb, expected_full_sha=args.expected_sha
+            )
+            print(f"embedded_ok git_sha={got}")
             return 0
     except IdentityError as e:
         print(f"exact_head_fail: {e}", file=sys.stderr)

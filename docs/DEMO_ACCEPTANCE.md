@@ -59,14 +59,22 @@ Synthetic / public fixtures only. No private or company corpora.
 - [ ] Ask a question that requires log retrieval; confirm the answer cites
   **host** identities (log event / source), not free-form model paths.
 
-### 6. Evidence → 1–4 Explorer lanes (~2 min)
-- [ ] Open **Evidence**; Select all log (eligible only).
-- [ ] **Show in Explorer** → assign **1–4 lanes**; host source identities
-  persist on the lanes (no reimport of the corpus).
+### 6. Evidence → 1–4 Explorer lanes (~2 min) — **MANUAL (native GUI only)**
+> **Honest scope:** this step is **not** claimed by the offline CLI consolidator.
+> It requires a packaged/native desktop session. Do not mark CLI `REHEARSAL_PASS`
+> as proof of Evidence → Explorer lanes.
 
-### 7. Confirm-gated investigation write (~2 min)
-- [ ] **Add to investigation** from Evidence (or equivalent).
-- [ ] Confirm the write in the modal; discard must leave durable state clean.
+- [ ] **[MANUAL GUI]** Open **Evidence**; Select all log (eligible only).
+- [ ] **[MANUAL GUI]** **Show in Explorer** → assign **1–4 lanes**; host source
+  identities persist on the lanes (no reimport of the corpus).
+
+### 7. Confirm-gated investigation write (~2 min) — **MANUAL (native GUI only)**
+> Same honesty rule: confirm-gated investigation write is desktop UI; CLI
+> consolidator does not fake this path.
+
+- [ ] **[MANUAL GUI]** **Add to investigation** from Evidence (or equivalent).
+- [ ] **[MANUAL GUI]** Confirm the write in the modal; discard must leave durable
+  state clean.
 - [ ] Never treat a draft preview as a completed write.
 
 ### 8. Stop / terminal state (~1 min)
@@ -98,16 +106,29 @@ export EXACT_HEAD_KEEP=1
 
 The script:
 
-1. Rejects unstamped pre-existing binaries.
-2. Builds or proves `contextdesk` for `git rev-parse HEAD`.
-3. Runs synthetic ZIP/folder import, timezone apply-all, explore/context,
-   `--context-selection`, `--activity` / `--trace`, two chat turns, session
-   reopen, and honest failure/recovery — offline mock provider only.
+1. Rejects unstamped / mismatched pre-existing binaries (stamp + **embedded**
+   `capabilities.git_sha` from `cd_core::build_identity`).
+2. Builds or proves `contextdesk` for `git rev-parse HEAD` (base lineage:
+   `12528f05…` — **do not merge** divergent demo-integration branches).
+3. Runs synthetic ZIP/folder import, timezone apply-all (unresolved→0; UTC ms
+   lab in `crates/cd-cli/tests/exact_head_timezone_utc_lab.rs`), explore/context,
+   `--context-selection`, `--activity` / `--trace`, two chat turns with tools,
+   session reopen, **honest SIGINT cancel**, recovery, and a required-scenario
+   gate that fails if any step artifact is missing — offline mock only.
 
 Adversarial unit tests (no cargo):
 
 ```bash
 python3 scripts/tests/exact_head_identity_test.py
+```
+
+Preserve / re-run existing CLI labs (activity parity, context, session, cancel):
+
+```bash
+cargo test -p cd-cli --test cli_activity_parity -- --nocapture
+cargo test -p cd-cli --test cli_public_acceptance_lab -- --nocapture
+cargo test -p cd-cli --test chat_cancellation -- --nocapture
+cargo test -p cd-cli --test exact_head_timezone_utc_lab -- --nocapture
 ```
 
 ---

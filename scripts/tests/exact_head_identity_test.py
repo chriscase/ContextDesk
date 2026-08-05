@@ -143,6 +143,38 @@ class ExactHeadIdentityTests(unittest.TestCase):
             self.assertEqual(r2.returncode, 0)
             self.assertIn("exact_head_ok", r2.stdout)
 
+    def test_embedded_runtime_identity_prefix_and_reject(self):
+        short = FULL[:12]
+        self.assertTrue(ehi.embedded_git_sha_matches(short, FULL))
+        self.assertTrue(ehi.embedded_git_sha_matches(FULL, FULL))
+        with self.assertRaises(ehi.IdentityError):
+            ehi.require_embedded_runtime_identity(
+                embedded_git_sha=None, expected_full_sha=FULL
+            )
+        with self.assertRaises(ehi.IdentityError):
+            ehi.require_embedded_runtime_identity(
+                embedded_git_sha="c" * 12, expected_full_sha=FULL
+            )
+        self.assertEqual(
+            ehi.require_embedded_runtime_identity(
+                embedded_git_sha=short, expected_full_sha=FULL
+            ),
+            short,
+        )
+
+    def test_parse_capabilities_git_sha(self):
+        doc = (
+            '{"schema_version":1,"ok":true,"data":{"git_sha":"'
+            + FULL[:12]
+            + '","cli_version":"0.1.0"}}'
+        )
+        self.assertEqual(ehi.parse_capabilities_git_sha(doc), FULL[:12])
+        self.assertIsNone(
+            ehi.parse_capabilities_git_sha(
+                '{"ok":true,"data":{"cli_version":"0.1.0"}}'
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
