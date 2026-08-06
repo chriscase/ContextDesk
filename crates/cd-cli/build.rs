@@ -16,6 +16,7 @@ fn main() {
     // is a pointer file in the linked worktrees used by acceptance lanes.
     watch_git_path("HEAD", "../../.git/HEAD");
     watch_git_path("logs/HEAD", "../../.git/logs/HEAD");
+    watch_current_ref();
 
     let pkg = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
     let sha = std::env::var("CD_GIT_SHA")
@@ -51,6 +52,14 @@ fn main() {
 fn watch_git_path(name: &str, fallback: &str) {
     let path = git_output(&["rev-parse", "--git-path", name]).unwrap_or_else(|| fallback.into());
     println!("cargo:rerun-if-changed={path}");
+}
+
+fn watch_current_ref() {
+    if let Some(reference) = git_output(&["symbolic-ref", "-q", "HEAD"]) {
+        if let Some(path) = git_output(&["rev-parse", "--git-path", &reference]) {
+            println!("cargo:rerun-if-changed={path}");
+        }
+    }
 }
 
 fn git_output(args: &[&str]) -> Option<String> {

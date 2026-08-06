@@ -21,6 +21,7 @@ fn main() {
     // the primary repository's `.git/worktrees/<name>/` directory.
     watch_git_path("HEAD", "../../.git/HEAD");
     watch_git_path("logs/HEAD", "../../.git/logs/HEAD");
+    watch_current_ref();
     println!("cargo:rerun-if-env-changed=CD_GIT_SHA");
     println!("cargo:rerun-if-env-changed=CD_GIT_DESCRIBE");
     println!("cargo:rerun-if-env-changed=CD_CHANNEL");
@@ -53,6 +54,14 @@ fn main() {
 fn watch_git_path(name: &str, fallback: &str) {
     let path = git_output(&["rev-parse", "--git-path", name]).unwrap_or_else(|| fallback.into());
     println!("cargo:rerun-if-changed={path}");
+}
+
+fn watch_current_ref() {
+    if let Some(reference) = git_output(&["symbolic-ref", "-q", "HEAD"]) {
+        if let Some(path) = git_output(&["rev-parse", "--git-path", &reference]) {
+            println!("cargo:rerun-if-changed={path}");
+        }
+    }
 }
 
 fn git_output(args: &[&str]) -> Option<String> {

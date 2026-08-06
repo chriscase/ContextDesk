@@ -82,10 +82,19 @@ printf 'ok 1 - initial build embeds the commit it was built at\n'
 
 # Same-branch commit: no checkout, no branch switch. `.git/HEAD`'s bytes do
 # not change; only refs/heads/<branch> and logs/HEAD do.
+HEAD_LOG="$(git -C "$FIXTURE_ROOT" rev-parse --git-path logs/HEAD)"
+HEAD_LOG_BACKUP="$TEST_ROOT/head-log-before-second"
+cp -p "$HEAD_LOG" "$HEAD_LOG_BACKUP"
 printf 'second\n' >"$FIXTURE_ROOT/README.md"
 git -C "$FIXTURE_ROOT" commit -qam "second"
 SECOND_SHA="$(git -C "$FIXTURE_ROOT" rev-parse --short=12 HEAD)"
 [[ "$SECOND_SHA" != "$FIRST_SHA" ]] || fail "fixture commits produced identical SHAs"
+
+# Restore the reflog to its pre-commit bytes and timestamp. This deliberately
+# removes it as a Cargo change signal, proving the current branch ref itself
+# is watched. Fast consecutive real builds can otherwise miss a reflog-only
+# transition on filesystems/toolchains with coarse timestamp observations.
+cp -p "$HEAD_LOG_BACKUP" "$HEAD_LOG"
 
 (cd "$CRATE_DIR" && cargo build -q 2>"$TEST_ROOT/build2.log") ||
   { cat "$TEST_ROOT/build2.log" >&2; fail "second cargo build failed"; }
