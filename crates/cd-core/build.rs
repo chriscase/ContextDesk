@@ -15,9 +15,12 @@ fn main() {
     // branch, silently baking a stale `CD_GIT_SHA`/`CD_GIT_DESCRIBE` into an
     // otherwise-fresh incremental build (#stale-git-identity). `.git/logs/HEAD`
     // (the reflog) is appended on every ref-changing operation — commit,
-    // checkout, merge, rebase, reset, pull — so watch it too.
-    println!("cargo:rerun-if-changed=../../.git/HEAD");
-    println!("cargo:rerun-if-changed=../../.git/logs/HEAD");
+    // checkout, merge, rebase, reset, pull — so watch it too. Ask Git for
+    // both paths instead of assuming `.git` is a directory: in a linked
+    // worktree it is a pointer file and the actual HEAD/reflog live under
+    // the primary repository's `.git/worktrees/<name>/` directory.
+    watch_git_path("HEAD", "../../.git/HEAD");
+    watch_git_path("logs/HEAD", "../../.git/logs/HEAD");
     println!("cargo:rerun-if-env-changed=CD_GIT_SHA");
     println!("cargo:rerun-if-env-changed=CD_GIT_DESCRIBE");
     println!("cargo:rerun-if-env-changed=CD_CHANNEL");
@@ -45,6 +48,11 @@ fn main() {
             println!("cargo:rustc-env=CD_CHANNEL={ch}");
         }
     }
+}
+
+fn watch_git_path(name: &str, fallback: &str) {
+    let path = git_output(&["rev-parse", "--git-path", name]).unwrap_or_else(|| fallback.into());
+    println!("cargo:rerun-if-changed={path}");
 }
 
 fn git_output(args: &[&str]) -> Option<String> {

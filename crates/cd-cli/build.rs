@@ -12,9 +12,10 @@ fn main() {
     // See crates/cd-core/build.rs for why both paths are required: `.git/HEAD`
     // alone misses same-branch commits (only `.git/logs/HEAD` and the branch's
     // ref file change), which silently bakes a stale CD_GIT_SHA into an
-    // otherwise-fresh incremental build.
-    println!("cargo:rerun-if-changed=../../.git/HEAD");
-    println!("cargo:rerun-if-changed=../../.git/logs/HEAD");
+    // otherwise-fresh incremental build. Resolve through Git because `.git`
+    // is a pointer file in the linked worktrees used by acceptance lanes.
+    watch_git_path("HEAD", "../../.git/HEAD");
+    watch_git_path("logs/HEAD", "../../.git/logs/HEAD");
 
     let pkg = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
     let sha = std::env::var("CD_GIT_SHA")
@@ -45,6 +46,11 @@ fn main() {
     // Single-line long version so clap --version stays parseable by scripts.
     let long = format!("{pkg} git={sha_s} describe={desc_s} channel={channel}");
     println!("cargo:rustc-env=CD_CLI_LONG_VERSION={long}");
+}
+
+fn watch_git_path(name: &str, fallback: &str) {
+    let path = git_output(&["rev-parse", "--git-path", name]).unwrap_or_else(|| fallback.into());
+    println!("cargo:rerun-if-changed={path}");
 }
 
 fn git_output(args: &[&str]) -> Option<String> {

@@ -35,7 +35,7 @@ fail() {
   exit 1
 }
 
-printf '1..3\n'
+printf '1..4\n'
 
 [[ -f "$BUILD_RS_SRC" ]] || fail "missing $BUILD_RS_SRC"
 
@@ -96,3 +96,24 @@ SECOND_EMBEDDED="$("$CARGO_TARGET_DIR/debug/fixture")"
   fail "rebuild embedded stale '$SECOND_EMBEDDED', expected fresh '$SECOND_SHA'" \
        " (build.rs did not rerun for a same-branch commit — regression!)"
 printf 'ok 3 - rebuild after a same-branch commit re-embeds the fresh CD_GIT_SHA\n'
+
+# Repeat the identity transition from a linked worktree. In this layout
+# `<worktree>/.git` is a pointer file, so hard-coded `.git/logs/HEAD` watchers
+# silently watch a nonexistent path. The production build script must use
+# `git rev-parse --git-path` and follow the worktree-specific reflog instead.
+LINKED_ROOT="$TEST_ROOT/linked"
+git -C "$FIXTURE_ROOT" worktree add -q -b linked-test "$LINKED_ROOT"
+LINKED_CRATE="$LINKED_ROOT/crates/fixture"
+LINKED_TARGET="$TEST_ROOT/linked-target"
+(cd "$LINKED_CRATE" && CARGO_TARGET_DIR="$LINKED_TARGET" cargo build -q 2>"$TEST_ROOT/linked-build1.log") ||
+  { cat "$TEST_ROOT/linked-build1.log" >&2; fail "initial linked-worktree build failed"; }
+
+printf 'linked change\n' >"$LINKED_ROOT/README.md"
+git -C "$LINKED_ROOT" commit -qam "linked second"
+LINKED_SHA="$(git -C "$LINKED_ROOT" rev-parse --short=12 HEAD)"
+(cd "$LINKED_CRATE" && CARGO_TARGET_DIR="$LINKED_TARGET" cargo build -q 2>"$TEST_ROOT/linked-build2.log") ||
+  { cat "$TEST_ROOT/linked-build2.log" >&2; fail "second linked-worktree build failed"; }
+LINKED_EMBEDDED="$("$LINKED_TARGET/debug/fixture")"
+[[ "$LINKED_EMBEDDED" == "$LINKED_SHA" ]] ||
+  fail "linked-worktree rebuild embedded stale '$LINKED_EMBEDDED', expected '$LINKED_SHA'"
+printf 'ok 4 - linked-worktree commit re-embeds the fresh CD_GIT_SHA\n'
