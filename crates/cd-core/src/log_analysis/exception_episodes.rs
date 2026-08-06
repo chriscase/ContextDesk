@@ -31,6 +31,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 use std::sync::Mutex;
 
+#[cfg(test)]
+type EpisodeScanPageHook = Option<Box<dyn FnMut(usize) + Send>>;
+
 /// Schema id for host-neutral reports.
 pub const EXCEPTION_EPISODE_SCHEMA_ID: &str = "contextdesk.exception_episode_report.v1";
 /// Schema version.
@@ -85,8 +88,7 @@ thread_local! {
     // must never truncate an unrelated production-default analysis.
     static TEST_CANDIDATE_CAP_OVERRIDE: Cell<usize> = const { Cell::new(0) };
     static TEST_ROW_WALK_CAP_OVERRIDE: Cell<usize> = const { Cell::new(0) };
-    static EPISODE_SCAN_PAGE_HOOK: RefCell<Option<Box<dyn FnMut(usize) + Send>>> =
-        RefCell::new(None);
+    static EPISODE_SCAN_PAGE_HOOK: RefCell<EpisodeScanPageHook> = RefCell::new(None);
 }
 /// Serializes tests that mutate cap overrides / page hooks.
 #[cfg(test)]
