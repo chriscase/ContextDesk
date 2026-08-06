@@ -29,7 +29,15 @@ static CompletedVerdict completed_verdict(int exit_code) {
     return CompletedVerdict::None;
 }
 
-int run_json(const std::string &data_dir, const std::vector<std::string> &cmd) {
+struct CommandResult {
+    std::string envelope;
+    int exit_code;
+    CompletedVerdict verdict;
+};
+
+static CommandResult failure(int code) { return {"", code, CompletedVerdict::None}; }
+
+CommandResult run_json(const std::string &data_dir, const std::vector<std::string> &cmd) {
     std::string bin = resolve_bin();
     std::vector<std::string> storage;
     storage.push_back(bin);
@@ -48,14 +56,14 @@ int run_json(const std::string &data_dir, const std::vector<std::string> &cmd) {
     int output_pipe[2];
     if (pipe(output_pipe) != 0) {
         std::perror("pipe");
-        return 70;
+        return failure(70);
     }
     pid_t pid = fork();
     if (pid < 0) {
         close(output_pipe[0]);
         close(output_pipe[1]);
         std::perror("fork");
-        return 70;
+        return failure(70);
     }
     if (pid == 0) {
         close(output_pipe[0]);
@@ -73,7 +81,7 @@ int run_json(const std::string &data_dir, const std::vector<std::string> &cmd) {
         char chunk[4096];
         ssize_t got = read(output_pipe[0], chunk, sizeof(chunk));
         if (got == 0) break;
-        if (got < 0) { close(output_pipe[0]); return 70; }
+        if (got < 0) { close(output_pipe[0]); return failure(70); }
         if (body.size() + static_cast<size_t>(got) > CONTEXTDESK_MAX_ENVELOPE_BYTES) oversized = true;
         else body.append(chunk, static_cast<size_t>(got));
     }
@@ -81,7 +89,7 @@ int run_json(const std::string &data_dir, const std::vector<std::string> &cmd) {
     int status = 0;
     if (waitpid(pid, &status, 0) < 0) {
         std::perror("waitpid");
-        return 70;
+        return failure(70);
     }
     if (WIFEXITED(status)) {
         int code = WEXITSTATUS(status);
@@ -89,17 +97,17 @@ int run_json(const std::string &data_dir, const std::vector<std::string> &cmd) {
         int ok = 0;
         if (oversized || !contextdesk_parse_envelope_ok(body.data(), body.size(), &ok)) {
             std::cerr << "invalid or oversized ContextDesk JSON envelope\n";
-            return 70;
+            return failure(70);
         }
-        std::cout << body << '\n';
         CompletedVerdict verdict = completed_verdict(code);
-        if (!ok) return code ? code : 70;
-        if (code != 0 && verdict == CompletedVerdict::None) return 70;
-        return code;
+        if (!ok) verdict = CompletedVerdict::None;
+        if ((!ok && code == 0) || (ok && code != 0 && verdict == CompletedVerdict::None)) return failure(70);
+        return {std::move(body), code, verdict};
     }
-    return 130;
+    return failure(130);
 }
 
+#ifndef CONTEXTDESK_CLIENT_NO_MAIN
 int main(int argc, char **argv) {
     std::string data_dir;
     std::vector<std::string> cmd;
@@ -112,5 +120,8 @@ int main(int argc, char **argv) {
         }
     }
     if (cmd.empty()) cmd.emplace_back("capabilities");
-    return run_json(data_dir, cmd);
+    CommandResult result = run_json(data_dir, cmd);
+    if (!result.envelope.empty()) std::cout << result.envelope << '\n';
+    return result.exit_code;
 }
+#endif

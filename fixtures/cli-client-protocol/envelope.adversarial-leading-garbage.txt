@@ -1,0 +1,2 @@
+progress: almost done
+{"schema_version":1,"ok":true,"command":"capabilities","data":{}}

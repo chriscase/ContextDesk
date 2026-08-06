@@ -68,11 +68,11 @@ func RunJSON(dataDir string, args ...string) (CommandResult, error) {
 	if len([]byte(text)) > maxEnvelopeBytes {
 		return CommandResult{ExitCode: code}, fmt.Errorf("oversized JSON envelope")
 	}
-	// last non-empty line
-	lines := strings.Split(text, "\n")
-	line := lines[len(lines)-1]
 	var envelope map[string]any
-	if jerr := json.Unmarshal([]byte(line), &envelope); jerr != nil {
+	// One-shot protocol means exactly one complete JSON value. Unmarshal the
+	// entire bounded stdout so leading garbage or a second value cannot hide
+	// behind an otherwise valid final line.
+	if jerr := json.Unmarshal([]byte(text), &envelope); jerr != nil {
 		return CommandResult{ExitCode: code}, fmt.Errorf("json: %w", jerr)
 	}
 	if ok, _ := envelope["ok"].(bool); !ok {

@@ -96,6 +96,7 @@ pub fn normalize_offline(
         )));
     }
     let counts: ImportPreviewCounts = plan.report.counts.clone();
+    let preview_truncated = plan.report.truncated;
     let selected: Vec<String> = plan
         .report
         .items
@@ -209,7 +210,8 @@ pub fn normalize_offline(
             // event-bearing input was unsupported, policy-blocked, or not
             // selected. Ingest-only partiality misses those sources because
             // the verified selection intentionally excludes them.
-            partial: ingest.stats.partial || preview_selection_is_partial(&counts),
+            partial: ingest.stats.partial
+                || preview_selection_is_partial(&counts, preview_truncated),
         };
 
         let mut report = write_and_validate_staging(
@@ -298,12 +300,8 @@ fn fail_on_partial_verdict(requested: bool, partial: bool) -> bool {
     requested && partial
 }
 
-fn preview_selection_is_partial(counts: &ImportPreviewCounts) -> bool {
-    let event_bearing = counts
-        .ready
-        .saturating_add(counts.review)
-        .saturating_add(counts.raw_fallback);
-    counts.unsupported > 0 || counts.blocked > 0 || counts.selected < event_bearing
+fn preview_selection_is_partial(counts: &ImportPreviewCounts, truncated: bool) -> bool {
+    truncated || counts.unsupported > 0 || counts.blocked > 0
 }
 
 fn complete_published_outcome(

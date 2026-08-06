@@ -252,6 +252,12 @@ CONTEXTDESK_BIN=target/release/contextdesk \
   python3 packages/cli-clients/python/contextdesk_client.py capabilities
 ```
 
+The checker always validates fixtures and source-level protocol requirements.
+It also builds and executes each language client when that language's compiler
+and runtime are present, exercising adversarial envelopes and completed exits
+8/9/10. A missing toolchain is reported explicitly as `SKIP`; it is not
+presented as runtime verification for that language.
+
 ## Versioning
 
 - Envelope `schema_version` and JSONL `schema_version` / `JSONL_STREAM_VERSION` bump only on breaking shape changes.

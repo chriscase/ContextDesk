@@ -30,8 +30,19 @@ contextdesk_verdict contextdesk_completed_verdict(int exit_code) {
     return CONTEXTDESK_NO_VERDICT;
 }
 
-/* argv: ["capabilities"] etc. Parses and prints one bounded envelope. */
-int contextdesk_run_json(const char *data_dir, char *const cmd_args[], int cmd_argc) {
+typedef struct {
+    char *envelope; /* caller frees */
+    int exit_code;
+    contextdesk_verdict verdict;
+} contextdesk_command_result;
+
+static contextdesk_command_result contextdesk_result_error(int code) {
+    contextdesk_command_result result = {NULL, code, CONTEXTDESK_NO_VERDICT};
+    return result;
+}
+
+/* argv: ["capabilities"] etc. Returns parsed typed completion + envelope. */
+contextdesk_command_result contextdesk_run_json(const char *data_dir, char *const cmd_args[], int cmd_argc) {
     const char *bin = resolve_bin();
     /* max 64 argv slots */
     char *argv[64];
@@ -50,14 +61,14 @@ int contextdesk_run_json(const char *data_dir, char *const cmd_args[], int cmd_a
     int output_pipe[2];
     if (pipe(output_pipe) != 0) {
         perror("pipe");
-        return 70;
+        return contextdesk_result_error(70);
     }
     pid_t pid = fork();
     if (pid < 0) {
         close(output_pipe[0]);
         close(output_pipe[1]);
         perror("fork");
-        return 70;
+        return contextdesk_result_error(70);
     }
     if (pid == 0) {
         close(output_pipe[0]);
@@ -71,7 +82,7 @@ int contextdesk_run_json(const char *data_dir, char *const cmd_args[], int cmd_a
     char *body = (char *)malloc(CONTEXTDESK_MAX_ENVELOPE_BYTES + 1u);
     if (!body) {
         close(output_pipe[0]);
-        return 70;
+        return contextdesk_result_error(70);
     }
     size_t used = 0;
     int oversized = 0;
@@ -79,7 +90,7 @@ int contextdesk_run_json(const char *data_dir, char *const cmd_args[], int cmd_a
         char chunk[4096];
         ssize_t got = read(output_pipe[0], chunk, sizeof(chunk));
         if (got == 0) break;
-        if (got < 0) { free(body); close(output_pipe[0]); return 70; }
+        if (got < 0) { free(body); close(output_pipe[0]); return contextdesk_result_error(70); }
         if (used + (size_t)got > CONTEXTDESK_MAX_ENVELOPE_BYTES) oversized = 1;
         else { memcpy(body + used, chunk, (size_t)got); used += (size_t)got; }
     }
@@ -88,7 +99,7 @@ int contextdesk_run_json(const char *data_dir, char *const cmd_args[], int cmd_a
     if (waitpid(pid, &status, 0) < 0) {
         perror("waitpid");
         free(body);
-        return 70;
+        return contextdesk_result_error(70);
     }
     if (WIFEXITED(status)) {
         int code = WEXITSTATUS(status);
@@ -97,20 +108,23 @@ int contextdesk_run_json(const char *data_dir, char *const cmd_args[], int cmd_a
         if (oversized || !contextdesk_parse_envelope_ok(body, used, &ok)) {
             fputs("invalid or oversized ContextDesk JSON envelope\n", stderr);
             free(body);
-            return 70;
+            return contextdesk_result_error(70);
         }
-        fwrite(body, 1, used, stdout);
-        fputc('\n', stdout);
-        free(body);
+        body[used] = '\0';
         contextdesk_verdict verdict = contextdesk_completed_verdict(code);
-        if (!ok) return code ? code : 70;
-        if (code != 0 && verdict == CONTEXTDESK_NO_VERDICT) return 70;
-        return code;
+        if (!ok) verdict = CONTEXTDESK_NO_VERDICT;
+        if ((!ok && code == 0) || (ok && code != 0 && verdict == CONTEXTDESK_NO_VERDICT)) {
+            free(body);
+            return contextdesk_result_error(70);
+        }
+        contextdesk_command_result result = {body, code, verdict};
+        return result;
     }
     free(body);
-    return 130; /* signalled ~ cancelled */
+    return contextdesk_result_error(130); /* signalled ~ cancelled */
 }
 
+#ifndef CONTEXTDESK_CLIENT_NO_MAIN
 int main(int argc, char **argv) {
     const char *data_dir = NULL;
     char *cmd[32];
@@ -126,5 +140,12 @@ int main(int argc, char **argv) {
         cmd[cmd_n++] = "capabilities";
     }
     cmd[cmd_n] = NULL;
-    return contextdesk_run_json(data_dir, cmd, cmd_n);
+    contextdesk_command_result result = contextdesk_run_json(data_dir, cmd, cmd_n);
+    if (result.envelope) {
+        fputs(result.envelope, stdout);
+        fputc('\n', stdout);
+        free(result.envelope);
+    }
+    return result.exit_code;
 }
+#endif

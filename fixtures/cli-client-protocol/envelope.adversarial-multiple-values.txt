@@ -1,0 +1,2 @@
+{"schema_version":1,"ok":false,"command":"capabilities","error":{"kind":"user_error","message":"first"}}
+{"schema_version":1,"ok":true,"command":"capabilities","data":{}}

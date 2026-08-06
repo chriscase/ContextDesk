@@ -218,6 +218,48 @@ fn normalize_partial_subprocess_exits_ten_and_preserves_parseable_outputs() {
 }
 
 #[test]
+fn truncated_preview_subprocess_exits_ten_and_preserves_artifacts() {
+    let tmp = TempDir::new().unwrap();
+    let input = tmp.path().join("many");
+    fs::create_dir_all(&input).unwrap();
+    for index in 0..=cd_core::log_analysis::import_preview::MAX_IMPORT_PREVIEW_ITEMS {
+        fs::write(
+            input.join(format!("source-{index:05}.log")),
+            format!("2026-01-01T00:00:00Z INFO event {index}\n"),
+        )
+        .unwrap();
+    }
+    let out = tmp.path().join("out");
+    let asserted = bin()
+        .args([
+            "--json",
+            "normalize",
+            input.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+            "--fail-on-partial",
+        ])
+        .assert()
+        .code(10);
+
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&asserted.get_output().stdout).expect("completed JSON envelope");
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["partial"], true);
+    assert_eq!(
+        envelope["data"]["sources_selected"],
+        cd_core::log_analysis::import_preview::MAX_IMPORT_PREVIEW_ITEMS as u64
+    );
+    let report: serde_json::Value = serde_json::from_slice(
+        &fs::read(out.join("normalization-report.json")).expect("published report"),
+    )
+    .expect("parseable report");
+    assert_eq!(report["partial"], true);
+    assert!(out.join("manifest.json").is_file());
+    assert!(out.join("sources").is_dir());
+}
+
+#[test]
 fn company_timestamp_fixture_normalizes_to_self_validating_w3c_output() {
     let tmp = TempDir::new().unwrap();
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))

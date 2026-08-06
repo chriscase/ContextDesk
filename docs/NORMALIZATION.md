@@ -181,7 +181,7 @@ for the format.
 | Ctrl-C | Exit **130** (`cancelled`); destination unchanged |
 | Non-empty `--output` | User error — refuse overwrite |
 | `--strict-time` | Fail closed if local times cannot be resolved |
-| `partial: true` | Report honesty flag when event-bearing selection is incomplete, preview found unsupported/policy-blocked sources, or selected intake later failed/excluded content; do not treat as full success for automation gates |
+| `partial: true` | Report honesty flag when preview was truncated, preview found unsupported/policy-blocked sources, or selected intake later failed/excluded content; do not treat as full success for automation gates |
 | `--fail-on-partial` + partial report | Exit **10** (`partial`) after publication; valid output remains available for diagnosis/use |
 
 ## Validate and summarize normalized output

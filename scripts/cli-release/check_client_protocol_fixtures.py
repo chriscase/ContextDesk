@@ -97,6 +97,10 @@ def main() -> int:
     adversarial_ok = load("envelope.adversarial-ok.json")
     adversarial_not_ok = load("envelope.adversarial-not-ok.json")
     adversarial_invalid_ok = load("envelope.adversarial-invalid-ok.json")
+    leading_garbage = (FIX / "envelope.adversarial-leading-garbage.txt").read_text(encoding="utf-8")
+    multiple_values = (FIX / "envelope.adversarial-multiple-values.txt").read_text(encoding="utf-8")
+    check("fixture exists envelope.adversarial-leading-garbage.txt", bool(leading_garbage))
+    check("fixture exists envelope.adversarial-multiple-values.txt", bool(multiple_values))
     check("adversarial key order keeps top-level ok", adversarial_ok.get("ok") is True)
     check("nested and misleading text cannot override false", adversarial_not_ok.get("ok") is False)
     check("non-boolean top-level ok is invalid", type(adversarial_invalid_ok.get("ok")) is not bool)
@@ -176,6 +180,20 @@ def main() -> int:
                 "rust": "serde_json::from_str(",
             }
             check(f"client {lang} parses JSON envelope", parser_needles[lang] in body)
+            if lang in ("c", "cpp"):
+                result_type = "contextdesk_command_result" if lang == "c" else "struct CommandResult"
+                check(
+                    f"client {lang} returns envelope+exit+typed verdict",
+                    result_type in body
+                    and "envelope" in body
+                    and "exit_code" in body
+                    and "verdict" in body,
+                )
+            if lang == "go":
+                check(
+                    "client go parses entire stdout, not a final line",
+                    'json.Unmarshal([]byte(text)' in body and "strings.Split(text" not in body,
+                )
 
     shared_parser = CLIENTS / "shared" / "contextdesk_envelope.h"
     check("bounded shared C/C++ envelope parser", shared_parser.is_file())
@@ -201,14 +219,71 @@ def main() -> int:
             runners["node"] = ["node", str(CLIENTS / REQUIRED_LANGS["node"])]
         if shutil.which("cc"):
             binary = temp / "client-c"
-            built = subprocess.run(["cc", str(CLIENTS / REQUIRED_LANGS["c"]), "-o", str(binary)], capture_output=True)
+            harness = temp / "client_c_harness.c"
+            harness.write_text(
+                '#define CONTEXTDESK_CLIENT_NO_MAIN\n'
+                f'#include "{CLIENTS / REQUIRED_LANGS["c"]}"\n'
+                'int main(void) { char *args[] = {"capabilities", NULL}; '
+                'contextdesk_command_result r = contextdesk_run_json(NULL, args, 1); '
+                'int expected = atoi(getenv("CD_FAKE_EXIT")); '
+                'if (expected >= 8 && expected <= 10 && (r.exit_code != expected || r.verdict != contextdesk_completed_verdict(expected) || !r.envelope)) return 70; '
+                'if (r.envelope) { puts(r.envelope); free(r.envelope); } return r.exit_code; }\n',
+                encoding="utf-8",
+            )
+            built = subprocess.run(["cc", str(harness), "-o", str(binary)], capture_output=True)
             check("client c compiles for matrix", built.returncode == 0, built.stderr.decode(errors="replace")[:300])
             if built.returncode == 0: runners["c"] = [str(binary)]
         if shutil.which("c++"):
             binary = temp / "client-cpp"
-            built = subprocess.run(["c++", "-std=c++17", str(CLIENTS / REQUIRED_LANGS["cpp"]), "-o", str(binary)], capture_output=True)
+            harness = temp / "client_cpp_harness.cpp"
+            harness.write_text(
+                '#define CONTEXTDESK_CLIENT_NO_MAIN\n'
+                f'#include "{CLIENTS / REQUIRED_LANGS["cpp"]}"\n'
+                'int main() { CommandResult r = run_json("", {"capabilities"}); '
+                'int expected = std::atoi(std::getenv("CD_FAKE_EXIT")); '
+                'if (expected >= 8 && expected <= 10 && (r.exit_code != expected || r.verdict != completed_verdict(expected) || r.envelope.empty())) return 70; '
+                'if (!r.envelope.empty()) std::cout << r.envelope << "\\n"; return r.exit_code; }\n',
+                encoding="utf-8",
+            )
+            built = subprocess.run(["c++", "-std=c++17", str(harness), "-o", str(binary)], capture_output=True)
             check("client cpp compiles for matrix", built.returncode == 0, built.stderr.decode(errors="replace")[:300])
             if built.returncode == 0: runners["cpp"] = [str(binary)]
+        if shutil.which("go"):
+            binary = temp / "client-go"
+            built = subprocess.run(["go", "build", "-o", str(binary), str(CLIENTS / REQUIRED_LANGS["go"])], capture_output=True)
+            check("client go compiles for matrix", built.returncode == 0, built.stderr.decode(errors="replace")[:300])
+            if built.returncode == 0: runners["go"] = [str(binary)]
+        else:
+            print("  SKIP  client go runtime matrix — go toolchain unavailable")
+        if shutil.which("cargo"):
+            cargo_env = os.environ.copy()
+            cargo_env.setdefault("CARGO_TARGET_DIR", str(temp / "cargo-target"))
+            manifest = CLIENTS / "rust" / "Cargo.toml"
+            built = subprocess.run(["cargo", "build", "--quiet", "--manifest-path", str(manifest)], env=cargo_env, capture_output=True)
+            check("client rust compiles for matrix", built.returncode == 0, built.stderr.decode(errors="replace")[:300])
+            if built.returncode == 0:
+                runners["rust"] = [str(Path(cargo_env["CARGO_TARGET_DIR"]) / "debug" / "contextdesk-cli-client-example")]
+        else:
+            print("  SKIP  client rust runtime matrix — cargo unavailable")
+        java_compiler, java_runtime = shutil.which("javac"), shutil.which("java")
+        if java_compiler and java_runtime:
+            built = subprocess.run([java_compiler, "-d", str(temp), str(CLIENTS / REQUIRED_LANGS["java"])], capture_output=True)
+            unavailable = b"Unable to locate a Java Runtime" in built.stderr
+            if unavailable:
+                print("  SKIP  client java runtime matrix — Java launcher present but runtime unavailable")
+            else:
+                check("client java compiles for matrix", built.returncode == 0, built.stderr.decode(errors="replace")[:300])
+                if built.returncode == 0: runners["java"] = [java_runtime, "-cp", str(temp), "ContextDeskClient"]
+        else:
+            print("  SKIP  client java runtime matrix — Java toolchain unavailable")
+        csharp_compiler = shutil.which("csc") or shutil.which("mcs")
+        if csharp_compiler and shutil.which("dotnet"):
+            binary = temp / "ContextDeskClient.exe"
+            built = subprocess.run([csharp_compiler, f"-out:{binary}", str(CLIENTS / REQUIRED_LANGS["csharp"])], capture_output=True)
+            check("client csharp compiles for matrix", built.returncode == 0, built.stderr.decode(errors="replace")[:300])
+            if built.returncode == 0: runners["csharp"] = ["dotnet", str(binary)]
+        else:
+            print("  SKIP  client csharp runtime matrix — C#/.NET toolchain unavailable")
 
         body_ok = json.dumps(adversarial_ok, separators=(",", ":"))
         body_not_ok = json.dumps(adversarial_not_ok, separators=(",", ":"))
@@ -218,7 +293,12 @@ def main() -> int:
                 env = {**os.environ, "CONTEXTDESK_BIN": str(fake), "CD_FAKE_BODY": body_ok, "CD_FAKE_EXIT": str(exit_code)}
                 ran = subprocess.run([*runner, "capabilities"], env=env, capture_output=True)
                 check(f"client {lang} preserves completed verdict exit {exit_code}", ran.returncode == exit_code)
-            for label, body, exit_code in (("nested false", body_not_ok, 4), ("nonboolean ok", body_invalid, 0)):
+            for label, body, exit_code in (
+                ("nested false", body_not_ok, 4),
+                ("nonboolean ok", body_invalid, 0),
+                ("leading garbage", leading_garbage, 0),
+                ("multiple JSON values", multiple_values, 0),
+            ):
                 env = {**os.environ, "CONTEXTDESK_BIN": str(fake), "CD_FAKE_BODY": body, "CD_FAKE_EXIT": str(exit_code)}
                 ran = subprocess.run([*runner, "capabilities"], env=env, capture_output=True)
                 check(f"client {lang} rejects {label}", ran.returncode != 0)
