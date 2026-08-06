@@ -666,8 +666,9 @@ activity, and any further phase change (a tool call, a synthesis retry,
 saving the session) only updates its counters internally, silently, since
 even a plain appended stderr line could land mid-word on the same shared
 terminal cursor the streaming reply owns. The turn ends with one concise
-result line: `done`/`cancelled`/`failed`, the session id, the same
-grounding status `--trace summary` reports, and the tool count — printed
+result line: `done`/`cancelled`/`failed`, the session id, a precise human
+label (`citations checked; interpretation unverified`, `citation check
+failed`, or `no corpus evidence check`), and the tool count — printed
 on its own fresh line even after a streamed reply that never ended in a
 newline itself (a leading line break precedes `cancelled`/`failed`
 specifically for this; `done` reuses the newline the reply's own text

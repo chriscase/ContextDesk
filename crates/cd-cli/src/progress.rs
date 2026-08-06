@@ -7,7 +7,7 @@
 
 use crate::config::ColorMode;
 use crate::config::OutputFormat;
-use crate::render::platform_supports_ansi;
+use crate::render::{platform_supports_ansi, TerminalTextSanitizer};
 use cd_core::process_progress::{
     LogIngestEvidence, ProcessProgress, ProcessProgressObserver, ProcessProgressPhase,
 };
@@ -48,6 +48,7 @@ pub struct CliProgressObserver {
     interactive: bool,
     last_phase: Mutex<Option<ProcessProgressPhase>>,
     last_redraw: Mutex<Instant>,
+    terminal_text: Mutex<TerminalTextSanitizer>,
     printed_anything: AtomicBool,
 }
 
@@ -63,6 +64,7 @@ impl CliProgressObserver {
             interactive: stderr_is_tty && !terminal_is_dumb && !plain && platform_supports_ansi(),
             last_phase: Mutex::new(None),
             last_redraw: Mutex::new(Instant::now() - MIN_REDRAW_INTERVAL),
+            terminal_text: Mutex::new(TerminalTextSanitizer::for_current_console()),
             printed_anything: AtomicBool::new(false),
         }
     }
@@ -120,10 +122,15 @@ impl CliProgressObserver {
             line.push_str(&format!(" | {:.1}s", elapsed_ms as f64 / 1_000.0));
         }
         if !update.message.is_empty() {
+            let message = self
+                .terminal_text
+                .lock()
+                .expect("progress text sanitizer lock")
+                .push(&update.message);
             if self.interactive {
-                line.push_str(&format!(" | {}", update.message));
+                line.push_str(&format!(" | {message}"));
             } else {
-                line.push_str(&format!("\n  {}", update.message));
+                line.push_str(&format!("\n  {message}"));
             }
         }
         if !self.interactive {

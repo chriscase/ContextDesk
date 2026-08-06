@@ -538,8 +538,10 @@ impl ChatStatusRenderer {
             } => {
                 self.push_colored(&mut line, "\x1b[32m", "done");
                 line.push_str(&format!(
-                    " | session {session_id} | {grounding} | tools {}/{}",
-                    state.tools_finished, state.tools_started
+                    " | session {session_id} | {} | tools {}/{}",
+                    human_grounding_label(grounding),
+                    state.tools_finished,
+                    state.tools_started
                 ));
             }
             ChatOutcomeSummary::Cancelled => {
@@ -563,6 +565,14 @@ impl ChatStatusRenderer {
         if self.caps.color {
             line.push_str("\x1b[0m");
         }
+    }
+}
+
+fn human_grounding_label(grounding: &str) -> &'static str {
+    match grounding {
+        "grounded" => "citations checked; interpretation unverified",
+        "ungrounded" => "citation check failed",
+        _ => "no corpus evidence check",
     }
 }
 
@@ -647,6 +657,19 @@ mod tests {
                 "wall\u{2011}clock\u{202f}10 \u{201c}ok\u{201d} \u{27e6}seq=1\u{27e7} \u{2026}"
             ),
             "wall-clock 10 \"ok\" [seq=1] ..."
+        );
+    }
+
+    #[test]
+    fn human_grounding_label_does_not_overclaim_diagnostic_correctness() {
+        assert_eq!(
+            human_grounding_label("grounded"),
+            "citations checked; interpretation unverified"
+        );
+        assert_eq!(human_grounding_label("ungrounded"), "citation check failed");
+        assert_eq!(
+            human_grounding_label("not_applicable"),
+            "no corpus evidence check"
         );
     }
 
