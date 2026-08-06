@@ -315,4 +315,46 @@ mod tests {
         );
         assert!(reclobber.is_err(), "no-clobber must reject second write");
     }
+
+    /// When `LQA_EXPORT_DIR` is set, write validated public-fixture reports there
+    /// for implementer/verifier evidence capture (JSON + Markdown).
+    #[test]
+    fn live_shaped_export_into_lqa_export_dir_env() {
+        let Ok(dir) = std::env::var("LQA_EXPORT_DIR") else {
+            // Optional evidence path — skip when not requested.
+            return;
+        };
+        let export_root = Path::new(&dir);
+        fs::create_dir_all(export_root).expect("create LQA_EXPORT_DIR");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/cli-release-demo");
+        assert!(fixture.is_dir());
+        let tmp = TempDir::new().unwrap();
+        let cache = tmp.path().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        let corpus_id = ingest_fixture(&cache, &fixture);
+        let json_path = export_root.join("assessment.json");
+        let md_path = export_root.join("assessment.md");
+        let _ = fs::remove_file(&json_path);
+        let _ = fs::remove_file(&md_path);
+        export_at_path(
+            &cache,
+            &corpus_id,
+            &json_path,
+            LoggingQualityReportFormat::Json,
+        )
+        .expect("json to LQA_EXPORT_DIR");
+        export_at_path(
+            &cache,
+            &corpus_id,
+            &md_path,
+            LoggingQualityReportFormat::Markdown,
+        )
+        .expect("md to LQA_EXPORT_DIR");
+        assert!(json_path.is_file() && md_path.is_file());
+        let body = fs::read_to_string(&json_path).unwrap();
+        assert!(body.contains("contextdesk.logging_quality_assessment.v1"));
+        eprintln!("LQA_EXPORT_JSON={}", json_path.display());
+        eprintln!("LQA_EXPORT_MD={}", md_path.display());
+    }
 }

@@ -226,12 +226,37 @@ describe("LoggingQualityPanel", () => {
       /1/,
     );
     expect(screen.getByTestId("lqa-bucket-partial").textContent).toMatch(/no/i);
+    // Measured source-level metrics (opaque keys + counts).
+    expect(screen.getByTestId("lqa-sources")).toBeTruthy();
+    expect(screen.getByTestId("lqa-source-src_0001").textContent).toMatch(
+      /src_0001/,
+    );
+    expect(screen.getByTestId("lqa-source-src_0001").textContent).toMatch(/4/);
     expect(
       screen.getAllByText(/review signal, not verified noise/i).length,
     ).toBeGreaterThan(0);
     expect(
       screen.getAllByText(/stored level is not severity provenance/i).length,
     ).toBeGreaterThan(0);
+  });
+
+  it("uses a single progress path while running (no dual status panels)", async () => {
+    let resolveAssess: (v: LoggingQualityAssessmentHostDto) => void = () => {};
+    host.assess.mockImplementation(
+      () =>
+        new Promise<LoggingQualityAssessmentHostDto>((resolve) => {
+          resolveAssess = resolve;
+        }),
+    );
+    render(
+      <LoggingQualityPanel corpusId="c1" open onDismiss={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByTestId("lqa-run"));
+    expect(screen.getByTestId("lqa-progress")).toBeTruthy();
+    expect(screen.queryByTestId("lqa-status")).toBeNull();
+    resolveAssess(sampleDto());
+    await waitFor(() => expect(screen.getByTestId("lqa-body")).toBeTruthy());
+    expect(screen.queryByTestId("lqa-progress")).toBeNull();
   });
 
   it("surfaces host failure without claiming export wrote a file", async () => {

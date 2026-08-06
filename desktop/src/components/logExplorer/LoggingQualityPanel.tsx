@@ -92,7 +92,8 @@ export function LoggingQualityPanel({
     correlationRef.current = `lqa-${Date.now().toString(36)}`;
     setPhase("running");
     setError(null);
-    setStatusMsg("Running deterministic assessment…");
+    // Single progress path: only `lqa-progress` while running (no parallel statusMsg).
+    setStatusMsg(null);
     setHostDto(null);
     emit(
       loggingQualityActivityEvent({
@@ -396,7 +397,8 @@ export function LoggingQualityPanel({
           </p>
         ) : null}
 
-        {statusMsg ? (
+        {/* Terminal / export status only when not mid-run (avoids dual progress). */}
+        {statusMsg && phase !== "running" ? (
           <p className="lqa-panel__status" role="status" data-testid="lqa-status">
             {statusMsg}
           </p>
@@ -465,6 +467,69 @@ function AssessmentBody({
             <p>{d.measuredFact}</p>
           </article>
         ))}
+      </section>
+
+      <section
+        className="lqa-sources"
+        aria-label="Source-level metrics"
+        data-testid="lqa-sources"
+      >
+        <h3>
+          Source-level metrics
+          {assessment.sources.length > 0
+            ? ` (${assessment.sources.length})`
+            : ""}
+        </h3>
+        <p className="field__hint">
+          Opaque source keys only (no absolute paths). Counts are measured
+          aggregates from the imported corpus.
+        </p>
+        {assessment.sources.length === 0 ? (
+          <p className="field__hint" data-testid="lqa-sources-empty">
+            No per-source rows (empty corpus or no event sources).
+          </p>
+        ) : (
+          <div className="lqa-sources__scroll">
+            <table className="lqa-sources__table">
+              <thead>
+                <tr>
+                  <th scope="col">Source key</th>
+                  <th scope="col">Events</th>
+                  <th scope="col">Wall</th>
+                  <th scope="col">Order-only</th>
+                  <th scope="col">Unresolved</th>
+                  <th scope="col">trace_id</th>
+                  <th scope="col">Unknown level</th>
+                  <th scope="col">Dominant level</th>
+                </tr>
+              </thead>
+              <tbody>
+                {assessment.sources.map((s) => (
+                  <tr
+                    key={s.sourceKey}
+                    data-testid={`lqa-source-${s.sourceKey}`}
+                  >
+                    <td>
+                      <code>{s.sourceKey}</code>
+                    </td>
+                    <td>{s.eventCount.toLocaleString()}</td>
+                    <td>{s.wallEventCount.toLocaleString()}</td>
+                    <td>{s.orderOnlyEventCount.toLocaleString()}</td>
+                    <td>{s.unresolvedLocalEventCount.toLocaleString()}</td>
+                    <td>{s.withTraceId.toLocaleString()}</td>
+                    <td>{s.unknownLevelCount.toLocaleString()}</td>
+                    <td>{s.dominantLevel ?? "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {assessment.privacy.sourcesTruncated ? (
+          <p className="field__hint" data-testid="lqa-sources-truncated">
+            Source inventory truncated at the assessment cap.
+          </p>
+        ) : null}
       </section>
 
       <section className="lqa-selection" aria-label="Selection coverage">

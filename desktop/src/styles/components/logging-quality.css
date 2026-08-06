@@ -132,8 +132,51 @@
 
 .lqa-selection,
 .lqa-honesty,
-.lqa-limitations {
+.lqa-limitations,
+.lqa-sources {
   margin-bottom: 0.85rem;
+}
+
+.lqa-sources h3 {
+  margin: 0 0 0.35rem;
+  font-size: var(--text-sm);
+}
+
+.lqa-sources__scroll {
+  max-height: 12rem;
+  overflow: auto;
+  border: 1px solid var(--border-soft, var(--border));
+  border-radius: var(--radius-sm, 6px);
+}
+
+.lqa-sources__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-2xs, 0.5625rem);
+  font-variant-numeric: tabular-nums;
+}
+
+.lqa-sources__table th,
+.lqa-sources__table td {
+  padding: 0.28rem 0.4rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border-soft, var(--border));
+  white-space: nowrap;
+}
+
+.lqa-sources__table th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-elevated, var(--bg-panel));
+  color: var(--text-faint);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.lqa-sources__table code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: inherit;
 }
 
 .lqa-selection h3,
