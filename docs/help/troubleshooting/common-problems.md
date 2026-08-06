@@ -35,6 +35,7 @@ configuration file.
 | Confluence harvest is blocked | Space allowlist is empty | Add at least one approved space key; harvest never treats empty as permission |
 | MCP tools are absent | Connector disabled, command not absolute, child failed, or discovery timed out | Review connector status and use an absolute executable path |
 | Context too long | Recent turns and tool results cannot fit the active model budget | Start a new chat or remove oversized session context; stored history remains |
+| Logs overview warns “Legacy corpus” or “Different ingest pipeline” | Corpus predates current parsing/framing semantics (or came from another pipeline version) | Optional: reimport the same sources into a new corpus to pick up improvements. The warning is advisory — ContextDesk never auto-reimports or deletes |
 | S3 dry run works but backup fails | Missing keychain credential, endpoint policy, authorization, or transport error | Recheck the redacted destination and key presence; never put credentials in the URL |
 
 ## Offline behavior

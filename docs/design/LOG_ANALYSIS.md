@@ -240,6 +240,14 @@ Ingest is the only write (it materializes a corpus). Everything else is Read —
 - `meta_version` **2** when stats are present; **1**/missing = legacy (id, name, created_at, engine).
 - Readers **must open** older meta; missing stats → derive event/template counts from DuckDB/templates.
 - Basename-only `source_label`; optional `origin_corpus_id` after package import.
+- Optional `ingestPipelineIdentity` (semantic string such as
+  `contextdesk.ingest_pipeline.v1`): covers **parse / frame / normalize-redact /
+  template-mining / DuckDB storage** semantics for this corpus. **Not** a Git
+  SHA. Missing/empty → compatibility `legacy_unknown`. Present but ≠ this
+  binary’s identity → `different_version`. Malformed values fail soft (corpus
+  still opens; treated as `different_version`). Hosts must **never** call a
+  corpus “broken” solely because it is old, and must **never** auto-reimport,
+  delete, or mutate it when showing the advisory.
 
 ### Package format `contextdesk.log_corpus.v1`
 

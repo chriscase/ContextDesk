@@ -1516,6 +1516,28 @@
   gap: var(--space-2);
 }
 
+.log-ingest-pipeline-warning,
+.log-ingest-partial {
+  display: grid;
+  gap: var(--space-1);
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, var(--border));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--warning) 7%, var(--bg-panel));
+  font-size: var(--text-sm);
+}
+
+.log-ingest-pipeline-warning strong,
+.log-ingest-partial strong {
+  color: var(--text);
+}
+
+.log-ingest-pipeline-warning span,
+.log-ingest-partial span {
+  color: var(--text-muted);
+}
+
 @media (max-width: 720px) {
   .log-ingest-diagnostic {
     align-items: stretch;

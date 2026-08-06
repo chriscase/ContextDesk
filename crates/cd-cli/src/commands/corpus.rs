@@ -5,7 +5,7 @@
 
 use crate::cli::CorpusAction;
 use crate::envelope::{CliError, CliResult, Render};
-use cd_core::log_analysis::LogCorpus;
+use cd_core::log_analysis::{IngestPipelineCompatibility, LogCorpus};
 use serde::Serialize;
 use std::path::Path;
 
@@ -17,6 +17,11 @@ pub struct CorpusItem {
     pub template_count: u64,
     pub created_at: i64,
     pub source_label: Option<String>,
+    /// Persisted semantic identity when known (`null` for legacy corpora).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ingest_pipeline_identity: Option<String>,
+    /// Host-neutral compatibility: `current` | `legacy_unknown` | `different_version`.
+    pub ingest_pipeline_compatibility: IngestPipelineCompatibility,
 }
 
 impl From<cd_core::log_analysis::CorpusSummary> for CorpusItem {
@@ -28,6 +33,8 @@ impl From<cd_core::log_analysis::CorpusSummary> for CorpusItem {
             template_count: s.template_count,
             created_at: s.created_at,
             source_label: s.source_label,
+            ingest_pipeline_identity: s.ingest_pipeline_identity,
+            ingest_pipeline_compatibility: s.ingest_pipeline_compatibility,
         }
     }
 }
@@ -57,18 +64,37 @@ impl Render for CorpusListOutput {
             .unwrap_or(4)
             .max(4);
         let mut out = format!(
-            "Corpora ({})\n\n  {:<id_width$}  {:<name_width$}  {:>10}  {:>10}\n",
+            "Corpora ({})\n\n  {:<id_width$}  {:<name_width$}  {:>10}  {:>10}  {}\n",
             self.corpora.len(),
             "ID",
             "NAME",
             "EVENTS",
-            "TEMPLATES"
+            "TEMPLATES",
+            "PIPELINE"
         );
         for item in &self.corpora {
             out.push_str(&format!(
-                "  {:<id_width$}  {:<name_width$}  {:>10}  {:>10}\n",
-                item.id, item.name, item.event_count, item.template_count
+                "  {:<id_width$}  {:<name_width$}  {:>10}  {:>10}  {}\n",
+                item.id,
+                item.name,
+                item.event_count,
+                item.template_count,
+                item.ingest_pipeline_compatibility.as_str()
             ));
+        }
+        let advisories: Vec<_> = self
+            .corpora
+            .iter()
+            .filter(|c| c.ingest_pipeline_compatibility.needs_reimport_advisory())
+            .collect();
+        if !advisories.is_empty() {
+            // Human-only note on stderr would mix with envelopes; keep text-mode
+            // advisory as a trailing paragraph on the same human render path.
+            out.push_str(
+                "\nNote: corpora marked legacy_unknown or different_version were imported under \
+                 older or other ingest-pipeline semantics. Reimporting may apply newer parsing \
+                 improvements; ContextDesk never auto-reimports or deletes them.\n",
+            );
         }
         out.trim_end().to_string()
     }
@@ -148,15 +174,28 @@ pub fn run(action: &CorpusAction, cache_root: &Path) -> CliResult<Box<dyn Render
 
 impl Render for CorpusItem {
     fn render_text(&self) -> String {
-        format!(
-            "Corpus\n\n  ID         {}\n  Name       {}\n  Events     {}\n  Templates  {}\n  Created    {}\n  Source     {}",
+        let identity = self
+            .ingest_pipeline_identity
+            .as_deref()
+            .unwrap_or("(unknown/legacy)");
+        let mut out = format!(
+            "Corpus\n\n  ID           {}\n  Name         {}\n  Events       {}\n  Templates    {}\n  Created      {}\n  Source       {}\n  Pipeline     {}\n  Compatibility {}",
             self.id,
             self.name,
             self.event_count,
             self.template_count,
             self.created_at,
-            self.source_label.as_deref().unwrap_or("(unknown)")
-        )
+            self.source_label.as_deref().unwrap_or("(unknown)"),
+            identity,
+            self.ingest_pipeline_compatibility.as_str()
+        );
+        if self.ingest_pipeline_compatibility.needs_reimport_advisory() {
+            out.push_str(
+                "\n\nNote: this corpus may predate current parsing/framing improvements. \
+                 Reimporting is optional and never automatic.",
+            );
+        }
+        out
     }
 
     fn render_json(&self) -> serde_json::Value {
@@ -166,4 +205,53 @@ impl Render for CorpusItem {
 
 fn open_or_not_found(cache_root: &Path, id: &str) -> CliResult<LogCorpus> {
     LogCorpus::open(cache_root, id).map_err(|_| CliError::not_found(format!("no corpus {id}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cd_core::log_analysis::INGEST_PIPELINE_IDENTITY;
+
+    #[test]
+    fn json_list_includes_stable_pipeline_fields() {
+        let out = CorpusListOutput {
+            corpora: vec![CorpusItem {
+                id: "c1".into(),
+                name: "n".into(),
+                event_count: 1,
+                template_count: 1,
+                created_at: 1,
+                source_label: None,
+                ingest_pipeline_identity: Some(INGEST_PIPELINE_IDENTITY.into()),
+                ingest_pipeline_compatibility: IngestPipelineCompatibility::Current,
+            }],
+        };
+        let v = out.render_json();
+        let row = &v["corpora"][0];
+        assert_eq!(row["ingest_pipeline_compatibility"], "current");
+        assert_eq!(row["ingest_pipeline_identity"], INGEST_PIPELINE_IDENTITY);
+        // Machine JSON must not embed the human advisory paragraph.
+        let s = v.to_string();
+        assert!(!s.contains("Reimporting"));
+    }
+
+    #[test]
+    fn text_list_mentions_pipeline_without_breaking_layout() {
+        let out = CorpusListOutput {
+            corpora: vec![CorpusItem {
+                id: "c1".into(),
+                name: "legacy".into(),
+                event_count: 2,
+                template_count: 1,
+                created_at: 1,
+                source_label: None,
+                ingest_pipeline_identity: None,
+                ingest_pipeline_compatibility: IngestPipelineCompatibility::LegacyUnknown,
+            }],
+        };
+        let text = out.render_text();
+        assert!(text.contains("PIPELINE"));
+        assert!(text.contains("legacy_unknown"));
+        assert!(text.contains("never auto-reimports"));
+    }
 }
