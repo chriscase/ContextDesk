@@ -5620,18 +5620,18 @@ mod tests {
         assert_eq!(
             max_renderings, 7,
             "seven progressive wraps must form one 7-rendering chain (occ={} max_r={})",
-            baseline.occurrence_count,
-            max_renderings
+            baseline.occurrence_count, max_renderings
         );
         assert_eq!(baseline.occurrence_count, 1);
 
         // Mutate only layer 6: incompatible root/cause + distinct site family.
-        events[6].message = "thread=worker-7 id=77 java.lang.IllegalStateException: XYZ_OTHER hop=6\n\
+        events[6].message =
+            "thread=worker-7 id=77 java.lang.IllegalStateException: XYZ_OTHER hop=6\n\
 \tat com.other.site.Handler.handle(H.java:1)\n\
 \tat com.other.site.Bridge.invoke(B.java:2)\n\
 \tCaused by: java.lang.IllegalStateException: XYZ_OTHER\n\
 \tat com.other.net.X.run(X.java:1)"
-            .into();
+                .into();
         let mutated = analyze_bounded_events(events.len() as u64, &events);
         let max_after = mutated
             .families
