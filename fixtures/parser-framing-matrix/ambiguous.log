@@ -1,0 +1,5 @@
+banner only - no calendar
+processing item without time
+2026-03-15 not a full timestamp line
+call 2026-03-15T12:00:00.123 at extension 555-0100
+2026-03-15 12:00:00,123 America/Chicago INFO: iana named zone residual
