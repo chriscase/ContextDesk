@@ -7,6 +7,7 @@ pub mod corpus;
 pub mod doctor;
 pub mod explore;
 pub mod import;
+pub mod logging_assessment;
 pub mod normalize;
 pub mod session;
 pub mod timezone;

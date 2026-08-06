@@ -1369,7 +1369,7 @@ async fn lab_developer_activity_on_truthful_off_no_sensitive_payload() {
         did_select,
         "provider context must show compaction/selection; sent={sent} chars={} notice={compacted_notice} blob_prefix={}",
         capture.max_chars(),
-        &provider_blob.chars().take(200).collect::<String>()
+        provider_blob.chars().take(200).collect::<String>()
     );
 
     let traced_calls = recorder.calls();

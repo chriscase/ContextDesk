@@ -56,6 +56,7 @@ contextdesk [OPTIONS] <COMMAND>
 | `confluence …` | Optional Confluence connector |
 | `capabilities` | Machine-readable build surface |
 | `doctor` | Demo readiness |
+| `logging-assessment <corpus-id>` | Deterministic logging-quality assessment with fixed finding-code improvement hints (no provider). |
 
 Drift check: `python3 scripts/cli-release/check_cli_docs.py` compares this list
 to a live binary when `CONTEXTDESK_BIN` is set.
@@ -517,6 +518,10 @@ contextdesk --data-dir "$DATA" --json explore "timeout" --k 10
 contextdesk --data-dir "$DATA" --json context "what failed?" --k 10
 contextdesk --data-dir "$DATA" --json capabilities
 contextdesk --data-dir "$DATA" doctor --skip-live-turn   # exit 8 expected without live checks
+
+# Logging quality assessment (synthetic import first)
+# contextdesk --data-dir "$DATA" logging-assessment <corpus-id> --json
+# contextdesk --data-dir "$DATA" logging-assessment <corpus-id> --report-format markdown --output plan.md
 
 # Timezone (after import of ambiguous local logs)
 contextdesk --data-dir "$DATA" timezone status --corpus <id>

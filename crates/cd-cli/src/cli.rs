@@ -124,6 +124,9 @@ pub enum Command {
     /// synthetic corpus created and destroyed for this check alone. Exit
     /// code reflects the verdict, not just whether the command itself ran.
     Doctor(DoctorArgs),
+    /// Deterministic logging-quality assessment + engineering improvement
+    /// plan for an imported corpus (no provider / LLM).
+    LoggingAssessment(LoggingAssessmentArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -140,6 +143,21 @@ pub struct DoctorArgs {
     /// sanity pass, never to certify demo-readiness.
     #[arg(long)]
     pub skip_live_turn: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct LoggingAssessmentArgs {
+    /// Corpus id to assess (from `contextdesk corpus list`).
+    pub corpus_id: String,
+    /// Atomic report export path. When set, writes the versioned assessment
+    /// (`--report-format json`) or Markdown projection of that JSON
+    /// (`--report-format markdown`) and refuses to overwrite an existing file.
+    #[arg(long, short = 'o')]
+    pub output: Option<PathBuf>,
+    /// On-disk report shape when `--output` is set (not the CLI envelope —
+    /// use global `--json` / `--format` for that). Defaults to `json`.
+    #[arg(long, default_value = "json")]
+    pub report_format: String,
 }
 
 #[derive(Debug, clap::Args)]
