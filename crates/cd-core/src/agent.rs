@@ -650,29 +650,56 @@ fn linked_broad_log_triage_requested(user_text: &str) -> bool {
         return false;
     }
 
-    // Causal questions about one described failure are focused linked-log
-    // investigation, even when the user naturally adds "in these logs".
-    // Broad triage is reserved for corpus-wide inventory/overview requests.
-    let has_focused_causal_question = [
-        " what caused ",
-        " what explains this ",
-        " what explains that ",
-        " what explains the failure ",
-        " what led to this ",
-        " what led to the failure ",
-        " what is causing this ",
-        " why did ",
-        " why is this ",
-        " cause of this ",
-        " caused this ",
-        " explain this failure ",
-        " explains this failure ",
-        " root cause of this ",
-        " root cause of the failure ",
-    ]
-    .iter()
-    .any(|cue| padded.contains(cue));
-    if has_focused_causal_question {
+    // Causal intent aimed at a singular locally-owned incident is focused,
+    // regardless of surface wording. Explicit corpus-wide/cross-source scope
+    // wins and keeps genuinely comprehensive RCA in broad triage.
+    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
+    let broad_scope_noun = |token: &&str| {
+        matches!(
+            *token,
+            "corpus" | "dataset" | "logs" | "sources" | "services" | "everything"
+        )
+    };
+    let explicit_broad_scope = tokens
+        .iter()
+        .any(|token| matches!(*token, "broad" | "overall" | "everything" | "comprehensive"))
+        || tokens.windows(2).any(|pair| {
+            (matches!(
+                pair[0],
+                "whole" | "entire" | "all" | "every" | "cross" | "multiple" | "this" | "that"
+            ) && broad_scope_noun(&pair[1]))
+                || pair == ["corpus", "wide"]
+        })
+        || tokens.iter().enumerate().any(|(index, token)| {
+            *token == "across" && tokens.iter().skip(index + 1).take(4).any(broad_scope_noun)
+        });
+    let causal_intent = tokens.iter().any(|token| {
+        matches!(
+            *token,
+            "cause"
+                | "caused"
+                | "causing"
+                | "explain"
+                | "explains"
+                | "explained"
+                | "why"
+                | "led"
+                | "root"
+        )
+    });
+    let local_owner = ["this", "that", "the", "our", "my", "current"];
+    let singular_target = [
+        "failure", "error", "incident", "outage", "problem", "issue", "request", "job",
+    ];
+    let locally_scoped_singular = tokens.iter().enumerate().any(|(index, token)| {
+        local_owner.contains(token)
+            && tokens
+                .iter()
+                .skip(index + 1)
+                .take(3)
+                .any(|candidate| singular_target.contains(candidate))
+    });
+    if causal_intent && locally_scoped_singular && !explicit_broad_scope {
         return false;
     }
 
@@ -709,16 +736,17 @@ fn linked_broad_log_triage_requested(user_text: &str) -> bool {
     ]
     .iter()
     .any(|cue| padded.contains(cue));
-    let names_log_scope = [
-        " log ",
-        " logs ",
-        " corpus ",
-        " these ",
-        " everything ",
-        " overall ",
-    ]
-    .iter()
-    .any(|cue| padded.contains(cue));
+    let names_log_scope = explicit_broad_scope
+        || [
+            " log ",
+            " logs ",
+            " corpus ",
+            " these ",
+            " everything ",
+            " overall ",
+        ]
+        .iter()
+        .any(|cue| padded.contains(cue));
 
     has_broad_action && names_log_scope && (has_problem_cue || padded.contains(" triage "))
 }
@@ -4921,6 +4949,15 @@ mod tests {
             "Please explain this failure using these logs."
         ));
         assert!(!linked_broad_log_triage_requested(
+            "What explains our checkout outage in these logs?"
+        ));
+        assert!(!linked_broad_log_triage_requested(
+            "What led to the current error?"
+        ));
+        assert!(!linked_broad_log_triage_requested(
+            "What caused the database incident in the logs?"
+        ));
+        assert!(!linked_broad_log_triage_requested(
             "What problems do you see around trace_id=trace-7f3a?"
         ));
         assert!(!linked_broad_log_triage_requested(
@@ -4939,6 +4976,12 @@ mod tests {
         ));
         assert!(linked_broad_log_triage_requested(
             "What explains the failures and anomalies across the whole corpus?"
+        ));
+        assert!(linked_broad_log_triage_requested(
+            "What explains this failure across all services?"
+        ));
+        assert!(linked_broad_log_triage_requested(
+            "Find the root cause of our outage with a comprehensive cross-source review."
         ));
     }
 

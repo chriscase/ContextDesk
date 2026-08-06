@@ -258,8 +258,8 @@ fn good_answer_for(key: &TriageKnownAnswerKey, host: &TriageHostFacts) -> Struct
     if causal.is_empty() && !key.root_cause_establishable {
         causal.push(TriageClaim {
             text: "no establishable trigger in imported evidence".into(),
-            seq: None,
-            source: None,
+            seq: Some(first_visible.seq),
+            source: Some(first_visible.source.clone()),
             role: Some("unknown".into()),
         });
     }
@@ -550,9 +550,56 @@ fn adversarial_mutations_fail_evaluator_with_dimension_reasons() {
             "citation_validity",
         ),
         (
+            "zero_evidence_prefix_with_material_tail_actual_text",
+            {
+                let mut mutation = good.clone();
+                mutation.observations[0].text =
+                    "No event evidence is available, but host reports five failures".into();
+                mutation.observations[0].seq = None;
+                mutation.observations[0].source = None;
+                mutation.observations[0].role = Some("zero_evidence".into());
+                mutation.to_markdown()
+            },
+            "citation_validity",
+        ),
+        (
+            "uncertainty_prefix_with_material_cause_tail_actual_text",
+            {
+                let mut mutation = good.clone();
+                mutation.causal_candidates[0].text =
+                    "Root cause is not establishable, but config X caused the outage".into();
+                mutation.causal_candidates[0].seq = None;
+                mutation.causal_candidates[0].source = None;
+                mutation.causal_candidates[0].role = Some("unknown".into());
+                mutation.to_markdown()
+            },
+            "citation_validity",
+        ),
+        (
             "negated_then_reasserted_actual_text",
             format!(
                 "{neutral_text}\nIt would be wrong to say all events in this corpus are errors. However, all events in this corpus are errors.\n"
+            ),
+            "unsupported_claims",
+        ),
+        (
+            "although_caveat_then_reasserted_actual_text",
+            format!(
+                "{neutral_text}\nAlthough saying all events in this corpus are errors would be wrong, all events in this corpus are errors.\n"
+            ),
+            "unsupported_claims",
+        ),
+        (
+            "semicolon_however_reasserted_actual_text",
+            format!(
+                "{neutral_text}\nSaying all events in this corpus are errors would be wrong; however, all events in this corpus are errors.\n"
+            ),
+            "unsupported_claims",
+        ),
+        (
+            "but_reasserted_actual_text",
+            format!(
+                "{neutral_text}\nAll events in this corpus are errors would be unsupported, but all events in this corpus are errors.\n"
             ),
             "unsupported_claims",
         ),
@@ -586,6 +633,9 @@ fn caveated_false_claim_wording_is_not_misclassified_as_a_positive_assertion() {
         "It would be wrong to say all events in this corpus are errors.",
         "It would be incorrect to claim every event in the corpus is an error.",
         "We must not claim that all events in the corpus are errors.",
+        "Saying all events in this corpus are errors would be wrong.",
+        "Saying all events in this corpus are errors would be unsupported.",
+        "All events in this corpus are errors is unsupported.",
         "The earliest error is not the root cause.",
     ] {
         let text = format!("{neutral_text}\n{caveat}\n");

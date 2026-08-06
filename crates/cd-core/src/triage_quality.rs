@@ -465,21 +465,20 @@ fn normalize_assertion_text(line: &str) -> String {
         .to_string()
 }
 
-fn phrase_is_negated(text: &str, phrase_at: usize) -> bool {
+fn phrase_is_caveated(text: &str, phrase_at: usize, phrase_len: usize) -> bool {
     let prefix = text.get(..phrase_at).unwrap_or_default();
-    let punctuation_boundary = prefix
+    let mut segment_start = prefix
         .char_indices()
         .rev()
-        .find(|(_, ch)| matches!(ch, '.' | '!' | '?' | ';'))
+        .find(|(_, ch)| matches!(ch, '.' | '!' | '?' | ';' | ','))
         .map_or(0, |(idx, ch)| idx + ch.len_utf8());
-    let contrast_boundary = [", but ", ", yet ", " however ", " actually "]
-        .iter()
-        .filter_map(|marker| prefix.rfind(marker).map(|idx| idx + marker.len()))
-        .max()
-        .unwrap_or(0);
-    let boundary = punctuation_boundary.max(contrast_boundary);
-    let scope = prefix.get(boundary..).unwrap_or(prefix);
-    [
+    for marker in [" but ", " yet ", " however ", " actually ", " although "] {
+        if let Some(idx) = prefix.rfind(marker) {
+            segment_start = segment_start.max(idx + marker.len());
+        }
+    }
+    let prefix_scope = prefix.get(segment_start..).unwrap_or(prefix);
+    let prefix_caveat = [
         "not ",
         "no evidence",
         "cannot ",
@@ -498,17 +497,49 @@ fn phrase_is_negated(text: &str, phrase_at: usize) -> bool {
         "incorrect to claim",
         "would be wrong",
         "would be incorrect",
+        "would be unsupported",
+        "would be unproven",
         "must not claim",
         "should not say",
     ]
     .iter()
-    .any(|marker| scope.contains(marker))
+    .any(|marker| prefix_scope.contains(marker));
+
+    let after_phrase = phrase_at.saturating_add(phrase_len);
+    let suffix = text.get(after_phrase..).unwrap_or_default();
+    let mut segment_end = suffix
+        .char_indices()
+        .find(|(_, ch)| matches!(ch, '.' | '!' | '?' | ';' | ','))
+        .map_or(suffix.len(), |(idx, _)| idx);
+    for marker in [" but ", " yet ", " however ", " actually "] {
+        if let Some(idx) = suffix.find(marker) {
+            segment_end = segment_end.min(idx);
+        }
+    }
+    let suffix_scope = suffix.get(..segment_end).unwrap_or(suffix);
+    let postfix_caveat = [
+        "would be wrong",
+        "would be incorrect",
+        "would be unsupported",
+        "would be unproven",
+        "is wrong",
+        "is incorrect",
+        "is unsupported",
+        "is unproven",
+        "cannot be supported",
+        "should not be claimed",
+        "must not be claimed",
+    ]
+    .iter()
+    .any(|marker| suffix_scope.contains(marker));
+
+    prefix_caveat || postfix_caveat
 }
 
 fn text_has_unnegated_phrase(text: &str, phrases: &[&str]) -> bool {
     phrases.iter().any(|phrase| {
         text.match_indices(phrase)
-            .any(|(idx, _)| !phrase_is_negated(text, idx))
+            .any(|(idx, _)| !phrase_is_caveated(text, idx, phrase.len()))
     })
 }
 
@@ -665,7 +696,7 @@ pub fn score_structured_triage_answer(
     for claim in &answer.observations {
         match (claim.seq, claim.source.as_ref()) {
             (Some(seq), Some(source)) if evidence_set.contains(&(seq, source.clone())) => {}
-            (None, None) if observation_is_explicitly_non_material(claim) => {}
+            (None, None) if evidence_set.is_empty() => {}
             _ => {
                 citation_ok = false;
                 break;
@@ -676,7 +707,7 @@ pub fn score_structured_triage_answer(
         for claim in &answer.causal_candidates {
             match (claim.seq, claim.source.as_ref()) {
                 (Some(seq), Some(source)) if evidence_set.contains(&(seq, source.clone())) => {}
-                (None, None) if causal_claim_is_explicitly_non_material(claim) => {}
+                (None, None) if evidence_set.is_empty() => {}
                 _ => {
                     citation_ok = false;
                     break;
@@ -743,7 +774,7 @@ pub fn score_structured_triage_answer(
                 c.seq == Some(seq)
                     && c.source.as_deref() == Some(source.as_str())
                     && answer.causal_candidates.len() == 1
-                    && c.role.as_deref() != Some("symptom")
+                    && !matches!(c.role.as_deref(), Some("symptom" | "unknown"))
             })
         })
     });
@@ -917,31 +948,6 @@ pub fn score_structured_triage_answer(
         passed,
         dimensions,
     }
-}
-
-fn observation_is_explicitly_non_material(claim: &TriageClaim) -> bool {
-    let text = normalize_assertion_text(&claim.text);
-    [
-        "zero unsuppressed events",
-        "no unsuppressed events",
-        "no event evidence is available",
-        "no events were returned",
-    ]
-    .iter()
-    .any(|disclosure| text.contains(disclosure))
-}
-
-fn causal_claim_is_explicitly_non_material(claim: &TriageClaim) -> bool {
-    let text = normalize_assertion_text(&claim.text);
-    [
-        "no establishable trigger",
-        "no causal candidate can be established",
-        "root cause is not establishable",
-        "insufficient evidence to identify a causal candidate",
-        "zero unsuppressed events",
-    ]
-    .iter()
-    .any(|disclosure| text.contains(disclosure))
 }
 
 fn find_token_seq(host: &TriageHostFacts, token: &str) -> Option<(u64, String)> {
@@ -1134,6 +1140,20 @@ mod tests {
 
         stripped.observations[0].text = "Host reports zero unsuppressed events".into();
         let score = score_structured_triage_answer(&stripped, &key, &host);
+        assert!(score.failed_ids().contains(&"citation_validity"));
+
+        let mut empty_host = host.clone();
+        empty_host.evidence.clear();
+        let mut uncited_empty_answer = stripped.clone();
+        for claim in uncited_empty_answer
+            .observations
+            .iter_mut()
+            .chain(uncited_empty_answer.causal_candidates.iter_mut())
+        {
+            claim.seq = None;
+            claim.source = None;
+        }
+        let score = score_structured_triage_answer(&uncited_empty_answer, &key, &empty_host);
         assert!(!score.failed_ids().contains(&"citation_validity"));
 
         let mut self_labelled = good_answer();
