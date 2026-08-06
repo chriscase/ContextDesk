@@ -595,7 +595,7 @@ fn line_has_citation_identity(line: &str) -> bool {
 fn identity_key_from_line(line: &str) -> String {
     let seq = extract_field_value(line, "seq").unwrap_or_default();
     let source = extract_field_value(line, "source").unwrap_or_default();
-    if seq.is_empty() && source.is_empty() {
+    if seq.parse::<u64>().is_err() || source.is_empty() {
         // Malformed identity line: do not invent a key from the full body.
         return String::new();
     }
@@ -1013,6 +1013,9 @@ mod tests {
         assert_ne!(a, c, "different source must remain distinct");
         assert_eq!(a, d, "quoted/unquoted source forms must match");
         assert!(identity_key_from_line("no identity here").is_empty());
+        assert!(identity_key_from_line("seq= source=api.log").is_empty());
+        assert!(identity_key_from_line("seq=not-a-number source=api.log").is_empty());
+        assert!(identity_key_from_line("seq=7 source=").is_empty());
         // Packer collapses same seq/source with different bodies (oversize path).
         let pad = "p".repeat(2_000);
         let blocks = vec![
