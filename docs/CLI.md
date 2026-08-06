@@ -634,6 +634,11 @@ than inventing them.
   `interpretation_validated=false` make the epistemic boundary explicit:
   a cited event was verified to exist, but ContextDesk does not claim that a
   model's interpretation, completeness, or root-cause diagnosis was proven.
+  Linked-log turns also include a typed `context_budget_telemetry` snapshot:
+  hard and packing budgets, reserved/free generation space, evidence and
+  history retained/omitted counts, capacity source, useful-headroom verdict,
+  and model-round identity. Text mode nests these facts under **Context**;
+  JSON/JSONL expose the same additive object without parsing display text.
 - **`context`** (adds `trace_context`, one line per provider call — one for a
   dry run, one per round for a real multi-round turn): the exact bounded,
   redacted messages and tool names that call sent. Reading consecutive
@@ -674,7 +679,10 @@ scrubbed by `cd_core::turn_trace` and requires `--activity-ack`.
 In **text** mode Activity prints on stderr as a nested causal hierarchy
 (Turn → Phase → Model round → Tool call lifecycle → Final status), after
 the status `done`/`failed`/`cancelled` line, so progress never interleaves
-with the hierarchy. Pipe/`TERM=dumb`/`NO_COLOR` stay ANSI-free ASCII.
+with the hierarchy. When Activity is requested without Trace, the latest
+typed context-budget snapshot is nested under **Context** in the same tree;
+requesting both avoids printing that snapshot twice. Pipe/`TERM=dumb`/
+`NO_COLOR` stay ANSI-free ASCII.
 JSON and JSONL expose the same typed activity data unchanged.
 
 Activity capture is **process-lifetime** for the turn: it is not a durable

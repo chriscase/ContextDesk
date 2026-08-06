@@ -27,6 +27,7 @@ use crate::envelope::{
 };
 use crate::render::{platform_supports_ansi, TerminalTextSanitizer};
 use cd_core::activity::{ActivityEvent, ActivityPhase, ActivityStatus, TurnActivityRecord};
+use cd_core::context_budgeting::ContextBudgetTelemetry;
 use std::io::{self, IsTerminal};
 
 const MIN_WIDTH: usize = 40;
@@ -107,7 +108,7 @@ impl HierarchyStyle {
         };
         Self {
             color,
-            ascii: ascii || !capable,
+            ascii: ascii || !capable || no_color_env,
             width: Some(columns.unwrap_or(DEFAULT_WIDTH).clamp(MIN_WIDTH, MAX_WIDTH)),
         }
     }
@@ -222,6 +223,29 @@ impl TreeWriter {
             self.glyphs.branch
         };
         self.line(prefix, connector, text);
+    }
+
+    fn branch_styled(&mut self, prefix: &str, last: bool, text: &str, ansi: &str) {
+        let connector = if last {
+            self.glyphs.last
+        } else {
+            self.glyphs.branch
+        };
+        self.out.push_str(prefix);
+        self.out.push_str(connector);
+        let indent = prefix.chars().count() + connector.chars().count();
+        let width = self.style.cols().saturating_sub(indent).max(16);
+        let clean = self.sanitizer.push(text);
+        let parts = wrap_preserving_utf8(&clean, width);
+        for (i, part) in parts.iter().enumerate() {
+            if i > 0 {
+                self.out.push('\n');
+                self.out.push_str(prefix);
+                self.out.push_str(self.glyphs.blank);
+            }
+            self.push_styled(part, ansi);
+        }
+        self.out.push('\n');
     }
 
     fn child_prefix(&self, prefix: &str, last: bool) -> String {
@@ -511,6 +535,9 @@ fn write_context_meta(w: &mut TreeWriter, prefix: &str, summary: &TraceSummaryLi
         false,
         &format!("history_messages={}", summary.history_messages),
     );
+    if let Some(telemetry) = &summary.context_budget_telemetry {
+        write_budget_telemetry(w, prefix, telemetry, false);
+    }
     if summary.retrieved_evidence == 0 && summary.evidence_ids.is_empty() {
         w.branch(prefix, false, "evidence: (empty)");
     } else {
@@ -542,6 +569,63 @@ fn write_context_meta(w: &mut TreeWriter, prefix: &str, summary: &TraceSummaryLi
         }
         _ => w.branch(prefix, true, "context_used: (omitted / not present)"),
     }
+}
+
+fn write_budget_telemetry(
+    w: &mut TreeWriter,
+    prefix: &str,
+    telemetry: &ContextBudgetTelemetry,
+    last: bool,
+) {
+    w.branch(
+        prefix,
+        false,
+        &format!(
+            "packing={}  reserved={}  free={}",
+            telemetry.packing_budget_chars,
+            telemetry.reserved_headroom_chars,
+            telemetry.free_chars_estimate
+        ),
+    );
+    w.branch(
+        prefix,
+        false,
+        &format!(
+            "evidence: pre_pack={}  included={}  omitted_blocks={}  omitted_chars={}",
+            telemetry.evidence_pre_pack_chars,
+            telemetry.evidence_included_chars,
+            telemetry.evidence_omitted_blocks,
+            telemetry.evidence_omitted_chars
+        ),
+    );
+    w.branch(
+        prefix,
+        false,
+        &format!(
+            "evidence_identities: included={}  omitted={}",
+            telemetry.evidence_identity_lines_included, telemetry.evidence_identity_lines_omitted
+        ),
+    );
+    w.branch(
+        prefix,
+        false,
+        &format!(
+            "history: retained={}  omitted={}  compacted={}",
+            telemetry.history_retained_messages,
+            telemetry.history_omitted_messages,
+            telemetry.history_compacted
+        ),
+    );
+    w.branch(
+        prefix,
+        last,
+        &format!(
+            "capacity_source={}  useful_headroom={}  model_round={}",
+            telemetry.provider_capacity_source.as_str(),
+            telemetry.useful_headroom,
+            telemetry.model_round
+        ),
+    );
 }
 
 fn write_model_round(
@@ -708,6 +792,16 @@ fn write_orphan_tools(
 
 /// Nested causal hierarchy for a finished activity record.
 pub fn render_activity_hierarchy(record: &TurnActivityRecord, style: HierarchyStyle) -> String {
+    render_activity_hierarchy_with_context(record, None, style)
+}
+
+/// Activity hierarchy with the latest typed context-budget snapshot nested in
+/// the same tree. Used by `--activity` when `--trace` is not also rendering it.
+pub fn render_activity_hierarchy_with_context(
+    record: &TurnActivityRecord,
+    context_budget: Option<&ContextBudgetTelemetry>,
+    style: HierarchyStyle,
+) -> String {
     let mut w = TreeWriter::new(style);
     w.line_root("Activity", CYAN);
 
@@ -741,6 +835,20 @@ pub fn render_activity_hierarchy(record: &TurnActivityRecord, style: HierarchySt
         cd_core::activity::ActivityDetailLevel::Full => "full",
     };
     w.branch(&tp, true, &format!("detail_level={detail}"));
+
+    if let Some(telemetry) = context_budget {
+        w.branch("", false, "Context");
+        let cp = w.child_prefix("", false);
+        w.branch(
+            &cp,
+            false,
+            &format!(
+                "hard={}  used={}",
+                telemetry.hard_budget_chars, telemetry.used_chars_estimate
+            ),
+        );
+        write_budget_telemetry(&mut w, &cp, telemetry, true);
+    }
 
     if record.events.is_empty() {
         w.branch("", true, "Events: (empty evidence)");
@@ -937,17 +1045,13 @@ fn write_single_event(w: &mut TreeWriter, prefix: &str, last: bool, ev: &Activit
     }
     if style_color_hint(w) {
         // Semantic color on the status token only; label stays plain.
-        let connector = if last { w.glyphs.last } else { w.glyphs.branch };
-        w.out.push_str(prefix);
-        w.out.push_str(connector);
         let ansi = match ev.status {
             ActivityStatus::Failed => RED,
             ActivityStatus::Cancelled | ActivityStatus::Withheld => YELLOW,
             ActivityStatus::Ok => GREEN,
             ActivityStatus::Pending => DIM,
         };
-        w.push_styled(&line, ansi);
-        w.out.push('\n');
+        w.branch_styled(prefix, last, &line, ansi);
     } else {
         w.branch(prefix, last, &line);
     }
@@ -980,6 +1084,7 @@ mod tests {
     use cd_core::activity::{
         ActivityDetailLevel, ActivityOrigin, ActivityTrigger, DataScope, Determinism, PrivacyClass,
     };
+    use cd_core::context_budgeting::CapacitySourceLabel;
 
     fn summary_fixture() -> TraceSummaryLine {
         TraceSummaryLine {
@@ -993,6 +1098,7 @@ mod tests {
             evidence_ids: vec![],
             context_budget_chars: 120_000,
             context_used_chars: 828,
+            context_budget_telemetry: None,
             context_messages_capped: false,
             tool_names: vec!["search_kb".into()],
             tools_executed: vec![],
@@ -1002,6 +1108,28 @@ mod tests {
             grounding_scope: "not_applicable".into(),
             interpretation_validated: false,
             context_used: None,
+        }
+    }
+
+    fn budget_fixture() -> ContextBudgetTelemetry {
+        ContextBudgetTelemetry {
+            model_round: 1,
+            hard_budget_chars: 120_000,
+            packing_budget_chars: 108_000,
+            reserved_headroom_chars: 12_000,
+            used_chars_estimate: 50_000,
+            free_chars_estimate: 70_000,
+            evidence_pre_pack_chars: 150_000,
+            evidence_included_chars: 90_000,
+            evidence_omitted_blocks: 2,
+            evidence_omitted_chars: 60_000,
+            evidence_identity_lines_included: 10,
+            evidence_identity_lines_omitted: 5,
+            history_retained_messages: 2,
+            history_omitted_messages: 1,
+            history_compacted: false,
+            provider_capacity_source: CapacitySourceLabel::UnknownConfigured,
+            useful_headroom: true,
         }
     }
 
@@ -1030,6 +1158,20 @@ mod tests {
         );
         assert!(!out.contains('├'));
         assert!(!out.contains(ARGS_NOT_CAPTURED)); // no tools at summary-only
+    }
+
+    #[test]
+    fn typed_context_budget_is_nested_in_trace() {
+        let mut summary = summary_fixture();
+        summary.context_budget_telemetry = Some(budget_fixture());
+        let out = render_trace_hierarchy(
+            &[StreamLine::TraceSummary(summary)],
+            TraceLevel::Summary,
+            HierarchyStyle::plain(),
+        );
+        assert!(out.contains("packing=108000"));
+        assert!(out.contains("omitted_chars=60000"));
+        assert!(out.contains("model_round=1"));
     }
 
     #[test]
@@ -1204,10 +1346,11 @@ Trace (summary)
             Some("xterm".into()),
             true,
             ColorMode::Auto,
-            true,
+            false,
             Some(80),
         );
         assert!(!no_color.color);
+        assert!(no_color.ascii, "NO_COLOR must select ASCII-safe glyphs");
         assert!(is_plain_output(&render_trace_hierarchy(
             &lines,
             TraceLevel::Summary,
@@ -1301,6 +1444,14 @@ Trace (summary)
         let empty_out = render_human_activity(&empty);
         assert!(empty_out.contains("empty evidence"));
         assert!(is_plain_output(&empty_out));
+        let with_context = render_activity_hierarchy_with_context(
+            &empty,
+            Some(&budget_fixture()),
+            HierarchyStyle::plain(),
+        );
+        assert!(with_context.contains("Context"));
+        assert!(with_context.contains("packing=108000"));
+        assert!(with_context.contains("model_round=1"));
 
         let mut provider = activity_event(
             2,
@@ -1413,5 +1564,40 @@ Trace (summary)
         assert!(out.contains('\u{1b}'));
         let plain = render_trace_hierarchy(&lines, TraceLevel::Summary, HierarchyStyle::plain());
         assert!(is_plain_output(&plain));
+    }
+
+    #[test]
+    fn colored_activity_sanitizes_untrusted_labels_and_details() {
+        let mut event = activity_event(
+            0,
+            "tool",
+            "\u{1b}[31mINJECT\u{7}",
+            ActivityPhase::Completed,
+            ActivityStatus::Ok,
+        );
+        event.detail = Some("detail\u{1b}[2J\u{7}".into());
+        let record = TurnActivityRecord {
+            version: 2,
+            turn_id: "t".into(),
+            session_id: "s".into(),
+            message_id: None,
+            scope: DataScope::conversation(),
+            status: ActivityStatus::Ok,
+            total_elapsed_ms: 1,
+            detail_level: ActivityDetailLevel::Summary,
+            events: vec![event],
+            dropped_events: 0,
+        };
+        let out = render_activity_hierarchy(
+            &record,
+            HierarchyStyle {
+                color: true,
+                ascii: true,
+                width: Some(80),
+            },
+        );
+        assert!(!out.contains("\u{1b}[31mINJECT"));
+        assert!(!out.contains("\u{1b}[2J"));
+        assert!(!out.contains('\u{7}'));
     }
 }

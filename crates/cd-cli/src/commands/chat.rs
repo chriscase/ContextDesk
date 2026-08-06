@@ -16,7 +16,10 @@ use crate::envelope::{
     CliError, CliResult, Envelope, JsonlMetaLine, StreamLine, TraceContextLine, TraceSummaryLine,
     TraceToolLine, TracedMessageLine,
 };
-use crate::human_hierarchy::{render_activity_hierarchy, render_trace_hierarchy, HierarchyStyle};
+use crate::human_hierarchy::{
+    render_activity_hierarchy, render_activity_hierarchy_with_context, render_trace_hierarchy,
+    HierarchyStyle,
+};
 use crate::render::{
     ChatOutcomeSummary, ChatStatusRenderer, TerminalCapabilities, TerminalTextSanitizer,
 };
@@ -408,20 +411,24 @@ pub async fn run(
             }
             if let Some(record) = &activity_record {
                 let style = HierarchyStyle::detect_stderr(color);
-                eprint!("{}", render_activity_hierarchy(record, style));
+                let context_budget = if effective_trace.is_none() {
+                    outcome.events.iter().rev().find_map(|event| match event {
+                        StreamEvent::ContextBudget { telemetry } => Some(telemetry),
+                        _ => None,
+                    })
+                } else {
+                    None
+                };
+                eprint!(
+                    "{}",
+                    render_activity_hierarchy_with_context(record, context_budget, style)
+                );
             }
-            // User-facing “Context used” from host SearchTrail (ordinary chat plan).
-            if let Some(summary) = context_used_from_events(&outcome.events) {
-                eprintln!("Context used: {summary}");
-            }
-            // Nested Context section only when trace or activity was requested —
-            // ordinary linked chat stays concise. Typed fields remain on JSON/JSONL.
-            if effective_trace.is_some() || args.activity.is_some() {
-                if let Some(tel) = outcome.events.iter().rev().find_map(|e| match e {
-                    StreamEvent::ContextBudget { telemetry } => Some(telemetry),
-                    _ => None,
-                }) {
-                    eprintln!("{}", tel.human_context_section());
+            // Ordinary chat gets one concise host summary. Trace/activity modes
+            // place the same typed facts inside their hierarchy instead.
+            if effective_trace.is_none() && args.activity.is_none() {
+                if let Some(summary) = context_used_from_events(&outcome.events) {
+                    eprintln!("Context used: {summary}");
                 }
             }
         }
