@@ -113,6 +113,10 @@ fn host_facts_for(corpus: &LogCorpus, key: &TriageKnownAnswerKey) -> TriageHostF
         sources_present,
         evidence: Vec::new(),
         messages_by_seq,
+        known_independent_incident_count: None,
+        stderr_record_count: None,
+        raw_exception_record_count: None,
+        episode_counts_complete: false,
     }
 }
 
@@ -277,6 +281,8 @@ fn good_answer_for(key: &TriageKnownAnswerKey, host: &TriageHostFacts) -> Struct
         asserts_observed_sources: key.sources_present.clone(),
         asserts_confident_wall_clock_order: false,
         asserts_root_cause_established: asserts_root && key.root_cause_establishable,
+        asserts_raw_volume_as_independent_incidents: false,
+        asserted_independent_incident_count: None,
     }
 }
 

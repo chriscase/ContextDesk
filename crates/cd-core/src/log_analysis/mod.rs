@@ -83,18 +83,14 @@ pub use event_revision::{
 pub use exception_episodes::{
     analyze_bounded_events, analyze_exception_episodes, analyze_exception_episodes_with_cancel,
     analyze_exception_episodes_with_cancel_flag, format_exception_episode_brief_section,
-    is_exception_candidate, project_template_onto_episodes, ExceptionAmplificationMetrics,
+    is_exception_candidate, project_template_onto_episodes, set_episode_scan_page_hook_for_test,
+    set_test_candidate_cap_override, set_test_row_walk_cap_override, ExceptionAmplificationMetrics,
     ExceptionCitationRole, ExceptionCorrelationConfidence, ExceptionCountRatio,
     ExceptionEpisodeAnalysis, ExceptionEpisodeReport, ExceptionEventCitation,
     ExceptionFamilySummary, ExceptionOccurrenceSummary, ExceptionRenderingKind,
-    TemplateEpisodeProjection, EXCEPTION_EPISODE_EVENT_SCAN_CAP, EXCEPTION_EPISODE_FAMILY_CAP,
-    EXCEPTION_EPISODE_RECORD_CAP, EXCEPTION_EPISODE_RENDER_CAP, EXCEPTION_EPISODE_ROW_WALK_CAP,
-    EXCEPTION_EPISODE_SCHEMA_ID, EXCEPTION_EPISODE_SCHEMA_VERSION,
-};
-#[cfg(test)]
-pub use exception_episodes::{
-    set_episode_scan_page_hook_for_test, set_test_candidate_cap_override,
-    set_test_row_walk_cap_override,
+    TemplateEpisodeProjection, TestScanOverrideGuard, EXCEPTION_EPISODE_EVENT_SCAN_CAP,
+    EXCEPTION_EPISODE_FAMILY_CAP, EXCEPTION_EPISODE_RECORD_CAP, EXCEPTION_EPISODE_RENDER_CAP,
+    EXCEPTION_EPISODE_ROW_WALK_CAP, EXCEPTION_EPISODE_SCHEMA_ID, EXCEPTION_EPISODE_SCHEMA_VERSION,
 };
 pub use format_profile::{
     fingerprint_format, BuiltInFormatProfile, BuiltInGrammar, FormatFingerprint,

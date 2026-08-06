@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "xyz-dual-rendering-cascade",
+  "cascade_occurrences": 56,
+  "app_records_per_occurrence": 1,
+  "stderr_records_per_occurrence": 265,
+  "stderr_cascade_records": 14840,
+  "app_cascade_records": 56,
+  "total_cascade_records": 14896,
+  "stderr_record_amplification": 265,
+  "interleaved_unrelated_records": 8,
+  "required_product_api": "cd_core::log_analysis::exception_episodes::analyze_exception_episodes"
+}

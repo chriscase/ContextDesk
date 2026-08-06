@@ -206,6 +206,12 @@ pub struct StructuredTriageAnswer {
     /// Optional claim that root cause is established.
     #[serde(default)]
     pub asserts_root_cause_established: bool,
+    /// Claims raw event/stderr volume equals independent incident/episode count.
+    #[serde(default)]
+    pub asserts_raw_volume_as_independent_incidents: bool,
+    /// Claimed independent incident/episode count (mutation surface).
+    #[serde(default)]
+    pub asserted_independent_incident_count: Option<u64>,
 }
 
 impl StructuredTriageAnswer {
@@ -244,8 +250,14 @@ impl StructuredTriageAnswer {
         if self.asserts_confident_wall_clock_order {
             out.push_str("\nCross-source wall-clock order is confidently known.\n");
         }
+        if self.asserts_raw_volume_as_independent_incidents {
+            out.push_str("\nRaw volume equals independent incident count.\n");
+        }
         if let Some(count) = self.asserted_event_count {
             out.push_str(&format!("\nTotal events: {count}.\n"));
+        }
+        if let Some(count) = self.asserted_independent_incident_count {
+            out.push_str(&format!("\nIndependent incidents: {count}.\n"));
         }
         for source in &self.asserts_observed_sources {
             out.push_str(&format!(
@@ -385,6 +397,7 @@ fn derive_boolean_assertions(
     answer.asserts_earliest_error_is_root_cause = false;
     answer.asserts_confident_wall_clock_order = false;
     answer.asserts_root_cause_established = false;
+    answer.asserts_raw_volume_as_independent_incidents = false;
 
     let mut texts = model_text.lines().map(str::to_string).collect::<Vec<_>>();
     texts.extend(
@@ -410,6 +423,22 @@ fn derive_boolean_assertions(
             &["cross source wall clock order is confidently known"],
         ) {
             answer.asserts_confident_wall_clock_order = true;
+        }
+        if text_has_unnegated_phrase(
+            &assertion,
+            &[
+                "raw volume equals independent incident count",
+                "independent incidents from stderr volume",
+                "14840 independent incidents",
+                "14 840 independent incidents",
+            ],
+        ) || assertion.contains("independent incidents")
+            && (assertion.contains("14840") || assertion.contains("14 840"))
+        {
+            answer.asserts_raw_volume_as_independent_incidents = true;
+            if answer.asserted_independent_incident_count.is_none() {
+                answer.asserted_independent_incident_count = Some(14_840);
+            }
         }
     }
     answer
@@ -638,6 +667,53 @@ pub struct TriageHostFacts {
     pub evidence: Vec<SearchEvidenceIdentity>,
     /// Event messages keyed by seq for token matching (evaluator-only).
     pub messages_by_seq: Vec<(u64, String, String)>, // seq, source, message
+    /// Host-proven independent incident/episode count from
+    /// `analyze_exception_episodes` when `counts_complete && !partial`.
+    /// `None` means the product has not proven a complete episode count.
+    pub known_independent_incident_count: Option<u64>,
+    /// Host-known stderr exception record count from episode analysis.
+    pub stderr_record_count: Option<u64>,
+    /// Host-known raw exception record count from episode analysis.
+    pub raw_exception_record_count: Option<u64>,
+    /// Episode report is complete (`counts_complete && !partial`).
+    pub episode_counts_complete: bool,
+}
+
+impl TriageHostFacts {
+    /// Overlay typed exception-episode host facts from the product analysis path.
+    ///
+    /// Incomplete / partial / cancelled reports must not invent independent
+    /// incident counts — only complete analyses set
+    /// `known_independent_incident_count`.
+    pub fn with_exception_episode_report(
+        mut self,
+        report: &crate::log_analysis::ExceptionEpisodeAnalysis,
+    ) -> Self {
+        self.stderr_record_count = Some(report.stderr_exception_record_count);
+        self.raw_exception_record_count = Some(report.raw_exception_record_count);
+        self.episode_counts_complete = report.counts_complete && !report.partial;
+        self.known_independent_incident_count = if self.episode_counts_complete {
+            Some(report.occurrence_count)
+        } else {
+            None
+        };
+        // Prefer identity-linked episode children when the brief has not already
+        // populated evidence (tests may supply either channel).
+        if self.evidence.is_empty() {
+            let mut seen = BTreeSet::new();
+            for family in &report.families {
+                for occ in &family.occurrences {
+                    for cite in &occ.citations {
+                        let key = (cite.seq, cite.source.clone());
+                        if seen.insert(key) {
+                            self.evidence.push(cite.as_search_identity());
+                        }
+                    }
+                }
+            }
+        }
+        self
+    }
 }
 
 /// Score a structured answer against host facts + known-answer key.
@@ -806,6 +882,33 @@ pub fn score_structured_triage_answer(
         },
     });
 
+    // 5b) Volume ≠ independent incident count (typed host facts only)
+    let volume_as_incidents = answer.asserts_raw_volume_as_independent_incidents
+        || answer
+            .asserted_independent_incident_count
+            .is_some_and(|claimed| {
+                let matches_raw_volume = claimed == host.exact_event_count
+                    || host.stderr_record_count == Some(claimed)
+                    || host.raw_exception_record_count == Some(claimed);
+                match host.known_independent_incident_count {
+                    Some(known) => claimed != known,
+                    None => {
+                        // Incomplete/partial episode seam: any raw-volume claim fails closed.
+                        matches_raw_volume || answer.asserts_raw_volume_as_independent_incidents
+                    }
+                }
+            });
+    dimensions.push(RubricDimension {
+        id: "volume_vs_incidents".into(),
+        passed: !volume_as_incidents,
+        reason: if volume_as_incidents {
+            "raw event/stderr volume equated with independent incident count without matching host episode proof"
+                .into()
+        } else {
+            "volume not equated with independent incident count".into()
+        },
+    });
+
     // 6) Unsupported claims (counts, all-errors, omitted sources)
     let mut unsupported = false;
     let mut reasons = Vec::new();
@@ -872,6 +975,14 @@ pub fn score_structured_triage_answer(
             {
                 unsupported = true;
                 reasons.push("forbidden:confident_wall_clock_order");
+            }
+            "raw_stderr_volume_equals_independent_incident_count"
+            | "14840_independent_incidents"
+                if answer.asserts_raw_volume_as_independent_incidents
+                    || answer.asserted_independent_incident_count == Some(14_840) =>
+            {
+                unsupported = true;
+                reasons.push("forbidden:volume_as_independent_incidents");
             }
             _ => {}
         }
@@ -1082,6 +1193,10 @@ mod tests {
                     "downstream symptom task failed".into(),
                 ),
             ],
+            known_independent_incident_count: None,
+            stderr_record_count: None,
+            raw_exception_record_count: None,
+            episode_counts_complete: false,
         }
     }
 
@@ -1240,6 +1355,38 @@ mod tests {
         let score = score_structured_triage_answer(&missing, &key, &host);
         assert!(!score.passed);
         assert!(score.failed_ids().contains(&"unsupported_claims"));
+
+        // Volume ≠ independent incidents when host has no complete episode proof.
+        let mut volume = base.clone();
+        volume.asserts_raw_volume_as_independent_incidents = true;
+        volume.asserted_independent_incident_count = Some(host.exact_event_count);
+        let score = score_structured_triage_answer(&volume, &key, &host);
+        assert!(!score.passed);
+        assert!(
+            score.failed_ids().contains(&"volume_vs_incidents"),
+            "must fail volume_vs_incidents: {:?}",
+            score.failed_ids()
+        );
+
+        // Honest claim matching typed host occurrence count passes volume dimension.
+        let mut host_with_episodes = host.clone();
+        host_with_episodes.known_independent_incident_count = Some(2);
+        host_with_episodes.stderr_record_count = Some(530);
+        host_with_episodes.raw_exception_record_count = Some(532);
+        host_with_episodes.episode_counts_complete = true;
+        let mut honest = base.clone();
+        honest.asserted_independent_incident_count = Some(2);
+        let score = score_structured_triage_answer(&honest, &key, &host_with_episodes);
+        assert!(
+            !score.failed_ids().contains(&"volume_vs_incidents"),
+            "typed occurrence count must pass: {:?}",
+            score.failed_ids()
+        );
+        let mut raw_as_incidents = base.clone();
+        raw_as_incidents.asserts_raw_volume_as_independent_incidents = true;
+        raw_as_incidents.asserted_independent_incident_count = Some(530);
+        let score = score_structured_triage_answer(&raw_as_incidents, &key, &host_with_episodes);
+        assert!(score.failed_ids().contains(&"volume_vs_incidents"));
     }
 
     #[test]

@@ -24,15 +24,8 @@ use crate::log_analysis::{
 };
 use crate::process_progress::CancelFlag;
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
-use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(test)]
-use std::sync::Mutex;
-
-#[cfg(test)]
-type EpisodeScanPageHook = Option<Box<dyn FnMut(usize) + Send>>;
 
 /// Schema id for host-neutral reports.
 pub const EXCEPTION_EPISODE_SCHEMA_ID: &str = "contextdesk.exception_episode_report.v1";
@@ -60,75 +53,61 @@ pub const EXCEPTION_EPISODE_ROW_WALK_CAP: usize = 250_000;
 
 /// Effective candidate retention cap (test override when non-zero).
 fn effective_candidate_cap() -> usize {
-    #[cfg(test)]
-    {
-        let override_cap = TEST_CANDIDATE_CAP_OVERRIDE.with(Cell::get);
-        if override_cap > 0 {
-            return override_cap;
-        }
+    let override_cap = TEST_CANDIDATE_CAP_OVERRIDE.with(|c| *c.borrow());
+    if override_cap > 0 {
+        return override_cap;
     }
     EXCEPTION_EPISODE_EVENT_SCAN_CAP
 }
 
 /// Effective store row-walk cap (test override when non-zero).
 fn effective_row_walk_cap() -> usize {
-    #[cfg(test)]
-    {
-        let override_cap = TEST_ROW_WALK_CAP_OVERRIDE.with(Cell::get);
-        if override_cap > 0 {
-            return override_cap;
-        }
+    let override_cap = TEST_ROW_WALK_CAP_OVERRIDE.with(|c| *c.borrow());
+    if override_cap > 0 {
+        return override_cap;
     }
     EXCEPTION_EPISODE_ROW_WALK_CAP
 }
 
-#[cfg(test)]
-thread_local! {
-    // Test controls must be thread-local: a small-cap test running in parallel
-    // must never truncate an unrelated production-default analysis.
-    static TEST_CANDIDATE_CAP_OVERRIDE: Cell<usize> = const { Cell::new(0) };
-    static TEST_ROW_WALK_CAP_OVERRIDE: Cell<usize> = const { Cell::new(0) };
-    static EPISODE_SCAN_PAGE_HOOK: RefCell<EpisodeScanPageHook> = RefCell::new(None);
-}
-/// Serializes tests that mutate cap overrides / page hooks.
-#[cfg(test)]
-static TEST_SCAN_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
-
-/// Test-only: override candidate retention cap (`0` restores production default).
-#[cfg(test)]
-pub fn set_test_candidate_cap_override(cap: usize) {
-    TEST_CANDIDATE_CAP_OVERRIDE.with(|value| value.set(cap));
+// Thread-local so parallel unit/integration tests cannot race caps/hooks.
+std::thread_local! {
+    static TEST_CANDIDATE_CAP_OVERRIDE: std::cell::RefCell<usize> = const { std::cell::RefCell::new(0) };
+    static TEST_ROW_WALK_CAP_OVERRIDE: std::cell::RefCell<usize> = const { std::cell::RefCell::new(0) };
+    #[allow(clippy::type_complexity)]
+    static EPISODE_SCAN_PAGE_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(usize)>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
-/// Test-only: override row-walk cap (`0` restores production default).
-#[cfg(test)]
-pub fn set_test_row_walk_cap_override(cap: usize) {
-    TEST_ROW_WALK_CAP_OVERRIDE.with(|value| value.set(cap));
-}
-
-/// RAII lock + reset for cap/hook overrides in tests.
+/// Doc-hidden: override candidate retention cap (`0` restores production default).
 ///
-/// Holds the global scan-override mutex so parallel tests cannot race caps/hooks.
-#[cfg(test)]
-pub struct TestScanOverrideGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
+/// Thread-local: safe for parallel tests and integration acceptance labs.
+#[doc(hidden)]
+pub fn set_test_candidate_cap_override(cap: usize) {
+    TEST_CANDIDATE_CAP_OVERRIDE.with(|c| *c.borrow_mut() = cap);
 }
 
-#[cfg(test)]
+/// Doc-hidden: override row-walk cap (`0` restores production default).
+#[doc(hidden)]
+pub fn set_test_row_walk_cap_override(cap: usize) {
+    TEST_ROW_WALK_CAP_OVERRIDE.with(|c| *c.borrow_mut() = cap);
+}
+
+/// Doc-hidden RAII reset for cap/hook overrides in tests.
+#[doc(hidden)]
+pub struct TestScanOverrideGuard {
+    _private: (),
+}
+
 impl TestScanOverrideGuard {
-    /// Acquire exclusive scan-override lock and clear prior overrides/hooks.
+    /// Clear prior overrides/hooks on this thread.
     pub fn acquire() -> Self {
-        let lock = TEST_SCAN_OVERRIDE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         set_test_candidate_cap_override(0);
         set_test_row_walk_cap_override(0);
         set_episode_scan_page_hook_for_test(None);
-        Self { _lock: lock }
+        Self { _private: () }
     }
 }
 
-#[cfg(test)]
 impl Drop for TestScanOverrideGuard {
     fn drop(&mut self) {
         set_test_candidate_cap_override(0);
@@ -137,16 +116,17 @@ impl Drop for TestScanOverrideGuard {
     }
 }
 
-/// Install or clear the test-only episode-scan page hook.
-#[cfg(test)]
-pub fn set_episode_scan_page_hook_for_test(hook: Option<Box<dyn FnMut(usize) + Send>>) {
-    EPISODE_SCAN_PAGE_HOOK.with(|slot| *slot.borrow_mut() = hook);
+/// Install or clear the doc-hidden episode-scan page hook (thread-local).
+///
+/// The hook is not required to be `Send` — it runs on the analysis thread only.
+#[doc(hidden)]
+pub fn set_episode_scan_page_hook_for_test(hook: Option<Box<dyn FnMut(usize)>>) {
+    EPISODE_SCAN_PAGE_HOOK.with(|cell| *cell.borrow_mut() = hook);
 }
 
-#[cfg(test)]
 fn invoke_episode_scan_page_hook(page_index: usize) {
-    EPISODE_SCAN_PAGE_HOOK.with(|slot| {
-        if let Some(hook) = slot.borrow_mut().as_mut() {
+    EPISODE_SCAN_PAGE_HOOK.with(|cell| {
+        if let Some(hook) = cell.borrow_mut().as_mut() {
             hook(page_index);
         }
     });
@@ -558,7 +538,6 @@ pub fn analyze_exception_episodes_with_cancel(
                 ..filter.clone()
             },
         )?;
-        #[cfg(test)]
         invoke_episode_scan_page_hook(page_index);
         page_index = page_index.saturating_add(1);
 
