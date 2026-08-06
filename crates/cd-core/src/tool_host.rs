@@ -9198,15 +9198,17 @@ mod tests {
         let abort = job.abort_handle();
         let page_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let page_seen_hook = Arc::clone(&page_seen);
-        crate::log_analysis::set_episode_scan_page_hook_for_test(Some(Box::new(move |page| {
-            page_seen_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if page == 0 {
-                // Abort after the first real scan page began — analyzer must observe it.
-                abort.abort();
-            }
-        })));
+        crate::log_analysis::exception_episodes::set_episode_scan_page_hook_for_test(Some(
+            Box::new(move |page| {
+                page_seen_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if page == 0 {
+                    // Abort after the first real scan page began — analyzer must observe it.
+                    abort.abort();
+                }
+            }),
+        ));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.build()));
-        crate::log_analysis::set_episode_scan_page_hook_for_test(None);
+        crate::log_analysis::exception_episodes::set_episode_scan_page_hook_for_test(None);
         let err = match result {
             Ok(Ok(brief)) => {
                 panic!(

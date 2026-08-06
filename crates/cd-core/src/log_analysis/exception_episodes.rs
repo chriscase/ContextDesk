@@ -53,23 +53,30 @@ pub const EXCEPTION_EPISODE_ROW_WALK_CAP: usize = 250_000;
 
 /// Effective candidate retention cap (test override when non-zero).
 fn effective_candidate_cap() -> usize {
-    let override_cap = TEST_CANDIDATE_CAP_OVERRIDE.with(|c| *c.borrow());
-    if override_cap > 0 {
-        return override_cap;
+    #[cfg(test)]
+    {
+        let override_cap = TEST_CANDIDATE_CAP_OVERRIDE.with(|c| *c.borrow());
+        if override_cap > 0 {
+            return override_cap;
+        }
     }
     EXCEPTION_EPISODE_EVENT_SCAN_CAP
 }
 
 /// Effective store row-walk cap (test override when non-zero).
 fn effective_row_walk_cap() -> usize {
-    let override_cap = TEST_ROW_WALK_CAP_OVERRIDE.with(|c| *c.borrow());
-    if override_cap > 0 {
-        return override_cap;
+    #[cfg(test)]
+    {
+        let override_cap = TEST_ROW_WALK_CAP_OVERRIDE.with(|c| *c.borrow());
+        if override_cap > 0 {
+            return override_cap;
+        }
     }
     EXCEPTION_EPISODE_ROW_WALK_CAP
 }
 
 // Thread-local so parallel unit/integration tests cannot race caps/hooks.
+#[cfg(test)]
 std::thread_local! {
     static TEST_CANDIDATE_CAP_OVERRIDE: std::cell::RefCell<usize> = const { std::cell::RefCell::new(0) };
     static TEST_ROW_WALK_CAP_OVERRIDE: std::cell::RefCell<usize> = const { std::cell::RefCell::new(0) };
@@ -81,26 +88,27 @@ std::thread_local! {
 /// Doc-hidden: override candidate retention cap (`0` restores production default).
 ///
 /// Thread-local: safe for parallel tests and integration acceptance labs.
-#[doc(hidden)]
-pub fn set_test_candidate_cap_override(cap: usize) {
+#[cfg(test)]
+fn set_test_candidate_cap_override(cap: usize) {
     TEST_CANDIDATE_CAP_OVERRIDE.with(|c| *c.borrow_mut() = cap);
 }
 
 /// Doc-hidden: override row-walk cap (`0` restores production default).
-#[doc(hidden)]
-pub fn set_test_row_walk_cap_override(cap: usize) {
+#[cfg(test)]
+fn set_test_row_walk_cap_override(cap: usize) {
     TEST_ROW_WALK_CAP_OVERRIDE.with(|c| *c.borrow_mut() = cap);
 }
 
 /// Doc-hidden RAII reset for cap/hook overrides in tests.
-#[doc(hidden)]
-pub struct TestScanOverrideGuard {
+#[cfg(test)]
+pub(crate) struct TestScanOverrideGuard {
     _private: (),
 }
 
+#[cfg(test)]
 impl TestScanOverrideGuard {
     /// Clear prior overrides/hooks on this thread.
-    pub fn acquire() -> Self {
+    pub(crate) fn acquire() -> Self {
         set_test_candidate_cap_override(0);
         set_test_row_walk_cap_override(0);
         set_episode_scan_page_hook_for_test(None);
@@ -108,6 +116,7 @@ impl TestScanOverrideGuard {
     }
 }
 
+#[cfg(test)]
 impl Drop for TestScanOverrideGuard {
     fn drop(&mut self) {
         set_test_candidate_cap_override(0);
@@ -119,11 +128,12 @@ impl Drop for TestScanOverrideGuard {
 /// Install or clear the doc-hidden episode-scan page hook (thread-local).
 ///
 /// The hook is not required to be `Send` — it runs on the analysis thread only.
-#[doc(hidden)]
-pub fn set_episode_scan_page_hook_for_test(hook: Option<Box<dyn FnMut(usize)>>) {
+#[cfg(test)]
+pub(crate) fn set_episode_scan_page_hook_for_test(hook: Option<Box<dyn FnMut(usize)>>) {
     EPISODE_SCAN_PAGE_HOOK.with(|cell| *cell.borrow_mut() = hook);
 }
 
+#[cfg(test)]
 fn invoke_episode_scan_page_hook(page_index: usize) {
     EPISODE_SCAN_PAGE_HOOK.with(|cell| {
         if let Some(hook) = cell.borrow_mut().as_mut() {
@@ -538,6 +548,7 @@ pub fn analyze_exception_episodes_with_cancel(
                 ..filter.clone()
             },
         )?;
+        #[cfg(test)]
         invoke_episode_scan_page_hook(page_index);
         page_index = page_index.saturating_add(1);
 
@@ -1864,6 +1875,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     fn event(seq: u64, ts: i64, source: &str, message: &str) -> ExplorerEvent {
@@ -3222,6 +3234,31 @@ mod tests {
             "scope={}",
             mid.candidate_scope
         );
+    }
+
+    #[test]
+    fn scan_page_hook_cancels_after_first_fetched_page() {
+        let _guard = TestScanOverrideGuard::acquire();
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("cancel");
+        fs::create_dir_all(&src).unwrap();
+        write_n_exception_lines(
+            &src.join("exceptions.log"),
+            MAX_EVENT_PAGE + 1,
+            "ERROR",
+            "XYZ_CANCEL",
+        );
+        let (_cache, _id, corpus) = ingest_dir(&src);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_hook = Arc::clone(&cancel);
+        set_episode_scan_page_hook_for_test(Some(Box::new(move |page| {
+            if page == 0 {
+                cancel_hook.store(true, Ordering::SeqCst);
+            }
+        })));
+        let error = analyze_exception_episodes_with_cancel(&corpus, &[], Some(cancel.as_ref()))
+            .expect_err("test-only page hook must cancel after the first fetched page");
+        assert!(matches!(error, CoreError::Cancelled));
     }
 
     #[test]

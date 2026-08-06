@@ -206,12 +206,12 @@ pub struct StructuredTriageAnswer {
     /// Optional claim that root cause is established.
     #[serde(default)]
     pub asserts_root_cause_established: bool,
-    /// Claims raw event/stderr volume equals independent incident/episode count.
+    /// Claims raw event/stderr volume equals semantic occurrence count.
     #[serde(default)]
-    pub asserts_raw_volume_as_independent_incidents: bool,
-    /// Claimed independent incident/episode count (mutation surface).
+    pub asserts_raw_volume_as_semantic_occurrences: bool,
+    /// Claimed semantic occurrence count (mutation surface).
     #[serde(default)]
-    pub asserted_independent_incident_count: Option<u64>,
+    pub asserted_semantic_occurrence_count: Option<u64>,
 }
 
 impl StructuredTriageAnswer {
@@ -250,14 +250,14 @@ impl StructuredTriageAnswer {
         if self.asserts_confident_wall_clock_order {
             out.push_str("\nCross-source wall-clock order is confidently known.\n");
         }
-        if self.asserts_raw_volume_as_independent_incidents {
-            out.push_str("\nRaw volume equals independent incident count.\n");
+        if self.asserts_raw_volume_as_semantic_occurrences {
+            out.push_str("\nRaw volume equals semantic occurrence count.\n");
         }
         if let Some(count) = self.asserted_event_count {
             out.push_str(&format!("\nTotal events: {count}.\n"));
         }
-        if let Some(count) = self.asserted_independent_incident_count {
-            out.push_str(&format!("\nIndependent incidents: {count}.\n"));
+        if let Some(count) = self.asserted_semantic_occurrence_count {
+            out.push_str(&format!("\nSemantic occurrences: {count}.\n"));
         }
         for source in &self.asserts_observed_sources {
             out.push_str(&format!(
@@ -397,7 +397,7 @@ fn derive_boolean_assertions(
     answer.asserts_earliest_error_is_root_cause = false;
     answer.asserts_confident_wall_clock_order = false;
     answer.asserts_root_cause_established = false;
-    answer.asserts_raw_volume_as_independent_incidents = false;
+    answer.asserts_raw_volume_as_semantic_occurrences = false;
 
     let mut texts = model_text.lines().map(str::to_string).collect::<Vec<_>>();
     texts.extend(
@@ -427,18 +427,20 @@ fn derive_boolean_assertions(
         if text_has_unnegated_phrase(
             &assertion,
             &[
-                "raw volume equals independent incident count",
-                "independent incidents from stderr volume",
-                "14840 independent incidents",
-                "14 840 independent incidents",
+                "raw volume equals semantic occurrence count",
+                "stderr records are semantic occurrences",
+                "stderr records represent semantic occurrences",
+                "raw records are separate occurrences",
             ],
-        ) || assertion.contains("independent incidents")
-            && (assertion.contains("14840") || assertion.contains("14 840"))
+        ) {
+            answer.asserts_raw_volume_as_semantic_occurrences = true;
+        }
+        if answer.asserted_semantic_occurrence_count.is_none()
+            && (assertion.contains("semantic occurrence")
+                || assertion.contains("semantic episode")
+                || assertion.contains("separate occurrences"))
         {
-            answer.asserts_raw_volume_as_independent_incidents = true;
-            if answer.asserted_independent_incident_count.is_none() {
-                answer.asserted_independent_incident_count = Some(14_840);
-            }
+            answer.asserted_semantic_occurrence_count = first_decimal_count(&assertion);
         }
     }
     answer
@@ -474,6 +476,12 @@ fn normalize_assertion_text(line: &str) -> String {
         .join(" ")
         .trim_matches(|ch: char| matches!(ch, '.' | '!' | '?' | ':' | ';' | ','))
         .to_string()
+}
+
+fn first_decimal_count(text: &str) -> Option<u64> {
+    text.split(|ch: char| !ch.is_ascii_digit() && ch != ',')
+        .filter(|token| token.chars().any(|ch| ch.is_ascii_digit()))
+        .find_map(|token| token.replace(',', "").parse().ok())
 }
 
 fn phrase_is_caveated(text: &str, phrase_at: usize, phrase_len: usize) -> bool {
@@ -667,10 +675,10 @@ pub struct TriageHostFacts {
     pub evidence: Vec<SearchEvidenceIdentity>,
     /// Event messages keyed by seq for token matching (evaluator-only).
     pub messages_by_seq: Vec<(u64, String, String)>, // seq, source, message
-    /// Host-proven independent incident/episode count from
+    /// Host-proven semantic occurrence count from
     /// `analyze_exception_episodes` when `counts_complete && !partial`.
     /// `None` means the product has not proven a complete episode count.
-    pub known_independent_incident_count: Option<u64>,
+    pub known_semantic_occurrence_count: Option<u64>,
     /// Host-known stderr exception record count from episode analysis.
     pub stderr_record_count: Option<u64>,
     /// Host-known raw exception record count from episode analysis.
@@ -682,9 +690,9 @@ pub struct TriageHostFacts {
 impl TriageHostFacts {
     /// Overlay typed exception-episode host facts from the product analysis path.
     ///
-    /// Incomplete / partial / cancelled reports must not invent independent
-    /// incident counts — only complete analyses set
-    /// `known_independent_incident_count`.
+    /// Incomplete / partial / cancelled reports must not invent semantic
+    /// occurrence counts — only complete analyses set
+    /// `known_semantic_occurrence_count`.
     pub fn with_exception_episode_report(
         mut self,
         report: &crate::log_analysis::ExceptionEpisodeAnalysis,
@@ -692,7 +700,7 @@ impl TriageHostFacts {
         self.stderr_record_count = Some(report.stderr_exception_record_count);
         self.raw_exception_record_count = Some(report.raw_exception_record_count);
         self.episode_counts_complete = report.counts_complete && !report.partial;
-        self.known_independent_incident_count = if self.episode_counts_complete {
+        self.known_semantic_occurrence_count = if self.episode_counts_complete {
             Some(report.occurrence_count)
         } else {
             None
@@ -882,30 +890,23 @@ pub fn score_structured_triage_answer(
         },
     });
 
-    // 5b) Volume ≠ independent incident count (typed host facts only)
-    let volume_as_incidents = answer.asserts_raw_volume_as_independent_incidents
-        || answer
-            .asserted_independent_incident_count
-            .is_some_and(|claimed| {
-                let matches_raw_volume = claimed == host.exact_event_count
-                    || host.stderr_record_count == Some(claimed)
-                    || host.raw_exception_record_count == Some(claimed);
-                match host.known_independent_incident_count {
-                    Some(known) => claimed != known,
-                    None => {
-                        // Incomplete/partial episode seam: any raw-volume claim fails closed.
-                        matches_raw_volume || answer.asserts_raw_volume_as_independent_incidents
-                    }
-                }
-            });
+    // 5b) Semantic occurrence claims fail closed unless the product report is
+    // complete and supplies the exact same semantic count.
+    let semantic_occurrence_claim_valid = match answer.asserted_semantic_occurrence_count {
+        Some(claimed) => {
+            host.episode_counts_complete
+                && host.known_semantic_occurrence_count == Some(claimed)
+                && !answer.asserts_raw_volume_as_semantic_occurrences
+        }
+        None => !answer.asserts_raw_volume_as_semantic_occurrences,
+    };
     dimensions.push(RubricDimension {
-        id: "volume_vs_incidents".into(),
-        passed: !volume_as_incidents,
-        reason: if volume_as_incidents {
-            "raw event/stderr volume equated with independent incident count without matching host episode proof"
-                .into()
+        id: "semantic_occurrence_count".into(),
+        passed: semantic_occurrence_claim_valid,
+        reason: if semantic_occurrence_claim_valid {
+            "semantic occurrence claim matches a complete product report".into()
         } else {
-            "volume not equated with independent incident count".into()
+            "semantic occurrence claim lacks an exact complete product report match".into()
         },
     });
 
@@ -976,13 +977,12 @@ pub fn score_structured_triage_answer(
                 unsupported = true;
                 reasons.push("forbidden:confident_wall_clock_order");
             }
-            "raw_stderr_volume_equals_independent_incident_count"
-            | "14840_independent_incidents"
-                if answer.asserts_raw_volume_as_independent_incidents
-                    || answer.asserted_independent_incident_count == Some(14_840) =>
+            "raw_stderr_volume_equals_semantic_occurrence_count" | "14840_semantic_occurrences"
+                if answer.asserts_raw_volume_as_semantic_occurrences
+                    || answer.asserted_semantic_occurrence_count == Some(14_840) =>
             {
                 unsupported = true;
-                reasons.push("forbidden:volume_as_independent_incidents");
+                reasons.push("forbidden:volume_as_semantic_occurrences");
             }
             _ => {}
         }
@@ -1193,7 +1193,7 @@ mod tests {
                     "downstream symptom task failed".into(),
                 ),
             ],
-            known_independent_incident_count: None,
+            known_semantic_occurrence_count: None,
             stderr_record_count: None,
             raw_exception_record_count: None,
             episode_counts_complete: false,
@@ -1356,37 +1356,91 @@ mod tests {
         assert!(!score.passed);
         assert!(score.failed_ids().contains(&"unsupported_claims"));
 
-        // Volume ≠ independent incidents when host has no complete episode proof.
+        // Raw volume cannot become semantic occurrences without complete proof.
         let mut volume = base.clone();
-        volume.asserts_raw_volume_as_independent_incidents = true;
-        volume.asserted_independent_incident_count = Some(host.exact_event_count);
+        volume.asserts_raw_volume_as_semantic_occurrences = true;
+        volume.asserted_semantic_occurrence_count = Some(host.exact_event_count);
         let score = score_structured_triage_answer(&volume, &key, &host);
         assert!(!score.passed);
         assert!(
-            score.failed_ids().contains(&"volume_vs_incidents"),
-            "must fail volume_vs_incidents: {:?}",
+            score.failed_ids().contains(&"semantic_occurrence_count"),
+            "must fail semantic_occurrence_count: {:?}",
             score.failed_ids()
         );
 
-        // Honest claim matching typed host occurrence count passes volume dimension.
+        // Honest claim matching a complete product report passes the dimension.
         let mut host_with_episodes = host.clone();
-        host_with_episodes.known_independent_incident_count = Some(2);
+        host_with_episodes.known_semantic_occurrence_count = Some(2);
         host_with_episodes.stderr_record_count = Some(530);
         host_with_episodes.raw_exception_record_count = Some(532);
         host_with_episodes.episode_counts_complete = true;
         let mut honest = base.clone();
-        honest.asserted_independent_incident_count = Some(2);
+        honest.asserted_semantic_occurrence_count = Some(2);
         let score = score_structured_triage_answer(&honest, &key, &host_with_episodes);
         assert!(
-            !score.failed_ids().contains(&"volume_vs_incidents"),
+            !score.failed_ids().contains(&"semantic_occurrence_count"),
             "typed occurrence count must pass: {:?}",
             score.failed_ids()
         );
-        let mut raw_as_incidents = base.clone();
-        raw_as_incidents.asserts_raw_volume_as_independent_incidents = true;
-        raw_as_incidents.asserted_independent_incident_count = Some(530);
-        let score = score_structured_triage_answer(&raw_as_incidents, &key, &host_with_episodes);
-        assert!(score.failed_ids().contains(&"volume_vs_incidents"));
+        let mut raw_as_occurrences = base.clone();
+        raw_as_occurrences.asserts_raw_volume_as_semantic_occurrences = true;
+        raw_as_occurrences.asserted_semantic_occurrence_count = Some(530);
+        let score = score_structured_triage_answer(&raw_as_occurrences, &key, &host_with_episodes);
+        assert!(score.failed_ids().contains(&"semantic_occurrence_count"));
+
+        let mut incomplete = host_with_episodes.clone();
+        incomplete.episode_counts_complete = false;
+        let score = score_structured_triage_answer(&honest, &key, &incomplete);
+        assert!(score.failed_ids().contains(&"semantic_occurrence_count"));
+
+        let mut missing_exact = host_with_episodes.clone();
+        missing_exact.known_semantic_occurrence_count = None;
+        let score = score_structured_triage_answer(&honest, &key, &missing_exact);
+        assert!(score.failed_ids().contains(&"semantic_occurrence_count"));
+
+        let mut mismatch = host_with_episodes;
+        mismatch.known_semantic_occurrence_count = Some(57);
+        let score = score_structured_triage_answer(&honest, &key, &mismatch);
+        assert!(score.failed_ids().contains(&"semantic_occurrence_count"));
+    }
+
+    #[test]
+    fn parse_then_score_semantic_occurrence_mutations_fail_closed() {
+        let key = sample_key();
+        let mut host = sample_host();
+        host.episode_counts_complete = true;
+        host.known_semantic_occurrence_count = Some(56);
+
+        let base = good_answer();
+        let honest_text = format!("{}\nSemantic occurrences: 56.\n", base.to_markdown());
+        let honest = parse_structured_triage_answer(&honest_text).unwrap();
+        assert_eq!(honest.asserted_semantic_occurrence_count, Some(56));
+        let score = score_structured_triage_answer(&honest, &key, &host);
+        assert!(score.passed, "failed={:?}", score.failed_ids());
+
+        for claim in [
+            "Semantic occurrences: 14,840.",
+            "The product report shows 12,345 semantic episodes.",
+            "9,876 stderr records represent semantic occurrences.",
+            "Raw records are separate occurrences: 777.",
+        ] {
+            let text = format!("{}\n{claim}\n", base.to_markdown());
+            let parsed = parse_structured_triage_answer(&text).unwrap();
+            let score = score_structured_triage_answer(&parsed, &key, &host);
+            assert!(
+                score.failed_ids().contains(&"semantic_occurrence_count"),
+                "claim={claim:?} parsed={parsed:?} failed={:?}",
+                score.failed_ids()
+            );
+        }
+
+        let mut structured = base;
+        structured.asserted_semantic_occurrence_count = Some(98_765);
+        let parsed = parse_structured_triage_answer(&serde_json::to_string(&structured).unwrap())
+            .expect("parse structured mutation");
+        assert_eq!(parsed.asserted_semantic_occurrence_count, Some(98_765));
+        let score = score_structured_triage_answer(&parsed, &key, &host);
+        assert!(score.failed_ids().contains(&"semantic_occurrence_count"));
     }
 
     #[test]

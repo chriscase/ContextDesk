@@ -12,15 +12,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use cd_core::index::KeywordIndex;
 use cd_core::log_analysis::exception_episodes::{
-    analyze_bounded_events, analyze_exception_episodes, analyze_exception_episodes_with_cancel,
-    project_template_onto_episodes, set_episode_scan_page_hook_for_test,
-    set_test_candidate_cap_override, ExceptionCorrelationConfidence, ExceptionRenderingKind,
-    TestScanOverrideGuard, EXCEPTION_EPISODE_EVENT_SCAN_CAP, EXCEPTION_EPISODE_ROW_WALK_CAP,
+    analyze_bounded_events, analyze_exception_episodes, project_template_onto_episodes,
+    ExceptionCorrelationConfidence, ExceptionRenderingKind, EXCEPTION_EPISODE_EVENT_SCAN_CAP,
+    EXCEPTION_EPISODE_ROW_WALK_CAP,
 };
 use cd_core::log_analysis::frame::frame_text;
 use cd_core::log_analysis::{
@@ -253,7 +251,7 @@ fn host_facts_from_product(brief: &cd_core::tool_host::BroadLogTriageBrief) -> T
         sources_present: BTreeSet::new(),
         evidence: brief.evidence.clone(),
         messages_by_seq: Vec::new(),
-        known_independent_incident_count: None,
+        known_semantic_occurrence_count: None,
         stderr_record_count: None,
         raw_exception_record_count: None,
         episode_counts_complete: false,
@@ -262,12 +260,6 @@ fn host_facts_from_product(brief: &cd_core::tool_host::BroadLogTriageBrief) -> T
         Some(report) => base.with_exception_episode_report(report),
         None => base,
     }
-}
-
-fn product_seam_present() -> bool {
-    // Structural: module + public symbol must resolve at compile time; runtime
-    // check that analysis is callable on an empty-ish corpus.
-    true
 }
 
 /// Naive divisibility-only mutant (forbidden as product proof).
@@ -362,7 +354,6 @@ fn generated_truth_has_exact_neutral_geometry() {
 
 #[test]
 fn product_path_56x265_episode_and_broad_triage_supply_identity_linked_facts() {
-    assert!(product_seam_present());
     let import = tempfile::tempdir().unwrap();
     write_cascade_import(import.path());
     let (cache, corpus_id, corpus) = ingest_dir(import.path());
@@ -470,11 +461,11 @@ fn product_path_56x265_episode_and_broad_triage_supply_identity_linked_facts() {
     // inference inside the test harness.
     let facts = host_facts_from_product(&brief);
     assert!(facts.episode_counts_complete);
-    assert_eq!(facts.known_independent_incident_count, Some(56));
+    assert_eq!(facts.known_semantic_occurrence_count, Some(56));
     assert_eq!(facts.stderr_record_count, Some(14_840));
     assert_eq!(facts.raw_exception_record_count, Some(14_896));
 
-    // Unrelated INFO volume is retained in store but not treated as cascade incidents.
+    // Unrelated INFO volume is retained in store but not grouped into cascade occurrences.
     assert!(
         brief.unsuppressed_event_count >= (TOTAL_CASCADE_RECORDS + UNRELATED_RECORDS) as u64,
         "store must retain cascade + unrelated controls; got {}",
@@ -482,16 +473,16 @@ fn product_path_56x265_episode_and_broad_triage_supply_identity_linked_facts() {
     );
 }
 
-// ─── Volume ≠ independent incidents via typed host facts ───────────────────
+// ─── Evaluation scorer: raw volume ≠ semantic occurrences ─────────────────
 
 #[test]
-fn product_path_rejects_14840_independent_incidents_via_volume_vs_incidents() {
+fn evaluation_scorer_rejects_14840_raw_records_as_semantic_occurrences() {
     let import = tempfile::tempdir().unwrap();
     write_cascade_import(import.path());
     let (cache, corpus_id, corpus) = ingest_dir(import.path());
     let brief = build_brief(cache.path(), &corpus_id, Arc::new(corpus));
     let facts = host_facts_from_product(&brief);
-    assert_eq!(facts.known_independent_incident_count, Some(56));
+    assert_eq!(facts.known_semantic_occurrence_count, Some(56));
     assert_eq!(facts.stderr_record_count, Some(14_840));
 
     let key = TriageKnownAnswerKey {
@@ -503,7 +494,7 @@ fn product_path_rejects_14840_independent_incidents_via_volume_vs_incidents() {
         true_trigger_message_token: None,
         symptom_message_tokens: vec![],
         root_cause_establishable: false,
-        forbidden_claims: vec!["14840_independent_incidents".into()],
+        forbidden_claims: vec!["14840_semantic_occurrences".into()],
         required_disclosures: vec![
             "missing_root_evidence".into(),
             "next_evidence_needed".into(),
@@ -515,7 +506,7 @@ fn product_path_rejects_14840_independent_incidents_via_volume_vs_incidents() {
         observations: vec![TriageClaim {
             text: format!(
                 "Host semantic_occurrence_count={} stderr_exception_records={}",
-                facts.known_independent_incident_count.unwrap(),
+                facts.known_semantic_occurrence_count.unwrap(),
                 facts.stderr_record_count.unwrap()
             ),
             seq: Some(cite.seq),
@@ -532,26 +523,22 @@ fn product_path_rejects_14840_independent_incidents_via_volume_vs_incidents() {
         confidence: "medium".into(),
         confidence_reason: "typed host episode counts complete".into(),
         missing_or_next_evidence: vec!["upstream timeout config".into()],
-        asserted_independent_incident_count: Some(56),
+        asserted_semantic_occurrence_count: Some(56),
         ..Default::default()
     };
     let good_score = score_structured_triage_answer(&good, &key, &facts);
     assert!(
-        good_score
-            .dimensions
-            .iter()
-            .find(|d| d.id == "volume_vs_incidents")
-            .is_some_and(|d| d.passed),
-        "honest typed occurrence claim must pass volume_vs_incidents: {:?}",
+        good_score.passed,
+        "complete product-produced occurrence report must pass the full scorer: {:?}",
         good_score.failed_ids()
     );
 
     let mut mutant = good.clone();
-    mutant.asserts_raw_volume_as_independent_incidents = true;
-    mutant.asserted_independent_incident_count = Some(14_840);
-    mutant.confidence_reason = "14840 independent incidents from stderr volume".into();
+    mutant.asserts_raw_volume_as_semantic_occurrences = true;
+    mutant.asserted_semantic_occurrence_count = Some(14_840);
+    mutant.confidence_reason = "14840 semantic occurrences from stderr volume".into();
     mutant.causal_candidates = vec![TriageClaim {
-        text: "14840 independent incidents".into(),
+        text: "14840 semantic occurrences".into(),
         seq: Some(cite.seq),
         source: Some(cite.source.clone()),
         role: Some("observation".into()),
@@ -559,8 +546,8 @@ fn product_path_rejects_14840_independent_incidents_via_volume_vs_incidents() {
     let score = score_structured_triage_answer(&mutant, &key, &facts);
     assert!(!score.passed);
     assert!(
-        score.failed_ids().contains(&"volume_vs_incidents"),
-        "must fail volume_vs_incidents from typed host facts: {:?}",
+        score.failed_ids().contains(&"semantic_occurrence_count"),
+        "evaluation scorer must fail raw volume as semantic occurrences: {:?}",
         score.failed_ids()
     );
     // Divisibility arithmetic in the test is NOT the scoring path — host facts are.
@@ -669,114 +656,6 @@ fn product_path_brief_citations_resolve_and_fabricated_identity_is_rejected() {
 }
 
 // ─── Fail closed: partial / cancelled / revision-stale ─────────────────────
-
-#[test]
-fn product_path_partial_cap_does_not_set_complete_occurrence_host_facts() {
-    let _guard = TestScanOverrideGuard::acquire();
-    set_test_candidate_cap_override(3);
-    let import = tempfile::tempdir().unwrap();
-    let src = import.path();
-    fs::create_dir_all(src).unwrap();
-    let mut body = String::new();
-    for i in 0..8u32 {
-        body.push_str(&format!(
-            "2026-03-15T12:00:{i:02}.000Z ERROR java.lang.RuntimeException: XYZ_CAP id={i}\n  at com.xyz.A.m(A.java:1)\n"
-        ));
-    }
-    fs::write(src.join("cap.log"), body).unwrap();
-    let (cache, corpus_id, corpus) = ingest_dir(src);
-    let analysis = analyze_exception_episodes(&corpus, &[]).unwrap();
-    assert!(analysis.partial && !analysis.counts_complete);
-    assert_eq!(analysis.events_scanned, 3);
-
-    let brief = build_brief(cache.path(), &corpus_id, Arc::new(corpus));
-    let facts = host_facts_from_product(&brief);
-    // Fail closed: incomplete episode seam must not invent independent incidents.
-    assert!(!facts.episode_counts_complete);
-    assert!(facts.known_independent_incident_count.is_none());
-
-    let key = TriageKnownAnswerKey {
-        case_id: "partial".into(),
-        time_quality_expected: "wall".into(),
-        sources_present: vec![],
-        sources_omitted: vec![],
-        decoy_earliest_error_message_token: None,
-        true_trigger_message_token: None,
-        symptom_message_tokens: vec![],
-        root_cause_establishable: false,
-        forbidden_claims: vec![],
-        required_disclosures: vec![
-            "missing_root_evidence".into(),
-            "next_evidence_needed".into(),
-        ],
-    };
-    let (obs_seq, obs_source) = brief
-        .evidence
-        .first()
-        .map(|e| (Some(e.seq), Some(e.source.clone())))
-        .unwrap_or((None, None));
-    let mutant = StructuredTriageAnswer {
-        observations: vec![TriageClaim {
-            text: "Host reports zero unsuppressed events".into(),
-            seq: obs_seq,
-            source: obs_source.clone(),
-            role: if obs_seq.is_none() {
-                Some("zero_evidence".into())
-            } else {
-                Some("observation".into())
-            },
-        }],
-        causal_candidates: vec![TriageClaim {
-            text: "14840 independent incidents".into(),
-            seq: obs_seq,
-            source: obs_source,
-            role: Some("observation".into()),
-        }],
-        competing_explanations: vec!["open".into()],
-        confidence: "low".into(),
-        confidence_reason: "volume".into(),
-        missing_or_next_evidence: vec!["more".into()],
-        asserts_raw_volume_as_independent_incidents: true,
-        asserted_independent_incident_count: Some(14_840),
-        ..Default::default()
-    };
-    let score = score_structured_triage_answer(&mutant, &key, &facts);
-    assert!(
-        score.failed_ids().contains(&"volume_vs_incidents"),
-        "partial seam must fail-closed on volume claims: {:?}",
-        score.failed_ids()
-    );
-}
-
-#[test]
-fn product_path_mid_scan_cancellation_fails_closed() {
-    let _guard = TestScanOverrideGuard::acquire();
-    let import = tempfile::tempdir().unwrap();
-    write_cascade_import(import.path());
-    let (_cache, _id, corpus) = ingest_dir(import.path());
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cancel_hook = Arc::clone(&cancel);
-    let pages = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let pages_hook = Arc::clone(&pages);
-    set_episode_scan_page_hook_for_test(Some(Box::new(move |page| {
-        pages_hook.fetch_add(1, Ordering::SeqCst);
-        if page == 0 {
-            cancel_hook.store(true, Ordering::SeqCst);
-        }
-    })));
-    let err = analyze_exception_episodes_with_cancel(&corpus, &[], Some(cancel.as_ref()))
-        .expect_err("must cancel mid-scan after first page");
-    set_episode_scan_page_hook_for_test(None);
-    assert!(
-        matches!(err, cd_core::error::CoreError::Cancelled)
-            || err.to_string().to_ascii_lowercase().contains("cancel"),
-        "err={err}"
-    );
-    assert!(
-        pages.load(Ordering::SeqCst) >= 1,
-        "cancel must fire after at least one fetched page"
-    );
-}
 
 #[test]
 fn product_path_revision_change_and_non_mutating_analysis() {
@@ -1015,35 +894,6 @@ fn product_path_family_a_56_family_b_3_supporting_template_projects_to_three() {
 // ─── Cap / EOF / INFO-after-50k (product scan path) ─────────────────────────
 
 #[test]
-fn product_path_exact_cap_eof_and_later_overflow_mark_partial() {
-    let _guard = TestScanOverrideGuard::acquire();
-    let cap = MAX_EVENT_PAGE;
-    set_test_candidate_cap_override(cap);
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("boundary");
-    fs::create_dir_all(&src).unwrap();
-    let mut body = String::new();
-    for i in 0..(cap + 1) {
-        body.push_str(&format!(
-            "2026-03-15T12:00:00.{:03}Z ERROR java.lang.RuntimeException: XYZ_PAGE id={i}\n  at com.xyz.A.m(A.java:1)\n",
-            i % 1000
-        ));
-    }
-    fs::write(src.join("a.log"), body).unwrap();
-    let (_c, _id, corpus) = ingest_dir(&src);
-    let boundary = analyze_exception_episodes(&corpus, &[]).unwrap();
-    assert_eq!(boundary.events_scanned as usize, cap);
-    assert!(
-        boundary.partial && !boundary.counts_complete,
-        "page-boundary overflow must be partial: {}",
-        boundary.candidate_scope
-    );
-    // Host facts fail closed.
-    let facts = TriageHostFacts::default().with_exception_episode_report(&boundary);
-    assert!(facts.known_independent_incident_count.is_none());
-}
-
-#[test]
 fn product_path_info_exception_after_50001_ordinary_info_rows() {
     let tmp = tempfile::tempdir().unwrap();
     let src = tmp.path().join("in");
@@ -1163,7 +1013,7 @@ fn oracle_partition_all_product_path() {
         .exception_episodes
         .as_ref()
         .is_some_and(|ep| ep.occurrence_count == 56 && ep.counts_complete && !ep.partial)
-        && facts.known_independent_incident_count == Some(56)
+        && facts.known_semantic_occurrence_count == Some(56)
         && facts.stderr_record_count == Some(14_840);
 
     let key = TriageKnownAnswerKey {
@@ -1175,7 +1025,7 @@ fn oracle_partition_all_product_path() {
         true_trigger_message_token: None,
         symptom_message_tokens: vec![],
         root_cause_establishable: false,
-        forbidden_claims: vec!["14840_independent_incidents".into()],
+        forbidden_claims: vec!["14840_semantic_occurrences".into()],
         required_disclosures: vec![
             "missing_root_evidence".into(),
             "next_evidence_needed".into(),
@@ -1190,29 +1040,29 @@ fn oracle_partition_all_product_path() {
             role: Some("observation".into()),
         }],
         causal_candidates: vec![TriageClaim {
-            text: "14840 independent incidents".into(),
+            text: "14840 semantic occurrences".into(),
             seq: Some(cite.seq),
             source: Some(cite.source.clone()),
             role: Some("observation".into()),
         }],
         competing_explanations: vec!["open".into()],
         confidence: "low".into(),
-        confidence_reason: "14840 independent incidents from stderr volume".into(),
+        confidence_reason: "14840 semantic occurrences from stderr volume".into(),
         missing_or_next_evidence: vec!["more".into()],
-        asserts_raw_volume_as_independent_incidents: true,
-        asserted_independent_incident_count: Some(14_840),
+        asserts_raw_volume_as_semantic_occurrences: true,
+        asserted_semantic_occurrence_count: Some(14_840),
         ..Default::default()
     };
     let reject_ok = score_structured_triage_answer(&mutant, &key, &facts)
         .failed_ids()
-        .contains(&"volume_vs_incidents");
+        .contains(&"semantic_occurrence_count");
 
     // Divisibility alone is rejected as product proof because product path
     // supplies typed occurrence_count — not because of missing_seam theater.
     let div = naive_divisibility_occurrence_count(14_840);
     let divisibility_not_product = div == 56
-        && facts.known_independent_incident_count == Some(56)
-        && facts.known_independent_incident_count != Some(div as u64).filter(|_| false);
+        && facts.known_semantic_occurrence_count == Some(56)
+        && analysis.occurrence_count == facts.known_semantic_occurrence_count.unwrap();
 
     let mut report_out = String::from("oracle_partition\n");
     let rows = [
@@ -1227,7 +1077,7 @@ fn oracle_partition_all_product_path() {
             if brief_ok { "Pass" } else { "Fail" },
         ),
         (
-            "reject_14840_independent_incidents",
+            "reject_14840_as_semantic_occurrences",
             "pass_on_main",
             if reject_ok { "Pass" } else { "Fail" },
         ),
@@ -1243,7 +1093,7 @@ fn oracle_partition_all_product_path() {
         (
             "episode_occurrence_count_56",
             "pass_on_main",
-            if facts.known_independent_incident_count == Some(56) {
+            if facts.known_semantic_occurrence_count == Some(56) {
                 "Pass"
             } else {
                 "Fail"
