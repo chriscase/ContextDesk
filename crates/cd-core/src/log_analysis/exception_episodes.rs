@@ -455,6 +455,10 @@ struct RenderEpisode {
     service: Option<String>,
     host: Option<String>,
     thread: Option<String>,
+    /// True when explicit and parenthesized execution keys conflicted on a child.
+    execution_key_conflict: bool,
+    /// True when an envelope delimiter was malformed on a child.
+    envelope_malformed: bool,
     trace_id: Option<String>,
     first_ts: i64,
     last_ts: i64,
@@ -473,6 +477,10 @@ impl RenderEpisode {
     }
 
     fn strong_execution_key(&self) -> Option<String> {
+        // Fail closed: conflicted/malformed envelopes never contribute a key.
+        if self.execution_key_conflict || self.envelope_malformed {
+            return None;
+        }
         if let Some(t) = &self.thread {
             if !t.is_empty() {
                 return Some(format!("thread:{t}"));
@@ -485,6 +493,61 @@ impl RenderEpisode {
         }
         None
     }
+}
+
+/// Recognized stream token on an exception envelope (exact `[stderr]` only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum EnvelopeStream {
+    Stderr,
+}
+
+/// Private typed view of one message's exception envelope (single parser).
+///
+/// Shared by candidate detection, signature extraction, classification,
+/// rendering construction, attachment compatibility, and execution-key use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExceptionEnvelope {
+    /// Structural body after level / stream / parenthesized-thread prefixes.
+    structural_payload: String,
+    /// Exact stream marker when recognized (`[stderr]` only; not stdout / ish).
+    stream: Option<EnvelopeStream>,
+    /// Explicit `thread=` / `thread_id=` / `threadId=` / `tid=` evidence.
+    explicit_thread: Option<String>,
+    /// Bounded parenthesized thread immediately after `[stderr]`.
+    parenthesized_thread: Option<String>,
+    /// Explicit and parenthesized keys both present and unequal.
+    execution_key_conflict: bool,
+    /// Unbalanced / empty / invalid parenthesized thread delimiter state.
+    malformed: bool,
+}
+
+impl ExceptionEnvelope {
+    /// Effective thread for lane keys and correlation (None if conflict/malformed).
+    fn effective_thread(&self) -> Option<&str> {
+        if self.execution_key_conflict || self.malformed {
+            return None;
+        }
+        self.explicit_thread
+            .as_deref()
+            .or(self.parenthesized_thread.as_deref())
+    }
+
+    fn is_stderr_stream(&self) -> bool {
+        matches!(self.stream, Some(EnvelopeStream::Stderr))
+    }
+
+    /// True when attachment/correlation must refuse this envelope.
+    fn fail_closed_for_attachment(&self) -> bool {
+        self.execution_key_conflict || self.malformed
+    }
+}
+
+/// Open separately-wrapped assembly key: source + typed thread evidence.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct WrapLaneKey {
+    source: String,
+    /// `None` = unkeyed plain stderr/stream lane on this source.
+    thread: Option<String>,
 }
 
 /// Analyze one corpus while honoring an exact suppression lens.
@@ -662,7 +725,8 @@ fn check_revisions(corpus: &LogCorpus, pinned_event: u64, pinned_template: u64) 
 /// Structure-based exception candidate predicate (not severity / not English "error").
 pub fn is_exception_candidate(event: &ExplorerEvent) -> bool {
     let message = event.message.as_str();
-    let payload = stderr_payload(message).unwrap_or(message);
+    let env = parse_exception_envelope(message);
+    let payload = env.structural_payload.as_str();
     if exception_signature(payload).is_some() || exception_signature(message).is_some() {
         return true;
     }
@@ -678,7 +742,7 @@ pub fn is_exception_candidate(event: &ExplorerEvent) -> bool {
         return true;
     }
     // Separately wrapped stream marker with structural exception content only.
-    if stderr_payload(message).is_some() {
+    if env.is_stderr_stream() {
         let p = payload.trim();
         if is_stack_continuation(p)
             || looks_like_exception_header_line(p)
@@ -1106,8 +1170,8 @@ fn derive_render_episodes_cancellable(
     is_cancelled: &dyn Fn() -> bool,
 ) -> CoreResult<(Vec<RenderEpisode>, bool)> {
     let mut episodes = Vec::new();
-    // Per-source open separately-wrapped rendering (no global open).
-    let mut open_wrap: BTreeMap<String, RenderEpisode> = BTreeMap::new();
+    // Per execution-lane open separately-wrapped rendering (source + thread).
+    let mut open_wrap: BTreeMap<WrapLaneKey, RenderEpisode> = BTreeMap::new();
     let mut partial = false;
 
     for (i, event) in events.iter().enumerate() {
@@ -1115,16 +1179,40 @@ fn derive_render_episodes_cancellable(
             return Err(CoreError::Cancelled);
         }
         let source = event.source.clone();
-        let stderr = stderr_payload(&event.message);
-        let payload = stderr.unwrap_or(event.message.as_str());
-        let is_wrapped_line = stderr.is_some() || is_single_line_exception_record(event, payload);
+        let env = parse_exception_envelope(&event.message);
+        let payload = env.structural_payload.as_str();
+        let is_wrapped_line =
+            env.is_stderr_stream() || is_single_line_exception_record(event, payload);
+        let lane = wrap_lane_key(&source, &env);
 
         if is_wrapped_line {
             let signature = exception_signature(payload);
             let complete_stack = has_stack_frame(payload) && signature.is_some();
+
+            // Conflicted/malformed envelopes never attach into an open lane.
+            if env.fail_closed_for_attachment() {
+                close_source_lanes(&mut open_wrap, &source, &mut episodes, &mut partial);
+                if let Some(signature) = signature {
+                    // Header/cause with a real signature can stand alone, but
+                    // never joins another rendering under a conflicted key.
+                    finish_episode(
+                        &mut episodes,
+                        Some(new_episode(
+                            event,
+                            &env,
+                            signature,
+                            ExceptionRenderingKind::SeparatelyWrappedRecords,
+                        )),
+                        &mut partial,
+                    );
+                }
+                // Pure frames/scaffold under fail-closed keys are not attached.
+                continue;
+            }
+
             if complete_stack {
                 // Full stack arrived as one separately-wrapped payload.
-                if let Some(open) = open_wrap.remove(&source) {
+                if let Some(open) = open_wrap.remove(&lane) {
                     finish_episode(&mut episodes, Some(open), &mut partial);
                 }
                 if let Some(signature) = signature {
@@ -1132,6 +1220,7 @@ fn derive_render_episodes_cancellable(
                         &mut episodes,
                         Some(new_episode(
                             event,
+                            &env,
                             signature,
                             ExceptionRenderingKind::SeparatelyWrappedRecords,
                         )),
@@ -1141,93 +1230,95 @@ fn derive_render_episodes_cancellable(
             } else if let Some(signature) = signature {
                 let is_cause = payload.trim_start().starts_with("Caused by:");
                 let can_attach = open_wrap
-                    .get(&source)
-                    .is_some_and(|open| adjacent_compatible(open, event));
+                    .get(&lane)
+                    .is_some_and(|open| adjacent_compatible(open, event, &env));
                 if is_cause && can_attach {
-                    let open = open_wrap.get_mut(&source).expect("checked");
-                    attach(open, event);
+                    let open = open_wrap.get_mut(&lane).expect("checked");
+                    attach(open, event, &env);
                     // Prefer root-cause signature (matches app full-stack last exception).
                     open.signature = signature;
                 } else if can_attach
                     && open_wrap
-                        .get(&source)
+                        .get(&lane)
                         .is_some_and(|o| o.signature == signature || is_stack_continuation(payload))
                 {
-                    // Same signature header re-open should finish prior and start new.
                     if looks_like_exception_header_line(payload)
                         && open_wrap
-                            .get(&source)
+                            .get(&lane)
                             .is_some_and(|o| o.signature != signature)
                     {
-                        if let Some(open) = open_wrap.remove(&source) {
+                        if let Some(open) = open_wrap.remove(&lane) {
                             finish_episode(&mut episodes, Some(open), &mut partial);
                         }
                         open_wrap.insert(
-                            source.clone(),
+                            lane.clone(),
                             new_episode(
                                 event,
+                                &env,
                                 signature,
                                 ExceptionRenderingKind::SeparatelyWrappedRecords,
                             ),
                         );
                     } else if looks_like_exception_header_line(payload) {
-                        // New header same stream → finish previous episode.
-                        if let Some(open) = open_wrap.remove(&source) {
+                        // New header same lane → finish previous episode.
+                        if let Some(open) = open_wrap.remove(&lane) {
                             finish_episode(&mut episodes, Some(open), &mut partial);
                         }
                         open_wrap.insert(
-                            source.clone(),
+                            lane.clone(),
                             new_episode(
                                 event,
+                                &env,
                                 signature,
                                 ExceptionRenderingKind::SeparatelyWrappedRecords,
                             ),
                         );
-                    } else if let Some(open) = open_wrap.get_mut(&source) {
-                        attach(open, event);
+                    } else if let Some(open) = open_wrap.get_mut(&lane) {
+                        attach(open, event, &env);
                     }
                 } else {
-                    if let Some(open) = open_wrap.remove(&source) {
+                    if let Some(open) = open_wrap.remove(&lane) {
                         finish_episode(&mut episodes, Some(open), &mut partial);
                     }
                     open_wrap.insert(
-                        source.clone(),
+                        lane.clone(),
                         new_episode(
                             event,
+                            &env,
                             signature,
                             ExceptionRenderingKind::SeparatelyWrappedRecords,
                         ),
                     );
                 }
             } else if open_wrap
-                .get(&source)
-                .is_some_and(|open| adjacent_compatible(open, event))
+                .get(&lane)
+                .is_some_and(|open| adjacent_compatible(open, event, &env))
                 && (is_stack_continuation(payload) || is_wrapper_scaffold_line(payload))
             {
                 // Frames and wrapper scaffolding attach without inventing a new signature.
-                if let Some(open) = open_wrap.get_mut(&source) {
-                    attach(open, event);
+                if let Some(open) = open_wrap.get_mut(&lane) {
+                    attach(open, event, &env);
                 }
-            } else if open_wrap.get(&source).is_some_and(|open| {
+            } else if open_wrap.get(&lane).is_some_and(|open| {
                 event.seq.saturating_sub(open.last_seq()) > MAX_ADJACENT_SEQ_GAP
             }) {
-                if let Some(open) = open_wrap.remove(&source) {
+                if let Some(open) = open_wrap.remove(&lane) {
                     finish_episode(&mut episodes, Some(open), &mut partial);
                 }
             }
             continue;
         }
 
-        // Non-wrapped: close any open wrap on this source, then maybe full-stack app record.
-        if let Some(open) = open_wrap.remove(&source) {
-            finish_episode(&mut episodes, Some(open), &mut partial);
-        }
+        // Non-wrapped: close open wraps on this source (all thread lanes), then
+        // maybe full-stack app record.
+        close_source_lanes(&mut open_wrap, &source, &mut episodes, &mut partial);
         if has_stack_frame(&event.message) {
             if let Some(signature) = exception_signature(&event.message) {
                 finish_episode(
                     &mut episodes,
                     Some(new_episode(
                         event,
+                        &env,
                         signature,
                         ExceptionRenderingKind::ApplicationFullStack,
                     )),
@@ -1243,6 +1334,31 @@ fn derive_render_episodes_cancellable(
         return Err(CoreError::Cancelled);
     }
     Ok((episodes, partial))
+}
+
+fn wrap_lane_key(source: &str, env: &ExceptionEnvelope) -> WrapLaneKey {
+    WrapLaneKey {
+        source: source.to_string(),
+        thread: env.effective_thread().map(str::to_string),
+    }
+}
+
+fn close_source_lanes(
+    open_wrap: &mut BTreeMap<WrapLaneKey, RenderEpisode>,
+    source: &str,
+    episodes: &mut Vec<RenderEpisode>,
+    partial: &mut bool,
+) {
+    let keys: Vec<WrapLaneKey> = open_wrap
+        .keys()
+        .filter(|k| k.source == source)
+        .cloned()
+        .collect();
+    for key in keys {
+        if let Some(open) = open_wrap.remove(&key) {
+            finish_episode(episodes, Some(open), partial);
+        }
+    }
 }
 
 fn is_single_line_exception_record(_event: &ExplorerEvent, payload: &str) -> bool {
@@ -1284,6 +1400,7 @@ fn finish_episode(
 
 fn new_episode(
     event: &ExplorerEvent,
+    env: &ExceptionEnvelope,
     signature: String,
     kind: ExceptionRenderingKind,
 ) -> RenderEpisode {
@@ -1293,7 +1410,9 @@ fn new_episode(
         source: event.source.clone(),
         service: event.service.clone(),
         host: event.host.clone(),
-        thread: extract_thread(&event.message),
+        thread: env.effective_thread().map(str::to_string),
+        execution_key_conflict: env.execution_key_conflict,
+        envelope_malformed: env.malformed,
         trace_id: event.trace_id.clone(),
         first_ts: event.ts,
         last_ts: event.ts,
@@ -1303,14 +1422,20 @@ fn new_episode(
     }
 }
 
-fn attach(episode: &mut RenderEpisode, event: &ExplorerEvent) {
+fn attach(episode: &mut RenderEpisode, event: &ExplorerEvent, env: &ExceptionEnvelope) {
     if episode.citations.len() >= EXCEPTION_EPISODE_RECORD_CAP {
         episode.complete = false;
         return;
     }
     episode.last_ts = event.ts;
+    if env.execution_key_conflict {
+        episode.execution_key_conflict = true;
+    }
+    if env.malformed {
+        episode.envelope_malformed = true;
+    }
     if episode.thread.is_none() {
-        episode.thread = extract_thread(&event.message);
+        episode.thread = env.effective_thread().map(str::to_string);
     }
     if episode.trace_id.is_none() {
         episode.trace_id = event.trace_id.clone();
@@ -1336,14 +1461,28 @@ fn citation(
     }
 }
 
-fn adjacent_compatible(episode: &RenderEpisode, event: &ExplorerEvent) -> bool {
+fn adjacent_compatible(
+    episode: &RenderEpisode,
+    event: &ExplorerEvent,
+    env: &ExceptionEnvelope,
+) -> bool {
+    if episode.execution_key_conflict
+        || episode.envelope_malformed
+        || env.fail_closed_for_attachment()
+    {
+        return false;
+    }
     if episode.source != event.source
         || event.seq.saturating_sub(episode.last_seq()) > MAX_ADJACENT_SEQ_GAP
     {
         return false;
     }
-    let thread = extract_thread(&event.message);
+    let thread = env.effective_thread().map(str::to_string);
     if episode.thread.is_some() && thread.is_some() && episode.thread != thread {
+        return false;
+    }
+    // Unkeyed open must not absorb a keyed event (and vice versa already separated by lane).
+    if episode.thread.is_some() != thread.is_some() {
         return false;
     }
     if episode.wall_time && event.active_timestamp_basis.is_wall_clock() {
@@ -1667,6 +1806,15 @@ fn duplicate_evidence(
         return None;
     }
 
+    // Fail closed when either rendering carried a conflicted/malformed envelope.
+    if left.execution_key_conflict
+        || right.execution_key_conflict
+        || left.envelope_malformed
+        || right.envelope_malformed
+    {
+        return None;
+    }
+
     let left_key = left.strong_execution_key();
     let right_key = right.strong_execution_key();
     let matching_execution_key = matches!((&left_key, &right_key), (Some(a), Some(b)) if a == b);
@@ -1703,15 +1851,178 @@ fn duplicate_evidence(
 }
 
 // ---------------------------------------------------------------------------
-// Signatures / payloads
+// Unified exception-envelope parse (single private entry)
 // ---------------------------------------------------------------------------
 
-fn stderr_payload(message: &str) -> Option<&str> {
-    let position = message.find("[stderr]")?;
-    if position > 256 {
+const STDERR_TOKEN: &str = "[stderr]";
+const MAX_ENVELOPE_PREFIX_BYTES: usize = 256;
+const MAX_THREAD_TOKEN_CHARS: usize = 96;
+
+/// Parse one message into the shared envelope view.
+///
+/// Anchored, fail-closed: exact `[stderr]` only; optional bounded `(thread)`
+/// immediately after the stream token; explicit `thread=` keys; never invent
+/// identity from free parentheses, method calls, `[stderr-ish]`, or stdout.
+fn parse_exception_envelope(message: &str) -> ExceptionEnvelope {
+    let explicit_thread = extract_explicit_thread_key(message);
+
+    let Some((token_at, after_token)) = find_exact_stderr_token(message) else {
+        return ExceptionEnvelope {
+            structural_payload: message.to_string(),
+            stream: None,
+            explicit_thread,
+            parenthesized_thread: None,
+            execution_key_conflict: false,
+            malformed: false,
+        };
+    };
+
+    // Prefix before `[stderr]` is discarded for structural classification (level /
+    // logger noise). Multi-line tails after the first line stay on the payload.
+    let (first_line_after, remaining_lines) = split_first_line(after_token);
+    let mut rest = first_line_after.trim_start();
+    let mut parenthesized_thread = None;
+    let mut malformed = false;
+
+    if rest.starts_with('(') {
+        match parse_parenthesized_thread_token(rest) {
+            Ok((thread, after)) => {
+                parenthesized_thread = Some(thread);
+                rest = after.trim_start();
+            }
+            Err(()) => {
+                malformed = true;
+                // Leave structural text as-is (including the broken '(') so we
+                // do not invent a thread or silently drop payload bytes.
+            }
+        }
+    }
+
+    let mut structural = rest.to_string();
+    if !remaining_lines.is_empty() {
+        if !structural.is_empty() {
+            structural.push('\n');
+        }
+        structural.push_str(remaining_lines);
+    }
+
+    // Bound: refuse stream recognition when the token sits too deep.
+    if token_at > MAX_ENVELOPE_PREFIX_BYTES {
+        return ExceptionEnvelope {
+            structural_payload: message.to_string(),
+            stream: None,
+            explicit_thread,
+            parenthesized_thread: None,
+            execution_key_conflict: false,
+            malformed: false,
+        };
+    }
+
+    let execution_key_conflict =
+        matches!((&explicit_thread, &parenthesized_thread), (Some(a), Some(b)) if a != b);
+
+    ExceptionEnvelope {
+        structural_payload: structural,
+        stream: Some(EnvelopeStream::Stderr),
+        explicit_thread,
+        parenthesized_thread,
+        execution_key_conflict,
+        malformed,
+    }
+}
+
+/// Exact `[stderr]` only — not `[stdout]`, not `[stderr-ish]`.
+fn find_exact_stderr_token(message: &str) -> Option<(usize, &str)> {
+    let position = message.find(STDERR_TOKEN)?;
+    // Guard against pathological long prefixes on the first line.
+    if position > MAX_ENVELOPE_PREFIX_BYTES {
         return None;
     }
-    message.get(position + "[stderr]".len()..).map(str::trim)
+    let after = message.get(position + STDERR_TOKEN.len()..)?;
+    Some((position, after))
+}
+
+fn split_first_line(text: &str) -> (&str, &str) {
+    match text.find('\n') {
+        Some(i) => {
+            let first = text.get(..i).unwrap_or(text);
+            let rest = text.get(i + 1..).unwrap_or("");
+            (first, rest)
+        }
+        None => (text, ""),
+    }
+}
+
+/// Parse `(pool-40-thread-1286)` immediately after `[stderr]`.
+///
+/// Fail closed on empty tokens, unbalanced delimiters, nested parens, spaces,
+/// or characters that are not valid in a thread identity token.
+fn parse_parenthesized_thread_token(s: &str) -> Result<(String, &str), ()> {
+    debug_assert!(s.starts_with('('));
+    let inner_start = 1usize;
+    let close_rel = s
+        .get(inner_start..)
+        .and_then(|rest| rest.find(')'))
+        .ok_or(())?;
+    let inner = s.get(inner_start..inner_start + close_rel).ok_or(())?;
+    if inner.is_empty() {
+        return Err(());
+    }
+    if inner.contains('(') || inner.contains(')') {
+        return Err(());
+    }
+    if !is_valid_thread_identity_token(inner) {
+        return Err(());
+    }
+    let after = s.get(inner_start + close_rel + 1..).ok_or(())?;
+    let token: String = inner.chars().take(MAX_THREAD_TOKEN_CHARS).collect();
+    Ok((token, after))
+}
+
+fn is_valid_thread_identity_token(token: &str) -> bool {
+    if token.is_empty() || token.chars().count() > MAX_THREAD_TOKEN_CHARS {
+        return false;
+    }
+    if token.chars().any(|c| c.is_whitespace()) {
+        return false;
+    }
+    let mut chars = token.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    // Reject method-call / source-location shapes: must not look like `Foo.java:12`
+    // as a sole paren group used for execution identity (still allow pool-N-thread-M).
+    if !(first.is_ascii_alphanumeric() || first == '_') {
+        return false;
+    }
+    token
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':'))
+}
+
+/// Explicit key=value thread evidence only (never free brackets / parentheses).
+fn extract_explicit_thread_key(message: &str) -> Option<String> {
+    for key in ["thread=", "thread_id=", "threadId=", "tid="] {
+        if let Some(start) = message.find(key) {
+            if start > MAX_ENVELOPE_PREFIX_BYTES {
+                continue;
+            }
+            let value = message.get(start + key.len()..).unwrap_or_default();
+            let value = value
+                .split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ']' | ';' | ')'))
+                .next()
+                .unwrap_or_default()
+                .trim_matches(['\"', '\'']);
+            if value.is_empty() {
+                continue;
+            }
+            if !is_valid_thread_identity_token(value) {
+                continue;
+            }
+            return Some(value.chars().take(MAX_THREAD_TOKEN_CHARS).collect());
+        }
+    }
+    None
 }
 
 fn has_stack_frame(message: &str) -> bool {
@@ -1720,6 +2031,7 @@ fn has_stack_frame(message: &str) -> bool {
 
 fn is_stack_continuation(line: &str) -> bool {
     let line = line.trim();
+    // Also accept structural payload that is only a frame/cause line.
     line.starts_with("at ")
         || line.starts_with("... ")
         || line.starts_with("Caused by:")
@@ -1749,8 +2061,27 @@ fn exception_signature_line(line: &str) -> Option<String> {
     let line = line
         .strip_prefix("ERROR ")
         .or_else(|| line.strip_prefix("error "))
+        .or_else(|| line.strip_prefix("WARN "))
+        .or_else(|| line.strip_prefix("INFO "))
         .unwrap_or(line)
         .trim();
+    // Strip residual stream token if a caller passed an unparsed line.
+    let line = line
+        .strip_prefix(STDERR_TOKEN)
+        .map(str::trim_start)
+        .unwrap_or(line);
+    // Strip a single parenthesized thread group if still present on the line.
+    let line = if line.starts_with('(') {
+        parse_parenthesized_thread_token(line)
+            .map(|(_, after)| after.trim_start())
+            .unwrap_or(line)
+    } else {
+        line
+    };
+    let line = line
+        .strip_prefix("Caused by:")
+        .map(str::trim_start)
+        .unwrap_or(line);
     if line.starts_with("at ") || line.starts_with("File \"") {
         return None;
     }
@@ -1827,37 +2158,6 @@ fn normalize_signature_detail(detail: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_lowercase()
-}
-
-fn extract_thread(message: &str) -> Option<String> {
-    for key in ["thread=", "thread_id=", "threadId=", "tid="] {
-        if let Some(start) = message.find(key) {
-            let value = message.get(start + key.len()..).unwrap_or_default();
-            let value = value
-                .split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ']' | ';'))
-                .next()
-                .unwrap_or_default()
-                .trim_matches(['\"', '\'']);
-            if !value.is_empty() {
-                return Some(value.chars().take(96).collect());
-            }
-        }
-    }
-    for bracketed in message.split('[').skip(1) {
-        let Some((value, _)) = bracketed.split_once(']') else {
-            continue;
-        };
-        let value = value.trim();
-        if !value.is_empty()
-            && !matches!(
-                value.to_ascii_lowercase().as_str(),
-                "stderr" | "stdout" | "error" | "warn" | "info" | "debug" | "fatal"
-            )
-        {
-            return Some(value.chars().take(96).collect());
-        }
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -3500,5 +3800,458 @@ mod tests {
         assert_eq!(proj.supporting_only_occurrence_count, Some(3));
         assert_ne!(proj.occurrence_count, Some(56));
         assert_ne!(proj.occurrence_count, Some(59));
+    }
+
+    // ─── WildFly / JBoss exception-envelope parser ─────────────────────────
+
+    #[test]
+    fn envelope_parses_exact_wildfly_prefixes_for_header_frame_cause_scaffold() {
+        let header = parse_exception_envelope(
+            "[stderr] (pool-40-thread-1286) java.lang.RuntimeException: XYZ_PAY",
+        );
+        assert_eq!(header.stream, Some(EnvelopeStream::Stderr));
+        assert_eq!(
+            header.parenthesized_thread.as_deref(),
+            Some("pool-40-thread-1286")
+        );
+        assert_eq!(
+            header.structural_payload,
+            "java.lang.RuntimeException: XYZ_PAY"
+        );
+        assert!(looks_like_exception_header_line(&header.structural_payload));
+        assert!(!header.execution_key_conflict && !header.malformed);
+
+        let frame =
+            parse_exception_envelope("[stderr] (pool-40-thread-1286) at com.xyz.A.m(A.java:1)");
+        assert_eq!(frame.structural_payload, "at com.xyz.A.m(A.java:1)");
+        assert!(is_stack_continuation(&frame.structural_payload));
+        assert_eq!(frame.effective_thread(), Some("pool-40-thread-1286"));
+
+        let cause = parse_exception_envelope(
+            "[stderr] (pool-40-thread-1286) Caused by: java.io.IOException: XYZ_UP",
+        );
+        assert!(cause.structural_payload.starts_with("Caused by:"));
+        assert!(is_stack_continuation(&cause.structural_payload));
+        assert!(exception_signature(&cause.structural_payload).is_some());
+
+        let scaffold = parse_exception_envelope(
+            "ERROR [stderr] (pool-40-thread-1286) Exception wrapper XYZ_WRAP#0 for payment",
+        );
+        assert_eq!(scaffold.stream, Some(EnvelopeStream::Stderr));
+        assert_eq!(
+            scaffold.parenthesized_thread.as_deref(),
+            Some("pool-40-thread-1286")
+        );
+        assert!(
+            is_wrapper_scaffold_line(&scaffold.structural_payload),
+            "payload={:?}",
+            scaffold.structural_payload
+        );
+        assert!(!scaffold.malformed);
+    }
+
+    #[test]
+    fn envelope_existing_thread_eq_and_plain_stderr_formats_remain_supported() {
+        let keyed =
+            parse_exception_envelope("thread=t1 [stderr] java.lang.RuntimeException: XYZ_PAY");
+        assert_eq!(keyed.explicit_thread.as_deref(), Some("t1"));
+        assert_eq!(keyed.stream, Some(EnvelopeStream::Stderr));
+        assert_eq!(
+            keyed.structural_payload,
+            "java.lang.RuntimeException: XYZ_PAY"
+        );
+        assert_eq!(keyed.effective_thread(), Some("t1"));
+
+        let plain = parse_exception_envelope("[stderr] java.lang.RuntimeException: XYZ_PAY");
+        assert!(plain.explicit_thread.is_none());
+        assert!(plain.parenthesized_thread.is_none());
+        assert_eq!(plain.stream, Some(EnvelopeStream::Stderr));
+        assert_eq!(
+            plain.structural_payload,
+            "java.lang.RuntimeException: XYZ_PAY"
+        );
+
+        // End-to-end: existing formats still dual-render.
+        let events = vec![
+            event(
+                1,
+                10,
+                "app.log",
+                "thread=t1 java.lang.RuntimeException: XYZ_PAY\n at com.xyz.A.m(A.java:1)",
+            ),
+            event(
+                2,
+                10,
+                "stderr.log",
+                "thread=t1 [stderr] java.lang.RuntimeException: XYZ_PAY",
+            ),
+            event(
+                3,
+                10,
+                "stderr.log",
+                "thread=t1 [stderr] at com.xyz.A.m(A.java:1)",
+            ),
+            event(
+                4,
+                20,
+                "app2.log",
+                "java.lang.RuntimeException: XYZ_PLAIN\n at com.xyz.B.m(B.java:1)",
+            ),
+            event(
+                5,
+                20,
+                "stderr2.log",
+                "[stderr] java.lang.RuntimeException: XYZ_PLAIN",
+            ),
+            event(6, 20, "stderr2.log", "[stderr] at com.xyz.B.m(B.java:1)"),
+        ];
+        let analysis = analyze_bounded_events(events.len() as u64, &events);
+        assert_eq!(analysis.occurrence_count, 2);
+        assert_eq!(analysis.duplicate_rendering_occurrence_count, 2);
+    }
+
+    #[test]
+    fn envelope_false_positive_and_malformed_prefix_table() {
+        // Ordinary prose parentheses are not execution keys.
+        let prose = parse_exception_envelope(
+            "see (note) about java.lang.RuntimeException: XYZ in the docs",
+        );
+        assert!(prose.stream.is_none());
+        assert!(prose.parenthesized_thread.is_none());
+        assert!(prose.explicit_thread.is_none());
+        assert!(!prose.malformed);
+
+        // Method-call parentheses are not thread identity.
+        let method =
+            parse_exception_envelope("[stderr] at com.xyz.payment.Client.charge(Client.java:42)");
+        assert_eq!(method.stream, Some(EnvelopeStream::Stderr));
+        assert!(
+            method.parenthesized_thread.is_none(),
+            "method-call paren must not become thread: {method:?}"
+        );
+        assert_eq!(
+            method.structural_payload,
+            "at com.xyz.payment.Client.charge(Client.java:42)"
+        );
+
+        // [stderr-ish] is not the stderr stream token.
+        let ish = parse_exception_envelope("[stderr-ish] java.lang.RuntimeException: XYZ");
+        assert!(ish.stream.is_none(), "{ish:?}");
+
+        // stdout is not treated as the stderr envelope stream.
+        let stdout = parse_exception_envelope("[stdout] java.lang.RuntimeException: XYZ");
+        assert!(stdout.stream.is_none(), "{stdout:?}");
+
+        // Unbalanced parenthesized thread → malformed.
+        let unbalanced = parse_exception_envelope(
+            "[stderr] (pool-40-thread-1286 java.lang.RuntimeException: XYZ",
+        );
+        assert!(unbalanced.malformed, "{unbalanced:?}");
+        assert!(unbalanced.parenthesized_thread.is_none());
+        assert!(unbalanced.fail_closed_for_attachment());
+
+        // Empty thread token → malformed.
+        let empty = parse_exception_envelope("[stderr] () java.lang.RuntimeException: XYZ");
+        assert!(empty.malformed, "{empty:?}");
+        assert!(empty.parenthesized_thread.is_none());
+
+        // Nested / invalid token → malformed.
+        let nested = parse_exception_envelope(
+            "[stderr] (pool-(bad)-thread) java.lang.RuntimeException: XYZ",
+        );
+        assert!(nested.malformed || nested.parenthesized_thread.is_none());
+    }
+
+    #[test]
+    fn envelope_conflicting_execution_keys_never_attach_or_correlate() {
+        // Explicit thread= differs from parenthesized pool thread on the same line.
+        let env = parse_exception_envelope(
+            "thread=worker-a [stderr] (pool-40-thread-1286) java.lang.RuntimeException: XYZ_C",
+        );
+        assert!(env.execution_key_conflict, "{env:?}");
+        assert!(env.fail_closed_for_attachment());
+        assert!(env.effective_thread().is_none());
+
+        let events = vec![
+            event(
+                1,
+                10,
+                "app.log",
+                "thread=worker-a java.lang.RuntimeException: XYZ_C\n at com.xyz.A.m(A.java:1)",
+            ),
+            event(
+                2,
+                10,
+                "stderr.log",
+                "thread=worker-a [stderr] (pool-40-thread-1286) java.lang.RuntimeException: XYZ_C",
+            ),
+            event(
+                3,
+                10,
+                "stderr.log",
+                "thread=worker-a [stderr] (pool-40-thread-1286) at com.xyz.A.m(A.java:1)",
+            ),
+        ];
+        let analysis = analyze_bounded_events(events.len() as u64, &events);
+        // Conflicted stderr must not dual-render with the app (fail closed).
+        assert_eq!(
+            analysis.duplicate_rendering_occurrence_count, 0,
+            "conflicted keys must not claim duplicate rendering: {analysis:?}"
+        );
+        // No occurrence may cite both app and conflicted stderr children together.
+        for occ in analysis.families.iter().flat_map(|f| &f.occurrences) {
+            let seqs: BTreeSet<u64> = occ.citations.iter().map(|c| c.seq).collect();
+            assert!(
+                !(seqs.contains(&1) && (seqs.contains(&2) || seqs.contains(&3))),
+                "cross-attach under conflict forbidden: {seqs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn envelope_interleaved_same_signature_pool_threads_remain_isolated() {
+        // Interleaved pool-A / pool-B WildFly-prefixed records, same signature.
+        let events = vec![
+            event(
+                1,
+                10,
+                "stderr.log",
+                "[stderr] (pool-A-thread-1) java.lang.RuntimeException: XYZ_INTER",
+            ),
+            event(
+                2,
+                10,
+                "stderr.log",
+                "[stderr] (pool-B-thread-2) java.lang.RuntimeException: XYZ_INTER",
+            ),
+            event(
+                3,
+                10,
+                "stderr.log",
+                "[stderr] (pool-A-thread-1) at com.xyz.A.m(A.java:1)",
+            ),
+            event(
+                4,
+                10,
+                "stderr.log",
+                "[stderr] (pool-B-thread-2) at com.xyz.B.m(B.java:1)",
+            ),
+            event(
+                5,
+                10,
+                "stderr.log",
+                "[stderr] (pool-A-thread-1) at com.xyz.A.n(A.java:2)",
+            ),
+            event(
+                6,
+                10,
+                "stderr.log",
+                "[stderr] (pool-B-thread-2) at com.xyz.B.n(B.java:2)",
+            ),
+        ];
+        let analysis = analyze_bounded_events(events.len() as u64, &events);
+        // Two physical stderr renderings, never one mixed rendering.
+        let stderr_occs: Vec<_> = analysis
+            .families
+            .iter()
+            .flat_map(|f| f.occurrences.iter())
+            .filter(|o| {
+                o.rendering_kinds
+                    .contains(&ExceptionRenderingKind::SeparatelyWrappedRecords)
+            })
+            .collect();
+        assert!(
+            analysis.rendering_episode_count >= 2,
+            "renderings={}",
+            analysis.rendering_episode_count
+        );
+        for occ in &stderr_occs {
+            let seqs: BTreeSet<u64> = occ.citations.iter().map(|c| c.seq).collect();
+            let has_a = seqs.iter().any(|s| matches!(s, 1 | 3 | 5));
+            let has_b = seqs.iter().any(|s| matches!(s, 2 | 4 | 6));
+            assert!(
+                !(has_a && has_b),
+                "cross-thread citations forbidden: {seqs:?}"
+            );
+        }
+        // Pool-A citations {1,3,5} and pool-B {2,4,6} must each appear in some
+        // occurrence without mixing.
+        let all_groups: Vec<BTreeSet<u64>> = analysis
+            .families
+            .iter()
+            .flat_map(|f| f.occurrences.iter())
+            .map(|o| o.citations.iter().map(|c| c.seq).collect())
+            .collect();
+        assert!(
+            all_groups
+                .iter()
+                .any(|g| g.is_superset(&BTreeSet::from([1, 3, 5])))
+                || all_groups.iter().any(|g| *g == BTreeSet::from([1, 3, 5])),
+            "pool-A must form one isolated rendering: {all_groups:?}"
+        );
+        assert!(
+            all_groups
+                .iter()
+                .any(|g| g.is_superset(&BTreeSet::from([2, 4, 6])))
+                || all_groups.iter().any(|g| *g == BTreeSet::from([2, 4, 6])),
+            "pool-B must form one isolated rendering: {all_groups:?}"
+        );
+    }
+
+    #[test]
+    fn envelope_265_prefixed_stderr_stack_is_one_rendering_with_unique_citations() {
+        let mut events = Vec::new();
+        let thread = "pool-40-thread-1286";
+        // Header
+        events.push(event(
+            1,
+            100,
+            "XYZ_server.stderr",
+            &format!("[stderr] ({thread}) java.lang.RuntimeException: XYZ_PAYMENT_FAILED id=0"),
+        ));
+        let mut seq = 2u64;
+        for w in 0..72u32 {
+            events.push(event(
+                seq,
+                100,
+                "XYZ_server.stderr",
+                &format!(
+                    "[stderr] ({thread}) Exception wrapper XYZ_WRAP#{w} for payment failure id=0"
+                ),
+            ));
+            seq += 1;
+        }
+        for f in 0..189u32 {
+            events.push(event(
+                seq,
+                100,
+                "XYZ_server.stderr",
+                &format!("[stderr] ({thread}) at com.xyz.payment.StackFrame{f}.invoke(StackFrame{f}.java:{})", f + 1),
+            ));
+            seq += 1;
+        }
+        // 1 intermediate + 2 terminal causes = 3 (matches 1+72+189+3 = 265)
+        events.push(event(
+            seq,
+            100,
+            "XYZ_server.stderr",
+            &format!("[stderr] ({thread}) Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT"),
+        ));
+        seq += 1;
+        events.push(event(
+            seq,
+            100,
+            "XYZ_server.stderr",
+            &format!("[stderr] ({thread}) Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT"),
+        ));
+        seq += 1;
+        events.push(event(
+            seq,
+            100,
+            "XYZ_server.stderr",
+            &format!("[stderr] ({thread}) Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT"),
+        ));
+        assert_eq!(events.len(), 265, "fixture must be exactly 265 records");
+
+        let analysis = analyze_bounded_events(events.len() as u64, &events);
+        assert_eq!(analysis.stderr_exception_record_count, 265);
+        assert_eq!(analysis.rendering_episode_count, 1);
+        assert_eq!(analysis.occurrence_count, 1);
+        let occ = analysis
+            .families
+            .iter()
+            .flat_map(|f| f.occurrences.iter())
+            .next()
+            .expect("occurrence");
+        assert_eq!(occ.raw_record_count, 265);
+        assert_eq!(occ.citations.len(), 265);
+        let mut seen = HashSet::new();
+        for c in &occ.citations {
+            assert!(
+                seen.insert((c.seq, c.source.clone())),
+                "duplicate citation seq={} source={}",
+                c.seq,
+                c.source
+            );
+        }
+        assert_eq!(seen.len(), 265);
+    }
+
+    #[test]
+    fn envelope_app_plus_265_prefixed_stderr_still_dual_renders_once() {
+        let mut events = Vec::new();
+        let thread = "pool-40-thread-1286";
+        // App carries the same explicit execution key as the WildFly stderr
+        // lane so dual-render correlation (unchanged policy) can Strong-match.
+        events.push(event(
+            1,
+            100,
+            "XYZ_app.log",
+            &format!(
+                "thread={thread} java.lang.RuntimeException: XYZ_PAYMENT_FAILED id=0\n at com.xyz.payment.Client.charge(Client.java:42)\n Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT\n at com.xyz.net.Http.execute(Http.java:15)"
+            ),
+        ));
+        let mut seq = 2u64;
+        events.push(event(
+            seq,
+            100,
+            "XYZ_server.stderr",
+            &format!("[stderr] ({thread}) java.lang.RuntimeException: XYZ_PAYMENT_FAILED id=0"),
+        ));
+        seq += 1;
+        for w in 0..72u32 {
+            events.push(event(
+                seq,
+                100,
+                "XYZ_server.stderr",
+                &format!(
+                    "[stderr] ({thread}) Exception wrapper XYZ_WRAP#{w} for payment failure id=0"
+                ),
+            ));
+            seq += 1;
+        }
+        for f in 0..189u32 {
+            events.push(event(
+                seq,
+                100,
+                "XYZ_server.stderr",
+                &format!("[stderr] ({thread}) at com.xyz.payment.StackFrame{f}.invoke(StackFrame{f}.java:{})", f + 1),
+            ));
+            seq += 1;
+        }
+        for _ in 0..3u32 {
+            events.push(event(
+                seq,
+                100,
+                "XYZ_server.stderr",
+                &format!(
+                    "[stderr] ({thread}) Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT"
+                ),
+            ));
+            seq += 1;
+        }
+        assert_eq!(events.len(), 266); // 1 app + 265 stderr
+
+        let analysis = analyze_bounded_events(events.len() as u64, &events);
+        assert_eq!(analysis.application_exception_record_count, 1);
+        assert_eq!(analysis.stderr_exception_record_count, 265);
+        assert_eq!(analysis.rendering_episode_count, 2);
+        assert_eq!(analysis.occurrence_count, 1);
+        assert_eq!(analysis.duplicate_rendering_occurrence_count, 1);
+        let occ = analysis
+            .families
+            .iter()
+            .flat_map(|f| f.occurrences.iter())
+            .next()
+            .expect("occurrence");
+        assert!(occ.duplicate_rendering);
+        assert_eq!(occ.raw_record_count, 266);
+        assert_eq!(occ.citations.len(), 266);
+        assert!(occ
+            .rendering_kinds
+            .contains(&ExceptionRenderingKind::ApplicationFullStack));
+        assert!(occ
+            .rendering_kinds
+            .contains(&ExceptionRenderingKind::SeparatelyWrappedRecords));
     }
 }
