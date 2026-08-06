@@ -76,6 +76,8 @@ pub mod ssrf;
 pub mod text;
 pub mod tool_host;
 pub mod tools;
+/// Hermetic broad-triage quality contract and structured rubric.
+pub mod triage_quality;
 pub mod turn_trace;
 pub mod vector_index;
 pub mod web_research;

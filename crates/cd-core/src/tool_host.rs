@@ -2165,6 +2165,31 @@ impl ToolHost {
         );
         body.push_str(BROAD_LOG_TRIAGE_RANKING_FORMULAS);
 
+        // Compact interpretation contract early so it survives end-truncation and
+        // remains model-visible under the hard brief byte ceiling.
+        let mut early_sources = facets
+            .sources
+            .keys()
+            .filter(|name| !name.is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
+        early_sources.sort();
+        let early_error_count = facets
+            .levels
+            .iter()
+            .filter(|(level, _)| matches!(level.as_str(), "error" | "fatal"))
+            .map(|(_, count)| *count)
+            .sum::<u64>();
+        body.push('\n');
+        body.push_str(
+            &crate::triage_quality::triage_interpretation_brief_guardrails(
+                &early_sources,
+                time_quality.label(),
+                unsuppressed_event_count,
+                Some(early_error_count),
+            ),
+        );
+
         body.push_str("\n## Top distributions\n");
         let facet_partial = [
             facets.levels.len(),

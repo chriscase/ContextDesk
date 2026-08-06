@@ -542,8 +542,25 @@ impl LogExplorerTurnContext {
              time without a timezone-aware conversion. Distinguish observation from inference, \
              label confidence, disclose caps and time-quality limits, identify the next evidence \
              needed to resolve uncertainty, and never fabricate a result, citation, count, or \
-             causal claim.",
-            self.corpus_id
+             causal claim.\n\n{}",
+            self.corpus_id,
+            crate::triage_quality::triage_answer_contract_system_text()
+        )
+    }
+
+    fn broad_triage_synthesis_system_hint(&self) -> String {
+        format!(
+            "{}\n\n{}",
+            self.staged_synthesis_system_hint(),
+            crate::triage_quality::triage_answer_contract_system_text()
+        )
+    }
+
+    fn broad_triage_zero_event_synthesis_system_hint(&self) -> String {
+        format!(
+            "{}\n\n{}",
+            self.zero_event_synthesis_system_hint(),
+            crate::triage_quality::triage_answer_contract_system_text()
         )
     }
 
@@ -2826,9 +2843,17 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
             } else if broad_triage_optional_deepening {
                 context.broad_triage_deepening_system_hint()
             } else if linked_allow_empty_evidence && linked_staged_synthesis_ready {
-                context.zero_event_synthesis_system_hint()
+                if linked_broad_triage && broad_triage_brief_complete {
+                    context.broad_triage_zero_event_synthesis_system_hint()
+                } else {
+                    context.zero_event_synthesis_system_hint()
+                }
             } else if linked_staged_synthesis_ready {
-                context.staged_synthesis_system_hint()
+                if linked_broad_triage && broad_triage_brief_complete {
+                    context.broad_triage_synthesis_system_hint()
+                } else {
+                    context.staged_synthesis_system_hint()
+                }
             } else {
                 let required = missing_required_read.expect("missing linked source");
                 format!(
@@ -2845,12 +2870,17 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                          citing each event with an exact seq=… plus source=\"…\" pair from the data rows only.",
                     );
             }
+            let packing_budget = if linked_broad_triage && broad_triage_brief_complete {
+                crate::triage_quality::broad_triage_packing_budget(char_budget)
+            } else {
+                char_budget
+            };
             let messages = match linked_round_model_context(
                 prior_history,
                 linked_system,
                 user_text,
                 &current_turn_evidence,
-                char_budget,
+                packing_budget,
             ) {
                 Ok(messages) => messages,
                 Err(error) => {
@@ -2869,6 +2899,12 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                          context budget.",
                     );
                 }
+                let used = estimate_context_chars(&messages);
+                let headroom = char_budget.saturating_sub(used);
+                trail.push(format!(
+                    "context_budget:used={used},budget={char_budget},packing_budget={packing_budget},headroom={headroom},reserved={}",
+                    char_budget.saturating_sub(packing_budget)
+                ));
             }
             let source_history_len = prior_history.len();
             let retained_history_messages = prior_history
@@ -4334,19 +4370,31 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
         opts.log_explorer_context.as_ref(),
         linked_prior_history.as_ref(),
     ) {
+        let char_budget = opts.effective_context_char_budget();
+        let packing_budget = if linked_broad_triage && broad_triage_brief_complete {
+            crate::triage_quality::broad_triage_packing_budget(char_budget)
+        } else {
+            char_budget
+        };
         match linked_round_model_context(
             prior_history,
             format!(
                 "{}\n{synthesis_instruction}",
                 if linked_allow_empty_evidence {
-                    context.zero_event_synthesis_system_hint()
+                    if linked_broad_triage && broad_triage_brief_complete {
+                        context.broad_triage_zero_event_synthesis_system_hint()
+                    } else {
+                        context.zero_event_synthesis_system_hint()
+                    }
+                } else if linked_broad_triage && broad_triage_brief_complete {
+                    context.broad_triage_synthesis_system_hint()
                 } else {
                     context.staged_synthesis_system_hint()
                 }
             ),
             user_text,
             &current_turn_evidence,
-            opts.effective_context_char_budget(),
+            packing_budget,
         ) {
             Ok(messages) => {
                 if broad_triage_brief_complete {
@@ -4357,6 +4405,12 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                             "The complete deterministic triage brief cannot fit final synthesis.",
                         );
                     }
+                    let used = estimate_context_chars(&messages);
+                    let headroom = char_budget.saturating_sub(used);
+                    trail.push(format!(
+                        "context_budget:used={used},budget={char_budget},packing_budget={packing_budget},headroom={headroom},reserved={}",
+                        char_budget.saturating_sub(packing_budget)
+                    ));
                 }
                 messages
             }
@@ -4774,6 +4828,10 @@ mod tests {
             synthesis_hint.contains("additional logs or configuration"),
             "{synthesis_hint}"
         );
+        assert!(
+            !synthesis_hint.contains("STRUCTURED TRIAGE ANSWER CONTRACT"),
+            "focused linked chat must not require the broad RCA shape: {synthesis_hint}"
+        );
         let broad_hint = context.broad_triage_deepening_system_hint();
         for required in [
             "observed symptoms",
@@ -4788,6 +4846,10 @@ mod tests {
                 "missing {required:?}: {broad_hint}"
             );
         }
+        assert!(
+            broad_hint.contains("STRUCTURED TRIAGE ANSWER CONTRACT"),
+            "{broad_hint}"
+        );
         assert!(LogExplorerTurnContext::new("bad window", "corpus-a", "x").is_err());
         assert!(LogExplorerTurnContext::new("window-a", "../corpus", "x").is_err());
     }
