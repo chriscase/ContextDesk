@@ -1,0 +1,735 @@
+//! Shared model-context budgeting for ordinary chat, broad triage, and focused
+//! linked-log synthesis.
+//!
+//! Headroom policy (generation reservation) is **shared** across linked
+//! synthesis paths — not only `broad_log_triage`. Evidence packing is
+//! deterministic and identity-aware: it ranks/dedupes host blocks, never splits
+//! citation `seq=` / `source=` lines or UTF-8 sequences, and discloses omits.
+
+use crate::model_context::ContextBudgetSource;
+use crate::text::{floor_char_boundary, truncate_bytes};
+use serde::{Deserialize, Serialize};
+
+/// Absolute characters reserved so linked/ordinary synthesis cannot pack to the
+/// hard budget ceiling (same class as broad triage). Near-ceiling packs such as
+/// 119_900 / 120_000 are not success.
+pub const SYNTHESIS_CONTEXT_HEADROOM_CHARS: usize = 12_000;
+
+/// Minimum free ratio of the hard budget after packing (0.0–1.0).
+pub const SYNTHESIS_MIN_HEADROOM_RATIO: f64 = 0.08;
+
+/// Backward-compatible alias used by broad-triage docs and tests.
+pub const BROAD_TRIAGE_CONTEXT_HEADROOM_CHARS: usize = SYNTHESIS_CONTEXT_HEADROOM_CHARS;
+/// Backward-compatible alias for the min headroom ratio.
+pub const BROAD_TRIAGE_MIN_HEADROOM_RATIO: f64 = SYNTHESIS_MIN_HEADROOM_RATIO;
+
+/// Max characters reserved for the omit disclosure footer inside evidence.
+const OMIT_FOOTER_RESERVE: usize = 240;
+/// Soft per-record body cap when a single evidence unit still exceeds remaining budget.
+const MAX_SINGLE_RECORD_BODY_CHARS: usize = 1_200;
+
+/// How the hard character capacity was established for this turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CapacitySourceLabel {
+    /// Product default (not measured from a live model).
+    #[default]
+    Default,
+    /// Operator/configured ContextDesk budget for the turn.
+    Configured,
+    /// Declared by catalog/gateway metadata (not live-probed this turn).
+    Declared,
+    /// Learned by shrinking after a prior context-length failure.
+    Learned,
+    /// Provider window is unknown; configured/default used honestly.
+    UnknownConfigured,
+}
+
+impl CapacitySourceLabel {
+    /// Stable wire string for trail / JSONL.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Configured => "configured",
+            Self::Declared => "declared",
+            Self::Learned => "learned",
+            Self::UnknownConfigured => "unknown_configured",
+        }
+    }
+
+    /// Map from [`ContextBudgetSource`] plus whether the host treated capacity as unknown.
+    pub fn from_budget_source(source: ContextBudgetSource, capacity_unknown: bool) -> Self {
+        if capacity_unknown {
+            return Self::UnknownConfigured;
+        }
+        match source {
+            ContextBudgetSource::Default => Self::Default,
+            ContextBudgetSource::Declared => Self::Declared,
+            ContextBudgetSource::Learned => Self::Learned,
+        }
+    }
+}
+
+/// Typed budget / packing telemetry for one model request.
+///
+/// Shared by CLI human progress, JSON/JSONL trails, and (when projected) Activity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextBudgetTelemetry {
+    /// Hard / configured ContextDesk char budget for this turn.
+    pub hard_budget_chars: usize,
+    /// Budget after reserved generation headroom (packing target).
+    pub packing_budget_chars: usize,
+    /// Reserved headroom = hard − packing.
+    pub reserved_headroom_chars: usize,
+    /// Estimated chars actually sent after packing.
+    pub used_chars_estimate: usize,
+    /// Free = hard − used (may be larger than reserved when under-filled).
+    pub free_chars_estimate: usize,
+    /// Evidence body chars included (excluding system/user/history).
+    pub evidence_included_chars: usize,
+    /// Evidence blocks omitted by the packer.
+    pub evidence_omitted_blocks: usize,
+    /// Approx chars of omitted evidence.
+    pub evidence_omitted_chars: usize,
+    /// Citeable identity lines retained.
+    pub evidence_identity_lines_included: usize,
+    /// Citeable identity lines dropped for budget.
+    pub evidence_identity_lines_omitted: usize,
+    /// History messages retained in the model window (non-system).
+    pub history_retained_messages: usize,
+    /// History messages omitted/compacted out of the model window.
+    pub history_omitted_messages: usize,
+    /// Whether history compaction/summary was applied.
+    pub history_compacted: bool,
+    /// Capacity provenance label (never pretends ContextDesk discovered a limit
+    /// when the source is default/configured/unknown).
+    pub provider_capacity_source: CapacitySourceLabel,
+    /// True when used leaves useful headroom under hard budget.
+    pub useful_headroom: bool,
+}
+
+impl ContextBudgetTelemetry {
+    /// Search-trail style step for CLI / Activity projection.
+    ///
+    /// Includes both legacy field names (`budget`, `packing_budget`) and extended
+    /// aliases (`hard`, `packing`) so existing parsers and new telemetry agree.
+    pub fn trail_step(&self) -> String {
+        format!(
+            "context_budget:used={},budget={},hard={},packing_budget={},packing={},\
+headroom={},reserved={},evidence_included={},evidence_omitted_blocks={},\
+evidence_omitted_chars={},history_retained={},history_omitted={},\
+history_compacted={},capacity_source={},useful_headroom={}",
+            self.used_chars_estimate,
+            self.hard_budget_chars,
+            self.hard_budget_chars,
+            self.packing_budget_chars,
+            self.packing_budget_chars,
+            self.free_chars_estimate,
+            self.reserved_headroom_chars,
+            self.evidence_included_chars,
+            self.evidence_omitted_blocks,
+            self.evidence_omitted_chars,
+            self.history_retained_messages,
+            self.history_omitted_messages,
+            self.history_compacted,
+            self.provider_capacity_source.as_str(),
+            self.useful_headroom
+        )
+    }
+
+    /// Compact JSON object for JSONL/developer detail.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+    }
+}
+
+/// Effective packing budget after reserving synthesis generation headroom.
+///
+/// Used by **focused** linked synthesis, **broad** triage, retries, and final
+/// linked synthesis — not only `broad_log_triage`.
+pub fn synthesis_packing_budget(hard_budget_chars: usize) -> usize {
+    if hard_budget_chars == 0 {
+        return 0;
+    }
+    let proportional = hard_budget_chars / 10;
+    let reservation = SYNTHESIS_CONTEXT_HEADROOM_CHARS.min(proportional);
+    // Never reserve more than half the window (tiny custom budgets).
+    let reservation = reservation.min(hard_budget_chars / 2);
+    hard_budget_chars.saturating_sub(reservation)
+}
+
+/// Backward-compatible name for broad-triage call sites and tests.
+pub fn broad_triage_packing_budget(char_budget: usize) -> usize {
+    synthesis_packing_budget(char_budget)
+}
+
+/// Whether measured usage leaves useful headroom relative to the hard budget.
+pub fn has_useful_context_headroom(used_chars: usize, hard_budget_chars: usize) -> bool {
+    if hard_budget_chars == 0 || used_chars > hard_budget_chars {
+        return false;
+    }
+    let free = hard_budget_chars.saturating_sub(used_chars);
+    let ratio = free as f64 / hard_budget_chars as f64;
+    let min_abs = SYNTHESIS_CONTEXT_HEADROOM_CHARS.min(hard_budget_chars / 10);
+    free >= min_abs || ratio + f64::EPSILON >= SYNTHESIS_MIN_HEADROOM_RATIO
+}
+
+/// Result of packing host evidence blocks for one synthesis request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackedLinkedEvidence {
+    /// Model-facing evidence body (may be empty).
+    pub text: String,
+    /// Blocks fully or partially included.
+    pub included_blocks: usize,
+    /// Blocks with no content retained.
+    pub omitted_blocks: usize,
+    /// Characters included in [`Self::text`] (excluding omit footer).
+    pub included_chars: usize,
+    /// Characters dropped.
+    pub omitted_chars: usize,
+    /// Lines containing both `seq=` and `source=` kept.
+    pub identity_lines_included: usize,
+    /// Such lines dropped.
+    pub identity_lines_omitted: usize,
+}
+
+/// Deterministic evidence packer for linked-log synthesis.
+///
+/// - Stable order: original block order, then line order within a block.
+/// - Prefers lines that carry citeable `seq=` + `source=` identities.
+/// - Dedupes identical identity keys (keeps first).
+/// - Never splits a citation line or UTF-8 codepoint.
+/// - When content exceeds `evidence_budget_chars`, appends an omit disclosure.
+pub fn pack_linked_evidence_blocks(
+    blocks: &[String],
+    evidence_budget_chars: usize,
+) -> PackedLinkedEvidence {
+    if blocks.is_empty() || evidence_budget_chars == 0 {
+        return PackedLinkedEvidence {
+            text: String::new(),
+            included_blocks: 0,
+            omitted_blocks: blocks.len(),
+            included_chars: 0,
+            omitted_chars: blocks.iter().map(|b| b.chars().count()).sum(),
+            identity_lines_included: 0,
+            identity_lines_omitted: 0,
+        };
+    }
+
+    let total_chars: usize = blocks.iter().map(|b| b.chars().count()).sum();
+    // Fast path: entire host evidence fits under budget. Preserve original block
+    // order (required for broad-triage complete brief checks) but still collapse
+    // exact-duplicate identity lines so focused packs stay deterministic.
+    if total_chars <= evidence_budget_chars {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut parts: Vec<String> = Vec::new();
+        let mut identity_lines_included = 0usize;
+        let mut identity_dupes = 0usize;
+        for block in blocks {
+            let mut block_lines: Vec<&str> = Vec::new();
+            for line in block.lines() {
+                let t = line.trim_end();
+                if t.is_empty() {
+                    continue;
+                }
+                if line_has_citation_identity(t) {
+                    let key = identity_key_from_line(t);
+                    if !seen.insert(key) {
+                        identity_dupes = identity_dupes.saturating_add(1);
+                        continue;
+                    }
+                    identity_lines_included = identity_lines_included.saturating_add(1);
+                }
+                block_lines.push(t);
+            }
+            if !block_lines.is_empty() {
+                parts.push(block_lines.join("\n"));
+            }
+        }
+        let text = parts.join("\n\n");
+        return PackedLinkedEvidence {
+            text: text.clone(),
+            included_blocks: blocks.len(),
+            omitted_blocks: 0,
+            included_chars: text.chars().count(),
+            omitted_chars: 0,
+            identity_lines_included,
+            identity_lines_omitted: identity_dupes,
+        };
+    }
+    // Budget for body after omit footer reserve when we expect overflow.
+    let body_budget =
+        evidence_budget_chars.saturating_sub(OMIT_FOOTER_RESERVE.min(evidence_budget_chars / 4));
+
+    #[derive(Clone)]
+    struct Unit {
+        block_idx: usize,
+        line: String,
+        is_identity: bool,
+        identity_key: Option<String>,
+        score: i32,
+    }
+
+    let mut units: Vec<Unit> = Vec::new();
+    for (block_idx, block) in blocks.iter().enumerate() {
+        for (line_i, raw_line) in block.lines().enumerate() {
+            let line = raw_line.trim_end().to_string();
+            if line.is_empty() {
+                continue;
+            }
+            let is_identity = line_has_citation_identity(&line);
+            let identity_key = if is_identity {
+                Some(identity_key_from_line(&line))
+            } else {
+                None
+            };
+            // Higher score = more important. Prefer identity lines, earlier blocks,
+            // and slightly prefer shorter identity rows (representative first).
+            let mut score = 0i32;
+            if is_identity {
+                score += 1_000;
+                score -= (line.chars().count() as i32).min(200);
+            } else {
+                score += 10;
+            }
+            // First/last lines of a block are often headers or rare tail events.
+            if line_i == 0 {
+                score += 50;
+            }
+            score -= (block_idx as i32) * 2;
+            units.push(Unit {
+                block_idx,
+                line,
+                is_identity,
+                identity_key,
+                score,
+            });
+        }
+    }
+
+    // Rank by score desc, then original order for stability.
+    let mut order: Vec<usize> = (0..units.len()).collect();
+    order.sort_by(|&a, &b| units[b].score.cmp(&units[a].score).then_with(|| a.cmp(&b)));
+
+    let mut selected: Vec<Option<String>> = vec![None; units.len()];
+    let mut used_chars = 0usize;
+    let mut seen_ids = std::collections::BTreeSet::new();
+    let mut identity_included = 0usize;
+    let mut identity_omitted = 0usize;
+    let mut blocks_touched = std::collections::BTreeSet::new();
+
+    for idx in order {
+        let u = &units[idx];
+        if let Some(key) = &u.identity_key {
+            if !seen_ids.insert(key.clone()) {
+                // Duplicate identity — omit without counting as omitted identity
+                // when we already kept one; still counts as skip.
+                continue;
+            }
+        }
+        let mut candidate = u.line.clone();
+        let mut cand_chars = candidate.chars().count();
+        // Separator newline if we already have content when assembled in order.
+        // Reserve 1 char per selected unit for joining.
+        let join_cost = 1;
+        if used_chars + cand_chars + join_cost > body_budget {
+            if u.is_identity {
+                // Try to keep identity line alone by truncating a long line's body
+                // after the identity markers — never mid-token on seq=/source=.
+                if let Some(trimmed) = truncate_preserving_identity_line(
+                    &candidate,
+                    body_budget.saturating_sub(used_chars + join_cost),
+                ) {
+                    candidate = trimmed;
+                    cand_chars = candidate.chars().count();
+                    if used_chars + cand_chars + join_cost > body_budget {
+                        identity_omitted = identity_omitted.saturating_add(1);
+                        continue;
+                    }
+                } else {
+                    identity_omitted = identity_omitted.saturating_add(1);
+                    continue;
+                }
+            } else {
+                // Non-identity: drop if it does not fit; optionally keep a short stub
+                // only when budget still allows a useful fragment.
+                let room = body_budget.saturating_sub(used_chars + join_cost);
+                if room < 48 {
+                    continue;
+                }
+                let stub =
+                    truncate_chars_at_boundary(&candidate, room.min(MAX_SINGLE_RECORD_BODY_CHARS));
+                if stub.chars().count() < 24 {
+                    continue;
+                }
+                candidate = stub;
+                cand_chars = candidate.chars().count();
+            }
+        }
+        selected[idx] = Some(candidate);
+        used_chars = used_chars.saturating_add(cand_chars + join_cost);
+        blocks_touched.insert(u.block_idx);
+        if u.is_identity {
+            identity_included = identity_included.saturating_add(1);
+        }
+    }
+
+    // Reassemble in original unit order for stable model-facing text.
+    let mut parts: Vec<String> = Vec::new();
+    for (i, slot) in selected.into_iter().enumerate() {
+        if let Some(line) = slot {
+            let _ = i;
+            parts.push(line);
+        }
+    }
+    let mut text = parts.join("\n");
+    let included_chars = text.chars().count();
+    let omitted_chars = total_chars.saturating_sub(included_chars);
+    let included_blocks = blocks_touched.len();
+    let omitted_blocks = blocks.len().saturating_sub(included_blocks);
+
+    // Count identity lines that never made it.
+    let total_identity = units.iter().filter(|u| u.is_identity).count();
+    // identity_omitted already tracks budget drops; add unselected unique ids.
+    let identity_omitted = identity_omitted.max(total_identity.saturating_sub(identity_included));
+
+    if omitted_blocks > 0 || omitted_chars > 0 || identity_omitted > 0 {
+        let footer = format!(
+            "\n[HOST EVIDENCE PACKED] omitted_blocks={omitted_blocks} omitted_chars≈{omitted_chars} \
+identity_lines_omitted={identity_omitted} identity_lines_included={identity_included}. \
+Further deepening must stay bounded — do not re-request the full window."
+        );
+        let room = evidence_budget_chars.saturating_sub(text.chars().count());
+        if room > 32 {
+            let foot = truncate_chars_at_boundary(&footer, room);
+            text.push_str(&foot);
+        }
+    }
+
+    // Final hard cap on evidence_budget_chars at char boundary.
+    if text.chars().count() > evidence_budget_chars {
+        text = truncate_chars_at_boundary(&text, evidence_budget_chars);
+    }
+
+    PackedLinkedEvidence {
+        text,
+        included_blocks,
+        omitted_blocks,
+        included_chars,
+        omitted_chars,
+        identity_lines_included: identity_included,
+        identity_lines_omitted: identity_omitted,
+    }
+}
+
+/// Compact correction package for a rejected linked synthesis draft.
+///
+/// Intentionally tiny: system reminder + bounded evidence pack — not a re-send
+/// of the full oversized context.
+pub fn compact_correction_package(
+    base_system: &str,
+    user_text: &str,
+    evidence_blocks: &[String],
+    packing_budget_chars: usize,
+) -> (String, String, PackedLinkedEvidence) {
+    let correction_system = format!(
+        "{base_system}\n\
+PRIOR DRAFT REJECTED: it lacked concrete event identity or treated host wrapper \
+metadata as evidence. Return a concise corrected answer citing each event with an \
+exact seq=… plus source=\"…\" pair from the data rows only. Use only the compact \
+evidence package below — do not assume omitted rows."
+    );
+    // Leave room for system + user in the packing budget.
+    let sys_chars = correction_system.chars().count();
+    let user_chars = user_text.chars().count();
+    let overhead = sys_chars.saturating_add(user_chars).saturating_add(512); // message framing
+    let evidence_budget = packing_budget_chars.saturating_sub(overhead).max(512);
+    // Prefer identity-dense packing under a tighter cap than first synthesis.
+    let tight = evidence_budget.min(packing_budget_chars / 3).max(400);
+    let packed = pack_linked_evidence_blocks(evidence_blocks, tight);
+    (correction_system, user_text.to_string(), packed)
+}
+
+fn line_has_citation_identity(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    // Accept seq=… and source=… (optionally quoted). Avoid requiring exact order.
+    let has_seq = lower.contains("seq=") || lower.contains("\"seq\":") || lower.contains("seq\":");
+    let has_source =
+        lower.contains("source=") || lower.contains("source\":") || lower.contains("\"source\"");
+    has_seq && has_source
+}
+
+fn identity_key_from_line(line: &str) -> String {
+    // Stable-ish key: normalize whitespace and lowercase for dedupe only.
+    line.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn truncate_chars_at_boundary(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    for (i, ch) in s.chars().enumerate() {
+        if i >= max_chars {
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Keep a citation-bearing line intact when possible; otherwise trim trailing body.
+fn truncate_preserving_identity_line(line: &str, max_chars: usize) -> Option<String> {
+    if max_chars < 16 {
+        return None;
+    }
+    if line.chars().count() <= max_chars {
+        return Some(line.to_string());
+    }
+    // Prefer cutting after source=… token if present (ASCII-safe floor for slice).
+    let lower = line.to_ascii_lowercase();
+    if let Some(src_pos) = lower.find("source=") {
+        let after = floor_char_boundary(line, src_pos + "source=".len());
+        let rest = line.get(after..).unwrap_or("");
+        let token_end = if let Some(stripped) = rest.strip_prefix('"') {
+            stripped
+                .find('"')
+                .map(|i| after + 1 + i + 1)
+                .unwrap_or(line.len())
+        } else {
+            rest.find(char::is_whitespace)
+                .map(|i| after + i)
+                .unwrap_or(line.len())
+        };
+        let token_end = floor_char_boundary(line, token_end.min(line.len()));
+        let head = line.get(..token_end).unwrap_or("");
+        if head.chars().count() <= max_chars && line_has_citation_identity(head) {
+            return Some(head.to_string());
+        }
+    }
+    // Fall back: char truncate; only accept if identity markers still both present.
+    let truncated = truncate_chars_at_boundary(line, max_chars);
+    if line_has_citation_identity(&truncated) {
+        Some(truncated)
+    } else {
+        let by_bytes = truncate_bytes(line, max_chars.saturating_mul(4));
+        if line_has_citation_identity(by_bytes) {
+            Some(by_bytes.to_string())
+        } else {
+            None
+        }
+    }
+}
+
+/// Inputs for [`telemetry_from_parts`] (keeps call sites under clippy arg limits).
+#[derive(Debug, Clone)]
+pub struct TelemetryParts<'a> {
+    /// Hard budget.
+    pub hard_budget_chars: usize,
+    /// Packing budget.
+    pub packing_budget_chars: usize,
+    /// Measured use.
+    pub used_chars_estimate: usize,
+    /// Packed evidence stats.
+    pub packed: &'a PackedLinkedEvidence,
+    /// Retained history message count.
+    pub history_retained_messages: usize,
+    /// Omitted history message count.
+    pub history_omitted_messages: usize,
+    /// Compaction applied.
+    pub history_compacted: bool,
+    /// Capacity source label.
+    pub provider_capacity_source: CapacitySourceLabel,
+}
+
+/// Build a telemetry snapshot after messages are finalized.
+pub fn telemetry_from_parts(parts: TelemetryParts<'_>) -> ContextBudgetTelemetry {
+    let reserved = parts
+        .hard_budget_chars
+        .saturating_sub(parts.packing_budget_chars);
+    let free = parts
+        .hard_budget_chars
+        .saturating_sub(parts.used_chars_estimate);
+    ContextBudgetTelemetry {
+        hard_budget_chars: parts.hard_budget_chars,
+        packing_budget_chars: parts.packing_budget_chars,
+        reserved_headroom_chars: reserved,
+        used_chars_estimate: parts.used_chars_estimate,
+        free_chars_estimate: free,
+        evidence_included_chars: parts.packed.included_chars,
+        evidence_omitted_blocks: parts.packed.omitted_blocks,
+        evidence_omitted_chars: parts.packed.omitted_chars,
+        evidence_identity_lines_included: parts.packed.identity_lines_included,
+        evidence_identity_lines_omitted: parts.packed.identity_lines_omitted,
+        history_retained_messages: parts.history_retained_messages,
+        history_omitted_messages: parts.history_omitted_messages,
+        history_compacted: parts.history_compacted,
+        provider_capacity_source: parts.provider_capacity_source,
+        useful_headroom: has_useful_context_headroom(
+            parts.used_chars_estimate,
+            parts.hard_budget_chars,
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packing_budget_reserves_headroom_like_broad_triage() {
+        let budget = 120_000;
+        let pack = synthesis_packing_budget(budget);
+        assert_eq!(pack, budget - SYNTHESIS_CONTEXT_HEADROOM_CHARS);
+        assert!(has_useful_context_headroom(pack, budget));
+        assert!(!has_useful_context_headroom(119_900, budget));
+        let small = 40_000;
+        let small_pack = synthesis_packing_budget(small);
+        assert_eq!(small_pack, small - small / 10);
+        assert!(has_useful_context_headroom(small_pack, small));
+    }
+
+    #[test]
+    fn broad_alias_matches_shared_budget() {
+        assert_eq!(
+            broad_triage_packing_budget(120_000),
+            synthesis_packing_budget(120_000)
+        );
+    }
+
+    #[test]
+    fn packer_is_deterministic_and_preserves_identities() {
+        let mut blocks = Vec::new();
+        for i in 0..200 {
+            blocks.push(format!(
+                "hit {i}: seq={i} source=\"worker.log\" template_id={} msg={}",
+                i % 7,
+                "x".repeat(400)
+            ));
+        }
+        // Inject a rare late event that should still compete via identity score.
+        blocks.push(
+            "RARE seq=9999 source=\"worker.log\" template_id=99 msg=needle-rare-event".into(),
+        );
+        let budget = 8_000;
+        let a = pack_linked_evidence_blocks(&blocks, budget);
+        let b = pack_linked_evidence_blocks(&blocks, budget);
+        assert_eq!(a, b);
+        assert!(a.identity_lines_included >= 1);
+        assert!(a.omitted_blocks > 0 || a.omitted_chars > 0);
+        assert!(a.text.chars().count() <= budget);
+        assert!(a.text.contains("seq="));
+        assert!(a.text.contains("source="));
+        // Full package near hard budget class would fail headroom check when used as packing fill.
+        assert!(!has_useful_context_headroom(119_900, 120_000));
+        // Citation lines never split mid-marker
+        for line in a.text.lines() {
+            if line.contains("seq=") {
+                assert!(
+                    !line.ends_with("seq") && !line.ends_with("seq="),
+                    "truncated identity: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn packer_handles_unicode_without_panic() {
+        let blocks = vec![
+            "seq=1 source=\"svc/日志—west.log\" msg=αβγδ 🎉🎉🎉".repeat(50),
+            "seq=2 source=\"svc/日志—west.log\" msg=こんにちは世界".repeat(50),
+        ];
+        let packed = pack_linked_evidence_blocks(&blocks, 500);
+        assert!(packed.text.chars().count() <= 500);
+        // Valid UTF-8 guaranteed by String
+        let _ = packed.text.as_str();
+        assert!(line_has_citation_identity(
+            "seq=1 source=\"svc/日志—west.log\" msg=x"
+        ));
+    }
+
+    #[test]
+    fn packer_dedupes_identical_identity_lines() {
+        let line = "seq=42 source=\"api.log\" template_id=3 msg=hello";
+        let blocks = vec![line.into(), line.into(), line.into()];
+        let packed = pack_linked_evidence_blocks(&blocks, 10_000);
+        let count = packed.text.lines().filter(|l| l.contains("seq=42")).count();
+        assert_eq!(
+            count, 1,
+            "duplicate identities must collapse: {}",
+            packed.text
+        );
+    }
+
+    #[test]
+    fn compact_correction_is_much_smaller_than_full_flood() {
+        let mut blocks = Vec::new();
+        for i in 0..100 {
+            blocks.push(format!("seq={i} source=\"s.log\" msg={}", "y".repeat(800)));
+        }
+        let full = pack_linked_evidence_blocks(&blocks, 50_000);
+        let (_sys, _user, compact) =
+            compact_correction_package("SYS", "what broke?", &blocks, 120_000);
+        assert!(compact.included_chars < full.included_chars);
+        assert!(compact.included_chars < 50_000);
+        assert!(compact.text.contains("seq="));
+    }
+
+    #[test]
+    fn capacity_source_unknown_configured_label() {
+        assert_eq!(
+            CapacitySourceLabel::from_budget_source(ContextBudgetSource::Default, true).as_str(),
+            "unknown_configured"
+        );
+        assert_eq!(
+            CapacitySourceLabel::from_budget_source(ContextBudgetSource::Declared, false).as_str(),
+            "declared"
+        );
+    }
+
+    #[test]
+    fn mutation_near_ceiling_fails_headroom_gate() {
+        // The near-full package class from the production defect must not pass.
+        assert!(!has_useful_context_headroom(119_900, 120_000));
+        assert!(!has_useful_context_headroom(120_000, 120_000));
+        let pack = synthesis_packing_budget(120_000);
+        assert!(has_useful_context_headroom(pack, 120_000));
+        // Filling only the packing budget still leaves useful headroom on hard budget.
+        assert!(has_useful_context_headroom(pack, 120_000));
+    }
+
+    #[test]
+    fn trail_step_contains_required_fields() {
+        let packed = pack_linked_evidence_blocks(&["seq=1 source=\"a.log\" msg=hi".into()], 1000);
+        let tel = telemetry_from_parts(TelemetryParts {
+            hard_budget_chars: 120_000,
+            packing_budget_chars: synthesis_packing_budget(120_000),
+            used_chars_estimate: 50_000,
+            packed: &packed,
+            history_retained_messages: 3,
+            history_omitted_messages: 10,
+            history_compacted: true,
+            provider_capacity_source: CapacitySourceLabel::Configured,
+        });
+        let step = tel.trail_step();
+        for key in [
+            "used=",
+            "budget=",
+            "hard=",
+            "packing_budget=",
+            "packing=",
+            "reserved=",
+            "evidence_included=",
+            "evidence_omitted_blocks=",
+            "history_retained=",
+            "capacity_source=",
+            "useful_headroom=",
+        ] {
+            assert!(step.contains(key), "missing {key} in {step}");
+        }
+    }
+}

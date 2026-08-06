@@ -14,14 +14,14 @@ use crate::log_analysis::SearchEvidenceIdentity;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// Characters reserved so a broad-triage model context cannot pack to the
-/// hard budget ceiling. Near-ceiling packing (e.g. 119_900 / 120_000) is not
-/// success: generation and honest uncertainty need useful headroom.
-pub const BROAD_TRIAGE_CONTEXT_HEADROOM_CHARS: usize = 12_000;
-
-/// Minimum headroom ratio of the turn budget that must remain free after packing
-/// the broad-triage synthesis request (0.0–1.0).
-pub const BROAD_TRIAGE_MIN_HEADROOM_RATIO: f64 = 0.08;
+// Headroom / packing budget live in `context_budgeting` so focused linked
+// synthesis and broad triage share one policy. Re-export under the historical
+// broad-triage names for existing imports and tests.
+pub use crate::context_budgeting::{
+    broad_triage_packing_budget, has_useful_context_headroom, synthesis_packing_budget,
+    BROAD_TRIAGE_CONTEXT_HEADROOM_CHARS, BROAD_TRIAGE_MIN_HEADROOM_RATIO,
+    SYNTHESIS_CONTEXT_HEADROOM_CHARS, SYNTHESIS_MIN_HEADROOM_RATIO,
+};
 
 /// Observations section label for structured triage answers.
 pub const SECTION_OBSERVATIONS: &str = "observations";
@@ -115,24 +115,6 @@ exact_unsuppressed_event_count: {exact_unsuppressed_event_count}\n"
         );
     }
     out
-}
-
-/// Effective packing budget after reserving broad-triage headroom.
-pub fn broad_triage_packing_budget(char_budget: usize) -> usize {
-    let proportional = char_budget / 10;
-    let reservation = BROAD_TRIAGE_CONTEXT_HEADROOM_CHARS.min(proportional);
-    char_budget.saturating_sub(reservation)
-}
-
-/// Whether measured usage leaves useful headroom relative to the hard budget.
-pub fn has_useful_context_headroom(used_chars: usize, budget_chars: usize) -> bool {
-    if budget_chars == 0 || used_chars > budget_chars {
-        return false;
-    }
-    let free = budget_chars.saturating_sub(used_chars);
-    let ratio = free as f64 / budget_chars as f64;
-    free >= BROAD_TRIAGE_CONTEXT_HEADROOM_CHARS.min(budget_chars / 10)
-        || ratio + f64::EPSILON >= BROAD_TRIAGE_MIN_HEADROOM_RATIO
 }
 
 /// Evaluator-only known-answer key for one adversarial corpus case.

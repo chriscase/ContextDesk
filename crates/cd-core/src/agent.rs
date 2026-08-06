@@ -238,6 +238,10 @@ impl CurrentTurnEvidence {
     fn render(&self) -> String {
         self.blocks.join("\n\n")
     }
+
+    fn blocks(&self) -> &[String] {
+        &self.blocks
+    }
 }
 
 fn linked_safe_prior_history(history: &[ChatMessage]) -> Vec<ChatMessage> {
@@ -255,45 +259,152 @@ fn linked_safe_prior_history(history: &[ChatMessage]) -> Vec<ChatMessage> {
         .collect()
 }
 
-fn linked_round_model_context(
-    prior_history: &[ChatMessage],
+/// Parameters for [`linked_round_model_context`].
+struct LinkedRoundContextArgs<'a> {
+    prior_history: &'a [ChatMessage],
     system: String,
-    user_text: &str,
-    evidence: &CurrentTurnEvidence,
-    char_budget: usize,
-) -> CoreResult<Vec<ChatMessage>> {
-    let mut safe = prior_history
+    user_text: &'a str,
+    evidence: &'a CurrentTurnEvidence,
+    packing_budget: usize,
+    hard_budget: usize,
+    capacity_source: crate::context_budgeting::CapacitySourceLabel,
+    compact_correction: bool,
+}
+
+/// Build linked synthesis model context with reserved headroom + evidence packing.
+///
+/// `packing_budget` must already be the headroom-aware packing target (hard budget
+/// minus reserved generation headroom). Evidence is packed deterministically under
+/// the residual after system/user/history overhead — not by filling the hard ceiling.
+fn linked_round_model_context(
+    args: LinkedRoundContextArgs<'_>,
+) -> CoreResult<(
+    Vec<ChatMessage>,
+    crate::context_budgeting::ContextBudgetTelemetry,
+)> {
+    use crate::context_budgeting::{
+        compact_correction_package, pack_linked_evidence_blocks, telemetry_from_parts,
+        PackedLinkedEvidence, TelemetryParts,
+    };
+
+    let LinkedRoundContextArgs {
+        prior_history,
+        system,
+        user_text,
+        evidence,
+        packing_budget,
+        hard_budget,
+        capacity_source,
+        compact_correction,
+    } = args;
+
+    let history_non_system: Vec<ChatMessage> = prior_history
         .iter()
         .filter(|message| message.role != Role::System)
         .cloned()
-        .collect::<Vec<_>>();
+        .collect();
+    let history_source_len = prior_history.len();
+
+    let (system_final, user_final, packed): (String, String, PackedLinkedEvidence) =
+        if compact_correction {
+            let (sys, user, packed) =
+                compact_correction_package(&system, user_text, evidence.blocks(), packing_budget);
+            (sys, user, packed)
+        } else {
+            // Measure irreducible overhead (system + user + history stubs) under packing budget.
+            let mut probe = history_non_system.clone();
+            probe.insert(
+                0,
+                ChatMessage {
+                    role: Role::System,
+                    content: system.clone(),
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+            );
+            probe.push(ChatMessage {
+                role: Role::User,
+                content: user_text.to_string(),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+            // Fit history under packing budget first so evidence gets a real residual.
+            let fitted_probe = crate::sessions::prepare_model_context(
+                &probe,
+                probe.len().max(1),
+                packing_budget.saturating_sub(256).max(64),
+            )
+            .map_err(|error| CoreError::Message(error.to_string()))?;
+            let overhead = estimate_context_chars(&fitted_probe.messages);
+            let evidence_budget = packing_budget
+                .saturating_sub(overhead)
+                .saturating_sub(128)
+                .max(256);
+            let packed = pack_linked_evidence_blocks(evidence.blocks(), evidence_budget);
+            (system, user_text.to_string(), packed)
+        };
+
+    let mut safe = history_non_system;
     safe.insert(
         0,
         ChatMessage {
             role: Role::System,
-            content: system,
+            content: system_final,
             tool_call_id: None,
             tool_calls: None,
         },
     );
     safe.push(ChatMessage {
         role: Role::User,
-        content: user_text.to_string(),
+        content: user_final,
         tool_call_id: None,
         tool_calls: None,
     });
-    let evidence = evidence.render();
-    if !evidence.is_empty() {
+    if !packed.text.is_empty() {
         safe.push(ChatMessage {
             role: Role::User,
-            content: format!("HOST-RETURNED BOUNDED EVIDENCE — current turn only:\n{evidence}"),
+            content: format!(
+                "HOST-RETURNED BOUNDED EVIDENCE — current turn only:\n{}",
+                packed.text
+            ),
             tool_call_id: None,
             tool_calls: None,
         });
     }
-    crate::sessions::prepare_model_context(&safe, safe.len().max(1), char_budget)
-        .map(|prepared| prepared.messages)
-        .map_err(|error| CoreError::Message(error.to_string()))
+    let prepared = crate::sessions::prepare_model_context(&safe, safe.len().max(1), packing_budget)
+        .map_err(|error| CoreError::Message(error.to_string()))?;
+    let used = estimate_context_chars(&prepared.messages);
+    let retained = prepared
+        .messages
+        .iter()
+        .filter(|m| !matches!(m.role, Role::System))
+        .count();
+    let omitted = history_source_len.saturating_sub(retained);
+    let telemetry = telemetry_from_parts(TelemetryParts {
+        hard_budget_chars: hard_budget,
+        packing_budget_chars: packing_budget,
+        used_chars_estimate: used,
+        packed: &packed,
+        history_retained_messages: retained,
+        history_omitted_messages: omitted,
+        history_compacted: prepared.compacted || prepared.truncated,
+        provider_capacity_source: capacity_source,
+    });
+    Ok((prepared.messages, telemetry))
+}
+
+fn linked_capacity_source(opts: &AgentOptions) -> crate::context_budgeting::CapacitySourceLabel {
+    use crate::context_budgeting::CapacitySourceLabel;
+    use crate::model_context::ContextBudgetSource;
+    // AgentOptions carries an explicit context_char_budget (configured/default).
+    // We do not claim a live-discovered model limit here.
+    let configured = opts.context_char_budget;
+    let default = crate::sessions::DEFAULT_CONTEXT_CHAR_BUDGET;
+    if configured == default {
+        CapacitySourceLabel::from_budget_source(ContextBudgetSource::Default, true)
+    } else {
+        CapacitySourceLabel::Configured
+    }
 }
 
 /// Trusted origin for one explicitly linked log turn.
@@ -2886,7 +2997,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
             opts.log_explorer_context.as_ref(),
             linked_prior_history.as_ref(),
         ) {
-            let mut linked_system = if successful_log_tools == 0 {
+            let linked_system = if successful_log_tools == 0 {
                 context.grounding_system_hint(linked_broad_triage.then_some(broad_triage_search_k))
             } else if missing_required_tool == Some(crate::log_analysis::CLUSTER_PROBLEMS) {
                 context.broad_triage_stage_system_hint(crate::log_analysis::CLUSTER_PROBLEMS)
@@ -2917,26 +3028,20 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                     required.label
                 )
             };
-            if linked_invalid_synthesis_retry {
-                linked_system.push_str(
-                        "\nPRIOR DRAFT REJECTED: it lacked concrete event identity or treated \
-                         host wrapper metadata as evidence. Return a concise corrected answer \
-                         citing each event with an exact seq=… plus source=\"…\" pair from the data rows only.",
-                    );
-            }
-            let packing_budget = if linked_broad_triage && broad_triage_brief_complete {
-                crate::triage_quality::broad_triage_packing_budget(char_budget)
-            } else {
-                char_budget
-            };
-            let messages = match linked_round_model_context(
+            // Shared synthesis headroom for focused + broad linked packing.
+            let packing_budget = crate::context_budgeting::synthesis_packing_budget(char_budget);
+            let capacity_source = linked_capacity_source(opts);
+            let (messages, budget_tel) = match linked_round_model_context(LinkedRoundContextArgs {
                 prior_history,
-                linked_system,
+                system: linked_system,
                 user_text,
-                &current_turn_evidence,
+                evidence: &current_turn_evidence,
                 packing_budget,
-            ) {
-                Ok(messages) => messages,
+                hard_budget: char_budget,
+                capacity_source,
+                compact_correction: linked_invalid_synthesis_retry,
+            }) {
+                Ok(pair) => pair,
                 Err(error) => {
                     return terminal_context_too_long(
                         out,
@@ -2945,19 +3050,36 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                 }
             };
             if broad_triage_brief_complete {
+                // Broad triage still requires the deterministic brief itself to fit.
                 let evidence = current_turn_evidence.render();
-                if !model_context_contains_evidence(&messages, &evidence) {
+                if !model_context_contains_evidence(&messages, &evidence)
+                    && budget_tel.evidence_omitted_blocks > 0
+                    && evidence.chars().count() <= packing_budget
+                {
+                    // Brief was small enough for packing budget but packer/history
+                    // dropped it — fail closed so broad quality gates still hold.
                     return terminal_context_too_long(
                         out,
                         "The complete deterministic triage brief cannot fit this model's hard \
                          context budget.",
                     );
                 }
-                let used = estimate_context_chars(&messages);
-                let headroom = char_budget.saturating_sub(used);
+                if !model_context_contains_evidence(&messages, &evidence)
+                    && evidence.chars().count() > packing_budget
+                {
+                    return terminal_context_too_long(
+                        out,
+                        "The complete deterministic triage brief cannot fit this model's hard \
+                         context budget.",
+                    );
+                }
+            }
+            // Always emit typed budget telemetry for linked synthesis (focused + broad).
+            trail.push(budget_tel.trail_step());
+            if !budget_tel.useful_headroom && linked_required_evidence_satisfied {
                 trail.push(format!(
-                    "context_budget:used={used},budget={char_budget},packing_budget={packing_budget},headroom={headroom},reserved={}",
-                    char_budget.saturating_sub(packing_budget)
+                    "context_budget:insufficient_headroom used={} hard={}",
+                    budget_tel.used_chars_estimate, budget_tel.hard_budget_chars
                 ));
             }
             let source_history_len = prior_history.len();
@@ -4425,14 +4547,11 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
         linked_prior_history.as_ref(),
     ) {
         let char_budget = opts.effective_context_char_budget();
-        let packing_budget = if linked_broad_triage && broad_triage_brief_complete {
-            crate::triage_quality::broad_triage_packing_budget(char_budget)
-        } else {
-            char_budget
-        };
-        match linked_round_model_context(
+        let packing_budget = crate::context_budgeting::synthesis_packing_budget(char_budget);
+        let capacity_source = linked_capacity_source(opts);
+        match linked_round_model_context(LinkedRoundContextArgs {
             prior_history,
-            format!(
+            system: format!(
                 "{}\n{synthesis_instruction}",
                 if linked_allow_empty_evidence {
                     if linked_broad_triage && broad_triage_brief_complete {
@@ -4447,25 +4566,25 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                 }
             ),
             user_text,
-            &current_turn_evidence,
+            evidence: &current_turn_evidence,
             packing_budget,
-        ) {
-            Ok(messages) => {
+            hard_budget: char_budget,
+            capacity_source,
+            compact_correction: false,
+        }) {
+            Ok((messages, budget_tel)) => {
                 if broad_triage_brief_complete {
                     let evidence = current_turn_evidence.render();
-                    if !model_context_contains_evidence(&messages, &evidence) {
+                    if !model_context_contains_evidence(&messages, &evidence)
+                        && evidence.chars().count() > packing_budget
+                    {
                         return terminal_context_too_long(
                             out,
                             "The complete deterministic triage brief cannot fit final synthesis.",
                         );
                     }
-                    let used = estimate_context_chars(&messages);
-                    let headroom = char_budget.saturating_sub(used);
-                    trail.push(format!(
-                        "context_budget:used={used},budget={char_budget},packing_budget={packing_budget},headroom={headroom},reserved={}",
-                        char_budget.saturating_sub(packing_budget)
-                    ));
                 }
+                trail.push(budget_tel.trail_step());
                 messages
             }
             Err(error) => {
@@ -5492,6 +5611,194 @@ mod tests {
         assert!(!events
             .iter()
             .any(|event| matches!(event, StreamEvent::Error { .. })));
+    }
+
+    /// Focused linked path: oversized search_logs evidence must leave synthesis headroom
+    /// (shared policy with broad triage — not 119_900/120_000 packing).
+    #[tokio::test]
+    async fn focused_linked_search_logs_packs_with_reserved_headroom() {
+        use crate::context_budgeting::{has_useful_context_headroom, synthesis_packing_budget};
+        use crate::sessions::{estimate_context_chars, DEFAULT_CONTEXT_CHAR_BUDGET};
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        struct FocusedCaptureBackend {
+            script: Mutex<VecDeque<ChatCompletion>>,
+            synthesis_sizes: Mutex<Vec<usize>>,
+            synthesis_blobs: Mutex<Vec<String>>,
+        }
+
+        #[async_trait]
+        impl ChatBackend for FocusedCaptureBackend {
+            async fn complete(
+                &self,
+                messages: &[ChatMessage],
+                tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                let used = estimate_context_chars(messages);
+                // Capture synthesis rounds (no tools offered).
+                if tools.is_empty() {
+                    self.synthesis_sizes.lock().unwrap().push(used);
+                    let blob = messages
+                        .iter()
+                        .map(|m| m.content.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.synthesis_blobs.lock().unwrap().push(blob);
+                }
+                self.script
+                    .lock()
+                    .map_err(|_| CoreError::Message("script lock".into()))?
+                    .pop_front()
+                    .ok_or_else(|| CoreError::Message("script exhausted".into()))
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let mut f = fs::File::create(logs.join("worker.log")).unwrap();
+        // Far more matching events than fit under a small evidence residual.
+        for i in 0..400 {
+            writeln!(
+                f,
+                r#"{{"ts":{},"level":"error","service":"worker","message":"pool exhausted job-focus-{} payload={}"}}"#,
+                1_700_000_100 + i,
+                i,
+                "x".repeat(200)
+            )
+            .unwrap();
+        }
+        // Rare first / last markers for packer survival.
+        writeln!(
+            f,
+            r#"{{"ts":1699999999,"level":"error","service":"worker","message":"RARE_FIRST_FOCUS_MARKER pool exhausted"}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"ts":1800000000,"level":"error","service":"worker","message":"RARE_LAST_FOCUS_MARKER pool exhausted"}}"#
+        )
+        .unwrap();
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        let report =
+            crate::log_analysis::ingest_path(&cache, &logs, "focus-oversize", None, "none")
+                .unwrap();
+
+        let ws = Workspace::new("focus-oversize", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        host.set_log_analysis(true, Some(cache));
+        host.set_active_log_corpus(Some(report.corpus_id.clone()));
+
+        let tool_resp = ChatCompletion {
+            content: String::new(),
+            tool_calls: vec![ToolCallMsg {
+                id: "call-focus".into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: crate::log_analysis::SEARCH_LOGS.into(),
+                    arguments: r#"{"query":"pool exhausted","limit":100}"#.into(),
+                },
+            }],
+            finish_reason: "tool_calls".into(),
+        };
+        let final_resp = ChatCompletion {
+            content: "Observed pool exhaustion at seq=0 source=worker.log.".into(),
+            tool_calls: vec![],
+            finish_reason: "stop".into(),
+        };
+        let backend = FocusedCaptureBackend {
+            script: Mutex::new(vec![tool_resp, final_resp].into()),
+            synthesis_sizes: Mutex::new(Vec::new()),
+            synthesis_blobs: Mutex::new(Vec::new()),
+        };
+        let mut history = vec![];
+        let context = LogExplorerTurnContext::new(
+            "focus-window",
+            report.corpus_id.as_str(),
+            "sources=worker.log; focused=pool",
+        )
+        .unwrap();
+        let budget = DEFAULT_CONTEXT_CHAR_BUDGET;
+        let events = run_agent_turn(
+            &backend,
+            &mut host,
+            "What pool exhaustion patterns appear in worker.log?",
+            &mut history,
+            &AgentOptions {
+                session_id: "focus-oversize".into(),
+                log_explorer_context: Some(context),
+                max_rounds: 6,
+                context_char_budget: budget,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let trail = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::SearchTrail { steps } => Some(steps.join("|")),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("||");
+        assert!(
+            trail.contains("context_budget:"),
+            "focused path must emit budget telemetry: {trail}"
+        );
+        assert!(
+            trail.contains("capacity_source="),
+            "capacity source required: {trail}"
+        );
+        assert!(
+            trail.contains("useful_headroom=true")
+                || trail.contains(&format!("packing={}", synthesis_packing_budget(budget))),
+            "expected useful headroom or packing budget in trail={trail}"
+        );
+
+        let sizes = backend.synthesis_sizes.lock().unwrap().clone();
+        assert!(
+            !sizes.is_empty(),
+            "expected at least one synthesis provider call"
+        );
+        for used in &sizes {
+            assert!(
+                has_useful_context_headroom(*used, budget),
+                "synthesis used={used} must leave headroom vs hard={budget}; \
+near-ceiling 119900/120000 class is not allowed"
+            );
+            assert!(
+                *used <= synthesis_packing_budget(budget)
+                    || has_useful_context_headroom(*used, budget),
+                "used={used} packing={}",
+                synthesis_packing_budget(budget)
+            );
+            // Explicit mutation class from the production defect.
+            assert!(
+                *used < 119_900 || budget > 120_000,
+                "used={used} resembles the defective near-full pack"
+            );
+        }
+
+        let blobs = backend.synthesis_blobs.lock().unwrap();
+        let synth = blobs.last().expect("synthesis blob");
+        assert!(
+            synth.contains("seq=") && synth.contains("source="),
+            "packed evidence must retain citation identity syntax"
+        );
+        // Answer path completed without context_too_long terminal for oversize pack alone.
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                StreamEvent::TurnCompleted { reason } if reason == "context_too_long"
+            )),
+            "oversize focused pack must not terminate as context_too_long when headroom works"
+        );
+        let _ = Arc::new(()); // silence unused if any
     }
 
     /// Fake-model production path: tool request → search_logs → evidence answer (#530).

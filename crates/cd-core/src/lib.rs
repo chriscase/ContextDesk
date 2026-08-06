@@ -21,6 +21,8 @@ pub mod chat;
 pub mod config;
 pub mod confluence_ro;
 pub mod connectors;
+/// Shared synthesis headroom, evidence packing, and budget telemetry.
+pub mod context_budgeting;
 /// Deterministic multi-source context plan for ordinary chat turns.
 pub mod context_plan;
 pub mod discovery;
