@@ -1,0 +1,6 @@
+{"ts":"2024-06-15T12:01:00Z","level":"info","service":"worker","message":"batch start batch_id=b-100"}
+{"ts":"2024-06-15T12:01:10Z","level":"error","service":"worker","message":"causal trigger: resource lease refused reason=quota_exhausted pool=compute"}
+{"ts":"2024-06-15T12:01:11Z","level":"error","service":"worker","message":"downstream symptom: task failed batch_id=b-100 step=fetch"}
+{"ts":"2024-06-15T12:01:12Z","level":"error","service":"worker","message":"downstream symptom: task failed batch_id=b-100 step=transform"}
+{"ts":"2024-06-15T12:01:13Z","level":"error","service":"worker","message":"downstream symptom: task failed batch_id=b-100 step=publish"}
+{"ts":"2024-06-15T12:01:14Z","level":"warn","service":"worker","message":"retry scheduled batch_id=b-100"}

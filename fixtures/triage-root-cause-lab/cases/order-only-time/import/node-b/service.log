@@ -1,0 +1,3 @@
+2024-09-01 08:00:05,100 INFO  - node-b boot complete
+2024-09-01 08:00:12,200 ERROR - causal candidate B: remote peer unreachable peer=node-a
+2024-09-01 08:00:16,300 ERROR - symptom: replicate lag growing

@@ -1,0 +1,3 @@
+2024-09-01 08:00:00,100 INFO  - node-a boot complete
+2024-09-01 08:00:10,200 ERROR - causal candidate A: local disk pressure high path=/var/data
+2024-09-01 08:00:15,300 ERROR - symptom: write failed path=/var/data/item

@@ -1,0 +1,5 @@
+{"ts":"2024-08-10T14:00:00Z","level":"info","service":"checkout","message":"job start job_id=j-9"}
+{"ts":"2024-08-10T14:00:10Z","level":"error","service":"checkout","message":"symptom only: feature entitlement check failed feature=export"}
+{"ts":"2024-08-10T14:00:11Z","level":"error","service":"checkout","message":"symptom only: feature entitlement check failed feature=export"}
+{"ts":"2024-08-10T14:00:12Z","level":"error","service":"checkout","message":"symptom only: workflow aborted job_id=j-9"}
+{"ts":"2024-08-10T14:00:20Z","level":"warn","service":"checkout","message":"operator note: entitlement authority source not present in this import"}

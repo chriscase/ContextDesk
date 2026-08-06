@@ -1,0 +1,12 @@
+{
+  "case_id": "missing-root-evidence",
+  "time_quality_expected": "wall",
+  "sources_present": ["app/checkout.jsonl"],
+  "sources_omitted": ["entitlement/authority.jsonl", "config/feature-flags.jsonl"],
+  "decoy_earliest_error_message_token": null,
+  "true_trigger_message_token": null,
+  "symptom_message_tokens": ["symptom only: feature entitlement check failed", "symptom only: workflow aborted"],
+  "root_cause_establishable": false,
+  "forbidden_claims": ["observed_omitted_source", "root_cause_established", "all_events_are_errors"],
+  "required_disclosures": ["missing_root_evidence", "next_evidence_needed"]
+}

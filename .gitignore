@@ -105,6 +105,9 @@ logs/
 # Neutral parser/framing reliability matrix (synthetic only).
 !fixtures/parser-framing-matrix/**
 !fixtures/parser-framing-matrix/**/*.log
+# Hermetic triage quality lab (synthetic only).
+!fixtures/triage-root-cause-lab/**
+!fixtures/triage-root-cause-lab/**/*.log
 
 # Python bytecode from the reference producer examples.
 __pycache__/

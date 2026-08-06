@@ -1,0 +1,2 @@
+{"ts":"2024-06-15T12:00:00Z","level":"error","service":"edge","message":"decoy: transient TLS handshake noise on unused endpoint"}
+{"ts":"2024-06-15T12:00:05Z","level":"info","service":"edge","message":"request accepted path=/health"}

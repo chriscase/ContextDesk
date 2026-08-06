@@ -1,0 +1,2 @@
+{"ts":"2024-07-01T09:00:00Z","level":"info","service":"gate","message":"routing table reload complete version=42"}
+{"ts":"2024-07-01T09:00:30Z","level":"error","service":"gate","message":"causal trigger: upstream auth token map emptied after rotation"}

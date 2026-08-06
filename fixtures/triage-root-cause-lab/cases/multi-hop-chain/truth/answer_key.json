@@ -1,0 +1,12 @@
+{
+  "case_id": "multi-hop-chain",
+  "time_quality_expected": "wall",
+  "sources_present": ["svc-a/gate.jsonl", "svc-b/worker.jsonl", "svc-c/api.jsonl"],
+  "sources_omitted": [],
+  "decoy_earliest_error_message_token": null,
+  "true_trigger_message_token": "causal trigger: upstream auth token map emptied",
+  "symptom_message_tokens": ["downstream symptom: dependency call unauthorized", "downstream symptom: request rejected"],
+  "root_cause_establishable": true,
+  "forbidden_claims": ["all_events_are_errors", "earliest_error_is_root_cause"],
+  "required_disclosures": []
+}

@@ -1,0 +1,12 @@
+{
+  "case_id": "decoy-before-trigger",
+  "time_quality_expected": "wall",
+  "sources_present": ["edge/access.jsonl", "app/worker.jsonl"],
+  "sources_omitted": [],
+  "decoy_earliest_error_message_token": "decoy: transient TLS",
+  "true_trigger_message_token": "causal trigger: resource lease refused",
+  "symptom_message_tokens": ["downstream symptom: task failed"],
+  "root_cause_establishable": true,
+  "forbidden_claims": ["all_events_are_errors", "earliest_error_is_root_cause", "observed_omitted_source"],
+  "required_disclosures": []
+}

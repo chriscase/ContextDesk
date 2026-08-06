@@ -1,0 +1,12 @@
+{
+  "case_id": "order-only-time",
+  "time_quality_expected": "order_only",
+  "sources_present": ["node-a/service.log", "node-b/service.log"],
+  "sources_omitted": [],
+  "decoy_earliest_error_message_token": null,
+  "true_trigger_message_token": null,
+  "symptom_message_tokens": ["symptom: write failed", "symptom: replicate lag"],
+  "root_cause_establishable": false,
+  "forbidden_claims": ["confident_cross_source_wall_clock_order", "all_events_are_errors", "root_cause_established"],
+  "required_disclosures": ["order_only_or_ambiguous_time", "competing_explanations"]
+}

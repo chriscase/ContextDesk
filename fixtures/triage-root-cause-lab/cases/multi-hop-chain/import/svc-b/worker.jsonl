@@ -1,0 +1,5 @@
+{"ts":"2024-07-01T09:00:45Z","level":"warn","service":"worker","message":"noise: queue depth elevated depth=12"}
+{"ts":"2024-07-01T09:01:00Z","level":"error","service":"worker","message":"downstream symptom: dependency call unauthorized target=svc-c"}
+{"ts":"2024-07-01T09:01:01Z","level":"error","service":"worker","message":"downstream symptom: dependency call unauthorized target=svc-c"}
+{"ts":"2024-07-01T09:01:02Z","level":"error","service":"worker","message":"downstream symptom: dependency call unauthorized target=svc-c"}
+{"ts":"2024-07-01T09:01:03Z","level":"info","service":"worker","message":"noise: heartbeat ok"}
