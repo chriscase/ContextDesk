@@ -136,6 +136,27 @@ fn default_report_omits_raw_bodies_and_private_paths() {
 }
 
 #[test]
+fn public_report_does_not_emit_user_controlled_corpus_name() {
+    let tmp = TempDir::new().unwrap();
+    let cache = tmp.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    let corpus = LogCorpus::create(
+        &cache,
+        "/Users/alice/incident api_key=not-for-public-export",
+    )
+    .unwrap();
+    let assessment = assess_logging_quality(&corpus).unwrap();
+    let public_json = serde_json::to_string(&assessment).unwrap().to_lowercase();
+    assert_eq!(assessment.corpus.name, "Imported corpus");
+    for pattern in public_assessment_denylist_patterns() {
+        assert!(
+            !public_json.contains(pattern),
+            "public report leaked {pattern:?}"
+        );
+    }
+}
+
+#[test]
 fn mixed_fixture_scores_time_and_sources() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/log-lab/scenarios/mixed-time-quality/import");

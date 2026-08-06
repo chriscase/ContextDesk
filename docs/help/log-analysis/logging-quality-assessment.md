@@ -74,11 +74,11 @@ Or: `./scripts/demo-logging-quality.sh`
 
 ## Five layers on every finding
 
-1. Measured fact  
-2. Deterministic finding  
-3. Fixed improvement hint (template id + acceptance criteria)  
-4. Evidence reference  
-5. Confidence / limitations  
+1. Measured fact
+2. Deterministic finding
+3. Fixed improvement hint (template id + acceptance criteria)
+4. Evidence reference
+5. Confidence / limitations
 
 Limitations are mandatory whenever residual uncertainty applies.
 

@@ -529,7 +529,12 @@ absolute paths, archive ancestry, credentials, environment values, and unredacte
         },
         corpus: LoggingQualityCorpusRef {
             id: summary_meta.id,
-            name: summary_meta.name,
+            // Corpus names are user-controlled and may have originated from a
+            // CLI `--name` value. A public-safe report must not turn a name
+            // such as a home path or pasted credential into exported data.
+            // The durable id is the stable report reference; hosts that need
+            // the local display name can resolve it from their own catalog.
+            name: "Imported corpus".into(),
             event_count,
             template_count,
             partial: stats.partial,
