@@ -418,7 +418,8 @@ impl ChatStatusRenderer {
             StreamEvent::TextDelta { .. } => unreachable!("handled above"),
             StreamEvent::ThoughtDelta { .. }
             | StreamEvent::Citation { .. }
-            | StreamEvent::SearchTrail { .. } => return,
+            | StreamEvent::SearchTrail { .. }
+            | StreamEvent::ContextBudget { .. } => return,
         };
         self.redraw(&mut state, phase_changed);
     }

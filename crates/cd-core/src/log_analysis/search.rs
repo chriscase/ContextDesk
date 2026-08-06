@@ -468,6 +468,137 @@ pub fn search_logs_with_excluded_templates(
     Ok(hits)
 }
 
+/// Char budget for dense citeable event rows attached to `search_logs` model detail.
+///
+/// Sized under [`crate::agent`]'s current-turn evidence cap so host-returned
+/// evidence can legitimately exceed the 108k packing residual (the production
+/// defect class) without inventing a second evidence channel.
+pub const SEARCH_LOGS_DENSE_IDENTITY_BUDGET_CHARS: usize = 180_000;
+/// Per-event message body chars in the dense identity dump (larger than exemplar UI).
+const DENSE_EVENT_MESSAGE_CHARS: usize = 1_600;
+
+/// Format dense `seq=`/`source=` identity rows for matching events so focused
+/// packing has real, oversized host evidence when the corpus is large.
+///
+/// Rows are ordered: first matching event, middle matches by seq, last matching
+/// event last — so packer first/last strata map to rare head/tail identities.
+pub fn dense_identity_dump_for_query(
+    corpus: &LogCorpus,
+    q: &SearchLogsQuery,
+    excluded_template_ids: &[u64],
+    budget_chars: usize,
+) -> CoreResult<String> {
+    let excluded = normalize_excluded_template_ids(excluded_template_ids)?;
+    let query_l = q.query.as_deref().unwrap_or("").to_lowercase();
+    let tokens: Vec<&str> = query_l
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() > 2)
+        .collect();
+    let matched: Vec<String> = corpus.with_events(|events| {
+        let mut matched = Vec::new();
+        for e in events {
+            if excluded.contains(&e.template_id) {
+                continue;
+            }
+            if let Some(from) = q.time_from {
+                if e.ts < from {
+                    continue;
+                }
+            }
+            if let Some(to) = q.time_to {
+                if e.ts >= to {
+                    continue;
+                }
+            }
+            if let Some(ref lvl) = q.level {
+                if !e.level.eq_ignore_ascii_case(lvl) {
+                    continue;
+                }
+            }
+            if let Some(ref svc) = q.service {
+                if e.service.as_deref() != Some(svc.as_str()) {
+                    continue;
+                }
+            }
+            if !tokens.is_empty() {
+                let msg_l = e.message.to_lowercase();
+                let token_hit = tokens.iter().any(|t| msg_l.contains(t));
+                let phrase_hit = !query_l.is_empty() && msg_l.contains(&query_l);
+                if !token_hit && !phrase_hit {
+                    continue;
+                }
+            }
+            // Longer message body than UI exemplars so packing residual is load-bearing.
+            let msg = if e.message.chars().count() > DENSE_EVENT_MESSAGE_CHARS {
+                e.message
+                    .chars()
+                    .take(DENSE_EVENT_MESSAGE_CHARS)
+                    .collect::<String>()
+            } else {
+                e.message.clone()
+            };
+            matched.push(format!(
+                "seq={} source=\"{}\" template_id={} msg={}",
+                e.seq,
+                e.source.replace('"', "'"),
+                e.template_id,
+                msg.replace('\n', "\\n")
+            ));
+        }
+        matched
+    });
+
+    if matched.is_empty() {
+        return Ok(String::new());
+    }
+
+    // Ensure first and last physical matches stay first/last in the dump even if
+    // we truncate the middle for budget.
+    let first = matched.first().cloned();
+    let last = if matched.len() > 1 {
+        matched.last().cloned()
+    } else {
+        None
+    };
+    let mut out = String::from("identity_rows:\n");
+    let mut used = out.chars().count();
+    if let Some(f) = first {
+        out.push_str(&f);
+        out.push('\n');
+        used = out.chars().count();
+    }
+    if matched.len() > 2 {
+        for row in matched.iter().take(matched.len() - 1).skip(1) {
+            let row_cost = row.chars().count() + 1;
+            if used + row_cost + last.as_ref().map(|l| l.chars().count() + 1).unwrap_or(0)
+                > budget_chars
+            {
+                break;
+            }
+            out.push_str(row);
+            out.push('\n');
+            used = out.chars().count();
+        }
+    }
+    if let Some(l) = last {
+        // Always try to append last rare identity if budget allows its capped form.
+        let cost = l.chars().count() + 1;
+        if used + cost <= budget_chars {
+            out.push_str(&l);
+            out.push('\n');
+        } else if budget_chars > used + 32 {
+            // Truncate last line to remaining budget while keeping identity markers.
+            let room = budget_chars.saturating_sub(used + 1);
+            let truncated: String = l.chars().take(room).collect();
+            if truncated.contains("seq=") && truncated.contains("source=") {
+                out.push_str(&truncated);
+                out.push('\n');
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1273,6 +1273,21 @@ impl RecordingTurnTrace {
                     .collect(),
                 host_policy_codes: crate::activity::host_policy_codes_from_trail_steps(steps),
             },
+            StreamEvent::ContextBudget { telemetry } => {
+                // Developer-detail record: typed JSON facts, not trail-string parsing.
+                self.record_developer(DeveloperDetailDraft::context_provenance(
+                    0,
+                    "context_budget",
+                    if telemetry.useful_headroom {
+                        "useful_headroom"
+                    } else {
+                        "insufficient_headroom"
+                    },
+                    telemetry.to_json(),
+                    ContextProvenanceAuthority::DeterministicHost,
+                ));
+                return;
+            }
             StreamEvent::Citation { source_id, .. } => TracedHostEvent::Citation {
                 source_id: source_id.clone(),
             },

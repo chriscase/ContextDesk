@@ -929,6 +929,35 @@ impl ActivityRecorder {
                         .collect(),
                     host_policy_codes: host_policy_codes_from_trail_steps(steps),
                 }),
+                StreamEvent::ContextBudget { telemetry } => {
+                    // Typed budget snapshot as an inspector row (metadata only).
+                    self.push(ActivityEvent {
+                        turn_id: String::new(),
+                        operation_id: "context-budget".into(),
+                        seq: 0,
+                        elapsed_ms: None,
+                        phase: ActivityPhase::Progress,
+                        status: ActivityStatus::Ok,
+                        origin: ActivityOrigin::DeterministicHost,
+                        determinism: Determinism::Deterministic,
+                        label: format!(
+                            "Context budget: used={} packing={} hard={} headroom={}",
+                            telemetry.used_chars_estimate,
+                            telemetry.packing_budget_chars,
+                            telemetry.hard_budget_chars,
+                            telemetry.useful_headroom
+                        ),
+                        detail: Some(
+                            serde_json::to_string(telemetry).unwrap_or_else(|_| "{}".into()),
+                        ),
+                        trigger: ActivityTrigger::HostPolicy,
+                        scope: self.scope.clone(),
+                        evidence: Vec::new(),
+                        privacy: PrivacyClass::Metadata,
+                        context: None,
+                    });
+                    None
+                }
                 StreamEvent::Citation { source_id, .. } => Some(TracedHostEvent::Citation {
                     source_id: source_id.clone(),
                 }),

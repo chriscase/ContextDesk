@@ -253,6 +253,10 @@ pub struct TraceSummaryLine {
     /// (full scrubbed sum across all messages that call offered — not only
     /// the bodies retained under the per-call message storage cap).
     pub context_used_chars: usize,
+    /// Typed linked/focused packing telemetry from core (additive; absent on
+    /// ordinary chat that never emitted `StreamEvent::ContextBudget`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_budget_telemetry: Option<cd_core::context_budgeting::ContextBudgetTelemetry>,
     /// True when that last call retained only a prefix of messages in the
     /// detailed trace payload; `context_used_chars` remains the full sum.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

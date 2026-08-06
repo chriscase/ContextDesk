@@ -411,6 +411,28 @@ pub async fn run(
             if let Some(summary) = context_used_from_events(&outcome.events) {
                 eprintln!("Context used: {summary}");
             }
+            // Typed packing telemetry (linked/focused): hard vs packing never conflated.
+            if let Some(tel) = outcome.events.iter().rev().find_map(|e| match e {
+                StreamEvent::ContextBudget { telemetry } => Some(telemetry),
+                _ => None,
+            }) {
+                eprintln!(
+                    "Context budget: hard={} packing={} used={} reserved={} free={} \
+evidence_pre_pack={} evidence_included={} omitted_blocks={} omitted_chars={} \
+capacity_source={} useful_headroom={}",
+                    tel.hard_budget_chars,
+                    tel.packing_budget_chars,
+                    tel.used_chars_estimate,
+                    tel.reserved_headroom_chars,
+                    tel.free_chars_estimate,
+                    tel.evidence_pre_pack_chars,
+                    tel.evidence_included_chars,
+                    tel.evidence_omitted_blocks,
+                    tel.evidence_omitted_chars,
+                    tel.provider_capacity_source.as_str(),
+                    tel.useful_headroom
+                );
+            }
         }
         OutputFormat::Jsonl => {
             let mut seq: u64 = 0;
@@ -769,6 +791,22 @@ fn build_trace_lines(
     }
     tool_names.truncate(MAX_TRACE_SUMMARY_ITEMS);
 
+    // Prefer the last typed ContextBudget event (synthesis) when present.
+    let context_budget_telemetry = outcome.events.iter().rev().find_map(|e| match e {
+        StreamEvent::ContextBudget { telemetry } => Some(telemetry.clone()),
+        _ => None,
+    });
+    // Human-facing hard budget: prefer typed telemetry hard when present so
+    // packing vs hard is never mislabeled as the same number.
+    let context_budget_chars = context_budget_telemetry
+        .as_ref()
+        .map(|t| t.hard_budget_chars)
+        .unwrap_or(context_budget_chars);
+    let context_used_chars = context_budget_telemetry
+        .as_ref()
+        .map(|t| t.used_chars_estimate)
+        .unwrap_or(context_used_chars);
+
     let summary = TraceSummaryLine {
         provider_profile_id: outcome.provider_profile_id.clone(),
         chat_model: outcome.chat_model.clone(),
@@ -780,6 +818,7 @@ fn build_trace_lines(
         evidence_ids,
         context_budget_chars,
         context_used_chars,
+        context_budget_telemetry,
         context_messages_capped,
         tool_names,
         tools_executed,
@@ -1009,5 +1048,90 @@ mod grounding_tests {
             vec!["broad_log_triage", "search_logs"],
             "legacy union remains backward compatible"
         );
+    }
+
+    #[test]
+    fn trace_summary_carries_typed_context_budget_telemetry() {
+        use cd_core::context_budgeting::{
+            synthesis_packing_budget, CapacitySourceLabel, ContextBudgetTelemetry,
+        };
+        let tel = ContextBudgetTelemetry {
+            hard_budget_chars: 120_000,
+            packing_budget_chars: synthesis_packing_budget(120_000),
+            reserved_headroom_chars: 12_000,
+            used_chars_estimate: 50_000,
+            free_chars_estimate: 70_000,
+            evidence_pre_pack_chars: 150_000,
+            evidence_included_chars: 90_000,
+            evidence_omitted_blocks: 2,
+            evidence_omitted_chars: 60_000,
+            evidence_identity_lines_included: 10,
+            evidence_identity_lines_omitted: 5,
+            history_retained_messages: 2,
+            history_omitted_messages: 1,
+            history_compacted: false,
+            provider_capacity_source: CapacitySourceLabel::UnknownConfigured,
+            useful_headroom: true,
+        };
+        let events = vec![
+            StreamEvent::ContextBudget {
+                telemetry: tel.clone(),
+            },
+            StreamEvent::SearchTrail {
+                steps: vec![tel.trail_step()],
+            },
+            StreamEvent::TurnCompleted {
+                reason: "stop".into(),
+            },
+        ];
+        let outcome = ChatWorkflowOutcome {
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            events,
+            final_text: "ok".into(),
+            provider_profile_id: "p".into(),
+            chat_model: "m".into(),
+            corpus_revision: None,
+            history_messages: 1,
+        };
+        let lines = build_trace_lines(
+            TraceLevel::Summary,
+            false,
+            Some("c"),
+            &outcome,
+            &[],
+            1,
+            99_999, // deliberate wrong budget — typed hard must win
+        );
+        let StreamLine::TraceSummary(summary) = &lines[0] else {
+            panic!("expected trace summary");
+        };
+        let typed = summary
+            .context_budget_telemetry
+            .as_ref()
+            .expect("typed context_budget_telemetry required");
+        assert_eq!(typed.hard_budget_chars, 120_000);
+        assert_eq!(typed.packing_budget_chars, 108_000);
+        assert_eq!(summary.context_budget_chars, 120_000);
+        assert_eq!(summary.context_used_chars, 50_000);
+        assert_ne!(
+            typed.hard_budget_chars, typed.packing_budget_chars,
+            "hard and packing must stay distinct"
+        );
+        // Legacy trail string still available via event (compatibility).
+        assert!(outcome_has_legacy_budget_trail(&outcome));
+        // Near-ceiling is never healthy in typed snapshot.
+        assert!(!cd_core::context_budgeting::has_useful_context_headroom(
+            119_900, 120_000
+        ));
+    }
+
+    fn outcome_has_legacy_budget_trail(outcome: &ChatWorkflowOutcome) -> bool {
+        outcome.events.iter().any(|e| match e {
+            StreamEvent::SearchTrail { steps } => {
+                steps.iter().any(|s| s.starts_with("context_budget:"))
+            }
+            _ => false,
+        })
     }
 }

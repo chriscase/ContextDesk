@@ -27,6 +27,8 @@ pub const BROAD_TRIAGE_MIN_HEADROOM_RATIO: f64 = SYNTHESIS_MIN_HEADROOM_RATIO;
 const OMIT_FOOTER_RESERVE: usize = 240;
 /// Soft per-record body cap when a single evidence unit still exceeds remaining budget.
 const MAX_SINGLE_RECORD_BODY_CHARS: usize = 1_200;
+/// Cap for force-included first/last identity lines so one huge lead cannot starve the tail.
+const MAX_MANDATORY_IDENTITY_CHARS: usize = 480;
 
 /// How the hard character capacity was established for this turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -86,6 +88,8 @@ pub struct ContextBudgetTelemetry {
     pub used_chars_estimate: usize,
     /// Free = hard − used (may be larger than reserved when under-filled).
     pub free_chars_estimate: usize,
+    /// Host evidence chars **before** packing (sum of trusted blocks).
+    pub evidence_pre_pack_chars: usize,
     /// Evidence body chars included (excluding system/user/history).
     pub evidence_included_chars: usize,
     /// Evidence blocks omitted by the packer.
@@ -117,8 +121,10 @@ impl ContextBudgetTelemetry {
     pub fn trail_step(&self) -> String {
         format!(
             "context_budget:used={},budget={},hard={},packing_budget={},packing={},\
-headroom={},reserved={},evidence_included={},evidence_omitted_blocks={},\
-evidence_omitted_chars={},history_retained={},history_omitted={},\
+headroom={},reserved={},evidence_pre_pack={},evidence_included={},\
+evidence_omitted_blocks={},evidence_omitted_chars={},\
+evidence_identity_included={},evidence_identity_omitted={},\
+history_retained={},history_omitted={},\
 history_compacted={},capacity_source={},useful_headroom={}",
             self.used_chars_estimate,
             self.hard_budget_chars,
@@ -127,9 +133,12 @@ history_compacted={},capacity_source={},useful_headroom={}",
             self.packing_budget_chars,
             self.free_chars_estimate,
             self.reserved_headroom_chars,
+            self.evidence_pre_pack_chars,
             self.evidence_included_chars,
             self.evidence_omitted_blocks,
             self.evidence_omitted_chars,
+            self.evidence_identity_lines_included,
+            self.evidence_identity_lines_omitted,
             self.history_retained_messages,
             self.history_omitted_messages,
             self.history_compacted,
@@ -303,33 +312,88 @@ pub fn pack_linked_evidence_blocks(
         }
     }
 
-    // Force-include first and last identity units so rare tail + lead survive.
+    // Force-include first and last identity units so rare tail + lead both survive.
+    // Capacity is **reserved** for them first so a huge early row cannot starve the last.
     let identity_idxs: Vec<usize> = units
         .iter()
         .enumerate()
         .filter(|(_, u)| u.is_identity)
         .map(|(i, _)| i)
         .collect();
+    let mut first_identity_idx: Option<usize> = None;
+    let mut last_identity_idx: Option<usize> = None;
     if let Some(&first) = identity_idxs.first() {
         units[first].stratum = 0;
         units[first].score += 5_000;
+        first_identity_idx = Some(first);
     }
     if identity_idxs.len() > 1 {
         if let Some(&last) = identity_idxs.last() {
             units[last].stratum = 1;
             units[last].score += 5_000;
+            last_identity_idx = Some(last);
         }
     }
 
-    // Stratum 0/1 first, then score desc, then original index for stability.
-    let mut order: Vec<usize> = (0..units.len()).collect();
-    order.sort_by(|&a, &b| {
-        units[a]
-            .stratum
-            .cmp(&units[b].stratum)
-            .then_with(|| units[b].score.cmp(&units[a].score))
-            .then_with(|| a.cmp(&b))
-    });
+    // Prepare mandatory lines (capped) and reserve their cost before middle fill.
+    // Prefer char-prefix truncation so useful msg text near the identity survives
+    // (source=-only cuts drop the event body). Dedup identity keys across strata.
+    let mut mandatory: Vec<(usize, String, usize)> = Vec::new();
+    let mut reserved_chars = 0usize;
+    let mut mandatory_keys = std::collections::BTreeSet::new();
+    for idx in [first_identity_idx, last_identity_idx]
+        .into_iter()
+        .flatten()
+    {
+        if mandatory.iter().any(|(i, _, _)| *i == idx) {
+            continue;
+        }
+        if let Some(key) = &units[idx].identity_key {
+            if !mandatory_keys.insert(key.clone()) {
+                continue; // same identity as another mandatory slot
+            }
+        }
+        let line = &units[idx].line;
+        let capped = {
+            let by_chars = truncate_chars_at_boundary(line, MAX_MANDATORY_IDENTITY_CHARS);
+            if line_has_citation_identity(&by_chars) {
+                by_chars
+            } else {
+                truncate_preserving_identity_line(line, MAX_MANDATORY_IDENTITY_CHARS)
+                    .unwrap_or(by_chars)
+            }
+        };
+        if !line_has_citation_identity(&capped) {
+            continue;
+        }
+        let cost = capped.chars().count().saturating_add(1);
+        mandatory.push((idx, capped, cost));
+        reserved_chars = reserved_chars.saturating_add(cost);
+    }
+    // Never reserve more than half the body for mandatory strata alone.
+    if reserved_chars > body_budget / 2 && !mandatory.is_empty() {
+        // Keep both mandatory lines but shrink their allowance proportionally.
+        let scale_budget = (body_budget / 2).max(64);
+        let n_mandatory = mandatory.len().max(1);
+        let max_line = (scale_budget / n_mandatory).max(32);
+        reserved_chars = 0;
+        for item in &mut mandatory {
+            if let Some(t) = truncate_preserving_identity_line(&item.1, max_line) {
+                item.1 = t;
+            } else {
+                item.1 = truncate_chars_at_boundary(&item.1, max_line);
+            }
+            item.2 = item.1.chars().count().saturating_add(1);
+            reserved_chars = reserved_chars.saturating_add(item.2);
+        }
+    }
+    let fill_budget = body_budget.saturating_sub(reserved_chars);
+
+    // Fill remaining budget with non-mandatory units (score desc, stable).
+    let mut order: Vec<usize> = (0..units.len())
+        .filter(|i| !mandatory.iter().any(|(m, _, _)| m == i))
+        .collect();
+    order.sort_by(|&a, &b| units[b].score.cmp(&units[a].score).then_with(|| a.cmp(&b)));
 
     let mut selected: Vec<Option<String>> = vec![None; units.len()];
     let mut used_chars = 0usize;
@@ -337,6 +401,17 @@ pub fn pack_linked_evidence_blocks(
     let mut identity_included = 0usize;
     let mut identity_omitted = 0usize;
     let mut blocks_touched = std::collections::BTreeSet::new();
+
+    // Place mandatory strata first (reserved capacity).
+    for (idx, line, cost) in &mandatory {
+        if let Some(key) = &units[*idx].identity_key {
+            seen_ids.insert(key.clone());
+        }
+        selected[*idx] = Some(line.clone());
+        used_chars = used_chars.saturating_add(*cost);
+        blocks_touched.insert(units[*idx].block_idx);
+        identity_included = identity_included.saturating_add(1);
+    }
 
     for idx in order {
         let u = &units[idx];
@@ -349,15 +424,17 @@ pub fn pack_linked_evidence_blocks(
         let mut candidate = u.line.clone();
         let mut cand_chars = candidate.chars().count();
         let join_cost = 1;
-        if used_chars + cand_chars + join_cost > body_budget {
+        // Middle fill only competes for fill_budget (mandatory already reserved).
+        let fill_used = used_chars.saturating_sub(reserved_chars.min(used_chars));
+        if fill_used + cand_chars + join_cost > fill_budget {
             if u.is_identity {
                 if let Some(trimmed) = truncate_preserving_identity_line(
                     &candidate,
-                    body_budget.saturating_sub(used_chars + join_cost),
+                    fill_budget.saturating_sub(fill_used + join_cost),
                 ) {
                     candidate = trimmed;
                     cand_chars = candidate.chars().count();
-                    if used_chars + cand_chars + join_cost > body_budget {
+                    if fill_used + cand_chars + join_cost > fill_budget {
                         identity_omitted = identity_omitted.saturating_add(1);
                         continue;
                     }
@@ -366,7 +443,7 @@ pub fn pack_linked_evidence_blocks(
                     continue;
                 }
             } else {
-                let room = body_budget.saturating_sub(used_chars + join_cost);
+                let room = fill_budget.saturating_sub(fill_used + join_cost);
                 if room < 48 {
                     continue;
                 }
@@ -379,6 +456,13 @@ pub fn pack_linked_evidence_blocks(
                 cand_chars = candidate.chars().count();
             }
         }
+        // Hard ceiling: never exceed full body_budget.
+        if used_chars + cand_chars + join_cost > body_budget {
+            if u.is_identity {
+                identity_omitted = identity_omitted.saturating_add(1);
+            }
+            continue;
+        }
         selected[idx] = Some(candidate);
         used_chars = used_chars.saturating_add(cand_chars + join_cost);
         blocks_touched.insert(u.block_idx);
@@ -389,11 +473,8 @@ pub fn pack_linked_evidence_blocks(
 
     // Reassemble in original unit order for stable model-facing text.
     let mut parts: Vec<String> = Vec::new();
-    for (i, slot) in selected.into_iter().enumerate() {
-        if let Some(line) = slot {
-            let _ = i;
-            parts.push(line);
-        }
+    for line in selected.into_iter().flatten() {
+        parts.push(line);
     }
     let mut text = parts.join("\n");
     let included_chars = text.chars().count();
@@ -546,11 +627,13 @@ pub struct TelemetryParts<'a> {
     pub packing_budget_chars: usize,
     /// Measured use.
     pub used_chars_estimate: usize,
+    /// Host evidence size before packing.
+    pub evidence_pre_pack_chars: usize,
     /// Packed evidence stats.
     pub packed: &'a PackedLinkedEvidence,
-    /// Retained history message count.
+    /// Retained **prior-history** message count (excludes system / current user / evidence).
     pub history_retained_messages: usize,
-    /// Omitted history message count.
+    /// Omitted prior-history message count.
     pub history_omitted_messages: usize,
     /// Compaction applied.
     pub history_compacted: bool,
@@ -572,6 +655,7 @@ pub fn telemetry_from_parts(parts: TelemetryParts<'_>) -> ContextBudgetTelemetry
         reserved_headroom_chars: reserved,
         used_chars_estimate: parts.used_chars_estimate,
         free_chars_estimate: free,
+        evidence_pre_pack_chars: parts.evidence_pre_pack_chars,
         evidence_included_chars: parts.packed.included_chars,
         evidence_omitted_blocks: parts.packed.omitted_blocks,
         evidence_omitted_chars: parts.packed.omitted_chars,
@@ -586,6 +670,40 @@ pub fn telemetry_from_parts(parts: TelemetryParts<'_>) -> ContextBudgetTelemetry
             parts.hard_budget_chars,
         ),
     }
+}
+
+/// Count prior-history retention: messages that came from `prior_history` and still
+/// appear in the prepared model window. Excludes system, the current user request,
+/// and the current-turn host evidence block.
+pub fn count_prior_history_retention(
+    prior_history: &[crate::chat::ChatMessage],
+    prepared: &[crate::chat::ChatMessage],
+    current_user_text: &str,
+) -> (usize, usize, bool) {
+    use crate::chat::Role;
+    let prior: Vec<&crate::chat::ChatMessage> = prior_history
+        .iter()
+        .filter(|m| m.role != Role::System)
+        .collect();
+    let prior_len = prior.len();
+    let mut retained = 0usize;
+    for p in &prior {
+        if prepared
+            .iter()
+            .any(|m| m.role == p.role && m.content == p.content)
+        {
+            retained = retained.saturating_add(1);
+        }
+    }
+    // Compaction inserts a host summary when prior messages were dropped.
+    let compacted = prepared.iter().any(|m| {
+        m.content.contains("[earlier conversation compacted]")
+            || m.content.contains("compacted for model context")
+    });
+    // Guard: current user / evidence must not inflate retained.
+    let _ = current_user_text;
+    let omitted = prior_len.saturating_sub(retained);
+    (retained, omitted, compacted)
 }
 
 #[cfg(test)]
@@ -641,15 +759,26 @@ mod tests {
         assert!(a.text.contains("seq="));
         assert!(a.text.contains("source="));
         assert!(
-            a.text.contains("needle-rare-event") || a.text.contains("seq=9999"),
+            a.text.contains("needle-rare-event") && a.text.contains("seq=9999"),
             "rare late identity must survive oversize pack: {}",
             a.text.chars().take(400).collect::<String>()
         );
         assert!(
-            a.text.contains("needle-first-event") || a.text.contains("seq=0"),
+            a.text.contains("needle-first-event"),
             "first/representative identity must survive: {}",
             a.text.chars().take(400).collect::<String>()
         );
+        // Identity counts must match packed text.
+        let id_lines = a
+            .text
+            .lines()
+            .filter(|l| line_has_citation_identity(l))
+            .count();
+        assert_eq!(
+            id_lines, a.identity_lines_included,
+            "included identity count must match packed lines"
+        );
+        assert!(a.identity_lines_omitted > 0);
         // Full package near hard budget class would fail headroom check when used as packing fill.
         assert!(!has_useful_context_headroom(119_900, 120_000));
         // Citation lines never split mid-marker
@@ -704,10 +833,14 @@ mod tests {
     }
 
     #[test]
-    fn packer_oversize_force_includes_last_rare_identity() {
-        // Many long early identity hits; rare needle is the last block only.
+    fn packer_oversize_force_includes_first_and_last_rare_identities() {
+        // Huge first identity + many mid hits must not starve the last rare row.
         let mut blocks = Vec::new();
-        for i in 0..80 {
+        blocks.push(format!(
+            "seq=0 source=\"worker.log\" template_id=0 msg=RARE_FIRST {}",
+            "LEAD_PAD ".repeat(40)
+        ));
+        for i in 1..80 {
             blocks.push(format!(
                 "seq={i} source=\"worker.log\" template_id={} msg={}",
                 i % 5,
@@ -725,15 +858,102 @@ mod tests {
             "must be an oversize pack"
         );
         assert!(
-            packed.text.contains("needle-rare-event")
-                || packed.text.contains("UNIQUE_TAIL")
-                || packed.text.contains("seq=9999"),
+            packed.text.contains("RARE_FIRST"),
+            "first rare must survive: {}",
+            packed.text.chars().take(300).collect::<String>()
+        );
+        assert!(
+            packed.text.contains("needle-rare-event") || packed.text.contains("UNIQUE_TAIL"),
             "last rare identity must survive: included={} omitted_blocks={} text_prefix={}",
             packed.identity_lines_included,
             packed.omitted_blocks,
             packed.text.chars().take(300).collect::<String>()
         );
         assert!(packed.text.chars().count() <= budget);
+        // Deterministic under reordering of middle blocks only (ends fixed).
+        let mut reordered = blocks.clone();
+        let last_i = reordered.len() - 1;
+        reordered[1..last_i].reverse();
+        let packed2 = pack_linked_evidence_blocks(&reordered, budget);
+        assert!(packed2.text.contains("RARE_FIRST"));
+        assert!(packed2.text.contains("needle-rare-event") || packed2.text.contains("UNIQUE_TAIL"));
+    }
+
+    #[test]
+    fn packer_tiny_residual_still_keeps_both_identity_strata() {
+        let blocks = vec![
+            "seq=1 source=\"a.log\" msg=first-rare".into(),
+            format!("seq=2 source=\"a.log\" msg={}", "x".repeat(5_000)),
+            "seq=3 source=\"a.log\" msg=last-rare".into(),
+        ];
+        let packed = pack_linked_evidence_blocks(&blocks, 200);
+        assert!(packed.text.contains("seq=1") && packed.text.contains("first-rare"));
+        assert!(packed.text.contains("seq=3") && packed.text.contains("last-rare"));
+        assert!(packed.text.chars().count() <= 200);
+    }
+
+    #[test]
+    fn count_prior_history_excludes_user_and_evidence() {
+        use crate::chat::{ChatMessage, Role};
+        let prior = vec![
+            ChatMessage {
+                role: Role::User,
+                content: "old question".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: "old answer".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+        let prepared = vec![
+            ChatMessage {
+                role: Role::System,
+                content: "sys".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::User,
+                content: "old question".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: "old answer".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::User,
+                content: "current question".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::User,
+                content:
+                    "HOST-RETURNED BOUNDED EVIDENCE — current turn only:\nseq=1 source=\"w.log\""
+                        .into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+        let (ret, om, _c) = count_prior_history_retention(&prior, &prepared, "current question");
+        assert_eq!(ret, 2, "both prior messages retained");
+        assert_eq!(om, 0);
+        // Drop one prior from prepared → omitted=1
+        let prepared2: Vec<_> = prepared
+            .into_iter()
+            .filter(|m| m.content != "old answer")
+            .collect();
+        let (ret2, om2, _) = count_prior_history_retention(&prior, &prepared2, "current question");
+        assert_eq!(ret2, 1);
+        assert_eq!(om2, 1);
     }
 
     #[test]
@@ -780,6 +1000,7 @@ mod tests {
             hard_budget_chars: 120_000,
             packing_budget_chars: synthesis_packing_budget(120_000),
             used_chars_estimate: 50_000,
+            evidence_pre_pack_chars: 80_000,
             packed: &packed,
             history_retained_messages: 3,
             history_omitted_messages: 10,

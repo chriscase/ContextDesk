@@ -4580,6 +4580,19 @@ impl ToolHost {
                 raw.push_str(&format!("    e.g. {e}\n"));
             }
         }
+        // Dense citeable rows (bounded) so focused packing sees real oversized host
+        // evidence — the production defect class — not only short UI exemplars.
+        let dense = crate::log_analysis::search::dense_identity_dump_for_query(
+            &corpus,
+            &q,
+            &suppression.excluded_template_ids,
+            crate::log_analysis::search::SEARCH_LOGS_DENSE_IDENTITY_BUDGET_CHARS,
+        )
+        .unwrap_or_default();
+        if !dense.is_empty() {
+            raw.push_str("---\n");
+            raw.push_str(&dense);
+        }
         raw.insert_str(
             0,
             &format!(

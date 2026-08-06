@@ -89,6 +89,15 @@ pub enum StreamEvent {
         /// Human-readable steps.
         steps: Vec<String>,
     },
+    /// Typed model-context budget / packing telemetry for one provider request.
+    ///
+    /// Emitted alongside a legacy `SearchTrail` `context_budget:…` string for
+    /// compatibility. Public consumers should read this event (or its JSON
+    /// projection) rather than parsing the trail string.
+    ContextBudget {
+        /// Full typed snapshot (camelCase on the wire).
+        telemetry: crate::context_budgeting::ContextBudgetTelemetry,
+    },
     /// Host must obtain a user decision before a write.
     PermissionRequired {
         /// Request id for `permission.respond`.

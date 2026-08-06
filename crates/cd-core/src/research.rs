@@ -96,6 +96,15 @@ pub fn event_to_dto(e: &StreamEvent) -> EventDto {
         StreamEvent::SearchTrail { steps } => {
             ("search_trail", serde_json::json!({ "steps": steps }))
         }
+        StreamEvent::ContextBudget { telemetry } => (
+            "context_budget",
+            telemetry
+                .to_json()
+                .as_object()
+                .cloned()
+                .map(serde_json::Value::Object)
+                .unwrap_or_else(|| telemetry.to_json()),
+        ),
         StreamEvent::PermissionRequired {
             request_id,
             tool_name,
