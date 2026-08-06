@@ -525,8 +525,8 @@ fn supported_matrix_corpus_never_puts_timestamp_prefix_in_message() {
 
 #[test]
 fn rotated_and_nested_identities_are_preserved_on_preview() {
-    let plan = preview_import_plan(&fixtures_root().join("rotated"), None)
-        .expect("preview rotated tree");
+    let plan =
+        preview_import_plan(&fixtures_root().join("rotated"), None).expect("preview rotated tree");
     let identities: BTreeSet<String> = plan
         .report
         .items
