@@ -26,7 +26,7 @@ use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
 use serde_json::{json, Value};
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use wiremock::matchers::{method, path};
@@ -283,7 +283,7 @@ async fn a_slow_provider_is_bounded_by_timeout_not_hung_forever() {
         .and(path("/v1/chat/completions"))
         .respond_with(
             ResponseTemplate::new(200)
-                .set_delay(Duration::from_secs(6))
+                .set_delay(Duration::from_secs(20))
                 .set_body_json(json!({
                     "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "late"}}]
                 })),
@@ -303,8 +303,8 @@ async fn a_slow_provider_is_bounded_by_timeout_not_hung_forever() {
 
     assert_eq!(output.status.code(), Some(8));
     assert!(
-        elapsed < Duration::from_secs(6),
-        "must not wait for the full 6s delay when --timeout is 2s (waited {elapsed:?})"
+        elapsed < Duration::from_secs(15),
+        "two independently bounded doctor probes must not wait for either full 20s provider delay when --timeout is 2s (waited {elapsed:?})"
     );
 
     let lines = jsonl(&output.stdout);
@@ -845,6 +845,33 @@ struct DelayedGroundedTwoTurnProvider {
     delay: Duration,
 }
 
+/// Holds the first provider response until the test has changed only the
+/// filesystem permission needed to make final corpus removal fail. Entering
+/// the provider proves corpus creation and seeding completed, avoiding a race
+/// with DuckDB initialization under parallel test load.
+#[derive(Clone)]
+struct GatedGroundedTwoTurnProvider {
+    call: Arc<AtomicUsize>,
+    first_request_entered: Arc<AtomicBool>,
+    release_first_response: Arc<AtomicBool>,
+}
+
+impl Respond for GatedGroundedTwoTurnProvider {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let call = self.call.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            self.first_request_entered.store(true, Ordering::SeqCst);
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !self.release_first_response.load(Ordering::SeqCst)
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        grounded_two_turn_response(call, request)
+    }
+}
+
 impl Respond for DelayedGroundedTwoTurnProvider {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         grounded_two_turn_response(self.call.fetch_add(1, Ordering::SeqCst), request)
@@ -875,37 +902,16 @@ fn wait_for_first_entry(dir: &Path) -> std::path::PathBuf {
     }
 }
 
-/// Poll `dir`'s own entry count until it stops changing across three
-/// consecutive checks, ~30ms apart — used after `wait_for_first_entry`
-/// finds a freshly-created directory that doctor is still writing multiple
-/// files into (corpus creation immediately followed by seeding: events,
-/// templates, an ingest summary, each its own file, all before any network
-/// call). Poisoning that directory's permissions the instant it merely
-/// *exists* races the remaining writes and can corrupt seeding itself
-/// instead of the later cleanup step a test actually means to target;
-/// settling on a stable count is a robust proxy for "doctor is done
-/// writing here," without hardcoding filenames or a wall-clock guess for
-/// how long seeding takes under variable load.
-fn wait_for_dir_to_settle(dir: &Path) {
+fn wait_for_flag(flag: &AtomicBool, description: &str) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let count = || std::fs::read_dir(dir).map(Iterator::count).unwrap_or(0);
-    let mut stable = 0;
-    let mut last = count();
-    while stable < 3 {
-        std::thread::sleep(Duration::from_millis(30));
-        let now = count();
-        if now == last {
-            stable += 1;
-        } else {
-            stable = 0;
-            last = now;
+    loop {
+        if flag.load(Ordering::SeqCst) {
+            return;
         }
         if std::time::Instant::now() > deadline {
-            panic!(
-                "{} never settled to a stable entry count within 10s",
-                dir.display()
-            );
+            panic!("{description} did not occur within 10s");
         }
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -1147,11 +1153,14 @@ async fn cleanup_check_fails_and_gates_readiness_when_the_synthetic_corpus_canno
     use std::os::unix::fs::PermissionsExt;
 
     let server = MockServer::start().await;
+    let first_request_entered = Arc::new(AtomicBool::new(false));
+    let release_first_response = Arc::new(AtomicBool::new(false));
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(DelayedGroundedTwoTurnProvider {
+        .respond_with(GatedGroundedTwoTurnProvider {
             call: Arc::new(AtomicUsize::new(0)),
-            delay: Duration::from_millis(150),
+            first_request_entered: first_request_entered.clone(),
+            release_first_response: release_first_response.clone(),
         })
         .mount(&server)
         .await;
@@ -1174,26 +1183,23 @@ async fn cleanup_check_fails_and_gates_readiness_when_the_synthetic_corpus_canno
         .spawn()
         .expect("spawn contextdesk doctor");
 
+    wait_for_flag(&first_request_entered, "first provider request");
     let corpora_dir = data_dir.path().join("cache").join("log_corpora");
     let corpus_dir = wait_for_first_entry(&corpora_dir);
-    // Seeding writes several more files into the corpus directory right
-    // after it's created (events, templates, an ingest summary) — settle
-    // before poisoning it, or the chmod below can land mid-seed and fail
-    // that instead of the cleanup step this test actually targets.
-    wait_for_dir_to_settle(&corpus_dir);
-    // Strip write permission from the corpus's OWN directory (not its
-    // parent, `log_corpora/`) so `remove_dir_all` cannot unlink the files
-    // inside it — removing a directory entry needs write on the
-    // CONTAINING directory, so this poisons discard specifically without
-    // preventing the corpus's own creation and seeding, both already
-    // finished by this point.
-    std::fs::set_permissions(&corpus_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    assert!(corpus_dir.join("meta.json").is_file());
+    assert!(corpus_dir.join("events.duckdb").is_file());
+    // The corpus itself stays writable so later read/open behavior (including
+    // DuckDB WAL housekeeping) remains production-real. Removing its final
+    // directory entry requires write access to `log_corpora`, so poisoning
+    // only that parent targets discard and nothing earlier in the workflow.
+    std::fs::set_permissions(&corpora_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    release_first_response.store(true, Ordering::SeqCst);
 
     let output = child.wait_with_output().expect("doctor run to completion");
 
     // Restore permissions so the tempdir can be cleaned up on drop
     // regardless of what the assertions below find.
-    let _ = std::fs::set_permissions(&corpus_dir, std::fs::Permissions::from_mode(0o755));
+    let _ = std::fs::set_permissions(&corpora_dir, std::fs::Permissions::from_mode(0o755));
 
     assert_eq!(
         output.status.code(),
@@ -1325,15 +1331,15 @@ async fn cleanup_check_fails_and_gates_readiness_when_the_synthetic_session_cann
 #[tokio::test]
 async fn an_interrupted_run_reports_cleanup_in_the_jsonl_interrupted_line_itself() {
     let server = MockServer::start().await;
+    let first_request_entered = Arc::new(AtomicBool::new(false));
+    let release_first_response = Arc::new(AtomicBool::new(false));
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_delay(Duration::from_secs(20))
-                .set_body_json(json!({
-                    "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "late"}}]
-                })),
-        )
+        .respond_with(GatedGroundedTwoTurnProvider {
+            call: Arc::new(AtomicUsize::new(0)),
+            first_request_entered: first_request_entered.clone(),
+            release_first_response: release_first_response.clone(),
+        })
         .mount(&server)
         .await;
 
@@ -1355,16 +1361,11 @@ async fn an_interrupted_run_reports_cleanup_in_the_jsonl_interrupted_line_itself
         .spawn()
         .expect("spawn contextdesk doctor");
 
-    // Turn one's own mock response is delayed 20s, giving a wide window —
-    // this test reads `output.stdout` in full afterward (rather than
-    // taking it early for line-by-line synchronization, the way the other
-    // interrupt tests do) specifically so it can parse the terminal
-    // `interrupted` JSONL line itself, which means it cannot synchronize on
-    // observed output the same way and instead uses a deliberately generous
-    // blind sleep — 5s, a quarter of the mock's 20s delay — so it stays
-    // reliable even under the kind of transient system load that made a
-    // tighter blind sleep flaky elsewhere in this file.
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Synchronize on the actual in-flight provider request. A blind sleep can
+    // still land before the process installs/polls its Ctrl-C handler under
+    // heavy parallel load, terminating by signal instead of the documented
+    // cooperative exit 130 and losing the structured interrupted record.
+    wait_for_flag(&first_request_entered, "first provider request");
     let pid = child.id();
     let killed = std::process::Command::new("kill")
         .args(["-INT", &pid.to_string()])
@@ -1375,6 +1376,7 @@ async fn an_interrupted_run_reports_cleanup_in_the_jsonl_interrupted_line_itself
     let output = child
         .wait_with_output()
         .expect("wait for interrupted process");
+    release_first_response.store(true, Ordering::SeqCst);
     assert_eq!(
         output.status.code(),
         Some(130),
