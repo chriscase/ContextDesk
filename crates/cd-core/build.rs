@@ -6,7 +6,18 @@ use std::process::Command;
 
 fn main() {
     // Rebuild when HEAD moves (best-effort; ignored if not a git tree).
+    //
+    // `.git/HEAD` only changes content when the checked-out ref itself
+    // changes (branch switch / detach). A same-branch commit updates
+    // `.git/refs/heads/<branch>` and appends to `.git/logs/HEAD`, leaving
+    // `.git/HEAD`'s bytes untouched — so watching it alone lets Cargo skip
+    // this build script after an ordinary `git commit` on the current
+    // branch, silently baking a stale `CD_GIT_SHA`/`CD_GIT_DESCRIBE` into an
+    // otherwise-fresh incremental build (#stale-git-identity). `.git/logs/HEAD`
+    // (the reflog) is appended on every ref-changing operation — commit,
+    // checkout, merge, rebase, reset, pull — so watch it too.
     println!("cargo:rerun-if-changed=../../.git/HEAD");
+    println!("cargo:rerun-if-changed=../../.git/logs/HEAD");
     println!("cargo:rerun-if-env-changed=CD_GIT_SHA");
     println!("cargo:rerun-if-env-changed=CD_GIT_DESCRIBE");
     println!("cargo:rerun-if-env-changed=CD_CHANNEL");

@@ -9,7 +9,12 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CD_GIT_SHA");
     println!("cargo:rerun-if-env-changed=CD_GIT_DESCRIBE");
     println!("cargo:rerun-if-env-changed=CD_CHANNEL");
+    // See crates/cd-core/build.rs for why both paths are required: `.git/HEAD`
+    // alone misses same-branch commits (only `.git/logs/HEAD` and the branch's
+    // ref file change), which silently bakes a stale CD_GIT_SHA into an
+    // otherwise-fresh incremental build.
     println!("cargo:rerun-if-changed=../../.git/HEAD");
+    println!("cargo:rerun-if-changed=../../.git/logs/HEAD");
 
     let pkg = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
     let sha = std::env::var("CD_GIT_SHA")
