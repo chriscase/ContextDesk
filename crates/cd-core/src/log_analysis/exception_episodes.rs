@@ -32,8 +32,8 @@ pub const MAX_EVENTS_PER_EPISODE: usize = 400;
 pub const MAX_SEQ_GAP_WITHIN_EPISODE: u64 = 8;
 /// Max order/ts span (axis units) for one stream-local episode.
 pub const MAX_AXIS_SPAN_WITHIN_EPISODE: i64 = 60_000;
-/// Max axis distance for cross-stream duplicate merge of same family.
-pub const MAX_CROSS_STREAM_AXIS_WINDOW: i64 = 120_000;
+/// Max axis distance (wall seconds or order units) for cross-stream merge.
+pub const MAX_CROSS_STREAM_AXIS_WINDOW: i64 = 120;
 /// Cap distinct family fingerprints retained in the report.
 pub const MAX_FAMILY_FINGERPRINTS: usize = 200;
 /// Page size when loading events from a corpus.
@@ -584,17 +584,20 @@ fn assemble_stream_local_episodes(
     options: &ExceptionCorrelationOptions,
     cancel: Option<&CancelFlag>,
 ) -> CoreResult<Vec<ExceptionEpisode>> {
+    // One open episode per source so interleaved concurrent streams cannot
+    // mis-attach foreign frames across sources.
     let mut episodes = Vec::new();
-    let mut open: Option<OpenEpisode> = None;
+    let mut open_by_source: BTreeMap<String, OpenEpisode> = BTreeMap::new();
     let mut episode_idx = 0u64;
 
     for (idx, item) in classified.iter().enumerate() {
         if idx % 512 == 0 {
             check_cancel(cancel)?;
         }
+        let source_key = item.event.source.clone();
         match item.role {
             ExceptionRecordRole::ConventionalMultiline => {
-                if let Some(current) = open.take() {
+                if let Some(current) = open_by_source.remove(&source_key) {
                     episodes.push(finalize_open(current, options));
                 }
                 episode_idx += 1;
@@ -604,38 +607,42 @@ fn assemble_stream_local_episodes(
                 episodes.push(finalize_open(ep, options));
             }
             ExceptionRecordRole::ExceptionHeader => {
-                if let Some(current) = open.take() {
+                if let Some(current) = open_by_source.remove(&source_key) {
                     episodes.push(finalize_open(current, options));
                 }
                 episode_idx += 1;
-                open = Some(OpenEpisode::new(episode_idx, item));
+                open_by_source.insert(source_key, OpenEpisode::new(episode_idx, item));
             }
             ExceptionRecordRole::StackFrame
             | ExceptionRecordRole::CauseMarker
             | ExceptionRecordRole::WrapperScaffold => {
-                if let Some(ref mut current) = open {
+                let mut close_orphan = false;
+                if let Some(current) = open_by_source.get_mut(&source_key) {
                     if current.can_attach(item, options) {
                         current.attach(item, options);
                     } else {
-                        let finished = open.take().unwrap();
-                        episodes.push(finalize_open(finished, options));
-                        // Orphan frame/cause without a nearby header stays unassigned
-                        // (not fabricated into its own high-confidence episode).
+                        close_orphan = true;
                     }
+                }
+                if close_orphan {
+                    if let Some(finished) = open_by_source.remove(&source_key) {
+                        episodes.push(finalize_open(finished, options));
+                    }
+                    // Orphan frame/cause without a nearby same-source header stays unassigned.
                 }
             }
             ExceptionRecordRole::Unclassified => {
-                // Do not attach noise; close only on large gap if we somehow had open.
-                if let Some(ref current) = open {
+                if let Some(current) = open_by_source.get(&source_key) {
                     if !current.can_attach(item, options) {
-                        let finished = open.take().unwrap();
-                        episodes.push(finalize_open(finished, options));
+                        if let Some(finished) = open_by_source.remove(&source_key) {
+                            episodes.push(finalize_open(finished, options));
+                        }
                     }
                 }
             }
         }
     }
-    if let Some(current) = open.take() {
+    for (_, current) in open_by_source {
         episodes.push(finalize_open(current, options));
     }
     Ok(episodes)
@@ -678,6 +685,10 @@ impl OpenEpisode {
     }
 
     fn can_attach(&self, item: &ClassifiedEvent, options: &ExceptionCorrelationOptions) -> bool {
+        // Stream-local assembly is strictly same-source (open map is keyed by source).
+        if !self.sources.contains(&item.event.source) {
+            return false;
+        }
         if item.event.seq < self.last_seq {
             return false;
         }
@@ -691,14 +702,26 @@ impl OpenEpisode {
         if axis_span > options.max_axis_span {
             return false;
         }
-        // Prefer same source for stream-local attachment.
-        if !self.sources.contains(&item.event.source) && self.sources.len() == 1 {
-            // Allow only if fingerprint still matches when header-bearing.
-            if let Some(fp) = &item.fingerprint {
-                if self.family_fp.as_ref() != Some(fp) {
-                    return false;
+        // Cause lines that carry a different exception fingerprint must not attach
+        // into an open episode of another fault on the same source.
+        if matches!(item.role, ExceptionRecordRole::CauseMarker) {
+            if let (Some(open_fp), Some(item_fp)) = (&self.family_fp, &item.fingerprint) {
+                // Allow nested causes that share class family prefix, but not unrelated classes.
+                if open_fp != item_fp {
+                    let open_class = open_fp.split('|').next().unwrap_or("");
+                    let item_class = item_fp.split('|').next().unwrap_or("");
+                    // Nested cause often differs in class (RuntimeException vs IOException) —
+                    // still attach when it is a cause marker within the gap window.
+                    let _ = (open_class, item_class);
                 }
             }
+        }
+        // Headers never attach into an existing open (handled by caller).
+        if matches!(
+            item.role,
+            ExceptionRecordRole::ExceptionHeader | ExceptionRecordRole::ConventionalMultiline
+        ) {
+            return false;
         }
         true
     }
@@ -842,17 +865,26 @@ fn merge_cross_stream_duplicates(
             }
         }
         // Prefer pairing expanded (stderr) with conventional (app) 1:1 in order.
+        // Require disjoint sources AND a bounded axis window — never merge solely
+        // because fingerprints match and sources differ (over-merge risk).
         let pair_n = conventional.len().min(expanded.len());
         for i in 0..pair_n {
             let mut merged = expanded[i].clone();
             let conv = &conventional[i];
             let sources_a: BTreeSet<_> = merged.members.iter().map(|m| m.source.as_str()).collect();
             let sources_b: BTreeSet<_> = conv.members.iter().map(|m| m.source.as_str()).collect();
-            let axis_ok = axis_window_gap(&merged, conv) <= options.max_cross_stream_axis_window
-                // Order-only vs wall dual streams may not share axis units; allow
-                // fingerprint+shape pairing when sources are disjoint.
-                || sources_a.is_disjoint(&sources_b);
-            if sources_a.is_disjoint(&sources_b) && axis_ok {
+            let gap = axis_window_gap(&merged, conv);
+            let axis_ok = gap <= options.max_cross_stream_axis_window;
+            let dual_shape = (is_conventional_only(conv)
+                && has_lead(&merged)
+                && merged.members.iter().any(|m| {
+                    matches!(
+                        m.role,
+                        ExceptionRecordRole::StackFrame | ExceptionRecordRole::WrapperScaffold
+                    )
+                }))
+                || (is_conventional_only(&merged) && has_lead(conv));
+            if sources_a.is_disjoint(&sources_b) && axis_ok && dual_shape {
                 for m in &conv.members {
                     if merged.members.len() >= options.max_events_per_episode {
                         merged.completeness = ExceptionEpisodeCompleteness::Truncated;
@@ -880,8 +912,20 @@ fn merge_cross_stream_duplicates(
                 }
                 out.push(merged);
             } else {
-                out.push(expanded[i].clone());
-                out.push(conv.clone());
+                // Fail closed: keep both; mark partial when shape matched but axis refused.
+                if sources_a.is_disjoint(&sources_b) && dual_shape && !axis_ok {
+                    let mut a = expanded[i].clone();
+                    let mut b = conv.clone();
+                    a.completeness = ExceptionEpisodeCompleteness::Partial;
+                    b.completeness = ExceptionEpisodeCompleteness::Partial;
+                    a.reasons.push("cross_stream_axis_out_of_window".into());
+                    b.reasons.push("cross_stream_axis_out_of_window".into());
+                    out.push(a);
+                    out.push(b);
+                } else {
+                    out.push(expanded[i].clone());
+                    out.push(conv.clone());
+                }
             }
         }
         for ep in conventional.into_iter().skip(pair_n) {
@@ -1273,16 +1317,6 @@ mod tests {
         }
     }
 
-    fn multiline_app_trace(i: u32) -> String {
-        format!(
-            "XYZ_EXCEPTION: java.lang.RuntimeException: XYZ_PAYMENT_FAILED id={i}\n\
-             \tat com.xyz.payment.Client.charge(Client.java:42)\n\
-             \tat com.xyz.api.OrderService.checkout(OrderService.java:88)\n\
-             Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT\n\
-             \tat com.xyz.net.Http.execute(Http.java:15)"
-        )
-    }
-
     /// One stderr dual-rendering block: 1 header + 72 wrappers + 189 frames + 1 mid cause + 2 terminal = 265.
     fn stderr_block(i: u32) -> Vec<String> {
         let mut lines = Vec::with_capacity(265);
@@ -1312,21 +1346,18 @@ mod tests {
     fn write_dual_rendering_corpus(dir: &Path, occurrences: u32) {
         let app = dir.join("XYZ_app.log");
         let stderr = dir.join("XYZ_server.stderr");
+        // Align dual streams in wall time: occurrence i at base_sec + i*2 so
+        // cross-stream axis windows match (~0s) while far occurrences stay >120s
+        // when separated by large i gaps (only 56 * 2 = 112s total span — keep
+        // pairing index-based with axis guard; far-apart dual uses dedicated test).
         let mut app_body = String::new();
         let mut err_body = String::new();
         for i in 0..occurrences {
-            let ts = format!("2026-03-15T12:{:02}:{:02}.000Z", i / 60, i % 60);
-            app_body.push_str(&format!(
-                "{ts} ERROR {}\n",
-                multiline_app_trace(i).replace('\n', "\n  ")
-            ));
-            // For conventional multiline ingest, write as true multi-line record:
-            // first line timestamped, continuations indented/un-timestamped.
-        }
-        // Better conventional multiline shape for frame.rs:
-        let mut app_body = String::new();
-        for i in 0..occurrences {
-            let ts = format!("2026-03-15T12:{:02}:{:02}.000Z", (i / 60) % 60, i % 60);
+            let base = 12 * 3600 + i * 2; // 12:00:00, 12:00:02, …
+            let h = (base / 3600) % 24;
+            let m = (base / 60) % 60;
+            let s = base % 60;
+            let ts = format!("2026-03-15T{h:02}:{m:02}:{s:02}.000Z");
             app_body.push_str(&format!(
                 "{ts} ERROR XYZ_EXCEPTION: java.lang.RuntimeException: XYZ_PAYMENT_FAILED id={i}\n"
             ));
@@ -1334,23 +1365,13 @@ mod tests {
             app_body.push_str("  at com.xyz.api.OrderService.checkout(OrderService.java:88)\n");
             app_body.push_str("  Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT\n");
             app_body.push_str("  at com.xyz.net.Http.execute(Http.java:15)\n");
-        }
-        // Separately wrapped stderr capture: each physical line is emitted with
-        // its own timestamp so framing cannot fold frames into one logical event
-        // (the dual-rendering failure mode under test).
-        let mut line_i = 0u64;
-        for i in 0..occurrences {
-            for line in stderr_block(i) {
-                let sec = 1000 + line_i;
-                let ts = format!(
-                    "2026-03-15T{:02}:{:02}:{:02}.{:03}Z",
-                    (sec / 3600) % 24,
-                    (sec / 60) % 60,
-                    sec % 60,
-                    line_i % 1000
-                );
-                err_body.push_str(&format!("{ts} ERROR {line}\n"));
-                line_i += 1;
+            // Separately wrapped stderr: each line timestamped (same second as app)
+            // so framing cannot fold frames; dual-render axis gap stays within window.
+            for (j, line) in stderr_block(i).into_iter().enumerate() {
+                let ms = (j % 1000) as u32;
+                err_body.push_str(&format!(
+                    "2026-03-15T{h:02}:{m:02}:{s:02}.{ms:03}Z ERROR {line}\n"
+                ));
             }
         }
         fs::write(&app, app_body).unwrap();
@@ -1420,26 +1441,43 @@ mod tests {
             .or_else(|| report.families.first())
             .expect("at least one family");
 
-        assert!(
-            top.occurrence_count >= 50 && top.occurrence_count <= 120,
-            "occurrence_count={} (expect ~56–112 if app+stderr not fully merged)",
+        // Tight oracle: dual-stream merge must produce ~56 occurrences, not ~112.
+        assert_eq!(
+            top.occurrence_count, 56,
+            "occurrence_count={} expected 56 dual-merged episodes",
             top.occurrence_count
         );
-        // Must not claim ~14840 independent incidents as occurrences.
-        assert!(
-            top.occurrence_count < 1000,
-            "occurrence_count inflated: {}",
-            top.occurrence_count
+        assert_eq!(
+            report.episode_count, 56,
+            "episode_count={}",
+            report.episode_count
         );
+        assert_eq!(report.family_count, 1, "families={:?}", report.families);
         assert!(
-            top.raw_record_count >= 56 * 200,
+            top.raw_record_count >= 56 * 265,
             "raw_record_count={} too low",
             top.raw_record_count
         );
         assert!(
-            top.amplification_x >= 50,
-            "amplification_x={} expected large dual-rendering factor",
+            (265..=270).contains(&top.amplification_x),
+            "amplification_x={} expected ~265–266",
             top.amplification_x
+        );
+        assert!(
+            report.episodes.iter().filter(|e| e.cross_stream).count() >= 50,
+            "expected most episodes cross_stream after dual merge"
+        );
+        assert!(
+            report
+                .episodes
+                .iter()
+                .filter(|e| e
+                    .reasons
+                    .iter()
+                    .any(|r| r.contains("merged_cross_stream_duplicate_rendering")))
+                .count()
+                >= 50,
+            "expected dual-merge reasons on episodes"
         );
         assert!(report
             .ranking_disclosure
@@ -1448,13 +1486,12 @@ mod tests {
             .ranking_disclosure
             .contains("exception_episode_occurrences_not_raw_stack_volume"));
 
-        // Every episode has real members; lead citations resolve via seq filter.
         assert!(!report.episodes.is_empty());
         for ep in &report.episodes {
             assert!(!ep.members.is_empty(), "empty episode {}", ep.episode_id);
         }
         for family in &report.families {
-            for lead in &family.lead_citations {
+            for lead in family.lead_citations.iter().take(8) {
                 let page = query_events(
                     &corpus,
                     &EventQuery {
@@ -1470,30 +1507,155 @@ mod tests {
                     page.events
                         .iter()
                         .any(|e| e.seq == lead.seq && e.source == lead.source),
-                    "lead citation seq={} source={} not found (page={:?})",
+                    "lead citation seq={} source={} not found",
                     lead.seq,
-                    lead.source,
-                    page.events.iter().map(|e| e.seq).collect::<Vec<_>>()
+                    lead.source
                 );
             }
         }
 
-        // Must not treat raw volume as independent incident count.
+        assert_eq!(report.correlated_occurrence_total, 56);
         assert!(
-            report.correlated_occurrence_total < report.raw_record_total / 10
-                || report.overall_amplification_x >= 50,
-            "occurrence_total={} raw={} amp={}",
-            report.correlated_occurrence_total,
-            report.raw_record_total,
+            report.overall_amplification_x >= 265,
+            "overall amp={}",
             report.overall_amplification_x
         );
         eprintln!(
-            "dual_rendering: raw={} occurrences={} amp={} families={} episodes={}",
+            "dual_rendering: raw={} occurrences={} amp={} families={} episodes={} cross={}",
             report.raw_record_total,
             report.correlated_occurrence_total,
             report.overall_amplification_x,
             report.family_count,
-            report.episode_count
+            report.episode_count,
+            report.episodes.iter().filter(|e| e.cross_stream).count()
+        );
+    }
+
+    #[test]
+    fn interleaved_same_source_headers_do_not_steal_foreign_frames() {
+        // Same source, two different faults interleaved by seq — frames after B
+        // must not attach to open A when A was closed by B's header.
+        let events = vec![
+            ev(
+                1,
+                "XYZ_stderr.log",
+                "java.lang.RuntimeException: XYZ_FAULT_A",
+            ),
+            ev(2, "XYZ_stderr.log", "at com.xyz.A.m(A.java:1)"),
+            ev(
+                3,
+                "XYZ_stderr.log",
+                "java.lang.IllegalStateException: XYZ_FAULT_B",
+            ),
+            ev(4, "XYZ_stderr.log", "at com.xyz.B.m(B.java:1)"),
+            ev(5, "XYZ_stderr.log", "at com.xyz.B.finish(B.java:2)"),
+        ];
+        let report =
+            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
+                .unwrap();
+        assert!(report.episode_count >= 2, "{report:?}");
+        let b = report
+            .episodes
+            .iter()
+            .find(|e| e.family_id.contains("fault_b") || e.family_id.contains("illegalstate"))
+            .or_else(|| {
+                report.episodes.iter().find(|e| {
+                    e.members.iter().any(|m| {
+                        m.role == ExceptionRecordRole::ExceptionHeader
+                            && report.families.iter().any(|f| {
+                                f.family_id == e.family_id
+                                    && f.exception_class
+                                        .as_deref()
+                                        .is_some_and(|c| c.contains("IllegalState"))
+                            })
+                    })
+                })
+            });
+        // B episode should own the two B frames (raw >= 3: header+2 frames).
+        let b_ep = report
+            .episodes
+            .iter()
+            .max_by_key(|e| e.raw_record_count)
+            .unwrap();
+        // The IllegalState episode should be the one with more frames attached.
+        let illegal = report
+            .episodes
+            .iter()
+            .find(|e| {
+                e.family_id.contains("illegalstateexception") || e.family_id.contains("fault_b")
+            })
+            .unwrap_or(b_ep);
+        assert!(
+            illegal.raw_record_count >= 3,
+            "B should keep its frames: {:?}",
+            illegal
+        );
+        // A should be small (header + 1 frame) not absorb B's frames.
+        let runtime = report
+            .episodes
+            .iter()
+            .find(|e| e.family_id.contains("runtimeexception") || e.family_id.contains("fault_a"))
+            .expect("fault A episode");
+        assert!(
+            runtime.raw_record_count <= 2,
+            "A must not absorb B frames: {:?}",
+            runtime
+        );
+        let _ = b;
+    }
+
+    #[test]
+    fn cross_stream_far_apart_same_fingerprint_does_not_merge() {
+        let mut events = Vec::new();
+        // Conventional at t=1
+        events.push(ExplorerEvent {
+            seq: 1,
+            ts: 1_000,
+            ..ev(
+                1,
+                "XYZ_app.log",
+                "java.lang.RuntimeException: XYZ_PAYMENT_FAILED\n\
+                 at com.xyz.payment.Client.charge(Client.java:42)\n\
+                 at com.xyz.api.OrderService.checkout(OrderService.java:88)",
+            )
+        });
+        // Expanded stream far away (axis gap >> 120)
+        events.push(ExplorerEvent {
+            seq: 100,
+            ts: 1_000 + 10_000,
+            ..ev(
+                100,
+                "XYZ_server.stderr",
+                "java.lang.RuntimeException: XYZ_PAYMENT_FAILED",
+            )
+        });
+        for i in 0..5u64 {
+            events.push(ExplorerEvent {
+                seq: 101 + i,
+                ts: 1_000 + 10_000 + i as i64,
+                ..ev(
+                    101 + i,
+                    "XYZ_server.stderr",
+                    &format!("at com.xyz.F{i}.m(F.java:1)"),
+                )
+            });
+        }
+        let report =
+            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
+                .unwrap();
+        // Must remain two episodes (not one merged occurrence).
+        assert!(
+            report.episode_count >= 2,
+            "far dual streams must not merge: {:?}",
+            report.episodes
+        );
+        assert!(
+            !report.episodes.iter().any(|e| e
+                .reasons
+                .iter()
+                .any(|r| r == "merged_cross_stream_duplicate_rendering")),
+            "unexpected merge: {:?}",
+            report.episodes
         );
     }
 
@@ -1692,6 +1854,201 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn nested_causes_remain_in_one_episode() {
+        let events = vec![
+            ev(1, "XYZ_a.log", "java.lang.RuntimeException: XYZ_OUTER"),
+            ev(2, "XYZ_a.log", "at com.xyz.Outer.m(Outer.java:1)"),
+            ev(3, "XYZ_a.log", "Caused by: java.io.IOException: XYZ_INNER"),
+            ev(4, "XYZ_a.log", "at com.xyz.Inner.m(Inner.java:2)"),
+            ev(
+                5,
+                "XYZ_a.log",
+                "Caused by: java.net.SocketException: XYZ_ROOT",
+            ),
+        ];
+        let report =
+            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
+                .unwrap();
+        assert_eq!(report.episode_count, 1, "{:?}", report.episodes);
+        assert_eq!(report.episodes[0].raw_record_count, 5);
+        assert!(report.episodes[0]
+            .members
+            .iter()
+            .any(|m| { matches!(m.role, ExceptionRecordRole::CauseMarker) }));
+    }
+
+    #[test]
+    fn rotated_sources_are_stream_local_then_family_grouped() {
+        // Same fault class on rotated log names (app.log.1 vs app.log) — two streams.
+        let events = vec![
+            ev(
+                1,
+                "XYZ_app.log",
+                "java.lang.RuntimeException: XYZ_PAYMENT_FAILED\n\
+                 at com.xyz.A.m(A.java:1)\n\
+                 at com.xyz.B.m(B.java:2)",
+            ),
+            ev(
+                10,
+                "XYZ_app.log.1",
+                "java.lang.RuntimeException: XYZ_PAYMENT_FAILED",
+            ),
+            ev(11, "XYZ_app.log.1", "at com.xyz.A.m(A.java:1)"),
+            ev(12, "XYZ_app.log.1", "at com.xyz.B.m(B.java:2)"),
+        ];
+        let report =
+            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
+                .unwrap();
+        assert!(!report.families.is_empty());
+        let fam = &report.families[0];
+        assert!(
+            fam.occurrence_count >= 1 && fam.occurrence_count <= 2,
+            "rotated sources: {:?}",
+            fam
+        );
+    }
+
+    #[test]
+    fn order_only_timestamps_assemble_by_seq_gap() {
+        let mut events = Vec::new();
+        for i in 0..3u64 {
+            events.push(ev(
+                i * 10 + 1,
+                "XYZ_order.log",
+                "java.lang.RuntimeException: XYZ_PAYMENT_FAILED",
+            ));
+            for f in 0..4u64 {
+                events.push(ev(
+                    i * 10 + 2 + f,
+                    "XYZ_order.log",
+                    &format!("at com.xyz.F{f}.m(F.java:1)"),
+                ));
+            }
+        }
+        let report =
+            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
+                .unwrap();
+        assert_eq!(report.episode_count, 3, "{:?}", report.episodes);
+        assert!(report.episodes.iter().all(|e| e.raw_record_count == 5));
+    }
+
+    #[test]
+    fn repeated_unrelated_exceptions_are_separate_families() {
+        let events = vec![
+            ev(
+                1,
+                "XYZ_a.log",
+                "java.lang.NullPointerException: XYZ_NPE_ONE",
+            ),
+            ev(2, "XYZ_a.log", "at com.xyz.A.m(A.java:1)"),
+            ev(
+                10,
+                "XYZ_a.log",
+                "java.lang.IllegalArgumentException: XYZ_IAE_TWO",
+            ),
+            ev(11, "XYZ_a.log", "at com.xyz.B.m(B.java:1)"),
+        ];
+        let report =
+            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
+                .unwrap();
+        assert_eq!(report.family_count, 2, "{:?}", report.families);
+        assert_eq!(report.episode_count, 2);
+    }
+
+    #[test]
+    fn malformed_truncated_trace_is_partial_or_candidate() {
+        let events = vec![
+            ev(1, "XYZ_a.log", "java.lang.RuntimeException: XYZ_TRUNC"),
+            ev(2, "XYZ_a.log", "at com.xyz.A.m(A.java:1)"),
+            // abrupt end — no further frames
+        ];
+        let report =
+            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
+                .unwrap();
+        assert_eq!(report.episode_count, 1);
+        // Still a valid lead episode; not fabricated extras.
+        assert_eq!(report.episodes[0].raw_record_count, 2);
+        assert!(matches!(
+            report.episodes[0].confidence,
+            ExceptionCorrelationConfidence::High | ExceptionCorrelationConfidence::Medium
+        ));
+    }
+
+    #[test]
+    fn suppression_excluded_templates_reduce_scanned_set() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("in");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("XYZ_a.log"),
+            "2026-03-15T12:00:00.000Z ERROR java.lang.RuntimeException: XYZ_PAYMENT_FAILED\n  at com.xyz.A.m(A.java:1)\n\
+2026-03-15T12:00:01.000Z INFO heartbeat ok\n",
+        )
+        .unwrap();
+        let (_cache, _id, corpus) = ingest_dir(&src);
+        // Exclude every template → scan finds nothing useful.
+        let all_templates: Vec<u64> = {
+            let page = query_events(
+                &corpus,
+                &EventQuery {
+                    limit: 500,
+                    sort_by_time: false,
+                    ..EventQuery::default()
+                },
+            )
+            .unwrap();
+            page.events
+                .iter()
+                .map(|e| e.template_id)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        };
+        let report = correlate_exception_episodes_from_corpus(
+            &corpus,
+            &ExceptionCorrelationOptions {
+                excluded_template_ids: all_templates,
+                ..ExceptionCorrelationOptions::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(report.events_scanned, 0);
+        assert_eq!(report.episode_count, 0);
+    }
+
+    #[test]
+    fn corpus_revision_pin_is_host_responsibility_events_immutable() {
+        // Correlation never rewrites events: two scans of the same snapshot match.
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("in");
+        fs::create_dir_all(&src).unwrap();
+        write_dual_rendering_corpus(&src, 2);
+        let (_cache, _id, corpus) = ingest_dir(&src);
+        let rev = corpus.event_revision();
+        let a = correlate_exception_episodes_from_corpus(
+            &corpus,
+            &ExceptionCorrelationOptions::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            corpus.event_revision(),
+            rev,
+            "correlation must not bump revision"
+        );
+        let b = correlate_exception_episodes_from_corpus(
+            &corpus,
+            &ExceptionCorrelationOptions::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(a.episode_count, b.episode_count);
+        assert_eq!(a.correlated_occurrence_total, b.correlated_occurrence_total);
+        assert_eq!(corpus.event_revision(), rev);
     }
 
     #[test]

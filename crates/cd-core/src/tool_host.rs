@@ -8993,6 +8993,148 @@ mod tests {
     }
 
     #[test]
+    fn broad_log_triage_brief_discloses_dual_rendering_episode_amplification() {
+        // Hermetic dual-rendering corpus (compact 4×265) must not present raw
+        // stack volume as independent incidents in the deterministic brief.
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("in");
+        fs::create_dir_all(&src).unwrap();
+        // Inline compact dual-render writer (neutral XYZ markers).
+        let mut app = String::new();
+        let mut err = String::new();
+        let occurrences = 4u32;
+        for i in 0..occurrences {
+            let base = 12 * 3600 + i * 2;
+            let h = (base / 3600) % 24;
+            let m = (base / 60) % 60;
+            let s = base % 60;
+            app.push_str(&format!(
+                "2026-03-15T{h:02}:{m:02}:{s:02}.000Z ERROR XYZ_EXCEPTION: java.lang.RuntimeException: XYZ_PAYMENT_FAILED id={i}\n"
+            ));
+            app.push_str("  at com.xyz.payment.Client.charge(Client.java:42)\n");
+            app.push_str("  at com.xyz.api.OrderService.checkout(OrderService.java:88)\n");
+            for (j, line) in [
+                format!("XYZ_EXCEPTION: java.lang.RuntimeException: XYZ_PAYMENT_FAILED id={i}"),
+                "Exception wrapper XYZ_WRAP".into(),
+            ]
+            .into_iter()
+            .chain((0..10).map(|f| {
+                format!("at com.xyz.payment.StackFrame{f}.invoke(StackFrame{f}.java:{f})")
+            }))
+            .chain(std::iter::once(
+                "Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT".into(),
+            ))
+            .enumerate()
+            {
+                err.push_str(&format!(
+                    "2026-03-15T{h:02}:{m:02}:{s:02}.{:03}Z ERROR {line}\n",
+                    j % 1000
+                ));
+            }
+        }
+        fs::write(src.join("XYZ_app.log"), app).unwrap();
+        fs::write(src.join("XYZ_server.stderr"), err).unwrap();
+
+        let cache = dir.path().join("cache");
+        let policy = crate::log_analysis::LogEmbedPolicy {
+            mode: crate::log_analysis::LogEmbedMode::None,
+            cloud_content_leaves_machine: false,
+            cloud_base_url: None,
+            model_id: "test-none".into(),
+            defer_above_source_bytes: None,
+        };
+        let report = crate::log_analysis::ingest_path_with_policy(
+            &cache,
+            &src,
+            "xyz-dual-brief",
+            &policy,
+            None,
+        )
+        .unwrap();
+        let corpus_id = report.corpus_id;
+        let corpus = Arc::new(crate::log_analysis::LogCorpus::open(&cache, &corpus_id).unwrap());
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut host = ToolHost::new(
+            Workspace::new("broad-triage-dual", vec![workspace]),
+            KeywordIndex::new(),
+            None,
+        );
+        host.set_log_analysis(true, Some(cache));
+        host.set_log_corpus_scope(Some(corpus_id.clone()));
+        host.set_active_log_corpus(Some(corpus_id.clone()));
+        host.seed_log_corpus_handle(&corpus_id, Arc::clone(&corpus))
+            .unwrap();
+        host.pin_log_suppression_lens(&corpus_id).unwrap();
+
+        let brief = host.build_broad_log_triage_brief().unwrap();
+        assert!(brief.deterministic_complete);
+        let text = &brief.model_text;
+        assert!(
+            text.contains("Exception episode correlation") || text.contains("exception_episode"),
+            "brief missing episode section (len={})",
+            text.len()
+        );
+        assert!(
+            text.contains("independent_incident_claim_forbidden")
+                || text.contains("ranking_basis: exception_episode"),
+            "brief missing ranking disclosure"
+        );
+        assert!(
+            text.contains("amplification") || text.contains("amplification_x"),
+            "brief missing amplification disclosure"
+        );
+        assert!(
+            text.contains("supporting_stack_or_wrapper")
+                || text.contains("supporting records")
+                || text.contains("wrapper"),
+            "brief missing supporting-role disclosure"
+        );
+        // Episode report attached to DTO with real citations.
+        let ep = brief
+            .exception_episodes
+            .as_ref()
+            .expect("exception_episodes DTO on brief");
+        assert!(
+            ep.correlated_occurrence_total > 0
+                && ep.correlated_occurrence_total < ep.raw_record_total,
+            "occurrence={} raw={}",
+            ep.correlated_occurrence_total,
+            ep.raw_record_total
+        );
+        assert!(
+            ep.overall_amplification_x >= 2,
+            "amp={}",
+            ep.overall_amplification_x
+        );
+        for lead in ep
+            .families
+            .iter()
+            .flat_map(|f| f.lead_citations.iter())
+            .take(8)
+        {
+            assert!(
+                brief.evidence.iter().any(|e| e.seq == lead.seq)
+                    || ep.episodes.iter().any(|e| {
+                        e.members
+                            .iter()
+                            .any(|m| m.seq == lead.seq && !m.source.is_empty())
+                    }),
+                "lead seq={} must resolve",
+                lead.seq
+            );
+            assert!(!lead.source.is_empty());
+        }
+        // Must not claim ~all raw records as independent incidents in ranking prose.
+        assert!(!text.contains("independent_incident_count:"));
+        assert!(
+            !text.contains(&format!("error_event_count={}", ep.raw_record_total))
+                || text.contains("supporting_stack_or_wrapper=true"),
+            "raw volume must not stand alone as incident ranking"
+        );
+    }
+
+    #[test]
     fn broad_log_triage_brief_is_deterministic_grounded_and_reuses_seeded_handle() {
         struct NeverSemantic {
             calls: std::sync::atomic::AtomicUsize,
