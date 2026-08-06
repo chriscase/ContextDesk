@@ -93,6 +93,39 @@ describe("SessionContextBar compact disclosure", () => {
     expect(screen.getByText("incident.txt")).toBeTruthy();
   });
 
+  it("portals Add context outside a clipped composer dock", async () => {
+    const { container } = render(
+      <div style={{ height: 80, overflow: "hidden" }}>
+        <SessionContextBar sessionId="session-1" />
+      </div>,
+    );
+    await waitFor(() => expect(host.list).toHaveBeenCalledWith("session-1"));
+    // Expand the bar so Add context is reachable.
+    fireEvent.click(screen.getByText("Context for this chat"));
+    const trigger = screen.getByRole("button", { name: /Add context/ });
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+      left: 12,
+      right: 120,
+      top: 40,
+      bottom: 64,
+      width: 108,
+      height: 24,
+      x: 12,
+      y: 40,
+      toJSON: () => ({}),
+    });
+    fireEvent.click(trigger);
+    const panel = await screen.findByTestId("session-context-add-panel");
+    expect(container.contains(panel)).toBe(false);
+    expect(panel.parentElement).toBe(document.body);
+    expect(panel.className).toContain("session-context-add__panel--portal");
+    // Inline viewport clamp from useLayoutEffect (styles are asserted in
+    // stackingPlanes.test.ts against the stylesheet source).
+    expect(panel.style.left).not.toBe("");
+    expect(panel.style.bottom).not.toBe("");
+    expect(panel.style.width).not.toBe("");
+  });
+
   it("attaches one imported corpus from the compact Add context dialog", async () => {
     host.corpora.mockResolvedValue([
       {

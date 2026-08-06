@@ -30,6 +30,7 @@ import {
 } from "../../lib/host";
 import { classifyCompletedCitation } from "../../lib/citations";
 import { ActivityCompactLine } from "../activity/ActivityCompactLine";
+import { settleTurnLifecycle } from "../../lib/activity/turnLifecycle";
 import type { ActivityMode, ActivityTurn } from "../../lib/activity/types";
 import type {
   HostEvidenceCitation,
@@ -164,7 +165,15 @@ function MessageRowImpl({
     const ro = new ResizeObserver(() => report());
     ro.observe(el);
     return () => ro.disconnect();
-  }, [m.id, m.content, m.streaming, m.tools, onHeightChange]);
+  }, [m.id, m.content, m.streaming, m.tools, onHeightChange, activityTurn]);
+
+  // Host terminal status beats a stale streaming flag (same settle as linked chat).
+  // Cancelled/failed turns must not keep ThinkingIndicator or data-streaming="true".
+  const showLiveStreaming = settleTurnLifecycle({
+    streaming: m.streaming,
+    content: m.content,
+    recordStatus: activityTurn?.summary.status ?? null,
+  }).live;
 
   return (
     <article
@@ -172,7 +181,8 @@ function MessageRowImpl({
       className="msg"
       data-role={m.role}
       data-msg-id={m.id}
-      data-streaming={m.streaming ? "true" : "false"}
+      data-streaming={showLiveStreaming ? "true" : "false"}
+      data-testid={m.role === "assistant" ? "chat-msg-assistant" : undefined}
     >
       <div className="msg__role">
         {m.role === "user"
@@ -397,7 +407,7 @@ function MessageRowImpl({
       <div className="msg__bubble">
         {m.role === "assistant" ? (
           <>
-            {m.streaming && !m.content.trim() && turnStartedAt ? (
+            {showLiveStreaming && !m.content.trim() && turnStartedAt ? (
               <ThinkingIndicator
                 startedAt={turnStartedAt}
                 model={effectiveChatModel}
@@ -407,7 +417,7 @@ function MessageRowImpl({
             {m.content ? (
               <div
                 className="msg__content"
-                data-streaming={m.streaming ? "true" : "false"}
+                data-streaming={showLiveStreaming ? "true" : "false"}
                 onClick={(e: ReactMouseEvent) => {
                   const t = e.target as HTMLElement;
                   const a = t.closest(
@@ -463,16 +473,16 @@ function MessageRowImpl({
                     );
                 }}
               >
-                <MarkdownBody text={m.content} streaming={m.streaming} />
-                {(m.streaming || m.content) && (
+                <MarkdownBody text={m.content} streaming={showLiveStreaming} />
+                {(showLiveStreaming || m.content) && (
                   <StreamLiveRegion
                     text={m.content}
-                    streaming={Boolean(m.streaming)}
+                    streaming={showLiveStreaming}
                   />
                 )}
               </div>
             ) : null}
-            {m.streaming && m.content.trim() && turnStartedAt ? (
+            {showLiveStreaming && m.content.trim() && turnStartedAt ? (
               <div className="thinking-ind-wrap">
                 <ThinkingIndicator
                   startedAt={turnStartedAt}
@@ -485,7 +495,7 @@ function MessageRowImpl({
         ) : (
           <div
             className="msg__content msg__content--user"
-            data-streaming={m.streaming ? "true" : "false"}
+            data-streaming="false"
           >
             {m.content}
           </div>
@@ -493,7 +503,7 @@ function MessageRowImpl({
       </div>
       {m.role === "assistant" &&
       m.meta &&
-      !m.streaming &&
+      !showLiveStreaming &&
       formatMsgMetaFooter(m.meta) ? (
         <details className="msg__meta-details">
           <summary>Response details</summary>
@@ -503,7 +513,8 @@ function MessageRowImpl({
       {m.role === "assistant" &&
       activityMode !== "off" &&
       activityTurn &&
-      (!m.streaming || (activityTurn.developerDetail?.length ?? 0) > 0) ? (
+      (!showLiveStreaming ||
+        (activityTurn.developerDetail?.length ?? 0) > 0) ? (
         <ActivityCompactLine
           turn={activityTurn}
           onOpenDetails={() => onOpenActivityDetails?.(m.id)}

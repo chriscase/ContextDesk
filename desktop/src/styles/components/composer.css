@@ -543,6 +543,18 @@
   box-shadow: var(--shadow-md);
 }
 
+/* Portaled above workspace overflow:hidden / composer-dock so the panel is
+   never clipped by the transcript or sticky dock at narrow or ultrawide. */
+.session-context-add__panel--portal {
+  position: fixed;
+  z-index: 80;
+  right: auto;
+  top: auto;
+  max-width: calc(100vw - 1rem);
+  max-height: min(32rem, 68vh);
+  box-shadow: var(--shadow-lg, var(--shadow-md));
+}
+
 .session-context-add__section {
   display: grid;
   gap: var(--space-1);
@@ -610,7 +622,9 @@
     grid-row: 2;
   }
 
-  .session-context-add__panel {
+  /* Portaled panel owns fixed placement at every width; keep the media query
+     as a layout fallback only for non-portal mounts (tests / stories). */
+  .session-context-add__panel:not(.session-context-add__panel--portal) {
     position: fixed;
     inset: auto var(--space-3) var(--space-3);
     width: auto;

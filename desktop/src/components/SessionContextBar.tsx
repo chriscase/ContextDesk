@@ -6,10 +6,12 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
   type InputHTMLAttributes,
 } from "react";
+import { createPortal } from "react-dom";
 import { useDismissibleLayer } from "../hooks/useDismissibleLayer";
 import {
   hostListLogCorpora,
@@ -55,9 +57,15 @@ export function SessionContextBar({
   const [importPhase, setImportPhase] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  const [addPanelPosition, setAddPanelPosition] = useState({
+    left: 8,
+    bottom: 8,
+    width: 320,
+  });
   const addLayerId = useId();
   const addRootRef = useRef<HTMLDivElement>(null);
   const addTriggerRef = useRef<HTMLButtonElement>(null);
+  const addPanelRef = useRef<HTMLDivElement>(null);
 
   const closeAdd = useCallback((restoreFocus: boolean) => {
     setAddOpen(false);
@@ -74,6 +82,45 @@ export function SessionContextBar({
     triggerRef: addTriggerRef,
     onDismiss: closeAdd,
   });
+
+  // Portaled panel: escape workspace overflow:hidden and stay above the
+  // composer/transcript without being clipped by the dock or chat-scroll.
+  useLayoutEffect(() => {
+    if (!addOpen) return;
+    const place = () => {
+      const trigger = addTriggerRef.current;
+      const panel = addPanelRef.current;
+      if (!trigger || !panel) return;
+      const triggerRect = trigger.getBoundingClientRect();
+      const panelRect = panel.getBoundingClientRect();
+      const margin = 8;
+      const width = Math.min(
+        panelRect.width || 320,
+        Math.max(240, window.innerWidth - margin * 2),
+      );
+      const height = panelRect.height || 280;
+      const left = Math.min(
+        Math.max(margin, triggerRect.left),
+        Math.max(margin, window.innerWidth - width - margin),
+      );
+      // Prefer opening upward from the trigger (composer-adjacent); fall back
+      // to a clamped bottom inset when the viewport is too short.
+      const preferredBottom = window.innerHeight - triggerRect.top + 6;
+      const maxBottom = window.innerHeight - height - margin;
+      const bottom = Math.min(
+        Math.max(margin, preferredBottom),
+        Math.max(margin, maxBottom),
+      );
+      setAddPanelPosition({ left, bottom, width });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [addOpen, corporaLoaded, corpora.length]);
 
   const refresh = useCallback(async () => {
     if (!sessionId) {
@@ -353,108 +400,120 @@ export function SessionContextBar({
             >
               + Add context
             </button>
-            {addOpen ? (
-              <div
-                id={addLayerId}
-                className="session-context-add__panel"
-                role="dialog"
-                aria-label="Add context"
-              >
-                <div className="session-context-add__section">
-                  <strong>Chat-only files</strong>
-                  <span className="field__hint">
-                    Imported under this chat’s bounded context pack.
-                  </span>
-                  <div className="session-context-add__actions">
-                    <label className="btn btn--ghost btn--sm">
-                      Files…
-                      <input
-                        type="file"
-                        multiple
-                        hidden
-                        disabled={disabled}
-                        onChange={(event) => {
-                          if (event.target.files) {
-                            void onFiles(event.target.files);
-                          }
-                          event.target.value = "";
-                          setAddOpen(false);
-                        }}
-                      />
-                    </label>
-                    <label className="btn btn--ghost btn--sm">
-                      Folder…
-                      <input
-                        type="file"
-                        multiple
-                        hidden
-                        disabled={disabled}
-                        {...({
-                          directory: "",
-                          webkitdirectory: "",
-                        } as InputHTMLAttributes<HTMLInputElement>)}
-                        onChange={(event) => {
-                          if (event.target.files) {
-                            void onFiles(event.target.files);
-                          }
-                          event.target.value = "";
-                          setAddOpen(false);
-                        }}
-                      />
-                    </label>
-                  </div>
-                </div>
-                <div className="session-context-add__section">
-                  <strong>Imported log corpus</strong>
-                  <span className="field__hint">
-                    One corpus per chat. Scope is enforced by the desktop host.
-                  </span>
+            {addOpen
+              ? createPortal(
                   <div
-                    className="session-context-add__corpora"
-                    aria-label="Imported log corpora"
+                    ref={addPanelRef}
+                    id={addLayerId}
+                    className="session-context-add__panel session-context-add__panel--portal"
+                    role="dialog"
+                    aria-label="Add context"
+                    data-testid="session-context-add-panel"
+                    data-dismissible-layer-branch={addLayerId}
+                    style={{
+                      left: addPanelPosition.left,
+                      bottom: addPanelPosition.bottom,
+                      width: addPanelPosition.width,
+                    }}
                   >
-                    {!corporaLoaded ? (
-                      <span className="field__hint">Loading corpora…</span>
-                    ) : corpora.length === 0 ? (
+                    <div className="session-context-add__section">
+                      <strong>Chat-only files</strong>
                       <span className="field__hint">
-                        No imported log corpora. Import logs from the Logs tab
-                        first.
+                        Imported under this chat’s bounded context pack.
                       </span>
-                    ) : (
-                      corpora.map((corpus) => (
-                        <button
-                          key={corpus.id}
-                          type="button"
-                          className="session-context-add__corpus"
-                          disabled={disabled}
-                          onClick={() => {
-                            setNote(null);
-                            void Promise.resolve(
-                              onLinkedCorpusChange?.(corpus.id),
-                            )
-                              .then(() => {
-                                closeAdd(true);
-                              })
-                              .catch((error) =>
-                                setNote(
-                                  error instanceof Error
-                                    ? error.message
-                                    : "Could not attach log corpus",
-                                ),
-                              );
-                          }}
-                        >
-                          <span>{corpus.name}</span>
-                          <span>
-                            {corpus.eventCount.toLocaleString()} events
+                      <div className="session-context-add__actions">
+                        <label className="btn btn--ghost btn--sm">
+                          Files…
+                          <input
+                            type="file"
+                            multiple
+                            hidden
+                            disabled={disabled}
+                            onChange={(event) => {
+                              if (event.target.files) {
+                                void onFiles(event.target.files);
+                              }
+                              event.target.value = "";
+                              setAddOpen(false);
+                            }}
+                          />
+                        </label>
+                        <label className="btn btn--ghost btn--sm">
+                          Folder…
+                          <input
+                            type="file"
+                            multiple
+                            hidden
+                            disabled={disabled}
+                            {...({
+                              directory: "",
+                              webkitdirectory: "",
+                            } as InputHTMLAttributes<HTMLInputElement>)}
+                            onChange={(event) => {
+                              if (event.target.files) {
+                                void onFiles(event.target.files);
+                              }
+                              event.target.value = "";
+                              setAddOpen(false);
+                            }}
+                          />
+                        </label>
+                      </div>
+                    </div>
+                    <div className="session-context-add__section">
+                      <strong>Imported log corpus</strong>
+                      <span className="field__hint">
+                        One corpus per chat. Scope is enforced by the desktop
+                        host.
+                      </span>
+                      <div
+                        className="session-context-add__corpora"
+                        aria-label="Imported log corpora"
+                      >
+                        {!corporaLoaded ? (
+                          <span className="field__hint">Loading corpora…</span>
+                        ) : corpora.length === 0 ? (
+                          <span className="field__hint">
+                            No imported log corpora. Import logs from the Logs
+                            tab first.
                           </span>
-                        </button>
-                      ))
-                    )}
-                  </div>
-                </div>
-              </div>
-            ) : null}
+                        ) : (
+                          corpora.map((corpus) => (
+                            <button
+                              key={corpus.id}
+                              type="button"
+                              className="session-context-add__corpus"
+                              disabled={disabled}
+                              onClick={() => {
+                                setNote(null);
+                                void Promise.resolve(
+                                  onLinkedCorpusChange?.(corpus.id),
+                                )
+                                  .then(() => {
+                                    closeAdd(true);
+                                  })
+                                  .catch((error) =>
+                                    setNote(
+                                      error instanceof Error
+                                        ? error.message
+                                        : "Could not attach log corpus",
+                                    ),
+                                  );
+                              }}
+                            >
+                              <span>{corpus.name}</span>
+                              <span>
+                                {corpus.eventCount.toLocaleString()} events
+                              </span>
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>,
+                  document.body,
+                )
+              : null}
           </div>
         </div>
         {note ? <p className="field__hint">{note}</p> : null}
