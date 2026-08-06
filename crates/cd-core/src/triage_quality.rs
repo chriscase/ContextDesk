@@ -696,7 +696,9 @@ pub fn score_structured_triage_answer(
     for claim in &answer.observations {
         match (claim.seq, claim.source.as_ref()) {
             (Some(seq), Some(source)) if evidence_set.contains(&(seq, source.clone())) => {}
-            (None, None) if evidence_set.is_empty() => {}
+            (None, None)
+                if evidence_set.is_empty()
+                    && observation_is_exact_empty_evidence_disclosure(claim) => {}
             _ => {
                 citation_ok = false;
                 break;
@@ -707,7 +709,9 @@ pub fn score_structured_triage_answer(
         for claim in &answer.causal_candidates {
             match (claim.seq, claim.source.as_ref()) {
                 (Some(seq), Some(source)) if evidence_set.contains(&(seq, source.clone())) => {}
-                (None, None) if evidence_set.is_empty() => {}
+                (None, None)
+                    if evidence_set.is_empty()
+                        && causal_is_exact_empty_evidence_disclosure(claim) => {}
                 _ => {
                     citation_ok = false;
                     break;
@@ -950,6 +954,27 @@ pub fn score_structured_triage_answer(
     }
 }
 
+fn observation_is_exact_empty_evidence_disclosure(claim: &TriageClaim) -> bool {
+    matches!(
+        normalize_assertion_text(&claim.text).as_str(),
+        "zero unsuppressed events"
+            | "no unsuppressed events"
+            | "no event evidence is available"
+            | "no events were returned"
+            | "host reports zero unsuppressed events"
+    )
+}
+
+fn causal_is_exact_empty_evidence_disclosure(claim: &TriageClaim) -> bool {
+    matches!(
+        normalize_assertion_text(&claim.text).as_str(),
+        "no establishable trigger in imported evidence"
+            | "no causal candidate can be established"
+            | "root cause is not establishable"
+            | "insufficient evidence to identify a causal candidate"
+    )
+}
+
 fn find_token_seq(host: &TriageHostFacts, token: &str) -> Option<(u64, String)> {
     host.messages_by_seq
         .iter()
@@ -1144,17 +1169,53 @@ mod tests {
 
         let mut empty_host = host.clone();
         empty_host.evidence.clear();
-        let mut uncited_empty_answer = stripped.clone();
-        for claim in uncited_empty_answer
-            .observations
-            .iter_mut()
-            .chain(uncited_empty_answer.causal_candidates.iter_mut())
-        {
-            claim.seq = None;
-            claim.source = None;
-        }
-        let score = score_structured_triage_answer(&uncited_empty_answer, &key, &empty_host);
+        let mut empty_answer = good_answer();
+        empty_answer.observations[0] = TriageClaim {
+            text: "Host reports zero unsuppressed events.".into(),
+            seq: None,
+            source: None,
+            role: Some("zero_evidence".into()),
+        };
+        empty_answer.causal_candidates[0] = TriageClaim {
+            text: "Root cause is not establishable.".into(),
+            seq: None,
+            source: None,
+            role: Some("unknown".into()),
+        };
+        let score = score_structured_triage_answer(&empty_answer, &key, &empty_host);
         assert!(!score.failed_ids().contains(&"citation_validity"));
+
+        let mut arbitrary_observation = empty_answer.clone();
+        arbitrary_observation.observations[0].text = "Host reports five failures".into();
+        let score = score_structured_triage_answer(&arbitrary_observation, &key, &empty_host);
+        assert!(score.failed_ids().contains(&"citation_validity"));
+
+        let mut arbitrary_causal = empty_answer.clone();
+        arbitrary_causal.causal_candidates[0].text = "Config X caused the outage".into();
+        let score = score_structured_triage_answer(&arbitrary_causal, &key, &empty_host);
+        assert!(score.failed_ids().contains(&"citation_validity"));
+
+        for text in [
+            "Host reports zero unsuppressed events, but five failures occurred",
+            "Host reports zero unsuppressed events and config X failed",
+            "Host reports zero unsuppressed events; however, the service crashed",
+        ] {
+            let mut tailed = empty_answer.clone();
+            tailed.observations[0].text = text.into();
+            let score = score_structured_triage_answer(&tailed, &key, &empty_host);
+            assert!(score.failed_ids().contains(&"citation_validity"), "{text}");
+        }
+
+        for text in [
+            "Root cause is not establishable, but config X caused the outage",
+            "Root cause is not establishable and config X caused the outage",
+            "Root cause is not establishable; however, config X caused the outage",
+        ] {
+            let mut tailed = empty_answer.clone();
+            tailed.causal_candidates[0].text = text.into();
+            let score = score_structured_triage_answer(&tailed, &key, &empty_host);
+            assert!(score.failed_ids().contains(&"citation_validity"), "{text}");
+        }
 
         let mut self_labelled = good_answer();
         self_labelled.causal_candidates[0].seq = None;
