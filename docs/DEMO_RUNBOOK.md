@@ -1,0 +1,281 @@
+# Demo runbook (public fixtures only)
+
+Repeatable **10–15 minute** rehearsal for ContextDesk on the tip you built.
+Public / synthetic fixtures only — never private or company corpora, and never
+import a Log Lab `truth/` directory.
+
+| Path | Kind | Provider needed? |
+| ---- | ---- | ---------------- |
+| [GUI path](#1-gui-path-manual-10–15-min) | **Manual** (native desktop) | Yes for grounded chat |
+| [CLI path](#2-cli-path-automated-proof-10–15-min) | **Automated** (copy/paste) | Optional (`chat --dry-run` needs a configured profile shape; live chat needs a working provider) |
+
+**Tip identity (this document’s verification base):** `main` @
+`9eb9fa2952fe53d7a2f1a970b83a46f1aea8115f`. Confirm before demos:
+
+```bash
+git rev-parse HEAD
+./target/debug/contextdesk --json capabilities
+# Expect data.git_sha prefix matching HEAD; commands must include import,
+# normalize, corpus, timezone, explore, context, chat, doctor — and must
+# *not* list the residual LQA subcommand on this tip (see §4).
+```
+
+Related: [DEMO_ACCEPTANCE.md](DEMO_ACCEPTANCE.md) (longer GUI checklist +
+exact-head consolidator), [CLI.md](CLI.md), [NORMALIZATION.md](NORMALIZATION.md),
+Help [demo datasets](help/log-analysis/demo-datasets.md).
+
+---
+
+## Deterministic host vs LLM
+
+| Work | Who does it | Notes |
+| ---- | ----------- | ----- |
+| Import, source selection, redaction, templates, corpus publish | **Host (deterministic)** | Same inputs → same corpus counters; no model |
+| Timezone status / apply / apply-all | **Host (deterministic)** | Explicit operator declaration; no silent guessing |
+| `explore`, `context`, Log Explorer search/filter/lanes | **Host (deterministic)** | Retrieval and evidence assembly on the host |
+| `normalize` → JSONL + manifest + report | **Host (deterministic)** | Offline; zero provider / keychain |
+| Activity Inspector / `chat --activity` | **Host capture** of a turn | Process-lifetime; not durable after quit |
+| Grounded answer text in `chat` / desktop chat | **LLM** (when not `--dry-run`) | Model synthesizes; citations must still resolve to **host** evidence ids |
+| `chat --dry-run` | **Host only** | Builds bounded context; guarantees no provider request |
+
+Do not present model prose as proof that ingest or retrieval worked. Use corpus
+counters, explore/context hits, Evidence chips, and Activity counts for that.
+
+---
+
+## Fixtures (safe roots only)
+
+| Fixture | Use for |
+| ------- | ------- |
+| `fixtures/cli-release-demo/` | Tiny smoke (6 events, explicit UTC wall times) |
+| `fixtures/log-lab/scenarios/company-timestamp-diversity/import/` | Timezone review (ambiguous local timestamps) |
+| `fixtures/log-lab/scenarios/mixed-time-quality/import/` | Mixed wall + order-only time quality (no TZ apply needed) |
+| Packaged first-run demo corpus (desktop) | GUI-only convenience install — see Help demo datasets |
+
+**Never** import `…/truth/` or a scenario parent that contains `truth/`.
+
+---
+
+## 1. GUI path (manual, 10–15 min)
+
+Label: **[MANUAL GUI]** — not claimed by CLI scripts.
+
+### Prerequisites
+
+1. Build / launch desktop from this tip (see [README → Install](../README.md#install)
+   and [DEV.md](DEV.md)).
+2. **[MANUAL GUI]** Settings → AI: configure a provider with tool capability
+   (Ollama, OpenAI-compatible, Anthropic, or Grok Build opt-in). Save key via
+   host keychain prompts — never paste secrets into docs or chat.
+3. Optional readiness: from a checkout, `contextdesk doctor` (CLI) against the
+   same machine’s config.
+
+### Steps
+
+1. **Import (~2 min) — [MANUAL GUI]**
+   - Logs → import folder
+     `fixtures/log-lab/scenarios/company-timestamp-diversity/import`
+     (or Install demo log corpus on first-run Ready).
+   - **Expect:** corpus appears in Logs library; import summary shows selected
+     sources; `timezone_ambiguous` / review UI for zone-less locals when present.
+
+2. **Timezone review when needed (~2 min) — [MANUAL GUI]**
+   - If the UI offers timezone review, apply one IANA zone (or Settings default)
+     / apply-all equivalent so ambiguous sources are declared — not guessed.
+   - **Expect:** unresolved local counts drop for resolvable sources; yearless /
+     unusable timestamps may remain unresolved (honest).
+   - Skip if the corpus has no ambiguous locals (e.g. `cli-release-demo`).
+
+3. **Explorer (~3 min) — [MANUAL GUI]**
+   - Open Explorer on the corpus; scan timeline / lanes; Find `timeout` or a
+     known `event_id` from the fixture.
+   - **Expect:** host event rows with provenance labels; no truth-file content.
+
+4. **Grounded chat (~3 min) — [MANUAL GUI]**
+   - Attach/link the corpus; ask e.g. “What timed out?” or a fixture-local
+     question.
+   - **Expect:** streaming answer with **host** citations / evidence ids; context
+     chips show the linked corpus before or as the turn starts.
+
+5. **Evidence (~2 min) — [MANUAL GUI]**
+   - From chat citations or Explorer selection: open Evidence; optionally
+     **Show in Explorer** (1–4 lanes).
+   - **Expect:** durable evidence identities; lanes keep source ids (no reimport).
+
+6. **Activity visibility (~1 min) — [MANUAL GUI]**
+   - Open Activity Inspector for the turn.
+   - **Expect:** phases / tool names / timings for this process. Quit/relaunch →
+     Activity from the previous process is **gone** (corpus/session remain).
+
+7. **Logging-quality assessment**
+   - **Not available in the desktop UI on this tip.** The CLI assessment
+     subcommand is also absent on `main` @ `9eb9fa2` (see
+     [§4 residual](#4-residual-logging-quality-assessment-not-on-this-tip)).
+   - Rehearse it only on a tip whose `capabilities` lists that subcommand, or
+     after it lands on `main`.
+
+---
+
+## 2. CLI path (automated proof, 10–15 min)
+
+Label: **[CLI]** — copy/paste; isolate state with `--data-dir`.
+
+Build once:
+
+```bash
+cargo build -p cd-cli
+BIN=./target/debug/contextdesk
+DATA=$(mktemp -d)
+echo "DATA=$DATA"
+```
+
+### A. Import → corpus list
+
+```bash
+$BIN --data-dir "$DATA" --json import ./fixtures/cli-release-demo
+```
+
+**Expect:** JSON envelope `ok: true`, `command: "import"`,
+`data.events_imported: 6`, `data.sources_selected: 1`,
+`data.timezone_ambiguous_sources: []`.
+
+```bash
+$BIN --data-dir "$DATA" --json corpus list
+CORPUS=$($BIN --data-dir "$DATA" --json corpus list | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["data"]["corpora"][0]["id"])')
+echo "CORPUS=$CORPUS"
+```
+
+**Expect:** one corpus; id matches `data.corpus_id` from import.
+
+### B. Explore / context (deterministic query — no LLM)
+
+```bash
+$BIN --data-dir "$DATA" --json explore "timeout" --corpus "$CORPUS"
+$BIN --data-dir "$DATA" --json context "timeout" --corpus "$CORPUS"
+```
+
+**Expect:** `explore` → `ok: true`, `data.hits` non-empty (timeout line).
+`context` → `ok: true`, `data.evidence` present (host-assembled; no model call).
+
+### C. Chat + Activity (where available)
+
+Dry-run (no provider network) — still projects Activity when requested:
+
+```bash
+$BIN --data-dir "$DATA" --json chat --dry-run --activity summary \
+  --corpus "$CORPUS" "what timed out?"
+```
+
+**Expect:** `ok: true`, `data.activity` present; no live completion.
+Live chat (optional): omit `--dry-run` after `contextdesk config init` /
+provider setup; **Expect:** grounded final text + citations when tools work.
+
+### D. Timezone review fixture (when demonstrating ambiguity)
+
+```bash
+DATA_TZ=$(mktemp -d)
+$BIN --data-dir "$DATA_TZ" --json import \
+  ./fixtures/log-lab/scenarios/company-timestamp-diversity/import
+CID=$($BIN --data-dir "$DATA_TZ" --json corpus list | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["data"]["corpora"][0]["id"])')
+$BIN --data-dir "$DATA_TZ" --json timezone status --corpus "$CID"
+$BIN --data-dir "$DATA_TZ" --json timezone apply-all America/Chicago \
+  --corpus "$CID" --yes
+$BIN --data-dir "$DATA_TZ" --json timezone status --corpus "$CID"
+```
+
+**Expect after import:** `timezone_ambiguous_sources` includes
+`01-shared-encodings.jsonl` and `04-ambiguous-or-unusable.log`.
+**Expect after apply-all:** `applied_sources` lists those files;
+`event_revision` bumps; some unusable/yearless locals may still show
+`unresolved_local_records > 0`.
+
+### E. Normalize (offline export)
+
+```bash
+OUT=$(mktemp -d)/norm
+$BIN normalize ./fixtures/cli-release-demo --output "$OUT" --json
+ls "$OUT/manifest.json" "$OUT/normalization-report.json" "$OUT/sources"
+```
+
+**Expect:** `ok: true`; exactly those three output shapes under `$OUT`.
+Re-run the same command against the same `$OUT`:
+
+```bash
+$BIN normalize ./fixtures/cli-release-demo --output "$OUT" --json
+```
+
+**Expect:** `ok: false`, error kind `user_error`, message refuses overwrite of a
+non-empty output directory (no-clobber).
+
+### F. Logging-quality assessment JSON/Markdown export
+
+**Deferred — not on this tip.** See
+[§4](#4-residual-logging-quality-assessment-not-on-this-tip). Do not invent the
+subcommand against a binary whose `capabilities` omit it.
+
+---
+
+## 3. Troubleshooting
+
+| Symptom | What to check |
+| ------- | ------------- |
+| Provider / key setup | Desktop: Settings → AI + preflight. CLI: `contextdesk config init`, `config show`, `doctor`. Keys stay in OS keychain; webview/CLI docs never print raw secrets. |
+| Wrong / shared local data | Prefer `--data-dir <scratch>` for demos. Default shared root is `~/.contextdesk` (desktop + CLI). |
+| Stale build identity | `capabilities` `git_sha` / `git_describe` must match `git rev-parse HEAD`. Rebuild: `cargo build -p cd-cli`. Exact-head gate: `scripts/exact_head_cli_acceptance.sh` / [DEMO_ACCEPTANCE.md](DEMO_ACCEPTANCE.md). |
+| Timezone uncertainty | Zone-less locals need explicit `timezone apply` / `apply-all` or Settings default **before** treating wall time as certain. Unusable/yearless stamps can remain unresolved after apply. |
+| Unsupported inputs | Import summary `sources_unsupported` / ignored ≠ “partial success” of those files. Binary noise may be excluded; see import-diagnose fixtures. Never import `truth/`. |
+| Export no-clobber | `normalize --output` must be empty/absent. When a tip ships LQA export, its `--output` path also refuses an existing file. Pick a fresh path. |
+| Activity empty after relaunch | Expected — process-lifetime only. Corpus and sessions persist. |
+| `chat` fails offline | Use `explore` / `context` / `chat --dry-run` for network-free proof. |
+
+---
+
+## 4. Residual: logging-quality assessment (Not on this tip)
+
+**Not on this tip.** Status on `main` @ `9eb9fa2`: the
+`logging-assessment` command is **absent** (`capabilities` does not list it;
+no desktop LQA UI).
+
+**Known tip with the command (do not merge assumptions into this doc’s base):**
+branch `cursor/logging-quality-assessment-5197` @
+`9869508d5d42c97d33aa2fd7f74d4fe8bcaf8f95` — verify locally:
+
+```bash
+contextdesk --json capabilities   # must list logging-assessment
+contextdesk logging-assessment --help
+```
+
+When that command exists, a public-fixture rehearsal is:
+
+```bash
+BIN=./target/debug/contextdesk   # build from the LQA tip
+DATA=$(mktemp -d)
+$BIN --data-dir "$DATA" import \
+  ./fixtures/log-lab/scenarios/mixed-time-quality/import
+ID=$($BIN --data-dir "$DATA" --json corpus list | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["data"]["corpora"][0]["id"])')
+$BIN --data-dir "$DATA" --json logging-assessment "$ID"
+REPORT_JSON=$(mktemp).json
+REPORT_MD=$(mktemp).md
+$BIN --data-dir "$DATA" logging-assessment "$ID" \
+  --output "$REPORT_JSON" --report-format json
+$BIN --data-dir "$DATA" logging-assessment "$ID" \
+  --output "$REPORT_MD" --report-format markdown
+# Re-run either export → refuse existing file (no-clobber)
+```
+
+**Expect:** assessment `schemaId` `contextdesk.logging_quality_assessment.v1`;
+Markdown is a projection of fixed finding hints (not a free-form LLM plan);
+no provider/keychain use.
+
+Until that lands on `main`, treat LQA as **residual** — not part of the
+shipped GUI/CLI paths above.
+
+---
+
+## Handbook impact
+
+none — documentation and navigation only; no product behavior change on this
+tip.

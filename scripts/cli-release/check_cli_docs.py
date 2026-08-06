@@ -8,6 +8,8 @@ Checks:
   4. When CONTEXTDESK_BIN is set, --help command list matches docs/CLI.md shipped set
   5. normalize status honesty: the shipped command must exist in the checked binary
   6. One-click proof: README links to docs/NORMALIZATION.md
+  7. Demo runbook + README documentation map: public fixtures, MANUAL/CLI labels,
+     and command-contract honesty for logging-assessment residual
 
 Exit 0 only if all pass.
 """
@@ -27,6 +29,7 @@ REQUIRED_DOCS = [
     "README.md",
     "docs/CLI.md",
     "docs/NORMALIZATION.md",
+    "docs/DEMO_RUNBOOK.md",
     "docs/LANGUAGE_INTEGRATION.md",
     "docs/CLI_PACKAGING.md",
     "docs/CLI_CLIENT_PROTOCOL.md",
@@ -37,6 +40,29 @@ REQUIRED_DOCS = [
     "fixtures/cli-docs/normalize-examples/source-explicit.jsonl",
     "packages/cli-clients/python/contextdesk_client.py",
 ]
+
+DEMO_PUBLIC_FIXTURES = [
+    "fixtures/cli-release-demo",
+    "fixtures/log-lab/scenarios/company-timestamp-diversity/import",
+    "fixtures/log-lab/scenarios/mixed-time-quality/import",
+]
+
+# Top-level CLI verbs the demo runbook may invoke outside the residual LQA section.
+DEMO_SHIPPED_VERBS = {
+    "import",
+    "normalize",
+    "corpus",
+    "timezone",
+    "explore",
+    "context",
+    "session",
+    "chat",
+    "config",
+    "confluence",
+    "capabilities",
+    "doctor",
+    "help",
+}
 
 SHIPPED_COMMANDS = {
     "import",
@@ -57,6 +83,7 @@ SHIPPED_COMMANDS = {
 HUB_LINKS = [
     "docs/CLI.md",
     "docs/NORMALIZATION.md",
+    "docs/DEMO_RUNBOOK.md",
     "docs/specs/NORMALIZED_LOG_EVENTS_V1.md",
     "docs/LANGUAGE_INTEGRATION.md",
     "docs/CLI_PACKAGING.md",
@@ -85,6 +112,14 @@ def check_files() -> None:
 def check_readme_hub() -> None:
     print("== README hub ==")
     text = (ROOT / "README.md").read_text(encoding="utf-8")
+    if re.search(r"(?m)^## Documentation map\s*$", text):
+        ok("README has ## Documentation map")
+    else:
+        fail("README missing ## Documentation map heading")
+    if "docs/DEMO_RUNBOOK.md" in text or "](docs/DEMO_RUNBOOK.md)" in text:
+        ok("README links docs/DEMO_RUNBOOK.md")
+    else:
+        fail("README missing link to docs/DEMO_RUNBOOK.md")
     if re.search(r"(?m)^## CLI and log normalization\s*$", text):
         ok("README has ## CLI and log normalization")
     else:
@@ -93,7 +128,7 @@ def check_readme_hub() -> None:
     idx = text.find("## CLI and log normalization")
     if idx < 0:
         return
-    window = text[idx : idx + 2500]
+    window = text[idx : idx + 3000]
     if "docs/NORMALIZATION.md" in window or "](docs/NORMALIZATION.md)" in window:
         ok("README section links docs/NORMALIZATION.md (one-click)")
     else:
@@ -139,6 +174,7 @@ def check_internal_links() -> None:
         ROOT / "README.md",
         ROOT / "docs" / "CLI.md",
         ROOT / "docs" / "NORMALIZATION.md",
+        ROOT / "docs" / "DEMO_RUNBOOK.md",
         ROOT / "docs" / "LANGUAGE_INTEGRATION.md",
         ROOT / "docs" / "CLI_PACKAGING.md",
         ROOT / "docs" / "CLI_CLIENT_PROTOCOL.md",
@@ -158,6 +194,94 @@ def check_internal_links() -> None:
                 ok(f"{doc.relative_to(ROOT)} → {rel}")
             else:
                 fail(f"broken link in {doc.relative_to(ROOT)}: [{label}]({rel})")
+
+
+def check_demo_runbook_contract() -> None:
+    """Public-fixture + command honesty gate for docs/DEMO_RUNBOOK.md."""
+    print("== demo runbook contract ==")
+    path = ROOT / "docs" / "DEMO_RUNBOOK.md"
+    if not path.is_file():
+        fail("docs/DEMO_RUNBOOK.md missing")
+        return
+    text = path.read_text(encoding="utf-8")
+
+    for needle in ("MANUAL GUI", "[CLI]", "Deterministic host vs LLM", "Troubleshooting"):
+        if needle in text:
+            ok(f"DEMO_RUNBOOK contains {needle!r}")
+        else:
+            fail(f"DEMO_RUNBOOK missing required section marker {needle!r}")
+
+    for rel in DEMO_PUBLIC_FIXTURES:
+        if rel in text:
+            ok(f"DEMO_RUNBOOK references fixture {rel}")
+        else:
+            fail(f"DEMO_RUNBOOK missing fixture path {rel}")
+        p = ROOT / rel
+        if p.is_dir() or p.is_file():
+            ok(f"fixture exists on disk: {rel}")
+        else:
+            fail(f"fixture path missing on disk: {rel}")
+
+    # Split residual LQA section so primary path cannot invent logging-assessment.
+    residual_idx = text.find("## 4. Residual")
+    if residual_idx < 0:
+        fail("DEMO_RUNBOOK missing ## 4. Residual logging-quality section")
+        primary, residual = text, ""
+    else:
+        primary, residual = text[:residual_idx], text[residual_idx:]
+        ok("DEMO_RUNBOOK has residual LQA section")
+
+    if "logging-assessment" in primary:
+        fail(
+            "DEMO_RUNBOOK primary paths invoke logging-assessment "
+            "(must stay in residual section only on tips without the command)"
+        )
+    else:
+        ok("primary DEMO_RUNBOOK paths omit logging-assessment")
+
+    if "logging-assessment" in residual and re.search(
+        r"not on this tip|not on `main`", residual, re.I
+    ):
+        ok("residual section documents logging-assessment honesty")
+    elif "logging-assessment" not in text:
+        ok("DEMO_RUNBOOK does not claim logging-assessment at all")
+    else:
+        fail("logging-assessment mentioned without residual honesty wording")
+
+    # Command verbs in fenced/code-ish contextdesk invocations (primary only).
+    verbs: set[str] = set()
+    for m in re.finditer(r"\bcontextdesk\s+([a-z][\w-]*)", primary):
+        verbs.add(m.group(1))
+    for m in re.finditer(r"\$BIN\s+(?:--data-dir\s+\"\$DATA(?:_TZ)?\"\s+)?(?:--json\s+)?([a-z][\w-]*)", primary):
+        verbs.add(m.group(1))
+    unknown = sorted(verbs - DEMO_SHIPPED_VERBS - {"--json", "build"})
+    # Filter accidental captures from prose like "contextdesk doctor"
+    unknown = [v for v in unknown if v not in DEMO_SHIPPED_VERBS]
+    if unknown:
+        fail(f"DEMO_RUNBOOK primary path uses unknown CLI verbs: {unknown}")
+    else:
+        ok(f"DEMO_RUNBOOK primary CLI verbs ⊆ shipped set ({sorted(verbs)})")
+
+    bin_path = os.environ.get("CONTEXTDESK_BIN", "").strip()
+    if not bin_path:
+        ok("CONTEXTDESK_BIN unset — skip live demo command presence")
+        return
+    if not Path(bin_path).exists():
+        fail(f"CONTEXTDESK_BIN not found: {bin_path}")
+        return
+    cmds = help_commands(bin_path)
+    for v in sorted(verbs):
+        if v in cmds or v in DEMO_SHIPPED_VERBS:
+            ok(f"demo verb present or shipped: {v}")
+        else:
+            fail(f"demo verb {v} not in binary --help")
+    if "logging-assessment" in cmds:
+        fail(
+            "binary exposes logging-assessment but DEMO_RUNBOOK residual claims "
+            "absent on this tip — update runbook tip identity"
+        )
+    else:
+        ok("binary lacks logging-assessment (matches residual honesty on this tip)")
 
 
 def help_commands(bin_path: str) -> set[str]:
@@ -315,6 +439,7 @@ def main() -> int:
     check_internal_links()
     check_command_drift()
     check_fixtures_json()
+    check_demo_runbook_contract()
     print()
     if failures:
         print(f"FAILED {len(failures)} check(s)")

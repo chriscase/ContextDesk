@@ -145,6 +145,8 @@ cargo test -p cd-cli --test exact_head_timezone_utc_lab -- --nocapture
 
 ## Related docs
 
+- [`docs/DEMO_RUNBOOK.md`](DEMO_RUNBOOK.md) — concise 10–15 min GUI + CLI
+  rehearsal (public fixtures; honest LQA residual on tips without the command).
 - [`docs/CLI.md`](CLI.md) — command grammar including `timezone apply-all`,
   `chat --activity`, `--trace`, `--context-selection`.
 - `scripts/cli-live-provider-rehearsal.sh` — ZIP import + dry-run / live turns.

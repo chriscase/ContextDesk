@@ -35,6 +35,18 @@ the product remains rename-friendly through [`branding.toml`](branding.toml).
 | **Identity**    | Rename via [`branding.toml`](branding.toml) (full runtime slug paths tracked in [#179](https://github.com/chriscase/ContextDesk/issues/179))                |
 | **Phase 1 DoD** | [Issue #65](https://github.com/chriscase/ContextDesk/issues/65) · [Roadmap](docs/ROADMAP.md) · [Backlog audit](docs/BACKLOG_AUDIT.md)                       |
 
+## Documentation map
+
+| Need | Start here |
+| ---- | ---------- |
+| **Install / build** | [Install](#install) · [Development](#development) · [DEV.md](docs/DEV.md) · [Packaging](docs/PACKAGING.md) |
+| **GUI use** | [Configure a provider](#configure-a-provider) · Help [first run](docs/help/getting-started/first-run.md) · [Log Explorer](docs/help/log-analysis/log-explorer.md) · [demo datasets](docs/help/log-analysis/demo-datasets.md) |
+| **CLI** | [CLI and log normalization](#cli-and-log-normalization) · [CLI guide](docs/CLI.md) |
+| **Normalization** | [NORMALIZATION.md](docs/NORMALIZATION.md) · [spec](docs/specs/NORMALIZED_LOG_EVENTS_V1.md) |
+| **Logging quality assessment (LQA)** | **Not on `main` yet** — residual until merge; see [Demo runbook §4](docs/DEMO_RUNBOOK.md#4-residual-logging-quality-assessment-not-on-this-tip) |
+| **Architecture** | [ARCHITECTURE.md](docs/ARCHITECTURE.md) · [PRODUCT.md](docs/PRODUCT.md) · [AGENTS.md](AGENTS.md) |
+| **Repeatable demo (GUI + CLI)** | **[Demo runbook](docs/DEMO_RUNBOOK.md)** · [Demo acceptance](docs/DEMO_ACCEPTANCE.md) |
+
 ## CLI and log normalization
 
 **One-click path to normalize:** [Normalization guide](docs/NORMALIZATION.md) ·
@@ -48,6 +60,7 @@ JSONL — offline, with no provider or keychain reads.
 
 | Guide | What it covers |
 | ----- | -------------- |
+| **[Demo runbook](docs/DEMO_RUNBOOK.md)** | 10–15 min GUI (manual) + CLI (copy/paste) paths; public fixtures; troubleshooting |
 | **[CLI guide](docs/CLI.md)** | Grammar (verified against `--help`), config, `--data-dir`, JSON/JSONL envelopes, exit codes, examples |
 | **[Normalization guide](docs/NORMALIZATION.md)** | Raw → normalized walkthrough, time resolutions, output layout, privacy, demos |
 | **[Normalized events specification](docs/specs/NORMALIZED_LOG_EVENTS_V1.md)** | Normative contract (not the human guide) |
