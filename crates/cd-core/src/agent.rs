@@ -5630,7 +5630,8 @@ mod tests {
     #[tokio::test]
     async fn focused_linked_search_logs_packs_with_reserved_headroom() {
         use crate::context_budgeting::{has_useful_context_headroom, synthesis_packing_budget};
-        use crate::sessions::{estimate_context_chars, DEFAULT_CONTEXT_CHAR_BUDGET};
+        use crate::model_context::MIN_CONTEXT_CHAR_BUDGET;
+        use crate::sessions::estimate_context_chars;
         use std::io::Write;
         use std::sync::{Arc, Mutex};
 
@@ -5670,28 +5671,29 @@ mod tests {
         let logs = dir.path().join("logs");
         fs::create_dir_all(&logs).unwrap();
         let mut f = fs::File::create(logs.join("worker.log")).unwrap();
-        // Lead rare identity (file order) — same query terms so search_logs returns it.
+        // Distinct rare lead template (unique tokens → own template + exemplar with seq=).
         writeln!(
             f,
-            r#"{{"ts":1699999999,"level":"error","service":"worker","message":"RARE_FIRST_FOCUS_MARKER pool exhausted job-focus-lead"}}"#
+            r#"{{"ts":1699999999,"level":"error","service":"worker","message":"RARE_FIRST_FOCUS_MARKER ALPHA_UNIQUE_LEAD pool exhausted {}"}}"#,
+            "L".repeat(1_200)
         )
         .unwrap();
-        // Enough long matching events that host evidence exceeds packing residual, but
-        // few enough that limit=100 returns first+last markers (not only mid hits).
-        for i in 0..80 {
+        // Many distinct long templates so host search_logs detail exceeds packing residual
+        // under the default 120k hard / 108k packing policy (real defect class).
+        for i in 0..48 {
             writeln!(
                 f,
-                r#"{{"ts":{},"level":"error","service":"worker","message":"pool exhausted job-focus-{} payload={}"}}"#,
+                r#"{{"ts":{},"level":"error","service":"worker","message":"MID_TEMPLATE_{i} pool exhausted UNIQUE_SHAPE_{i} payload={}"}}"#,
                 1_700_000_100 + i,
-                i,
-                "x".repeat(900)
+                "M".repeat(2_400)
             )
             .unwrap();
         }
-        // Tail rare identity for packer last-stratum survival.
+        // Distinct rare tail template.
         writeln!(
             f,
-            r#"{{"ts":1800000000,"level":"error","service":"worker","message":"RARE_LAST_FOCUS_MARKER pool exhausted job-focus-tail"}}"#
+            r#"{{"ts":1800000000,"level":"error","service":"worker","message":"RARE_LAST_FOCUS_MARKER OMEGA_UNIQUE_TAIL pool exhausted {}"}}"#,
+            "T".repeat(1_200)
         )
         .unwrap();
         let cache = dir.path().join("cache");
@@ -5705,7 +5707,9 @@ mod tests {
         let mut host = ToolHost::new(ws, idx, None);
         host.set_log_analysis(true, Some(cache));
         host.set_active_log_corpus(Some(report.corpus_id.clone()));
+        // Note: run_agent_turn overwrites host max_results from AgentOptions.
 
+        // search_logs uses `k`, not `limit`.
         let tool_resp = ChatCompletion {
             content: String::new(),
             tool_calls: vec![ToolCallMsg {
@@ -5713,7 +5717,7 @@ mod tests {
                 kind: "function".into(),
                 function: FunctionCall {
                     name: crate::log_analysis::SEARCH_LOGS.into(),
-                    arguments: r#"{"query":"pool exhausted","limit":100}"#.into(),
+                    arguments: r#"{"query":"pool exhausted","k":50,"semantic":false}"#.into(),
                 },
             }],
             finish_reason: "tool_calls".into(),
@@ -5735,7 +5739,16 @@ mod tests {
             "sources=worker.log; focused=pool",
         )
         .unwrap();
-        let budget = DEFAULT_CONTEXT_CHAR_BUDGET;
+        // Product min hard budget (24k) with shared headroom packing. Default 120k is
+        // still covered by has_useful_context_headroom mutation below and unit packer
+        // oversize tests; tool-facing search_logs bodies are exemplar-bounded so they
+        // often fit under 108k residual without omit (omit is unit-tested on packer).
+        let budget = MIN_CONTEXT_CHAR_BUDGET;
+        let packing_budget = synthesis_packing_budget(budget);
+        assert!(
+            packing_budget < budget,
+            "packing={packing_budget} must reserve headroom vs hard={budget}"
+        );
         let events = run_agent_turn(
             &backend,
             &mut host,
@@ -5746,6 +5759,8 @@ mod tests {
                 log_explorer_context: Some(context),
                 max_rounds: 6,
                 context_char_budget: budget,
+                // Host cap is clamp(1,50); raise so many unique templates enter evidence.
+                max_results_per_source: 50,
                 ..Default::default()
             },
         )
@@ -5761,6 +5776,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("||");
         assert!(
+            trail.contains("per_source=50"),
+            "expected raised per-source cap in trail: {trail}"
+        );
+        assert!(
             trail.contains("context_budget:"),
             "focused path must emit budget telemetry: {trail}"
         );
@@ -5770,7 +5789,7 @@ mod tests {
         );
         assert!(
             trail.contains("useful_headroom=true")
-                || trail.contains(&format!("packing={}", synthesis_packing_budget(budget))),
+                || trail.contains(&format!("packing={packing_budget}")),
             "expected useful headroom or packing budget in trail={trail}"
         );
 
@@ -5786,16 +5805,16 @@ mod tests {
 near-ceiling 119900/120000 class is not allowed"
             );
             assert!(
-                *used <= synthesis_packing_budget(budget)
-                    || has_useful_context_headroom(*used, budget),
-                "used={used} packing={}",
-                synthesis_packing_budget(budget)
+                *used <= packing_budget || has_useful_context_headroom(*used, budget),
+                "used={used} packing={packing_budget}"
             );
-            // Explicit mutation class from the production defect.
+            // Near-full hard pack without useful free margin is forbidden at any budget.
             assert!(
-                *used < 119_900 || budget > 120_000,
-                "used={used} resembles the defective near-full pack"
+                *used < budget.saturating_sub(budget / 20).max(1),
+                "used={used} fills hard={budget} without useful free margin"
             );
+            // Production defect class still fails the shared gate at 120k.
+            assert!(!has_useful_context_headroom(119_900, 120_000));
         }
 
         let blobs = backend.synthesis_blobs.lock().unwrap();
@@ -5804,25 +5823,82 @@ near-ceiling 119900/120000 class is not allowed"
             synth.contains("seq=") && synth.contains("source="),
             "packed evidence must retain citation identity syntax"
         );
-        // When the host returned oversize evidence (omits disclosed), the packer must still
-        // keep at least one of the rare first/last markers that appear in the tool evidence.
-        // Unit packer tests cover pure last-identity force-include; this path checks the
-        // production search_logs → linked_round_model_context wiring.
+        // Parse real trail keys from ContextBudgetTelemetry::trail_step on the **last**
+        // synthesis step that reports evidence_included (pre-tool steps have 0).
+        // Keys are evidence_omitted_blocks= / evidence_omitted_chars= — never "evidence_omitted=".
+        fn last_context_budget_field(trail: &str, key: &str) -> Option<u64> {
+            let mut last = None;
+            for part in trail.split("context_budget:") {
+                if part.is_empty() {
+                    continue;
+                }
+                let step = part.split('|').next().unwrap_or(part);
+                if !step.contains("evidence_included=") {
+                    continue;
+                }
+                // Prefer the synthesis step that actually packed host evidence.
+                let included = {
+                    let needle = "evidence_included=";
+                    step.split(needle)
+                        .nth(1)
+                        .and_then(|rest| rest.split([',', '|', ' ']).next())
+                        .and_then(|t| t.parse::<u64>().ok())
+                        .unwrap_or(0)
+                };
+                if included == 0 && key != "evidence_included" {
+                    continue;
+                }
+                let needle = format!("{key}=");
+                if let Some(rest) = step.split(&needle).nth(1) {
+                    let token = rest.split([',', '|', ' ']).next().unwrap_or("");
+                    if let Ok(v) = token.parse::<u64>() {
+                        last = Some(v);
+                    }
+                }
+            }
+            last
+        }
+        let omitted_blocks =
+            last_context_budget_field(&trail, "evidence_omitted_blocks").unwrap_or(0);
+        let omitted_chars =
+            last_context_budget_field(&trail, "evidence_omitted_chars").unwrap_or(0);
+        let packing = last_context_budget_field(&trail, "packing").unwrap_or(0);
+        let used = last_context_budget_field(&trail, "used").unwrap_or(0);
+        let evidence_included = last_context_budget_field(&trail, "evidence_included").unwrap_or(0);
+        eprintln!(
+            "FOCUSED_HEADROOM_CAPTURE hard={budget} packing_policy={packing_budget} \
+trail_used={used} trail_packing={packing} evidence_included={evidence_included} \
+omitted_blocks={omitted_blocks} omitted_chars={omitted_chars} synth_chars={}",
+            synth.chars().count()
+        );
+        assert!(
+            evidence_included > 0,
+            "synthesis must pack host evidence; trail={trail}"
+        );
+        // Trail must emit the real omit keys (not the dead "evidence_omitted=" shorthand).
+        assert!(
+            trail.contains("evidence_omitted_blocks=") && trail.contains("evidence_omitted_chars="),
+            "trail must expose real omit field names; trail={trail}"
+        );
+        // Rare first/last markers from distinct templates must appear in packed synthesis
+        // evidence on this production path (always required — no dead if-branch).
         let has_first = synth.contains("RARE_FIRST_FOCUS_MARKER");
         let has_last = synth.contains("RARE_LAST_FOCUS_MARKER");
-        let omitted = trail.contains("evidence_omitted=") && !trail.contains("evidence_omitted=0");
-        if omitted {
+        assert!(
+            has_first || has_last,
+            "focused pack must keep rare first or last marker from host search_logs evidence; \
+has_first={has_first} has_last={has_last} omitted_blocks={omitted_blocks} \
+omitted_chars={omitted_chars} evidence_included={evidence_included} \
+trail={trail} synth_prefix={}",
+            synth.chars().take(1_200).collect::<String>()
+        );
+        // When the packer did omit (oversize residual), rare survival is especially
+        // load-bearing; unit tests force omit. Log for capture either way.
+        if omitted_blocks > 0 || omitted_chars > 0 {
+            eprintln!("FOCUSED_OVERSIZE_OMIT_CAPTURE has_first={has_first} has_last={has_last}");
             assert!(
                 has_first || has_last,
-                "oversize focused pack must keep rare first or last marker (not only early hits); \
-has_first={has_first} has_last={has_last} trail={trail} synth_prefix={}",
-                synth.chars().take(800).collect::<String>()
-            );
-        } else {
-            // Under-budget path still retains citation syntax (asserted above).
-            assert!(
-                has_first || has_last || synth.contains("job-focus-"),
-                "synthesis evidence missing focused hits"
+                "oversize omit path must retain rare marker"
             );
         }
         // Answer path completed without context_too_long terminal for oversize pack alone.
