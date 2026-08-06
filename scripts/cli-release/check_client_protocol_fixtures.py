@@ -8,7 +8,12 @@ not a reimplementation of product parsers.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import stat
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -89,6 +94,12 @@ def main() -> int:
     check("completed verdict keeps ok report", (verdict.get("envelope") or {}).get("ok") is True)
     check("completed verdict process exit", verdict.get("process_exit") in (8, 9, 10))
     check("completed verdict is typed", verdict.get("verdict_kind") in ("not_ready", "non_conforming", "partial"))
+    adversarial_ok = load("envelope.adversarial-ok.json")
+    adversarial_not_ok = load("envelope.adversarial-not-ok.json")
+    adversarial_invalid_ok = load("envelope.adversarial-invalid-ok.json")
+    check("adversarial key order keeps top-level ok", adversarial_ok.get("ok") is True)
+    check("nested and misleading text cannot override false", adversarial_not_ok.get("ok") is False)
+    check("non-boolean top-level ok is invalid", type(adversarial_invalid_ok.get("ok")) is not bool)
 
     prog = load("progress.line.json")
     check("progress type", prog.get("type") == "progress")
@@ -143,6 +154,74 @@ def main() -> int:
                 )
             for needle in ("not_ready", "non_conforming", "partial"):
                 check(f"client {lang} typed verdict {needle}", needle in body)
+            exact_mapping = {
+                "python": ('8: "not_ready"', '9: "non_conforming"', '10: "partial"'),
+                "node": ('[8, "not_ready"]', '[9, "non_conforming"]', '[10, "partial"]'),
+                "java": ('case 8 -> "not_ready"', 'case 9 -> "non_conforming"', 'case 10 -> "partial"'),
+                "csharp": ('8 => "not_ready"', '9 => "non_conforming"', '10 => "partial"'),
+                "go": ("case 8:", "case 9:", "case 10:"),
+                "c": ("exit_code == 8", "exit_code == 9", "exit_code == 10"),
+                "cpp": ("exit_code == 8", "exit_code == 9", "exit_code == 10"),
+                "rust": ('8 => Some("not_ready")', '9 => Some("non_conforming")', '10 => Some("partial")'),
+            }
+            check(f"client {lang} exact typed mapping exits 8/9/10", all(part in body for part in exact_mapping[lang]))
+            parser_needles = {
+                "python": "json.loads(",
+                "node": "JSON.parse(",
+                "java": "JsonEnvelope.parseOk(",
+                "csharp": "JsonDocument.Parse(",
+                "go": "json.Unmarshal(",
+                "c": "contextdesk_parse_envelope_ok(",
+                "cpp": "contextdesk_parse_envelope_ok(",
+                "rust": "serde_json::from_str(",
+            }
+            check(f"client {lang} parses JSON envelope", parser_needles[lang] in body)
+
+    shared_parser = CLIENTS / "shared" / "contextdesk_envelope.h"
+    check("bounded shared C/C++ envelope parser", shared_parser.is_file())
+    if shared_parser.is_file():
+        parser_text = shared_parser.read_text(encoding="utf-8")
+        check("shared parser has byte bound", "CONTEXTDESK_MAX_ENVELOPE_BYTES" in parser_text)
+        check("shared parser has depth bound", "CONTEXTDESK_MAX_JSON_DEPTH" in parser_text)
+
+    print("== executable client verdict matrix (available toolchains) ==")
+    with tempfile.TemporaryDirectory(prefix="contextdesk-client-protocol-") as td:
+        temp = Path(td)
+        fake = temp / "contextdesk-fake"
+        fake.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os,sys\n"
+            "sys.stdout.write(os.environ['CD_FAKE_BODY'] + '\\n')\n"
+            "raise SystemExit(int(os.environ['CD_FAKE_EXIT']))\n",
+            encoding="utf-8",
+        )
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+        runners: dict[str, list[str]] = {"python": [sys.executable, str(CLIENTS / REQUIRED_LANGS["python"])]}
+        if shutil.which("node"):
+            runners["node"] = ["node", str(CLIENTS / REQUIRED_LANGS["node"])]
+        if shutil.which("cc"):
+            binary = temp / "client-c"
+            built = subprocess.run(["cc", str(CLIENTS / REQUIRED_LANGS["c"]), "-o", str(binary)], capture_output=True)
+            check("client c compiles for matrix", built.returncode == 0, built.stderr.decode(errors="replace")[:300])
+            if built.returncode == 0: runners["c"] = [str(binary)]
+        if shutil.which("c++"):
+            binary = temp / "client-cpp"
+            built = subprocess.run(["c++", "-std=c++17", str(CLIENTS / REQUIRED_LANGS["cpp"]), "-o", str(binary)], capture_output=True)
+            check("client cpp compiles for matrix", built.returncode == 0, built.stderr.decode(errors="replace")[:300])
+            if built.returncode == 0: runners["cpp"] = [str(binary)]
+
+        body_ok = json.dumps(adversarial_ok, separators=(",", ":"))
+        body_not_ok = json.dumps(adversarial_not_ok, separators=(",", ":"))
+        body_invalid = json.dumps(adversarial_invalid_ok, separators=(",", ":"))
+        for lang, runner in runners.items():
+            for exit_code in (8, 9, 10):
+                env = {**os.environ, "CONTEXTDESK_BIN": str(fake), "CD_FAKE_BODY": body_ok, "CD_FAKE_EXIT": str(exit_code)}
+                ran = subprocess.run([*runner, "capabilities"], env=env, capture_output=True)
+                check(f"client {lang} preserves completed verdict exit {exit_code}", ran.returncode == exit_code)
+            for label, body, exit_code in (("nested false", body_not_ok, 4), ("nonboolean ok", body_invalid, 0)):
+                env = {**os.environ, "CONTEXTDESK_BIN": str(fake), "CD_FAKE_BODY": body, "CD_FAKE_EXIT": str(exit_code)}
+                ran = subprocess.run([*runner, "capabilities"], env=env, capture_output=True)
+                check(f"client {lang} rejects {label}", ran.returncode != 0)
 
     print("== protocol doc ==")
     doc = ROOT / "docs" / "CLI_CLIENT_PROTOCOL.md"

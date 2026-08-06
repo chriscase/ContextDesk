@@ -181,7 +181,7 @@ for the format.
 | Ctrl-C | Exit **130** (`cancelled`); destination unchanged |
 | Non-empty `--output` | User error — refuse overwrite |
 | `--strict-time` | Fail closed if local times cannot be resolved |
-| `partial: true` | Report honesty flag when selection incomplete; do not treat as full success for automation gates |
+| `partial: true` | Report honesty flag when event-bearing selection is incomplete, preview found unsupported/policy-blocked sources, or selected intake later failed/excluded content; do not treat as full success for automation gates |
 | `--fail-on-partial` + partial report | Exit **10** (`partial`) after publication; valid output remains available for diagnosis/use |
 
 ## Validate and summarize normalized output
@@ -205,6 +205,8 @@ bound, `diagnostics_truncated` is true and per-code counts are explicitly named
 `diagnostic_sample_counts`; `diagnostics_total` remains the full observed total.
 Validation retains at most 512 diagnostics and 32 already-redacted error
 samples across the entire run and reports omitted counts per file and globally.
+Those omitted counts include both the core validator's per-file caps (256
+diagnostics and 5 samples) and later global truncation, counted exactly once.
 Summary reduces and drops each file report before opening the next file.
 
 Discovery fails closed beyond 4,096 files, 4,096 visited directories, 65,536

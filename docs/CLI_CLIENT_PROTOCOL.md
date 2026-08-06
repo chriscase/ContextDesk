@@ -124,6 +124,12 @@ command-line wrapper. Any other `ok:true` + nonzero exit is a protocol error.
 
 Fixture: `fixtures/cli-client-protocol/envelope.completed-verdict.json`.
 
+Clients parse the complete, bounded JSON object and require a top-level boolean
+`ok`; substring matching is not conforming. Nested `ok` fields, reordered keys,
+escaped/misleading string contents, and a string value such as `"ok":"true"`
+must not change the verdict. The adversarial envelope fixtures exercise these
+cases, and the C/C++ examples share the same dependency-free bounded tokenizer.
+
 ## JSONL progress + terminal (`--jsonl`)
 
 Streaming commands (import progress, chat, doctor) may emit **one JSON object per line** on stdout.

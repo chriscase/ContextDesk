@@ -15,9 +15,10 @@ use super::timezone_resolution::{
 };
 use crate::error::{CoreError, CoreResult};
 use crate::normalized_log_events::{
-    validate_stream, EventTime, NormalizedLogEvent, NormalizedLogHeader, ProducerIdentity,
-    ProducerRedactionClaim, Severity, SeverityConfidence, SeverityProvenance, TimeBasis,
-    TimeResolution, NORMALIZED_LOG_EVENTS_READER_VERSION, NORMALIZED_LOG_EVENTS_SCHEMA_ID,
+    is_valid_w3c_trace_id, validate_stream, EventTime, NormalizedLogEvent, NormalizedLogHeader,
+    ProducerIdentity, ProducerRedactionClaim, Severity, SeverityConfidence, SeverityProvenance,
+    TimeBasis, TimeResolution, NORMALIZED_LOG_EVENTS_READER_VERSION,
+    NORMALIZED_LOG_EVENTS_SCHEMA_ID,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -294,7 +295,15 @@ pub fn map_event_to_normalized(
         time,
         severity,
         message: event.message.clone(),
-        trace_id: event.trace_id.clone(),
+        // Raw intake accepts vendor correlation strings. The normalized v1
+        // `traceId` field is narrower: only a non-zero lowercase 32-hex W3C
+        // identifier may cross this boundary. Omit everything else rather
+        // than laundering an arbitrary correlation into a standards claim.
+        trace_id: event
+            .trace_id
+            .as_deref()
+            .filter(|value| is_valid_w3c_trace_id(value))
+            .map(str::to_owned),
         span_id: None,
         correlations: Vec::new(),
         attributes: serde_json::Map::new(),
@@ -1050,6 +1059,40 @@ mod tests {
         .unwrap();
         assert_eq!(n.canonical, "ORIGINAL with secret [REDACTED]");
         assert_eq!(n.message, "hello");
+    }
+
+    #[test]
+    fn trace_id_is_emitted_only_when_it_is_valid_w3c_shape() {
+        let valid = "0123456789abcdef0123456789abcdef";
+        let malformed = [
+            "trace-company-ts-shared",
+            "0123456789abcdef",
+            "0123456789ABCDEF0123456789ABCDEF",
+            "00000000000000000000000000000000",
+            "0123456789abcdef0123456789abcdeg",
+        ];
+        let mut event = base_event();
+        event.trace_id = Some(valid.into());
+        let normalized = map_event_to_normalized(
+            &event,
+            Some("raw"),
+            false,
+            &NormalizeTimezonePolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(normalized.trace_id.as_deref(), Some(valid));
+
+        for candidate in malformed {
+            event.trace_id = Some(candidate.into());
+            let normalized = map_event_to_normalized(
+                &event,
+                Some("raw"),
+                false,
+                &NormalizeTimezonePolicy::default(),
+            )
+            .unwrap();
+            assert_eq!(normalized.trace_id, None, "candidate={candidate}");
+        }
     }
 
     /// Acceptance mutations: real validator rejects incoherent severity / multi-source abuse.

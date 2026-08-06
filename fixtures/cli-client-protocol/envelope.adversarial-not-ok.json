@@ -1,0 +1,11 @@
+{
+  "data": {
+    "ok": true,
+    "message": "misleading text: \"ok\": true"
+  },
+  "ok": false,
+  "error": {
+    "kind": "user_error",
+    "message": "expected rejection"
+  }
+}

@@ -176,6 +176,79 @@ fn normalize_json_envelope_is_terminal_success() {
     assert!(v["data"]["events"].as_u64().unwrap_or(0) >= 1);
 }
 
+#[test]
+fn normalize_partial_subprocess_exits_ten_and_preserves_parseable_outputs() {
+    let tmp = TempDir::new().unwrap();
+    let input = tmp.path().join("in");
+    write_tree(&input); // includes a binary source the preview cannot normalize
+    let out = tmp.path().join("out");
+    let asserted = bin()
+        .args([
+            "--json",
+            "normalize",
+            input.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+            "--fail-on-partial",
+        ])
+        .assert()
+        .code(10);
+
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&asserted.get_output().stdout).expect("completed JSON envelope");
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["partial"], true);
+    assert_eq!(envelope["data"]["fail_on_partial"], true);
+    let report: serde_json::Value = serde_json::from_slice(
+        &fs::read(out.join("normalization-report.json")).expect("published report"),
+    )
+    .expect("parseable report");
+    assert_eq!(report["partial"], true);
+    assert!(out.join("manifest.json").is_file());
+    let source = fs::read_dir(out.join("sources"))
+        .unwrap()
+        .next()
+        .expect("published source")
+        .unwrap()
+        .path();
+    bin()
+        .args(["normalized", "validate", source.to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+#[test]
+fn company_timestamp_fixture_normalizes_to_self_validating_w3c_output() {
+    let tmp = TempDir::new().unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/log-lab/scenarios/company-timestamp-diversity/import");
+    let out = tmp.path().join("out");
+    bin()
+        .args([
+            "normalize",
+            fixture.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    bin()
+        .args(["normalized", "validate", out.to_str().unwrap()])
+        .assert()
+        .success();
+    for entry in fs::read_dir(out.join("sources")).unwrap() {
+        let text = fs::read_to_string(entry.unwrap().path()).unwrap();
+        for line in text.lines().skip(1) {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_ne!(
+                event.get("traceId").and_then(serde_json::Value::as_str),
+                Some("trace-company-ts-shared")
+            );
+        }
+    }
+}
+
 /// Structural: normalize path must not *call* provider or secret-store APIs.
 #[test]
 fn normalize_command_source_has_no_provider_or_keychain() {

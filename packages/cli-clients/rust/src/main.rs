@@ -5,6 +5,8 @@
 use std::env;
 use std::process::{Command, Stdio};
 
+const MAX_ENVELOPE_BYTES: usize = 1024 * 1024;
+
 fn resolve_bin() -> String {
     env::var("CONTEXTDESK_BIN").unwrap_or_else(|_| "contextdesk".into())
 }
@@ -43,6 +45,9 @@ fn run_json(data_dir: Option<&str>, args: &[String]) -> Result<CommandResult, St
         .output()
         .map_err(|e| format!("spawn {bin}: {e}"))?;
     let code = output.status.code().unwrap_or(70);
+    if output.stdout.len() > MAX_ENVELOPE_BYTES {
+        return Err("oversized JSON envelope".into());
+    }
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if stdout.is_empty() {
         let stderr = String::from_utf8_lossy(&output.stderr);

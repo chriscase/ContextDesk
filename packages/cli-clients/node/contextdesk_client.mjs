@@ -12,6 +12,7 @@ function resolveBin() {
 }
 
 const completedVerdicts = new Map([[8, "not_ready"], [9, "non_conforming"], [10, "partial"]]);
+const MAX_ENVELOPE_BYTES = 1024 * 1024;
 
 /**
  * @param {string[]} args command args after global flags
@@ -36,7 +37,11 @@ export function runJson(args, opts = {}) {
     child.stderr.on("data", (c) => (stderr += c));
     child.on("error", reject);
     child.on("close", (code) => {
-      const line = stdout.trim().split(/\r?\n/).filter(Boolean).pop() || "";
+      const line = stdout.trim();
+      if (Buffer.byteLength(line, "utf8") > MAX_ENVELOPE_BYTES) {
+        reject(new Error(`oversized JSON envelope (exit=${code})`));
+        return;
+      }
       let envelope;
       try {
         envelope = JSON.parse(line);
@@ -44,7 +49,11 @@ export function runJson(args, opts = {}) {
         reject(new Error(`invalid JSON (exit=${code}): ${stderr || line}`));
         return;
       }
-      if (!envelope.ok) {
+      if (!envelope || Array.isArray(envelope) || typeof envelope !== "object" || typeof envelope.ok !== "boolean") {
+        reject(new Error(`envelope requires top-level boolean ok (exit=${code})`));
+        return;
+      }
+      if (envelope.ok === false) {
         const err = envelope.error || {};
         const e = new Error(err.message || "command failed");
         e.kind = err.kind || "internal";

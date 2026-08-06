@@ -10,6 +10,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "../shared/contextdesk_envelope.h"
+
 static std::string resolve_bin() {
     if (const char *b = std::getenv("CONTEXTDESK_BIN")) {
         if (b[0]) return b;
@@ -43,16 +45,39 @@ int run_json(const std::string &data_dir, const std::vector<std::string> &cmd) {
     for (auto &s : storage) argv.push_back(s.data());
     argv.push_back(nullptr);
 
+    int output_pipe[2];
+    if (pipe(output_pipe) != 0) {
+        std::perror("pipe");
+        return 70;
+    }
     pid_t pid = fork();
     if (pid < 0) {
+        close(output_pipe[0]);
+        close(output_pipe[1]);
         std::perror("fork");
         return 70;
     }
     if (pid == 0) {
+        close(output_pipe[0]);
+        if (dup2(output_pipe[1], STDOUT_FILENO) < 0) _exit(127);
+        close(output_pipe[1]);
         execvp(bin.c_str(), argv.data());
         std::perror("execvp");
         _exit(127);
     }
+    close(output_pipe[1]);
+    std::string body;
+    body.reserve(4096);
+    bool oversized = false;
+    for (;;) {
+        char chunk[4096];
+        ssize_t got = read(output_pipe[0], chunk, sizeof(chunk));
+        if (got == 0) break;
+        if (got < 0) { close(output_pipe[0]); return 70; }
+        if (body.size() + static_cast<size_t>(got) > CONTEXTDESK_MAX_ENVELOPE_BYTES) oversized = true;
+        else body.append(chunk, static_cast<size_t>(got));
+    }
+    close(output_pipe[0]);
     int status = 0;
     if (waitpid(pid, &status, 0) < 0) {
         std::perror("waitpid");
@@ -60,7 +85,16 @@ int run_json(const std::string &data_dir, const std::vector<std::string> &cmd) {
     }
     if (WIFEXITED(status)) {
         int code = WEXITSTATUS(status);
-        (void)completed_verdict(code); // typed mapping for the JSON parser layer
+        while (!body.empty() && (body.back() == '\n' || body.back() == '\r' || body.back() == ' ' || body.back() == '\t')) body.pop_back();
+        int ok = 0;
+        if (oversized || !contextdesk_parse_envelope_ok(body.data(), body.size(), &ok)) {
+            std::cerr << "invalid or oversized ContextDesk JSON envelope\n";
+            return 70;
+        }
+        std::cout << body << '\n';
+        CompletedVerdict verdict = completed_verdict(code);
+        if (!ok) return code ? code : 70;
+        if (code != 0 && verdict == CompletedVerdict::None) return 70;
         return code;
     }
     return 130;

@@ -205,7 +205,11 @@ pub fn normalize_offline(
             unsupported: counts.unsupported,
             excluded: counts.blocked,
             failed: ingest.stats.failed_files,
-            partial: ingest.stats.partial,
+            // A successful subset is still partial when preview proved that
+            // event-bearing input was unsupported, policy-blocked, or not
+            // selected. Ingest-only partiality misses those sources because
+            // the verified selection intentionally excludes them.
+            partial: ingest.stats.partial || preview_selection_is_partial(&counts),
         };
 
         let mut report = write_and_validate_staging(
@@ -292,6 +296,14 @@ fn check_cancel(cancel: Option<&CancelFlag>) -> CoreResult<()> {
 
 fn fail_on_partial_verdict(requested: bool, partial: bool) -> bool {
     requested && partial
+}
+
+fn preview_selection_is_partial(counts: &ImportPreviewCounts) -> bool {
+    let event_bearing = counts
+        .ready
+        .saturating_add(counts.review)
+        .saturating_add(counts.raw_fallback);
+    counts.unsupported > 0 || counts.blocked > 0 || counts.selected < event_bearing
 }
 
 fn complete_published_outcome(
@@ -554,6 +566,7 @@ mod tests {
             "2026-01-01T00:00:00Z INFO retained event\n",
         )
         .unwrap();
+        fs::write(input.join("unsupported.log"), b"prefix\0binary").unwrap();
         let output = tmp.path().join("out");
         let options = NormalizeOptions {
             input,
@@ -563,27 +576,15 @@ mod tests {
             fail_on_partial: true,
         };
         let outcome = normalize_offline_quiet(&options).expect("complete publish");
-        assert!(!outcome.report.partial);
-        assert!(!outcome.partial_policy_failed);
+        assert!(outcome.report.partial);
+        assert!(outcome.partial_policy_failed);
         assert!(outcome.report.events > 0);
         assert!(output.join("manifest.json").is_file());
         assert!(output.join("normalization-report.json").is_file());
         assert!(output.join("sources").is_dir());
 
-        // The verdict is intentionally computed only after the report has
-        // been published. Mutating either input bit proves both halves of the
-        // automation policy without manufacturing an unsafe filesystem race.
         assert!(fail_on_partial_verdict(true, true));
         assert!(!fail_on_partial_verdict(false, true));
         assert!(!fail_on_partial_verdict(true, false));
-
-        let mut partial_report = outcome.report;
-        partial_report.partial = true;
-        let partial = complete_published_outcome(partial_report, output.clone(), true);
-        assert!(partial.partial_policy_failed);
-        assert!(partial.report.partial);
-        assert!(output.join("manifest.json").is_file());
-        assert!(output.join("normalization-report.json").is_file());
-        assert!(output.join("sources").is_dir());
     }
 }

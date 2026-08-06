@@ -24,6 +24,7 @@ class ContextDeskError(RuntimeError):
 
 
 COMPLETED_VERDICTS = {8: "not_ready", 9: "non_conforming", 10: "partial"}
+MAX_ENVELOPE_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -77,12 +78,16 @@ def run_json(
             f"empty stdout (stderr={proc.stderr[:400]!r})",
             proc.returncode,
         )
+    if len(stdout.encode("utf-8")) > MAX_ENVELOPE_BYTES:
+        raise ContextDeskError("internal", "oversized JSON envelope", proc.returncode)
     try:
-        envelope = json.loads(stdout.splitlines()[-1])
+        envelope = json.loads(stdout)
     except json.JSONDecodeError as e:
         raise ContextDeskError("internal", f"invalid JSON: {e}: {stdout[:400]!r}", proc.returncode) from e
 
-    if not envelope.get("ok", False):
+    if not isinstance(envelope, dict) or type(envelope.get("ok")) is not bool:
+        raise ContextDeskError("internal", "envelope requires top-level boolean ok", proc.returncode)
+    if envelope["ok"] is False:
         err = envelope.get("error") or {}
         raise ContextDeskError(
             err.get("kind") or "internal",

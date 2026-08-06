@@ -100,20 +100,25 @@ pub fn validate_normalized_path_with_observer(
         let mut validation = validate_one(&discovered.root, path, cancel)?;
         aggregate.observe(&validation)?;
 
-        let diagnostics_before = validation.diagnostics.len();
         validation.diagnostics.truncate(diagnostic_budget);
         diagnostic_budget = diagnostic_budget.saturating_sub(validation.diagnostics.len());
-        let diagnostics_omitted = diagnostics_before.saturating_sub(validation.diagnostics.len());
+        // `diagnostics_total` already includes findings omitted by core's
+        // per-file cap. Subtract only the final retained count so later global
+        // truncation is included exactly once as well.
+        let diagnostics_omitted = validation
+            .diagnostics_total
+            .saturating_sub(validation.diagnostics.len() as u64);
 
-        let samples_before = validation.error_samples.len();
         validation.error_samples.truncate(sample_budget);
         sample_budget = sample_budget.saturating_sub(validation.error_samples.len());
-        let error_samples_omitted = samples_before.saturating_sub(validation.error_samples.len());
+        let error_samples_omitted = validation
+            .error_samples_total
+            .saturating_sub(validation.error_samples.len() as u64);
         validation.diagnostics_truncated |= diagnostics_omitted > 0;
         files.push(NormalizedFileValidation {
             path: portable_display(&discovered.root, path, discovered.kind),
-            diagnostics_omitted: diagnostics_omitted as u64,
-            error_samples_omitted: error_samples_omitted as u64,
+            diagnostics_omitted,
+            error_samples_omitted,
             validation,
         });
     }
@@ -488,6 +493,30 @@ mod tests {
             MAX_RETAINED_DIAGNOSTICS
         );
         assert!(summary.diagnostics_omitted_from_sample > 0);
+    }
+
+    #[test]
+    fn per_file_omissions_include_core_and_global_caps_exactly_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("many.jsonl");
+        let mut body = format!("{}\n", header("many"));
+        for _ in 0..1_000 {
+            body.push_str("{}\n");
+        }
+        fs::write(&path, body).unwrap();
+
+        let report = validate_normalized_path(&path, None).unwrap();
+        let file = &report.files[0];
+        assert_eq!(file.validation.diagnostics_total, 1_000);
+        assert_eq!(file.validation.diagnostics.len(), 256);
+        assert_eq!(file.diagnostics_omitted, 744);
+        assert_eq!(report.diagnostics_retained, 256);
+        assert_eq!(report.diagnostics_omitted, 744);
+        assert_eq!(file.validation.error_samples_total, 1_000);
+        assert_eq!(file.validation.error_samples.len(), 5);
+        assert_eq!(file.error_samples_omitted, 995);
+        assert_eq!(report.error_samples_retained, 5);
+        assert_eq!(report.error_samples_omitted, 995);
     }
 
     #[test]

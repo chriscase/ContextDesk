@@ -1,0 +1,9 @@
+{
+  "data": {
+    "ok": false,
+    "message": "misleading text: \"ok\": false; escaped slash \\ and quote \""
+  },
+  "command": "normalized",
+  "schema_version": 1,
+  "ok": true
+}

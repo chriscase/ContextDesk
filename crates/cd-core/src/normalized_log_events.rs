@@ -596,6 +596,10 @@ pub struct NormalizedLogValidation {
     /// report is exactly the kind of artifact that gets pasted into a ticket.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub error_samples: Vec<String>,
+    /// Total offending records eligible for a redacted sample, including
+    /// records omitted by the per-file [`MAX_ERROR_SAMPLES`] bound.
+    #[serde(default)]
+    pub error_samples_total: u64,
 }
 
 fn push_bounded_diagnostic(
@@ -733,6 +737,16 @@ fn is_hex_identifier(value: &str, expected_len: usize) -> bool {
         && value.bytes().all(|byte| byte.is_ascii_hexdigit())
         && value == value.to_ascii_lowercase()
         && value.bytes().any(|byte| byte != b'0')
+}
+
+/// Whether a value is a valid non-zero lowercase W3C trace identifier.
+pub fn is_valid_w3c_trace_id(value: &str) -> bool {
+    is_hex_identifier(value, 32)
+}
+
+/// Whether a value is a valid non-zero lowercase W3C span identifier.
+pub fn is_valid_w3c_span_id(value: &str) -> bool {
+    is_hex_identifier(value, 16)
 }
 
 /// Validate one header.
@@ -1047,7 +1061,7 @@ pub fn validate_event(
     }
 
     if let Some(trace) = &event.trace_id {
-        if !is_hex_identifier(trace, 32) {
+        if !is_valid_w3c_trace_id(trace) {
             push(
                 NormalizedLogDiagnosticCode::TraceIdentifierMalformed,
                 "traceId",
@@ -1055,7 +1069,7 @@ pub fn validate_event(
         }
     }
     if let Some(span) = &event.span_id {
-        if !is_hex_identifier(span, 16) {
+        if !is_valid_w3c_span_id(span) {
             push(
                 NormalizedLogDiagnosticCode::TraceIdentifierMalformed,
                 "spanId",
@@ -1180,6 +1194,7 @@ pub fn validate_stream_with_cancel<R: std::io::BufRead>(
     let mut diagnostics = Vec::new();
     let mut diagnostics_total = 0u64;
     let mut samples: Vec<String> = Vec::new();
+    let mut error_samples_total = 0u64;
     let mut events_validated = 0u64;
     let mut expected_seq = 0u64;
     let mut line_number = 0u64;
@@ -1255,8 +1270,11 @@ pub fn validate_stream_with_cancel<R: std::io::BufRead>(
             let total_before = diagnostics_total;
             validate_line_as_header(text, line_number, &mut diagnostics);
             absorb_generated_diagnostics(&mut diagnostics, before, &mut diagnostics_total);
-            if diagnostics_total > total_before && samples.len() < MAX_ERROR_SAMPLES {
-                samples.push(error_sample(text));
+            if diagnostics_total > total_before {
+                error_samples_total = error_samples_total.saturating_add(1);
+                if samples.len() < MAX_ERROR_SAMPLES {
+                    samples.push(error_sample(text));
+                }
             }
             continue;
         }
@@ -1273,12 +1291,16 @@ pub fn validate_stream_with_cancel<R: std::io::BufRead>(
             Ok(event) => {
                 if diagnostics_total == total_before {
                     events_validated += 1;
-                } else if samples.len() < MAX_ERROR_SAMPLES {
-                    samples.push(error_sample(text));
+                } else {
+                    error_samples_total = error_samples_total.saturating_add(1);
+                    if samples.len() < MAX_ERROR_SAMPLES {
+                        samples.push(error_sample(text));
+                    }
                 }
                 expected_seq = event.source_seq.saturating_add(1);
             }
             Err(_) => {
+                error_samples_total = error_samples_total.saturating_add(1);
                 if samples.len() < MAX_ERROR_SAMPLES {
                     samples.push(error_sample(text));
                 }
@@ -1313,6 +1335,7 @@ pub fn validate_stream_with_cancel<R: std::io::BufRead>(
         diagnostics_truncated: diagnostics_total > diagnostics.len() as u64,
         diagnostics,
         error_samples: samples,
+        error_samples_total,
     })
 }
 
@@ -1885,6 +1908,7 @@ pub fn validate_file(contents: &str) -> NormalizedLogValidation {
     let mut diagnostics = Vec::new();
     let mut diagnostics_total = 0u64;
     let mut samples = Vec::new();
+    let mut error_samples_total = 0u64;
     let mut events_validated = 0u64;
 
     let mut lines = contents.lines().enumerate();
@@ -1901,6 +1925,7 @@ pub fn validate_file(contents: &str) -> NormalizedLogValidation {
                 location: None,
             }],
             error_samples: Vec::new(),
+            error_samples_total: 0,
         };
     };
 
@@ -1919,8 +1944,11 @@ pub fn validate_file(contents: &str) -> NormalizedLogValidation {
     let total_before = diagnostics_total;
     validate_line_as_header(header_line, 1, &mut diagnostics);
     absorb_generated_diagnostics(&mut diagnostics, before, &mut diagnostics_total);
-    if diagnostics_total > total_before && samples.len() < MAX_ERROR_SAMPLES {
-        samples.push(error_sample(header_line));
+    if diagnostics_total > total_before {
+        error_samples_total = error_samples_total.saturating_add(1);
+        if samples.len() < MAX_ERROR_SAMPLES {
+            samples.push(error_sample(header_line));
+        }
     }
 
     let mut expected_seq = 0u64;
@@ -1949,12 +1977,16 @@ pub fn validate_file(contents: &str) -> NormalizedLogValidation {
             Ok(event) => {
                 if diagnostics_total == total_before {
                     events_validated += 1;
-                } else if samples.len() < MAX_ERROR_SAMPLES {
-                    samples.push(error_sample(raw));
+                } else {
+                    error_samples_total = error_samples_total.saturating_add(1);
+                    if samples.len() < MAX_ERROR_SAMPLES {
+                        samples.push(error_sample(raw));
+                    }
                 }
                 expected_seq = event.source_seq.saturating_add(1);
             }
             Err(_) => {
+                error_samples_total = error_samples_total.saturating_add(1);
                 if samples.len() < MAX_ERROR_SAMPLES {
                     samples.push(error_sample(raw));
                 }
@@ -1977,6 +2009,7 @@ pub fn validate_file(contents: &str) -> NormalizedLogValidation {
         diagnostics_truncated: diagnostics_total > diagnostics.len() as u64,
         diagnostics,
         error_samples: samples,
+        error_samples_total,
     }
 }
 

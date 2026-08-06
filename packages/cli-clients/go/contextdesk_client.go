@@ -24,6 +24,8 @@ type CommandResult struct {
 	VerdictKind string
 }
 
+const maxEnvelopeBytes = 1024 * 1024
+
 func completedVerdict(code int) string {
 	switch code {
 	case 8:
@@ -62,6 +64,9 @@ func RunJSON(dataDir string, args ...string) (CommandResult, error) {
 			return CommandResult{ExitCode: code}, fmt.Errorf("empty stdout: %w (stderr=%s)", err, stderr.String())
 		}
 		return CommandResult{ExitCode: code}, fmt.Errorf("empty stdout (stderr=%s)", stderr.String())
+	}
+	if len([]byte(text)) > maxEnvelopeBytes {
+		return CommandResult{ExitCode: code}, fmt.Errorf("oversized JSON envelope")
 	}
 	// last non-empty line
 	lines := strings.Split(text, "\n")

@@ -7,6 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include "../shared/contextdesk_envelope.h"
 
 static const char *resolve_bin(void) {
     const char *b = getenv("CONTEXTDESK_BIN");
@@ -29,7 +30,7 @@ contextdesk_verdict contextdesk_completed_verdict(int exit_code) {
     return CONTEXTDESK_NO_VERDICT;
 }
 
-/* argv: ["capabilities"] etc. Prints child stdout; returns exit code. */
+/* argv: ["capabilities"] etc. Parses and prints one bounded envelope. */
 int contextdesk_run_json(const char *data_dir, char *const cmd_args[], int cmd_argc) {
     const char *bin = resolve_bin();
     /* max 64 argv slots */
@@ -46,24 +47,67 @@ int contextdesk_run_json(const char *data_dir, char *const cmd_args[], int cmd_a
     }
     argv[n] = NULL;
 
+    int output_pipe[2];
+    if (pipe(output_pipe) != 0) {
+        perror("pipe");
+        return 70;
+    }
     pid_t pid = fork();
     if (pid < 0) {
+        close(output_pipe[0]);
+        close(output_pipe[1]);
         perror("fork");
         return 70;
     }
     if (pid == 0) {
+        close(output_pipe[0]);
+        if (dup2(output_pipe[1], STDOUT_FILENO) < 0) _exit(127);
+        close(output_pipe[1]);
         execvp(bin, argv);
         perror("execvp");
         _exit(127);
     }
+    close(output_pipe[1]);
+    char *body = (char *)malloc(CONTEXTDESK_MAX_ENVELOPE_BYTES + 1u);
+    if (!body) {
+        close(output_pipe[0]);
+        return 70;
+    }
+    size_t used = 0;
+    int oversized = 0;
+    for (;;) {
+        char chunk[4096];
+        ssize_t got = read(output_pipe[0], chunk, sizeof(chunk));
+        if (got == 0) break;
+        if (got < 0) { free(body); close(output_pipe[0]); return 70; }
+        if (used + (size_t)got > CONTEXTDESK_MAX_ENVELOPE_BYTES) oversized = 1;
+        else { memcpy(body + used, chunk, (size_t)got); used += (size_t)got; }
+    }
+    close(output_pipe[0]);
     int status = 0;
     if (waitpid(pid, &status, 0) < 0) {
         perror("waitpid");
+        free(body);
         return 70;
     }
     if (WIFEXITED(status)) {
-        return WEXITSTATUS(status);
+        int code = WEXITSTATUS(status);
+        int ok = 0;
+        while (used && (body[used - 1] == '\n' || body[used - 1] == '\r' || body[used - 1] == ' ' || body[used - 1] == '\t')) used--;
+        if (oversized || !contextdesk_parse_envelope_ok(body, used, &ok)) {
+            fputs("invalid or oversized ContextDesk JSON envelope\n", stderr);
+            free(body);
+            return 70;
+        }
+        fwrite(body, 1, used, stdout);
+        fputc('\n', stdout);
+        free(body);
+        contextdesk_verdict verdict = contextdesk_completed_verdict(code);
+        if (!ok) return code ? code : 70;
+        if (code != 0 && verdict == CONTEXTDESK_NO_VERDICT) return 70;
+        return code;
     }
+    free(body);
     return 130; /* signalled ~ cancelled */
 }
 
@@ -82,7 +126,5 @@ int main(int argc, char **argv) {
         cmd[cmd_n++] = "capabilities";
     }
     cmd[cmd_n] = NULL;
-    /* Parent does not capture pipes in this minimal example — child inherits stdout.
-     * Production C clients should pipe stdout and parse JSON envelopes. */
     return contextdesk_run_json(data_dir, cmd, cmd_n);
 }
