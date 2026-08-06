@@ -1275,8 +1275,9 @@ impl RecordingTurnTrace {
             },
             StreamEvent::ContextBudget { telemetry } => {
                 // Developer-detail record: typed JSON facts, not trail-string parsing.
+                // Round identity comes from the snapshot itself (retries are distinct).
                 self.record_developer(DeveloperDetailDraft::context_provenance(
-                    0,
+                    telemetry.model_round,
                     "context_budget",
                     if telemetry.useful_headroom {
                         "useful_headroom"

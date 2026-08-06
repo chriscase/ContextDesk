@@ -468,137 +468,6 @@ pub fn search_logs_with_excluded_templates(
     Ok(hits)
 }
 
-/// Char budget for dense citeable event rows attached to `search_logs` model detail.
-///
-/// Sized under [`crate::agent`]'s current-turn evidence cap so host-returned
-/// evidence can legitimately exceed the 108k packing residual (the production
-/// defect class) without inventing a second evidence channel.
-pub const SEARCH_LOGS_DENSE_IDENTITY_BUDGET_CHARS: usize = 180_000;
-/// Per-event message body chars in the dense identity dump (larger than exemplar UI).
-const DENSE_EVENT_MESSAGE_CHARS: usize = 1_600;
-
-/// Format dense `seq=`/`source=` identity rows for matching events so focused
-/// packing has real, oversized host evidence when the corpus is large.
-///
-/// Rows are ordered: first matching event, middle matches by seq, last matching
-/// event last — so packer first/last strata map to rare head/tail identities.
-pub fn dense_identity_dump_for_query(
-    corpus: &LogCorpus,
-    q: &SearchLogsQuery,
-    excluded_template_ids: &[u64],
-    budget_chars: usize,
-) -> CoreResult<String> {
-    let excluded = normalize_excluded_template_ids(excluded_template_ids)?;
-    let query_l = q.query.as_deref().unwrap_or("").to_lowercase();
-    let tokens: Vec<&str> = query_l
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| t.len() > 2)
-        .collect();
-    let matched: Vec<String> = corpus.with_events(|events| {
-        let mut matched = Vec::new();
-        for e in events {
-            if excluded.contains(&e.template_id) {
-                continue;
-            }
-            if let Some(from) = q.time_from {
-                if e.ts < from {
-                    continue;
-                }
-            }
-            if let Some(to) = q.time_to {
-                if e.ts >= to {
-                    continue;
-                }
-            }
-            if let Some(ref lvl) = q.level {
-                if !e.level.eq_ignore_ascii_case(lvl) {
-                    continue;
-                }
-            }
-            if let Some(ref svc) = q.service {
-                if e.service.as_deref() != Some(svc.as_str()) {
-                    continue;
-                }
-            }
-            if !tokens.is_empty() {
-                let msg_l = e.message.to_lowercase();
-                let token_hit = tokens.iter().any(|t| msg_l.contains(t));
-                let phrase_hit = !query_l.is_empty() && msg_l.contains(&query_l);
-                if !token_hit && !phrase_hit {
-                    continue;
-                }
-            }
-            // Longer message body than UI exemplars so packing residual is load-bearing.
-            let msg = if e.message.chars().count() > DENSE_EVENT_MESSAGE_CHARS {
-                e.message
-                    .chars()
-                    .take(DENSE_EVENT_MESSAGE_CHARS)
-                    .collect::<String>()
-            } else {
-                e.message.clone()
-            };
-            matched.push(format!(
-                "seq={} source=\"{}\" template_id={} msg={}",
-                e.seq,
-                e.source.replace('"', "'"),
-                e.template_id,
-                msg.replace('\n', "\\n")
-            ));
-        }
-        matched
-    });
-
-    if matched.is_empty() {
-        return Ok(String::new());
-    }
-
-    // Ensure first and last physical matches stay first/last in the dump even if
-    // we truncate the middle for budget.
-    let first = matched.first().cloned();
-    let last = if matched.len() > 1 {
-        matched.last().cloned()
-    } else {
-        None
-    };
-    let mut out = String::from("identity_rows:\n");
-    let mut used = out.chars().count();
-    if let Some(f) = first {
-        out.push_str(&f);
-        out.push('\n');
-        used = out.chars().count();
-    }
-    if matched.len() > 2 {
-        for row in matched.iter().take(matched.len() - 1).skip(1) {
-            let row_cost = row.chars().count() + 1;
-            if used + row_cost + last.as_ref().map(|l| l.chars().count() + 1).unwrap_or(0)
-                > budget_chars
-            {
-                break;
-            }
-            out.push_str(row);
-            out.push('\n');
-            used = out.chars().count();
-        }
-    }
-    if let Some(l) = last {
-        // Always try to append last rare identity if budget allows its capped form.
-        let cost = l.chars().count() + 1;
-        if used + cost <= budget_chars {
-            out.push_str(&l);
-            out.push('\n');
-        } else if budget_chars > used + 32 {
-            // Truncate last line to remaining budget while keeping identity markers.
-            let room = budget_chars.saturating_sub(used + 1);
-            let truncated: String = l.chars().take(room).collect();
-            if truncated.contains("seq=") && truncated.contains("source=") {
-                out.push_str(&truncated);
-                out.push('\n');
-            }
-        }
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,6 +476,97 @@ mod tests {
     use crate::log_analysis::ingest::ingest_path;
     use crate::log_analysis::store::{template_content_hash, TemplateRow};
     use std::io::Write;
+
+    #[test]
+    fn search_logs_respects_k_and_does_not_scale_with_unrelated_corpus_size() {
+        // Production search must not load/scan every event for an auxiliary dump.
+        // Detail/identity volume is bounded by k (and exemplars), not total corpus size.
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let mut f = std::fs::File::create(logs.join("app.log")).unwrap();
+        // Unrelated noise: large corpus of non-matching lines.
+        for i in 0..5_000 {
+            writeln!(
+                f,
+                r#"{{"level":"info","message":"heartbeat ok pulse-{i}"}}"#
+            )
+            .unwrap();
+        }
+        // Few matching targets.
+        for i in 0..20 {
+            writeln!(
+                f,
+                r#"{{"level":"error","message":"connection refused upstream-{i}"}}"#
+            )
+            .unwrap();
+        }
+        let report = ingest_path(dir.path(), &logs, "k-bound", None, "none").unwrap();
+        let corpus = LogCorpus::open(dir.path(), &report.corpus_id).unwrap();
+        let hits = search_logs(
+            &corpus,
+            &SearchLogsQuery {
+                query: Some("connection refused".into()),
+                semantic: false,
+                k: 3,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert!(hits.len() <= 3, "k must cap hits, got {}", hits.len());
+        let identity_count: usize = hits.iter().map(|h| h.evidence.len()).sum();
+        // Exemplars per template are small (≤3); must not approach the 5k noise events.
+        assert!(
+            identity_count <= 3 * MAX_EXEMPLARS_PER_TEMPLATE,
+            "identities must stay within exemplar bounds, got {identity_count}"
+        );
+        // Detail-like join of exemplars stays tiny vs corpus size.
+        let detail_chars: usize = hits
+            .iter()
+            .flat_map(|h| h.exemplars.iter())
+            .map(|e| e.chars().count())
+            .sum();
+        assert!(
+            detail_chars < 20_000,
+            "bounded search detail must not scale with noise corpus, detail_chars={detail_chars}"
+        );
+        assert!(
+            !hits
+                .iter()
+                .any(|h| h.pattern.to_lowercase().contains("heartbeat")),
+            "unrelated corpus templates must not enter matching hits"
+        );
+    }
+
+    #[test]
+    fn search_logs_module_has_no_dense_identity_dump_api() {
+        // Guard against reintroducing production full-corpus auxiliary dumps.
+        // Strip this test body so self-referential strings do not false-positive.
+        let src = include_str!("search.rs");
+        let prod = src
+            .split("mod tests {")
+            .next()
+            .expect("production half of search.rs");
+        assert!(
+            !prod.contains("fn dense_identity"),
+            "no dense_identity* production API"
+        );
+        assert!(
+            !prod.contains("DENSE_IDENTITY_BUDGET"),
+            "no dense identity budget constant"
+        );
+        assert!(
+            !prod.contains("identity_rows:"),
+            "search must not append synthetic identity_rows dumps"
+        );
+        // tool_host must not call a dense dump helper either
+        let host = include_str!("../tool_host.rs");
+        assert!(
+            !host.contains("dense_identity") && !host.contains("identity_rows:"),
+            "ToolHost search_logs must not append dense identity dumps"
+        );
+    }
 
     #[test]
     fn paraphrase_search_logs_semantic() {

@@ -117,6 +117,10 @@ pub struct AgentOptions {
     /// Explicit user selection text from shared turn inputs (Explorer selection
     /// summary, client highlight, etc.). Empty/None means none was provided.
     pub user_selection: Option<String>,
+    /// Test-only oversize evidence blocks appended **after** real governed tool
+    /// results. Never compiled into release; does not change search_logs semantics.
+    #[cfg(test)]
+    pub test_fixture_evidence_blocks: Vec<String>,
 }
 
 fn explicit_user_selection_message(selection: Option<&str>) -> Option<ChatMessage> {
@@ -272,6 +276,8 @@ struct LinkedRoundContextArgs<'a> {
     /// When true (broad-triage complete brief), keep host evidence verbatim and
     /// let prepare/fit + caller's contains-check enforce fail-closed completeness.
     require_full_evidence: bool,
+    /// Zero-based model request identity for typed telemetry.
+    model_round: u32,
 }
 
 /// Build linked synthesis model context with reserved headroom + evidence packing.
@@ -300,6 +306,7 @@ fn linked_round_model_context(
         capacity_source,
         compact_correction,
         require_full_evidence,
+        model_round,
     } = args;
 
     let history_non_system: Vec<ChatMessage> = prior_history
@@ -406,6 +413,7 @@ fn linked_round_model_context(
         );
     let _ = history_source_len; // prior length is owned by count_prior_history_retention
     let telemetry = telemetry_from_parts(TelemetryParts {
+        model_round,
         hard_budget_chars: hard_budget,
         packing_budget_chars: packing_budget,
         used_chars_estimate: used,
@@ -1348,6 +1356,8 @@ impl Default for AgentOptions {
             developer_trace: None,
             applied_skill_ids: Vec::new(),
             user_selection: None,
+            #[cfg(test)]
+            test_fixture_evidence_blocks: Vec::new(),
         }
     }
 }
@@ -1380,6 +1390,8 @@ impl AgentOptions {
             developer_trace: None,
             applied_skill_ids: Vec::new(),
             user_selection: None,
+            #[cfg(test)]
+            test_fixture_evidence_blocks: Vec::new(),
         }
     }
 
@@ -3068,6 +3080,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                 compact_correction: linked_invalid_synthesis_retry,
                 require_full_evidence: broad_triage_brief_complete
                     && !linked_invalid_synthesis_retry,
+                model_round: round as u32,
             }) {
                 Ok(pair) => pair,
                 Err(error) => {
@@ -4401,6 +4414,22 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                 // deepening attempt instead of silently treating it as success.
                 current_turn_evidence.push(&result.detail_for_model);
             }
+            // Test-only: after a real search_logs result, append fixture blocks so
+            // oversize packing can be exercised without changing production search.
+            #[cfg(test)]
+            if linked_turn
+                && governed_evidence_success
+                && resolved_tool_name == crate::log_analysis::SEARCH_LOGS
+                && !opts.test_fixture_evidence_blocks.is_empty()
+            {
+                for block in &opts.test_fixture_evidence_blocks {
+                    current_turn_evidence.push(block);
+                }
+                trail.push(format!(
+                    "test_fixture_evidence_blocks:{}",
+                    opts.test_fixture_evidence_blocks.len()
+                ));
+            }
             let awaiting_permission = result
                 .events
                 .iter()
@@ -4591,6 +4620,9 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
             capacity_source,
             compact_correction: false,
             require_full_evidence: broad_triage_brief_complete,
+            // Forced no-tools synthesis after tool-round budget: use max_rounds as
+            // the request index (one past the last tool-capable round).
+            model_round: opts.max_rounds as u32,
         }) {
             Ok((messages, budget_tel)) => {
                 if broad_triage_brief_complete {
@@ -5923,8 +5955,11 @@ trail={trail} synth_prefix={}",
     }
 
     /// Production defect class: default 120k hard budget with host evidence that
-    /// exceeds the 108k packing residual. Real `run_agent_turn` → `search_logs`
-    /// → synthesis; typed `ContextBudget` telemetry + rare first **and** last.
+    /// exceeds the 108k packing residual.
+    ///
+    /// Real `run_agent_turn` → real `search_logs` (bounded product detail) plus a
+    /// **test-only** fixture seam that appends additional host evidence blocks
+    /// after the genuine tool result — never a production full-corpus scan.
     #[tokio::test]
     async fn focused_linked_120k_path_packs_with_headroom_and_omits() {
         use crate::context_budgeting::{
@@ -5970,27 +6005,22 @@ trail={trail} synth_prefix={}",
         let logs = dir.path().join("logs");
         fs::create_dir_all(&logs).unwrap();
         let mut f = fs::File::create(logs.join("worker.log")).unwrap();
-        // Rare first (dense dump preserves file order first/last).
         writeln!(
             f,
-            r#"{{"ts":1699999999,"level":"error","service":"worker","message":"RARE_FIRST_FOCUS_MARKER pool exhausted {}"}}"#,
-            "F".repeat(1_500)
+            r#"{{"ts":1699999999,"level":"error","service":"worker","message":"RARE_FIRST_FOCUS_MARKER pool exhausted lead"}}"#
         )
         .unwrap();
-        // Enough long unique events that dense identity dump exceeds packing residual.
-        for i in 0..120 {
+        for i in 0..40 {
             writeln!(
                 f,
-                r#"{{"ts":{},"level":"error","service":"worker","message":"MID_EVENT_{i} pool exhausted UNIQUE_{i} {}"}}"#,
-                1_700_000_100 + i,
-                "X".repeat(1_500)
+                r#"{{"ts":{},"level":"error","service":"worker","message":"MID_EVENT_{i} pool exhausted UNIQUE_{i}"}}"#,
+                1_700_000_100 + i
             )
             .unwrap();
         }
         writeln!(
             f,
-            r#"{{"ts":1800000000,"level":"error","service":"worker","message":"RARE_LAST_FOCUS_MARKER pool exhausted {}"}}"#,
-            "L".repeat(1_500)
+            r#"{{"ts":1800000000,"level":"error","service":"worker","message":"RARE_LAST_FOCUS_MARKER pool exhausted tail"}}"#
         )
         .unwrap();
         let cache = dir.path().join("cache");
@@ -6004,8 +6034,29 @@ trail={trail} synth_prefix={}",
         host.set_log_analysis(true, Some(cache));
         host.set_active_log_corpus(Some(report.corpus_id.clone()));
 
-        // Backend answers with a seq/source pair extracted after the tool round by
-        // using a known first identity (seq=0) that dense dump includes.
+        // Test-only oversize fixture appended after real search_logs.
+        let mut fixture = Vec::new();
+        fixture.push("seq=0 source=\"worker.log\" msg=RARE_FIRST_FOCUS_MARKER fixture-lead".into());
+        let mut acc = 0usize;
+        let mut i = 1u64;
+        while acc < 150_000 {
+            let line = format!(
+                "seq={i} source=\"worker.log\" msg=fixture-mid-{i} {}",
+                "Z".repeat(700)
+            );
+            acc += line.chars().count() + 2;
+            fixture.push(line);
+            i += 1;
+        }
+        fixture.push(format!(
+            "seq={i} source=\"worker.log\" msg=RARE_LAST_FOCUS_MARKER fixture-tail"
+        ));
+        let fixture_chars: usize = fixture.iter().map(|b| b.chars().count()).sum();
+        assert!(
+            fixture_chars > 108_000,
+            "fixture must exceed packing residual alone; chars={fixture_chars}"
+        );
+
         let tool_resp = ChatCompletion {
             content: String::new(),
             tool_calls: vec![ToolCallMsg {
@@ -6013,7 +6064,7 @@ trail={trail} synth_prefix={}",
                 kind: "function".into(),
                 function: FunctionCall {
                     name: crate::log_analysis::SEARCH_LOGS.into(),
-                    arguments: r#"{"query":"pool exhausted","k":50,"semantic":false}"#.into(),
+                    arguments: r#"{"query":"pool exhausted","k":8,"semantic":false}"#.into(),
                 },
             }],
             finish_reason: "tool_calls".into(),
@@ -6053,14 +6104,35 @@ trail={trail} synth_prefix={}",
                 log_explorer_context: Some(context),
                 max_rounds: 6,
                 context_char_budget: hard,
-                max_results_per_source: 50,
+                max_results_per_source: 8,
+                test_fixture_evidence_blocks: fixture.clone(),
                 ..Default::default()
             },
         )
         .await
         .unwrap();
 
-        // Typed StreamEvent::ContextBudget (public contract — not trail parsing).
+        let trail = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::SearchTrail { steps } => Some(steps.join("|")),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("||");
+        assert!(
+            trail.contains("tool:search_logs") || trail.contains("search_logs"),
+            "real search_logs must run; trail={trail}"
+        );
+        assert!(
+            trail.contains("test_fixture_evidence_blocks:"),
+            "test fixture seam must apply after tool result; trail={trail}"
+        );
+        assert!(
+            !trail.contains("identity_rows:"),
+            "production must not emit dense identity_rows dumps"
+        );
+
         let budget_events: Vec<_> = events
             .iter()
             .filter_map(|e| match e {
@@ -6068,19 +6140,15 @@ trail={trail} synth_prefix={}",
                 _ => None,
             })
             .collect();
-        assert!(
-            !budget_events.is_empty(),
-            "must emit typed ContextBudget event(s); events={}",
-            events.len()
-        );
+        assert!(!budget_events.is_empty(), "must emit typed ContextBudget");
         let tel = budget_events
             .iter()
-            .find(|t| t.evidence_included_chars > 0 || t.evidence_pre_pack_chars > 0)
+            .find(|t| t.evidence_pre_pack_chars > 0)
             .or(budget_events.last())
             .expect("budget telemetry");
         eprintln!(
             "FOCUS_120K_CAPTURE hard={} packing={} reserved={} pre_pack={} included={} \
-omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}",
+omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={} round={}",
             tel.hard_budget_chars,
             tel.packing_budget_chars,
             tel.reserved_headroom_chars,
@@ -6091,21 +6159,22 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             tel.used_chars_estimate,
             tel.useful_headroom,
             tel.evidence_identity_lines_included,
-            tel.evidence_identity_lines_omitted
+            tel.evidence_identity_lines_omitted,
+            tel.model_round
         );
         assert_eq!(tel.hard_budget_chars, 120_000);
         assert_eq!(tel.packing_budget_chars, 108_000);
         assert_eq!(tel.reserved_headroom_chars, 12_000);
         assert!(
             tel.evidence_pre_pack_chars > 108_000,
-            "pre-pack host evidence must exceed packing residual; pre_pack={}",
+            "pre-pack must exceed packing residual; pre_pack={}",
             tel.evidence_pre_pack_chars
         );
         assert!(
             tel.evidence_omitted_blocks > 0 || tel.evidence_omitted_chars > 0,
-            "omission counters must be nonzero when pre_pack > packing residual"
+            "omission counters must be nonzero"
         );
-        assert!(tel.useful_headroom, "useful_headroom must be true");
+        assert!(tel.useful_headroom);
         assert!(tel.used_chars_estimate <= 108_000);
 
         let sizes = backend.synthesis_sizes.lock().unwrap().clone();
@@ -6116,7 +6185,6 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 "provider used={used} must leave headroom vs hard={hard}"
             );
             assert!(*used <= packing, "provider used={used} > packing={packing}");
-            assert!(*used < 119_900, "near-ceiling defect class");
         }
 
         let synth = backend
@@ -6127,27 +6195,9 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             .cloned()
             .expect("synthesis blob");
         assert!(synth.contains("seq=") && synth.contains("source="));
-        assert!(
-            synth.contains("RARE_FIRST_FOCUS_MARKER"),
-            "first rare must survive 120k packing"
-        );
-        assert!(
-            synth.contains("RARE_LAST_FOCUS_MARKER"),
-            "last rare must survive 120k packing"
-        );
-
-        // Legacy trail string still present for compatibility.
-        let trail = events
-            .iter()
-            .filter_map(|e| match e {
-                StreamEvent::SearchTrail { steps } => Some(steps.join("|")),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("||");
+        assert!(synth.contains("RARE_FIRST_FOCUS_MARKER"), "first rare");
+        assert!(synth.contains("RARE_LAST_FOCUS_MARKER"), "last rare");
         assert!(trail.contains("context_budget:"));
-        assert!(trail.contains("packing_budget=108000") || trail.contains("packing=108000"));
-
         assert!(
             !events.iter().any(|e| matches!(
                 e,
@@ -6156,38 +6206,25 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             "must not terminate context_too_long"
         );
 
-        // Mutation/control: packing WITHOUT headroom reservation (fill hard) fails
-        // useful-headroom and recreates the near-ceiling defect class when fed
-        // the same pre-pack evidence size.
-        let fake_blocks = vec![synth.clone()]; // reuse identity-bearing text as stand-in
-                                               // Build artificial oversized blocks matching pre_pack scale.
-        let mut flood = Vec::new();
-        let mut acc = 0usize;
-        let mut i = 0u64;
-        while acc < 120_000 {
-            let line = format!("seq={i} source=\"worker.log\" msg={}", "Y".repeat(800));
-            acc += line.chars().count() + 2;
-            flood.push(line);
-            i += 1;
-        }
-        // Defect class: pack to full hard budget (no headroom) → used near ceiling.
-        let no_headroom = pack_linked_evidence_blocks(&flood, hard);
-        let defect_used = no_headroom.included_chars.min(hard);
-        assert!(
-            !has_useful_context_headroom(defect_used.max(119_900), hard)
-                || defect_used >= 119_900
-                || !has_useful_context_headroom(119_900, hard),
-            "helper: near-ceiling package is not healthy"
+        // Real legacy control: same accumulated evidence packed to hard ceiling
+        // without shared reservation. Measure result; do not force 119_900 into assert.
+        let legacy_pack = pack_linked_evidence_blocks(&fixture, hard);
+        let legacy_used = legacy_pack.included_chars.min(hard);
+        eprintln!(
+            "FOCUS_120K_LEGACY_CONTROL included={} omitted_chars={} measured_used={}",
+            legacy_pack.included_chars, legacy_pack.omitted_chars, legacy_used
         );
-        // Explicit: filling packing budget (correct) is healthy; 119900 is not.
-        assert!(has_useful_context_headroom(packing, hard));
-        assert!(!has_useful_context_headroom(119_900, hard));
-        // Control: if we had packed flood to hard without shared policy, included
-        // would approach hard; shared packer at packing residual leaves headroom.
-        let correct = pack_linked_evidence_blocks(&flood, packing);
-        assert!(correct.included_chars <= packing);
-        assert!(correct.omitted_chars > 0 || correct.omitted_blocks > 0);
-        let _ = (fake_blocks, Arc::new(()));
+        assert!(
+            !has_useful_context_headroom(legacy_used, hard),
+            "legacy fill-to-hard must fail useful-headroom; measured_used={legacy_used} hard={hard}"
+        );
+        let shared_pack = pack_linked_evidence_blocks(&fixture, packing);
+        assert!(shared_pack.included_chars <= packing);
+        assert!(has_useful_context_headroom(
+            shared_pack.included_chars.min(packing),
+            hard
+        ));
+        let _ = Arc::new(());
     }
 
     /// Fake-model production path: tool request → search_logs → evidence answer (#530).

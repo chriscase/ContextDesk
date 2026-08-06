@@ -411,27 +411,15 @@ pub async fn run(
             if let Some(summary) = context_used_from_events(&outcome.events) {
                 eprintln!("Context used: {summary}");
             }
-            // Typed packing telemetry (linked/focused): hard vs packing never conflated.
-            if let Some(tel) = outcome.events.iter().rev().find_map(|e| match e {
-                StreamEvent::ContextBudget { telemetry } => Some(telemetry),
-                _ => None,
-            }) {
-                eprintln!(
-                    "Context budget: hard={} packing={} used={} reserved={} free={} \
-evidence_pre_pack={} evidence_included={} omitted_blocks={} omitted_chars={} \
-capacity_source={} useful_headroom={}",
-                    tel.hard_budget_chars,
-                    tel.packing_budget_chars,
-                    tel.used_chars_estimate,
-                    tel.reserved_headroom_chars,
-                    tel.free_chars_estimate,
-                    tel.evidence_pre_pack_chars,
-                    tel.evidence_included_chars,
-                    tel.evidence_omitted_blocks,
-                    tel.evidence_omitted_chars,
-                    tel.provider_capacity_source.as_str(),
-                    tel.useful_headroom
-                );
+            // Nested Context section only when trace or activity was requested —
+            // ordinary linked chat stays concise. Typed fields remain on JSON/JSONL.
+            if effective_trace.is_some() || args.activity.is_some() {
+                if let Some(tel) = outcome.events.iter().rev().find_map(|e| match e {
+                    StreamEvent::ContextBudget { telemetry } => Some(telemetry),
+                    _ => None,
+                }) {
+                    eprintln!("{}", tel.human_context_section());
+                }
             }
         }
         OutputFormat::Jsonl => {
@@ -1056,6 +1044,7 @@ mod grounding_tests {
             synthesis_packing_budget, CapacitySourceLabel, ContextBudgetTelemetry,
         };
         let tel = ContextBudgetTelemetry {
+            model_round: 1,
             hard_budget_chars: 120_000,
             packing_budget_chars: synthesis_packing_budget(120_000),
             reserved_headroom_chars: 12_000,

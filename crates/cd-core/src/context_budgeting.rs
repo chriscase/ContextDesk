@@ -78,6 +78,8 @@ impl CapacitySourceLabel {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextBudgetTelemetry {
+    /// Zero-based model request / round identity for this snapshot.
+    pub model_round: u32,
     /// Hard / configured ContextDesk char budget for this turn.
     pub hard_budget_chars: usize,
     /// Budget after reserved generation headroom (packing target).
@@ -120,12 +122,13 @@ impl ContextBudgetTelemetry {
     /// aliases (`hard`, `packing`) so existing parsers and new telemetry agree.
     pub fn trail_step(&self) -> String {
         format!(
-            "context_budget:used={},budget={},hard={},packing_budget={},packing={},\
+            "context_budget:round={},used={},budget={},hard={},packing_budget={},packing={},\
 headroom={},reserved={},evidence_pre_pack={},evidence_included={},\
 evidence_omitted_blocks={},evidence_omitted_chars={},\
 evidence_identity_included={},evidence_identity_omitted={},\
 history_retained={},history_omitted={},\
 history_compacted={},capacity_source={},useful_headroom={}",
+            self.model_round,
             self.used_chars_estimate,
             self.hard_budget_chars,
             self.hard_budget_chars,
@@ -144,6 +147,43 @@ history_compacted={},capacity_source={},useful_headroom={}",
             self.history_compacted,
             self.provider_capacity_source.as_str(),
             self.useful_headroom
+        )
+    }
+
+    /// Nested multi-line human Context section (trace/detail only — not ordinary chat).
+    pub fn human_context_section(&self) -> String {
+        format!(
+            "Context\n\
+  hard:              {}\n\
+  packing:           {}\n\
+  used:              {}\n\
+  reserved:          {}\n\
+  free:              {}\n\
+  evidence_pre_pack: {}\n\
+  evidence_included: {}\n\
+  omitted_blocks:    {}\n\
+  omitted_chars:     {}\n\
+  history_retained:  {}\n\
+  history_omitted:   {}\n\
+  history_compacted: {}\n\
+  capacity_source:   {}\n\
+  useful_headroom:   {}\n\
+  model_round:       {}",
+            self.hard_budget_chars,
+            self.packing_budget_chars,
+            self.used_chars_estimate,
+            self.reserved_headroom_chars,
+            self.free_chars_estimate,
+            self.evidence_pre_pack_chars,
+            self.evidence_included_chars,
+            self.evidence_omitted_blocks,
+            self.evidence_omitted_chars,
+            self.history_retained_messages,
+            self.history_omitted_messages,
+            self.history_compacted,
+            self.provider_capacity_source.as_str(),
+            self.useful_headroom,
+            self.model_round
         )
     }
 
@@ -272,12 +312,10 @@ pub fn pack_linked_evidence_blocks(
             if line.is_empty() {
                 continue;
             }
-            let is_identity = line_has_citation_identity(&line);
-            let identity_key = if is_identity {
-                Some(identity_key_from_line(&line))
-            } else {
-                None
-            };
+            let raw_key = identity_key_from_line(&line);
+            // Valid identity requires parseable seq+source (not mere keyword presence).
+            let is_identity = line_has_citation_identity(&line) && !raw_key.is_empty();
+            let identity_key = if is_identity { Some(raw_key) } else { None };
             // Prefer identity lines and denser (shorter) rows. Do **not** penalize
             // late identity blocks — that drops rare tail events under oversize packs.
             let mut score = 0i32;
@@ -553,12 +591,52 @@ fn line_has_citation_identity(line: &str) -> bool {
     has_seq && has_source
 }
 
+/// Authoritative citation identity key: `seq` + `source` only (not message body).
 fn identity_key_from_line(line: &str) -> String {
-    // Stable-ish key: normalize whitespace and lowercase for dedupe only.
-    line.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase()
+    let seq = extract_field_value(line, "seq").unwrap_or_default();
+    let source = extract_field_value(line, "source").unwrap_or_default();
+    if seq.is_empty() && source.is_empty() {
+        // Malformed identity line: do not invent a key from the full body.
+        return String::new();
+    }
+    format!(
+        "seq={}|source={}",
+        seq.to_ascii_lowercase(),
+        source.to_ascii_lowercase()
+    )
+}
+
+/// Extract `key=value`, `key="value"`, or JSON `"key":"value"` / `"key": value`.
+fn extract_field_value(line: &str, key: &str) -> Option<String> {
+    let lower = line.to_ascii_lowercase();
+    let key_l = key.to_ascii_lowercase();
+    // Prefer key= form (log lines); fall back to JSON "key": form.
+    let (pos, prefix_len) = if let Some(p) = lower.find(&format!("{key_l}=")) {
+        (p, key_l.len() + 1)
+    } else if let Some(p) = lower.find(&format!("\"{key_l}\":")) {
+        (p, key_l.len() + 3)
+    } else {
+        return None;
+    };
+    let after = line.get(pos + prefix_len..)?.trim_start();
+    let value = if let Some(rest) = after.strip_prefix('"') {
+        let end = rest.find('"')?;
+        rest.get(..end)?.to_string()
+    } else if let Some(rest) = after.strip_prefix('\'') {
+        let end = rest.find('\'')?;
+        rest.get(..end)?.to_string()
+    } else {
+        after
+            .split(|c: char| c.is_whitespace() || c == ',' || c == '}')
+            .next()
+            .unwrap_or("")
+            .to_string()
+    };
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn truncate_chars_at_boundary(s: &str, max_chars: usize) -> String {
@@ -621,6 +699,8 @@ fn truncate_preserving_identity_line(line: &str, max_chars: usize) -> Option<Str
 /// Inputs for [`telemetry_from_parts`] (keeps call sites under clippy arg limits).
 #[derive(Debug, Clone)]
 pub struct TelemetryParts<'a> {
+    /// Zero-based model request / round for this snapshot.
+    pub model_round: u32,
     /// Hard budget.
     pub hard_budget_chars: usize,
     /// Packing budget.
@@ -650,6 +730,7 @@ pub fn telemetry_from_parts(parts: TelemetryParts<'_>) -> ContextBudgetTelemetry
         .hard_budget_chars
         .saturating_sub(parts.used_chars_estimate);
     ContextBudgetTelemetry {
+        model_round: parts.model_round,
         hard_budget_chars: parts.hard_budget_chars,
         packing_budget_chars: parts.packing_budget_chars,
         reserved_headroom_chars: reserved,
@@ -672,36 +753,66 @@ pub fn telemetry_from_parts(parts: TelemetryParts<'_>) -> ContextBudgetTelemetry
     }
 }
 
-/// Count prior-history retention: messages that came from `prior_history` and still
-/// appear in the prepared model window. Excludes system, the current user request,
-/// and the current-turn host evidence block.
+/// Count prior-history retention with multiset/occurrence-aware matching.
+///
+/// Excludes system messages, the current user request (even if it duplicates an
+/// earlier user turn), and the current-turn host evidence block. Two identical
+/// prior messages only contribute as many retentions as distinct prepared copies.
 pub fn count_prior_history_retention(
     prior_history: &[crate::chat::ChatMessage],
     prepared: &[crate::chat::ChatMessage],
     current_user_text: &str,
 ) -> (usize, usize, bool) {
     use crate::chat::Role;
+    use std::collections::HashMap;
+
     let prior: Vec<&crate::chat::ChatMessage> = prior_history
         .iter()
         .filter(|m| m.role != Role::System)
         .collect();
     let prior_len = prior.len();
-    let mut retained = 0usize;
-    for p in &prior {
-        if prepared
-            .iter()
-            .any(|m| m.role == p.role && m.content == p.content)
-        {
-            retained = retained.saturating_add(1);
+
+    // Multiset of prepared non-system messages. Exclude only the **last** user
+    // message matching current_user_text (the current request) and host evidence
+    // blocks — not every prior turn that happens to share the same text.
+    let mut skip_current_user_idx: Option<usize> = None;
+    for (i, m) in prepared.iter().enumerate().rev() {
+        if m.role == Role::User && m.content == current_user_text {
+            skip_current_user_idx = Some(i);
+            break;
         }
     }
-    // Compaction inserts a host summary when prior messages were dropped.
+    let mut prepared_bag: HashMap<(String, String), usize> = HashMap::new();
+    for (i, m) in prepared.iter().enumerate() {
+        if m.role == Role::System {
+            continue;
+        }
+        if Some(i) == skip_current_user_idx {
+            continue;
+        }
+        if m.content.starts_with("HOST-RETURNED BOUNDED EVIDENCE") {
+            continue;
+        }
+        *prepared_bag
+            .entry((m.role.as_str().to_string(), m.content.clone()))
+            .or_insert(0) += 1;
+    }
+
+    let mut retained = 0usize;
+    for p in &prior {
+        let key = (p.role.as_str().to_string(), p.content.clone());
+        if let Some(count) = prepared_bag.get_mut(&key) {
+            if *count > 0 {
+                *count -= 1;
+                retained = retained.saturating_add(1);
+            }
+        }
+    }
+
     let compacted = prepared.iter().any(|m| {
         m.content.contains("[earlier conversation compacted]")
             || m.content.contains("compacted for model context")
     });
-    // Guard: current user / evidence must not inflate retained.
-    let _ = current_user_text;
     let omitted = prior_len.saturating_sub(retained);
     (retained, omitted, compacted)
 }
@@ -893,6 +1004,112 @@ mod tests {
     }
 
     #[test]
+    fn identity_key_is_seq_and_source_not_body() {
+        let a = identity_key_from_line(r#"seq=7 source="api.log" msg=hello"#);
+        let b = identity_key_from_line(r#"seq=7 source="api.log" msg=different body text"#);
+        let c = identity_key_from_line(r#"seq=7 source="other.log" msg=hello"#);
+        let d = identity_key_from_line(r#"seq=7 source=api.log msg=unquoted"#);
+        assert_eq!(a, b, "same seq+source must dedupe across message body");
+        assert_ne!(a, c, "different source must remain distinct");
+        assert_eq!(a, d, "quoted/unquoted source forms must match");
+        assert!(identity_key_from_line("no identity here").is_empty());
+        // Packer collapses same seq/source with different bodies (oversize path).
+        let pad = "p".repeat(2_000);
+        let blocks = vec![
+            format!(r#"seq=1 source="w.log" msg=AAAAAAAA {pad}"#),
+            format!(r#"seq=1 source="w.log" msg=BBBBBBBB {pad}"#),
+            format!(r#"seq=2 source="w.log" msg=CCCCCCCC {pad}"#),
+        ];
+        let packed = pack_linked_evidence_blocks(&blocks, 3_500);
+        let seq1 = packed
+            .text
+            .lines()
+            .filter(|l| l.contains("seq=1") && l.contains("source="))
+            .count();
+        assert_eq!(
+            seq1, 1,
+            "duplicate seq+source must collapse: {}",
+            packed.text
+        );
+        assert!(packed.text.contains("seq=2") || packed.identity_lines_included >= 1);
+    }
+
+    #[test]
+    fn count_prior_history_multiset_duplicates_and_collisions() {
+        use crate::chat::{ChatMessage, Role};
+        let prior = vec![
+            ChatMessage {
+                role: Role::User,
+                content: "same".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::User,
+                content: "same".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: "reply".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: "reply".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+        // Only one copy of each survives prepare
+        let prepared = vec![
+            ChatMessage {
+                role: Role::User,
+                content: "same".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: "reply".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::User,
+                content: "same".into(), // current user collides with prior — excluded
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::User,
+                content:
+                    "HOST-RETURNED BOUNDED EVIDENCE — current turn only:\nseq=1 source=\"w.log\""
+                        .into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+        let (ret, om, _) = count_prior_history_retention(&prior, &prepared, "same");
+        assert_eq!(
+            ret, 2,
+            "one user + one assistant of the duplicates retained"
+        );
+        assert_eq!(om, 2);
+        // Compaction marker
+        let prepared_c = vec![ChatMessage {
+            role: Role::System,
+            content: "[earlier conversation compacted] summary".into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        let (_, _, compacted) = count_prior_history_retention(&prior, &prepared_c, "new question");
+        assert!(compacted);
+    }
+
+    #[test]
     fn count_prior_history_excludes_user_and_evidence() {
         use crate::chat::{ChatMessage, Role};
         let prior = vec![
@@ -997,6 +1214,7 @@ mod tests {
     fn trail_step_contains_required_fields() {
         let packed = pack_linked_evidence_blocks(&["seq=1 source=\"a.log\" msg=hi".into()], 1000);
         let tel = telemetry_from_parts(TelemetryParts {
+            model_round: 2,
             hard_budget_chars: 120_000,
             packing_budget_chars: synthesis_packing_budget(120_000),
             used_chars_estimate: 50_000,
@@ -1009,6 +1227,7 @@ mod tests {
         });
         let step = tel.trail_step();
         for key in [
+            "round=",
             "used=",
             "budget=",
             "hard=",
