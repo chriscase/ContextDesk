@@ -114,10 +114,35 @@ impl Render for ExceptionEpisodesOutput {
                 .collect::<Vec<_>>()
                 .join("\n  "),
         );
+        out.push_str(&format!(
+            "\nCompleteness\n\n               Scan complete                 {}\n               Renderings complete           {}\n               Correlation complete          {}\n               Citations complete            {}\n               Structural coverage           {}\n               Semantic counts certified     {}\n               Application propagation chains {}\n               Strongly supported derived episodes {}\n               Standalone renderings         {}\n               Unresolved renderings         {}\n               Ambiguous components          {}\n               counts_complete (deprecated v1 alias) {}\n",
+            r.scan_complete,
+            r.renderings_complete,
+            r.correlation_complete,
+            r.citations_complete,
+            r.structural_coverage_complete,
+            r.semantic_counts_certified,
+            r.application_propagation_chain_count,
+            r.strong_derived_episode_count,
+            r.standalone_rendering_count,
+            r.unresolved_rendering_count,
+            r.ambiguous_component_count,
+            r.counts_complete,
+        ));
+        if r.semantic_counts_certified {
+            out.push_str(&format!(
+                "\nSummary\n\n  {} strongly supported derived episodes · {} renderings · {} underlying records\n",
+                r.strong_derived_episode_count,
+                r.rendering_episode_count,
+                r.raw_exception_record_count,
+            ));
+        } else {
+            out.push_str(
+                "\nSummary\n\n  Semantic episode totals are not certified; raw/rendering counts and unresolved/ambiguous components above are authoritative.\n",
+            );
+        }
         out.push_str(
-            "\n\nNote\n\n  Four layers: raw records, physical renderings, semantic occurrences, \
-             families. Duplicate renderings require multi-signal evidence. Order-only \
-             cross-source merge requires a strong execution key. Raw events are unchanged.\n",
+            "\n\nNote\n\n  Layers: raw records, physical renderings, application propagation chains,              strongly supported derived episodes, families. Never claim independent incident counts.              Order-only app-app grouping requires an exact unique execution anchor.              counts_complete is a deprecated v1 alias and does not alone certify semantic totals.              Raw events are unchanged.\n",
         );
         out.trim_end().to_string()
     }

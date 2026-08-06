@@ -68,7 +68,7 @@ fn exception_episodes_json_discloses_occurrence_vs_raw() {
     let report = &envelope["data"]["report"];
     assert_eq!(
         report["schemaId"],
-        "contextdesk.exception_episode_report.v1"
+        "contextdesk.exception_episode_report.v2"
     );
     let occurrences = report["occurrenceCount"].as_u64().unwrap_or(0);
     let raw = report["rawExceptionRecordCount"].as_u64().unwrap_or(0);

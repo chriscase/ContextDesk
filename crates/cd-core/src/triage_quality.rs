@@ -676,14 +676,14 @@ pub struct TriageHostFacts {
     /// Event messages keyed by seq for token matching (evaluator-only).
     pub messages_by_seq: Vec<(u64, String, String)>, // seq, source, message
     /// Host-proven semantic occurrence count from
-    /// `analyze_exception_episodes` when `counts_complete && !partial`.
+    /// `analyze_exception_episodes` when `semantic_counts_certified`.
     /// `None` means the product has not proven a complete episode count.
     pub known_semantic_occurrence_count: Option<u64>,
     /// Host-known stderr exception record count from episode analysis.
     pub stderr_record_count: Option<u64>,
     /// Host-known raw exception record count from episode analysis.
     pub raw_exception_record_count: Option<u64>,
-    /// Episode report is complete (`counts_complete && !partial`).
+    /// Episode semantic totals are certified for host/model exposure.
     pub episode_counts_complete: bool,
 }
 
@@ -699,9 +699,12 @@ impl TriageHostFacts {
     ) -> Self {
         self.stderr_record_count = Some(report.stderr_exception_record_count);
         self.raw_exception_record_count = Some(report.raw_exception_record_count);
-        self.episode_counts_complete = report.counts_complete && !report.partial;
+        // Only expose exact semantic totals when v2 certification holds.
+        // Deprecated counts_complete alone must not authorize incident claims.
+        self.episode_counts_complete =
+            report.semantic_counts_certified && !report.partial && report.counts_complete;
         self.known_semantic_occurrence_count = if self.episode_counts_complete {
-            Some(report.occurrence_count)
+            Some(report.strong_derived_episode_count)
         } else {
             None
         };

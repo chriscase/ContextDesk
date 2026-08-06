@@ -1,21 +1,23 @@
-//! Bounded, derived exception-rendering analysis (four layers).
+//! Bounded, derived exception-rendering analysis (v2 layers).
 //!
 //! Layers (never mutate durable events):
 //! 1. **Raw records** — stored events that look exception-related.
-//! 2. **Renderings** — physical emission shapes (app full-stack vs separately
-//!    wrapped line/stream records).
-//! 3. **Occurrences (semantic episodes)** — one logical failure; may include
-//!    multiple renderings only when evidence supports duplicate rendering.
-//! 4. **Families** — bounded groups of occurrences sharing a root signature.
+//! 2. **Physical renderings** — app full-stack vs separately wrapped streams.
+//! 3. **Application propagation chains** — multi-app wraps/rethrows with
+//!    typed execution evidence and fail-closed boundaries.
+//! 4. **Strongly supported derived episodes** — chain↔stderr unique matches
+//!    (or single dual-render) under reciprocal/forced evidence only.
+//! 5. **Families** — bounded groups of episodes sharing a root signature.
 //!
 //! Merge guards (fail closed):
 //! - message equality, divisibility, adjacency, or rotation-family alone never
-//!   merge occurrences;
-//! - order-only cross-source merge requires a strong execution key (matching
-//!   thread or trace_id);
-//! - suppression is applied only via excluded template ids at scan time — hidden
-//!   children never appear in citations;
-//! - caps, cancellation, and revision are explicit partial/error paths.
+//!   merge episodes;
+//! - order-only app-app grouping requires an exact unique execution anchor;
+//! - thread alone never overrides a conflicting trace/request identifier;
+//! - unkeyed nodes never transitively bridge conflicting keyed groups;
+//! - suppression is applied only via excluded template ids at scan time;
+//! - caps, cancellation, and revision are explicit partial/error paths;
+//! - semantic totals are certified only when correlation + citations complete.
 
 use crate::error::{CoreError, CoreResult};
 use crate::log_analysis::{
@@ -27,10 +29,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Schema id for host-neutral reports.
-pub const EXCEPTION_EPISODE_SCHEMA_ID: &str = "contextdesk.exception_episode_report.v1";
-/// Schema version.
-pub const EXCEPTION_EPISODE_SCHEMA_VERSION: u32 = 1;
+/// Schema id for host-neutral reports (v2 semantics; field-compatible transition).
+pub const EXCEPTION_EPISODE_SCHEMA_ID: &str = "contextdesk.exception_episode_report.v2";
+/// Schema version (2 = typed completeness + certified strong derived episodes).
+pub const EXCEPTION_EPISODE_SCHEMA_VERSION: u32 = 2;
 
 /// Maximum exception-candidate events retained in one analysis.
 pub const EXCEPTION_EPISODE_EVENT_SCAN_CAP: usize = 50_000;
@@ -48,6 +50,10 @@ const MAX_ADJACENT_WALL_SECONDS: i64 = 5;
 const MAX_DUPLICATE_SEQ_GAP: u64 = 512;
 /// Max wall-seconds between dual-render pairings (tight: not mere same-hour).
 const MAX_DUPLICATE_WALL_SECONDS: i64 = 2;
+/// Max wall-seconds spanning one application propagation chain.
+const MAX_CHAIN_WALL_SECONDS: i64 = 5;
+/// Max wall-seconds between a chain span and a supporting stderr rendering.
+const MAX_CHAIN_STDERR_WALL_SECONDS: i64 = 5;
 /// Max store rows walked when collecting exception candidates (independent of severity).
 pub const EXCEPTION_EPISODE_ROW_WALK_CAP: usize = 250_000;
 
@@ -421,7 +427,9 @@ pub struct ExceptionEpisodeAnalysis {
     pub amplification: ExceptionAmplificationMetrics,
     /// True when any cap truncated work — totals must not be treated as corpus-wide complete.
     pub partial: bool,
-    /// `!partial`: retained counts cover the declared candidate scope completely.
+    /// Deprecated v1 alias: `scan_complete && renderings_complete && !partial`.
+    /// Does **not** alone certify semantic episode totals — use
+    /// `semantic_counts_certified` for host/model exact derived counts.
     pub counts_complete: bool,
     /// True when any occurrence is uncertain.
     pub uncertain: bool,
@@ -437,6 +445,29 @@ pub struct ExceptionEpisodeAnalysis {
     pub ranking_disclosure: String,
     /// Ranked families.
     pub families: Vec<ExceptionFamilySummary>,
+    /// Scan of candidate rows completed without row-walk / candidate caps.
+    pub scan_complete: bool,
+    /// Structural template coverage conservation certified for this analysis.
+    pub structural_coverage_complete: bool,
+    /// Physical rendering assembly completed without render/record caps.
+    pub renderings_complete: bool,
+    /// Propagation + chain↔stderr correlation completed without ambiguity.
+    pub correlation_complete: bool,
+    /// Every retained episode has complete citations (no truncated attachments).
+    pub citations_complete: bool,
+    /// Semantic/derived episode totals are certified for host/model exposure.
+    pub semantic_counts_certified: bool,
+    /// Strongly supported derived episode count (certified total when
+    /// `semantic_counts_certified`; otherwise best-effort retained count).
+    pub strong_derived_episode_count: u64,
+    /// Physical renderings that stand alone (no multi-rendering claim).
+    pub standalone_rendering_count: u64,
+    /// Physical renderings left unresolved after correlation.
+    pub unresolved_rendering_count: u64,
+    /// Components left unresolved due to ambiguous partner choice.
+    pub ambiguous_component_count: u64,
+    /// Application propagation chain count retained before stderr matching.
+    pub application_propagation_chain_count: u64,
 }
 
 /// Alias retained for CLI/brief naming.
@@ -460,6 +491,10 @@ struct RenderEpisode {
     wall_time: bool,
     citations: Vec<ExceptionEventCitation>,
     complete: bool,
+    /// Bounded structural payload text for graph derivation (not model-facing).
+    structural_payload: String,
+    /// Request/correlation-like identifier extracted from payload (not model prose).
+    request_id: Option<String>,
 }
 
 impl RenderEpisode {
@@ -775,6 +810,11 @@ pub fn analyze_bounded_events(
 struct MatchingMeta {
     unpaired_renderings: u64,
     ambiguous: bool,
+    ambiguous_components: u64,
+    application_propagation_chains: u64,
+    strong_derived_episodes: u64,
+    standalone_renderings: u64,
+    correlation_complete: bool,
 }
 
 fn analyze_bounded_events_cancellable(
@@ -893,7 +933,26 @@ fn analyze_bounded_events_cancellable(
     let scan_partial = events_available > events.len() as u64;
     let family_partial = family_count_available > EXCEPTION_EPISODE_FAMILY_CAP as u64;
     let partial = scan_partial || render_partial || family_partial;
-    let counts_complete = !partial;
+    let scan_complete = !scan_partial;
+    let renderings_complete = !render_partial;
+    // Deprecated v1 alias: scan + render completeness only (not semantic certification).
+    let counts_complete = scan_complete && renderings_complete && !partial;
+    let citations_complete = families
+        .iter()
+        .all(|f| f.occurrences.iter().all(|o| o.citations_complete));
+    let correlation_complete = match_meta.correlation_complete && !match_meta.ambiguous;
+    let structural_coverage_complete = counts_complete
+        && citations_complete
+        && match_meta.unpaired_renderings == 0
+        && correlation_complete
+        && match_meta.strong_derived_episodes > 0;
+    // Semantic certification requires full correlation uniqueness + conservation.
+    let semantic_counts_certified = structural_coverage_complete
+        && correlation_complete
+        && citations_complete
+        && !partial
+        && match_meta.strong_derived_episodes == occurrence_count
+        && match_meta.unpaired_renderings == 0;
 
     let mut analysis = ExceptionEpisodeAnalysis {
         schema_id: EXCEPTION_EPISODE_SCHEMA_ID.into(),
@@ -918,12 +977,23 @@ fn analyze_bounded_events_cancellable(
         counts_complete,
         uncertain,
         matching_policy:
-            "max_cardinality_bipartite_distance_ordered_dfs; not unique-optimum assignment".into(),
+            "v2_app_propagation_chains_plus_unique_chain_stderr_match; forced_or_reciprocal_unique_only".into(),
         matching_ambiguous: match_meta.ambiguous,
         pinned_event_revision: None,
         pinned_template_analysis_revision: None,
         ranking_disclosure: String::new(),
         families,
+        scan_complete,
+        structural_coverage_complete,
+        renderings_complete,
+        correlation_complete,
+        citations_complete,
+        semantic_counts_certified,
+        strong_derived_episode_count: match_meta.strong_derived_episodes,
+        standalone_rendering_count: match_meta.standalone_renderings,
+        unresolved_rendering_count: match_meta.unpaired_renderings,
+        ambiguous_component_count: match_meta.ambiguous_components,
+        application_propagation_chain_count: match_meta.application_propagation_chains,
     };
     analysis.ranking_disclosure = build_ranking_disclosure(&analysis);
     Ok(analysis)
@@ -932,7 +1002,7 @@ fn analyze_bounded_events_cancellable(
 fn build_ranking_disclosure(report: &ExceptionEpisodeAnalysis) -> String {
     let amp = &report.amplification;
     format!(
-        "ranking_basis: semantic_occurrence_count_not_raw_stack_volume\n\
+        "ranking_basis: strong_derived_episodes_not_raw_stack_volume\n\
          candidate_scope: {}\n\
          layer_raw_exception_records: {}\n\
          layer_application_exception_records: {}\n\
@@ -941,19 +1011,31 @@ fn build_ranking_disclosure(report: &ExceptionEpisodeAnalysis) -> String {
          layer_unpaired_renderings: {}\n\
          layer_semantic_occurrences: {}\n\
          layer_duplicate_rendering_occurrences: {}\n\
+         layer_application_propagation_chains: {}\n\
+         layer_strong_derived_episodes: {}\n\
+         layer_standalone_renderings: {}\n\
+         layer_unresolved_renderings: {}\n\
+         layer_ambiguous_components: {}\n\
          amplification_raw_records_per_occurrence: {}/{} = {} rem {} integral={}\n\
          amplification_stderr_records_per_occurrence: {}/{} = {} rem {} integral={}\n\
          amplification_application_records_per_occurrence: {}/{} = {} rem {} integral={}\n\
          amplification_renderings_per_occurrence: {}/{} = {} rem {} integral={}\n\
-         counts_complete: {}\n\
+         scan_complete: {}\n\
+         renderings_complete: {}\n\
+         correlation_complete: {}\n\
+         citations_complete: {}\n\
+         structural_coverage_complete: {}\n\
+         semantic_counts_certified: {}\n\
+         counts_complete: {} (deprecated v1 alias: scan+render complete, not semantic certification)\n\
          matching_policy: {}\n\
          matching_ambiguous: {}\n\
          independent_incident_claim_forbidden: true\n\
          interpretation: wrappers and stack frames are supporting records of a rendering; \
-         duplicate renderings use max-cardinality bipartite matching with distance-ordered DFS \
-         (deterministic; not claimed as the unique global optimum when ambiguous). \
-         Order-only cross-source merge requires a strong execution key. \
-         When counts_complete=false/partial=true, counts must not be presented as corpus-wide totals.\n",
+         application multi-renderings form propagation chains under typed execution evidence; \
+         chain↔stderr matching is forced/reciprocal-unique only. \
+         Order-only app-app grouping requires an exact unique execution anchor. \
+         Exact semantic totals may be exposed only when semantic_counts_certified=true. \
+         When partial or uncertified, do not present derived episode totals as corpus-wide incidents.\n",
         report.candidate_scope,
         report.raw_exception_record_count,
         report.application_exception_record_count,
@@ -962,6 +1044,11 @@ fn build_ranking_disclosure(report: &ExceptionEpisodeAnalysis) -> String {
         report.unpaired_rendering_count,
         report.occurrence_count,
         report.duplicate_rendering_occurrence_count,
+        report.application_propagation_chain_count,
+        report.strong_derived_episode_count,
+        report.standalone_rendering_count,
+        report.unresolved_rendering_count,
+        report.ambiguous_component_count,
         amp.raw_records_per_occurrence.numerator,
         amp.raw_records_per_occurrence.denominator,
         amp.raw_records_per_occurrence.quotient,
@@ -982,6 +1069,12 @@ fn build_ranking_disclosure(report: &ExceptionEpisodeAnalysis) -> String {
         amp.renderings_per_occurrence.quotient,
         amp.renderings_per_occurrence.remainder,
         amp.renderings_per_occurrence.ratio_integral(),
+        report.scan_complete,
+        report.renderings_complete,
+        report.correlation_complete,
+        report.citations_complete,
+        report.structural_coverage_complete,
+        report.semantic_counts_certified,
         report.counts_complete,
         report.matching_policy,
         report.matching_ambiguous,
@@ -1066,23 +1159,50 @@ pub fn format_exception_episode_brief_section(report: &ExceptionEpisodeAnalysis)
     let amp = &report.amplification;
     // Keep this section dense: full ranking_disclosure lives on the DTO for hosts
     // that need it; the brief only carries the triage-critical lines.
+    let semantic_line = if report.semantic_counts_certified && !report.partial {
+        format!(
+            "semantic_counts_certified: true\n\
+             strongly_supported_derived_episodes: {}\n\
+             semantic_occurrence_count: {}\n",
+            report.strong_derived_episode_count, report.strong_derived_episode_count
+        )
+    } else {
+        format!(
+            "semantic_counts_certified: false\n\
+             strongly_supported_derived_episodes_uncertified: {}\n\
+             semantic_occurrence_count: withheld\n\
+             limitation: exact semantic/derived episode totals are not certified; \
+use raw/rendering and unresolved/ambiguous counts only\n",
+            report.strong_derived_episode_count
+        )
+    };
     out.push_str(&format!(
         "schema_id: {}\nschema_version: {}\n\
          independent_incident_claim_forbidden: true\n\
-         counts_complete: {}\npartial: {}\nuncertain: {}\nmatching_ambiguous: {}\n\
+         scan_complete: {}\nrenderings_complete: {}\ncorrelation_complete: {}\n\
+         citations_complete: {}\nstructural_coverage_complete: {}\n\
+         counts_complete: {} (deprecated v1 alias)\npartial: {}\nuncertain: {}\nmatching_ambiguous: {}\n\
          raw_exception_record_count: {}\n\
          application_exception_record_count: {}\n\
          stderr_exception_record_count: {}\n\
          physical_rendering_count: {}\n\
+         application_propagation_chain_count: {}\n\
          unpaired_rendering_count: {}\n\
-         semantic_occurrence_count: {}\n\
+         standalone_rendering_count: {}\n\
+         unresolved_rendering_count: {}\n\
+         ambiguous_component_count: {}\n\
          duplicate_rendering_occurrence_count: {}\n\
          amplification_raw_records_per_occurrence: {}/{} = {} rem {}\n\
          amplification_stderr_records_per_occurrence: {}/{} = {} rem {}\n\
          amplification_renderings_per_occurrence: {}/{} = {} rem {}\n\
-         matching_policy: {}\n",
+         matching_policy: {}\n{}",
         report.schema_id,
         report.schema_version,
+        report.scan_complete,
+        report.renderings_complete,
+        report.correlation_complete,
+        report.citations_complete,
+        report.structural_coverage_complete,
         report.counts_complete,
         report.partial,
         report.uncertain,
@@ -1091,8 +1211,11 @@ pub fn format_exception_episode_brief_section(report: &ExceptionEpisodeAnalysis)
         report.application_exception_record_count,
         report.stderr_exception_record_count,
         report.rendering_episode_count,
+        report.application_propagation_chain_count,
         report.unpaired_rendering_count,
-        report.occurrence_count,
+        report.standalone_rendering_count,
+        report.unresolved_rendering_count,
+        report.ambiguous_component_count,
         report.duplicate_rendering_occurrence_count,
         amp.raw_records_per_occurrence.numerator,
         amp.raw_records_per_occurrence.denominator,
@@ -1106,7 +1229,8 @@ pub fn format_exception_episode_brief_section(report: &ExceptionEpisodeAnalysis)
         amp.renderings_per_occurrence.denominator,
         amp.renderings_per_occurrence.quotient,
         amp.renderings_per_occurrence.remainder,
-        report.matching_policy
+        report.matching_policy,
+        semantic_line,
     ));
     for family in report.families.iter().take(4) {
         let famp = &family.amplification;
@@ -1139,18 +1263,13 @@ pub fn format_exception_episode_brief_section(report: &ExceptionEpisodeAnalysis)
                 occ.rendering_count,
                 occ.duplicate_rendering
             ));
-            for c in occ.citations.iter().take(2) {
-                out.push_str(&format!(
-                    "    cite seq={} source={} template_id={} role={:?}\n",
-                    c.seq, c.source, c.template_id, c.role
-                ));
-            }
         }
     }
     out.push_str(
-        "interpretation: do not treat raw stack-frame volume as independent incidents; \
-         prefer semantic_occurrence_count and typed amplification ratios with remainders; \
-         counts_complete is independent of ratio_integral.\n",
+        "note: raw records ≠ renderings ≠ strongly supported derived episodes ≠ independent incidents; \
+         amplification ratios include remainders; \
+         counts_complete is independent of ratio_integral; \
+         semantic totals require semantic_counts_certified.\n",
     );
     out
 }
@@ -1398,6 +1517,13 @@ fn new_episode(
     signature: String,
     kind: ExceptionRenderingKind,
 ) -> RenderEpisode {
+    let mut structural_payload = env.structural_payload.clone();
+    // Bound retained payload for graph derivation.
+    if structural_payload.len() > 8_192 {
+        structural_payload.truncate(8_192);
+    }
+    let request_id = extract_request_like_id(&structural_payload)
+        .or_else(|| extract_request_like_id(&event.message));
     RenderEpisode {
         signature,
         kind,
@@ -1413,6 +1539,8 @@ fn new_episode(
         wall_time: event.active_timestamp_basis.is_wall_clock(),
         citations: vec![citation(event, kind, ExceptionCitationRole::RenderingLead)],
         complete: true,
+        structural_payload,
+        request_id,
     }
 }
 
@@ -1434,11 +1562,33 @@ fn attach(episode: &mut RenderEpisode, event: &ExplorerEvent, env: &ExceptionEnv
     if episode.trace_id.is_none() {
         episode.trace_id = event.trace_id.clone();
     }
+    if episode.request_id.is_none() {
+        episode.request_id = extract_request_like_id(&env.structural_payload)
+            .or_else(|| extract_request_like_id(&event.message));
+    }
     episode.citations.push(citation(
         event,
         episode.kind,
         ExceptionCitationRole::SupportingRecord,
     ));
+    // Append structural payload for multi-line stderr assembly (bounded).
+    if episode.structural_payload.len() < 8_192 {
+        if !episode.structural_payload.is_empty() {
+            episode.structural_payload.push('\n');
+        }
+        let add = env.structural_payload.as_str();
+        let remain = 8_192 - episode.structural_payload.len();
+        let take = add
+            .char_indices()
+            .take_while(|(i, _)| *i < remain)
+            .map(|(i, c)| i + c.len_utf8())
+            .last()
+            .unwrap_or(0)
+            .min(add.len());
+        if let Some(chunk) = add.get(..take) {
+            episode.structural_payload.push_str(chunk);
+        }
+    }
 }
 
 fn citation(
@@ -1488,185 +1638,1088 @@ fn adjacent_compatible(
 }
 
 // ---------------------------------------------------------------------------
-// Layer 3: semantic occurrences (duplicate-render correlation)
+// Layer 3–4: application propagation chains + chain↔stderr episodes
 // ---------------------------------------------------------------------------
 
-/// One-to-one duplicate-rendering matching via max-cardinality bipartite DFS.
+/// Exception-graph summary derived from one physical rendering's payload text.
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
+struct ExceptionGraphSummary {
+    /// Ordered exception types outer → root (lowercased).
+    exception_types: Vec<String>,
+    /// Normalized root detail (after type).
+    root_detail: String,
+    /// Root signature string (type + detail).
+    root_signature: String,
+    /// First top-frame class.method per cause level (bounded).
+    top_frames: Vec<String>,
+    /// Propagation-site key (outermost top frame, or signature fallback).
+    propagation_site: String,
+    /// True when types + at least one frame were recovered.
+    complete: bool,
+}
+
+/// Typed execution signals with provenance/scope (never inject raw ids into prose).
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
+struct TypedExecutionSignals {
+    trace_id: Option<String>,
+    request_id: Option<String>,
+    host: Option<String>,
+    process: Option<String>,
+    /// Source-scoped thread identity (explicit or parenthesized).
+    thread: Option<String>,
+    service: Option<String>,
+    source: String,
+    /// Logger/class bracket text — never a strong thread identity.
+    logger: Option<String>,
+    wall_time: bool,
+    first_ts: i64,
+    last_ts: i64,
+    execution_key_conflict: bool,
+    envelope_malformed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum LinkConfidence {
+    ExactExecutionAnchor,
+    StrongMultiSignal,
+    Candidate,
+}
+
+fn derive_exception_graph(message: &str, fallback_signature: &str) -> ExceptionGraphSummary {
+    let mut types = Vec::new();
+    let mut top_frames = Vec::new();
+    let mut pending_frame_slot = false;
+    for line in message.lines() {
+        let trimmed = line.trim();
+        if let Some(sig) = exception_signature_line(trimmed) {
+            let (ty, detail) = split_signature_type_detail(&sig);
+            types.push(ty);
+            if !detail.is_empty() {
+                // keep last detail as root detail candidate
+            }
+            pending_frame_slot = true;
+            continue;
+        }
+        if pending_frame_slot {
+            if let Some(frame) = extract_top_frame_key(trimmed) {
+                top_frames.push(frame);
+                pending_frame_slot = false;
+            }
+        }
+    }
+    let root_signature = if fallback_signature.is_empty() {
+        types.last().cloned().unwrap_or_default()
+    } else {
+        fallback_signature.to_string()
+    };
+    let (root_ty, root_detail) = split_signature_type_detail(&root_signature);
+    if types.is_empty() && !root_ty.is_empty() {
+        types.push(root_ty);
+    }
+    let propagation_site = top_frames
+        .first()
+        .cloned()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            if root_signature.is_empty() {
+                "unknown_site".into()
+            } else {
+                format!("sig:{root_signature}")
+            }
+        });
+    let complete = !types.is_empty() && !top_frames.is_empty();
+    ExceptionGraphSummary {
+        exception_types: types,
+        root_detail,
+        root_signature,
+        top_frames,
+        propagation_site,
+        complete,
+    }
+}
+
+fn split_signature_type_detail(sig: &str) -> (String, String) {
+    if let Some((ty, detail)) = sig.split_once(':') {
+        (ty.trim().to_string(), detail.trim().to_string())
+    } else {
+        (sig.trim().to_string(), String::new())
+    }
+}
+
+fn extract_top_frame_key(line: &str) -> Option<String> {
+    let line = line.trim();
+    let rest = line.strip_prefix("at ")?.trim();
+    // com.foo.Bar.method(File.java:1) → com.foo.Bar.method
+    let head = rest.split('(').next()?.trim();
+    if head.is_empty() {
+        return None;
+    }
+    Some(head.chars().take(160).collect())
+}
+
+fn signals_from_rendering(r: &RenderEpisode) -> TypedExecutionSignals {
+    TypedExecutionSignals {
+        trace_id: r.trace_id.clone().filter(|s| !s.is_empty()),
+        request_id: r.request_id.clone().filter(|s| !s.is_empty()),
+        host: r.host.clone().filter(|s| !s.is_empty()),
+        process: None,
+        thread: r.thread.clone().filter(|s| !s.is_empty()),
+        service: r.service.clone().filter(|s| !s.is_empty()),
+        source: r.source.clone(),
+        logger: None,
+        wall_time: r.wall_time,
+        first_ts: r.first_ts,
+        last_ts: r.last_ts,
+        execution_key_conflict: r.execution_key_conflict,
+        envelope_malformed: r.envelope_malformed,
+    }
+}
+
+/// Global-scope conflict (trace/request) always rejects. Source-scoped thread
+/// conflicts only within the same source.
+fn execution_signals_conflict(a: &TypedExecutionSignals, b: &TypedExecutionSignals) -> bool {
+    if a.execution_key_conflict
+        || b.execution_key_conflict
+        || a.envelope_malformed
+        || b.envelope_malformed
+    {
+        return true;
+    }
+    if let (Some(x), Some(y)) = (&a.trace_id, &b.trace_id) {
+        if x != y {
+            return true;
+        }
+    }
+    if let (Some(x), Some(y)) = (&a.request_id, &b.request_id) {
+        if x != y {
+            return true;
+        }
+    }
+    // Thread never overrides a conflicting trace: if both have traces that match
+    // but threads differ, still ok for cross-source; same-source thread mismatch rejects.
+    if a.source == b.source {
+        if let (Some(x), Some(y)) = (&a.thread, &b.thread) {
+            if x != y {
+                return true;
+            }
+        }
+    }
+    if let (Some(x), Some(y)) = (&a.host, &b.host) {
+        if x != y {
+            return true;
+        }
+    }
+    if let (Some(x), Some(y)) = (&a.service, &b.service) {
+        if x != y {
+            return true;
+        }
+    }
+    false
+}
+
+fn matching_global_anchor(a: &TypedExecutionSignals, b: &TypedExecutionSignals) -> bool {
+    matches!((&a.trace_id, &b.trace_id), (Some(x), Some(y)) if x == y)
+        || matches!((&a.request_id, &b.request_id), (Some(x), Some(y)) if x == y)
+}
+
+fn same_scoped_thread_host(a: &TypedExecutionSignals, b: &TypedExecutionSignals) -> bool {
+    match (&a.thread, &b.thread) {
+        (Some(x), Some(y)) if x == y => {}
+        _ => return false,
+    }
+    // Host: if both present must match; if either missing, allow only when threads match.
+    match (&a.host, &b.host) {
+        (Some(x), Some(y)) => x == y,
+        _ => true,
+    }
+}
+
+fn graphs_structurally_related(a: &ExceptionGraphSummary, b: &ExceptionGraphSummary) -> bool {
+    if a.root_signature.is_empty() || b.root_signature.is_empty() {
+        return false;
+    }
+    // Same root signature (normalized).
+    if a.root_signature == b.root_signature {
+        return true;
+    }
+    // Shared root type.
+    if let (Some(ra), Some(rb)) = (a.exception_types.last(), b.exception_types.last()) {
+        if ra == rb {
+            return true;
+        }
+    }
+    // Cause-chain suffix compatibility (one type sequence ends with the other).
+    if !a.exception_types.is_empty() && !b.exception_types.is_empty() {
+        if is_type_suffix(&a.exception_types, &b.exception_types)
+            || is_type_suffix(&b.exception_types, &a.exception_types)
+        {
+            return true;
+        }
+        // Progressive wrap: outer type of one equals any type of the other.
+        if a.exception_types
+            .iter()
+            .any(|t| b.exception_types.contains(t))
+        {
+            return true;
+        }
+    }
+    // Compatible detail tokens (shared non-placeholder words).
+    if !a.root_detail.is_empty() && !b.root_detail.is_empty() {
+        let ta: Vec<_> = a
+            .root_detail
+            .split_whitespace()
+            .filter(|t| *t != "<*>" && t.len() > 3)
+            .collect();
+        let tb: Vec<_> = b
+            .root_detail
+            .split_whitespace()
+            .filter(|t| *t != "<*>" && t.len() > 3)
+            .collect();
+        if ta.iter().any(|t| tb.contains(t)) {
+            return true;
+        }
+    }
+    // Progressive propagation sites (same package stem, distinct frames).
+    if progressive_propagation_sites(&a.propagation_site, &b.propagation_site) {
+        return true;
+    }
+    // Distinct sites + both look like exception types (wraps/rethrows family).
+    if a.propagation_site != b.propagation_site
+        && looks_like_exception_type_name(
+            a.exception_types.first().map(|s| s.as_str()).unwrap_or(""),
+        )
+        && looks_like_exception_type_name(
+            b.exception_types.first().map(|s| s.as_str()).unwrap_or(""),
+        )
+        && !a.top_frames.is_empty()
+        && !b.top_frames.is_empty()
+    {
+        // Same top-frame package prefix of depth ≥ 2 (com.xyz.*).
+        if package_prefix_match(
+            a.top_frames.first().map(|s| s.as_str()).unwrap_or(""),
+            b.top_frames.first().map(|s| s.as_str()).unwrap_or(""),
+            2,
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+fn looks_like_exception_type_name(token: &str) -> bool {
+    let token = token.trim();
+    if token.is_empty() {
+        return false;
+    }
+    looks_like_exception_type(token)
+        || token.contains("exception")
+        || token.contains("error")
+        || token.contains('.')
+}
+
+fn progressive_propagation_sites(a: &str, b: &str) -> bool {
+    if a == b || a.is_empty() || b.is_empty() {
+        return false;
+    }
+    // com.xyz.layer0.Handler.handle vs com.xyz.layer6.Handler.handle
+    package_prefix_match(a, b, 2)
+}
+
+fn package_prefix_match(a: &str, b: &str, min_segments: usize) -> bool {
+    let sa: Vec<_> = a.split('.').collect();
+    let sb: Vec<_> = b.split('.').collect();
+    if sa.len() < min_segments || sb.len() < min_segments {
+        return false;
+    }
+    let n = min_segments.min(sa.len()).min(sb.len());
+    sa[..n] == sb[..n] && a != b
+}
+
+fn is_type_suffix(longer: &[String], shorter: &[String]) -> bool {
+    if shorter.len() > longer.len() {
+        return false;
+    }
+    longer[longer.len() - shorter.len()..] == shorter[..]
+}
+
+fn wall_span_ok(a: &TypedExecutionSignals, b: &TypedExecutionSignals, max_secs: i64) -> bool {
+    if !(a.wall_time && b.wall_time) {
+        return false;
+    }
+    interval_gap(a.first_ts, a.last_ts, b.first_ts, b.last_ts) <= max_secs as u64
+}
+
+fn chain_wall_span_ok(members: &[&RenderEpisode], candidate: &RenderEpisode) -> bool {
+    if members.is_empty() {
+        return true;
+    }
+    if !candidate.wall_time || members.iter().any(|m| !m.wall_time) {
+        return false;
+    }
+    let mut lo = candidate.first_ts.min(candidate.last_ts);
+    let mut hi = candidate.first_ts.max(candidate.last_ts);
+    for m in members {
+        lo = lo.min(m.first_ts.min(m.last_ts));
+        hi = hi.max(m.first_ts.max(m.last_ts));
+    }
+    hi.abs_diff(lo) <= MAX_CHAIN_WALL_SECONDS as u64
+}
+
+/// One-to-one / multi-app propagation correlation (v2).
 ///
-/// Unlike reverse-insertion greedy, this reassigns along augmenting paths so a
-/// locally preferred edge cannot permanently steal a partner that enables a
-/// larger matching. Neighbor order is stable: stronger confidence, then smaller
-/// axis distance, then seq/source ties. Policy is deterministic under input
-/// reorder but is **not** claimed as the unique global optimum of all max
-/// matchings; `matching_ambiguous` is set when alternate max-cardinality
-/// choices were available.
+/// Builds application propagation chains under fail-closed execution boundaries,
+/// then matches each chain uniquely to at most one stderr rendering. Ambiguity
+/// remains unresolved (never arbitrary choice).
 fn correlate_renderings_cancellable(
     renderings: Vec<RenderEpisode>,
     is_cancelled: &dyn Fn() -> bool,
 ) -> CoreResult<(Vec<(String, ExceptionOccurrenceSummary)>, MatchingMeta)> {
     let n = renderings.len();
-    let mut by_signature: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (idx, rendering) in renderings.iter().enumerate() {
-        by_signature
-            .entry(rendering.signature.clone())
-            .or_default()
-            .push(idx);
+    let graphs: Vec<ExceptionGraphSummary> = renderings
+        .iter()
+        .map(|r| {
+            let mut g = derive_exception_graph(&r.structural_payload, &r.signature);
+            if g.exception_types.is_empty() {
+                let (ty, detail) = split_signature_type_detail(&r.signature);
+                if !ty.is_empty() {
+                    g.exception_types.push(ty);
+                }
+                g.root_detail = detail;
+                g.root_signature = r.signature.clone();
+            }
+            if g.propagation_site.starts_with("sig:") || g.propagation_site == "unknown_site" {
+                // Distinct site per rendering identity when frames unavailable.
+                g.propagation_site =
+                    format!("render:{}:{}:{}", r.source, r.first_seq(), r.kind as u8);
+            }
+            g
+        })
+        .collect();
+    let signals: Vec<TypedExecutionSignals> =
+        renderings.iter().map(signals_from_rendering).collect();
+
+    let mut app_idxs: Vec<usize> = Vec::new();
+    let mut wrap_idxs: Vec<usize> = Vec::new();
+    for (i, r) in renderings.iter().enumerate() {
+        match r.kind {
+            ExceptionRenderingKind::ApplicationFullStack => app_idxs.push(i),
+            ExceptionRenderingKind::SeparatelyWrappedRecords => wrap_idxs.push(i),
+        }
+    }
+    app_idxs.sort_by(|&a, &b| {
+        renderings[a]
+            .first_ts
+            .cmp(&renderings[b].first_ts)
+            .then_with(|| renderings[a].first_seq().cmp(&renderings[b].first_seq()))
+            .then_with(|| renderings[a].source.cmp(&renderings[b].source))
+            .then_with(|| a.cmp(&b))
+    });
+    wrap_idxs.sort_by(|&a, &b| {
+        renderings[a]
+            .first_ts
+            .cmp(&renderings[b].first_ts)
+            .then_with(|| renderings[a].first_seq().cmp(&renderings[b].first_seq()))
+            .then_with(|| renderings[a].source.cmp(&renderings[b].source))
+            .then_with(|| a.cmp(&b))
+    });
+
+    if is_cancelled() {
+        return Err(CoreError::Cancelled);
     }
 
-    let mut paired = vec![false; n];
-    let mut pairs: Vec<(String, usize, usize, ExceptionCorrelationConfidence)> = Vec::new();
-    let mut matching_ambiguous = false;
+    // --- Build app propagation chains (no unrestricted union-find) ---
+    let mut assigned_app = vec![false; n];
+    let mut chains: Vec<Vec<usize>> = Vec::new();
+    let mut ambiguous_components = 0u64;
 
-    for (signature, indices) in &by_signature {
+    for &seed in &app_idxs {
+        if assigned_app[seed] {
+            continue;
+        }
         if is_cancelled() {
             return Err(CoreError::Cancelled);
         }
-        let mut apps = Vec::new();
-        let mut wraps = Vec::new();
-        for &idx in indices {
-            match renderings[idx].kind {
-                ExceptionRenderingKind::ApplicationFullStack => apps.push(idx),
-                ExceptionRenderingKind::SeparatelyWrappedRecords => wraps.push(idx),
-            }
-        }
-        // Stable left/right order by first_seq/source.
-        apps.sort_by(|&a, &b| {
-            renderings[a]
-                .first_seq()
-                .cmp(&renderings[b].first_seq())
-                .then_with(|| renderings[a].source.cmp(&renderings[b].source))
-                .then_with(|| a.cmp(&b))
-        });
-        wraps.sort_by(|&a, &b| {
-            renderings[a]
-                .first_seq()
-                .cmp(&renderings[b].first_seq())
-                .then_with(|| renderings[a].source.cmp(&renderings[b].source))
-                .then_with(|| a.cmp(&b))
-        });
+        let mut chain = vec![seed];
+        assigned_app[seed] = true;
+        let mut chain_sites = vec![graphs[seed].propagation_site.clone()];
+        let mut chain_trace = signals[seed].trace_id.clone();
+        loop {
+            let mut candidates: Vec<(usize, LinkConfidence)> = Vec::new();
+            for &other in &app_idxs {
+                if assigned_app[other] {
+                    continue;
+                }
+                if execution_signals_conflict(&signals[seed], &signals[other]) {
+                    // Also check against every chain member.
+                }
+                if chain
+                    .iter()
+                    .any(|&m| execution_signals_conflict(&signals[m], &signals[other]))
+                {
+                    continue;
+                }
+                // Unkeyed must not bridge two conflicting keyed groups: if chain
+                // has a trace and other has a different trace, already refused.
+                // If other is unkeyed and chain has trace, allow only with
+                // multi-signal structural + unique reciprocal (not as bridge to
+                // another keyed node — enforced by never adding a second key).
+                if let Some(ct) = &chain_trace {
+                    if let Some(ot) = &signals[other].trace_id {
+                        if ct != ot {
+                            continue;
+                        }
+                    }
+                }
+                // Structural relation with at least one chain member.
+                let structural = chain
+                    .iter()
+                    .any(|&m| graphs_structurally_related(&graphs[m], &graphs[other]));
+                if !structural {
+                    continue;
+                }
+                // Distinct propagation site (repeated site closes chain).
+                if chain_sites.contains(&graphs[other].propagation_site) {
+                    continue;
+                }
+                // Wall span bound for wall-clock members.
+                let member_refs: Vec<&RenderEpisode> =
+                    chain.iter().map(|&i| &renderings[i]).collect();
+                let all_wall =
+                    member_refs.iter().all(|m| m.wall_time) && renderings[other].wall_time;
+                let any_order_only =
+                    member_refs.iter().any(|m| !m.wall_time) || !renderings[other].wall_time;
 
-        let n_l = apps.len();
-        let n_r = wraps.len();
-        if n_l == 0 || n_r == 0 {
-            continue;
-        }
+                let matching_thread = chain.iter().any(|&m| {
+                    matches!(
+                        (&signals[m].thread, &signals[other].thread),
+                        (Some(a), Some(b)) if a == b
+                    )
+                });
+                // Exact anchors: matching trace/request, or matching explicit thread
+                // identity (thread is a first-class execution anchor when present).
+                let exact_anchor = chain
+                    .iter()
+                    .any(|&m| matching_global_anchor(&signals[m], &signals[other]))
+                    || matching_thread;
+                if any_order_only && !exact_anchor {
+                    // OrderOnly: multi-signal wall fallback forbidden; need exact anchor.
+                    continue;
+                }
+                if all_wall && !chain_wall_span_ok(&member_refs, &renderings[other]) {
+                    continue;
+                }
 
-        // adj[l] = list of (right_local, conf_rank, distance, confidence) sorted by preference
-        let mut adj: Vec<Vec<(usize, u8, u64, ExceptionCorrelationConfidence)>> =
-            vec![Vec::new(); n_l];
-        for (li, &app_idx) in apps.iter().enumerate() {
-            for (ri, &wrap_idx) in wraps.iter().enumerate() {
-                let Some(confidence) =
-                    duplicate_evidence(&renderings[app_idx], &renderings[wrap_idx])
-                else {
+                let conf = if exact_anchor {
+                    LinkConfidence::ExactExecutionAnchor
+                } else if all_wall
+                    && chain
+                        .iter()
+                        .any(|&m| same_scoped_thread_host(&signals[m], &signals[other]))
+                {
+                    // Wall multi-signal fallback (forbidden for OrderOnly — already gated).
+                    LinkConfidence::StrongMultiSignal
+                } else {
                     continue;
                 };
-                let conf_rank = match confidence {
-                    ExceptionCorrelationConfidence::Strong => 0u8,
-                    ExceptionCorrelationConfidence::Moderate => 1u8,
-                    ExceptionCorrelationConfidence::Uncorrelated => 2u8,
-                };
-                let distance = axis_distance(&renderings[app_idx], &renderings[wrap_idx]);
-                adj[li].push((ri, conf_rank, distance, confidence));
-            }
-            adj[li].sort_by(|a, b| {
-                a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)).then_with(|| {
-                    let wa = wraps[a.0];
-                    let wb = wraps[b.0];
-                    renderings[wa]
-                        .first_seq()
-                        .cmp(&renderings[wb].first_seq())
-                        .then_with(|| renderings[wa].source.cmp(&renderings[wb].source))
-                        .then_with(|| wa.cmp(&wb))
-                })
-            });
-        }
 
-        // Ambiguity on either bipartite side: any app with ≥2 compatible stderr
-        // partners, or any stderr with ≥2 competing apps. Unique forced matchings
-        // are exactly the graphs where every incident degree is ≤1.
-        if bipartite_degrees_allow_alternate_max_matchings(&adj, n_r) {
-            matching_ambiguous = true;
-        }
-
-        // Kuhn max-cardinality matching; mt_r[ri] = Some(li)
-        let mut mt_r: Vec<Option<usize>> = vec![None; n_r];
-        fn try_kuhn(
-            v: usize,
-            adj: &[Vec<(usize, u8, u64, ExceptionCorrelationConfidence)>],
-            mt_r: &mut [Option<usize>],
-            used: &mut [bool],
-        ) -> bool {
-            if used[v] {
-                return false;
+                // Candidate-only links (not exact/strong) never collapse.
+                if matches!(conf, LinkConfidence::Candidate) {
+                    continue;
+                }
+                candidates.push((other, conf));
             }
-            used[v] = true;
-            for &(to, _, _, _) in &adj[v] {
-                if mt_r[to].is_none() || try_kuhn(mt_r[to].expect("matched"), adj, mt_r, used) {
-                    mt_r[to] = Some(v);
-                    return true;
+            if candidates.is_empty() {
+                break;
+            }
+            // Unique reciprocal: among candidates, prefer those for which this
+            // chain is the unique eligible partner in the local window.
+            let mut forced: Vec<(usize, LinkConfidence)> = Vec::new();
+            for &(cand, conf) in &candidates {
+                // Exact anchors (shared thread/request/trace) do not require
+                // rival-free uniqueness among same-anchor siblings — the anchor
+                // itself is the fail-closed boundary. Multi-signal wall fallback
+                // still requires a unique reciprocal candidate.
+                if matches!(conf, LinkConfidence::ExactExecutionAnchor) {
+                    forced.push((cand, conf));
+                    continue;
+                }
+                let rivals = count_rival_chains_for_app(
+                    cand,
+                    &chain,
+                    &chains,
+                    &app_idxs,
+                    &assigned_app,
+                    &renderings,
+                    &graphs,
+                    &signals,
+                );
+                if rivals == 0 {
+                    forced.push((cand, conf));
                 }
             }
-            false
+            if forced.is_empty() {
+                if candidates.len() > 1 {
+                    ambiguous_components += 1;
+                }
+                break;
+            }
+            // Deterministic: take earliest by ts/seq among forced.
+            forced.sort_by(|a, b| {
+                renderings[a.0]
+                    .first_ts
+                    .cmp(&renderings[b.0].first_ts)
+                    .then_with(|| {
+                        renderings[a.0]
+                            .first_seq()
+                            .cmp(&renderings[b.0].first_seq())
+                    })
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            let (pick, _) = forced[0];
+            // If pick introduces a new trace into an unkeyed chain, set it; if
+            // chain already keyed and pick unkeyed, ok; never second key.
+            if chain_trace.is_none() {
+                chain_trace = signals[pick].trace_id.clone();
+            }
+            chain.push(pick);
+            chain_sites.push(graphs[pick].propagation_site.clone());
+            assigned_app[pick] = true;
         }
-        for v in 0..n_l {
-            let mut used = vec![false; n_l];
-            let _ = try_kuhn(v, &adj, &mut mt_r, &mut used);
-        }
-
-        for (ri, li_opt) in mt_r.iter().enumerate() {
-            let Some(li) = *li_opt else {
-                continue;
-            };
-            let app_idx = apps[li];
-            let wrap_idx = wraps[ri];
-            let confidence = adj[li]
-                .iter()
-                .find(|(r, _, _, _)| *r == ri)
-                .map(|(_, _, _, c)| *c)
-                .unwrap_or(ExceptionCorrelationConfidence::Moderate);
-            paired[app_idx] = true;
-            paired[wrap_idx] = true;
-            pairs.push((signature.clone(), app_idx, wrap_idx, confidence));
-        }
+        chains.push(chain);
     }
 
-    let unpaired = paired.iter().filter(|p| !**p).count() as u64;
+    if is_cancelled() {
+        return Err(CoreError::Cancelled);
+    }
+
+    // --- Match chains to stderr (unique 1:1) ---
+    let mut paired = vec![false; n];
     let mut occurrences: Vec<(String, ExceptionOccurrenceSummary)> = Vec::new();
-    for (signature, i_a, i_b, confidence) in pairs {
-        let group = vec![renderings[i_a].clone(), renderings[i_b].clone()];
-        occurrences.push((signature, occurrence_from_renderings(group, confidence)));
+    let mut used_wrap = vec![false; n];
+    let mut strong_derived = 0u64;
+    let mut matching_ambiguous = ambiguous_components > 0;
+
+    // Precompute wrap eligibility per chain.
+    let mut chain_wrap_edges: Vec<Vec<(usize, ExceptionCorrelationConfidence)>> =
+        vec![Vec::new(); chains.len()];
+    for (ci, chain) in chains.iter().enumerate() {
+        for &wi in &wrap_idxs {
+            if let Some(conf) = chain_stderr_evidence(chain, wi, &renderings, &graphs, &signals) {
+                chain_wrap_edges[ci].push((wi, conf));
+            }
+        }
+        chain_wrap_edges[ci].sort_by(|a, b| {
+            let rank = |c: ExceptionCorrelationConfidence| match c {
+                ExceptionCorrelationConfidence::Strong => 0u8,
+                ExceptionCorrelationConfidence::Moderate => 1u8,
+                ExceptionCorrelationConfidence::Uncorrelated => 2u8,
+            };
+            rank(a.1)
+                .cmp(&rank(b.1))
+                .then_with(|| {
+                    renderings[a.0]
+                        .first_seq()
+                        .cmp(&renderings[b.0].first_seq())
+                })
+                .then_with(|| a.0.cmp(&b.0))
+        });
     }
-    for (idx, rendering) in renderings.into_iter().enumerate() {
+
+    // Ambiguity: chain with ≥2 wrap partners or wrap with ≥2 chain partners.
+    let mut wrap_deg: BTreeMap<usize, u64> = BTreeMap::new();
+    for edges in &chain_wrap_edges {
+        if edges.len() >= 2 {
+            matching_ambiguous = true;
+            ambiguous_components += 1;
+        }
+        for &(wi, _) in edges {
+            *wrap_deg.entry(wi).or_default() += 1;
+        }
+    }
+    for deg in wrap_deg.values() {
+        if *deg >= 2 {
+            matching_ambiguous = true;
+            ambiguous_components += 1;
+            break;
+        }
+    }
+
+    // Forced unique edges only (degree 1 on both sides among remaining).
+    let mut chain_matched = vec![false; chains.len()];
+    // Iterate chains in stable order.
+    let mut chain_order: Vec<usize> = (0..chains.len()).collect();
+    chain_order.sort_by(|&a, &b| {
+        let sa = chains[a]
+            .iter()
+            .map(|&i| renderings[i].first_seq())
+            .min()
+            .unwrap_or(0);
+        let sb = chains[b]
+            .iter()
+            .map(|&i| renderings[i].first_seq())
+            .min()
+            .unwrap_or(0);
+        sa.cmp(&sb).then_with(|| a.cmp(&b))
+    });
+
+    for &ci in &chain_order {
+        if is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
+        // Eligible unused wraps with unique reverse degree among unmatched chains.
+        let mut unique_partners: Vec<(usize, ExceptionCorrelationConfidence)> = Vec::new();
+        for &(wi, conf) in &chain_wrap_edges[ci] {
+            if used_wrap[wi] {
+                continue;
+            }
+            // Count other unmatched chains that also list this wrap.
+            let mut reverse = 0u32;
+            for &cj in &chain_order {
+                if cj == ci || chain_matched[cj] {
+                    continue;
+                }
+                if chain_wrap_edges[cj].iter().any(|(w, _)| *w == wi) {
+                    reverse += 1;
+                }
+            }
+            if reverse == 0 {
+                unique_partners.push((wi, conf));
+            }
+        }
+        if unique_partners.len() == 1 {
+            let (wi, conf) = unique_partners[0];
+            // Also ensure this chain has only this unique partner among unused.
+            let other_unique = chain_wrap_edges[ci]
+                .iter()
+                .filter(|(w, _)| !used_wrap[*w] && *w != wi)
+                .filter(|(w, _)| {
+                    let mut reverse = 0u32;
+                    for &cj in &chain_order {
+                        if cj == ci || chain_matched[cj] {
+                            continue;
+                        }
+                        if chain_wrap_edges[cj].iter().any(|(ww, _)| ww == w) {
+                            reverse += 1;
+                        }
+                    }
+                    reverse == 0
+                })
+                .count();
+            if other_unique > 0 {
+                matching_ambiguous = true;
+                ambiguous_components += 1;
+                continue;
+            }
+            used_wrap[wi] = true;
+            chain_matched[ci] = true;
+            let mut group: Vec<RenderEpisode> = chains[ci]
+                .iter()
+                .map(|&i| {
+                    paired[i] = true;
+                    renderings[i].clone()
+                })
+                .collect();
+            paired[wi] = true;
+            group.push(renderings[wi].clone());
+            let signature = episode_signature_for_group(&group, &graphs, &chains[ci], wi);
+            occurrences.push((signature, occurrence_from_renderings(group, conf)));
+            strong_derived += 1;
+        } else if unique_partners.len() > 1 {
+            matching_ambiguous = true;
+            ambiguous_components += 1;
+        }
+    }
+
+    // Unmatched chains of multiple apps still form multi-app episodes without stderr
+    // only when chain length > 1 with strong internal evidence — but without stderr
+    // they are not "duplicate_rendering" dual; count as multi-rendering occurrences
+    // with Moderate confidence. For semantic certification of the real-format oracle,
+    // stderr match is required; leave multi-app-only as unpaired members if no stderr.
+    // Prefer: emit chain as one occurrence when len>1 even without stderr (still multi).
+    for (ci, chain) in chains.iter().enumerate() {
+        if chain_matched[ci] {
+            continue;
+        }
+        if chain.len() > 1 {
+            let mut group: Vec<RenderEpisode> = Vec::new();
+            for &i in chain {
+                paired[i] = true;
+                group.push(renderings[i].clone());
+            }
+            let signature = group
+                .last()
+                .map(|r| r.signature.clone())
+                .unwrap_or_default();
+            // Multi-app without unique stderr: unresolved semantic certification.
+            occurrences.push((
+                signature,
+                occurrence_from_renderings(group, ExceptionCorrelationConfidence::Moderate),
+            ));
+            // Not strong_derived for certification (no SupportsSameExecution stderr).
+        }
+    }
+
+    // Classic 1:1 dual for remaining unpaired single apps ↔ wraps (backward compat).
+    let mut rem_apps: Vec<usize> = app_idxs.iter().copied().filter(|&i| !paired[i]).collect();
+    let mut rem_wraps: Vec<usize> = wrap_idxs.iter().copied().filter(|&i| !paired[i]).collect();
+    rem_apps.sort();
+    rem_wraps.sort();
+    let (dual_pairs, dual_ambig) =
+        bipartite_unique_duals(&rem_apps, &rem_wraps, &renderings, &|| is_cancelled())?;
+    if dual_ambig {
+        matching_ambiguous = true;
+        ambiguous_components += 1;
+    }
+    for (ai, wi, conf) in dual_pairs {
+        paired[ai] = true;
+        paired[wi] = true;
+        let group = vec![renderings[ai].clone(), renderings[wi].clone()];
+        let signature = renderings[ai].signature.clone();
+        occurrences.push((signature, occurrence_from_renderings(group, conf)));
+        strong_derived += 1;
+    }
+
+    // Standalone unpaired renderings.
+    let mut standalone = 0u64;
+    let mut unpaired = 0u64;
+    for (idx, rendering) in renderings.iter().enumerate() {
         if paired[idx] {
             continue;
         }
+        unpaired += 1;
+        standalone += 1;
         let signature = rendering.signature.clone();
         occurrences.push((
             signature,
             occurrence_from_renderings(
-                vec![rendering],
+                vec![rendering.clone()],
                 ExceptionCorrelationConfidence::Uncorrelated,
             ),
         ));
     }
+
     occurrences.sort_by(|a, b| {
         a.1.first_seq
             .cmp(&b.1.first_seq)
             .then_with(|| a.0.cmp(&b.0))
             .then_with(|| a.1.last_seq.cmp(&b.1.last_seq))
     });
+
+    let correlation_complete = !matching_ambiguous && unpaired == 0;
     Ok((
         occurrences,
         MatchingMeta {
             unpaired_renderings: unpaired,
             ambiguous: matching_ambiguous,
+            ambiguous_components,
+            application_propagation_chains: chains.len() as u64,
+            strong_derived_episodes: strong_derived,
+            standalone_renderings: standalone,
+            correlation_complete,
         },
     ))
 }
 
-/// True when the bipartite edge set admits more than one maximum matching
-/// candidate structure: any left degree ≥ 2 or any right degree ≥ 2.
+#[allow(clippy::too_many_arguments)]
+fn count_rival_chains_for_app(
+    cand: usize,
+    current_chain: &[usize],
+    existing_chains: &[Vec<usize>],
+    app_idxs: &[usize],
+    assigned_app: &[bool],
+    renderings: &[RenderEpisode],
+    graphs: &[ExceptionGraphSummary],
+    signals: &[TypedExecutionSignals],
+) -> u32 {
+    // Count other seeds that could form a competing chain claiming cand.
+    // Simplified: count other unassigned apps that share exact anchor or same
+    // thread with cand and are structurally related, outside current chain.
+    let mut rivals = 0u32;
+    for &other in app_idxs {
+        if other == cand || assigned_app[other] || current_chain.contains(&other) {
+            continue;
+        }
+        if execution_signals_conflict(&signals[cand], &signals[other]) {
+            continue;
+        }
+        if !graphs_structurally_related(&graphs[cand], &graphs[other]) {
+            continue;
+        }
+        let linked = matching_global_anchor(&signals[cand], &signals[other])
+            || (renderings[cand].wall_time
+                && renderings[other].wall_time
+                && same_scoped_thread_host(&signals[cand], &signals[other])
+                && wall_span_ok(&signals[cand], &signals[other], MAX_CHAIN_WALL_SECONDS));
+        if linked {
+            rivals += 1;
+        }
+    }
+    let _ = existing_chains;
+    rivals
+}
+
+fn chain_stderr_evidence(
+    chain: &[usize],
+    wrap_idx: usize,
+    renderings: &[RenderEpisode],
+    graphs: &[ExceptionGraphSummary],
+    signals: &[TypedExecutionSignals],
+) -> Option<ExceptionCorrelationConfidence> {
+    let wrap = &renderings[wrap_idx];
+    let wrap_sig = &signals[wrap_idx];
+    let wrap_graph = &graphs[wrap_idx];
+    if wrap.signature.is_empty() {
+        return None;
+    }
+    // Global signal conflicts with any chain member refuse.
+    for &mi in chain {
+        if execution_signals_conflict(&signals[mi], wrap_sig) {
+            return None;
+        }
+    }
+    // Signature/graph compatibility with any member.
+    // Prefer exact signature / root match; structural package-prefix alone is
+    // insufficient when every chain would match every stderr.
+    let exact_sig = chain.iter().any(|&mi| {
+        renderings[mi].signature == wrap.signature
+            || graphs[mi].root_signature == wrap_graph.root_signature
+            || graphs[mi].root_signature == wrap.signature
+            || renderings[mi].signature == wrap_graph.root_signature
+    });
+    let structural = chain
+        .iter()
+        .any(|&mi| graphs_structurally_related(&graphs[mi], wrap_graph));
+    let matching_request = chain.iter().any(|&mi| {
+        matches!(
+            (&signals[mi].request_id, &wrap_sig.request_id),
+            (Some(a), Some(b)) if a == b
+        )
+    });
+    let exact_anchor = chain
+        .iter()
+        .any(|&mi| matching_global_anchor(&signals[mi], wrap_sig))
+        || matching_request;
+    if !(exact_sig || matching_request || (structural && exact_anchor)) {
+        return None;
+    }
+    // Package-prefix structural alone is not enough without a request/trace anchor.
+    if !exact_sig && !exact_anchor {
+        return None;
+    }
+    // Unequal explicit threads across sources refuse unless a stronger global
+    // anchor (trace/request) matches — prevents worker-A app dual-pairing to
+    // worker-B stderr on signature alone.
+    let conflicting_threads = chain.iter().any(|&mi| {
+        matches!(
+            (&signals[mi].thread, &wrap_sig.thread),
+            (Some(a), Some(b)) if a != b
+        )
+    });
+    if conflicting_threads && !exact_anchor {
+        return None;
+    }
+
+    let chain_wall = chain.iter().all(|&i| renderings[i].wall_time) && wrap.wall_time;
+    let chain_order_only = chain.iter().any(|&i| !renderings[i].wall_time) || !wrap.wall_time;
+    // Cross-source thread equality is optional (different pools); matching thread
+    // strengthens. Asymmetric source-scoped threads do not conflict (handled above).
+    let matching_thread = chain.iter().any(|&mi| {
+        matches!(
+            (&signals[mi].thread, &wrap_sig.thread),
+            (Some(a), Some(b)) if a == b
+        )
+    });
+
+    if chain_order_only {
+        // Order-only chain↔stderr: Strong when shared trace/request or matching
+        // thread. Adjacency alone never correlates.
+        if exact_anchor || matching_thread {
+            return Some(ExceptionCorrelationConfidence::Strong);
+        }
+        // Multi-app (or single) chains that already carry an execution identity
+        // (thread/trace/request) may uniquely support a graph-compatible stderr
+        // even when the stderr pool-thread name differs. Uniqueness is enforced
+        // by the caller; single unkeyed app+stderr without anchors still refuse.
+        let chain_anchored = chain.iter().any(|&i| {
+            signals[i].thread.is_some()
+                || signals[i].trace_id.is_some()
+                || signals[i].request_id.is_some()
+        });
+        if chain_anchored && !chain.is_empty() {
+            // Prefer multi-member propagation chains; single-app anchored duals
+            // still need matching_thread/trace for Strong (above). For single-app
+            // with thread only on one side, refuse unless unique caller + graph —
+            // but keep Moderate only when the chain has ≥2 apps (propagation)
+            // OR wrap also carries some execution signal that does not conflict.
+            if chain.len() >= 2
+                || wrap_sig.thread.is_some()
+                || wrap_sig.trace_id.is_some()
+                || wrap_sig.request_id.is_some()
+            {
+                // Single-app + keyed wrap without matching key: still refuse
+                // (would re-open order_only no-key duals via wrap thread alone).
+                if chain.len() == 1 && !matching_thread && !exact_anchor {
+                    // Only allow when app is keyed and wrap is keyed with equal key
+                    // (already handled) or both unkeyed (not anchored).
+                    return None;
+                }
+                return Some(ExceptionCorrelationConfidence::Moderate);
+            }
+        }
+        return None;
+    }
+
+    // Wall path: require close wall between wrap and chain span.
+    let mut lo = wrap.first_ts.min(wrap.last_ts);
+    let mut hi = wrap.first_ts.max(wrap.last_ts);
+    for &mi in chain {
+        lo = lo.min(renderings[mi].first_ts.min(renderings[mi].last_ts));
+        hi = hi.max(renderings[mi].first_ts.max(renderings[mi].last_ts));
+    }
+    // Gap from wrap interval to chain interval.
+    let chain_lo = chain
+        .iter()
+        .map(|&i| renderings[i].first_ts.min(renderings[i].last_ts))
+        .min()
+        .unwrap_or(lo);
+    let chain_hi = chain
+        .iter()
+        .map(|&i| renderings[i].first_ts.max(renderings[i].last_ts))
+        .max()
+        .unwrap_or(hi);
+    let gap = interval_gap(chain_lo, chain_hi, wrap.first_ts, wrap.last_ts);
+    if gap > MAX_CHAIN_STDERR_WALL_SECONDS as u64 {
+        return None;
+    }
+    if exact_anchor || matching_thread {
+        return Some(ExceptionCorrelationConfidence::Strong);
+    }
+    // Moderate: wall-close + graph compatible + unique partner checked by caller.
+    if chain_wall {
+        return Some(ExceptionCorrelationConfidence::Moderate);
+    }
+    None
+}
+
+fn episode_signature_for_group(
+    group: &[RenderEpisode],
+    graphs: &[ExceptionGraphSummary],
+    chain: &[usize],
+    wrap_idx: usize,
+) -> String {
+    // Prefer stderr root signature when present; else last chain member.
+    if !group.is_empty() {
+        if let Some(w) = group
+            .iter()
+            .find(|r| r.kind == ExceptionRenderingKind::SeparatelyWrappedRecords)
+        {
+            if !w.signature.is_empty() {
+                return w.signature.clone();
+            }
+        }
+    }
+    if let Some(&last) = chain.last() {
+        if !graphs[last].root_signature.is_empty() {
+            return graphs[last].root_signature.clone();
+        }
+        return renderings_sig_fallback(group);
+    }
+    let _ = wrap_idx;
+    renderings_sig_fallback(group)
+}
+
+fn renderings_sig_fallback(group: &[RenderEpisode]) -> String {
+    group
+        .last()
+        .map(|r| r.signature.clone())
+        .unwrap_or_default()
+}
+
+/// Classic bipartite dual matching for leftover single apps (max-cardinality Kuhn).
+type DualMatchPairs = Vec<(usize, usize, ExceptionCorrelationConfidence)>;
+fn bipartite_unique_duals(
+    apps: &[usize],
+    wraps: &[usize],
+    renderings: &[RenderEpisode],
+    is_cancelled: &dyn Fn() -> bool,
+) -> CoreResult<(DualMatchPairs, bool)> {
+    let n_l = apps.len();
+    let n_r = wraps.len();
+    if n_l == 0 || n_r == 0 {
+        return Ok((Vec::new(), false));
+    }
+    let mut adj: Vec<Vec<(usize, u8, u64, ExceptionCorrelationConfidence)>> = vec![Vec::new(); n_l];
+    for (li, &app_idx) in apps.iter().enumerate() {
+        if is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
+        for (ri, &wrap_idx) in wraps.iter().enumerate() {
+            let Some(confidence) = duplicate_evidence(&renderings[app_idx], &renderings[wrap_idx])
+            else {
+                continue;
+            };
+            let conf_rank = match confidence {
+                ExceptionCorrelationConfidence::Strong => 0u8,
+                ExceptionCorrelationConfidence::Moderate => 1u8,
+                ExceptionCorrelationConfidence::Uncorrelated => 2u8,
+            };
+            let distance = axis_distance(&renderings[app_idx], &renderings[wrap_idx]);
+            adj[li].push((ri, conf_rank, distance, confidence));
+        }
+        adj[li].sort_by(|a, b| {
+            a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)).then_with(|| {
+                let wa = wraps[a.0];
+                let wb = wraps[b.0];
+                renderings[wa]
+                    .first_seq()
+                    .cmp(&renderings[wb].first_seq())
+                    .then_with(|| renderings[wa].source.cmp(&renderings[wb].source))
+                    .then_with(|| wa.cmp(&wb))
+            })
+        });
+    }
+    let ambiguous = bipartite_degrees_allow_alternate_max_matchings(&adj, n_r);
+    let mut mt_r: Vec<Option<usize>> = vec![None; n_r];
+    fn try_kuhn(
+        v: usize,
+        adj: &[Vec<(usize, u8, u64, ExceptionCorrelationConfidence)>],
+        mt_r: &mut [Option<usize>],
+        used: &mut [bool],
+    ) -> bool {
+        if used[v] {
+            return false;
+        }
+        used[v] = true;
+        for &(to, _, _, _) in &adj[v] {
+            if mt_r[to].is_none() || try_kuhn(mt_r[to].expect("matched"), adj, mt_r, used) {
+                mt_r[to] = Some(v);
+                return true;
+            }
+        }
+        false
+    }
+    for v in 0..n_l {
+        let mut used = vec![false; n_l];
+        let _ = try_kuhn(v, &adj, &mut mt_r, &mut used);
+    }
+    let mut pairs = Vec::new();
+    for (ri, li_opt) in mt_r.iter().enumerate() {
+        let Some(li) = *li_opt else {
+            continue;
+        };
+        let conf = adj[li]
+            .iter()
+            .find(|(r, _, _, _)| *r == ri)
+            .map(|(_, _, _, c)| *c)
+            .unwrap_or(ExceptionCorrelationConfidence::Moderate);
+        pairs.push((apps[li], wraps[ri], conf));
+    }
+    Ok((pairs, ambiguous))
+}
+
 fn bipartite_degrees_allow_alternate_max_matchings(
     adj: &[Vec<(usize, u8, u64, ExceptionCorrelationConfidence)>],
     n_r: usize,
@@ -1780,6 +2833,9 @@ fn duplicate_evidence(
     if left.signature.is_empty() || right.signature.is_empty() {
         return None;
     }
+    if left.signature != right.signature {
+        return None;
+    }
 
     let seq_gap = if right.first_seq() >= left.last_seq() {
         right.first_seq().saturating_sub(left.last_seq())
@@ -1813,9 +2869,29 @@ fn duplicate_evidence(
     let right_key = right.strong_execution_key();
     let matching_execution_key = matches!((&left_key, &right_key), (Some(a), Some(b)) if a == b);
     let conflicting_execution_key = matches!((&left_key, &right_key), (Some(a), Some(b)) if a != b);
+    // Cross-source: thread keys may legitimately differ (app task vs pool thread).
+    // Only treat as conflict when both are same-prefix kind (both thread: or both trace:)
+    // and unequal — trace conflict always; thread conflict only same-source.
+    let conflicting_execution_key = if left.source != right.source {
+        matches!((&left.trace_id, &right.trace_id), (Some(a), Some(b)) if a != b)
+    } else {
+        conflicting_execution_key
+    };
     if conflicting_execution_key {
         return None;
     }
+    // For cross-source, matching means matching trace, or matching thread when both set equal.
+    let matching_execution_key = if left.source != right.source {
+        match (&left.trace_id, &right.trace_id) {
+            (Some(a), Some(b)) if a == b => true,
+            _ => matches!(
+                (&left.thread, &right.thread),
+                (Some(a), Some(b)) if a == b
+            ),
+        }
+    } else {
+        matching_execution_key
+    };
 
     let both_wall = left.wall_time && right.wall_time;
     let wall_gap = interval_gap(left.first_ts, left.last_ts, right.first_ts, right.last_ts);
@@ -1837,8 +2913,19 @@ fn duplicate_evidence(
         return Some(ExceptionCorrelationConfidence::Strong);
     }
     // Moderate: wall-close dual kinds, neither side carries an execution key.
-    // (Asymmetric keys fail closed; matching keys already returned Strong.)
+    // (Asymmetric keys fail closed for same-source; cross-source asymmetric ok.)
     if left_key.is_none() && right_key.is_none() {
+        return Some(ExceptionCorrelationConfidence::Moderate);
+    }
+    if left.source != right.source {
+        // Both sides present unequal threads: conflicting execution keys (fail closed).
+        if matches!(
+            (&left.thread, &right.thread),
+            (Some(a), Some(b)) if a != b
+        ) {
+            return None;
+        }
+        // Asymmetric keys (only one side carries thread/trace): wall-close Moderate.
         return Some(ExceptionCorrelationConfidence::Moderate);
     }
     None
@@ -1861,14 +2948,7 @@ fn parse_exception_envelope(message: &str) -> ExceptionEnvelope {
     let explicit_thread = extract_explicit_thread_key(message);
 
     let Some((token_at, after_token)) = find_exact_stderr_token(message) else {
-        return ExceptionEnvelope {
-            structural_payload: message.to_string(),
-            stream: None,
-            explicit_thread,
-            parenthesized_thread: None,
-            execution_key_conflict: false,
-            malformed: false,
-        };
+        return parse_non_stderr_envelope(message, explicit_thread);
     };
 
     // Prefix before `[stderr]` is discarded for structural classification (level /
@@ -1918,6 +2998,70 @@ fn parse_exception_envelope(message: &str) -> ExceptionEnvelope {
     ExceptionEnvelope {
         structural_payload: structural,
         stream: Some(EnvelopeStream::Stderr),
+        explicit_thread,
+        parenthesized_thread,
+        execution_key_conflict,
+        malformed,
+    }
+}
+
+/// Non-stderr WildFly-style envelope: optional LEVEL, optional `[logger]`,
+/// optional `(thread)`, then structural payload.
+///
+/// Logger bracket text is never treated as a thread identity.
+fn parse_non_stderr_envelope(message: &str, explicit_thread: Option<String>) -> ExceptionEnvelope {
+    let (first_line, remaining_lines) = split_first_line(message);
+    let mut rest = first_line.trim_start();
+    // Optional level token.
+    for level in [
+        "ERROR ", "error ", "WARN ", "warn ", "INFO ", "info ", "DEBUG ", "debug ", "FATAL ",
+        "fatal ", "TRACE ", "trace ",
+    ] {
+        if let Some(after) = rest.strip_prefix(level) {
+            rest = after.trim_start();
+            break;
+        }
+    }
+    // Optional [logger] — capture but never promote to thread.
+    let mut _logger: Option<String> = None;
+    if rest.starts_with('[') {
+        if let Some(close) = rest.find(']') {
+            let inner = rest.get(1..close).unwrap_or("");
+            // Reject stream-ish tokens already handled elsewhere; keep generic logger.
+            if inner != "stderr"
+                && !inner.is_empty()
+                && inner.chars().count() <= MAX_THREAD_TOKEN_CHARS
+            {
+                _logger = Some(inner.to_string());
+            }
+            rest = rest.get(close + 1..).unwrap_or("").trim_start();
+        }
+    }
+    let mut parenthesized_thread = None;
+    let mut malformed = false;
+    if rest.starts_with('(') {
+        match parse_parenthesized_thread_token(rest) {
+            Ok((thread, after)) => {
+                parenthesized_thread = Some(thread);
+                rest = after.trim_start();
+            }
+            Err(()) => {
+                malformed = true;
+            }
+        }
+    }
+    let mut structural = rest.to_string();
+    if !remaining_lines.is_empty() {
+        if !structural.is_empty() {
+            structural.push('\n');
+        }
+        structural.push_str(remaining_lines);
+    }
+    let execution_key_conflict =
+        matches!((&explicit_thread, &parenthesized_thread), (Some(a), Some(b)) if a != b);
+    ExceptionEnvelope {
+        structural_payload: structural,
+        stream: None,
         explicit_thread,
         parenthesized_thread,
         execution_key_conflict,
@@ -1977,21 +3121,85 @@ fn is_valid_thread_identity_token(token: &str) -> bool {
     if token.is_empty() || token.chars().count() > MAX_THREAD_TOKEN_CHARS {
         return false;
     }
-    if token.chars().any(|c| c.is_whitespace()) {
-        return false;
-    }
     let mut chars = token.chars();
     let Some(first) = chars.next() else {
         return false;
     };
     // Reject method-call / source-location shapes: must not look like `Foo.java:12`
-    // as a sole paren group used for execution identity (still allow pool-N-thread-M).
+    // as a sole paren group used for execution identity (still allow pool-N-thread-M
+    // and WildFly `default task-1` with internal spaces).
     if !(first.is_ascii_alphanumeric() || first == '_') {
         return false;
     }
     token
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':'))
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | ' '))
+        && !token.chars().all(|c| c.is_whitespace())
+}
+
+fn is_valid_explicit_thread_token(token: &str) -> bool {
+    // Explicit thread= values stay space-free (token boundary is whitespace).
+    is_valid_thread_identity_token(token) && !token.chars().any(|c| c.is_whitespace())
+}
+
+/// Extract request/correlation/transaction identifiers for execution anchors.
+///
+/// Values are corpus-local digests (`req:…`) — never injected into model prose.
+fn extract_request_like_id(message: &str) -> Option<String> {
+    for key in [
+        "request_id=",
+        "requestId=",
+        "correlation_id=",
+        "correlationId=",
+        "transaction_id=",
+        "transactionId=",
+        "txid=",
+        "trace_id=",
+        "traceId=",
+    ] {
+        if let Some(start) = message.find(key) {
+            if start > MAX_ENVELOPE_PREFIX_BYTES.saturating_mul(4) {
+                continue;
+            }
+            let value = message.get(start + key.len()..).unwrap_or_default();
+            let value = value
+                .split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ']' | ';' | ')' | '"'))
+                .next()
+                .unwrap_or_default()
+                .trim_matches(['\"', '\'']);
+            if value.is_empty() || value.chars().count() > MAX_THREAD_TOKEN_CHARS {
+                continue;
+            }
+            return Some(format!("req:{value}"));
+        }
+    }
+    // Bare `id=<token>` on exception-ish lines (payment/correlation ids).
+    // Only accept when the value is short and mostly alnum (includes pure digits).
+    for (idx, _) in message.match_indices("id=") {
+        if idx > 0 {
+            let prev = message.as_bytes()[idx - 1];
+            if prev.is_ascii_alphanumeric() || prev == b'_' {
+                continue; // part of longer key like request_id= already handled
+            }
+        }
+        let value = message.get(idx + 3..).unwrap_or_default();
+        let value = value
+            .split(|ch: char| {
+                ch.is_whitespace() || matches!(ch, ',' | ']' | ';' | ')' | '"' | '\'')
+            })
+            .next()
+            .unwrap_or_default();
+        if value.is_empty() || value.chars().count() > 32 {
+            continue;
+        }
+        if value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        {
+            return Some(format!("id:{value}"));
+        }
+    }
+    None
 }
 
 /// Explicit key=value thread evidence only (never free brackets / parentheses).
@@ -2010,7 +3218,7 @@ fn extract_explicit_thread_key(message: &str) -> Option<String> {
             if value.is_empty() {
                 continue;
             }
-            if !is_valid_thread_identity_token(value) {
+            if !is_valid_explicit_thread_token(value) {
                 continue;
             }
             return Some(value.chars().take(MAX_THREAD_TOKEN_CHARS).collect());
@@ -4247,5 +5455,137 @@ mod tests {
         assert!(occ
             .rendering_kinds
             .contains(&ExceptionRenderingKind::SeparatelyWrappedRecords));
+    }
+
+    // ─── P0 v2 propagation / honesty mutations ─────────────────────────────
+
+    #[test]
+    fn p0_generic_bracketed_logger_is_not_thread_identity() {
+        let env = parse_exception_envelope(
+            "ERROR [com.foo.Logger] java.lang.RuntimeException: XYZ_L\n at com.foo.A.m(A.java:1)",
+        );
+        assert!(env.effective_thread().is_none());
+        assert!(!env.is_stderr_stream());
+        let with_task = parse_exception_envelope(
+            "ERROR [com.foo.Logger] (default task-9) java.lang.RuntimeException: XYZ_L\n at com.foo.A.m(A.java:1)",
+        );
+        assert_eq!(with_task.effective_thread(), Some("default task-9"));
+    }
+
+    #[test]
+    fn p0_unkeyed_never_bridges_conflicting_trace_groups() {
+        let events = [
+            event(
+                1,
+                100,
+                "app.log",
+                "java.lang.RuntimeException: XYZ_BRIDGE\n at com.xyz.A.m(A.java:1)",
+            ),
+            event(
+                2,
+                101,
+                "app.log",
+                "java.lang.RuntimeException: XYZ_BRIDGE\n at com.xyz.B.m(B.java:1)",
+            ),
+            event(
+                3,
+                102,
+                "app.log",
+                "java.lang.RuntimeException: XYZ_BRIDGE\n at com.xyz.C.m(C.java:1)",
+            ),
+        ];
+        let mut e0 = events[0].clone();
+        e0.trace_id = Some("trace-A".into());
+        let mut e1 = events[1].clone();
+        e1.trace_id = None; // unkeyed middle
+        let mut e2 = events[2].clone();
+        e2.trace_id = Some("trace-C".into());
+        let analysis = analyze_bounded_events(3, &[e0, e1, e2]);
+        // Must not form one transitive chain across conflicting traces.
+        assert!(
+            analysis.occurrence_count >= 2,
+            "unkeyed must not bridge A and C (got {})",
+            analysis.occurrence_count
+        );
+        assert_eq!(analysis.duplicate_rendering_occurrence_count, 0);
+    }
+
+    #[test]
+    fn p0_conflicting_trace_same_thread_refuses_merge() {
+        let mut a = event(
+            1,
+            100,
+            "app.log",
+            "thread=worker-1 java.lang.RuntimeException: XYZ_T\n at com.xyz.A.m(A.java:1)",
+        );
+        let mut b = event(
+            2,
+            101,
+            "app.log",
+            "thread=worker-1 java.lang.RuntimeException: XYZ_T\n at com.xyz.B.m(B.java:1)",
+        );
+        a.trace_id = Some("trace-A".into());
+        b.trace_id = Some("trace-B".into());
+        let analysis = analyze_bounded_events(2, &[a, b]);
+        assert_eq!(
+            analysis.occurrence_count, 2,
+            "conflicting traces on same thread must stay separate"
+        );
+    }
+
+    #[test]
+    fn p0_repeated_propagation_site_splits_execution_boundary() {
+        // Same thread + same site twice → two executions (worker reuse).
+        let events = vec![
+            event(
+                1,
+                100,
+                "app.log",
+                "thread=worker-1 id=1 java.lang.RuntimeException: XYZ_R\n at com.xyz.site.Handler.handle(H.java:1)",
+            ),
+            event(
+                2,
+                110,
+                "app.log",
+                "thread=worker-1 id=2 java.lang.RuntimeException: XYZ_R\n at com.xyz.site.Handler.handle(H.java:1)",
+            ),
+        ];
+        let analysis = analyze_bounded_events(2, &events);
+        assert_eq!(
+            analysis.occurrence_count, 2,
+            "repeated propagation site must create two execution boundaries"
+        );
+    }
+
+    #[test]
+    fn p0_semantic_counts_certified_false_when_unpaired_remain() {
+        // Single app without dual partner → uncertified semantic totals.
+        let events = vec![event(
+            1,
+            100,
+            "app.log",
+            "java.lang.RuntimeException: XYZ_SOLO\n at com.xyz.A.m(A.java:1)",
+        )];
+        let analysis = analyze_bounded_events(1, &events);
+        assert!(!analysis.semantic_counts_certified);
+        assert_eq!(analysis.standalone_rendering_count, 1);
+        assert!(analysis
+            .ranking_disclosure
+            .contains("independent_incident_claim_forbidden: true"));
+        assert!(analysis
+            .ranking_disclosure
+            .contains("semantic_counts_certified: false"));
+    }
+
+    #[test]
+    fn p0_extract_request_like_id_is_corpus_local() {
+        assert_eq!(
+            extract_request_like_id("RuntimeException: fail id=42 hop=3"),
+            Some("id:42".into())
+        );
+        assert_eq!(
+            extract_request_like_id("msg correlation_id=abc-9 more"),
+            Some("req:abc-9".into())
+        );
     }
 }

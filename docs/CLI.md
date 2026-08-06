@@ -567,21 +567,26 @@ contextdesk episodes <corpus-id>            # friendly alias + explicit corpus
 contextdesk --json exception-episodes <corpus-id>
 ```
 
-It reports four deliberately separate layers:
+It reports v2 layers with typed completeness:
 
 1. **Raw records** — durable exception-looking events and exact citations.
 2. **Physical renderings** — full application stacks versus separately
-   wrapped stderr/line records.
-3. **Semantic occurrences** — conservative one-to-one correlations supported
-   by time and execution identity; adjacency, matching text, divisibility, or
-   rotated filenames alone never merge records.
-4. **Signature families** — bounded impact-ranked groups of occurrences.
+   wrapped stderr/line records (including WildFly `[stderr] (thread)` lanes).
+3. **Application propagation chains** — multi-app wraps/rethrows under typed
+   execution evidence (trace/request/thread) with fail-closed boundaries.
+4. **Strongly supported derived episodes** — chain↔stderr unique matches
+   (forced/reciprocal only); never bare “N incidents”.
+5. **Families** — bounded groups of episodes sharing a root signature.
 
-Use `raw_exception_record_count` for actual stored volume and
-`occurrence_count` for the estimated independent failure count. The report
-also exposes application/stderr/rendering amplification ratios with numerator,
-denominator, quotient, and remainder—no hidden rounding. Every occurrence
-retains citations back to the underlying `seq` + `source` events.
+Completeness fields separate `scan_complete`, `renderings_complete`,
+`correlation_complete`, `citations_complete`, `structural_coverage_complete`,
+and `semantic_counts_certified`. The deprecated v1 `counts_complete` alias
+means scan+render completeness only and does **not** alone authorize exact
+semantic totals. Broad triage exposes an exact derived episode count only when
+`semantic_counts_certified=true`.
+
+A certified success line looks like:
+`56 strongly supported derived episodes · 448 renderings · 15,232 underlying records`.
 
 Treat the result as incomplete whenever `counts_complete=false` or
 `partial=true`. `uncertain=true` and `matching_ambiguous=true` disclose weaker
