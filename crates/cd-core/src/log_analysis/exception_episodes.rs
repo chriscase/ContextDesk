@@ -75,7 +75,7 @@ fn effective_row_walk_cap() -> usize {
     EXCEPTION_EPISODE_ROW_WALK_CAP
 }
 
-// Thread-local so parallel unit/integration tests cannot race caps/hooks.
+// Thread-local so parallel unit tests cannot race caps/hooks.
 #[cfg(test)]
 std::thread_local! {
     static TEST_CANDIDATE_CAP_OVERRIDE: std::cell::RefCell<usize> = const { std::cell::RefCell::new(0) };
@@ -85,21 +85,21 @@ std::thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Doc-hidden: override candidate retention cap (`0` restores production default).
+/// Test-only: override candidate retention cap (`0` restores production default).
 ///
-/// Thread-local: safe for parallel tests and integration acceptance labs.
+/// Thread-local: safe for parallel unit tests.
 #[cfg(test)]
 fn set_test_candidate_cap_override(cap: usize) {
     TEST_CANDIDATE_CAP_OVERRIDE.with(|c| *c.borrow_mut() = cap);
 }
 
-/// Doc-hidden: override row-walk cap (`0` restores production default).
+/// Test-only: override row-walk cap (`0` restores production default).
 #[cfg(test)]
 fn set_test_row_walk_cap_override(cap: usize) {
     TEST_ROW_WALK_CAP_OVERRIDE.with(|c| *c.borrow_mut() = cap);
 }
 
-/// Doc-hidden RAII reset for cap/hook overrides in tests.
+/// Test-only RAII reset for cap/hook overrides.
 #[cfg(test)]
 pub(crate) struct TestScanOverrideGuard {
     _private: (),
@@ -125,7 +125,7 @@ impl Drop for TestScanOverrideGuard {
     }
 }
 
-/// Install or clear the doc-hidden episode-scan page hook (thread-local).
+/// Install or clear the test-only episode-scan page hook (thread-local).
 ///
 /// The hook is not required to be `Send` — it runs on the analysis thread only.
 #[cfg(test)]
