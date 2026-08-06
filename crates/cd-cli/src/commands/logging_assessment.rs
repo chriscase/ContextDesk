@@ -99,7 +99,18 @@ impl Render for LoggingAssessmentMarkdownOutput {
     }
 }
 
-pub fn run(args: &LoggingAssessmentArgs, cache_root: &Path) -> CliResult<Box<dyn Render>> {
+pub fn run(
+    args: &LoggingAssessmentArgs,
+    cache_root: &Path,
+    current_corpus: &Option<String>,
+) -> CliResult<Box<dyn Render>> {
+    let corpus_id = args
+        .corpus_id
+        .as_deref()
+        .or(current_corpus.as_deref())
+        .ok_or_else(|| {
+            CliError::user("no corpus given and none set - import logs first or pass a corpus id")
+        })?;
     let report_format = LoggingQualityReportFormat::parse(&args.report_format)
         .map_err(|e| CliError::user(e.to_string()))?;
 
@@ -107,7 +118,7 @@ pub fn run(args: &LoggingAssessmentArgs, cache_root: &Path) -> CliResult<Box<dyn
         let outcome = assess_corpus_logging_quality(
             cache_root,
             &LoggingQualityAssessmentOptions {
-                corpus_id: args.corpus_id.clone(),
+                corpus_id: corpus_id.to_string(),
                 output: None,
                 report_format: LoggingQualityReportFormat::Json,
             },
@@ -121,7 +132,7 @@ pub fn run(args: &LoggingAssessmentArgs, cache_root: &Path) -> CliResult<Box<dyn
     let outcome = assess_corpus_logging_quality(
         cache_root,
         &LoggingQualityAssessmentOptions {
-            corpus_id: args.corpus_id.clone(),
+            corpus_id: corpus_id.to_string(),
             output: args.output.clone(),
             report_format,
         },

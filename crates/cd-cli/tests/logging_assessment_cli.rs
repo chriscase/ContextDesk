@@ -93,6 +93,22 @@ fn logging_assessment_json_contract_and_atomic_markdown_export() {
     assert!(!dump.contains("messagenewline"));
     assert!(!dump.contains("multilineheuristic"));
 
+    // The short form uses the same current-corpus state written by import.
+    // It must not create a second assessment implementation or require the
+    // operator to copy an opaque id for the everyday path.
+    let current = bin()
+        .args(["--data-dir", data.to_str().unwrap(), "--json", "assess"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let current_envelope: Value = serde_json::from_slice(&current).unwrap();
+    assert_eq!(
+        current_envelope["data"]["assessment"]["corpus"]["id"],
+        corpus_id
+    );
+
     let plan = tmp.path().join("plan.md");
     bin()
         .args([

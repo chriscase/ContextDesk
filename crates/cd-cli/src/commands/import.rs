@@ -8,7 +8,7 @@
 //! CLI's new "current corpus."
 
 use crate::cli::ImportArgs;
-use crate::config::OutputFormat;
+use crate::config::{ColorMode, OutputFormat};
 use crate::envelope::{CliError, CliResult, Render};
 use crate::progress::CliProgressObserver;
 use cd_core::config::AppConfig;
@@ -204,6 +204,7 @@ pub async fn run(
     cache_root: &Path,
     cfg: &AppConfig,
     format: OutputFormat,
+    color: ColorMode,
 ) -> CliResult<ImportOutput> {
     if args.embed {
         // `cd_workflow::import::default_import_with_observer` always
@@ -222,7 +223,7 @@ pub async fn run(
     }
 
     let cancel = CancelFlag::new();
-    let observer = Arc::new(CliProgressObserver::new(format));
+    let observer = Arc::new(CliProgressObserver::new(format, color));
 
     let cache_root_owned = cache_root.to_path_buf();
     let source_owned = args.source.clone();

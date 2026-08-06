@@ -122,6 +122,23 @@ Terminal lines use the shared stream envelope fields documented in
 
 Fixtures: `fixtures/cli-client-protocol/progress.line.json`, `stream.terminal.done.json`.
 
+### Chat trace semantics
+
+For `type: "trace_summary"`, clients should prefer the precise additive
+fields over the legacy union:
+
+- `tools_executed`: tools with actual host lifecycle events;
+- `tools_offered`: schemas made available to a provider call;
+- `tool_names`: backward-compatible union of the two;
+- `retrieved_evidence` / `evidence_ids`: governed citation identities,
+  including trusted identities produced by deterministic broad triage;
+- `grounding_scope: "citation_identity_only"`: cited identities were checked,
+  not the model's interpretation or causal conclusion;
+- `interpretation_validated: false`: v1 has no deterministic diagnosis oracle.
+
+Do not infer that an offered tool ran, or that `grounding: "grounded"`
+certifies a root-cause conclusion.
+
 ## Exit / error mapping
 
 Stable categories (`crates/cd-cli/src/envelope.rs`):
@@ -157,6 +174,7 @@ Clients should create a new process group when they need to cancel a tree of chi
 | `--data-dir` / `CONTEXTDESK_DATA_DIR` | Isolates config, cache, sessions, CLI state |
 | `CONTEXTDESK_BIN` | Optional absolute path to the executable for adapters |
 | `CONTEXTDESK_FORMAT` | `json` / `jsonl` / text |
+| `CONTEXTDESK_ASCII` | Human-terminal typography only (`1` ASCII, `0` Unicode); machine JSON/JSONL is always UTF-8 |
 | Provider secrets | OS keychain via host config — never pass raw API keys on argv |
 
 ## Minimal invocation shape (all languages)

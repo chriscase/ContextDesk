@@ -5,7 +5,9 @@
 //! `cd_core::process_progress::ProcessProgress` struct desktop broadcasts
 //! over Tauri IPC, just written as JSON instead of emitted as an event.
 
+use crate::config::ColorMode;
 use crate::config::OutputFormat;
+use crate::render::platform_supports_ansi;
 use cd_core::process_progress::{
     LogIngestEvidence, ProcessProgress, ProcessProgressObserver, ProcessProgressPhase,
 };
@@ -50,12 +52,15 @@ pub struct CliProgressObserver {
 }
 
 impl CliProgressObserver {
-    pub fn new(format: OutputFormat) -> Self {
+    pub fn new(format: OutputFormat, color_mode: ColorMode) -> Self {
         let stderr_is_tty = io::stderr().is_terminal();
         let terminal_is_dumb = std::env::var("TERM").ok().as_deref() == Some("dumb");
+        let no_color = std::env::var_os("NO_COLOR").is_some();
+        let plain = matches!(color_mode, ColorMode::Never)
+            || (matches!(color_mode, ColorMode::Auto) && no_color);
         Self {
             format,
-            interactive: stderr_is_tty && !terminal_is_dumb,
+            interactive: stderr_is_tty && !terminal_is_dumb && !plain && platform_supports_ansi(),
             last_phase: Mutex::new(None),
             last_redraw: Mutex::new(Instant::now() - MIN_REDRAW_INTERVAL),
             printed_anything: AtomicBool::new(false),
@@ -103,20 +108,20 @@ impl CliProgressObserver {
             line.push_str(&format!(" {:>3.0}%", fraction.clamp(0.0, 1.0) * 100.0));
         }
         if let Some(files) = update.files_processed {
-            line.push_str(&format!(" · {} files", grouped(files)));
+            line.push_str(&format!(" | {} files", grouped(files)));
         }
         if let Some(lines) = update.lines_processed {
-            line.push_str(&format!(" · {} lines", grouped(lines)));
+            line.push_str(&format!(" | {} lines", grouped(lines)));
         }
         if let Some(templates) = update.templates {
-            line.push_str(&format!(" · {} templates", grouped(templates)));
+            line.push_str(&format!(" | {} templates", grouped(templates)));
         }
         if let Some(elapsed_ms) = update.elapsed_ms {
-            line.push_str(&format!(" · {:.1}s", elapsed_ms as f64 / 1_000.0));
+            line.push_str(&format!(" | {:.1}s", elapsed_ms as f64 / 1_000.0));
         }
         if !update.message.is_empty() {
             if self.interactive {
-                line.push_str(&format!(" · {}", update.message));
+                line.push_str(&format!(" | {}", update.message));
             } else {
                 line.push_str(&format!("\n  {}", update.message));
             }

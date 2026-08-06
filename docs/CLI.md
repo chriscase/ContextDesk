@@ -48,15 +48,15 @@ contextdesk [OPTIONS] <COMMAND>
 | `normalize <source> --output <dir>` | Offline raw → `normalized_log_events.v1` JSONL, manifest, and report (no durable corpus). See [NORMALIZATION.md](NORMALIZATION.md). |
 | `corpus list\|show\|rename\|delete\|use` | Corpus management |
 | `timezone status\|apply\|clear\|apply-all` | Ambiguous local time declarations |
-| `explore <query>` | Template-level search |
+| `explore <query>` (alias `search`) | Template-level search |
 | `context` | Grounded evidence assembly without a model turn |
 | `session list\|show` | Durable chat sessions |
-| `chat <question>` | Grounded model turn |
+| `chat <question>` (alias `ask`) | Grounded model turn |
 | `config init\|validate\|show\|path` | CLI + shared config |
 | `confluence …` | Optional Confluence connector |
 | `capabilities` | Machine-readable build surface |
 | `doctor` | Demo readiness |
-| `logging-assessment <corpus-id>` | Deterministic logging-quality assessment with fixed finding-code improvement hints (no provider). |
+| `logging-assessment [corpus-id]` (alias `assess`) | Deterministic logging-quality assessment with fixed finding-code improvement hints (no provider); defaults to the current corpus. |
 
 Drift check: `python3 scripts/cli-release/check_cli_docs.py` compares this list
 to a live binary when `CONTEXTDESK_BIN` is set.
@@ -65,7 +65,15 @@ to a live binary when `CONTEXTDESK_BIN` is set.
 
 ```bash
 contextdesk import <archive>
-contextdesk chat "<question>"
+contextdesk ask "<question>"
+```
+
+The original `chat`, `explore`, and `logging-assessment` names remain stable.
+The shorter `ask`, `search`, and `assess` aliases are equivalent conveniences:
+
+```bash
+contextdesk search "timeout"
+contextdesk assess
 ```
 
 A normal import needs no per-file selection — the CLI accepts the same
@@ -499,6 +507,8 @@ contextdesk config init [--project] [--interactive|--non-interactive] [--force]
 contextdesk config validate|show|path
 contextdesk capabilities
 contextdesk doctor [--timeout <seconds>] [--skip-live-turn]
+contextdesk logging-assessment [corpus-id] [--report-format json|markdown] [--output <file>]
+# Friendly aliases: ask=chat, search=explore, assess=logging-assessment
 ```
 
 Global flags (available on every subcommand): `--format`, `--json`,
@@ -562,10 +572,20 @@ it captures the real request(s) alongside sending them.
 - **`summary`** (`trace_summary`, one line): provider/model identity, corpus
   id + revision, history/retrieval message counts, evidence ids (deduped
   citation source ids), this model's context budget vs. characters actually
-  sent, distinct tool names offered or called, elapsed time, and a grounding
+  sent, tools actually executed separately from tools merely offered, elapsed
+  time, and a grounding
   status — `not_applicable` for an ordinary (unlinked) turn, `ungrounded` if
   the turn ended with one of the `linked_*` evidence-validation error codes,
-  `grounded` otherwise.
+  `grounded` otherwise. `tool_names` remains the backward-compatible union;
+  new readers should use `tools_executed` and `tools_offered`. Evidence
+  identities produced by the deterministic `broad_log_triage` host stage are
+  emitted through the same governed citation stream as ordinary log-tool
+  evidence, so `retrieved_evidence` no longer misleadingly reports zero for
+  such a turn.
+  `grounding_scope="citation_identity_only"` and
+  `interpretation_validated=false` make the epistemic boundary explicit:
+  a cited event was verified to exist, but ContextDesk does not claim that a
+  model's interpretation, completeness, or root-cause diagnosis was proven.
 - **`context`** (adds `trace_context`, one line per provider call — one for a
   dry run, one per round for a real multi-round turn): the exact bounded,
   redacted messages and tool names that call sent. Reading consecutive
@@ -591,7 +611,7 @@ capture point in the first place: the traced boundary
 credential.
 
 ```json
-{"type":"trace_summary","provider_profile_id":"ollama-local","chat_model":"mistral","corpus_id":null,"corpus_revision":null,"dry_run":true,"history_messages":3,"retrieved_evidence":0,"evidence_ids":[],"context_budget_chars":120000,"context_used_chars":828,"tool_names":["search_kb"],"elapsed_ms":2,"grounding":"not_applicable"}
+{"type":"trace_summary","provider_profile_id":"ollama-local","chat_model":"mistral","corpus_id":null,"corpus_revision":null,"dry_run":true,"history_messages":3,"retrieved_evidence":0,"evidence_ids":[],"context_budget_chars":120000,"context_used_chars":828,"tool_names":["search_kb"],"tools_executed":[],"tools_offered":["search_kb"],"elapsed_ms":2,"grounding":"not_applicable","grounding_scope":"not_applicable","interpretation_validated":false}
 ```
 
 ## `chat --activity` / `--context-selection`
@@ -657,9 +677,25 @@ The renderer degrades to bounded, ANSI-free, one-line-per-transition
 output — never an overwriting redraw — whenever stderr is redirected to a
 file or pipe, `TERM=dumb`, or there is no controlling terminal at all (the
 same rule `import`'s existing progress line already follows). Color
-follows `--color auto|always|never` (default `auto`); under `auto`,
-`NO_COLOR` (<https://no-color.org>) disables it, but an explicit
-`--color always` still wins. Ctrl-C during `chat` sets the same
+follows `--color auto|always|never` (default `auto`). `--color never`
+disables every ANSI cursor/color sequence, while `NO_COLOR`
+(<https://no-color.org>) does the same under `auto`; an explicit
+`--color always` still wins for terminals that support ANSI. Human output is
+also scrubbed of model-supplied terminal control sequences, including escape
+sequences split across streaming chunks. On Windows, human terminal text
+uses ASCII-safe punctuation by default so legacy PowerShell code pages cannot
+turn smart punctuation or citation brackets into mojibake. Set
+`CONTEXTDESK_ASCII=0` to retain Unicode typography, or
+`CONTEXTDESK_ASCII=1` to request ASCII on any platform. Structured JSON and
+JSONL remain unmodified UTF-8 data; when inspecting them directly in Windows
+PowerShell, set its output encoding first:
+
+```powershell
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+$OutputEncoding = [Console]::OutputEncoding
+```
+
+Ctrl-C during `chat` sets the same
 cooperative cancel flag `run_chat_workflow` already accepts (the same
 mechanism `contextdesk doctor`'s own live-turn checks use, see
 [Readiness](#readiness-contextdesk-doctor) above), gives the turn a

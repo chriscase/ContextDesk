@@ -3,7 +3,7 @@
 //! Entirely local: no provider transport and no OS secret-store reads.
 
 use crate::cli::NormalizeArgs;
-use crate::config::OutputFormat;
+use crate::config::{ColorMode, OutputFormat};
 use crate::envelope::{CliError, CliResult, Render};
 use crate::progress::CliProgressObserver;
 use cd_core::log_analysis::normalize_export::NormalizeTimezonePolicy;
@@ -118,7 +118,11 @@ fn resolve_source(source: &std::path::Path) -> PathBuf {
     source.to_path_buf()
 }
 
-pub async fn run(args: &NormalizeArgs, format: OutputFormat) -> CliResult<NormalizeOutput> {
+pub async fn run(
+    args: &NormalizeArgs,
+    format: OutputFormat,
+    color: ColorMode,
+) -> CliResult<NormalizeOutput> {
     let map = parse_timezone_map(args.timezone_map.as_deref())?;
     let _output_tz = std::env::var("CONTEXTDESK_OUTPUT_TIMEZONE").unwrap_or_else(|_| "UTC".into());
 
@@ -156,7 +160,7 @@ pub async fn run(args: &NormalizeArgs, format: OutputFormat) -> CliResult<Normal
     };
 
     let cancel = CancelFlag::new();
-    let observer = Arc::new(CliProgressObserver::new(format));
+    let observer = Arc::new(CliProgressObserver::new(format, color));
     let cancel_for_task = cancel.clone();
     let observer_for_task = observer.clone();
     let options_for_task = options.clone();

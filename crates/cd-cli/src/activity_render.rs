@@ -99,7 +99,7 @@ pub fn render_human_summary(record: &TurnActivityRecord) -> String {
     ));
     for event in &record.events {
         out.push_str(&format!(
-            "  [{seq}] {origin:?}/{determinism:?} {phase:?} {status:?} — {label}",
+            "  [{seq}] {origin:?}/{determinism:?} {phase:?} {status:?} - {label}",
             seq = event.seq,
             origin = event.origin,
             determinism = event.determinism,
@@ -114,7 +114,7 @@ pub fn render_human_summary(record: &TurnActivityRecord) -> String {
     }
     if record.is_truncated() {
         out.push_str(&format!(
-            "  … truncated: {} event(s) omitted by hard bound\n",
+            "  ... truncated: {} event(s) omitted by hard bound\n",
             record.dropped_events
         ));
     }

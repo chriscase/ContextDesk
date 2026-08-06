@@ -48,7 +48,7 @@ impl TerminalCapabilities {
     /// Resolve from the real process environment.
     pub fn detect(color_mode: ColorMode) -> Self {
         Self::from_parts(
-            io::stderr().is_terminal(),
+            io::stderr().is_terminal() && platform_supports_ansi(),
             std::env::var("TERM").ok(),
             std::env::var_os("NO_COLOR").is_some(),
             color_mode,
@@ -72,13 +72,167 @@ impl TerminalCapabilities {
         color_mode: ColorMode,
     ) -> Self {
         let dumb = term.as_deref() == Some("dumb");
-        let interactive = is_tty && !dumb;
+        let plain = matches!(color_mode, ColorMode::Never)
+            || (matches!(color_mode, ColorMode::Auto) && no_color_env);
+        let interactive = is_tty && !dumb && !plain;
         let color = match color_mode {
             ColorMode::Never => false,
             ColorMode::Always => true,
             ColorMode::Auto => interactive && !no_color_env,
         };
         Self { interactive, color }
+    }
+}
+
+/// Conservative platform capability check. Unix terminals conventionally
+/// interpret ANSI when attached to a tty. On Windows, a tty alone is not
+/// enough: legacy Console Host sessions can display escape bytes literally,
+/// so enable redraw only for terminals that advertise VT/ANSI support.
+pub fn platform_supports_ansi() -> bool {
+    #[cfg(not(windows))]
+    {
+        true
+    }
+    #[cfg(windows)]
+    {
+        std::env::var_os("WT_SESSION").is_some()
+            || std::env::var_os("ANSICON").is_some()
+            || std::env::var("ConEmuANSI").is_ok_and(|value| value.eq_ignore_ascii_case("ON"))
+            || std::env::var_os("TERM_PROGRAM").is_some()
+            || std::env::var("TERM").is_ok_and(|value| {
+                let value = value.to_ascii_lowercase();
+                value.starts_with("xterm")
+                    || value.starts_with("screen")
+                    || value.starts_with("tmux")
+                    || value.contains("cygwin")
+            })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EscapeState {
+    Text,
+    Escape,
+    Csi,
+    Osc,
+    OscEscape,
+}
+
+/// Stateful filter for untrusted model text written to a human terminal.
+/// JSON/JSONL retain the original bytes; only terminal presentation strips
+/// control sequences that could redraw the screen, change the title, or
+/// otherwise appear as mojibake on an unsupported console.
+pub struct TerminalTextSanitizer {
+    state: EscapeState,
+    ascii: bool,
+}
+
+impl Default for TerminalTextSanitizer {
+    fn default() -> Self {
+        Self {
+            state: EscapeState::Text,
+            ascii: false,
+        }
+    }
+}
+
+impl TerminalTextSanitizer {
+    pub fn for_current_console() -> Self {
+        let ascii = match std::env::var("CONTEXTDESK_ASCII") {
+            Ok(value) if matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no") => {
+                false
+            }
+            Ok(value) if matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes") => {
+                true
+            }
+            _ => cfg!(windows),
+        };
+        Self {
+            state: EscapeState::Text,
+            ascii,
+        }
+    }
+
+    #[cfg(test)]
+    fn ascii() -> Self {
+        Self {
+            state: EscapeState::Text,
+            ascii: true,
+        }
+    }
+
+    pub fn push(&mut self, chunk: &str) -> String {
+        let mut out = String::with_capacity(chunk.len());
+        for character in chunk.chars() {
+            self.state = match self.state {
+                EscapeState::Text => match character {
+                    '\u{1b}' => EscapeState::Escape,
+                    '\n' | '\t' => {
+                        out.push(character);
+                        EscapeState::Text
+                    }
+                    '\r' => EscapeState::Text,
+                    c if c.is_control() => EscapeState::Text,
+                    c => {
+                        if self.ascii {
+                            push_ascii_typography(&mut out, c);
+                        } else {
+                            out.push(c);
+                        }
+                        EscapeState::Text
+                    }
+                },
+                EscapeState::Escape => match character {
+                    '[' => EscapeState::Csi,
+                    ']' => EscapeState::Osc,
+                    '\u{1b}' => EscapeState::Escape,
+                    _ => EscapeState::Text,
+                },
+                EscapeState::Csi => {
+                    if ('@'..='~').contains(&character) {
+                        EscapeState::Text
+                    } else {
+                        EscapeState::Csi
+                    }
+                }
+                EscapeState::Osc => match character {
+                    '\u{7}' => EscapeState::Text,
+                    '\u{1b}' => EscapeState::OscEscape,
+                    _ => EscapeState::Osc,
+                },
+                EscapeState::OscEscape => {
+                    if character == '\\' {
+                        EscapeState::Text
+                    } else {
+                        EscapeState::Osc
+                    }
+                }
+            };
+        }
+        out
+    }
+}
+
+fn push_ascii_typography(out: &mut String, character: char) {
+    match character {
+        '\u{00a0}' | '\u{2007}' | '\u{202f}' => out.push(' '),
+        '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2212}' => {
+            out.push('-')
+        }
+        '\u{2018}' | '\u{2019}' | '\u{2032}' => out.push('\''),
+        '\u{201c}' | '\u{201d}' | '\u{2033}' => out.push('"'),
+        '\u{2026}' => out.push_str("..."),
+        '\u{00b7}' | '\u{2022}' => out.push('*'),
+        '\u{2190}' => out.push_str("<-"),
+        '\u{2192}' => out.push_str("->"),
+        '\u{21d2}' => out.push_str("=>"),
+        '\u{27e6}' => out.push('['),
+        '\u{27e7}' => out.push(']'),
+        c if c.is_ascii() => out.push(c),
+        // Preserve non-Latin content rather than corrupting or deleting it.
+        // The Windows default only normalizes typography known to cause the
+        // observed mojibake; meaningful international text remains intact.
+        c => out.push(c),
     }
 }
 
@@ -332,9 +486,9 @@ impl ChatStatusRenderer {
             ));
         }
         if state.retries > 0 {
-            line.push_str(&format!(" · retry {}", state.retries));
+            line.push_str(&format!(" | retry {}", state.retries));
         }
-        line.push_str(&format!(" · {:.1}s", state.started.elapsed().as_secs_f32()));
+        line.push_str(&format!(" | {:.1}s", state.started.elapsed().as_secs_f32()));
         if !interactive_now {
             line.push('\n');
         }
@@ -384,7 +538,7 @@ impl ChatStatusRenderer {
             } => {
                 self.push_colored(&mut line, "\x1b[32m", "done");
                 line.push_str(&format!(
-                    " · session {session_id} · {grounding} · tools {}/{}",
+                    " | session {session_id} | {grounding} | tools {}/{}",
                     state.tools_finished, state.tools_started
                 ));
             }
@@ -393,10 +547,10 @@ impl ChatStatusRenderer {
             }
             ChatOutcomeSummary::Failed { message } => {
                 self.push_colored(&mut line, "\x1b[31m", "failed");
-                line.push_str(&format!(" · {message}"));
+                line.push_str(&format!(" | {message}"));
             }
         }
-        line.push_str(&format!(" · {elapsed:.1}s"));
+        line.push_str(&format!(" | {elapsed:.1}s"));
         eprintln!("{line}");
         let _ = io::stderr().flush();
     }
@@ -447,9 +601,9 @@ mod tests {
     }
 
     #[test]
-    fn no_color_env_disables_color_but_not_redraw() {
+    fn no_color_env_selects_plain_output() {
         let caps = TerminalCapabilities::from_parts(true, None, true, ColorMode::Auto);
-        assert!(caps.interactive);
+        assert!(!caps.interactive);
         assert!(!caps.color);
     }
 
@@ -465,7 +619,35 @@ mod tests {
     fn explicit_color_never_beats_a_real_colorful_terminal() {
         let caps = TerminalCapabilities::from_parts(true, None, false, ColorMode::Never);
         assert!(!caps.color);
-        assert!(caps.interactive); // redraw is a separate concern from color
+        assert!(!caps.interactive);
+    }
+
+    #[test]
+    fn terminal_text_filter_strips_split_ansi_and_control_sequences() {
+        let mut filter = TerminalTextSanitizer::default();
+        assert_eq!(filter.push("safe\u{1b}[31"), "safe");
+        assert_eq!(
+            filter.push("mred\u{1b}[0m\nnext\rline\u{7}"),
+            "red\nnextline"
+        );
+    }
+
+    #[test]
+    fn terminal_text_filter_strips_osc_title_sequences_across_chunks() {
+        let mut filter = TerminalTextSanitizer::default();
+        assert_eq!(filter.push("before\u{1b}]0;secret"), "before");
+        assert_eq!(filter.push(" title\u{1b}\\after"), "after");
+    }
+
+    #[test]
+    fn ascii_terminal_mode_normalizes_problematic_typography() {
+        let mut filter = TerminalTextSanitizer::ascii();
+        assert_eq!(
+            filter.push(
+                "wall\u{2011}clock\u{202f}10 \u{201c}ok\u{201d} \u{27e6}seq=1\u{27e7} \u{2026}"
+            ),
+            "wall-clock 10 \"ok\" [seq=1] ..."
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@ mod cli;
 mod commands;
 mod config;
 mod envelope;
+mod presentation;
 mod progress;
 mod provider_probe;
 mod render;
@@ -102,15 +103,22 @@ async fn dispatch(
 ) -> i32 {
     match command {
         Command::Import(args) => {
-            let result = commands::import::run(args, &paths.cache_root, app_cfg, format).await;
+            let result = commands::import::run(
+                args,
+                &paths.cache_root,
+                app_cfg,
+                format,
+                resolved.color.value,
+            )
+            .await;
             if let Ok(outcome) = &result {
                 cli_state.set_current_corpus(outcome.corpus_id.clone());
             }
-            emit(format, "import", result)
+            emit(format, resolved.color.value, "import", result)
         }
         Command::Normalize(args) => {
-            let result = commands::normalize::run(args, format).await;
-            emit(format, "normalize", result)
+            let result = commands::normalize::run(args, format, resolved.color.value).await;
+            emit(format, resolved.color.value, "normalize", result)
         }
         Command::Corpus { action } => {
             let result = commands::corpus::run(action, &paths.cache_root);
@@ -119,27 +127,27 @@ async fn dispatch(
                     cli_state.set_current_corpus(extract_corpus_id(output));
                 }
             }
-            emit(format, "corpus", result)
+            emit(format, resolved.color.value, "corpus", result)
         }
         Command::Timezone { action } => {
             let result =
                 commands::timezone::run(action, &paths.cache_root, &cli_state.current_corpus_id);
-            emit(format, "timezone", result)
+            emit(format, resolved.color.value, "timezone", result)
         }
         Command::Explore(args) => {
             let result =
                 commands::explore::run(args, &paths.cache_root, &cli_state.current_corpus_id);
-            emit(format, "explore", result)
+            emit(format, resolved.color.value, "explore", result)
         }
         Command::Context(args) => {
             let result =
                 commands::context::run(args, &paths.cache_root, &cli_state.current_corpus_id);
-            emit(format, "context", result)
+            emit(format, resolved.color.value, "context", result)
         }
         Command::Session { action } => {
             let store = adapters::session_store(paths);
             let result = commands::session::run(action, &store);
-            emit(format, "session", result)
+            emit(format, resolved.color.value, "session", result)
         }
         Command::Chat(args) => {
             let secrets = adapters::secret_store();
@@ -194,14 +202,15 @@ async fn dispatch(
                 &secrets,
             )
             .await;
-            emit(format, "config", result)
+            emit(format, resolved.color.value, "config", result)
         }
         Command::Confluence { action } => {
             let result = commands::confluence_cmd::run(action, paths, app_cfg).await;
-            emit(format, "confluence", result)
+            emit(format, resolved.color.value, "confluence", result)
         }
         Command::Capabilities => emit(
             format,
+            resolved.color.value,
             "capabilities",
             Ok(commands::capabilities::run(&paths.branding)),
         ),
@@ -243,8 +252,12 @@ async fn dispatch(
             }
         }
         Command::LoggingAssessment(args) => {
-            let result = commands::logging_assessment::run(args, &paths.cache_root);
-            emit(format, "logging_assessment", result)
+            let result = commands::logging_assessment::run(
+                args,
+                &paths.cache_root,
+                &cli_state.current_corpus_id,
+            );
+            emit(format, resolved.color.value, "logging_assessment", result)
         }
     }
 }
@@ -260,13 +273,16 @@ fn extract_corpus_id(output: &dyn Render) -> String {
 
 fn emit<T: Render>(
     format: OutputFormat,
+    color: config::ColorMode,
     command: &'static str,
     result: Result<T, CliError>,
 ) -> i32 {
     match result {
         Ok(value) => {
             match format {
-                OutputFormat::Text => println!("{}", value.render_text()),
+                OutputFormat::Text => {
+                    println!("{}", presentation::present(&value.render_text(), color))
+                }
                 OutputFormat::Json | OutputFormat::Jsonl => {
                     let envelope = Envelope::ok(command, value.render_json());
                     println!(

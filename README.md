@@ -90,8 +90,12 @@ export PATH="$(pwd)/target/release:$PATH"   # or use target/release/contextdesk
 
 # Isolated profile — never touches ~/.contextdesk
 contextdesk --data-dir ./cd-demo-data import ./fixtures/cli-release-demo
-contextdesk --data-dir ./cd-demo-data chat "what timed out?"
+contextdesk --data-dir ./cd-demo-data ask "what timed out?"
 ```
+
+Short aliases keep everyday use simple: `ask` = `chat`, `search` = `explore`,
+and `assess` = `logging-assessment` (using the current corpus when its id is
+omitted). The full command names remain supported for scripts.
 
 Requires a configured provider for `chat` (see `contextdesk config init` or
 `contextdesk doctor`). For a **network-free** five-minute path, use import →

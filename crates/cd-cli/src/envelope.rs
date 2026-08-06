@@ -249,14 +249,25 @@ pub struct TraceSummaryLine {
     /// detailed trace payload; `context_used_chars` remains the full sum.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub context_messages_capped: bool,
-    /// Distinct tool names offered or called across every round.
+    /// Backward-compatible union of offered and executed tool names.
     pub tool_names: Vec<String>,
+    /// Distinct tools actually executed, derived only from Tool events.
+    pub tools_executed: Vec<String>,
+    /// Distinct tools offered to the provider across all recorded rounds.
+    pub tools_offered: Vec<String>,
     /// Total wall-clock time across every backend call this turn made.
     pub elapsed_ms: u64,
     /// `"not_applicable"` (ordinary turn) | `"grounded"` | `"ungrounded"` —
     /// derived from whether the turn completed cleanly or ended with one of
     /// the `linked_*` evidence-validation error codes.
     pub grounding: String,
+    /// What `grounding` actually certifies. Citation validation establishes
+    /// that referenced evidence identities exist; it does not certify the
+    /// model's interpretation, completeness, or causal diagnosis.
+    pub grounding_scope: String,
+    /// Always false in v1: ContextDesk has no deterministic oracle for a
+    /// model's incident interpretation or root-cause conclusion.
+    pub interpretation_validated: bool,
     /// Host deterministic context-plan "Context used" summary when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_used: Option<String>,

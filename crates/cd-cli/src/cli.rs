@@ -88,6 +88,7 @@ pub enum Command {
         action: TimezoneAction,
     },
     /// Search an imported corpus.
+    #[command(visible_alias = "search")]
     Explore(ExploreArgs),
     /// Assemble grounded evidence + citations for a question without
     /// running a model turn.
@@ -98,6 +99,7 @@ pub enum Command {
         action: SessionAction,
     },
     /// Ask a question, grounded in the current (or given) corpus.
+    #[command(visible_alias = "ask")]
     Chat(ChatArgs),
     /// CLI configuration.
     Config {
@@ -126,6 +128,7 @@ pub enum Command {
     Doctor(DoctorArgs),
     /// Deterministic logging-quality assessment with fixed finding-code
     /// improvement hints for an imported corpus (no provider / LLM).
+    #[command(visible_alias = "assess")]
     LoggingAssessment(LoggingAssessmentArgs),
 }
 
@@ -147,8 +150,9 @@ pub struct DoctorArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct LoggingAssessmentArgs {
-    /// Corpus id to assess (from `contextdesk corpus list`).
-    pub corpus_id: String,
+    /// Corpus id to assess. Defaults to the current corpus selected by the
+    /// most recent import or `contextdesk corpus use`.
+    pub corpus_id: Option<String>,
     /// Atomic report export path. When set, writes the versioned assessment
     /// (`--report-format json`) or Markdown projection of that JSON
     /// (`--report-format markdown`) and refuses to overwrite an existing file.
@@ -500,4 +504,28 @@ pub enum ProviderKindArg {
     OpenAiCompatible,
     Anthropic,
     XaiGrokBuild,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn friendly_command_aliases_parse_to_the_same_production_commands() {
+        let ask = Cli::try_parse_from(["contextdesk", "ask", "what failed?"]).unwrap();
+        assert!(matches!(ask.command, Command::Chat(_)));
+
+        let search = Cli::try_parse_from(["contextdesk", "search", "pool exhausted"]).unwrap();
+        assert!(matches!(search.command, Command::Explore(_)));
+
+        let assess = Cli::try_parse_from(["contextdesk", "assess"]).unwrap();
+        assert!(matches!(
+            assess.command,
+            Command::LoggingAssessment(LoggingAssessmentArgs {
+                corpus_id: None,
+                ..
+            })
+        ));
+    }
 }

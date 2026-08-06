@@ -18,7 +18,9 @@ use crate::envelope::{
     CliError, CliResult, Envelope, JsonlMetaLine, StreamLine, TraceContextLine, TraceSummaryLine,
     TraceToolLine, TracedMessageLine,
 };
-use crate::render::{ChatOutcomeSummary, ChatStatusRenderer, TerminalCapabilities};
+use crate::render::{
+    ChatOutcomeSummary, ChatStatusRenderer, TerminalCapabilities, TerminalTextSanitizer,
+};
 use cd_core::config::AppConfig;
 use cd_core::events::StreamEvent;
 use cd_core::keychain_store::SecretStore;
@@ -159,6 +161,7 @@ pub async fn run(
     let observed_session_id = Arc::new(Mutex::new(session_id.clone()));
     let live_session_id = observed_session_id.clone();
     let mut answer_started = false;
+    let mut terminal_text = TerminalTextSanitizer::for_current_console();
     let mut live_sink = |event: StreamEvent| {
         if let StreamEvent::TurnStarted { session_id, .. } = &event {
             *live_session_id.lock().expect("CLI live session lock") = Some(session_id.clone());
@@ -173,10 +176,10 @@ pub async fn run(
             chat_renderer.on_event(&event);
             if let StreamEvent::TextDelta { text } = &event {
                 if stdout_is_tty && !answer_started {
-                    println!("Answer\n──────");
+                    println!("+--------+\n| Answer |\n+--------+");
                     answer_started = true;
                 }
-                print!("{text}");
+                print!("{}", terminal_text.push(text));
                 let _ = io::stdout().flush();
             }
         }
@@ -258,7 +261,7 @@ pub async fn run(
                 if text {
                     chat_renderer.clear_for_interrupt();
                 }
-                eprintln!("cancelling — waiting for the turn to wind down...");
+                eprintln!("cancelling - waiting for the turn to wind down...");
                 let _ = tokio::time::timeout(INTERRUPT_GRACE, &mut turn).await;
                 Err(CliError::cancelled("chat turn cancelled"))
             }
@@ -324,7 +327,8 @@ pub async fn run(
             }
             if text {
                 if let Some(record) = &activity_record {
-                    eprint!("{}", render_human_summary(record));
+                    let mut sanitizer = TerminalTextSanitizer::for_current_console();
+                    eprint!("{}", sanitizer.push(&render_human_summary(record)));
                 }
                 let summary = if error.category == crate::envelope::ExitCategory::Cancelled {
                     ChatOutcomeSummary::Cancelled
@@ -400,7 +404,8 @@ pub async fn run(
             }
             if let Some(record) = &activity_record {
                 // Keep answer stdout clean; activity summary on stderr.
-                eprint!("{}", render_human_summary(record));
+                let mut sanitizer = TerminalTextSanitizer::for_current_console();
+                eprint!("{}", sanitizer.push(&render_human_summary(record)));
             }
             // User-facing “Context used” from host SearchTrail (ordinary chat plan).
             if let Some(summary) = context_used_from_events(&outcome.events) {
@@ -746,12 +751,20 @@ fn build_trace_lines(
         .map(traced_call_context_used_chars)
         .unwrap_or(0);
     let context_messages_capped = calls.last().is_some_and(|c| c.messages_capped);
-    let mut tool_names = dedup_tool_names(&outcome.events);
+    let tools_executed = dedup_tool_names(&outcome.events);
+    let mut tools_offered = Vec::new();
     for call in calls {
         for name in &call.tool_names {
-            if !tool_names.contains(name) {
-                tool_names.push(name.clone());
+            if !tools_offered.contains(name) {
+                tools_offered.push(name.clone());
             }
+        }
+    }
+    tools_offered.truncate(MAX_TRACE_SUMMARY_ITEMS);
+    let mut tool_names = tools_executed.clone();
+    for name in &tools_offered {
+        if !tool_names.contains(name) {
+            tool_names.push(name.clone());
         }
     }
     tool_names.truncate(MAX_TRACE_SUMMARY_ITEMS);
@@ -769,6 +782,8 @@ fn build_trace_lines(
         context_used_chars,
         context_messages_capped,
         tool_names,
+        tools_executed,
+        tools_offered,
         // Prefer the sum of actual backend-call time when a trace sink was
         // active (it is, whenever this function runs); fall back to the
         // whole-command wall clock so the field is never simply absent.
@@ -778,6 +793,12 @@ fn build_trace_lines(
             elapsed_ms
         },
         grounding: grounding_status(corpus_id, &outcome.events).to_string(),
+        grounding_scope: if corpus_id.is_some() {
+            "citation_identity_only".to_string()
+        } else {
+            "not_applicable".to_string()
+        },
+        interpretation_validated: false,
         context_used: context_used_from_events(&outcome.events),
     };
     lines.push(StreamLine::TraceSummary(summary));
@@ -848,6 +869,7 @@ fn build_trace_lines(
 #[cfg(test)]
 mod grounding_tests {
     use super::*;
+    use cd_core::events::ToolPhase;
 
     fn citation(source_id: &str) -> StreamEvent {
         StreamEvent::Citation {
@@ -918,5 +940,74 @@ mod grounding_tests {
             .map(|i| citation(&format!("log_event:{i}")))
             .collect();
         assert!(dedup_citation_ids(&events).len() <= MAX_TRACE_SUMMARY_ITEMS);
+    }
+
+    #[test]
+    fn trace_separates_executed_tools_offered_tools_and_trusted_evidence() {
+        let events = vec![
+            StreamEvent::Tool {
+                id: "host-brief".into(),
+                name: "broad_log_triage".into(),
+                phase: ToolPhase::Finished,
+                summary: "Prepared bounded triage brief".into(),
+                detail: None,
+                ok: Some(true),
+            },
+            StreamEvent::Citation {
+                source_id: "log_event:7".into(),
+                label: "api.log".into(),
+                locator: Some("event 7 / template 2".into()),
+                corpus_id: Some("corpus-a".into()),
+            },
+            StreamEvent::TurnCompleted {
+                reason: "stop".into(),
+            },
+        ];
+        let outcome = ChatWorkflowOutcome {
+            session_id: "session-a".into(),
+            turn_id: "turn-a".into(),
+            events,
+            final_text: "Observed symptom; cause unproven.".into(),
+            provider_profile_id: "profile-a".into(),
+            chat_model: "model-a".into(),
+            corpus_revision: Some(3),
+            history_messages: 3,
+        };
+        let calls = vec![TracedCall {
+            seq: 0,
+            elapsed_ms: 5,
+            tool_names: vec!["search_logs".into()],
+            messages: vec![],
+            context_used_chars: 100,
+            messages_capped: false,
+            outcome: TracedOutcome::Completed {
+                finish_reason: "stop".into(),
+                tool_call_count: 0,
+            },
+        }];
+
+        let lines = build_trace_lines(
+            TraceLevel::Summary,
+            false,
+            Some("corpus-a"),
+            &outcome,
+            &calls,
+            5,
+            1_000,
+        );
+        let StreamLine::TraceSummary(summary) = &lines[0] else {
+            panic!("expected trace summary")
+        };
+        assert_eq!(summary.retrieved_evidence, 1);
+        assert_eq!(summary.evidence_ids, vec!["log_event:7"]);
+        assert_eq!(summary.tools_executed, vec!["broad_log_triage"]);
+        assert_eq!(summary.tools_offered, vec!["search_logs"]);
+        assert_eq!(summary.grounding_scope, "citation_identity_only");
+        assert!(!summary.interpretation_validated);
+        assert_eq!(
+            summary.tool_names,
+            vec!["broad_log_triage", "search_logs"],
+            "legacy union remains backward compatible"
+        );
     }
 }
