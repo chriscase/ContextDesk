@@ -293,12 +293,19 @@ describe("LoggingQualityPanel", () => {
 
   it("exports only after host confirms written; no-clobber surfaces failed", async () => {
     host.assess.mockResolvedValue(sampleDto());
-    host.exportReport
-      .mockResolvedValueOnce({
+    // Simulate Tauri IPC: real host wire JSON (camelCase displayName), not a
+    // hand-maintained parallel shape that could hide snake_case bugs.
+    const hostWireWritten = JSON.parse(
+      JSON.stringify({
         status: "written",
         format: "json",
         displayName: "contextdesk-logging-quality.json",
-      })
+      }),
+    );
+    expect(hostWireWritten.displayName).toBe("contextdesk-logging-quality.json");
+    expect(hostWireWritten.display_name).toBeUndefined();
+    host.exportReport
+      .mockResolvedValueOnce(hostWireWritten)
       .mockResolvedValueOnce({
         status: "failed",
         reason: "output already exists or cannot be created",
@@ -314,6 +321,9 @@ describe("LoggingQualityPanel", () => {
         /atomic publish confirmed/i,
       ),
     );
+    const success = screen.getByTestId("lqa-status").textContent ?? "";
+    expect(success).toContain("contextdesk-logging-quality.json");
+    expect(success).not.toMatch(/undefined/);
     fireEvent.click(screen.getByTestId("lqa-export-json"));
     await waitFor(() =>
       expect(screen.getByTestId("lqa-error").textContent).toMatch(

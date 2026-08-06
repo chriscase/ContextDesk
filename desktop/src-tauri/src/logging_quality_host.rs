@@ -29,6 +29,10 @@ pub struct LoggingQualityAssessmentHostDto {
 }
 
 /// Terminal export status returned to the renderer (no destination path).
+///
+/// Wire contract (must match `desktop/src/lib/loggingQuality/types.ts`):
+/// - `status` tag values: `cancelled` | `written` | `failed` (snake_case variants)
+/// - field names **camelCase**: `displayName`, not `display_name`
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum LoggingQualityExportStatus {
@@ -38,6 +42,7 @@ pub enum LoggingQualityExportStatus {
     Written {
         format: String,
         /// Safe display basename only (never a directory path).
+        #[serde(rename = "displayName")]
         display_name: String,
     },
     /// Publish failed (including no-clobber conflict).
@@ -245,6 +250,65 @@ mod tests {
         assert!(looks_like_absolute_path("C:\\Users\\me"));
         assert!(!looks_like_absolute_path("api/app.jsonl"));
         assert!(!looks_like_absolute_path("src_0001"));
+    }
+
+    /// Wire keys must match the desktop TypeScript DTO (`displayName`, not `display_name`).
+    #[test]
+    fn export_status_serde_uses_camel_case_display_name() {
+        let written = LoggingQualityExportStatus::Written {
+            format: "json".into(),
+            display_name: "contextdesk-logging-quality.json".into(),
+        };
+        let v = serde_json::to_value(&written).expect("serialize written");
+        assert_eq!(v["status"], "written");
+        assert_eq!(v["format"], "json");
+        assert_eq!(v["displayName"], "contextdesk-logging-quality.json");
+        assert!(
+            v.get("display_name").is_none(),
+            "must not emit snake_case display_name: {v}"
+        );
+
+        let cancelled = serde_json::to_value(&LoggingQualityExportStatus::Cancelled).unwrap();
+        assert_eq!(cancelled, serde_json::json!({"status": "cancelled"}));
+
+        let failed = serde_json::to_value(&LoggingQualityExportStatus::Failed {
+            reason: "output already exists or cannot be created".into(),
+        })
+        .unwrap();
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(
+            failed["reason"],
+            "output already exists or cannot be created"
+        );
+
+        // Real export path produces the same wire shape.
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("a.jsonl"),
+            concat!(
+                r#"{"ts":"2026-01-01T12:00:00Z","level":"INFO","msg":"x"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let cache = tmp.path().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        let corpus_id = ingest_fixture(&cache, &src);
+        let out = tmp.path().join("report.json");
+        let status = export_at_path(
+            &cache,
+            &corpus_id,
+            &out,
+            LoggingQualityReportFormat::Json,
+        )
+        .expect("export");
+        let wire = serde_json::to_value(&status).expect("serialize export status");
+        assert_eq!(wire["status"], "written");
+        assert_eq!(wire["format"], "json");
+        assert_eq!(wire["displayName"], "report.json");
+        assert!(wire.get("display_name").is_none());
     }
 
     /// Live-shaped public-fixture path: ingest → assess → export JSON+MD → no-clobber.
