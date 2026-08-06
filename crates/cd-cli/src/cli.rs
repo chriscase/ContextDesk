@@ -124,8 +124,8 @@ pub enum Command {
     /// synthetic corpus created and destroyed for this check alone. Exit
     /// code reflects the verdict, not just whether the command itself ran.
     Doctor(DoctorArgs),
-    /// Deterministic logging-quality assessment + engineering improvement
-    /// plan for an imported corpus (no provider / LLM).
+    /// Deterministic logging-quality assessment with fixed finding-code
+    /// improvement hints for an imported corpus (no provider / LLM).
     LoggingAssessment(LoggingAssessmentArgs),
 }
 

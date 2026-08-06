@@ -52,6 +52,10 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Durable memory hybrid recall (embed-on-write) | Shipped | crates/cd-core/src/memory/sqlite_store.rs:MEMORY_EMBED_TIMEOUT_MS | #346 |
 | Log analysis Phase-1 pipeline | Shipped | crates/cd-core/src/log_analysis/mod.rs:ingest_path | #355–#362 |
 | Log event store (DuckDB) | Shipped | crates/cd-core/src/log_analysis/store.rs:EVENT_ENGINE | #358 |
+| Offline `contextdesk normalize` (JSONL + manifest + report) | Shipped | crates/cd-cli/src/commands/normalize.rs:run | No durable corpus; zero provider |
+| Deterministic logging-quality assessment CLI | Shipped | crates/cd-cli/src/commands/logging_assessment.rs:run | Fixed finding-code hints; no LLM |
+| Logging quality assessment core DTO | Shipped | crates/cd-core/src/log_analysis/logging_quality.rs:assess_logging_quality | Public-safe aggregates only |
+| Desktop LQA panel + host export | Shipped | desktop/src/components/logExplorer/LoggingQualityPanel.tsx:LoggingQualityPanel | Host DTO only; no frontend scoring |
 | Log why-tools (correlate/anomalies/trace) | Shipped | crates/cd-core/src/log_analysis/why.rs:correlate | #363 |
 | Log desktop surface | Shipped | desktop/src/components/panes/LogPane.tsx:LogPane | #362 |
 | Log Investigation Workspace (explorer) | Shipped | desktop/src/components/logExplorer/LogExplorer.tsx:LogExplorer | #480–#487 |

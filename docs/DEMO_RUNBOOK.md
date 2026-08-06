@@ -106,10 +106,15 @@ Label: **[MANUAL GUI]** — not claimed by CLI scripts.
    - **Expect:** phases / tool names / timings for this process. Quit/relaunch →
      Activity from the previous process is **gone** (corpus/session remain).
 
-7. **Logging-quality assessment**
-   - The deterministic assessment is available through the CLI path below.
-     The desktop assessment UI is still in development, so do not claim it in
-     this GUI walkthrough yet.
+7. **Logging-quality assessment (~2–3 min) — [MANUAL GUI]**
+   - With a corpus open in Log Explorer, select **Assess quality**.
+   - Review the score, distinct selection buckets, fixed improvement hints,
+     and limitations. Use **Show in Explorer** where available (at most four
+     lanes); aggregate-only findings never fabricate event citations.
+   - Export JSON or Markdown through the native Save panel; an existing file
+     is refused rather than overwritten.
+   - **Expect:** deterministic, provider-free results. The Activity rail shows
+     start, facts, export, cancellation, or failure without paths or secrets.
 
 ---
 
@@ -242,11 +247,12 @@ ContextDesk refuses to overwrite it.
 
 ## 4. Logging-quality assessment scope
 
-`logging-assessment` is a deterministic CLI capability: it uses the imported
+`logging-assessment` is a deterministic capability: it uses the imported
 corpus only, never a provider or keychain. Markdown is a projection of its
 versioned JSON report and the improvement hints are fixed templates, not a
-free-form LLM plan. The desktop LQA UI is still in development; use the CLI
-path above for this demo until it lands.
+free-form LLM plan. CLI and desktop share the same `cd-core` DTO via
+`cd-workflow`: use CLI for headless automation and Log Explorer → **Assess
+quality** for interactive evidence/lane review.
 
 ---
 

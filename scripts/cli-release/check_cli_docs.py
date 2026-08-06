@@ -254,10 +254,14 @@ def check_demo_runbook_contract() -> None:
         else:
             fail(f"demo verb {v} not in binary --help")
     if "logging-assessment" in cmds:
-        if "logging-assessment" not in text or "desktop LQA UI is still in development" not in text:
-            fail("LQA-capable binary needs an accurate CLI path and desktop-scope note")
+        if (
+            "logging-assessment" not in text
+            or "Log Explorer → **Assess" not in text
+            or "deterministic, provider-free results" not in text
+        ):
+            fail("LQA-capable binary needs accurate CLI and desktop paths")
         else:
-            ok("LQA-capable binary matches runbook CLI path and desktop-scope note")
+            ok("LQA-capable binary matches runbook CLI and desktop paths")
     else:
         fail("binary lacks documented logging-assessment command")
 
