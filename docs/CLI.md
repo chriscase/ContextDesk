@@ -582,6 +582,17 @@ provider and renders it at the named level; each level includes everything
 the level below it shows. Works with or without `--dry-run` — on a real turn
 it captures the real request(s) alongside sending them.
 
+In **text** mode the CLI prints a nested human hierarchy (Turn → Context →
+Model round → Tools offered / Tool call → Arguments / Result → Outcome /
+Final status) using ASCII tree characters by default on Windows and whenever
+stdout is redirected, `TERM=dumb`, or `NO_COLOR` applies under `--color auto`.
+Capable TTYs may use sparse semantic color and, when
+`CONTEXTDESK_ASCII=0`, Unicode box-drawing. JSON and JSONL keep the same
+byte-compatible `trace_summary` / `trace_context` / `trace_tool` schemas —
+human rendering never changes those shapes. Tool-call JSON *arguments* are
+not retained by the contract; the human renderer says so explicitly rather
+than inventing them.
+
 - **`summary`** (`trace_summary`, one line): provider/model identity, corpus
   id + revision, history/retrieval message counts, evidence ids (deduped
   citation source ids), this model's context budget vs. characters actually
@@ -636,6 +647,12 @@ phases, origins, tool names, and timings (never message bodies). Full
 adds opt-in redacted, hard-bounded provider message bodies already
 scrubbed by `cd_core::turn_trace` and requires `--activity-ack`.
 
+In **text** mode Activity prints on stderr as a nested causal hierarchy
+(Turn → Phase → Model round → Tool call lifecycle → Final status), after
+the status `done`/`failed`/`cancelled` line, so progress never interleaves
+with the hierarchy. Pipe/`TERM=dumb`/`NO_COLOR` stay ANSI-free ASCII.
+JSON and JSONL expose the same typed activity data unchanged.
+
 Activity capture is **process-lifetime** for the turn: it is not a durable
 session transcript. Durable state after quit is corpus/session/investigation
 only (see [`DEMO_ACCEPTANCE.md`](DEMO_ACCEPTANCE.md)).
@@ -649,6 +666,31 @@ host-resolved corpus evidence instead.
 contextdesk chat "summarize selection" --new \
   --context-selection "host-pasted evidence for this turn only" \
   --activity summary --trace summary
+```
+
+### Human trace / activity smoke (Bash, PowerShell, redirected)
+
+```bash
+# Bash — capable TTY (nested ASCII/Unicode hierarchy on stdout/stderr)
+contextdesk chat "ping" --new --dry-run --trace summary --activity summary
+
+# Redirected — stable plain lines, no ANSI / no cursor movement
+contextdesk chat "ping" --new --dry-run --trace context --activity summary \
+  > /tmp/trace.txt 2> /tmp/activity.txt
+# JSON/JSONL schemas unchanged:
+contextdesk chat "ping" --new --dry-run --trace summary --format jsonl | head
+```
+
+```powershell
+# PowerShell — UTF-8 console first; ASCII tree is the Windows default
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+$OutputEncoding = [Console]::OutputEncoding
+contextdesk chat "ping" --new --dry-run --trace summary --activity summary
+# Force ASCII even on a Unicode-capable console:
+$env:CONTEXTDESK_ASCII = "1"
+contextdesk chat "ping" --new --dry-run --trace summary
+# Redirected file capture stays plain:
+contextdesk chat "ping" --new --dry-run --trace summary *> trace-activity.txt
 ```
 
 ## Permission prompts (`chat`)

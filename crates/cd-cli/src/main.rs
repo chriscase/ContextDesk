@@ -4,6 +4,7 @@ mod cli;
 mod commands;
 mod config;
 mod envelope;
+mod human_hierarchy;
 mod presentation;
 mod progress;
 mod provider_probe;

@@ -66,9 +66,11 @@ the ordered timeline after the turn via `ActivityRecorder::record_timeline`.
 There is no second desktop or CLI tracing loop. The CLI's `chat --activity
 summary|full` projects the same `TracedCall`/`TurnActivityRecord` contract;
 `full` requires `--activity-ack`. Human output keeps the answer on stdout and
-the activity summary on stderr. JSON and JSONL expose the same typed activity
-data, including failed turns. This is contract and execution-seam parity, not
-a claim that the CLI reproduces every desktop layout or import control.
+the activity hierarchy on stderr. JSON and JSONL expose the same typed activity
+data, including failed turns. Text-mode Activity is a nested causal tree
+(turn / phase / model round / tool lifecycle), not a flat Debug dump. This is
+contract and execution-seam parity, not a claim that the CLI reproduces every
+desktop layout or import control.
 
 ### Why this cannot change execution
 

@@ -9,15 +9,14 @@
 //! `cd_core::turn_trace` data the workflow call already produced rather
 //! than deriving anything of its own.
 
-use crate::activity_render::{
-    activity_lines, context_used_from_events, project_turn_activity, render_human_summary,
-};
+use crate::activity_render::{activity_lines, context_used_from_events, project_turn_activity};
 use crate::cli::{ActivityLevel, ChatArgs, TraceLevel};
 use crate::config::{ColorMode, OutputFormat};
 use crate::envelope::{
     CliError, CliResult, Envelope, JsonlMetaLine, StreamLine, TraceContextLine, TraceSummaryLine,
     TraceToolLine, TracedMessageLine,
 };
+use crate::human_hierarchy::{render_activity_hierarchy, render_trace_hierarchy, HierarchyStyle};
 use crate::render::{
     ChatOutcomeSummary, ChatStatusRenderer, TerminalCapabilities, TerminalTextSanitizer,
 };
@@ -326,10 +325,8 @@ pub async fn run(
                 print_json_failure(&error, activity_record.as_ref());
             }
             if text {
-                if let Some(record) = &activity_record {
-                    let mut sanitizer = TerminalTextSanitizer::for_current_console();
-                    eprint!("{}", sanitizer.push(&render_human_summary(record)));
-                }
+                // Finish status first so progress never interleaves with
+                // activity hierarchy on stderr.
                 let summary = if error.category == crate::envelope::ExitCategory::Cancelled {
                     ChatOutcomeSummary::Cancelled
                 } else {
@@ -338,6 +335,12 @@ pub async fn run(
                     }
                 };
                 chat_renderer.finish(summary);
+                if let Some(record) = &activity_record {
+                    // Hierarchy renderer sanitizes leaf values; apply
+                    // destination style (TTY color / redirected plain).
+                    let style = HierarchyStyle::detect_stderr(color);
+                    eprint!("{}", render_activity_hierarchy(record, style));
+                }
             }
             return Err(error);
         }
@@ -393,19 +396,19 @@ pub async fn run(
                 println!();
             }
             let grounding = grounding_status(corpus_id.as_deref(), &outcome.events);
+            // Status line first — never interleave with trace/activity sections.
             chat_renderer.finish(ChatOutcomeSummary::Ok {
                 session_id: &outcome.session_id,
                 grounding,
             });
             if let Some(lines) = &trace_lines {
-                for line in lines {
-                    println!("{}", serde_json::to_string_pretty(line).unwrap_or_default());
-                }
+                let level = effective_trace.unwrap_or(TraceLevel::Summary);
+                let style = HierarchyStyle::detect_stdout(color);
+                print!("{}", render_trace_hierarchy(lines, level, style));
             }
             if let Some(record) = &activity_record {
-                // Keep answer stdout clean; activity summary on stderr.
-                let mut sanitizer = TerminalTextSanitizer::for_current_console();
-                eprint!("{}", sanitizer.push(&render_human_summary(record)));
+                let style = HierarchyStyle::detect_stderr(color);
+                eprint!("{}", render_activity_hierarchy(record, style));
             }
             // User-facing “Context used” from host SearchTrail (ordinary chat plan).
             if let Some(summary) = context_used_from_events(&outcome.events) {
