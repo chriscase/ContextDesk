@@ -5,6 +5,7 @@ mod handbook;
 mod investigation_report_export;
 mod log_diagnostic_report;
 mod log_diagnostics;
+mod logging_quality_host;
 
 use cd_core::branding::Branding;
 use cd_core::chat::{ChatMessage, Role as ChatRole};
@@ -11808,6 +11809,99 @@ fn log_release_investigation_report_export(
         .release(&request.report_id)
 }
 
+// ─── Logging Quality Assessment (deterministic host adapter) ─────────────────
+
+/// Run the pure `cd-core` assessor for one imported corpus.
+///
+/// Returns the shared assessment DTO plus an opaque-key → portable source map
+/// for Explorer bridging. Does not write files. Does not call providers.
+#[tauri::command]
+async fn log_assess_logging_quality(
+    state: State<'_, AppState>,
+    corpus_id: String,
+) -> Result<logging_quality_host::LoggingQualityAssessmentHostDto, String> {
+    let cache = log_cache_dir(&state)?;
+    let id = corpus_id.trim().to_string();
+    if id.is_empty() {
+        return Err("No corpus selected. Import or open a log corpus first.".into());
+    }
+    tokio::task::spawn_blocking(move || logging_quality_host::assess_at_cache(&cache, &id))
+        .await
+        .map_err(|e| format!("logging quality assessment task join: {e}"))?
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LogLoggingQualityExportRequest {
+    corpus_id: String,
+    /// `json` or `markdown`.
+    format: String,
+}
+
+/// Host-owned Save panel + atomic no-clobber export via `cd-workflow`.
+///
+/// Destination path never enters the webview. Re-assesses (deterministic) so
+/// export bytes match current durable corpus state.
+#[tauri::command]
+async fn log_export_logging_quality_assessment(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    request: LogLoggingQualityExportRequest,
+) -> Result<logging_quality_host::LoggingQualityExportStatus, String> {
+    let corpus_id = request.corpus_id.trim().to_string();
+    if corpus_id.is_empty() {
+        return Err("No corpus selected. Import or open a log corpus first.".into());
+    }
+    let format = logging_quality_host::parse_report_format(&request.format)?;
+    let cache = log_cache_dir(&state)?;
+    let file_name = logging_quality_host::default_export_file_name(format);
+    let (title, filter_name, extension) = match format {
+        cd_workflow::logging_quality::LoggingQualityReportFormat::Json => {
+            ("Save logging quality assessment as JSON", "JSON", "json")
+        }
+        cd_workflow::logging_quality::LoggingQualityReportFormat::Markdown => {
+            (
+                "Save logging quality assessment as Markdown",
+                "Markdown",
+                "md",
+            )
+        }
+    };
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title(title)
+        .set_file_name(file_name)
+        .add_filter(filter_name, &[extension])
+        .save_file(move |selected| {
+            let _ = sender.send(selected);
+        });
+    let selected = receiver
+        .await
+        .map_err(|_| "native logging-quality Save dialog ended unexpectedly".to_string())?
+        .map(|path| {
+            path.into_path()
+                .map_err(|_| "native logging-quality Save dialog returned an invalid path".to_string())
+        })
+        .transpose()?;
+    let Some(path) = selected else {
+        return Ok(logging_quality_host::LoggingQualityExportStatus::Cancelled);
+    };
+    let cache_for_write = cache.clone();
+    let corpus_for_write = corpus_id.clone();
+    match tokio::task::spawn_blocking(move || {
+        logging_quality_host::export_at_path(&cache_for_write, &corpus_for_write, &path, format)
+    })
+    .await
+    .map_err(|e| format!("logging quality export task join: {e}"))?
+    {
+        Ok(status) => Ok(status),
+        Err(reason) => Ok(logging_quality_host::LoggingQualityExportStatus::Failed { reason }),
+    }
+}
+
 /// List chat sessions linked to a corpus (any chat may link).
 #[tauri::command]
 fn list_chat_sessions_for_corpus(
@@ -13177,6 +13271,8 @@ pub fn run() {
             log_assemble_investigation_report,
             log_save_investigation_report_export,
             log_release_investigation_report_export,
+            log_assess_logging_quality,
+            log_export_logging_quality_assessment,
             list_chat_sessions_for_corpus,
             set_chat_linked_corpus,
             open_log_explorer,

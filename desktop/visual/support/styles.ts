@@ -34,4 +34,5 @@ import "../../src/styles/components/import-flow.css";
 import "../../src/styles/components/investigation-report.css";
 import "../../src/styles/components/activity-inspector.css";
 import "../../src/styles/components/evidence-set.css";
+import "../../src/styles/components/logging-quality.css";
 import "../../src/styles/help.css";
