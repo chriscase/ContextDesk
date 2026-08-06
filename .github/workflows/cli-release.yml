@@ -46,7 +46,7 @@ jobs:
             exe: contextdesk
             archive_ext: tar.gz
           - platform: macos-x64
-            os: macos-13
+            os: macos-15-intel
             triple: x86_64-apple-darwin
             exe: contextdesk
             archive_ext: tar.gz
