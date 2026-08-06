@@ -9132,14 +9132,15 @@ mod tests {
 
     #[test]
     fn broad_log_triage_cancels_during_exception_episode_scan() {
-        // Abort at the exception_episodes checkpoint so cancellation is observed
-        // by the cancellation-aware analyzer, not merely before it starts.
+        // Prove the analyzer itself observes cancellation mid-scan: abort only
+        // after the first episode-scan page is fetched (not at the checkpoint).
         let dir = tempdir().unwrap();
         let src = dir.path().join("in");
         fs::create_dir_all(&src).unwrap();
         let mut app = String::new();
         let mut err = String::new();
-        for i in 0..12u32 {
+        // Enough events to force multi-page candidate walk.
+        for i in 0..80u32 {
             let base = 12 * 3600 + i * 2;
             let h = (base / 3600) % 24;
             let m = (base / 60) % 60;
@@ -9147,7 +9148,7 @@ mod tests {
             app.push_str(&format!(
                 "2026-03-15T{h:02}:{m:02}:{s:02}.000Z ERROR java.lang.RuntimeException: XYZ_CANCEL id={i}\n  at com.xyz.A.m(A.java:1)\n"
             ));
-            for j in 0..20u32 {
+            for j in 0..40u32 {
                 err.push_str(&format!(
                     "2026-03-15T{h:02}:{m:02}:{s:02}.{:03}Z ERROR at com.xyz.F{j}.m(F.java:{j})\n",
                     j % 1000
@@ -9191,15 +9192,37 @@ mod tests {
             .unwrap();
         host.pin_log_suppression_lens(&corpus_id).unwrap();
 
-        let mut job = host.prepare_broad_log_triage_brief().unwrap();
-        job.phase_hook = Some(Arc::new(|phase, abort| {
-            if phase == "exception_episodes" {
+        // Serialize against other tests that touch scan hooks/caps.
+        let _scan_lock = crate::log_analysis::exception_episodes::TestScanOverrideGuard::acquire();
+        let job = host.prepare_broad_log_triage_brief().unwrap();
+        let abort = job.abort_handle();
+        let page_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let page_seen_hook = Arc::clone(&page_seen);
+        crate::log_analysis::set_episode_scan_page_hook_for_test(Some(Box::new(move |page| {
+            page_seen_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if page == 0 {
+                // Abort after the first real scan page began — analyzer must observe it.
                 abort.abort();
             }
-        }));
-        let err = job
-            .build()
-            .expect_err("cancelled exception episode scan must not succeed");
+        })));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.build()));
+        crate::log_analysis::set_episode_scan_page_hook_for_test(None);
+        let err = match result {
+            Ok(Ok(brief)) => {
+                panic!(
+                    "expected cancellation, got successful brief (bytes={})",
+                    brief.model_text_bytes
+                );
+            }
+            Ok(Err(e)) => e,
+            Err(payload) => {
+                panic!("worker panicked instead of cancelling cleanly: {payload:?}");
+            }
+        };
+        assert!(
+            page_seen.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "episode scan must have begun at least one page before cancel"
+        );
         let msg = err.to_string();
         assert!(
             matches!(err, CoreError::Cancelled)

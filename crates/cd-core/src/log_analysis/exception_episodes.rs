@@ -25,14 +25,18 @@ use crate::log_analysis::{
 use crate::process_progress::CancelFlag;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::sync::Mutex;
 
 /// Schema id for host-neutral reports.
 pub const EXCEPTION_EPISODE_SCHEMA_ID: &str = "contextdesk.exception_episode_report.v1";
 /// Schema version.
 pub const EXCEPTION_EPISODE_SCHEMA_VERSION: u32 = 1;
 
-/// Maximum events inspected in one analysis.
+/// Maximum exception-candidate events retained in one analysis.
 pub const EXCEPTION_EPISODE_EVENT_SCAN_CAP: usize = 50_000;
 /// Maximum derived renderings retained before results become partial.
 pub const EXCEPTION_EPISODE_RENDER_CAP: usize = 2_048;
@@ -50,6 +54,104 @@ const MAX_DUPLICATE_SEQ_GAP: u64 = 512;
 const MAX_DUPLICATE_WALL_SECONDS: i64 = 2;
 /// Max store rows walked when collecting exception candidates (independent of severity).
 pub const EXCEPTION_EPISODE_ROW_WALK_CAP: usize = 250_000;
+
+/// Effective candidate retention cap (test override when non-zero).
+fn effective_candidate_cap() -> usize {
+    #[cfg(test)]
+    {
+        let override_cap = TEST_CANDIDATE_CAP_OVERRIDE.load(Ordering::SeqCst);
+        if override_cap > 0 {
+            return override_cap;
+        }
+    }
+    EXCEPTION_EPISODE_EVENT_SCAN_CAP
+}
+
+/// Effective store row-walk cap (test override when non-zero).
+fn effective_row_walk_cap() -> usize {
+    #[cfg(test)]
+    {
+        let override_cap = TEST_ROW_WALK_CAP_OVERRIDE.load(Ordering::SeqCst);
+        if override_cap > 0 {
+            return override_cap;
+        }
+    }
+    EXCEPTION_EPISODE_ROW_WALK_CAP
+}
+
+#[cfg(test)]
+static TEST_CANDIDATE_CAP_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static TEST_ROW_WALK_CAP_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+/// Serializes tests that mutate cap overrides / page hooks.
+#[cfg(test)]
+static TEST_SCAN_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Test-only: override candidate retention cap (`0` restores production default).
+#[cfg(test)]
+pub fn set_test_candidate_cap_override(cap: usize) {
+    TEST_CANDIDATE_CAP_OVERRIDE.store(cap, Ordering::SeqCst);
+}
+
+/// Test-only: override row-walk cap (`0` restores production default).
+#[cfg(test)]
+pub fn set_test_row_walk_cap_override(cap: usize) {
+    TEST_ROW_WALK_CAP_OVERRIDE.store(cap, Ordering::SeqCst);
+}
+
+/// RAII lock + reset for cap/hook overrides in tests.
+///
+/// Holds the global scan-override mutex so parallel tests cannot race caps/hooks.
+#[cfg(test)]
+pub struct TestScanOverrideGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl TestScanOverrideGuard {
+    /// Acquire exclusive scan-override lock and clear prior overrides/hooks.
+    pub fn acquire() -> Self {
+        let lock = TEST_SCAN_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        set_test_candidate_cap_override(0);
+        set_test_row_walk_cap_override(0);
+        set_episode_scan_page_hook_for_test(None);
+        Self { _lock: lock }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestScanOverrideGuard {
+    fn drop(&mut self) {
+        set_test_candidate_cap_override(0);
+        set_test_row_walk_cap_override(0);
+        set_episode_scan_page_hook_for_test(None);
+    }
+}
+
+/// Test-only page hook invoked after each episode-scan page is fetched (0-based).
+/// Used to prove mid-scan cancellation on the production broad-triage path.
+#[cfg(test)]
+#[allow(clippy::type_complexity)]
+static EPISODE_SCAN_PAGE_HOOK: Mutex<Option<Box<dyn FnMut(usize) + Send>>> = Mutex::new(None);
+
+/// Install or clear the test-only episode-scan page hook.
+#[cfg(test)]
+pub fn set_episode_scan_page_hook_for_test(hook: Option<Box<dyn FnMut(usize) + Send>>) {
+    *EPISODE_SCAN_PAGE_HOOK
+        .lock()
+        .expect("episode scan page hook") = hook;
+}
+
+#[cfg(test)]
+fn invoke_episode_scan_page_hook(page_index: usize) {
+    if let Ok(mut guard) = EPISODE_SCAN_PAGE_HOOK.lock() {
+        if let Some(hook) = guard.as_mut() {
+            hook(page_index);
+        }
+    }
+}
 
 /// Physical rendering shape found in the event store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -429,20 +531,25 @@ pub fn analyze_exception_episodes_with_cancel(
     let store_total = query_event_count(corpus, &filter)?.total_matched;
     check_revisions(corpus, pinned_event_revision, pinned_template_revision)?;
 
+    let candidate_cap = effective_candidate_cap();
+    let row_walk_cap = effective_row_walk_cap();
     let mut candidates = Vec::new();
     let mut rows_walked: u64 = 0;
     let mut after_seq = None;
     let mut walk_truncated = false;
     let mut candidate_truncated = false;
+    let mut store_eof = false;
+    let mut page_index: usize = 0;
 
-    while rows_walked < EXCEPTION_EPISODE_ROW_WALK_CAP as u64
-        && candidates.len() < EXCEPTION_EPISODE_EVENT_SCAN_CAP
-    {
+    // Keep walking until EOF, row-walk cap, or a candidate beyond retention cap.
+    // Filling the retention cap alone must NOT stop the walk: only a later
+    // candidate (overflow) or proven EOF decides completeness.
+    while rows_walked < row_walk_cap as u64 {
         if is_cancelled() {
             return Err(CoreError::Cancelled);
         }
         check_revisions(corpus, pinned_event_revision, pinned_template_revision)?;
-        let walk_remaining = EXCEPTION_EPISODE_ROW_WALK_CAP as u64 - rows_walked;
+        let walk_remaining = row_walk_cap as u64 - rows_walked;
         let page_limit = (walk_remaining as usize).min(MAX_EVENT_PAGE);
         let page = query_event_rows(
             corpus,
@@ -452,7 +559,12 @@ pub fn analyze_exception_episodes_with_cancel(
                 ..filter.clone()
             },
         )?;
+        #[cfg(test)]
+        invoke_episode_scan_page_hook(page_index);
+        page_index = page_index.saturating_add(1);
+
         if page.events.is_empty() {
+            store_eof = true;
             break;
         }
         after_seq = page.events.last().map(|event| event.seq);
@@ -463,9 +575,10 @@ pub fn analyze_exception_episodes_with_cancel(
                 return Err(CoreError::Cancelled);
             }
             if is_exception_candidate(&event) {
-                if candidates.len() < EXCEPTION_EPISODE_EVENT_SCAN_CAP {
+                if candidates.len() < candidate_cap {
                     candidates.push(event);
                 } else {
+                    // Cap already full: any further candidate means incomplete.
                     candidate_truncated = true;
                     break;
                 }
@@ -475,12 +588,10 @@ pub fn analyze_exception_episodes_with_cancel(
             break;
         }
         if page_len < page_limit as u64 {
+            store_eof = true;
             break;
         }
-        if rows_walked >= EXCEPTION_EPISODE_ROW_WALK_CAP as u64
-            && after_seq.is_some()
-            && store_total > rows_walked
-        {
+        if rows_walked >= row_walk_cap as u64 && store_total > rows_walked {
             walk_truncated = true;
             break;
         }
@@ -490,16 +601,30 @@ pub fn analyze_exception_episodes_with_cancel(
         return Err(CoreError::Cancelled);
     }
 
+    // Fail closed whenever the candidate cap prevents proving EOF:
+    // - overflow candidate after cap → candidate_truncated
+    // - walk cap hit before store EOF → walk_truncated
+    // - filled cap but exited without store_eof (should not happen with continued
+    //   walk; retained as belt-and-suspenders)
+    if candidates.len() == candidate_cap && !candidate_truncated && !store_eof && !walk_truncated {
+        candidate_truncated = true;
+    }
+    // Exact CAP + proven store_eof with no overflow → complete totals allowed.
+    let incomplete = walk_truncated || candidate_truncated;
+
     let candidate_scope = format!(
         "structure_based_exception_candidates_independent_of_severity; \
-         rows_walked={rows_walked}/{EXCEPTION_EPISODE_ROW_WALK_CAP}; \
-         candidates_retained={}/{EXCEPTION_EPISODE_EVENT_SCAN_CAP}; \
-         store_rows_under_suppression={store_total}",
-        candidates.len()
+         rows_walked={rows_walked}/{row_walk_cap}; \
+         candidates_retained={}/{candidate_cap}; \
+         store_rows_under_suppression={store_total}; \
+         store_eof={store_eof}; \
+         candidate_cap_prevents_complete_totals={}",
+        candidates.len(),
+        incomplete
     );
-    // When walk/candidate caps truncate, events_available is a lower bound only.
-    let events_available = if walk_truncated || candidate_truncated {
-        candidates.len() as u64 + 1 // strictly more than retained
+    // When caps prevent EOF proof, available count is a strict lower bound.
+    let events_available = if incomplete {
+        candidates.len() as u64 + 1
     } else {
         candidates.len() as u64
     };
@@ -511,13 +636,20 @@ pub fn analyze_exception_episodes_with_cancel(
         MatchingMeta::default(),
     )?;
     analysis.rows_walked = rows_walked;
-    analysis.row_walk_cap = EXCEPTION_EPISODE_ROW_WALK_CAP;
+    analysis.row_walk_cap = row_walk_cap;
+    analysis.event_scan_cap = candidate_cap;
     analysis.candidate_scope = candidate_scope;
     analysis.pinned_event_revision = Some(pinned_event_revision);
     analysis.pinned_template_analysis_revision = Some(pinned_template_revision);
-    if walk_truncated || candidate_truncated {
+    if incomplete {
         analysis.partial = true;
         analysis.counts_complete = false;
+        if !analysis.ranking_disclosure.contains("lower_bound") {
+            analysis.candidate_scope.push_str(
+                "; available_candidate_count_is_lower_bound=true; \
+                 never_claim_complete_corpus_totals_under_candidate_cap_without_eof",
+            );
+        }
     }
     // Recompute disclosure after partial flags settle.
     analysis.ranking_disclosure = build_ranking_disclosure(&analysis);
@@ -1300,7 +1432,6 @@ fn correlate_renderings_cancellable(
         // adj[l] = list of (right_local, conf_rank, distance, confidence) sorted by preference
         let mut adj: Vec<Vec<(usize, u8, u64, ExceptionCorrelationConfidence)>> =
             vec![Vec::new(); n_l];
-        let mut edge_count = 0usize;
         for (li, &app_idx) in apps.iter().enumerate() {
             for (ri, &wrap_idx) in wraps.iter().enumerate() {
                 let Some(confidence) =
@@ -1315,7 +1446,6 @@ fn correlate_renderings_cancellable(
                 };
                 let distance = axis_distance(&renderings[app_idx], &renderings[wrap_idx]);
                 adj[li].push((ri, conf_rank, distance, confidence));
-                edge_count += 1;
             }
             adj[li].sort_by(|a, b| {
                 a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)).then_with(|| {
@@ -1330,16 +1460,11 @@ fn correlate_renderings_cancellable(
             });
         }
 
-        // Ambiguity: more edges than needed for a perfect side, or multiple
-        // distance-0 options for a single app.
-        if edge_count > n_l.min(n_r) {
-            for list in &adj {
-                let zero_dist = list.iter().filter(|e| e.2 == 0).count();
-                if zero_dist > 1 || list.len() > 1 {
-                    matching_ambiguous = true;
-                    break;
-                }
-            }
+        // Ambiguity on either bipartite side: any app with ≥2 compatible stderr
+        // partners, or any stderr with ≥2 competing apps. Unique forced matchings
+        // are exactly the graphs where every incident degree is ≤1.
+        if bipartite_degrees_allow_alternate_max_matchings(&adj, n_r) {
+            matching_ambiguous = true;
         }
 
         // Kuhn max-cardinality matching; mt_r[ri] = Some(li)
@@ -1416,6 +1541,29 @@ fn correlate_renderings_cancellable(
             ambiguous: matching_ambiguous,
         },
     ))
+}
+
+/// True when the bipartite edge set admits more than one maximum matching
+/// candidate structure: any left degree ≥ 2 or any right degree ≥ 2.
+fn bipartite_degrees_allow_alternate_max_matchings(
+    adj: &[Vec<(usize, u8, u64, ExceptionCorrelationConfidence)>],
+    n_r: usize,
+) -> bool {
+    let mut right_deg = vec![0usize; n_r];
+    for list in adj {
+        if list.len() >= 2 {
+            return true;
+        }
+        for &(ri, _, _, _) in list {
+            if ri < n_r {
+                right_deg[ri] = right_deg[ri].saturating_add(1);
+                if right_deg[ri] >= 2 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn occurrence_from_renderings(
@@ -1733,7 +1881,7 @@ mod tests {
     use crate::log_analysis::embed_policy::{LogEmbedMode, LogEmbedPolicy};
     use crate::log_analysis::ingest::ingest_path_with_policy;
     use crate::log_analysis::{
-        query_events, ActiveTimestampBasis, TimeQuality, TimestampProvenance,
+        query_events, ActiveTimestampBasis, TimeQuality, TimestampProvenance, MAX_EVENT_PAGE,
     };
     use std::collections::BTreeSet;
     use std::fs;
@@ -2938,5 +3086,378 @@ mod tests {
             report_folder.raw_exception_record_count,
             report_zip.raw_exception_record_count
         );
+    }
+
+    /// One durable exception candidate per record (single-line header with type).
+    fn write_n_exception_lines(path: &Path, n: usize, level: &str, id_prefix: &str) {
+        let mut body = String::new();
+        for i in 0..n {
+            body.push_str(&format!(
+                "2026-03-15T12:00:{:02}.{:03}Z {level} java.lang.RuntimeException: {id_prefix}_{i}\n",
+                (i / 1000) % 60,
+                i % 1000
+            ));
+        }
+        fs::write(path, body).unwrap();
+    }
+
+    fn write_n_info_noise(path: &Path, n: usize) {
+        let mut body = String::new();
+        for i in 0..n {
+            body.push_str(&format!(
+                "2026-03-15T11:00:{:02}.{:03}Z INFO heartbeat ok n={i}\n",
+                (i / 1000) % 60,
+                i % 1000
+            ));
+        }
+        fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn candidate_cap_exact_eof_is_complete() {
+        // Cap N with exactly N candidates and store EOF → complete.
+        let _guard = TestScanOverrideGuard::acquire();
+        let cap = 8usize;
+        set_test_candidate_cap_override(cap);
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("in");
+        fs::create_dir_all(&src).unwrap();
+        write_n_exception_lines(&src.join("XYZ_e.log"), cap, "ERROR", "XYZ_CAP");
+        let (_c, _id, corpus) = ingest_dir(&src);
+        let analysis = analyze_exception_episodes(&corpus, &[]).unwrap();
+        assert_eq!(analysis.events_scanned as usize, cap);
+        assert!(
+            analysis.counts_complete,
+            "scope={}",
+            analysis.candidate_scope
+        );
+        assert!(!analysis.partial);
+        assert!(analysis.candidate_scope.contains("store_eof=true"));
+    }
+
+    #[test]
+    fn candidate_cap_exact_then_ordinary_rows_is_complete() {
+        let _guard = TestScanOverrideGuard::acquire();
+        let cap = 8usize;
+        set_test_candidate_cap_override(cap);
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("in");
+        fs::create_dir_all(&src).unwrap();
+        write_n_exception_lines(&src.join("XYZ_e.log"), cap, "ERROR", "XYZ_CAP");
+        write_n_info_noise(&src.join("XYZ_noise.log"), 40);
+        let (_c, _id, corpus) = ingest_dir(&src);
+        let analysis = analyze_exception_episodes(&corpus, &[]).unwrap();
+        assert_eq!(analysis.events_scanned as usize, cap);
+        assert!(
+            analysis.counts_complete && !analysis.partial,
+            "ordinary rows after exact cap must not force incomplete: {}",
+            analysis.candidate_scope
+        );
+    }
+
+    #[test]
+    fn candidate_cap_exact_then_later_exception_is_partial() {
+        let _guard = TestScanOverrideGuard::acquire();
+        let cap = 8usize;
+        set_test_candidate_cap_override(cap);
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("in");
+        fs::create_dir_all(&src).unwrap();
+        write_n_exception_lines(&src.join("a_XYZ_e.log"), cap, "ERROR", "XYZ_CAP");
+        write_n_info_noise(&src.join("b_XYZ_noise.log"), 20);
+        write_n_exception_lines(&src.join("c_XYZ_late.log"), 1, "ERROR", "XYZ_LATE");
+        let (_c, _id, corpus) = ingest_dir(&src);
+        let analysis = analyze_exception_episodes(&corpus, &[]).unwrap();
+        assert_eq!(
+            analysis.events_scanned as usize, cap,
+            "scope={}",
+            analysis.candidate_scope
+        );
+        assert!(analysis.partial);
+        assert!(!analysis.counts_complete);
+        assert!(
+            analysis.candidate_scope.contains("lower_bound")
+                || analysis.events_available > analysis.events_scanned,
+            "scope={}",
+            analysis.candidate_scope
+        );
+    }
+
+    #[test]
+    fn candidate_cap_at_page_boundary_vs_mid_page() {
+        let _guard = TestScanOverrideGuard::acquire();
+        // MAX_EVENT_PAGE = 500. Cap=500 fills exactly one page when every row is a candidate.
+        let cap = MAX_EVENT_PAGE;
+        set_test_candidate_cap_override(cap);
+
+        // Page-boundary: exactly one full page of candidates + later overflow candidate.
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("boundary");
+        fs::create_dir_all(&src).unwrap();
+        write_n_exception_lines(&src.join("a.log"), cap, "ERROR", "XYZ_PAGE");
+        write_n_exception_lines(&src.join("b.log"), 1, "ERROR", "XYZ_AFTER_PAGE");
+        let (_c, _id, corpus) = ingest_dir(&src);
+        let boundary = analyze_exception_episodes(&corpus, &[]).unwrap();
+        assert_eq!(boundary.events_scanned as usize, cap);
+        assert!(
+            boundary.partial && !boundary.counts_complete,
+            "page-boundary overflow must be partial: {}",
+            boundary.candidate_scope
+        );
+
+        // Mid-page: cap=3 with 5 candidates in a short file (overflow mid first page).
+        set_test_candidate_cap_override(3);
+        let src2 = tmp.path().join("mid");
+        fs::create_dir_all(&src2).unwrap();
+        write_n_exception_lines(&src2.join("m.log"), 5, "ERROR", "XYZ_MID");
+        let (_c2, _id2, corpus2) = ingest_dir(&src2);
+        let mid = analyze_exception_episodes(&corpus2, &[]).unwrap();
+        assert_eq!(mid.events_scanned, 3, "scope={}", mid.candidate_scope);
+        assert!(
+            mid.partial && !mid.counts_complete,
+            "scope={}",
+            mid.candidate_scope
+        );
+    }
+
+    #[test]
+    fn matching_ambiguous_both_bipartite_sides_and_unique_forced() {
+        // two apps → one compatible stderr
+        let two_apps_one_stderr = vec![
+            event(
+                1,
+                10,
+                "app.log",
+                "java.lang.RuntimeException: XYZ_SIDE\n at com.xyz.A.m(A.java:1)",
+            ),
+            event(
+                2,
+                10,
+                "app.log",
+                "java.lang.RuntimeException: XYZ_SIDE\n at com.xyz.A.m(A.java:1)",
+            ),
+            event(
+                3,
+                10,
+                "stderr.log",
+                "[stderr] java.lang.RuntimeException: XYZ_SIDE",
+            ),
+            event(4, 10, "stderr.log", "[stderr] at com.xyz.A.m(A.java:1)"),
+        ];
+        let a = analyze_bounded_events(4, &two_apps_one_stderr);
+        assert!(
+            a.matching_ambiguous,
+            "two apps competing for one stderr must be ambiguous"
+        );
+
+        // one app → two compatible stderr
+        let one_app_two_stderr = vec![
+            event(
+                1,
+                10,
+                "app.log",
+                "java.lang.RuntimeException: XYZ_SIDE2\n at com.xyz.A.m(A.java:1)",
+            ),
+            event(
+                2,
+                10,
+                "s1.log",
+                "[stderr] java.lang.RuntimeException: XYZ_SIDE2",
+            ),
+            event(3, 10, "s1.log", "[stderr] at com.xyz.A.m(A.java:1)"),
+            event(
+                4,
+                10,
+                "s2.log",
+                "[stderr] java.lang.RuntimeException: XYZ_SIDE2",
+            ),
+            event(5, 10, "s2.log", "[stderr] at com.xyz.A.m(A.java:1)"),
+        ];
+        let b = analyze_bounded_events(5, &one_app_two_stderr);
+        assert!(
+            b.matching_ambiguous,
+            "one app with two stderr partners must be ambiguous"
+        );
+
+        // alternating-cycle: 2×2 complete bipartite (same wall, same signature)
+        let cycle = vec![
+            event(
+                1,
+                10,
+                "app.log",
+                "java.lang.RuntimeException: XYZ_CYC\n at com.xyz.A.m(A.java:1)",
+            ),
+            event(
+                2,
+                10,
+                "app.log",
+                "java.lang.RuntimeException: XYZ_CYC\n at com.xyz.A.m(A.java:1)",
+            ),
+            event(
+                3,
+                10,
+                "s1.log",
+                "[stderr] java.lang.RuntimeException: XYZ_CYC",
+            ),
+            event(4, 10, "s1.log", "[stderr] at com.xyz.A.m(A.java:1)"),
+            event(
+                5,
+                10,
+                "s2.log",
+                "[stderr] java.lang.RuntimeException: XYZ_CYC",
+            ),
+            event(6, 10, "s2.log", "[stderr] at com.xyz.A.m(A.java:1)"),
+        ];
+        let c = analyze_bounded_events(6, &cycle);
+        assert!(
+            c.matching_ambiguous,
+            "alternating-cycle graph must be ambiguous"
+        );
+
+        // unique perfect: disjoint exact pairs at distinct times with only one edge each
+        let unique = vec![
+            event(
+                1,
+                10,
+                "app.log",
+                "java.lang.RuntimeException: XYZ_U1\n at com.xyz.A.m(A.java:1)",
+            ),
+            event(
+                2,
+                10,
+                "s1.log",
+                "[stderr] java.lang.RuntimeException: XYZ_U1",
+            ),
+            event(
+                3,
+                30,
+                "app.log",
+                "java.lang.RuntimeException: XYZ_U2\n at com.xyz.A.m(A.java:1)",
+            ),
+            event(
+                4,
+                30,
+                "s2.log",
+                "[stderr] java.lang.RuntimeException: XYZ_U2",
+            ),
+        ];
+        let d = analyze_bounded_events(4, &unique);
+        // Different signatures → separate components each with degree 1.
+        assert!(
+            !d.matching_ambiguous,
+            "unique forced pairs must not be marked ambiguous (got policy={})",
+            d.matching_policy
+        );
+        assert_eq!(d.duplicate_rendering_occurrence_count, 2);
+    }
+
+    #[test]
+    fn production_scan_reaches_info_exception_after_50k_ordinary_info() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("in");
+        fs::create_dir_all(&src).unwrap();
+        write_n_info_noise(&src.join("a_noise.log"), 50_001);
+        // INFO-level exception after the noise (structure-based, not severity).
+        fs::write(
+            src.join("b_late.log"),
+            "2026-03-15T14:00:00.000Z INFO java.lang.RuntimeException: XYZ_INFO_LATE\n  at com.xyz.Late.m(Late.java:1)\n",
+        )
+        .unwrap();
+        let (_c, _id, corpus) = ingest_dir(&src);
+        let analysis = analyze_exception_episodes(&corpus, &[]).unwrap();
+        assert!(
+            analysis.raw_exception_record_count >= 1,
+            "must reach INFO exception after 50k ordinary INFO rows"
+        );
+        assert!(
+            analysis.occurrence_count >= 1,
+            "INFO exception must form an occurrence without severity filtering"
+        );
+        assert!(
+            analysis.rows_walked > 50_000,
+            "walk must pass the ordinary volume (walked={})",
+            analysis.rows_walked
+        );
+        // Within 250k walk — should not be walk-truncated for this size.
+        assert!(
+            analysis.rows_walked <= EXCEPTION_EPISODE_ROW_WALK_CAP as u64,
+            "walked={}",
+            analysis.rows_walked
+        );
+    }
+
+    #[test]
+    fn template_projection_family_a_56_family_b_3_supporting_is_exactly_three() {
+        // Family A: 56 dual occurrences (compact stderr, not 265).
+        // Family B: 3 dual occurrences with unique supporting template_id=7777.
+        let mut events = Vec::new();
+        for i in 0..56u64 {
+            let t = (i * 2) as i64;
+            events.push(event(
+                i * 10 + 1,
+                t,
+                "app_a.log",
+                "java.lang.RuntimeException: XYZ_FAM_A\n at com.xyz.A.m(A.java:1)",
+            ));
+            events.push(event(
+                i * 10 + 2,
+                t,
+                "err_a.log",
+                "[stderr] java.lang.RuntimeException: XYZ_FAM_A",
+            ));
+            events.push(event(
+                i * 10 + 3,
+                t,
+                "err_a.log",
+                "[stderr] at com.xyz.A.m(A.java:1)",
+            ));
+        }
+        for i in 0..3u64 {
+            let t = 10_000 + (i * 2) as i64;
+            let base = 10_000 + i * 10;
+            let mut app = event(
+                base + 1,
+                t,
+                "app_b.log",
+                "java.lang.IllegalStateException: XYZ_FAM_B\n at com.xyz.B.m(B.java:1)",
+            );
+            app.template_id = 9001;
+            let mut head = event(
+                base + 2,
+                t,
+                "err_b.log",
+                "[stderr] java.lang.IllegalStateException: XYZ_FAM_B",
+            );
+            head.template_id = 9002;
+            let mut support = event(
+                base + 3,
+                t,
+                "err_b.log",
+                "[stderr] at com.xyz.B.uniqueSupport(B.java:99)",
+            );
+            support.template_id = 7777;
+            events.push(app);
+            events.push(head);
+            events.push(support);
+        }
+        let analysis = analyze_bounded_events(events.len() as u64, &events);
+        assert_eq!(analysis.occurrence_count, 59);
+        let fam_a = analysis
+            .families
+            .iter()
+            .find(|f| f.occurrence_count == 56)
+            .expect("family A 56");
+        let fam_b = analysis
+            .families
+            .iter()
+            .find(|f| f.occurrence_count == 3)
+            .expect("family B 3");
+        assert_ne!(fam_a.signature, fam_b.signature);
+        let proj = project_template_onto_episodes(&analysis, 7777);
+        assert!(proj.complete, "{proj:?}");
+        assert_eq!(proj.occurrence_count, Some(3));
+        assert_eq!(proj.supporting_only_occurrence_count, Some(3));
+        assert_ne!(proj.occurrence_count, Some(56));
+        assert_ne!(proj.occurrence_count, Some(59));
     }
 }

@@ -91,6 +91,11 @@ pub use exception_episodes::{
     EXCEPTION_EPISODE_RECORD_CAP, EXCEPTION_EPISODE_RENDER_CAP, EXCEPTION_EPISODE_ROW_WALK_CAP,
     EXCEPTION_EPISODE_SCHEMA_ID, EXCEPTION_EPISODE_SCHEMA_VERSION,
 };
+#[cfg(test)]
+pub use exception_episodes::{
+    set_episode_scan_page_hook_for_test, set_test_candidate_cap_override,
+    set_test_row_walk_cap_override,
+};
 pub use format_profile::{
     fingerprint_format, BuiltInFormatProfile, BuiltInGrammar, FormatFingerprint,
     FormatFingerprintOutcome, FormatProfileIdentity, BUILT_IN_FORMAT_PROFILES,
