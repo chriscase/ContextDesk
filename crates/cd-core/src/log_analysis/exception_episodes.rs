@@ -24,9 +24,9 @@ use crate::log_analysis::{
 };
 use crate::process_progress::CancelFlag;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
 #[cfg(test)]
-use std::sync::atomic::AtomicUsize;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 use std::sync::Mutex;
@@ -59,7 +59,7 @@ pub const EXCEPTION_EPISODE_ROW_WALK_CAP: usize = 250_000;
 fn effective_candidate_cap() -> usize {
     #[cfg(test)]
     {
-        let override_cap = TEST_CANDIDATE_CAP_OVERRIDE.load(Ordering::SeqCst);
+        let override_cap = TEST_CANDIDATE_CAP_OVERRIDE.with(Cell::get);
         if override_cap > 0 {
             return override_cap;
         }
@@ -71,7 +71,7 @@ fn effective_candidate_cap() -> usize {
 fn effective_row_walk_cap() -> usize {
     #[cfg(test)]
     {
-        let override_cap = TEST_ROW_WALK_CAP_OVERRIDE.load(Ordering::SeqCst);
+        let override_cap = TEST_ROW_WALK_CAP_OVERRIDE.with(Cell::get);
         if override_cap > 0 {
             return override_cap;
         }
@@ -80,9 +80,14 @@ fn effective_row_walk_cap() -> usize {
 }
 
 #[cfg(test)]
-static TEST_CANDIDATE_CAP_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
-#[cfg(test)]
-static TEST_ROW_WALK_CAP_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    // Test controls must be thread-local: a small-cap test running in parallel
+    // must never truncate an unrelated production-default analysis.
+    static TEST_CANDIDATE_CAP_OVERRIDE: Cell<usize> = const { Cell::new(0) };
+    static TEST_ROW_WALK_CAP_OVERRIDE: Cell<usize> = const { Cell::new(0) };
+    static EPISODE_SCAN_PAGE_HOOK: RefCell<Option<Box<dyn FnMut(usize) + Send>>> =
+        RefCell::new(None);
+}
 /// Serializes tests that mutate cap overrides / page hooks.
 #[cfg(test)]
 static TEST_SCAN_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
@@ -90,13 +95,13 @@ static TEST_SCAN_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
 /// Test-only: override candidate retention cap (`0` restores production default).
 #[cfg(test)]
 pub fn set_test_candidate_cap_override(cap: usize) {
-    TEST_CANDIDATE_CAP_OVERRIDE.store(cap, Ordering::SeqCst);
+    TEST_CANDIDATE_CAP_OVERRIDE.with(|value| value.set(cap));
 }
 
 /// Test-only: override row-walk cap (`0` restores production default).
 #[cfg(test)]
 pub fn set_test_row_walk_cap_override(cap: usize) {
-    TEST_ROW_WALK_CAP_OVERRIDE.store(cap, Ordering::SeqCst);
+    TEST_ROW_WALK_CAP_OVERRIDE.with(|value| value.set(cap));
 }
 
 /// RAII lock + reset for cap/hook overrides in tests.
@@ -130,27 +135,19 @@ impl Drop for TestScanOverrideGuard {
     }
 }
 
-/// Test-only page hook invoked after each episode-scan page is fetched (0-based).
-/// Used to prove mid-scan cancellation on the production broad-triage path.
-#[cfg(test)]
-#[allow(clippy::type_complexity)]
-static EPISODE_SCAN_PAGE_HOOK: Mutex<Option<Box<dyn FnMut(usize) + Send>>> = Mutex::new(None);
-
 /// Install or clear the test-only episode-scan page hook.
 #[cfg(test)]
 pub fn set_episode_scan_page_hook_for_test(hook: Option<Box<dyn FnMut(usize) + Send>>) {
-    *EPISODE_SCAN_PAGE_HOOK
-        .lock()
-        .expect("episode scan page hook") = hook;
+    EPISODE_SCAN_PAGE_HOOK.with(|slot| *slot.borrow_mut() = hook);
 }
 
 #[cfg(test)]
 fn invoke_episode_scan_page_hook(page_index: usize) {
-    if let Ok(mut guard) = EPISODE_SCAN_PAGE_HOOK.lock() {
-        if let Some(hook) = guard.as_mut() {
+    EPISODE_SCAN_PAGE_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().as_mut() {
             hook(page_index);
         }
-    }
+    });
 }
 
 /// Physical rendering shape found in the event store.
@@ -3133,6 +3130,32 @@ mod tests {
         );
         assert!(!analysis.partial);
         assert!(analysis.candidate_scope.contains("store_eof=true"));
+    }
+
+    #[test]
+    fn scan_test_controls_are_thread_local() {
+        let _guard = TestScanOverrideGuard::acquire();
+        set_test_candidate_cap_override(3);
+        set_test_row_walk_cap_override(7);
+        let hook_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_calls_inner = std::sync::Arc::clone(&hook_calls);
+        set_episode_scan_page_hook_for_test(Some(Box::new(move |_| {
+            hook_calls_inner.fetch_add(1, Ordering::SeqCst);
+        })));
+
+        std::thread::spawn(|| {
+            assert_eq!(effective_candidate_cap(), EXCEPTION_EPISODE_EVENT_SCAN_CAP);
+            assert_eq!(effective_row_walk_cap(), EXCEPTION_EPISODE_ROW_WALK_CAP);
+            invoke_episode_scan_page_hook(0);
+        })
+        .join()
+        .expect("parallel test thread");
+
+        assert_eq!(effective_candidate_cap(), 3);
+        assert_eq!(effective_row_walk_cap(), 7);
+        assert_eq!(hook_calls.load(Ordering::SeqCst), 0);
+        invoke_episode_scan_page_hook(0);
+        assert_eq!(hook_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
