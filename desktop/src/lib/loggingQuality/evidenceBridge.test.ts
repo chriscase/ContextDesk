@@ -58,8 +58,8 @@ describe("planShowInExplorer", () => {
         },
         {
           kind: "template",
-          key: "42",
-          value: 42,
+          key: "template_id:42",
+          value: 300,
           label: "template 42",
         },
       ]),

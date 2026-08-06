@@ -70,11 +70,13 @@ export function planShowInExplorer(
         sawResolvableSource = true;
       }
     } else if (loc.kind === "template") {
-      const id = Number(loc.key);
+      // Core emits `template_id:<id>`; accept a bare numeric key as a
+      // compatibility shape. `value` is the event count, never an id.
+      const rawId = loc.key.startsWith("template_id:")
+        ? loc.key.slice("template_id:".length)
+        : loc.key;
+      const id = Number(rawId);
       if (Number.isSafeInteger(id) && id >= 0) templateIds.push(id);
-      else if (loc.value != null && Number.isSafeInteger(loc.value)) {
-        templateIds.push(Number(loc.value));
-      }
     } else if (loc.kind === "corpus_metric" || loc.kind === "selection_bucket") {
       sawAggregateOnlyKind = true;
     }
