@@ -23,6 +23,7 @@ pub mod ingest;
 mod ingest_confidence;
 pub mod lanes;
 pub mod linked_search_bound;
+pub mod logging_quality;
 pub mod noise_candidates;
 pub mod normalize_export;
 pub mod operational_metrics;
@@ -113,6 +114,19 @@ pub use lanes::{
 pub use linked_search_bound::{
     citations_from_search_evidence, BoundDecision, CiteableEvidenceSet,
     LinkedSearchProgressTracker, SearchIntentKey, MAX_MATERIAL_NO_PROGRESS_REFINEMENTS,
+};
+pub use logging_quality::{
+    assess_logging_quality, public_assessment_denylist_patterns, render_logging_quality_markdown,
+    validate_logging_quality_json, LoggingQualityAssessment, LoggingQualityConfidence,
+    LoggingQualityCorpusRef, LoggingQualityDimensionScore, LoggingQualityEvidenceKind,
+    LoggingQualityEvidenceLocator, LoggingQualityFinding, LoggingQualityFindingCategory,
+    LoggingQualityFindingConfidence, LoggingQualityFindingSeverity, LoggingQualityGrade,
+    LoggingQualityImprovementHint, LoggingQualityMetrics, LoggingQualityPrivacy,
+    LoggingQualitySelectionCoverage, LoggingQualitySourceMetrics, LoggingQualityStoredLevelMetrics,
+    LoggingQualitySummary, LoggingQualityTemplateMetrics, LoggingQualityTemplateRef,
+    LoggingQualityTraceIdMetrics, LOGGING_QUALITY_REDACTION_MODE, LOGGING_QUALITY_SCHEMA_ID,
+    LOGGING_QUALITY_SCHEMA_VERSION, MAX_ASSESSMENT_FINDINGS, MAX_ASSESSMENT_SOURCES,
+    MAX_CONCENTRATION_TEMPLATES,
 };
 pub use noise_candidates::{
     propose_noise_candidates, propose_noise_candidates_with_cancel, score_noise_candidate_facts,

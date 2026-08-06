@@ -15,6 +15,7 @@
 
 pub mod chat;
 pub mod import;
+pub mod logging_quality;
 pub mod normalize;
 pub mod provider;
 pub mod session;

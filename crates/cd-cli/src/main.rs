@@ -242,6 +242,10 @@ async fn dispatch(
                 Err(e) => emit_error(format, "doctor", e),
             }
         }
+        Command::LoggingAssessment(args) => {
+            let result = commands::logging_assessment::run(args, &paths.cache_root);
+            emit(format, "logging_assessment", result)
+        }
     }
 }
 

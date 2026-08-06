@@ -14,6 +14,7 @@ tags:
 order: 10
 related:
   - demo-log-datasets
+  - logging-quality-assessment
   - skills-context-packs
   - permission-tiers
   - memory-overview

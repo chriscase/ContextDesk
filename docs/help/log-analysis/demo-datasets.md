@@ -12,6 +12,7 @@ order: 5
 related:
   - log-analysis-pipeline
   - log-explorer
+  - logging-quality-assessment
 ---
 
 # Try the demo log datasets

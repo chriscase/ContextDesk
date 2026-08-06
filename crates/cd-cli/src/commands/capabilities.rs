@@ -95,6 +95,7 @@ const COMMANDS: &[&str] = &[
     "config path",
     "capabilities",
     "doctor",
+    "logging-assessment",
 ];
 
 pub fn run(branding: &Branding) -> CapabilitiesOutput {
