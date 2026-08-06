@@ -218,44 +218,24 @@ pub fn pack_linked_evidence_blocks(
     }
 
     let total_chars: usize = blocks.iter().map(|b| b.chars().count()).sum();
-    // Fast path: entire host evidence fits under budget. Preserve original block
-    // order (required for broad-triage complete brief checks) but still collapse
-    // exact-duplicate identity lines so focused packs stay deterministic.
+    // Fast path: entire host evidence fits under budget. Preserve blocks
+    // **byte-for-byte** (same join as CurrentTurnEvidence::render) so broad-triage
+    // complete-brief checks using `contains(evidence)` keep working. Deduping is
+    // only applied on the oversize ranked path below.
     if total_chars <= evidence_budget_chars {
-        let mut seen = std::collections::BTreeSet::new();
-        let mut parts: Vec<String> = Vec::new();
-        let mut identity_lines_included = 0usize;
-        let mut identity_dupes = 0usize;
-        for block in blocks {
-            let mut block_lines: Vec<&str> = Vec::new();
-            for line in block.lines() {
-                let t = line.trim_end();
-                if t.is_empty() {
-                    continue;
-                }
-                if line_has_citation_identity(t) {
-                    let key = identity_key_from_line(t);
-                    if !seen.insert(key) {
-                        identity_dupes = identity_dupes.saturating_add(1);
-                        continue;
-                    }
-                    identity_lines_included = identity_lines_included.saturating_add(1);
-                }
-                block_lines.push(t);
-            }
-            if !block_lines.is_empty() {
-                parts.push(block_lines.join("\n"));
-            }
-        }
-        let text = parts.join("\n\n");
+        let text = blocks.join("\n\n");
+        let identity_lines_included = text
+            .lines()
+            .filter(|l| line_has_citation_identity(l))
+            .count();
         return PackedLinkedEvidence {
-            text: text.clone(),
+            text,
             included_blocks: blocks.len(),
             omitted_blocks: 0,
-            included_chars: text.chars().count(),
+            included_chars: total_chars,
             omitted_chars: 0,
             identity_lines_included,
-            identity_lines_omitted: identity_dupes,
+            identity_lines_omitted: 0,
         };
     }
     // Budget for body after omit footer reserve when we expect overflow.
@@ -269,11 +249,16 @@ pub fn pack_linked_evidence_blocks(
         is_identity: bool,
         identity_key: Option<String>,
         score: i32,
+        /// 0 = force first identity, 1 = force last identity, 2 = normal fill.
+        stratum: u8,
     }
 
     let mut units: Vec<Unit> = Vec::new();
+    let n_blocks = blocks.len();
     for (block_idx, block) in blocks.iter().enumerate() {
-        for (line_i, raw_line) in block.lines().enumerate() {
+        let line_list: Vec<&str> = block.lines().collect();
+        let n_lines = line_list.len();
+        for (line_i, raw_line) in line_list.iter().enumerate() {
             let line = raw_line.trim_end().to_string();
             if line.is_empty() {
                 continue;
@@ -284,33 +269,67 @@ pub fn pack_linked_evidence_blocks(
             } else {
                 None
             };
-            // Higher score = more important. Prefer identity lines, earlier blocks,
-            // and slightly prefer shorter identity rows (representative first).
+            // Prefer identity lines and denser (shorter) rows. Do **not** penalize
+            // late identity blocks — that drops rare tail events under oversize packs.
             let mut score = 0i32;
             if is_identity {
                 score += 1_000;
-                score -= (line.chars().count() as i32).min(200);
+                score -= (line.chars().count() as i32).min(150);
             } else {
                 score += 10;
+                score -= (block_idx as i32).min(80);
             }
-            // First/last lines of a block are often headers or rare tail events.
+            // First/last lines of a block (headers / rare tails).
             if line_i == 0 {
-                score += 50;
+                score += 80;
             }
-            score -= (block_idx as i32) * 2;
+            if n_lines > 1 && line_i + 1 == n_lines {
+                score += 120;
+            }
+            if n_blocks > 1 && block_idx + 1 == n_blocks && is_identity {
+                score += 200;
+            }
+            if block_idx == 0 && is_identity {
+                score += 100;
+            }
             units.push(Unit {
                 block_idx,
                 line,
                 is_identity,
                 identity_key,
                 score,
+                stratum: 2,
             });
         }
     }
 
-    // Rank by score desc, then original order for stability.
+    // Force-include first and last identity units so rare tail + lead survive.
+    let identity_idxs: Vec<usize> = units
+        .iter()
+        .enumerate()
+        .filter(|(_, u)| u.is_identity)
+        .map(|(i, _)| i)
+        .collect();
+    if let Some(&first) = identity_idxs.first() {
+        units[first].stratum = 0;
+        units[first].score += 5_000;
+    }
+    if identity_idxs.len() > 1 {
+        if let Some(&last) = identity_idxs.last() {
+            units[last].stratum = 1;
+            units[last].score += 5_000;
+        }
+    }
+
+    // Stratum 0/1 first, then score desc, then original index for stability.
     let mut order: Vec<usize> = (0..units.len()).collect();
-    order.sort_by(|&a, &b| units[b].score.cmp(&units[a].score).then_with(|| a.cmp(&b)));
+    order.sort_by(|&a, &b| {
+        units[a]
+            .stratum
+            .cmp(&units[b].stratum)
+            .then_with(|| units[b].score.cmp(&units[a].score))
+            .then_with(|| a.cmp(&b))
+    });
 
     let mut selected: Vec<Option<String>> = vec![None; units.len()];
     let mut used_chars = 0usize;
@@ -323,20 +342,15 @@ pub fn pack_linked_evidence_blocks(
         let u = &units[idx];
         if let Some(key) = &u.identity_key {
             if !seen_ids.insert(key.clone()) {
-                // Duplicate identity — omit without counting as omitted identity
-                // when we already kept one; still counts as skip.
+                // Duplicate identity — keep first only.
                 continue;
             }
         }
         let mut candidate = u.line.clone();
         let mut cand_chars = candidate.chars().count();
-        // Separator newline if we already have content when assembled in order.
-        // Reserve 1 char per selected unit for joining.
         let join_cost = 1;
         if used_chars + cand_chars + join_cost > body_budget {
             if u.is_identity {
-                // Try to keep identity line alone by truncating a long line's body
-                // after the identity markers — never mid-token on seq=/source=.
                 if let Some(trimmed) = truncate_preserving_identity_line(
                     &candidate,
                     body_budget.saturating_sub(used_chars + join_cost),
@@ -352,8 +366,6 @@ pub fn pack_linked_evidence_blocks(
                     continue;
                 }
             } else {
-                // Non-identity: drop if it does not fit; optionally keep a short stub
-                // only when budget still allows a useful fragment.
                 let room = body_budget.saturating_sub(used_chars + join_cost);
                 if room < 48 {
                     continue;
@@ -611,7 +623,11 @@ mod tests {
                 "x".repeat(400)
             ));
         }
-        // Inject a rare late event that should still compete via identity score.
+        // Lead + rare late identity must survive oversize packing (not only early hits).
+        blocks.insert(
+            0,
+            "LEAD seq=0 source=\"worker.log\" template_id=0 msg=needle-first-event".into(),
+        );
         blocks.push(
             "RARE seq=9999 source=\"worker.log\" template_id=99 msg=needle-rare-event".into(),
         );
@@ -619,11 +635,21 @@ mod tests {
         let a = pack_linked_evidence_blocks(&blocks, budget);
         let b = pack_linked_evidence_blocks(&blocks, budget);
         assert_eq!(a, b);
-        assert!(a.identity_lines_included >= 1);
+        assert!(a.identity_lines_included >= 2);
         assert!(a.omitted_blocks > 0 || a.omitted_chars > 0);
         assert!(a.text.chars().count() <= budget);
         assert!(a.text.contains("seq="));
         assert!(a.text.contains("source="));
+        assert!(
+            a.text.contains("needle-rare-event") || a.text.contains("seq=9999"),
+            "rare late identity must survive oversize pack: {}",
+            a.text.chars().take(400).collect::<String>()
+        );
+        assert!(
+            a.text.contains("needle-first-event") || a.text.contains("seq=0"),
+            "first/representative identity must survive: {}",
+            a.text.chars().take(400).collect::<String>()
+        );
         // Full package near hard budget class would fail headroom check when used as packing fill.
         assert!(!has_useful_context_headroom(119_900, 120_000));
         // Citation lines never split mid-marker
@@ -654,15 +680,60 @@ mod tests {
 
     #[test]
     fn packer_dedupes_identical_identity_lines() {
-        let line = "seq=42 source=\"api.log\" template_id=3 msg=hello";
-        let blocks = vec![line.into(), line.into(), line.into()];
-        let packed = pack_linked_evidence_blocks(&blocks, 10_000);
-        let count = packed.text.lines().filter(|l| l.contains("seq=42")).count();
+        // Oversize path only: under-budget fast path preserves verbatim joins for
+        // broad-triage brief fidelity (no dedupe). Pad so total_chars > budget.
+        let pad = "z".repeat(2_000);
+        let line = format!("seq=42 source=\"api.log\" template_id=3 msg=hello {pad}");
+        let blocks = vec![line.clone(), line.clone(), line.clone()];
+        let budget = 3_500; // < 3 * ~2k so rank/dedupe path runs
+        assert!(
+            blocks.iter().map(|b| b.chars().count()).sum::<usize>() > budget,
+            "test setup must force oversize ranked path"
+        );
+        let packed = pack_linked_evidence_blocks(&blocks, budget);
+        let count = packed
+            .text
+            .lines()
+            .filter(|l| l.contains("seq=42") && l.contains("source=\"api.log\""))
+            .count();
         assert_eq!(
             count, 1,
-            "duplicate identities must collapse: {}",
+            "duplicate identities must collapse on oversize path: {}",
             packed.text
         );
+    }
+
+    #[test]
+    fn packer_oversize_force_includes_last_rare_identity() {
+        // Many long early identity hits; rare needle is the last block only.
+        let mut blocks = Vec::new();
+        for i in 0..80 {
+            blocks.push(format!(
+                "seq={i} source=\"worker.log\" template_id={} msg={}",
+                i % 5,
+                "EARLY_LONG_HIT ".repeat(80)
+            ));
+        }
+        blocks.push(
+            "seq=9999 source=\"worker.log\" template_id=99 msg=needle-rare-event UNIQUE_TAIL"
+                .into(),
+        );
+        let budget = 6_000;
+        let packed = pack_linked_evidence_blocks(&blocks, budget);
+        assert!(
+            packed.omitted_blocks > 0 || packed.omitted_chars > 0,
+            "must be an oversize pack"
+        );
+        assert!(
+            packed.text.contains("needle-rare-event")
+                || packed.text.contains("UNIQUE_TAIL")
+                || packed.text.contains("seq=9999"),
+            "last rare identity must survive: included={} omitted_blocks={} text_prefix={}",
+            packed.identity_lines_included,
+            packed.omitted_blocks,
+            packed.text.chars().take(300).collect::<String>()
+        );
+        assert!(packed.text.chars().count() <= budget);
     }
 
     #[test]

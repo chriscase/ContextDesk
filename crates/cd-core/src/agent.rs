@@ -269,6 +269,9 @@ struct LinkedRoundContextArgs<'a> {
     hard_budget: usize,
     capacity_source: crate::context_budgeting::CapacitySourceLabel,
     compact_correction: bool,
+    /// When true (broad-triage complete brief), keep host evidence verbatim and
+    /// let prepare/fit + caller's contains-check enforce fail-closed completeness.
+    require_full_evidence: bool,
 }
 
 /// Build linked synthesis model context with reserved headroom + evidence packing.
@@ -296,6 +299,7 @@ fn linked_round_model_context(
         hard_budget,
         capacity_source,
         compact_correction,
+        require_full_evidence,
     } = args;
 
     let history_non_system: Vec<ChatMessage> = prior_history
@@ -310,8 +314,28 @@ fn linked_round_model_context(
             let (sys, user, packed) =
                 compact_correction_package(&system, user_text, evidence.blocks(), packing_budget);
             (sys, user, packed)
+        } else if require_full_evidence {
+            // Broad-triage complete brief: verbatim host evidence (same join as render).
+            let text = evidence.render();
+            let id_lines = text
+                .lines()
+                .filter(|l| {
+                    let lower = l.to_ascii_lowercase();
+                    lower.contains("seq=") && lower.contains("source")
+                })
+                .count();
+            let packed = PackedLinkedEvidence {
+                text: text.clone(),
+                included_blocks: evidence.blocks().len(),
+                omitted_blocks: 0,
+                included_chars: text.chars().count(),
+                omitted_chars: 0,
+                identity_lines_included: id_lines,
+                identity_lines_omitted: 0,
+            };
+            (system, user_text.to_string(), packed)
         } else {
-            // Measure irreducible overhead (system + user + history stubs) under packing budget.
+            // Focused (or incomplete) path: rank/dedupe under residual after overhead.
             let mut probe = history_non_system.clone();
             probe.insert(
                 0,
@@ -328,7 +352,6 @@ fn linked_round_model_context(
                 tool_call_id: None,
                 tool_calls: None,
             });
-            // Fit history under packing budget first so evidence gets a real residual.
             let fitted_probe = crate::sessions::prepare_model_context(
                 &probe,
                 probe.len().max(1),
@@ -3040,6 +3063,8 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                 hard_budget: char_budget,
                 capacity_source,
                 compact_correction: linked_invalid_synthesis_retry,
+                require_full_evidence: broad_triage_brief_complete
+                    && !linked_invalid_synthesis_retry,
             }) {
                 Ok(pair) => pair,
                 Err(error) => {
@@ -3050,23 +3075,10 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                 }
             };
             if broad_triage_brief_complete {
-                // Broad triage still requires the deterministic brief itself to fit.
+                // Strict fail-closed: complete deterministic brief must appear in
+                // the packed model context (same gate as pre-focused-headroom path).
                 let evidence = current_turn_evidence.render();
-                if !model_context_contains_evidence(&messages, &evidence)
-                    && budget_tel.evidence_omitted_blocks > 0
-                    && evidence.chars().count() <= packing_budget
-                {
-                    // Brief was small enough for packing budget but packer/history
-                    // dropped it — fail closed so broad quality gates still hold.
-                    return terminal_context_too_long(
-                        out,
-                        "The complete deterministic triage brief cannot fit this model's hard \
-                         context budget.",
-                    );
-                }
-                if !model_context_contains_evidence(&messages, &evidence)
-                    && evidence.chars().count() > packing_budget
-                {
+                if !model_context_contains_evidence(&messages, &evidence) {
                     return terminal_context_too_long(
                         out,
                         "The complete deterministic triage brief cannot fit this model's hard \
@@ -4571,13 +4583,13 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
             hard_budget: char_budget,
             capacity_source,
             compact_correction: false,
+            require_full_evidence: broad_triage_brief_complete,
         }) {
             Ok((messages, budget_tel)) => {
                 if broad_triage_brief_complete {
+                    // Strict fail-closed (same as pre-focused-headroom path).
                     let evidence = current_turn_evidence.render();
-                    if !model_context_contains_evidence(&messages, &evidence)
-                        && evidence.chars().count() > packing_budget
-                    {
+                    if !model_context_contains_evidence(&messages, &evidence) {
                         return terminal_context_too_long(
                             out,
                             "The complete deterministic triage brief cannot fit final synthesis.",
@@ -5658,26 +5670,28 @@ mod tests {
         let logs = dir.path().join("logs");
         fs::create_dir_all(&logs).unwrap();
         let mut f = fs::File::create(logs.join("worker.log")).unwrap();
-        // Far more matching events than fit under a small evidence residual.
-        for i in 0..400 {
+        // Lead rare identity (file order) — same query terms so search_logs returns it.
+        writeln!(
+            f,
+            r#"{{"ts":1699999999,"level":"error","service":"worker","message":"RARE_FIRST_FOCUS_MARKER pool exhausted job-focus-lead"}}"#
+        )
+        .unwrap();
+        // Enough long matching events that host evidence exceeds packing residual, but
+        // few enough that limit=100 returns first+last markers (not only mid hits).
+        for i in 0..80 {
             writeln!(
                 f,
                 r#"{{"ts":{},"level":"error","service":"worker","message":"pool exhausted job-focus-{} payload={}"}}"#,
                 1_700_000_100 + i,
                 i,
-                "x".repeat(200)
+                "x".repeat(900)
             )
             .unwrap();
         }
-        // Rare first / last markers for packer survival.
+        // Tail rare identity for packer last-stratum survival.
         writeln!(
             f,
-            r#"{{"ts":1699999999,"level":"error","service":"worker","message":"RARE_FIRST_FOCUS_MARKER pool exhausted"}}"#
-        )
-        .unwrap();
-        writeln!(
-            f,
-            r#"{{"ts":1800000000,"level":"error","service":"worker","message":"RARE_LAST_FOCUS_MARKER pool exhausted"}}"#
+            r#"{{"ts":1800000000,"level":"error","service":"worker","message":"RARE_LAST_FOCUS_MARKER pool exhausted job-focus-tail"}}"#
         )
         .unwrap();
         let cache = dir.path().join("cache");
@@ -5790,6 +5804,27 @@ near-ceiling 119900/120000 class is not allowed"
             synth.contains("seq=") && synth.contains("source="),
             "packed evidence must retain citation identity syntax"
         );
+        // When the host returned oversize evidence (omits disclosed), the packer must still
+        // keep at least one of the rare first/last markers that appear in the tool evidence.
+        // Unit packer tests cover pure last-identity force-include; this path checks the
+        // production search_logs → linked_round_model_context wiring.
+        let has_first = synth.contains("RARE_FIRST_FOCUS_MARKER");
+        let has_last = synth.contains("RARE_LAST_FOCUS_MARKER");
+        let omitted = trail.contains("evidence_omitted=") && !trail.contains("evidence_omitted=0");
+        if omitted {
+            assert!(
+                has_first || has_last,
+                "oversize focused pack must keep rare first or last marker (not only early hits); \
+has_first={has_first} has_last={has_last} trail={trail} synth_prefix={}",
+                synth.chars().take(800).collect::<String>()
+            );
+        } else {
+            // Under-budget path still retains citation syntax (asserted above).
+            assert!(
+                has_first || has_last || synth.contains("job-focus-"),
+                "synthesis evidence missing focused hits"
+            );
+        }
         // Answer path completed without context_too_long terminal for oversize pack alone.
         assert!(
             !events.iter().any(|e| matches!(
