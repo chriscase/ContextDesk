@@ -8570,6 +8570,7 @@ export function LogExplorer({ corpusId }: Props) {
           corpusId={corpusId}
           open={loggingQualityOpen}
           onDismiss={() => setLoggingQualityOpen(false)}
+          onActivity={recordActivity}
           onShowInExplorer={(plan) => {
             const nextLanes = plan.lanes.slice(0, 4).map((lane, i) => ({
               id: lane.id || `lane-${i}`,
