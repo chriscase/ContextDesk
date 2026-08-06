@@ -7511,6 +7511,11 @@ struct LogCorpusSummaryDto {
     engine: String,
     created_at: i64,
     source_label: Option<String>,
+    /// Persisted semantic ingest-pipeline identity when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ingest_pipeline_identity: Option<String>,
+    /// `current` | `legacy_unknown` | `different_version` — never "broken".
+    ingest_pipeline_compatibility: cd_core::log_analysis::IngestPipelineCompatibility,
     stats: Option<LogCorpusStatsDto>,
     top_templates: Vec<LogTopTemplateDto>,
     embedding: cd_core::log_analysis::CorpusEmbeddingStatus,
@@ -8224,6 +8229,8 @@ fn summary_dto(c: &cd_core::log_analysis::LogCorpus) -> LogCorpusSummaryDto {
         engine: s.engine,
         created_at: s.created_at,
         source_label: s.source_label,
+        ingest_pipeline_identity: s.ingest_pipeline_identity,
+        ingest_pipeline_compatibility: s.ingest_pipeline_compatibility,
         stats: s.stats.as_ref().map(stats_dto),
         top_templates: top,
         embedding: c.embedding_status(),
@@ -8259,6 +8266,8 @@ fn list_log_corpora_at(cache: &std::path::Path) -> Result<Vec<LogCorpusSummaryDt
             engine: summary.engine,
             created_at: summary.created_at,
             source_label: summary.source_label,
+            ingest_pipeline_identity: summary.ingest_pipeline_identity,
+            ingest_pipeline_compatibility: summary.ingest_pipeline_compatibility,
             stats: summary.stats.as_ref().map(stats_dto),
             top_templates,
             embedding: summary.embedding,
@@ -11859,13 +11868,11 @@ async fn log_export_logging_quality_assessment(
         cd_workflow::logging_quality::LoggingQualityReportFormat::Json => {
             ("Save logging quality assessment as JSON", "JSON", "json")
         }
-        cd_workflow::logging_quality::LoggingQualityReportFormat::Markdown => {
-            (
-                "Save logging quality assessment as Markdown",
-                "Markdown",
-                "md",
-            )
-        }
+        cd_workflow::logging_quality::LoggingQualityReportFormat::Markdown => (
+            "Save logging quality assessment as Markdown",
+            "Markdown",
+            "md",
+        ),
     };
     let (sender, receiver) = tokio::sync::oneshot::channel();
     window
@@ -11882,8 +11889,9 @@ async fn log_export_logging_quality_assessment(
         .await
         .map_err(|_| "native logging-quality Save dialog ended unexpectedly".to_string())?
         .map(|path| {
-            path.into_path()
-                .map_err(|_| "native logging-quality Save dialog returned an invalid path".to_string())
+            path.into_path().map_err(|_| {
+                "native logging-quality Save dialog returned an invalid path".to_string()
+            })
         })
         .transpose()?;
     let Some(path) = selected else {

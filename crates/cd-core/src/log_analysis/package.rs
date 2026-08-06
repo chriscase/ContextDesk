@@ -1187,6 +1187,13 @@ fn legacy_corpus_meta(
         vector_index: get_string("vectorIndex", "vector_index"),
         source_label: Some(format!("import:{origin_id}")),
         origin_corpus_id: Some(origin_id.to_string()),
+        ingest_pipeline_identity:
+            crate::log_analysis::ingest_pipeline::normalize_ingest_pipeline_identity_value(
+                value
+                    .get("ingestPipelineIdentity")
+                    .cloned()
+                    .or_else(|| value.get("ingest_pipeline_identity").cloned()),
+            ),
         stats: manifest.stats.clone(),
         top_templates: Vec::new(),
         embedding: serde_json::from_value(

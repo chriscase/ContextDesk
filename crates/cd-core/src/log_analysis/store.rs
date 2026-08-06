@@ -5,6 +5,11 @@
 //! the **event** store only, not the ANN backend.
 
 use super::drain::TemplateInfo;
+use super::ingest_pipeline::{
+    classify_ingest_pipeline_identity, deserialize_optional_ingest_pipeline_identity,
+    serialize_optional_ingest_pipeline_identity, IngestPipelineCompatibility,
+    INGEST_PIPELINE_IDENTITY,
+};
 use super::parse::{ActiveTimestampBasis, TimestampProvenance};
 use super::redact_log::RedactedOriginal;
 use crate::error::{CoreError, CoreResult};
@@ -281,6 +286,17 @@ pub struct CorpusMeta {
     /// Ordinary user ingest and portable package import leave this absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_identity: Option<String>,
+    /// Semantic ingest-pipeline identity (parse/frame/normalize/template/storage).
+    ///
+    /// Absent on pre-provenance corpora → [`IngestPipelineCompatibility::LegacyUnknown`].
+    /// Never a Git SHA, path, or secret.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_ingest_pipeline_identity",
+        serialize_with = "serialize_optional_ingest_pipeline_identity",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ingest_pipeline_identity: Option<String>,
     /// Ingest / corpus statistics when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<CorpusStats>,
@@ -290,6 +306,13 @@ pub struct CorpusMeta {
     /// Actual semantic-vector availability and local model identity.
     #[serde(default)]
     pub embedding: CorpusEmbeddingStatus,
+}
+
+impl CorpusMeta {
+    /// Compatibility of this meta's pipeline identity vs the running process.
+    pub fn ingest_pipeline_compatibility(&self) -> IngestPipelineCompatibility {
+        classify_ingest_pipeline_identity(self.ingest_pipeline_identity.as_deref())
+    }
 }
 
 fn default_meta_version() -> u32 {
@@ -315,12 +338,26 @@ pub struct CorpusSummary {
     /// Basename-only source label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_label: Option<String>,
+    /// Persisted semantic ingest-pipeline identity when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingest_pipeline_identity: Option<String>,
+    /// Host-neutral compatibility vs this process's pipeline (always set).
+    pub ingest_pipeline_compatibility: IngestPipelineCompatibility,
     /// Persisted ingest stats when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<CorpusStats>,
     /// Actual semantic-vector availability.
     #[serde(default)]
     pub embedding: CorpusEmbeddingStatus,
+}
+
+impl CorpusSummary {
+    fn with_pipeline(mut self, ingest_pipeline_identity: Option<String>) -> Self {
+        self.ingest_pipeline_compatibility =
+            classify_ingest_pipeline_identity(ingest_pipeline_identity.as_deref());
+        self.ingest_pipeline_identity = ingest_pipeline_identity;
+        self
+    }
 }
 
 /// One stored line event after parse/template/redact.
@@ -513,6 +550,7 @@ impl LogCorpus {
             source_label: None,
             origin_corpus_id: None,
             managed_identity: None,
+            ingest_pipeline_identity: Some(INGEST_PIPELINE_IDENTITY.to_string()),
             stats: None,
             top_templates: Vec::new(),
             embedding: CorpusEmbeddingStatus::default(),
@@ -674,6 +712,8 @@ impl LogCorpus {
     ) -> CoreResult<()> {
         let mut meta = self.meta.lock().map_err(|_| lock_err())?;
         meta.meta_version = META_VERSION;
+        // Reinforce current pipeline identity on every successful ingest publish.
+        meta.ingest_pipeline_identity = Some(INGEST_PIPELINE_IDENTITY.to_string());
         if let Some(label) = source_label {
             meta.source_label = Some(label);
         }
@@ -745,17 +785,23 @@ impl LogCorpus {
             let root = cache_root.join("log_corpora").join(&id);
             if let Ok(meta) = read_meta_file(&root) {
                 if let Some(ref stats) = meta.stats {
-                    out.push(CorpusSummary {
-                        id: meta.id.clone(),
-                        name: meta.name.clone(),
-                        event_count: stats.lines,
-                        template_count: stats.templates,
-                        engine: meta.engine.clone(),
-                        created_at: meta.created_at,
-                        source_label: meta.source_label.clone(),
-                        stats: Some(stats.clone()),
-                        embedding: meta.embedding.clone(),
-                    });
+                    out.push(
+                        CorpusSummary {
+                            id: meta.id.clone(),
+                            name: meta.name.clone(),
+                            event_count: stats.lines,
+                            template_count: stats.templates,
+                            engine: meta.engine.clone(),
+                            created_at: meta.created_at,
+                            source_label: meta.source_label.clone(),
+                            ingest_pipeline_identity: None,
+                            ingest_pipeline_compatibility:
+                                IngestPipelineCompatibility::LegacyUnknown,
+                            stats: Some(stats.clone()),
+                            embedding: meta.embedding.clone(),
+                        }
+                        .with_pipeline(meta.ingest_pipeline_identity.clone()),
+                    );
                     continue;
                 }
                 // Legacy meta without stats: open for live counts if possible.
@@ -772,10 +818,17 @@ impl LogCorpus {
     /// Build a list/detail summary from this open corpus.
     pub fn summary(&self) -> CorpusSummary {
         let meta = self.meta.lock().ok();
-        let (created_at, source_label, stats) = meta
+        let (created_at, source_label, stats, pipeline_id) = meta
             .as_ref()
-            .map(|m| (m.created_at, m.source_label.clone(), m.stats.clone()))
-            .unwrap_or((0, None, None));
+            .map(|m| {
+                (
+                    m.created_at,
+                    m.source_label.clone(),
+                    m.stats.clone(),
+                    m.ingest_pipeline_identity.clone(),
+                )
+            })
+            .unwrap_or((0, None, None, None));
         let (event_count, template_count) = if let Some(ref s) = stats {
             (s.lines, s.templates)
         } else {
@@ -791,9 +844,12 @@ impl LogCorpus {
             engine: EVENT_ENGINE.into(),
             created_at,
             source_label,
+            ingest_pipeline_identity: None,
+            ingest_pipeline_compatibility: IngestPipelineCompatibility::LegacyUnknown,
             stats,
             embedding,
         }
+        .with_pipeline(pipeline_id)
     }
 
     /// Append events (streaming ingest) into DuckDB.
@@ -1886,6 +1942,11 @@ pub fn read_meta_file(root: &Path) -> CoreResult<CorpusMeta> {
         source_label: None,
         origin_corpus_id: None,
         managed_identity: None,
+        ingest_pipeline_identity: super::ingest_pipeline::normalize_ingest_pipeline_identity_value(
+            v.get("ingestPipelineIdentity")
+                .cloned()
+                .or_else(|| v.get("ingest_pipeline_identity").cloned()),
+        ),
         stats: None,
         top_templates: Vec::new(),
         embedding: CorpusEmbeddingStatus::default(),
@@ -2151,6 +2212,163 @@ mod tests {
         // counts derived from store when stats absent
         assert_eq!(s.event_count, opened.event_count() as u64);
         assert!(s.stats.is_none());
+        assert!(s.ingest_pipeline_identity.is_none());
+        assert_eq!(
+            s.ingest_pipeline_compatibility,
+            IngestPipelineCompatibility::LegacyUnknown
+        );
+    }
+
+    #[test]
+    fn new_corpus_records_current_ingest_pipeline_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = LogCorpus::create(dir.path(), "fresh").unwrap();
+        let meta = c.meta().unwrap();
+        assert_eq!(
+            meta.ingest_pipeline_identity.as_deref(),
+            Some(INGEST_PIPELINE_IDENTITY)
+        );
+        assert_eq!(
+            meta.ingest_pipeline_compatibility(),
+            IngestPipelineCompatibility::Current
+        );
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(c.root().join("meta.json")).unwrap())
+                .unwrap();
+        assert_eq!(raw["ingestPipelineIdentity"], INGEST_PIPELINE_IDENTITY);
+        let summary = c.summary();
+        assert_eq!(
+            summary.ingest_pipeline_compatibility,
+            IngestPipelineCompatibility::Current
+        );
+    }
+
+    #[test]
+    fn different_pipeline_version_reports_different_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = LogCorpus::create(dir.path(), "future").unwrap();
+        let id = c.id().to_string();
+        let root = c.root().to_path_buf();
+        let mut meta = c.meta().unwrap();
+        drop(c);
+        meta.ingest_pipeline_identity = Some("contextdesk.ingest_pipeline.v99".into());
+        write_meta_file(&root, &meta).unwrap();
+        let opened = LogCorpus::open(dir.path(), &id).unwrap();
+        let summary = opened.summary();
+        assert_eq!(
+            summary.ingest_pipeline_identity.as_deref(),
+            Some("contextdesk.ingest_pipeline.v99")
+        );
+        assert_eq!(
+            summary.ingest_pipeline_compatibility,
+            IngestPipelineCompatibility::DifferentVersion
+        );
+        assert!(summary
+            .ingest_pipeline_compatibility
+            .needs_reimport_advisory());
+    }
+
+    #[test]
+    fn past_pipeline_version_reports_different_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = LogCorpus::create(dir.path(), "past").unwrap();
+        let id = c.id().to_string();
+        let root = c.root().to_path_buf();
+        let mut meta = c.meta().unwrap();
+        drop(c);
+        meta.ingest_pipeline_identity = Some("contextdesk.ingest_pipeline.v0".into());
+        write_meta_file(&root, &meta).unwrap();
+        let summary = LogCorpus::open(dir.path(), &id).unwrap().summary();
+        assert_eq!(
+            summary.ingest_pipeline_compatibility,
+            IngestPipelineCompatibility::DifferentVersion
+        );
+    }
+
+    #[test]
+    fn malformed_pipeline_identity_still_opens_as_different_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = LogCorpus::create(dir.path(), "malformed").unwrap();
+        let id = c.id().to_string();
+        let root = c.root().to_path_buf();
+        drop(c);
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("meta.json")).unwrap())
+                .unwrap();
+        raw["ingestPipelineIdentity"] = serde_json::json!(42);
+        std::fs::write(
+            root.join("meta.json"),
+            serde_json::to_vec_pretty(&raw).unwrap(),
+        )
+        .unwrap();
+        let opened =
+            LogCorpus::open(dir.path(), &id).expect("malformed identity must not block open");
+        assert_eq!(opened.name(), "malformed");
+        let summary = opened.summary();
+        assert_eq!(
+            summary.ingest_pipeline_compatibility,
+            IngestPipelineCompatibility::DifferentVersion
+        );
+        // Identity must never leak secrets/paths even when malformed.
+        let id_str = summary.ingest_pipeline_identity.unwrap_or_default();
+        assert!(!id_str.contains('/'));
+        assert!(!id_str.contains("password"));
+    }
+
+    #[test]
+    fn ingest_reinforces_current_pipeline_identity() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let mut f = std::fs::File::create(logs.join("a.log")).unwrap();
+        writeln!(f, "ts=1700000000 level=error msg=fail").unwrap();
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let report = crate::log_analysis::ingest_path(&cache, &logs, "s", None, "none").unwrap();
+        let meta = LogCorpus::open(&cache, &report.corpus_id)
+            .unwrap()
+            .meta()
+            .unwrap();
+        assert_eq!(
+            meta.ingest_pipeline_identity.as_deref(),
+            Some(INGEST_PIPELINE_IDENTITY)
+        );
+        let list = LogCorpus::list_summaries(&cache).unwrap();
+        let row = list.iter().find(|s| s.id == report.corpus_id).unwrap();
+        assert_eq!(
+            row.ingest_pipeline_compatibility,
+            IngestPipelineCompatibility::Current
+        );
+    }
+
+    #[test]
+    fn list_summaries_reports_legacy_without_mutating_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = LogCorpus::create(dir.path(), "stamp").unwrap();
+        let id = c.id().to_string();
+        let root = c.root().to_path_buf();
+        // Give it stats so list_summaries takes the meta-only path.
+        let mut meta = c.meta().unwrap();
+        drop(c);
+        meta.ingest_pipeline_identity = None;
+        meta.stats = Some(CorpusStats {
+            lines: 3,
+            templates: 1,
+            files: 1,
+            ..CorpusStats::default()
+        });
+        write_meta_file(&root, &meta).unwrap();
+        let before = std::fs::read_to_string(root.join("meta.json")).unwrap();
+        let list = LogCorpus::list_summaries(dir.path()).unwrap();
+        let row = list.iter().find(|s| s.id == id).unwrap();
+        assert_eq!(
+            row.ingest_pipeline_compatibility,
+            IngestPipelineCompatibility::LegacyUnknown
+        );
+        let after = std::fs::read_to_string(root.join("meta.json")).unwrap();
+        assert_eq!(before, after, "listing must not mutate meta.json");
+        assert!(!before.contains("ingestPipelineIdentity"));
     }
 
     #[test]

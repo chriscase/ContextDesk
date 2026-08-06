@@ -33,6 +33,11 @@ pub struct CapabilitiesOutput {
     /// Nonzero exits that still carry a completed `ok:true` report envelope.
     pub completed_verdict_categories: Vec<ExitCategoryDoc>,
     pub normalized: NormalizedCapabilities,
+    /// Semantic ingest-pipeline identity this binary stamps on new corpora.
+    /// Not a Git SHA — covers parse/frame/normalize/template/storage semantics.
+    pub ingest_pipeline_identity: &'static str,
+    /// Privacy-safe summary of what [`Self::ingest_pipeline_identity`] covers.
+    pub ingest_pipeline_semantics: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,6 +67,10 @@ impl Render for CapabilitiesOutput {
         } else {
             out.push_str(&format!("git=(none) channel={}\n", self.build_channel));
         }
+        out.push_str(&format!(
+            "ingest_pipeline={} ({})\n",
+            self.ingest_pipeline_identity, self.ingest_pipeline_semantics
+        ));
         out.push_str("\nexit codes:\n");
         for c in &self.exit_categories {
             out.push_str(&format!("  {:>3}  {}\n", c.code, c.kind));
@@ -165,5 +174,7 @@ pub fn run(branding: &Branding) -> CapabilitiesOutput {
             max_retained_diagnostics: cd_workflow::normalized::MAX_RETAINED_DIAGNOSTICS,
             max_retained_error_samples: cd_workflow::normalized::MAX_RETAINED_ERROR_SAMPLES,
         },
+        ingest_pipeline_identity: cd_core::log_analysis::INGEST_PIPELINE_IDENTITY,
+        ingest_pipeline_semantics: cd_core::log_analysis::INGEST_PIPELINE_SEMANTICS,
     }
 }

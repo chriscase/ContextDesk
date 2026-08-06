@@ -797,6 +797,8 @@ instant while ambiguous controls remain order-only.
   parser dispatch and timestamp parsing.
 - [`store.rs`](../../../crates/cd-core/src/log_analysis/store.rs): DuckDB event
   store, corpus metadata, embedding state.
+- [`ingest_pipeline.rs`](../../../crates/cd-core/src/log_analysis/ingest_pipeline.rs):
+  semantic pipeline identity and compatibility classification (not Git SHA).
 - [`drain.rs`](../../../crates/cd-core/src/log_analysis/drain.rs): incremental
   templates.
 - [`embed_policy.rs`](../../../crates/cd-core/src/log_analysis/embed_policy.rs):
@@ -818,6 +820,7 @@ instant while ambiguous controls remain order-only.
 | Slice                          | Status                        | What is true now                                              | What is not claimed                     |
 | ------------------------------ | ----------------------------- | ------------------------------------------------------------- | --------------------------------------- |
 | Batch ingest/store/templates   | **Shipped**                   | Embedded local pipeline and deterministic states              | Live sources/tailing                    |
+| Ingest-pipeline provenance + stale-corpus diagnostics | **Shipped** | `ingestPipelineIdentity` on new meta; host-neutral `current` / `legacy_unknown` / `different_version`; CLI list/show + capabilities; GUI advisory only | Auto-reimport, Git-SHA-as-pipeline-id, or treating legacy as corrupt |
 | Redacted Original              | **Shipped**                   | Bounded, redacted, tested source representation                | Unbounded raw retention or perfect domain-specific PII removal |
 | Explicit-offset JSON           | **Shipped**                   | Defensible RFC3339/epoch to whole seconds with persisted explicit-wall provenance | Subsecond persistence |
 | Explicit-offset logfmt/RFC5424 | **Shipped**                   | Explicit `Z`/offset forms normalize to whole seconds and remain authoritative under source declarations | Subsecond persistence and skew correction |

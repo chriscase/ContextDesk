@@ -1914,6 +1914,11 @@ export type LogTopTemplateDto = {
   severity: number;
 };
 
+export type IngestPipelineCompatibility =
+  | "current"
+  | "legacy_unknown"
+  | "different_version";
+
 export type LogCorpusSummaryDto = {
   id: string;
   name: string;
@@ -1922,6 +1927,13 @@ export type LogCorpusSummaryDto = {
   engine: string;
   createdAt: number;
   sourceLabel: string | null;
+  /** Semantic ingest-pipeline identity when known; null for legacy corpora. */
+  ingestPipelineIdentity?: string | null;
+  /**
+   * Host-neutral compatibility vs this app build's pipeline.
+   * Missing on older hosts — treat as legacy_unknown in UI.
+   */
+  ingestPipelineCompatibility?: IngestPipelineCompatibility | null;
   stats: LogCorpusStatsDto | null;
   topTemplates: LogTopTemplateDto[];
   embedding?: LogEmbeddingStatusDto | null;

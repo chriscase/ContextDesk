@@ -38,6 +38,7 @@ import {
   hostSetActiveLogCorpus,
   type LogClusterDto,
   type LogCorpusSummaryDto,
+  type IngestPipelineCompatibility,
   type FailedLogIngestDiagnosticDto,
   type LogImportConfidenceDto,
   type LogSearchHitDto,
@@ -139,6 +140,20 @@ function analysisFingerprint(corpus: LogCorpusSummaryDto): string {
     embedding?.totalTemplates ?? corpus.templateCount,
     embedding?.updatedAt ?? 0,
   ].join(":");
+}
+
+/** Host-neutral pipeline compatibility; missing field ⇒ legacy_unknown. */
+export function corpusPipelineCompatibility(
+  corpus: LogCorpusSummaryDto,
+): IngestPipelineCompatibility {
+  return corpus.ingestPipelineCompatibility ?? "legacy_unknown";
+}
+
+export function corpusNeedsPipelineAdvisory(
+  corpus: LogCorpusSummaryDto,
+): boolean {
+  const status = corpusPipelineCompatibility(corpus);
+  return status === "legacy_unknown" || status === "different_version";
 }
 
 const EMPTY_ANALYSIS: CorpusAnalysis = {
@@ -2027,6 +2042,34 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                       meta — re-ingest for full stats).
                     </p>
                   )}
+                  {corpusNeedsPipelineAdvisory(active) ? (
+                    <div
+                      className="log-ingest-pipeline-warning"
+                      role="note"
+                      data-testid="log-ingest-pipeline-warning"
+                    >
+                      <strong>
+                        {corpusPipelineCompatibility(active) ===
+                        "different_version"
+                          ? "Different ingest pipeline"
+                          : "Legacy corpus"}
+                      </strong>
+                      <span>
+                        This corpus was imported under{" "}
+                        {corpusPipelineCompatibility(active) ===
+                        "different_version"
+                          ? "other"
+                          : "older or unknown"}{" "}
+                        parsing/framing semantics (
+                        {corpusPipelineCompatibility(active)}
+                        {active.ingestPipelineIdentity
+                          ? ` · ${active.ingestPipelineIdentity}`
+                          : ""}
+                        ). Reimporting may apply newer improvements. ContextDesk
+                        never auto-reimports or deletes it.
+                      </span>
+                    </div>
+                  ) : null}
                   {active.topTemplates?.length ? (
                     <div>
                       <h4>Top templates</h4>

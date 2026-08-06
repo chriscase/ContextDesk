@@ -527,6 +527,29 @@ Global flags (available on every subcommand): `--format`, `--json`,
 `--data-dir <path>` (alias `--profile-dir`), `--profile <id>`, `--model
 <id>`.
 
+## Ingest-pipeline provenance (stale corpora)
+
+New corpora persist `ingest_pipeline_identity` (e.g.
+`contextdesk.ingest_pipeline.v1`) in `meta.json`. This is a **semantic** stamp
+for parse/frame/normalize/template/storage behavior — **not** the Git SHA from
+`capabilities.git_sha`.
+
+| `ingest_pipeline_compatibility` | Meaning |
+| ------------------------------- | ------- |
+| `current` | Matches this binary’s pipeline identity |
+| `legacy_unknown` | Field missing/empty (pre-provenance corpora) — still fully usable |
+| `different_version` | Present but ≠ current (or soft-failed malformed) — still usable |
+
+`corpus list` / `corpus show` expose both fields in JSON. Human text adds a
+PIPELINE column and an optional reimport note; `--json` / `--jsonl` never mix
+that prose into the envelope. `capabilities` reports this binary’s
+`ingest_pipeline_identity` + `ingest_pipeline_semantics`.
+
+**Decide whether to reimport:** if Explorer/chat results look wrong after a
+framing/parser fix, reimport the same public sources into a **new** corpus.
+ContextDesk never auto-reimports, deletes, or mutates the old one. Keep the
+legacy corpus if you need historical evidence as-imported.
+
 ## Quick examples (synthetic data only)
 
 ```bash

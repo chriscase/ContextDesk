@@ -21,6 +21,7 @@ pub mod import_preview;
 pub mod import_profile;
 pub mod ingest;
 mod ingest_confidence;
+pub mod ingest_pipeline;
 pub mod lanes;
 pub mod linked_search_bound;
 pub mod logging_quality;
@@ -106,6 +107,10 @@ pub use ingest::{
 pub use ingest_confidence::{
     IngestConfidenceCounts, IngestConfidenceReport, IngestFormatOutcome, SourceIngestConfidence,
     UnresolvedTimeReason, MAX_TIMESTAMP_PREFIX_SAMPLES, MAX_TIMESTAMP_PREFIX_SAMPLE_CHARS,
+};
+pub use ingest_pipeline::{
+    classify_ingest_pipeline_identity, IngestPipelineCompatibility, INGEST_PIPELINE_IDENTITY,
+    INGEST_PIPELINE_SEMANTICS,
 };
 pub use lanes::{
     clamp_lane_count, compute_gaps, link_allowed, nearest_at_or_after, scrub_linked, GapRegion,

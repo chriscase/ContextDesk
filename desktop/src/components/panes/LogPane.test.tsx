@@ -152,6 +152,8 @@ function corpus(id: string, name: string): LogCorpusSummaryDto {
     engine: "duckdb",
     createdAt: 1_700_000_000,
     sourceLabel: `${id}.log`,
+    ingestPipelineIdentity: "contextdesk.ingest_pipeline.v1",
+    ingestPipelineCompatibility: "current",
     stats: null,
     topTemplates: [],
     embedding: {
@@ -1795,6 +1797,106 @@ describe("LogPane", () => {
     expect(
       within(overview).getByTestId("log-embedding-state").textContent,
     ).toContain("Keyword-only · deferred");
+  });
+
+  it("renders legacy pipeline warning without triggering import", async () => {
+    const legacy = {
+      ...corpus("legacy-only", "Old incident"),
+      ingestPipelineIdentity: null,
+      ingestPipelineCompatibility: "legacy_unknown" as const,
+      stats: {
+        files: 1,
+        discoveredFiles: 1,
+        excludedFiles: 0,
+        failedFiles: 0,
+        ignoredFiles: 0,
+        exclusionCounts: {},
+        exclusionExamples: [],
+        partial: false,
+        lines: 12,
+        templates: 3,
+        reductionRatio: 4,
+        embedded: 0,
+        sourceBytes: 100,
+        corpusBytes: 200,
+        levelCounts: { info: 12 },
+        tsMin: 1,
+        tsMax: 2,
+        formatCounts: { plain: 12 },
+      },
+    };
+    hostMocks.listCorpora.mockResolvedValue([legacy]);
+    hostMocks.ingest.mockClear();
+    render(<LogPane />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: corpusButtonName(legacy.name),
+      }),
+    );
+    const overview = await screen.findByTestId("log-overview");
+    const warn = within(overview).getByTestId("log-ingest-pipeline-warning");
+    expect(warn.textContent).toMatch(/Legacy corpus/);
+    expect(warn.textContent).toMatch(/never auto-reimports/);
+    expect(hostMocks.ingest).not.toHaveBeenCalled();
+  });
+
+  it("renders different-version pipeline warning without triggering import", async () => {
+    const different = {
+      ...corpus("diff-only", "Future stamped"),
+      ingestPipelineIdentity: "contextdesk.ingest_pipeline.v99",
+      ingestPipelineCompatibility: "different_version" as const,
+      stats: null,
+    };
+    hostMocks.listCorpora.mockResolvedValue([different]);
+    hostMocks.ingest.mockClear();
+    render(<LogPane />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: corpusButtonName(different.name),
+      }),
+    );
+    const overview = await screen.findByTestId("log-overview");
+    const warn = within(overview).getByTestId("log-ingest-pipeline-warning");
+    expect(warn.textContent).toMatch(/Different ingest pipeline/);
+    expect(warn.textContent).toMatch(/v99/);
+    expect(hostMocks.ingest).not.toHaveBeenCalled();
+  });
+
+  it("omits pipeline warning for current corpora", async () => {
+    const current = {
+      ...corpus("cur-only", "Fresh"),
+      stats: {
+        files: 1,
+        discoveredFiles: 1,
+        excludedFiles: 0,
+        failedFiles: 0,
+        ignoredFiles: 0,
+        exclusionCounts: {},
+        exclusionExamples: [],
+        partial: false,
+        lines: 12,
+        templates: 3,
+        reductionRatio: 4,
+        embedded: 0,
+        sourceBytes: 100,
+        corpusBytes: 200,
+        levelCounts: { info: 12 },
+        tsMin: 1,
+        tsMax: 2,
+        formatCounts: { plain: 12 },
+      },
+    };
+    hostMocks.listCorpora.mockResolvedValue([current]);
+    render(<LogPane />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: corpusButtonName(current.name),
+      }),
+    );
+    const overview = await screen.findByTestId("log-overview");
+    expect(
+      within(overview).queryByTestId("log-ingest-pipeline-warning"),
+    ).toBeNull();
   });
 
   it("keeps 250k-event corpus activation responsive until analysis is explicitly requested (#743)", async () => {

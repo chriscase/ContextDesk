@@ -5,12 +5,8 @@
 //! publishes a no-clobber report via the workflow. It never re-scores and never
 //! returns absolute filesystem paths to the webview.
 
-use cd_core::log_analysis::{
-    assess_logging_quality, LogCorpus, LoggingQualityAssessment,
-};
-use cd_workflow::logging_quality::{
-    publish_assessment_report, LoggingQualityReportFormat,
-};
+use cd_core::log_analysis::{assess_logging_quality, LogCorpus, LoggingQualityAssessment};
+use cd_workflow::logging_quality::{publish_assessment_report, LoggingQualityReportFormat};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -121,7 +117,10 @@ pub fn export_at_path(
         .unwrap_or("report")
         .to_string();
     // Refuse to echo anything path-like as display_name.
-    if looks_like_absolute_path(&display_name) || display_name.contains('/') || display_name.contains('\\') {
+    if looks_like_absolute_path(&display_name)
+        || display_name.contains('/')
+        || display_name.contains('\\')
+    {
         return Ok(LoggingQualityExportStatus::Written {
             format: format.as_str().into(),
             display_name: "report".into(),
@@ -216,28 +215,15 @@ mod tests {
         let corpus_id = ingest_fixture(&cache, &src);
 
         let out = tmp.path().join("out.json");
-        let first = export_at_path(
-            &cache,
-            &corpus_id,
-            &out,
-            LoggingQualityReportFormat::Json,
-        )
-        .expect("first export");
-        assert!(matches!(
-            first,
-            LoggingQualityExportStatus::Written { .. }
-        ));
+        let first = export_at_path(&cache, &corpus_id, &out, LoggingQualityReportFormat::Json)
+            .expect("first export");
+        assert!(matches!(first, LoggingQualityExportStatus::Written { .. }));
         assert!(out.is_file());
         let body = fs::read_to_string(&out).unwrap();
         assert!(body.contains("contextdesk.logging_quality_assessment.v1"));
         assert!(!body.to_ascii_lowercase().contains("/users/"));
 
-        let second = export_at_path(
-            &cache,
-            &corpus_id,
-            &out,
-            LoggingQualityReportFormat::Json,
-        );
+        let second = export_at_path(&cache, &corpus_id, &out, LoggingQualityReportFormat::Json);
         assert!(second.is_err(), "no-clobber must fail: {second:?}");
 
         let missing = assess_at_cache(&cache, "does-not-exist");
@@ -297,13 +283,8 @@ mod tests {
         fs::create_dir_all(&cache).unwrap();
         let corpus_id = ingest_fixture(&cache, &src);
         let out = tmp.path().join("report.json");
-        let status = export_at_path(
-            &cache,
-            &corpus_id,
-            &out,
-            LoggingQualityReportFormat::Json,
-        )
-        .expect("export");
+        let status = export_at_path(&cache, &corpus_id, &out, LoggingQualityReportFormat::Json)
+            .expect("export");
         let wire = serde_json::to_value(&status).expect("serialize export status");
         assert_eq!(wire["status"], "written");
         assert_eq!(wire["format"], "json");
@@ -314,8 +295,7 @@ mod tests {
     /// Live-shaped public-fixture path: ingest → assess → export JSON+MD → no-clobber.
     #[test]
     fn live_shaped_public_fixture_assess_export_roundtrip() {
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/cli-release-demo");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/cli-release-demo");
         assert!(
             fixture.is_dir(),
             "public fixture missing: {}",
@@ -390,8 +370,7 @@ mod tests {
         };
         let export_root = Path::new(&dir);
         fs::create_dir_all(export_root).expect("create LQA_EXPORT_DIR");
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/cli-release-demo");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/cli-release-demo");
         assert!(fixture.is_dir());
         let tmp = TempDir::new().unwrap();
         let cache = tmp.path().join("cache");
