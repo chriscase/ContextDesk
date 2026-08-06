@@ -128,6 +128,7 @@ const COMMANDS: &[&str] = &[
     "capabilities",
     "doctor",
     "logging-assessment",
+    "exception-episodes",
 ];
 
 pub fn run(branding: &Branding) -> CapabilitiesOutput {

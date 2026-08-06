@@ -136,6 +136,10 @@ pub enum Command {
     /// improvement hints for an imported corpus (no provider / LLM).
     #[command(visible_alias = "assess")]
     LoggingAssessment(LoggingAssessmentArgs),
+    /// Deterministic exception episode / duplicate-rendering correlation
+    /// for an imported corpus (no provider / LLM). Does not rewrite events.
+    #[command(visible_alias = "episodes")]
+    ExceptionEpisodes(ExceptionEpisodesArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -168,6 +172,13 @@ pub struct LoggingAssessmentArgs {
     /// use global `--json` / `--format` for that). Defaults to `json`.
     #[arg(long, default_value = "json")]
     pub report_format: String,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ExceptionEpisodesArgs {
+    /// Corpus id to correlate. Defaults to the current corpus selected by the
+    /// most recent import or `contextdesk corpus use`.
+    pub corpus_id: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]

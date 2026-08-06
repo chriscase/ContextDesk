@@ -165,6 +165,8 @@ pub struct BroadLogTriageBrief {
     pub suppression_lens_suspended: bool,
     /// Whether deterministic broad triage completed successfully.
     pub deterministic_complete: bool,
+    /// Host-neutral exception episode correlation (derived; raw events unchanged).
+    pub exception_episodes: Option<crate::log_analysis::ExceptionEpisodeReport>,
 }
 
 /// Cooperative abort handle for one deterministic broad-log triage worker.
@@ -2229,6 +2231,31 @@ impl ToolHost {
             }
         }
 
+        checkpoint("exception_episodes")?;
+        let exception_report = match crate::log_analysis::correlate_exception_episodes_from_corpus(
+            &corpus,
+            &crate::log_analysis::ExceptionCorrelationOptions {
+                excluded_template_ids: suppression.excluded_template_ids.clone(),
+                ..crate::log_analysis::ExceptionCorrelationOptions::default()
+            },
+            None,
+        ) {
+            Ok(report) => Some(report),
+            Err(error) => {
+                // Fail open for triage completeness: disclose the miss, keep other sections.
+                body.push_str(&format!(
+                    "\n## Exception episode correlation\ncorrelation_error: {}\n\
+                     interpretation: raw template counts remain available; episode ranking unavailable for this run.\n",
+                    serde_json::to_string(&error.to_string()).unwrap_or_else(|_| "\"error\"".into())
+                ));
+                None
+            }
+        };
+        if let Some(report) = exception_report.as_ref() {
+            body.push('\n');
+            body.push_str(&crate::log_analysis::format_exception_episode_brief_section(report));
+        }
+
         let (error_templates_available, selected_errors) =
             broad_triage_error_templates(&corpus, &suppression.excluded_template_ids)?;
         checkpoint("error_templates")?;
@@ -2247,14 +2274,60 @@ impl ToolHost {
              selected_error_templates: {}\n\
              impact_slots: {}\n\
              rare_candidate_reserve: {BROAD_LOG_TRIAGE_RARE_ERROR_RESERVE}\n\
-             exemplars_per_template_cap: {BROAD_LOG_TRIAGE_ERROR_EXEMPLAR_CAP}\n",
+             exemplars_per_template_cap: {BROAD_LOG_TRIAGE_ERROR_EXEMPLAR_CAP}\n\
+             ranking_note: prefer exception episode occurrence counts over raw error_event_count when amplification is disclosed above\n",
             selected_errors.len(),
             BROAD_LOG_TRIAGE_ERROR_DISPLAY_CAP.saturating_sub(BROAD_LOG_TRIAGE_RARE_ERROR_RESERVE)
         ));
+        // Template ids that appear only as supporting stack frames in episodes.
+        let supporting_frame_templates: std::collections::HashSet<u64> = exception_report
+            .as_ref()
+            .map(|report| {
+                let mut supporting = std::collections::HashSet::new();
+                let mut lead = std::collections::HashSet::new();
+                for ep in &report.episodes {
+                    for m in &ep.members {
+                        match m.role {
+                            crate::log_analysis::ExceptionRecordRole::StackFrame
+                            | crate::log_analysis::ExceptionRecordRole::WrapperScaffold => {
+                                supporting.insert(m.template_id);
+                            }
+                            crate::log_analysis::ExceptionRecordRole::ExceptionHeader
+                            | crate::log_analysis::ExceptionRecordRole::ConventionalMultiline => {
+                                lead.insert(m.template_id);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                supporting.retain(|id| !lead.contains(id));
+                supporting
+            })
+            .unwrap_or_default();
         let mut evidence = Vec::new();
         let mut seen_evidence = std::collections::HashSet::new();
         let mut correlation_seeds = Vec::new();
         let mut identity_partial = false;
+        // Prefer episode lead citations as trusted identities before template exemplars.
+        if let Some(report) = exception_report.as_ref() {
+            for family in report.families.iter().take(4) {
+                for lead in family.lead_citations.iter().take(4) {
+                    if evidence.len() >= BROAD_LOG_TRIAGE_IDENTITY_CAP {
+                        identity_partial = true;
+                        break;
+                    }
+                    let identity = crate::log_analysis::SearchEvidenceIdentity {
+                        seq: lead.seq,
+                        source: lead.source.clone(),
+                        citation_source: broad_triage_citation_source(&lead.source),
+                        template_id: lead.template_id,
+                    };
+                    if seen_evidence.insert(identity.clone()) {
+                        evidence.push(identity);
+                    }
+                }
+            }
+        }
         for hit in &selected_errors {
             let pattern = corpus
                 .template_pattern(hit.template_id)
@@ -2277,13 +2350,25 @@ impl ToolHost {
             })?;
             let first_source = broad_triage_source_identity(&first_span.source);
             let last_source = broad_triage_source_identity(&last_span.source);
+            let supporting = supporting_frame_templates.contains(&hit.template_id);
+            let episode_adjusted = if supporting {
+                // Disclose raw volume but label supporting frames honestly.
+                exception_report
+                    .as_ref()
+                    .map(|r| r.correlated_occurrence_total)
+                    .unwrap_or(hit.error_event_count)
+            } else {
+                hit.error_event_count
+            };
             body.push_str(&format!(
-                "- template_id={} severity={} error_event_count={} pattern={pattern}\n\
+                "- template_id={} severity={} error_event_count={} episode_adjusted_count={} supporting_stack_or_wrapper={} pattern={pattern}\n\
                    first_occurrence seq={} source={first_source} axis_value={}\n\
                    last_occurrence seq={} source={last_source} axis_value={}\n",
                 hit.template_id,
                 hit.severity,
                 hit.error_event_count,
+                episode_adjusted,
+                supporting,
                 first_span.seq,
                 first_span.ts,
                 last_span.seq,
@@ -2798,6 +2883,7 @@ impl ToolHost {
             template_analysis_revision,
             suppression_lens_suspended: suppression.suppression_lens_suspended,
             deterministic_complete: true,
+            exception_episodes: exception_report,
         })
     }
 

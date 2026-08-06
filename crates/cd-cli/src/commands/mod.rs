@@ -5,6 +5,7 @@ pub mod confluence_cmd;
 pub mod context;
 pub mod corpus;
 pub mod doctor;
+pub mod exception_episodes;
 pub mod explore;
 pub mod import;
 pub mod logging_assessment;

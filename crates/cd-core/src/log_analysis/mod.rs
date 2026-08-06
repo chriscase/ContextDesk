@@ -13,6 +13,7 @@ pub mod diagnostics;
 pub mod drain;
 pub mod embed_policy;
 pub mod event_revision;
+pub mod exception_episodes;
 pub mod format_profile;
 pub mod frame;
 pub mod governed_citation;
@@ -78,6 +79,14 @@ pub use event_revision::{
     apply_event_timestamp_revision, undo_event_revision, EventRevisionMetadata,
     EventRevisionReport, EventTimestampUpdate, EVENT_REVISION_AUDIT_SCHEMA_VERSION,
     EVENT_REVISION_METADATA_SCHEMA_VERSION, MAX_EVENT_REVISION_METADATA_BYTES,
+};
+pub use exception_episodes::{
+    correlate_exception_episodes, correlate_exception_episodes_from_corpus,
+    format_exception_episode_brief_section, ExceptionCorrelationConfidence,
+    ExceptionCorrelationOptions, ExceptionEpisode, ExceptionEpisodeCompleteness,
+    ExceptionEpisodeMember, ExceptionEpisodeReport, ExceptionFamily, ExceptionRecordRole,
+    EXCEPTION_EPISODE_SCHEMA_ID, EXCEPTION_EPISODE_SCHEMA_VERSION, MAX_CORRELATION_EVENTS,
+    MAX_EPISODES, MAX_EVENTS_PER_EPISODE,
 };
 pub use format_profile::{
     fingerprint_format, BuiltInFormatProfile, BuiltInGrammar, FormatFingerprint,

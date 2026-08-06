@@ -296,6 +296,14 @@ async fn dispatch(
             );
             emit(format, resolved.color.value, "logging_assessment", result)
         }
+        Command::ExceptionEpisodes(args) => {
+            let result = commands::exception_episodes::run(
+                args,
+                &paths.cache_root,
+                &cli_state.current_corpus_id,
+            );
+            emit(format, resolved.color.value, "exception_episodes", result)
+        }
     }
 }
 

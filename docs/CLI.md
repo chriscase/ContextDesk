@@ -59,6 +59,7 @@ contextdesk [OPTIONS] <COMMAND>
 | `capabilities` | Machine-readable build surface |
 | `doctor` | Demo readiness |
 | `logging-assessment [corpus-id]` (alias `assess`) | Deterministic logging-quality assessment with fixed finding-code improvement hints (no provider); defaults to the current corpus. |
+| `exception-episodes [corpus-id]` | Deterministic exception episode correlation (occurrence vs raw records; no provider). |
 
 Drift check: `python3 scripts/cli-release/check_cli_docs.py` compares this list
 to a live binary when `CONTEXTDESK_BIN` is set.
