@@ -53,11 +53,13 @@ pub fn memory_tool_specs() -> Vec<ToolSpec> {
                     "id": { "type": "string", "description": "Existing id for metadata update" },
                     "pinned": { "type": "boolean" }
                 },
-                "anyOf": [
-                    { "required": ["content"] },
-                    { "required": ["body_markdown"] },
-                    { "required": ["id"] }
-                ]
+                // Keep the root schema a plain object. Some tool-calling
+                // providers reject root-level anyOf/oneOf even when every
+                // branch is object-shaped. The equivalent semantic rule is
+                // enforced by write_op_from_save_args before any write can be
+                // proposed: save needs content/body_markdown, or an id for a
+                // metadata update.
+                "required": []
             }),
         },
         ToolSpec {
@@ -331,6 +333,28 @@ mod tests {
         assert!(names.contains(&"retract_memory"));
         let retract = specs.iter().find(|s| s.name == "retract_memory").unwrap();
         assert_eq!(retract.side_effect, ToolSideEffect::SoftWrite);
+    }
+
+    #[test]
+    fn save_memory_schema_is_provider_compatible_and_runtime_validation_remains_strict() {
+        let save = memory_tool_specs()
+            .into_iter()
+            .find(|spec| spec.name == "save_memory")
+            .expect("save_memory tool spec");
+        assert_eq!(save.parameters["type"], "object");
+        assert!(save.parameters.get("anyOf").is_none());
+        assert!(save.parameters.get("oneOf").is_none());
+
+        let err = write_op_from_save_args(&json!({})).expect_err("missing write payload");
+        assert!(err
+            .to_string()
+            .contains("requires content or body_markdown"));
+        assert!(write_op_from_save_args(&json!({ "content": "remember this" })).is_ok());
+        assert!(write_op_from_save_args(&json!({
+            "id": Uuid::now_v7().to_string(),
+            "pinned": true
+        }))
+        .is_ok());
     }
 
     #[test]
