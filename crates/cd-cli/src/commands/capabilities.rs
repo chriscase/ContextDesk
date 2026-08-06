@@ -69,12 +69,16 @@ const CATEGORIES: &[ExitCategory] = &[
     ExitCategory::NotImplemented,
     ExitCategory::Cancelled,
     ExitCategory::NotReady,
+    ExitCategory::NonConforming,
+    ExitCategory::Partial,
     ExitCategory::Internal,
 ];
 
 const COMMANDS: &[&str] = &[
     "import",
     "normalize",
+    "normalized validate",
+    "normalized summarize",
     "corpus list",
     "corpus show",
     "corpus rename",

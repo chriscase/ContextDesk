@@ -19,6 +19,7 @@ timestamp model (no invented instants).
 | Normative JSONL event contract + schema + producer examples | **Shipped** |
 | Ordinary import of raw logs (including JSONL that happens to conform) | **Shipped** — no special “fast path” claim |
 | Offline CLI `contextdesk normalize` | **Shipped** — raw file/folder/ZIP to validated JSONL, manifest, and report |
+| Offline CLI `contextdesk normalized validate|summarize` | **Shipped** — inspect one JSONL file or a directory recursively |
 | Parquet output | **Not shipped** (`--output-format` defaults to `jsonl` only) |
 
 ## What normalize is (and is not)
@@ -50,6 +51,7 @@ contextdesk normalize [OPTIONS] --output <OUTPUT> <SOURCE>
 | `--source-timezone` / `CONTEXTDESK_SOURCE_TIMEZONE` | IANA zone for zone-less local timestamps without a map entry |
 | `--timezone-map` / `CONTEXTDESK_TIMEZONE_MAP` | JSON object: portable source id → IANA zone |
 | `--strict-time` / `CONTEXTDESK_STRICT_TIME` | Fail closed if unresolved local time lacks a zone |
+| `--fail-on-partial` | Publish valid artifacts, but exit 10 when the report is partial |
 | Global `--json` / `--jsonl` / `--format` | **Command rendering** (envelope), not the data format |
 | `CONTEXTDESK_WORKING_DIR` | When set to a directory, relative `<SOURCE>` paths resolve under it |
 
@@ -180,6 +182,26 @@ for the format.
 | Non-empty `--output` | User error — refuse overwrite |
 | `--strict-time` | Fail closed if local times cannot be resolved |
 | `partial: true` | Report honesty flag when selection incomplete; do not treat as full success for automation gates |
+| `--fail-on-partial` + partial report | Exit **10** (`partial`) after publication; valid output remains available for diagnosis/use |
+
+## Validate and summarize normalized output
+
+Both inspection commands are read-only, source-agnostic, streaming, and
+offline. A direct file is inspected regardless of extension. A directory is
+walked recursively and regular `.jsonl` files are inspected in stable relative
+path order; symlinks and non-JSONL sidecars such as manifests are ignored.
+
+```bash
+contextdesk normalized validate ./out-normalize
+contextdesk --json normalized summarize ./out-normalize/sources/example.jsonl
+```
+
+`validate` returns per-file bounded diagnostics. `summarize` returns aggregate
+counts only. Both use versioned report DTOs inside the ordinary versioned CLI
+envelope. Conforming input exits 0; a completed inspection that finds invalid
+content exits **9** (`non_conforming`). When diagnostics exceed the retained
+bound, `diagnostics_truncated` is true and per-code counts are explicitly named
+`diagnostic_sample_counts`; `diagnostics_total` remains the full observed total.
 
 ## Disk space and staging
 
@@ -202,7 +224,10 @@ $BIN normalize --help
 rm -rf ./out-normalize
 $BIN normalize ./fixtures/cli-release-demo --output ./out-normalize --json
 
-# 4) Inspect exact files
+# 4) Gate the published normalized streams (exit 9 if non-conforming)
+$BIN normalized validate ./out-normalize
+
+# 5) Inspect exact files
 ls -la ./out-normalize
 ls -la ./out-normalize/sources
 python3 -c 'import json;print(json.load(open("out-normalize/normalization-report.json"))["events"])'
@@ -216,6 +241,7 @@ $bin = ".\target\release\contextdesk.exe"
 & $bin normalize --help
 Remove-Item -Recurse -Force .\out-normalize -ErrorAction SilentlyContinue
 & $bin normalize .\fixtures\cli-release-demo --output .\out-normalize --json
+& $bin normalized validate .\out-normalize
 Get-ChildItem .\out-normalize
 Get-ChildItem .\out-normalize\sources
 ```

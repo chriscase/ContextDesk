@@ -77,6 +77,12 @@ pub enum Command {
     /// Offline normalize selected sources to `contextdesk.normalized_log_events.v1`
     /// JSONL (zero provider / keychain). Does not persist a durable corpus.
     Normalize(NormalizeArgs),
+    /// Validate or summarize normalized JSONL files without importing them.
+    /// Entirely offline: no provider, keychain, or durable corpus.
+    Normalized {
+        #[command(subcommand)]
+        action: NormalizedAction,
+    },
     /// Manage imported corpora.
     Corpus {
         #[command(subcommand)]
@@ -207,6 +213,24 @@ pub struct NormalizeArgs {
     /// Fail closed when any unresolved local timestamp lacks a resolvable zone.
     #[arg(long, env = "CONTEXTDESK_STRICT_TIME")]
     pub strict_time: bool,
+    /// Publish valid output normally, but exit with the stable `partial` code
+    /// when any selected source failed or was excluded.
+    #[arg(long)]
+    pub fail_on_partial: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NormalizedAction {
+    /// Validate one normalized JSONL file or every `.jsonl` file under a directory.
+    Validate(NormalizedPathArgs),
+    /// Print aggregate conformance counts for one file or directory.
+    Summarize(NormalizedPathArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct NormalizedPathArgs {
+    /// Normalized JSONL file, or directory recursively containing `.jsonl` files.
+    pub input: PathBuf,
 }
 
 #[derive(Debug, Subcommand)]

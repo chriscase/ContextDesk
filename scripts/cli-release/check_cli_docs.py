@@ -51,6 +51,7 @@ DEMO_PUBLIC_FIXTURES = [
 DEMO_SHIPPED_VERBS = {
     "import",
     "normalize",
+    "normalized",
     "corpus",
     "timezone",
     "explore",
@@ -68,6 +69,7 @@ DEMO_SHIPPED_VERBS = {
 SHIPPED_COMMANDS = {
     "import",
     "normalize",
+    "normalized",
     "corpus",
     "timezone",
     "explore",

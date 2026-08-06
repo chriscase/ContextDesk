@@ -181,7 +181,9 @@ fn normalize_json_envelope_is_terminal_success() {
 fn normalize_command_source_has_no_provider_or_keychain() {
     let src = include_str!("../src/commands/normalize.rs");
     let workflow = include_str!("../../cd-workflow/src/normalize.rs");
-    for text in [src, workflow] {
+    let inspect_src = include_str!("../src/commands/normalized.rs");
+    let inspect_workflow = include_str!("../../cd-workflow/src/normalized.rs");
+    for text in [src, workflow, inspect_src, inspect_workflow] {
         // Call sites / types — not prose mentioning the prohibition.
         assert!(!text.contains("secret_store("));
         assert!(!text.contains("SecretStore"));
@@ -190,4 +192,117 @@ fn normalize_command_source_has_no_provider_or_keychain() {
         assert!(!text.contains("ProviderClient"));
         assert!(!text.contains("chat_completion"));
     }
+}
+
+#[test]
+fn normalized_validate_and_summarize_accept_file_or_directory() {
+    let tmp = TempDir::new().unwrap();
+    let input = tmp.path().join("in");
+    write_tree(&input);
+    let out = tmp.path().join("out");
+    bin()
+        .args([
+            "normalize",
+            input.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let validated = bin()
+        .args(["--json", "normalized", "validate", out.to_str().unwrap()])
+        .assert()
+        .success();
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&validated.get_output().stdout).expect("pure JSON envelope");
+    assert_eq!(envelope["schema_version"], 1);
+    assert_eq!(envelope["command"], "normalized");
+    assert_eq!(
+        envelope["data"]["schema_id"],
+        "contextdesk.normalized_validation.v1"
+    );
+    assert_eq!(envelope["data"]["ok"], true);
+    assert!(envelope["data"]["files_examined"].as_u64().unwrap_or(0) >= 1);
+    for file in envelope["data"]["files"].as_array().unwrap() {
+        assert!(!file["path"].as_str().unwrap().starts_with('/'));
+    }
+
+    let source_file = fs::read_dir(out.join("sources"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let summarized = bin()
+        .args([
+            "--jsonl",
+            "normalized",
+            "summarize",
+            source_file.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let line = String::from_utf8(summarized.get_output().stdout.clone()).unwrap();
+    assert_eq!(line.lines().count(), 1, "JSONL purity: exactly one object");
+    let envelope: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(
+        envelope["data"]["schema_id"],
+        "contextdesk.normalized_summary.v1"
+    );
+    assert_eq!(envelope["data"]["input_kind"], "file");
+}
+
+#[test]
+fn normalized_mutation_returns_stable_nonconforming_exit_and_report() {
+    let tmp = TempDir::new().unwrap();
+    let input = tmp.path().join("in");
+    write_tree(&input);
+    let out = tmp.path().join("out");
+    bin()
+        .args([
+            "normalize",
+            input.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let source_file = fs::read_dir(out.join("sources"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(source_file)
+        .unwrap();
+    use std::io::Write as _;
+    writeln!(file, "{{}}").unwrap();
+
+    let checked = bin()
+        .args(["--json", "normalized", "validate", out.to_str().unwrap()])
+        .assert()
+        .code(9);
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&checked.get_output().stdout).expect("pure JSON envelope");
+    assert_eq!(envelope["ok"], true, "inspection itself completed");
+    assert_eq!(envelope["data"]["ok"], false, "content is non-conforming");
+    assert!(envelope["data"]["diagnostics_total"].as_u64().unwrap_or(0) > 0);
+}
+
+#[test]
+fn normalized_help_and_fail_on_partial_are_public() {
+    bin()
+        .args(["normalized", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("validate"))
+        .stdout(predicate::str::contains("summarize"));
+    bin()
+        .args(["normalize", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--fail-on-partial"));
 }

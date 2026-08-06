@@ -46,6 +46,8 @@ contextdesk [OPTIONS] <COMMAND>
 | ------- | ---- |
 | `import <source>` | Import archive/dir into a durable corpus |
 | `normalize <source> --output <dir>` | Offline raw → `normalized_log_events.v1` JSONL, manifest, and report (no durable corpus). See [NORMALIZATION.md](NORMALIZATION.md). |
+| `normalized validate <file-or-dir>` | Read-only offline conformance gate over normalized JSONL; exit 9 when content is invalid. |
+| `normalized summarize <file-or-dir>` | Aggregate-only offline conformance summary over normalized JSONL. |
 | `corpus list\|show\|rename\|delete\|use` | Corpus management |
 | `timezone status\|apply\|clear\|apply-all` | Ambiguous local time declarations |
 | `explore <query>` (alias `search`) | Template-level search |
@@ -460,6 +462,8 @@ line — `verdict` on completion, `interrupted` on Ctrl-C. See
 | 6 | `provider_error` | The configured provider could not be reached or errored. |
 | 7 | `not_implemented` | Grammar accepted, behavior intentionally not implemented yet. Never conflated with success. |
 | 8 | `not_ready` | `contextdesk doctor` completed its full check but the verdict was "not ready" — this is not a bug, the command did exactly what it promised. |
+| 9 | `non_conforming` | `normalized validate` or `normalized summarize` completed and found invalid normalized content; inspect the emitted report. |
+| 10 | `partial` | `normalize --fail-on-partial` published valid output but its report is partial; output is preserved. |
 | 70 | `internal` | Unexpected failure — a bug, not an expected branch. |
 | 130 | `cancelled` | The operation was interrupted by Ctrl-C before it finished (`import`, `normalize`, `doctor`, `chat`). |
 
@@ -479,7 +483,10 @@ Verified by comparing to `contextdesk --help` / subcommand `--help` (see
 contextdesk import <source> [--name NAME] [--embed] [--explain-selection]
 contextdesk normalize <source> --output <dir> [--output-format jsonl]
             [--source-timezone <iana>] [--timezone-map '<json>'] [--strict-time]
+            [--fail-on-partial]
             # Shipped; use `normalize --help` for the exact installed contract
+contextdesk normalized validate <file-or-dir>
+contextdesk normalized summarize <file-or-dir>
 contextdesk corpus list
 contextdesk corpus show <id>
 contextdesk corpus rename <id> <name>
@@ -542,6 +549,8 @@ contextdesk --data-dir "$DATA" chat "summarize timeouts" --corpus <id>
 
 # Normalize (requires normalize subcommand on binary)
 # contextdesk normalize ./fixtures/cli-release-demo --output ./out-norm --json
+# contextdesk normalized validate ./out-norm
+# contextdesk --json normalized summarize ./out-norm
 # Exact files: out-norm/manifest.json, normalization-report.json, sources/*.jsonl
 # Full guide: docs/NORMALIZATION.md
 ```

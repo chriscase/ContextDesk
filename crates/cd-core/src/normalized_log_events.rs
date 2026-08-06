@@ -1166,6 +1166,17 @@ fn error_sample(raw: &str) -> String {
 /// Diagnostics carry a record number and a field location, never payload and
 /// never a filesystem path — a validation report is a shareable artifact.
 pub fn validate_stream<R: std::io::BufRead>(reader: R) -> CoreResult<NormalizedLogValidation> {
+    validate_stream_with_cancel(reader, None)
+}
+
+/// Validate a normalized-log stream with cooperative cancellation between
+/// records. This is the host-neutral long-running-operation entry point; the
+/// simpler [`validate_stream`] remains convenient for library callers that do
+/// not expose cancellation.
+pub fn validate_stream_with_cancel<R: std::io::BufRead>(
+    reader: R,
+    cancel: Option<&crate::process_progress::CancelFlag>,
+) -> CoreResult<NormalizedLogValidation> {
     let mut diagnostics = Vec::new();
     let mut diagnostics_total = 0u64;
     let mut samples: Vec<String> = Vec::new();
@@ -1178,6 +1189,9 @@ pub fn validate_stream<R: std::io::BufRead>(reader: R) -> CoreResult<NormalizedL
     let mut raw: Vec<u8> = Vec::new();
 
     loop {
+        if cancel.is_some_and(crate::process_progress::CancelFlag::is_cancelled) {
+            return Err(crate::error::CoreError::Cancelled);
+        }
         raw.clear();
         // Bounded: read at most one byte past the limit so an over-long line is
         // detected without being materialized.

@@ -118,7 +118,23 @@ async fn dispatch(
         }
         Command::Normalize(args) => {
             let result = commands::normalize::run(args, format, resolved.color.value).await;
-            emit(format, resolved.color.value, "normalize", result)
+            let partial_policy_failed = result.as_ref().is_ok_and(|output| output.fail_on_partial);
+            let code = emit(format, resolved.color.value, "normalize", result);
+            if code == 0 && partial_policy_failed {
+                ExitCategory::Partial.code()
+            } else {
+                code
+            }
+        }
+        Command::Normalized { action } => {
+            let result = commands::normalized::run(action).await;
+            let non_conforming = result.as_ref().is_ok_and(|output| !output.is_conforming());
+            let code = emit(format, resolved.color.value, "normalized", result);
+            if code == 0 && non_conforming {
+                ExitCategory::NonConforming.code()
+            } else {
+                code
+            }
         }
         Command::Corpus { action } => {
             let result = commands::corpus::run(action, &paths.cache_root);

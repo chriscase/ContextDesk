@@ -33,6 +33,8 @@ pub struct NormalizeOutput {
     pub truncations: u64,
     pub formats: BTreeMap<String, u64>,
     pub partial: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fail_on_partial: bool,
     pub files: Vec<String>,
 }
 
@@ -67,6 +69,11 @@ impl Render for NormalizeOutput {
         if self.partial {
             out.push_str(
                 "\n\nWarning\n\n  Partial output: some selected content failed or was excluded.",
+            );
+        }
+        if self.partial && self.fail_on_partial {
+            out.push_str(
+                "\n  --fail-on-partial requested: output was preserved; process exit is nonzero.",
             );
         }
         out.push_str(
@@ -157,6 +164,7 @@ pub async fn run(
         output: args.output.clone(),
         output_format: args.output_format.clone(),
         timezone,
+        fail_on_partial: args.fail_on_partial,
     };
 
     let cancel = CancelFlag::new();
@@ -246,6 +254,7 @@ pub async fn run(
         truncations: outcome.report.truncations,
         formats: outcome.report.formats,
         partial: outcome.report.partial,
+        fail_on_partial: outcome.partial_policy_failed,
         files,
     })
 }

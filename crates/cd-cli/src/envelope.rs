@@ -59,6 +59,12 @@ pub enum ExitCategory {
     /// process-exit-code signal a script can gate on (`contextdesk doctor
     /// && start_demo.sh`).
     NotReady = 8,
+    /// A normalized stream inspection completed and found one or more files
+    /// non-conforming. The report is complete; this code makes it gateable.
+    NonConforming = 9,
+    /// Normalize safely published valid artifacts, but the result was partial
+    /// and `--fail-on-partial` requested a failing automation verdict.
+    Partial = 10,
     /// Any failure that does not fit an above category — a bug, not an
     /// expected outcome a caller should branch on.
     Internal = 70,
@@ -80,6 +86,8 @@ impl ExitCategory {
             ExitCategory::NotImplemented => "not_implemented",
             ExitCategory::Cancelled => "cancelled",
             ExitCategory::NotReady => "not_ready",
+            ExitCategory::NonConforming => "non_conforming",
+            ExitCategory::Partial => "partial",
             ExitCategory::Internal => "internal",
         }
     }

@@ -34,6 +34,10 @@ pub struct NormalizeOptions {
     pub output_format: String,
     /// Timezone policy for zone-less local timestamps.
     pub timezone: NormalizeTimezonePolicy,
+    /// Publish every valid artifact, but mark the completion as policy-failed
+    /// when source ingestion was partial. Hosts use this to return a nonzero
+    /// automation exit without discarding safely published evidence.
+    pub fail_on_partial: bool,
 }
 
 /// Successful normalize outcome.
@@ -43,6 +47,9 @@ pub struct NormalizeOutcome {
     pub report: NormalizationReport,
     /// Absolute output directory.
     pub output: PathBuf,
+    /// True only when `fail_on_partial` was requested and the published report
+    /// honestly declares `partial=true`.
+    pub partial_policy_failed: bool,
 }
 
 /// Offline normalize: no durable corpus, no provider/keychain.
@@ -242,6 +249,7 @@ pub fn normalize_offline(
         );
 
         Ok(NormalizeOutcome {
+            partial_policy_failed: fail_on_partial_verdict(options.fail_on_partial, report.partial),
             report,
             output: options.output.clone(),
         })
@@ -280,6 +288,10 @@ fn check_cancel(cancel: Option<&CancelFlag>) -> CoreResult<()> {
     } else {
         Ok(())
     }
+}
+
+fn fail_on_partial_verdict(requested: bool, partial: bool) -> bool {
+    requested && partial
 }
 
 #[cfg(test)]
@@ -326,6 +338,7 @@ mod tests {
             output: output.clone(),
             output_format: "jsonl".into(),
             timezone: NormalizeTimezonePolicy::default(),
+            fail_on_partial: false,
         };
         let outcome = normalize_offline_quiet(&opts).expect("normalize");
         assert!(output.join("manifest.json").is_file());
@@ -372,6 +385,7 @@ mod tests {
             output: output.clone(),
             output_format: "jsonl".into(),
             timezone: NormalizeTimezonePolicy::default(),
+            fail_on_partial: false,
         };
         let outcome = normalize_offline_quiet(&opts).expect("single-line must not fail on seq 0");
         assert_eq!(outcome.report.events, 1, "exactly one logical event");
@@ -404,6 +418,7 @@ mod tests {
             output: output.clone(),
             output_format: "jsonl".into(),
             timezone: NormalizeTimezonePolicy::default(),
+            fail_on_partial: false,
         };
         let err = normalize_offline_quiet(&opts).unwrap_err();
         assert!(
@@ -426,6 +441,7 @@ mod tests {
             output: output.clone(),
             output_format: "jsonl".into(),
             timezone: NormalizeTimezonePolicy::default(),
+            fail_on_partial: false,
         };
         let err = normalize_offline(&opts, Some(&flag), &NoopProcessProgress).unwrap_err();
         assert!(matches!(err, CoreError::Cancelled) || err.to_string().contains("cancel"));
@@ -445,6 +461,7 @@ mod tests {
             output: output.clone(),
             output_format: "jsonl".into(),
             timezone: NormalizeTimezonePolicy::default(),
+            fail_on_partial: false,
         };
         let outcome = normalize_offline_quiet(&opts).expect("normalize");
         assert!(
@@ -513,5 +530,39 @@ mod tests {
             source_ids.len() >= 2,
             "expected multiple source files, got {source_ids:?}"
         );
+    }
+
+    #[test]
+    fn fail_on_partial_is_a_post_publish_verdict_not_an_output_rollback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("in");
+        fs::create_dir_all(&input).unwrap();
+        fs::write(
+            input.join("keep.log"),
+            "2026-01-01T00:00:00Z INFO retained event\n",
+        )
+        .unwrap();
+        let output = tmp.path().join("out");
+        let options = NormalizeOptions {
+            input,
+            output: output.clone(),
+            output_format: "jsonl".into(),
+            timezone: NormalizeTimezonePolicy::default(),
+            fail_on_partial: true,
+        };
+        let outcome = normalize_offline_quiet(&options).expect("complete publish");
+        assert!(!outcome.report.partial);
+        assert!(!outcome.partial_policy_failed);
+        assert!(outcome.report.events > 0);
+        assert!(output.join("manifest.json").is_file());
+        assert!(output.join("normalization-report.json").is_file());
+        assert!(output.join("sources").is_dir());
+
+        // The verdict is intentionally computed only after the report has
+        // been published. Mutating either input bit proves both halves of the
+        // automation policy without manufacturing an unsafe filesystem race.
+        assert!(fail_on_partial_verdict(true, true));
+        assert!(!fail_on_partial_verdict(false, true));
+        assert!(!fail_on_partial_verdict(true, false));
     }
 }
