@@ -43,7 +43,7 @@ struct EvidenceLine<'a> {
 
 pub struct CliProgressObserver {
     format: OutputFormat,
-    stderr_is_tty: bool,
+    interactive: bool,
     last_phase: Mutex<Option<ProcessProgressPhase>>,
     last_redraw: Mutex<Instant>,
     printed_anything: AtomicBool,
@@ -51,9 +51,11 @@ pub struct CliProgressObserver {
 
 impl CliProgressObserver {
     pub fn new(format: OutputFormat) -> Self {
+        let stderr_is_tty = io::stderr().is_terminal();
+        let terminal_is_dumb = std::env::var("TERM").ok().as_deref() == Some("dumb");
         Self {
             format,
-            stderr_is_tty: io::stderr().is_terminal(),
+            interactive: stderr_is_tty && !terminal_is_dumb,
             last_phase: Mutex::new(None),
             last_redraw: Mutex::new(Instant::now() - MIN_REDRAW_INTERVAL),
             printed_anything: AtomicBool::new(false),
@@ -76,7 +78,7 @@ impl CliProgressObserver {
             *last = Some(update.phase);
             changed
         };
-        if !phase_changed && self.stderr_is_tty {
+        if !phase_changed && self.interactive {
             let mut last_redraw = self.last_redraw.lock().expect("progress observer lock");
             if last_redraw.elapsed() < MIN_REDRAW_INTERVAL {
                 return;
@@ -90,33 +92,59 @@ impl CliProgressObserver {
         }
 
         let mut line = String::new();
-        if self.stderr_is_tty {
+        if self.interactive {
             line.push('\r');
             line.push_str("\x1b[2K"); // clear the line before redrawing shorter text over a longer one
         }
         line.push_str(update.phase.label());
         if let Some(fraction) = update.fraction {
-            line.push_str(&format!(" {:.0}%", fraction * 100.0));
+            line.push(' ');
+            line.push_str(&progress_bar(fraction, 20));
+            line.push_str(&format!(" {:>3.0}%", fraction.clamp(0.0, 1.0) * 100.0));
         }
         if let Some(files) = update.files_processed {
-            line.push_str(&format!(" files={files}"));
+            line.push_str(&format!(" · {} files", grouped(files)));
         }
         if let Some(lines) = update.lines_processed {
-            line.push_str(&format!(" lines={lines}"));
+            line.push_str(&format!(" · {} lines", grouped(lines)));
         }
         if let Some(templates) = update.templates {
-            line.push_str(&format!(" templates={templates}"));
+            line.push_str(&format!(" · {} templates", grouped(templates)));
+        }
+        if let Some(elapsed_ms) = update.elapsed_ms {
+            line.push_str(&format!(" · {:.1}s", elapsed_ms as f64 / 1_000.0));
         }
         if !update.message.is_empty() {
-            line.push_str(&format!(" — {}", update.message));
+            if self.interactive {
+                line.push_str(&format!(" · {}", update.message));
+            } else {
+                line.push_str(&format!("\n  {}", update.message));
+            }
         }
-        if !self.stderr_is_tty {
+        if !self.interactive {
             line.push('\n');
         }
         eprint!("{line}");
         let _ = io::stderr().flush();
         self.printed_anything.store(true, Ordering::Relaxed);
     }
+}
+
+fn progress_bar(fraction: f32, width: usize) -> String {
+    let filled = (fraction.clamp(0.0, 1.0) * width as f32).round() as usize;
+    format!("[{}{}]", "=".repeat(filled), "-".repeat(width - filled))
+}
+
+fn grouped(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, character) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(character);
+    }
+    out
 }
 
 impl ProcessProgressObserver for CliProgressObserver {
@@ -153,5 +181,24 @@ impl ProcessProgressObserver for CliProgressObserver {
         // (the same bounded aggregate `report.stats` already carries) —
         // printing every evidence item live here would be exactly the
         // unbounded per-file spam this module exists to avoid.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{grouped, progress_bar};
+
+    #[test]
+    fn progress_bar_is_bounded_and_readable() {
+        assert_eq!(progress_bar(-1.0, 10), "[----------]");
+        assert_eq!(progress_bar(0.5, 10), "[=====-----]");
+        assert_eq!(progress_bar(2.0, 10), "[==========]");
+    }
+
+    #[test]
+    fn groups_large_counts() {
+        assert_eq!(grouped(12), "12");
+        assert_eq!(grouped(1_234), "1,234");
+        assert_eq!(grouped(12_345_678), "12,345,678");
     }
 }

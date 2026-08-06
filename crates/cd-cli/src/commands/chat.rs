@@ -158,6 +158,7 @@ pub async fn run(
     let host_event_sink = recorder.clone();
     let observed_session_id = Arc::new(Mutex::new(session_id.clone()));
     let live_session_id = observed_session_id.clone();
+    let mut answer_started = false;
     let mut live_sink = |event: StreamEvent| {
         if let StreamEvent::TurnStarted { session_id, .. } = &event {
             *live_session_id.lock().expect("CLI live session lock") = Some(session_id.clone());
@@ -171,6 +172,10 @@ pub async fn run(
         } else if text {
             chat_renderer.on_event(&event);
             if let StreamEvent::TextDelta { text } = &event {
+                if stdout_is_tty && !answer_started {
+                    println!("Answer\n──────");
+                    answer_started = true;
+                }
                 print!("{text}");
                 let _ = io::stdout().flush();
             }

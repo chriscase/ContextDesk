@@ -29,24 +29,24 @@ impl Render for LoggingAssessmentOutput {
         let a = &self.assessment;
         let mut out = String::new();
         out.push_str(&format!(
-            "Logging quality: {} (score {})\n",
+            "Logging quality assessment\n\n  Grade      {}\n  Score      {}/100\n  Summary    {}\n",
             a.summary.grade.as_str(),
-            a.summary.overall_score
+            a.summary.overall_score,
+            a.summary.headline
         ));
-        out.push_str(&format!("  {}\n", a.summary.headline));
         out.push_str(&format!(
-            "  corpus {} · {} events · {} templates · partial={}\n",
+            "\nCorpus\n\n  ID         {}\n  Events     {}\n  Templates  {}\n  Partial    {}\n",
             a.corpus.id, a.corpus.event_count, a.corpus.template_count, a.corpus.partial
         ));
         out.push_str(&format!(
-            "  time={:?} wall={} order_only={} unresolved={}\n",
+            "\nTime quality\n\n  Overall     {:?}\n  Wall-clock  {}\n  Order-only  {}\n  Unresolved  {}\n",
             a.metrics.time_quality,
             a.metrics.wall_event_count,
             a.metrics.order_only_event_count,
             a.metrics.unresolved_local_event_count
         ));
         out.push_str(&format!(
-            "  selection: selected={} ignored={} unsupported={} excluded_policy={} failed={}\n",
+            "\nSelection\n\n  Selected     {}\n  Ignored      {}\n  Unsupported  {}\n  Excluded     {}\n  Failed       {}\n",
             a.metrics.selection.selected_imported,
             a.metrics.selection.ignored,
             a.metrics.selection.unsupported,
@@ -54,10 +54,10 @@ impl Render for LoggingAssessmentOutput {
             a.metrics.selection.failed
         ));
         if !a.findings.is_empty() {
-            out.push_str("  findings:\n");
+            out.push_str("\nFindings\n");
             for f in a.findings.iter().take(8) {
                 out.push_str(&format!(
-                    "    - {} [{:?}] {} → {}\n",
+                    "\n  {} [{:?}]\n    {}\n    Improvement: {}\n",
                     f.id, f.severity, f.title, f.improvement_hint.template_id
                 ));
             }
@@ -67,13 +67,13 @@ impl Render for LoggingAssessmentOutput {
         }
         if let Some(path) = &self.output {
             out.push_str(&format!(
-                "  wrote {} ({})\n",
+                "\nExport\n\n  Wrote   {}\n  Format  {}\n",
                 path,
                 self.report_format.as_deref().unwrap_or("json")
             ));
         } else {
             out.push_str(
-                "  tip: --report-format markdown --output plan.md for a Markdown projection\n",
+                "\nTip\n\n  Add `--report-format markdown --output plan.md` to export a readable plan.\n",
             );
         }
         out.trim_end().to_string()

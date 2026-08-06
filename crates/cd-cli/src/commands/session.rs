@@ -26,16 +26,17 @@ impl Render for SessionListOutput {
         if self.sessions.is_empty() {
             return "No sessions yet. Run `contextdesk chat \"<question>\"`.".to_string();
         }
-        let mut out = String::new();
+        let mut out = format!("Chat sessions ({})\n", self.sessions.len());
         for s in &self.sessions {
             out.push_str(&format!(
-                "{}  {} ({} messages){}\n",
-                s.id,
+                "\n  {}\n    {}\n    {} messages · updated {}{}\n",
                 s.title,
+                s.id,
                 s.message_count,
+                s.updated_at.format("%Y-%m-%d %H:%M UTC"),
                 s.linked_corpus_id
                     .as_deref()
-                    .map(|c| format!(" [corpus {c}]"))
+                    .map(|c| format!(" · corpus {c}"))
                     .unwrap_or_default()
             ));
         }
@@ -62,9 +63,9 @@ pub struct MessageItem {
 
 impl Render for SessionShowOutput {
     fn render_text(&self) -> String {
-        let mut out = format!("{} ({})\n\n", self.title, self.id);
+        let mut out = format!("{}\n{}\n", self.title, self.id);
         for m in &self.messages {
-            out.push_str(&format!("[{}] {}\n\n", m.role, m.content));
+            out.push_str(&format!("\n{}\n{}\n", m.role.to_uppercase(), m.content));
         }
         out.trim_end().to_string()
     }

@@ -42,12 +42,18 @@ impl Render for ContextOutput {
                 self.query, self.corpus_id
             );
         }
-        let mut out = format!("evidence for {:?} in {}:\n\n", self.query, self.corpus_id);
-        for item in &self.evidence {
+        let mut out = format!(
+            "Grounded context\n\n  Question   {:?}\n  Corpus     {}\n  Evidence   {} item(s)\n",
+            self.query,
+            self.corpus_id,
+            self.evidence.len()
+        );
+        for (index, item) in self.evidence.iter().enumerate() {
             out.push_str(&format!(
-                "[{}] {}\n  {} matching event(s): {}\n\n",
-                item.citation_id,
+                "\n{}. {}\n   Citation   {}\n   Events     {} matching\n   Samples    {}\n",
+                index + 1,
                 item.pattern,
+                item.citation_id,
                 item.count,
                 item.event_citation_ids.join(", ")
             ));

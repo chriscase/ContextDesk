@@ -30,11 +30,21 @@ impl Render for ExploreOutput {
         if self.hits.is_empty() {
             return format!("no matches for {:?} in {}", self.query, self.corpus_id);
         }
-        let mut out = String::new();
-        for hit in &self.hits {
+        let mut out = format!(
+            "Search results\n\n  Query     {:?}\n  Corpus    {}\n  Matches   {}\n",
+            self.query,
+            self.corpus_id,
+            self.hits.len()
+        );
+        for (index, hit) in self.hits.iter().enumerate() {
             out.push_str(&format!(
-                "[log_template:{}] score={:.2} count={} sev={}  {}\n",
-                hit.template_id, hit.score, hit.count, hit.severity, hit.pattern
+                "\n{}. {}\n   Evidence   log_template:{}\n   Score      {:.2}\n   Events     {}\n   Severity   {}\n",
+                index + 1,
+                hit.pattern,
+                hit.template_id,
+                hit.score,
+                hit.count,
+                hit.severity
             ));
         }
         out.trim_end().to_string()

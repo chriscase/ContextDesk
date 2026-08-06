@@ -56,7 +56,8 @@ fn normalize_folder_produces_jsonl_manifest_report() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("normalized"));
+        .stdout(predicate::str::contains("Normalization complete"))
+        .stdout(predicate::str::contains("\n\nFiles written\n\n"));
     assert!(out.join("manifest.json").is_file());
     assert!(out.join("normalization-report.json").is_file());
     let sources: Vec<_> = fs::read_dir(out.join("sources"))

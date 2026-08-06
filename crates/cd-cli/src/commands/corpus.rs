@@ -42,10 +42,31 @@ impl Render for CorpusListOutput {
         if self.corpora.is_empty() {
             return "No corpora imported yet. Run `contextdesk import <archive>`.".to_string();
         }
-        let mut out = String::new();
+        let id_width = self
+            .corpora
+            .iter()
+            .map(|item| item.id.chars().count())
+            .max()
+            .unwrap_or(2)
+            .max(2);
+        let name_width = self
+            .corpora
+            .iter()
+            .map(|item| item.name.chars().count())
+            .max()
+            .unwrap_or(4)
+            .max(4);
+        let mut out = format!(
+            "Corpora ({})\n\n  {:<id_width$}  {:<name_width$}  {:>10}  {:>10}\n",
+            self.corpora.len(),
+            "ID",
+            "NAME",
+            "EVENTS",
+            "TEMPLATES"
+        );
         for item in &self.corpora {
             out.push_str(&format!(
-                "{}  {}  ({} events, {} templates)\n",
+                "  {:<id_width$}  {:<name_width$}  {:>10}  {:>10}\n",
                 item.id, item.name, item.event_count, item.template_count
             ));
         }
@@ -128,7 +149,7 @@ pub fn run(action: &CorpusAction, cache_root: &Path) -> CliResult<Box<dyn Render
 impl Render for CorpusItem {
     fn render_text(&self) -> String {
         format!(
-            "{}\n  name: {}\n  events: {}\n  templates: {}\n  created_at: {}\n  source: {}",
+            "Corpus\n\n  ID         {}\n  Name       {}\n  Events     {}\n  Templates  {}\n  Created    {}\n  Source     {}",
             self.id,
             self.name,
             self.event_count,

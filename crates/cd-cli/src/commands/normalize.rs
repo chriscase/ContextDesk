@@ -39,11 +39,11 @@ pub struct NormalizeOutput {
 impl Render for NormalizeOutput {
     fn render_text(&self) -> String {
         let mut out = format!(
-            "normalized {} events from {} sources → {}",
-            self.events, self.sources, self.output
+            "Normalization complete\n\n  Output     {}\n  Events     {}\n  Sources    {}",
+            self.output, self.events, self.sources
         );
         out.push_str(&format!(
-            "\n  selection: {} examined, {} selected, {} ignored, {} unsupported, {} excluded, {} failed",
+            "\n\nSelection\n\n  Examined     {}\n  Selected     {}\n  Ignored      {}\n  Unsupported  {}\n  Excluded     {}\n  Failed       {}",
             self.sources_examined,
             self.sources_selected,
             self.sources_ignored,
@@ -52,7 +52,7 @@ impl Render for NormalizeOutput {
             self.sources_failed
         ));
         out.push_str(&format!(
-            "\n  time: {} explicit, {} producer_resolved, {} unresolved, {} order_only",
+            "\n\nTime quality\n\n  Explicit           {}\n  Producer-resolved  {}\n  Unresolved         {}\n  Order-only         {}",
             self.time_source_explicit,
             self.time_producer_resolved,
             self.time_unresolved,
@@ -60,14 +60,18 @@ impl Render for NormalizeOutput {
         ));
         if self.redactions > 0 || self.truncations > 0 {
             out.push_str(&format!(
-                "\n  privacy: {} redacted originals, {} truncated",
+                "\n\nPrivacy\n\n  Redacted originals  {}\n  Truncated           {}",
                 self.redactions, self.truncations
             ));
         }
         if self.partial {
-            out.push_str("\n  note: partial (some selected content failed or was excluded)");
+            out.push_str(
+                "\n\nWarning\n\n  Partial output: some selected content failed or was excluded.",
+            );
         }
-        out.push_str("\n  wrote: manifest.json, normalization-report.json, sources/*.jsonl");
+        out.push_str(
+            "\n\nFiles written\n\n  manifest.json\n  normalization-report.json\n  sources/*.jsonl",
+        );
         out
     }
 

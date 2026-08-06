@@ -81,16 +81,19 @@ impl From<&ImportPreviewItem> for SelectionItem {
 impl Render for ImportOutput {
     fn render_text(&self) -> String {
         let mut out = format!(
-            "imported {} events into corpus \"{}\" ({})",
-            self.events_imported, self.corpus_name, self.corpus_id
+            "Import complete\n\n  Corpus       {}\n  Corpus ID    {}\n  Events       {}\n  Templates    {}",
+            self.corpus_name,
+            self.corpus_id,
+            self.events_imported,
+            self.templates
         );
         // Preview inventory vs ingest walk are different metrics — always label both.
         out.push_str(&format!(
-            "\n  preview inventory: {} file entries; ingest walk: {} filesystem/archive entries",
+            "\n\nSources\n\n  Previewed    {} file entries\n  Discovered   {} filesystem/archive entries",
             self.entries_examined, self.discovered_files
         ));
         out.push_str(&format!(
-            "\n  selection: {} selected, {} ignored (noise/hidden/dirs), {} unsupported, {} excluded (policy), {} failed (I/O)",
+            "\n  Selected     {}\n  Ignored      {} (noise, hidden files, or directories)\n  Unsupported  {}\n  Excluded     {} (policy)\n  Failed       {} (I/O)",
             self.sources_selected,
             self.sources_ignored,
             self.sources_unsupported,
@@ -102,14 +105,13 @@ impl Render for ImportOutput {
                 "\n  note: ignored entries are intentional noise filtering, not import failures",
             );
         }
-        out.push_str(&format!("\n  {} template(s)", self.templates));
         if !self.formats.is_empty() {
             let formats: Vec<String> = self
                 .formats
                 .iter()
                 .map(|(id, count)| format!("{id}={count}"))
                 .collect();
-            out.push_str(&format!("\n  formats: {}", formats.join(", ")));
+            out.push_str(&format!("\n\nFormats\n\n  {}", formats.join("\n  ")));
         }
         if !self.timestamp_provenance.is_empty() {
             let provenance: Vec<String> = self
@@ -118,8 +120,8 @@ impl Render for ImportOutput {
                 .map(|(kind, count)| format!("{kind}={count}"))
                 .collect();
             out.push_str(&format!(
-                "\n  timestamp provenance: {}",
-                provenance.join(", ")
+                "\n\nTimestamp provenance\n\n  {}",
+                provenance.join("\n  ")
             ));
         }
         if self.partial {

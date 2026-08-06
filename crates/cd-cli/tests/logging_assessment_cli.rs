@@ -107,7 +107,8 @@ fn logging_assessment_json_contract_and_atomic_markdown_export() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("wrote"));
+        .stdout(predicate::str::contains("\nExport\n"))
+        .stdout(predicate::str::contains("Wrote"));
     let md = fs::read_to_string(&plan).unwrap();
     assert!(md.contains("Logging Quality Assessment"));
     assert!(md.contains("JSON is the source of truth"));
@@ -160,5 +161,6 @@ fn logging_assessment_human_text_lists_findings() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Logging quality:"));
+        .stdout(predicate::str::contains("Logging quality assessment"))
+        .stdout(predicate::str::contains("\n\nFindings\n\n"));
 }

@@ -39,7 +39,12 @@ impl Render for StatusOutput {
                 self.corpus_id
             );
         }
-        let mut out = format!("{} (revision {})\n", self.corpus_id, self.event_revision);
+        let mut out = format!(
+            "Timezone status\n\n  Corpus    {}\n  Revision  {}\n  Sources   {}\n",
+            self.corpus_id,
+            self.event_revision,
+            self.sources.len()
+        );
         for s in &self.sources {
             let flag = if s.unresolved_local_records > 0 {
                 " [UNRESOLVED]"
@@ -47,12 +52,12 @@ impl Render for StatusOutput {
                 ""
             };
             out.push_str(&format!(
-                "  {}  resolved={} unresolved={} wall_clock={}{}\n",
+                "\n  {}{}\n    Resolved    {}\n    Unresolved  {}\n    Wall-clock  {}\n",
                 s.source,
+                flag,
                 s.resolved_local_records,
                 s.unresolved_local_records,
-                s.explicit_wall_clock_records,
-                flag
+                s.explicit_wall_clock_records
             ));
         }
         out.trim_end().to_string()
