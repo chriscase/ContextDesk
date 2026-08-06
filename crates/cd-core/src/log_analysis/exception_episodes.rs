@@ -5588,4 +5588,131 @@ mod tests {
             Some("req:abc-9".into())
         );
     }
+
+    #[test]
+    fn p0_seven_progressive_wraps_form_one_chain_root_mutation_splits() {
+        // Seven progressive app layers: shared thread + request id + progressive
+        // sites + compatible root signatures form one multi-rendering chain.
+        // Mutating only the last layer's root type splits that member out.
+        let mut events = Vec::new();
+        for layer in 0..7u64 {
+            // Outer wraps share root cause type for dual-stable signatures; sites differ.
+            let body = format!(
+                "thread=worker-7 id=77 java.lang.RuntimeException: XYZ_PAYMENT_FAILED hop={layer}\n\
+\tat com.xyz.layer{layer}.Handler.handle(Handler{layer}.java:{line})\n\
+\tat com.xyz.layer{layer}.Bridge.invoke(Bridge{layer}.java:{line2})\n\
+\tCaused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT id=77\n\
+\tat com.xyz.net.Http.execute(Http.java:15)",
+                layer = layer,
+                line = 10 + layer,
+                line2 = 20 + layer,
+            );
+            events.push(event(layer + 1, 1_700_000_100, "app.log", &body));
+        }
+        let baseline = analyze_bounded_events(events.len() as u64, &events);
+        let max_renderings = baseline
+            .families
+            .iter()
+            .flat_map(|f| f.occurrences.iter())
+            .map(|o| o.rendering_count)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            max_renderings, 7,
+            "seven progressive wraps must form one 7-rendering chain (occ={} max_r={})",
+            baseline.occurrence_count,
+            max_renderings
+        );
+        assert_eq!(baseline.occurrence_count, 1);
+
+        // Mutate only layer 6: incompatible root/cause + distinct site family.
+        events[6].message = "thread=worker-7 id=77 java.lang.IllegalStateException: XYZ_OTHER hop=6\n\
+\tat com.other.site.Handler.handle(H.java:1)\n\
+\tat com.other.site.Bridge.invoke(B.java:2)\n\
+\tCaused by: java.lang.IllegalStateException: XYZ_OTHER\n\
+\tat com.other.net.X.run(X.java:1)"
+            .into();
+        let mutated = analyze_bounded_events(events.len() as u64, &events);
+        let max_after = mutated
+            .families
+            .iter()
+            .flat_map(|f| f.occurrences.iter())
+            .map(|o| o.rendering_count)
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_after < 7,
+            "mutating the last layer root/site must break the 7-member chain (max_r={max_after})"
+        );
+        assert!(
+            mutated.occurrence_count >= 2,
+            "root mutation must yield a split (occ={})",
+            mutated.occurrence_count
+        );
+    }
+
+    #[test]
+    fn p0_order_only_app_app_without_exact_anchor_stays_separate() {
+        let a = order_event(
+            1,
+            "app.log",
+            "java.lang.RuntimeException: XYZ_OO\n at com.xyz.A.m(A.java:1)",
+        );
+        let b = order_event(
+            2,
+            "app.log",
+            "java.lang.RuntimeException: XYZ_OO\n at com.xyz.B.m(B.java:1)",
+        );
+        let analysis = analyze_bounded_events(2, &[a, b]);
+        assert_eq!(
+            analysis.occurrence_count, 2,
+            "OrderOnly app-app without exact unique execution anchor must not group"
+        );
+        assert_eq!(analysis.duplicate_rendering_occurrence_count, 0);
+    }
+
+    #[test]
+    fn p0_one_stderr_two_app_chains_remains_unresolved() {
+        // Two distinct request-anchored app chains, one compatible stderr → unresolved.
+        let events = vec![
+            event(
+                1,
+                10,
+                "app.log",
+                "thread=tA id=1 java.lang.RuntimeException: XYZ_AMB\n at com.xyz.A.m(A.java:1)",
+            ),
+            event(
+                2,
+                11,
+                "app.log",
+                "thread=tB id=2 java.lang.RuntimeException: XYZ_AMB\n at com.xyz.B.m(B.java:1)",
+            ),
+            event(
+                3,
+                12,
+                "stderr.log",
+                "[stderr] (pool-1) java.lang.RuntimeException: XYZ_AMB",
+            ),
+            event(
+                4,
+                12,
+                "stderr.log",
+                "[stderr] (pool-1) at com.xyz.A.m(A.java:1)",
+            ),
+        ];
+        // Make stderr compatible with both via matching id absent → signature only.
+        // Without unique request match, must not absorb both chains into one episode with stderr.
+        let analysis = analyze_bounded_events(4, &events);
+        // Either ambiguous flag or no dual that includes both apps + one stderr.
+        let duals_with_two_apps = analysis
+            .families
+            .iter()
+            .flat_map(|f| f.occurrences.iter())
+            .filter(|o| o.rendering_count >= 3)
+            .count();
+        assert_eq!(
+            duals_with_two_apps, 0,
+            "one stderr must never absorb two executions"
+        );
+    }
 }
