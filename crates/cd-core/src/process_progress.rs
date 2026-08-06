@@ -104,6 +104,8 @@ pub enum ProcessProgressKind {
     LogIngest,
     /// Session context pack file/zip import.
     SessionContextImport,
+    /// Offline validation or summarization of normalized JSONL streams.
+    NormalizedInspection,
 }
 
 /// Pipeline phase labels (snake_case on the wire for Tauri/UI).

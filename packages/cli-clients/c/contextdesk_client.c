@@ -13,6 +13,22 @@ static const char *resolve_bin(void) {
     return (b && b[0]) ? b : "contextdesk";
 }
 
+typedef enum {
+    CONTEXTDESK_NO_VERDICT = 0,
+    CONTEXTDESK_NOT_READY,
+    CONTEXTDESK_NON_CONFORMING,
+    CONTEXTDESK_PARTIAL
+} contextdesk_verdict;
+
+/* Use only after parsing an ok:true envelope. Stable kinds are not_ready,
+ * non_conforming, and partial: report-bearing verdicts, never internal. */
+contextdesk_verdict contextdesk_completed_verdict(int exit_code) {
+    if (exit_code == 8) return CONTEXTDESK_NOT_READY;
+    if (exit_code == 9) return CONTEXTDESK_NON_CONFORMING;
+    if (exit_code == 10) return CONTEXTDESK_PARTIAL;
+    return CONTEXTDESK_NO_VERDICT;
+}
+
 /* argv: ["capabilities"] etc. Prints child stdout; returns exit code. */
 int contextdesk_run_json(const char *data_dir, char *const cmd_args[], int cmd_argc) {
     const char *bin = resolve_bin();

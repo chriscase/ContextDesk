@@ -30,6 +30,25 @@ pub struct CapabilitiesOutput {
     pub build_channel: String,
     pub exit_categories: Vec<ExitCategoryDoc>,
     pub commands: Vec<&'static str>,
+    /// Nonzero exits that still carry a completed `ok:true` report envelope.
+    pub completed_verdict_categories: Vec<ExitCategoryDoc>,
+    pub normalized: NormalizedCapabilities,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NormalizedCapabilities {
+    pub event_schema_id: &'static str,
+    pub event_reader_version: u32,
+    pub validation_schema_id: &'static str,
+    pub summary_schema_id: &'static str,
+    pub inspection_schema_version: u32,
+    pub max_line_bytes: usize,
+    pub max_files: usize,
+    pub max_directories: usize,
+    pub max_directory_entries: usize,
+    pub max_directory_depth: usize,
+    pub max_retained_diagnostics: usize,
+    pub max_retained_error_samples: usize,
 }
 
 impl Render for CapabilitiesOutput {
@@ -119,5 +138,32 @@ pub fn run(branding: &Branding) -> CapabilitiesOutput {
             })
             .collect(),
         commands: COMMANDS.to_vec(),
+        completed_verdict_categories: [
+            ExitCategory::NotReady,
+            ExitCategory::NonConforming,
+            ExitCategory::Partial,
+        ]
+        .into_iter()
+        .map(|category| ExitCategoryDoc {
+            code: category.code(),
+            kind: category.kind(),
+        })
+        .collect(),
+        normalized: NormalizedCapabilities {
+            event_schema_id: cd_core::normalized_log_events::NORMALIZED_LOG_EVENTS_SCHEMA_ID,
+            event_reader_version:
+                cd_core::normalized_log_events::NORMALIZED_LOG_EVENTS_READER_VERSION,
+            validation_schema_id: cd_workflow::normalized::NORMALIZED_VALIDATION_SCHEMA_ID,
+            summary_schema_id: cd_workflow::normalized::NORMALIZED_SUMMARY_SCHEMA_ID,
+            inspection_schema_version:
+                cd_workflow::normalized::NORMALIZED_INSPECTION_SCHEMA_VERSION,
+            max_line_bytes: cd_core::normalized_log_events::MAX_NORMALIZED_LINE_BYTES,
+            max_files: cd_workflow::normalized::MAX_NORMALIZED_FILES,
+            max_directories: cd_workflow::normalized::MAX_NORMALIZED_DIRECTORIES,
+            max_directory_entries: cd_workflow::normalized::MAX_NORMALIZED_DIRECTORY_ENTRIES,
+            max_directory_depth: cd_workflow::normalized::MAX_DIRECTORY_DEPTH,
+            max_retained_diagnostics: cd_workflow::normalized::MAX_RETAINED_DIAGNOSTICS,
+            max_retained_error_samples: cd_workflow::normalized::MAX_RETAINED_ERROR_SAMPLES,
+        },
     }
 }

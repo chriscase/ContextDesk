@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
@@ -20,6 +21,16 @@ class ContextDeskError(RuntimeError):
         self.kind = kind
         self.message = message
         self.exit_code = exit_code
+
+
+COMPLETED_VERDICTS = {8: "not_ready", 9: "non_conforming", 10: "partial"}
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    envelope: Dict[str, Any]
+    exit_code: int
+    verdict_kind: Optional[str]
 
 
 def resolve_bin(explicit: Optional[str] = None) -> str:
@@ -35,8 +46,8 @@ def run_json(
     env: Optional[Mapping[str, str]] = None,
     cwd: Optional[Path] = None,
     timeout: Optional[float] = None,
-) -> Dict[str, Any]:
-    """Run contextdesk with --json; return parsed envelope."""
+) -> CommandResult:
+    """Return a typed completion; exits 8/9/10 retain their report envelope."""
     bin_ = resolve_bin(bin_path)
     argv: List[str] = [bin_]
     if data_dir is not None:
@@ -62,7 +73,7 @@ def run_json(
     stdout = (proc.stdout or "").strip()
     if not stdout:
         raise ContextDeskError(
-            "internal" if proc.returncode not in (0, 1, 3, 4, 5, 6, 7, 8, 70, 130) else "user_error",
+            "internal" if proc.returncode not in (0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 70, 130) else "user_error",
             f"empty stdout (stderr={proc.stderr[:400]!r})",
             proc.returncode,
         )
@@ -78,12 +89,12 @@ def run_json(
             err.get("message") or "command failed",
             proc.returncode,
         )
-    if proc.returncode != 0:
+    if proc.returncode != 0 and proc.returncode not in COMPLETED_VERDICTS:
         raise ContextDeskError("internal", f"ok envelope but exit {proc.returncode}", proc.returncode)
-    return envelope
+    return CommandResult(envelope, proc.returncode, COMPLETED_VERDICTS.get(proc.returncode))
 
 
-def capabilities(**kwargs: Any) -> Dict[str, Any]:
+def capabilities(**kwargs: Any) -> CommandResult:
     return run_json(["capabilities"], **kwargs)
 
 
@@ -98,12 +109,11 @@ def main(argv: Sequence[str]) -> int:
         data_dir = Path(args[i + 1])
         del args[i : i + 2]
     if args[0] == "capabilities":
-        env = capabilities(data_dir=data_dir)
-        print(json.dumps(env, indent=2))
-        return 0
-    env = run_json(args, data_dir=data_dir)
-    print(json.dumps(env, indent=2))
-    return 0
+        result = capabilities(data_dir=data_dir)
+    else:
+        result = run_json(args, data_dir=data_dir)
+    print(json.dumps(result.envelope, indent=2))
+    return result.exit_code
 
 
 if __name__ == "__main__":

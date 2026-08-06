@@ -1198,8 +1198,7 @@ pub fn validate_stream_with_cancel<R: std::io::BufRead>(
         // Bounded by hand rather than via `Take`, which does not expose
         // `read_until`: read one byte past the limit so an over-long line is
         // detected without materializing it.
-        let read = read_bounded_line(&mut reader, &mut raw, MAX_NORMALIZED_LINE_BYTES + 2)
-            .map_err(|error| crate::error::CoreError::Message(format!("read stream: {error}")))?;
+        let read = read_bounded_line(&mut reader, &mut raw, MAX_NORMALIZED_LINE_BYTES + 2, cancel)?;
         if read == 0 {
             break;
         }
@@ -1322,17 +1321,25 @@ fn read_bounded_line<R: std::io::BufRead>(
     reader: &mut R,
     out: &mut Vec<u8>,
     limit: usize,
-) -> std::io::Result<usize> {
+    cancel: Option<&crate::process_progress::CancelFlag>,
+) -> CoreResult<usize> {
     // NOTE: `out` may be a TRUNCATED prefix of the physical line. Callers must
     // only strip CR when an LF was actually retained. A CR that merely sits at
     // the cut point of a truncated prefix is content; stripping it would shrink
     // an overlong record back under the bound.
     let mut total = 0usize;
     loop {
+        if cancel.is_some_and(crate::process_progress::CancelFlag::is_cancelled) {
+            return Err(crate::error::CoreError::Cancelled);
+        }
         let available = match reader.fill_buf() {
             Ok(buffer) => buffer,
             Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
+            Err(error) => {
+                return Err(crate::error::CoreError::Message(format!(
+                    "read stream: {error}"
+                )))
+            }
         };
         if available.is_empty() {
             return Ok(total);
@@ -1355,6 +1362,9 @@ fn read_bounded_line<R: std::io::BufRead>(
                 }
                 reader.consume(len);
                 total += len;
+                if cancel.is_some_and(crate::process_progress::CancelFlag::is_cancelled) {
+                    return Err(crate::error::CoreError::Cancelled);
+                }
             }
         }
     }
@@ -1652,8 +1662,7 @@ pub fn canonicalize_stream<R: std::io::BufRead, W: std::io::Write>(
 
     loop {
         raw.clear();
-        let read = read_bounded_line(&mut reader, &mut raw, MAX_NORMALIZED_LINE_BYTES + 2)
-            .map_err(|error| crate::error::CoreError::Message(format!("read: {error}")))?;
+        let read = read_bounded_line(&mut reader, &mut raw, MAX_NORMALIZED_LINE_BYTES + 2, None)?;
         if read == 0 {
             break;
         }
@@ -2950,5 +2959,53 @@ mod tests {
         let encoded = serde_json::to_string(&report).unwrap();
         assert!(encoded.contains("\"eventsValidated\""));
         assert!(encoded.contains("\"missing_header\""));
+    }
+
+    struct CancellingChunkReader {
+        bytes: Vec<u8>,
+        position: usize,
+        fills: usize,
+        cancel: crate::process_progress::CancelFlag,
+    }
+
+    impl std::io::Read for CancellingChunkReader {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            let available = std::io::BufRead::fill_buf(self)?;
+            let count = available.len().min(output.len());
+            output[..count].copy_from_slice(&available[..count]);
+            std::io::BufRead::consume(self, count);
+            Ok(count)
+        }
+    }
+
+    impl std::io::BufRead for CancellingChunkReader {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            self.fills += 1;
+            if self.fills == 4 {
+                self.cancel.cancel();
+            }
+            let end = (self.position + 4096).min(self.bytes.len());
+            Ok(&self.bytes[self.position..end])
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.position = (self.position + amount).min(self.bytes.len());
+        }
+    }
+
+    #[test]
+    fn cancellation_interrupts_oversized_unterminated_line_drain() {
+        let cancel = crate::process_progress::CancelFlag::new();
+        let mut bytes = serde_json::to_vec(&header()).unwrap();
+        bytes.push(b'\n');
+        bytes.extend(std::iter::repeat_n(b'x', MAX_NORMALIZED_LINE_BYTES * 4));
+        let reader = CancellingChunkReader {
+            bytes,
+            position: 0,
+            fills: 0,
+            cancel: cancel.clone(),
+        };
+        let error = validate_stream_with_cancel(reader, Some(&cancel)).unwrap_err();
+        assert!(matches!(error, crate::error::CoreError::Cancelled));
     }
 }

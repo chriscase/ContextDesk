@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 
 /// Every filesystem location this process needs, resolved once at startup.
 pub struct Paths {
-    pub branding: Branding,
     pub config_dir: PathBuf,
     /// The SAME `AppConfig` file the desktop app reads and writes
     /// (`~/.contextdesk/config.json` by default) — provider profiles,
@@ -85,7 +84,6 @@ impl Paths {
             cli_state_dir: config_dir.join("cli"),
             app_config_path,
             config_dir,
-            branding,
             isolated,
         })
     }

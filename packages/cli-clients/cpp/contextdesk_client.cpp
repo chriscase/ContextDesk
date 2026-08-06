@@ -17,6 +17,16 @@ static std::string resolve_bin() {
     return "contextdesk";
 }
 
+enum class CompletedVerdict { None, NotReady, NonConforming, Partial };
+
+// Parsed ok:true kinds: not_ready, non_conforming, partial (completed verdicts).
+static CompletedVerdict completed_verdict(int exit_code) {
+    if (exit_code == 8) return CompletedVerdict::NotReady;
+    if (exit_code == 9) return CompletedVerdict::NonConforming;
+    if (exit_code == 10) return CompletedVerdict::Partial;
+    return CompletedVerdict::None;
+}
+
 int run_json(const std::string &data_dir, const std::vector<std::string> &cmd) {
     std::string bin = resolve_bin();
     std::vector<std::string> storage;
@@ -48,7 +58,11 @@ int run_json(const std::string &data_dir, const std::vector<std::string> &cmd) {
         std::perror("waitpid");
         return 70;
     }
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFEXITED(status)) {
+        int code = WEXITSTATUS(status);
+        (void)completed_verdict(code); // typed mapping for the JSON parser layer
+        return code;
+    }
     return 130;
 }
 

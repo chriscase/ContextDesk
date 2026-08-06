@@ -9,7 +9,23 @@ fn resolve_bin() -> String {
     env::var("CONTEXTDESK_BIN").unwrap_or_else(|_| "contextdesk".into())
 }
 
-fn run_json(data_dir: Option<&str>, args: &[String]) -> Result<(i32, String), String> {
+#[derive(Debug)]
+struct CommandResult {
+    envelope: serde_json::Value,
+    exit_code: i32,
+    verdict_kind: Option<&'static str>,
+}
+
+fn completed_verdict(code: i32) -> Option<&'static str> {
+    match code {
+        8 => Some("not_ready"),
+        9 => Some("non_conforming"),
+        10 => Some("partial"),
+        _ => None,
+    }
+}
+
+fn run_json(data_dir: Option<&str>, args: &[String]) -> Result<CommandResult, String> {
     let bin = resolve_bin();
     let mut cmd = Command::new(&bin);
     if let Some(d) = data_dir {
@@ -32,7 +48,20 @@ fn run_json(data_dir: Option<&str>, args: &[String]) -> Result<(i32, String), St
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("empty stdout exit={code} stderr={stderr}"));
     }
-    Ok((code, stdout))
+    let envelope: serde_json::Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("invalid JSON: {error}"))?;
+    if envelope.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(format!("command error exit={code}: {envelope}"));
+    }
+    let verdict_kind = completed_verdict(code);
+    if code != 0 && verdict_kind.is_none() {
+        return Err(format!("ok envelope but exit={code}"));
+    }
+    Ok(CommandResult {
+        envelope,
+        exit_code: code,
+        verdict_kind,
+    })
 }
 
 fn main() {
@@ -50,10 +79,11 @@ fn main() {
         args.push("capabilities".into());
     }
     match run_json(data_dir.as_deref(), &args) {
-        Ok((code, body)) => {
-            println!("{body}");
-            if code != 0 {
-                std::process::exit(code);
+        Ok(result) => {
+            let _typed_verdict = result.verdict_kind;
+            println!("{}", result.envelope);
+            if result.exit_code != 0 {
+                std::process::exit(result.exit_code);
             }
         }
         Err(e) => {

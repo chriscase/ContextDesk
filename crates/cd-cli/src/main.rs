@@ -23,6 +23,9 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> i32 {
+    if let Some(code) = run_state_free(&cli).await {
+        return code;
+    }
     let paths = match adapters::Paths::resolve(
         cli.global.data_dir.as_deref(),
         cli.global.app_config.as_deref(),
@@ -91,6 +94,46 @@ async fn run(cli: Cli) -> i32 {
     result
 }
 
+/// Commands in this lane are pure over explicit inputs and must not resolve,
+/// read, create, migrate, or save ContextDesk application/CLI state.
+async fn run_state_free(cli: &Cli) -> Option<i32> {
+    let format = if cli.global.json {
+        OutputFormat::Json
+    } else if cli.global.jsonl {
+        OutputFormat::Jsonl
+    } else {
+        cli.global.format.unwrap_or(OutputFormat::Text)
+    };
+    let color = cli.global.color.unwrap_or(config::ColorMode::Auto);
+    match &cli.command {
+        Command::Normalize(args) => {
+            let result = commands::normalize::run(args, format, color).await;
+            let verdict = result
+                .as_ref()
+                .is_ok_and(|output| output.fail_on_partial)
+                .then_some(ExitCategory::Partial);
+            Some(emit_completed(format, color, "normalize", result, verdict))
+        }
+        Command::Normalized { action } => {
+            let result = commands::normalized::run(action, format, color).await;
+            let verdict = result
+                .as_ref()
+                .is_ok_and(|output| !output.is_conforming())
+                .then_some(ExitCategory::NonConforming);
+            Some(emit_completed(format, color, "normalized", result, verdict))
+        }
+        Command::Capabilities => Some(emit(
+            format,
+            color,
+            "capabilities",
+            Ok(commands::capabilities::run(
+                &cd_core::branding::Branding::embedded(),
+            )),
+        )),
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch(
     command: &Command,
@@ -116,25 +159,8 @@ async fn dispatch(
             }
             emit(format, resolved.color.value, "import", result)
         }
-        Command::Normalize(args) => {
-            let result = commands::normalize::run(args, format, resolved.color.value).await;
-            let partial_policy_failed = result.as_ref().is_ok_and(|output| output.fail_on_partial);
-            let code = emit(format, resolved.color.value, "normalize", result);
-            if code == 0 && partial_policy_failed {
-                ExitCategory::Partial.code()
-            } else {
-                code
-            }
-        }
-        Command::Normalized { action } => {
-            let result = commands::normalized::run(action).await;
-            let non_conforming = result.as_ref().is_ok_and(|output| !output.is_conforming());
-            let code = emit(format, resolved.color.value, "normalized", result);
-            if code == 0 && non_conforming {
-                ExitCategory::NonConforming.code()
-            } else {
-                code
-            }
+        Command::Normalize(_) | Command::Normalized { .. } => {
+            unreachable!("state-free commands return before stateful dispatch")
         }
         Command::Corpus { action } => {
             let result = commands::corpus::run(action, &paths.cache_root);
@@ -224,12 +250,7 @@ async fn dispatch(
             let result = commands::confluence_cmd::run(action, paths, app_cfg).await;
             emit(format, resolved.color.value, "confluence", result)
         }
-        Command::Capabilities => emit(
-            format,
-            resolved.color.value,
-            "capabilities",
-            Ok(commands::capabilities::run(&paths.branding)),
-        ),
+        Command::Capabilities => unreachable!("capabilities is state-free"),
         Command::Doctor(args) => {
             let secrets = adapters::secret_store();
             let sessions = adapters::session_store(paths);
@@ -313,6 +334,25 @@ fn emit<T: Render>(
     }
 }
 
+fn emit_completed<T: Render>(
+    format: OutputFormat,
+    color: config::ColorMode,
+    command: &'static str,
+    result: Result<T, CliError>,
+    verdict: Option<ExitCategory>,
+) -> i32 {
+    let code = emit(format, color, command, result);
+    completed_verdict_exit(code, verdict)
+}
+
+fn completed_verdict_exit(base_code: i32, verdict: Option<ExitCategory>) -> i32 {
+    if base_code == 0 {
+        verdict.map_or(0, ExitCategory::code)
+    } else {
+        base_code
+    }
+}
+
 fn emit_error(format: OutputFormat, command: &'static str, error: CliError) -> i32 {
     match format {
         OutputFormat::Text => eprintln!("error: {error}"),
@@ -333,4 +373,20 @@ fn emit_error(format: OutputFormat, command: &'static str, error: CliError) -> i
 fn emit_bare_error(error: &CliError) -> i32 {
     eprintln!("error: {error}");
     error.category.code()
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    use super::*;
+
+    #[test]
+    fn completed_verdict_never_masks_an_execution_error() {
+        assert_eq!(completed_verdict_exit(0, None), 0);
+        assert_eq!(
+            completed_verdict_exit(0, Some(ExitCategory::NonConforming)),
+            9
+        );
+        assert_eq!(completed_verdict_exit(0, Some(ExitCategory::Partial)), 10);
+        assert_eq!(completed_verdict_exit(70, Some(ExitCategory::Partial)), 70);
+    }
 }

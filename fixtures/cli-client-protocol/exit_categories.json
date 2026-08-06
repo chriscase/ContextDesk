@@ -7,6 +7,8 @@
   {"code": 6, "kind": "provider_error"},
   {"code": 7, "kind": "not_implemented"},
   {"code": 8, "kind": "not_ready"},
+  {"code": 9, "kind": "non_conforming"},
+  {"code": 10, "kind": "partial"},
   {"code": 70, "kind": "internal"},
   {"code": 130, "kind": "cancelled"}
 ]

@@ -248,11 +248,11 @@ pub fn normalize_offline(
             ),
         );
 
-        Ok(NormalizeOutcome {
-            partial_policy_failed: fail_on_partial_verdict(options.fail_on_partial, report.partial),
+        Ok(complete_published_outcome(
             report,
-            output: options.output.clone(),
-        })
+            options.output.clone(),
+            options.fail_on_partial,
+        ))
     })();
 
     match &result {
@@ -292,6 +292,18 @@ fn check_cancel(cancel: Option<&CancelFlag>) -> CoreResult<()> {
 
 fn fail_on_partial_verdict(requested: bool, partial: bool) -> bool {
     requested && partial
+}
+
+fn complete_published_outcome(
+    report: NormalizationReport,
+    output: PathBuf,
+    fail_on_partial: bool,
+) -> NormalizeOutcome {
+    NormalizeOutcome {
+        partial_policy_failed: fail_on_partial_verdict(fail_on_partial, report.partial),
+        report,
+        output,
+    }
 }
 
 #[cfg(test)]
@@ -564,5 +576,14 @@ mod tests {
         assert!(fail_on_partial_verdict(true, true));
         assert!(!fail_on_partial_verdict(false, true));
         assert!(!fail_on_partial_verdict(true, false));
+
+        let mut partial_report = outcome.report;
+        partial_report.partial = true;
+        let partial = complete_published_outcome(partial_report, output.clone(), true);
+        assert!(partial.partial_policy_failed);
+        assert!(partial.report.partial);
+        assert!(output.join("manifest.json").is_file());
+        assert!(output.join("normalization-report.json").is_file());
+        assert!(output.join("sources").is_dir());
     }
 }

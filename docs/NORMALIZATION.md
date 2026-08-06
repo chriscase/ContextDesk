@@ -186,8 +186,9 @@ for the format.
 
 ## Validate and summarize normalized output
 
-Both inspection commands are read-only, source-agnostic, streaming, and
-offline. A direct file is inspected regardless of extension. A directory is
+Both inspection commands are state-free, source-agnostic, per-file streaming,
+and offline. They do not initialize data-dir, app/project config, or CLI state.
+A direct file is inspected regardless of extension. A directory is
 walked recursively and regular `.jsonl` files are inspected in stable relative
 path order; symlinks and non-JSONL sidecars such as manifests are ignored.
 
@@ -202,6 +203,19 @@ envelope. Conforming input exits 0; a completed inspection that finds invalid
 content exits **9** (`non_conforming`). When diagnostics exceed the retained
 bound, `diagnostics_truncated` is true and per-code counts are explicitly named
 `diagnostic_sample_counts`; `diagnostics_total` remains the full observed total.
+Validation retains at most 512 diagnostics and 32 already-redacted error
+samples across the entire run and reports omitted counts per file and globally.
+Summary reduces and drops each file report before opening the next file.
+
+Discovery fails closed beyond 4,096 files, 4,096 visited directories, 65,536
+directory entries, or depth 32. Root symlinks are rejected. On Unix, the final
+file component is opened with no-follow protection and verified as a regular
+file. This is still a trusted local-tree tool: an untrusted process able to
+replace ancestor directories concurrently is outside the cross-platform P0
+containment guarantee. Copy hostile trees into a controlled directory first.
+
+Long scans emit bounded phase progress. For one-shot `--json` and `--jsonl`,
+progress stays on stderr and stdout remains exactly one JSON envelope.
 
 ## Disk space and staging
 

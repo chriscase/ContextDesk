@@ -245,6 +245,10 @@ fn normalized_validate_and_summarize_accept_file_or_directory() {
         .success();
     let line = String::from_utf8(summarized.get_output().stdout.clone()).unwrap();
     assert_eq!(line.lines().count(), 1, "JSONL purity: exactly one object");
+    let progress = String::from_utf8_lossy(&summarized.get_output().stderr);
+    assert!(progress.contains("Discover / read"));
+    assert!(progress.contains("Validate"));
+    assert!(progress.contains("Completed"));
     let envelope: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
     assert_eq!(
         envelope["data"]["schema_id"],
@@ -305,4 +309,59 @@ fn normalized_help_and_fail_on_partial_are_public() {
         .assert()
         .success()
         .stdout(predicate::str::contains("--fail-on-partial"));
+}
+
+#[test]
+fn state_free_commands_ignore_broken_unrelated_state_and_write_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let poisoned_home = tmp.path().join("home-is-a-file");
+    let poisoned_data = tmp.path().join("data-is-a-file");
+    let bad_project = tmp.path().join("bad-project.toml");
+    let bad_app = tmp.path().join("bad-app.json");
+    fs::write(&poisoned_home, b"unchanged-home").unwrap();
+    fs::write(&poisoned_data, b"unchanged-data").unwrap();
+    fs::write(&bad_project, b"not = [valid").unwrap();
+    fs::write(&bad_app, b"{not-json").unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/normalized-log-events/valid/minimal.jsonl");
+
+    for command in [
+        vec!["normalized", "validate", fixture.to_str().unwrap()],
+        vec!["capabilities"],
+    ] {
+        let mut invocation = bin();
+        invocation
+            .env("HOME", &poisoned_home)
+            .args(["--data-dir", poisoned_data.to_str().unwrap()])
+            .args(["--config", bad_project.to_str().unwrap()])
+            .args(["--app-config", bad_app.to_str().unwrap()])
+            .arg("--json")
+            .args(command)
+            .assert()
+            .success();
+    }
+
+    let input = tmp.path().join("raw");
+    write_tree(&input);
+    let output = tmp.path().join("normalized-out");
+    bin()
+        .env("HOME", &poisoned_home)
+        .args(["--data-dir", poisoned_data.to_str().unwrap()])
+        .args(["--config", bad_project.to_str().unwrap()])
+        .args(["--app-config", bad_app.to_str().unwrap()])
+        .args([
+            "--json",
+            "normalize",
+            input.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(fs::read(poisoned_home).unwrap(), b"unchanged-home");
+    assert_eq!(fs::read(poisoned_data).unwrap(), b"unchanged-data");
+    assert_eq!(fs::read(bad_project).unwrap(), b"not = [valid");
+    assert_eq!(fs::read(bad_app).unwrap(), b"{not-json");
+    assert!(output.join("manifest.json").is_file());
 }

@@ -5,6 +5,11 @@ edition = "2021"
 publish = false
 description = "Thin reference client: spawns the contextdesk binary (not a product crate)"
 
+[dependencies]
+serde_json = "1"
+
+[workspace]
+
 [[bin]]
 name = "contextdesk-cli-client-example"
 path = "src/main.rs"

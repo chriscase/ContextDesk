@@ -56,7 +56,22 @@ Envelope (`schema_version` = 1):
     "git_describe": "…",
     "build_channel": "installed",
     "exit_categories": [{"code": 0, "kind": "success"}, …],
-    "commands": ["import", "corpus list", …]
+    "commands": ["import", "normalized validate", …],
+    "completed_verdict_categories": [
+      {"code": 8, "kind": "not_ready"},
+      {"code": 9, "kind": "non_conforming"},
+      {"code": 10, "kind": "partial"}
+    ],
+    "normalized": {
+      "event_schema_id": "contextdesk.normalized_log_events.v1",
+      "validation_schema_id": "contextdesk.normalized_validation.v1",
+      "summary_schema_id": "contextdesk.normalized_summary.v1",
+      "inspection_schema_version": 1,
+      "max_files": 4096,
+      "max_directories": 4096,
+      "max_directory_entries": 65536,
+      "max_retained_diagnostics": 512
+    }
   }
 }
 ```
@@ -66,6 +81,8 @@ Client must:
 - Reject `ok: false`.
 - Record `cli_version`, `envelope_schema_version`, `git_sha`, `build_channel`.
 - Map `exit_categories` for later process exits.
+- Treat `completed_verdict_categories` as report-bearing completions and
+  handshake normalized schema ids/versions/limits before depending on them.
 - Fail closed if required commands for the integration are absent.
 
 Fixture: `fixtures/cli-client-protocol/capabilities.ok.json`.
@@ -95,6 +112,17 @@ Failure:
 ```
 
 Fixture: `fixtures/cli-client-protocol/envelope.ok.json`, `envelope.err.json`.
+
+### Completed verdict envelope (`ok:true` + nonzero exit)
+
+Exits 8 (`not_ready`), 9 (`non_conforming`), and 10 (`partial`) mean the
+command completed and its report is authoritative, but the verdict should fail
+an automation gate. The envelope remains `ok:true` and carries `data`; it is
+not an internal error. Clients return a typed result containing the envelope,
+exit code, and verdict kind. They must preserve the nonzero exit when used as a
+command-line wrapper. Any other `ok:true` + nonzero exit is a protocol error.
+
+Fixture: `fixtures/cli-client-protocol/envelope.completed-verdict.json`.
 
 ## JSONL progress + terminal (`--jsonl`)
 
@@ -153,10 +181,14 @@ Stable categories (`crates/cd-cli/src/envelope.rs`):
 | 6 | provider_error | Model/provider failure |
 | 7 | not_implemented | Grammar accepted, behavior not shipped |
 | 8 | not_ready | Doctor verdict not ready |
+| 9 | non_conforming | Normalized inspection completed; content is invalid |
+| 10 | partial | Normalize published valid output; report is partial |
 | 70 | internal | Unexpected bug |
 | 130 | cancelled | Ctrl-C / SIGINT |
 
 Map `error.kind` from JSON when present; otherwise map process exit code via the capabilities table.
+For exits 8/9/10, map the completed verdict and retain the `ok:true` report
+instead of constructing an error envelope.
 
 ## Cancellation
 
@@ -176,6 +208,11 @@ Clients should create a new process group when they need to cancel a tree of chi
 | `CONTEXTDESK_FORMAT` | `json` / `jsonl` / text |
 | `CONTEXTDESK_ASCII` | Human-terminal typography only (`1` ASCII, `0` Unicode); machine JSON/JSONL is always UTF-8 |
 | Provider secrets | OS keychain via host config — never pass raw API keys on argv |
+
+`normalized validate`, `normalized summarize`, `normalize`, and `capabilities`
+are state-free: they do not read or create the data directory, app/project CLI
+config, provider config, or CLI state. Explicit input/output paths and global
+format/color flags remain authoritative for these commands.
 
 ## Minimal invocation shape (all languages)
 

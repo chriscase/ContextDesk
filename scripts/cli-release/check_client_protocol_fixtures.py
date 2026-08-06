@@ -55,18 +55,40 @@ def main() -> int:
         "build_channel",
         "exit_categories",
         "commands",
+        "completed_verdict_categories",
+        "normalized",
     ):
         check(f"capabilities.data.{k}", k in data)
     check("exit_categories non-empty", bool(data.get("exit_categories")))
     kinds = {c.get("kind") for c in data.get("exit_categories") or []}
-    for k in ("success", "user_error", "cancelled", "internal"):
+    for k in ("success", "user_error", "not_ready", "non_conforming", "partial", "cancelled", "internal"):
         check(f"exit kind {k}", k in kinds)
+    verdicts = {
+        (item.get("code"), item.get("kind"))
+        for item in data.get("completed_verdict_categories") or []
+    }
+    check("completed verdict exits 8/9/10", verdicts == {(8, "not_ready"), (9, "non_conforming"), (10, "partial")})
+    normalized = data.get("normalized") or {}
+    for key in (
+        "event_schema_id", "event_reader_version", "validation_schema_id",
+        "summary_schema_id", "inspection_schema_version", "max_line_bytes",
+        "max_files", "max_directories", "max_directory_entries",
+        "max_directory_depth", "max_retained_diagnostics",
+        "max_retained_error_samples",
+    ):
+        check(f"capabilities.normalized.{key}", key in normalized)
+    for command in ("normalize", "normalized validate", "normalized summarize"):
+        check(f"capability command {command}", command in (data.get("commands") or []))
 
     env_ok = load("envelope.ok.json")
     check("envelope.ok ok", env_ok.get("ok") is True and "data" in env_ok)
     env_err = load("envelope.err.json")
     check("envelope.err not ok", env_err.get("ok") is False)
     check("envelope.err has error.kind", bool((env_err.get("error") or {}).get("kind")))
+    verdict = load("envelope.completed-verdict.json")
+    check("completed verdict keeps ok report", (verdict.get("envelope") or {}).get("ok") is True)
+    check("completed verdict process exit", verdict.get("process_exit") in (8, 9, 10))
+    check("completed verdict is typed", verdict.get("verdict_kind") in ("not_ready", "non_conforming", "partial"))
 
     prog = load("progress.line.json")
     check("progress type", prog.get("type") == "progress")
@@ -119,6 +141,8 @@ def main() -> int:
                     f"client {lang} marks ABI/JNI future",
                     "future" in body.lower() or "Future" in body or "not implemented" in body.lower(),
                 )
+            for needle in ("not_ready", "non_conforming", "partial"):
+                check(f"client {lang} typed verdict {needle}", needle in body)
 
     print("== protocol doc ==")
     doc = ROOT / "docs" / "CLI_CLIENT_PROTOCOL.md"
@@ -134,6 +158,9 @@ def main() -> int:
             "C ABI",
             "JNI",
             "Future",
+            "completed verdict",
+            "non_conforming",
+            "partial",
         ):
             check(f"doc mentions {needle}", needle.lower() in t.lower() or needle in t)
 

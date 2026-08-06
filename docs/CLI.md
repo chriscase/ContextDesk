@@ -470,6 +470,10 @@ line — `verdict` on completion, `interrupted` on Ctrl-C. See
 Clap's own usage errors (bad flags, missing required args) use clap's
 default exit code (2) and are not part of this table.
 
+Codes 8, 9, and 10 are completed verdicts: machine output retains an
+`ok:true` report envelope even though the process exit is nonzero. Clients must
+not rewrite these into `internal`; see [CLI_CLIENT_PROTOCOL.md](CLI_CLIENT_PROTOCOL.md).
+
 ### Import progress stream (`--jsonl` on `import`)
 
 See also the import command: phase transitions and a final result object form the documented JSONL stream contract.

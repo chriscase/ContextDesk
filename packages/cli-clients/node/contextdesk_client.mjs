@@ -11,6 +11,8 @@ function resolveBin() {
   return process.env.CONTEXTDESK_BIN || "contextdesk";
 }
 
+const completedVerdicts = new Map([[8, "not_ready"], [9, "non_conforming"], [10, "partial"]]);
+
 /**
  * @param {string[]} args command args after global flags
  * @param {{ dataDir?: string, env?: NodeJS.ProcessEnv, cwd?: string }} [opts]
@@ -50,11 +52,11 @@ export function runJson(args, opts = {}) {
         reject(e);
         return;
       }
-      if (code !== 0) {
+      if (code !== 0 && !completedVerdicts.has(code)) {
         reject(Object.assign(new Error(`ok envelope but exit ${code}`), { kind: "internal", exitCode: code }));
         return;
       }
-      resolve(envelope);
+      resolve({ envelope, exitCode: code, verdictKind: completedVerdicts.get(code) || null });
     });
   });
 }
@@ -77,8 +79,9 @@ if (isMain) {
   }
   if (cmd.length === 0) cmd.push("capabilities");
   runJson(cmd, { dataDir })
-    .then((env) => {
-      console.log(JSON.stringify(env, null, 2));
+    .then((result) => {
+      console.log(JSON.stringify(result.envelope, null, 2));
+      process.exitCode = result.exitCode;
     })
     .catch((e) => {
       console.error(JSON.stringify({ ok: false, error: { kind: e.kind || "internal", message: e.message } }));

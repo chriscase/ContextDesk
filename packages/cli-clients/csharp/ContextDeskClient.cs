@@ -10,6 +10,15 @@ using System.Threading.Tasks;
 
 public sealed class ContextDeskClient
 {
+    public sealed record CommandResult(string Envelope, int ExitCode, string? VerdictKind);
+
+    private static string? CompletedVerdict(int code) => code switch
+    {
+        8 => "not_ready",
+        9 => "non_conforming",
+        10 => "partial",
+        _ => null,
+    };
     private readonly string _bin;
     private readonly string? _dataDir;
 
@@ -21,7 +30,7 @@ public sealed class ContextDeskClient
         _dataDir = dataDir;
     }
 
-    public async Task<string> RunJsonAsync(IEnumerable<string> commandArgs)
+    public async Task<CommandResult> RunJsonAsync(IEnumerable<string> commandArgs)
     {
         var psi = new ProcessStartInfo
         {
@@ -52,10 +61,16 @@ public sealed class ContextDeskClient
         {
             throw new InvalidOperationException($"empty stdout exit={proc.ExitCode} stderr={stderr}");
         }
-        return text;
+        var ok = text.Contains("\"ok\": true") || text.Contains("\"ok\":true");
+        var verdict = CompletedVerdict(proc.ExitCode);
+        if (!ok)
+            throw new InvalidOperationException($"command error exit={proc.ExitCode} body={text}");
+        if (proc.ExitCode != 0 && verdict is null)
+            throw new InvalidOperationException($"ok envelope but exit={proc.ExitCode}");
+        return new CommandResult(text, proc.ExitCode, verdict);
     }
 
-    public Task<string> CapabilitiesAsync() => RunJsonAsync(new[] { "capabilities" });
+    public Task<CommandResult> CapabilitiesAsync() => RunJsonAsync(new[] { "capabilities" });
 
     public static async Task<int> Main(string[] args)
     {
@@ -74,7 +89,8 @@ public sealed class ContextDeskClient
         }
         if (cmd.Count == 0) cmd.Add("capabilities");
         var client = new ContextDeskClient(dataDir: dataDir);
-        Console.WriteLine(await client.RunJsonAsync(cmd).ConfigureAwait(false));
-        return 0;
+        var result = await client.RunJsonAsync(cmd).ConfigureAwait(false);
+        Console.WriteLine(result.Envelope);
+        return result.ExitCode;
     }
 }

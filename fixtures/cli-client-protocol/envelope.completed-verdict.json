@@ -1,0 +1,17 @@
+{
+  "process_exit": 9,
+  "verdict_kind": "non_conforming",
+  "envelope": {
+    "schema_version": 1,
+    "ok": true,
+    "command": "normalized",
+    "data": {
+      "schema_id": "contextdesk.normalized_validation.v1",
+      "schema_version": 1,
+      "ok": false,
+      "files_examined": 1,
+      "files_nonconforming": 1,
+      "diagnostics_total": 1
+    }
+  }
+}

@@ -10,6 +10,16 @@ import java.util.List;
 import java.util.Map;
 
 public final class ContextDeskClient {
+    public record CommandResult(String envelope, int exitCode, String verdictKind) {}
+
+    private static String completedVerdict(int code) {
+        return switch (code) {
+            case 8 -> "not_ready";
+            case 9 -> "non_conforming";
+            case 10 -> "partial";
+            default -> null;
+        };
+    }
     private final String bin;
     private final String dataDir;
 
@@ -19,7 +29,7 @@ public final class ContextDeskClient {
     }
 
     /** Run contextdesk with --json; return stdout envelope text. */
-    public String runJson(List<String> commandArgs) throws Exception {
+    public CommandResult runJson(List<String> commandArgs) throws Exception {
         List<String> argv = new ArrayList<>();
         argv.add(bin);
         if (dataDir != null && !dataDir.isEmpty()) {
@@ -49,13 +59,16 @@ public final class ContextDeskClient {
             throw new RuntimeException("empty stdout, exit=" + code);
         }
         // Caller parses JSON; we only guarantee spawn + capture.
-        if (code != 0 && !text.contains("\"ok\": false") && !text.contains("\"ok\":false")) {
+        boolean ok = text.contains("\"ok\": true") || text.contains("\"ok\":true");
+        String verdict = completedVerdict(code);
+        if (code != 0 && ok && verdict == null) {
             throw new RuntimeException("exit=" + code + " body=" + text);
         }
-        return text;
+        if (!ok) throw new RuntimeException("command error exit=" + code + " body=" + text);
+        return new CommandResult(text, code, verdict);
     }
 
-    public String capabilities() throws Exception {
+    public CommandResult capabilities() throws Exception {
         List<String> args = new ArrayList<>();
         args.add("capabilities");
         return runJson(args);
@@ -75,6 +88,8 @@ public final class ContextDeskClient {
             cmd.add("capabilities");
         }
         ContextDeskClient c = new ContextDeskClient(null, dataDir);
-        System.out.println(c.runJson(cmd));
+        CommandResult result = c.runJson(cmd);
+        System.out.println(result.envelope());
+        if (result.exitCode() != 0) System.exit(result.exitCode());
     }
 }

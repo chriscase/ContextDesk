@@ -3,11 +3,14 @@
 
 use crate::cli::NormalizedAction;
 use crate::envelope::{CliError, CliResult, Render};
+use crate::progress::CliProgressObserver;
+use crate::{config::ColorMode, config::OutputFormat};
 use cd_core::process_progress::CancelFlag;
 use cd_workflow::normalized::{
-    summarize_normalized_path, validate_normalized_path, NormalizedSummaryReport,
-    NormalizedValidationReport,
+    summarize_normalized_path_with_observer, validate_normalized_path_with_observer,
+    NormalizedSummaryReport, NormalizedValidationReport,
 };
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub enum NormalizedOutput {
@@ -41,7 +44,11 @@ impl Render for NormalizedOutput {
     }
 }
 
-pub async fn run(action: &NormalizedAction) -> CliResult<NormalizedOutput> {
+pub async fn run(
+    action: &NormalizedAction,
+    format: OutputFormat,
+    color: ColorMode,
+) -> CliResult<NormalizedOutput> {
     let (input, summarize) = match action {
         NormalizedAction::Validate(args) => (&args.input, false),
         NormalizedAction::Summarize(args) => (&args.input, true),
@@ -53,12 +60,30 @@ pub async fn run(action: &NormalizedAction) -> CliResult<NormalizedOutput> {
 
     let cancel = CancelFlag::new();
     let cancel_for_task = cancel.clone();
+    // `normalized` is a one-shot command even under global `--jsonl`; keep
+    // progress on stderr so stdout remains exactly one envelope object.
+    let progress_format = if format == OutputFormat::Jsonl {
+        OutputFormat::Json
+    } else {
+        format
+    };
+    let observer = Arc::new(CliProgressObserver::new(progress_format, color));
+    let observer_for_task = observer.clone();
     let mut task = tokio::task::spawn_blocking(move || {
         if summarize {
-            summarize_normalized_path(&input, Some(&cancel_for_task)).map(NormalizedOutput::Summary)
+            summarize_normalized_path_with_observer(
+                &input,
+                Some(&cancel_for_task),
+                observer_for_task.as_ref(),
+            )
+            .map(NormalizedOutput::Summary)
         } else {
-            validate_normalized_path(&input, Some(&cancel_for_task))
-                .map(NormalizedOutput::Validation)
+            validate_normalized_path_with_observer(
+                &input,
+                Some(&cancel_for_task),
+                observer_for_task.as_ref(),
+            )
+            .map(NormalizedOutput::Validation)
         }
     });
     let joined = tokio::select! {
@@ -71,6 +96,7 @@ pub async fn run(action: &NormalizedAction) -> CliResult<NormalizedOutput> {
             (&mut task).await
         }
     };
+    observer.finish();
     match joined {
         Ok(Ok(output)) => Ok(output),
         Ok(Err(cd_core::error::CoreError::Cancelled)) => Err(CliError::cancelled(

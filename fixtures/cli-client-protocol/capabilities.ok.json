@@ -18,15 +18,39 @@
       {"code": 6, "kind": "provider_error"},
       {"code": 7, "kind": "not_implemented"},
       {"code": 8, "kind": "not_ready"},
+      {"code": 9, "kind": "non_conforming"},
+      {"code": 10, "kind": "partial"},
       {"code": 70, "kind": "internal"},
       {"code": 130, "kind": "cancelled"}
     ],
     "commands": [
       "import",
+      "normalize",
+      "normalized validate",
+      "normalized summarize",
       "corpus list",
       "explore",
       "capabilities",
       "doctor"
-    ]
+    ],
+    "completed_verdict_categories": [
+      {"code": 8, "kind": "not_ready"},
+      {"code": 9, "kind": "non_conforming"},
+      {"code": 10, "kind": "partial"}
+    ],
+    "normalized": {
+      "event_schema_id": "contextdesk.normalized_log_events.v1",
+      "event_reader_version": 1,
+      "validation_schema_id": "contextdesk.normalized_validation.v1",
+      "summary_schema_id": "contextdesk.normalized_summary.v1",
+      "inspection_schema_version": 1,
+      "max_line_bytes": 1048576,
+      "max_files": 4096,
+      "max_directories": 4096,
+      "max_directory_entries": 65536,
+      "max_directory_depth": 32,
+      "max_retained_diagnostics": 512,
+      "max_retained_error_samples": 32
+    }
   }
 }

@@ -18,8 +18,27 @@ func resolveBin() string {
 	return "contextdesk"
 }
 
-// RunJSON spawns contextdesk --json <args...> and returns the envelope map.
-func RunJSON(dataDir string, args ...string) (map[string]any, int, error) {
+type CommandResult struct {
+	Envelope    map[string]any
+	ExitCode    int
+	VerdictKind string
+}
+
+func completedVerdict(code int) string {
+	switch code {
+	case 8:
+		return "not_ready"
+	case 9:
+		return "non_conforming"
+	case 10:
+		return "partial"
+	default:
+		return ""
+	}
+}
+
+// RunJSON retains report-bearing completed verdicts (8/9/10) as typed results.
+func RunJSON(dataDir string, args ...string) (CommandResult, error) {
 	bin := resolveBin()
 	argv := make([]string, 0, 4+len(args))
 	if dataDir != "" {
@@ -40,21 +59,25 @@ func RunJSON(dataDir string, args ...string) (map[string]any, int, error) {
 	text := strings.TrimSpace(stdout.String())
 	if text == "" {
 		if err != nil {
-			return nil, code, fmt.Errorf("empty stdout: %w (stderr=%s)", err, stderr.String())
+			return CommandResult{ExitCode: code}, fmt.Errorf("empty stdout: %w (stderr=%s)", err, stderr.String())
 		}
-		return nil, code, fmt.Errorf("empty stdout (stderr=%s)", stderr.String())
+		return CommandResult{ExitCode: code}, fmt.Errorf("empty stdout (stderr=%s)", stderr.String())
 	}
 	// last non-empty line
 	lines := strings.Split(text, "\n")
 	line := lines[len(lines)-1]
 	var envelope map[string]any
 	if jerr := json.Unmarshal([]byte(line), &envelope); jerr != nil {
-		return nil, code, fmt.Errorf("json: %w", jerr)
+		return CommandResult{ExitCode: code}, fmt.Errorf("json: %w", jerr)
 	}
 	if ok, _ := envelope["ok"].(bool); !ok {
-		return envelope, code, fmt.Errorf("command not ok: %v", envelope["error"])
+		return CommandResult{ExitCode: code}, fmt.Errorf("command not ok exit=%d: %v", code, envelope["error"])
 	}
-	return envelope, code, nil
+	verdict := completedVerdict(code)
+	if code != 0 && verdict == "" {
+		return CommandResult{ExitCode: code}, fmt.Errorf("ok envelope but exit=%d", code)
+	}
+	return CommandResult{Envelope: envelope, ExitCode: code, VerdictKind: verdict}, nil
 }
 
 func main() {
@@ -71,15 +94,18 @@ func main() {
 	if len(args) == 0 {
 		args = []string{"capabilities"}
 	}
-	env, code, err := RunJSON(dataDir, args...)
+	result, err := RunJSON(dataDir, args...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
-		if code == 0 {
-			code = 70
+		if result.ExitCode == 0 {
+			result.ExitCode = 70
 		}
-		os.Exit(code)
+		os.Exit(result.ExitCode)
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	_ = enc.Encode(env)
+	_ = enc.Encode(result.Envelope)
+	if result.ExitCode != 0 {
+		os.Exit(result.ExitCode)
+	}
 }
