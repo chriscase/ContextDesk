@@ -21,28 +21,36 @@ impl Render for ExceptionEpisodesOutput {
         out.push_str(&format!(
             "  Schema           {} v{}\n\
              \nLayers\n\n\
+               Candidate scope             {}\n\
                Events available            {}\n\
                Events scanned              {}\n\
+               Rows walked                 {}\n\
                Raw exception records       {}\n\
                Application records         {}\n\
                Stderr records              {}\n\
                Physical renderings         {}\n\
+               Unpaired renderings         {}\n\
                Semantic occurrences        {}\n\
                Duplicate-render occurrences {}\n\
                Families                    {}\n\
                Raw records / occurrence    {}/{} = {} rem {}\n\
                Stderr records / occurrence {}/{} = {} rem {}\n\
                Renderings / occurrence     {}/{} = {} rem {}\n\
+               Counts complete             {}\n\
                Partial                     {}\n\
-               Uncertain                   {}\n",
+               Uncertain                   {}\n\
+               Matching ambiguous          {}\n",
             r.schema_id,
             r.schema_version,
+            r.candidate_scope,
             r.events_available,
             r.events_scanned,
+            r.rows_walked,
             r.raw_exception_record_count,
             r.application_exception_record_count,
             r.stderr_exception_record_count,
             r.rendering_episode_count,
+            r.unpaired_rendering_count,
             r.occurrence_count,
             r.duplicate_rendering_occurrence_count,
             r.families.len(),
@@ -58,23 +66,31 @@ impl Render for ExceptionEpisodesOutput {
             amp.renderings_per_occurrence.denominator,
             amp.renderings_per_occurrence.quotient,
             amp.renderings_per_occurrence.remainder,
+            r.counts_complete,
             r.partial,
-            r.uncertain
+            r.uncertain,
+            r.matching_ambiguous
         ));
         if !r.families.is_empty() {
             out.push_str("\nFamilies\n");
             for f in r.families.iter().take(12) {
                 let famp = &f.amplification;
                 out.push_str(&format!(
-                    "\n  {} occurrences={} raw={} renderings={} raw_per_occ={}/{}={} rem{} duplicates={}\n",
+                    "\n  {} occurrences={} raw={} app={} stderr={} renderings={} raw_per_occ={}/{}={} rem{} app_per_occ={}/{}={} rem{} duplicates={}\n",
                     f.signature,
                     f.occurrence_count,
                     f.raw_record_count,
+                    f.application_record_count,
+                    f.stderr_record_count,
                     f.rendering_episode_count,
                     famp.raw_records_per_occurrence.numerator,
                     famp.raw_records_per_occurrence.denominator,
                     famp.raw_records_per_occurrence.quotient,
                     famp.raw_records_per_occurrence.remainder,
+                    famp.application_records_per_occurrence.numerator,
+                    famp.application_records_per_occurrence.denominator,
+                    famp.application_records_per_occurrence.quotient,
+                    famp.application_records_per_occurrence.remainder,
                     f.duplicate_rendering_occurrence_count
                 ));
                 for occ in f.occurrences.iter().take(2) {

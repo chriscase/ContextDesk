@@ -204,7 +204,6 @@ impl BroadLogTriageAbortHandle {
         Ok(())
     }
 
-    #[cfg(test)]
     pub(crate) fn is_aborted(&self) -> bool {
         self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -2232,13 +2231,22 @@ impl ToolHost {
         }
 
         checkpoint("exception_episodes")?;
-        let exception_report = match crate::log_analysis::analyze_exception_episodes(
+        let exception_report = match crate::log_analysis::analyze_exception_episodes_with_cancel(
             &corpus,
             &suppression.excluded_template_ids,
+            Some(abort.cancelled.as_ref()),
         ) {
             Ok(report) => Some(report),
+            Err(crate::error::CoreError::Cancelled) => {
+                // Cancellation mid-scan is terminal for the brief worker — never
+                // return a partially fabricated successful report.
+                return Err(crate::error::CoreError::Cancelled);
+            }
+            Err(error) if abort.is_aborted() || error.to_string().contains("cancel") => {
+                return Err(crate::error::CoreError::Cancelled);
+            }
             Err(error) => {
-                // Fail open for triage completeness: disclose the miss, keep other sections.
+                // Fail open for non-cancel errors: disclose the miss, keep other sections.
                 body.push_str(&format!(
                     "\n## Exception episode correlation\ncorrelation_error: {}\n\
                      interpretation: raw template counts remain available; episode ranking unavailable for this run.\n",
@@ -2247,6 +2255,7 @@ impl ToolHost {
                 None
             }
         };
+        abort.check()?;
         if let Some(report) = exception_report.as_ref() {
             body.push('\n');
             body.push_str(&crate::log_analysis::format_exception_episode_brief_section(report));
@@ -2275,27 +2284,6 @@ impl ToolHost {
             selected_errors.len(),
             BROAD_LOG_TRIAGE_ERROR_DISPLAY_CAP.saturating_sub(BROAD_LOG_TRIAGE_RARE_ERROR_RESERVE)
         ));
-        // Template ids that appear only as non-first citations in exception renderings
-        // (supporting stack/wrapper lines) vs first citation (lead).
-        let supporting_frame_templates: std::collections::HashSet<u64> = exception_report
-            .as_ref()
-            .map(|report| {
-                let mut supporting = std::collections::HashSet::new();
-                let mut lead = std::collections::HashSet::new();
-                for family in &report.families {
-                    for occ in &family.occurrences {
-                        if let Some(first) = occ.citations.first() {
-                            lead.insert(first.template_id);
-                        }
-                        for c in occ.citations.iter().skip(1) {
-                            supporting.insert(c.template_id);
-                        }
-                    }
-                }
-                supporting.retain(|id| !lead.contains(id));
-                supporting
-            })
-            .unwrap_or_default();
         let mut evidence = Vec::new();
         let mut seen_evidence = std::collections::HashSet::new();
         let mut correlation_seeds = Vec::new();
@@ -2343,15 +2331,30 @@ impl ToolHost {
             })?;
             let first_source = broad_triage_source_identity(&first_span.source);
             let last_source = broad_triage_source_identity(&last_span.source);
-            let supporting = supporting_frame_templates.contains(&hit.template_id);
-            let episode_adjusted = if supporting {
-                exception_report
-                    .as_ref()
-                    .map(|r| r.occurrence_count)
-                    .unwrap_or(hit.error_event_count)
-            } else {
-                hit.error_event_count
-            };
+            let projection = exception_report
+                .as_ref()
+                .map(|r| crate::log_analysis::project_template_onto_episodes(r, hit.template_id));
+            let (episode_adjusted_display, supporting_display, projection_complete) =
+                match projection.as_ref() {
+                    Some(p) if p.complete => {
+                        let supporting_only = p.supporting_only_occurrence_count.unwrap_or(0);
+                        let lead = p.lead_occurrence_count.unwrap_or(0);
+                        let supporting = supporting_only > 0 && lead == 0;
+                        let count = p.occurrence_count.unwrap_or(0);
+                        (count.to_string(), supporting.to_string(), true)
+                    }
+                    Some(_) => (
+                        "unknown_partial".to_string(),
+                        "unknown_partial".to_string(),
+                        false,
+                    ),
+                    None => (
+                        hit.error_event_count.to_string(),
+                        "false".to_string(),
+                        false,
+                    ),
+                };
+            let _ = projection_complete;
             body.push_str(&format!(
                 "- template_id={} severity={} error_event_count={} episode_adjusted_count={} supporting_stack_or_wrapper={} pattern={pattern}\n\
                    first_occurrence seq={} source={first_source} axis_value={}\n\
@@ -2359,8 +2362,8 @@ impl ToolHost {
                 hit.template_id,
                 hit.severity,
                 hit.error_event_count,
-                episode_adjusted,
-                supporting,
+                episode_adjusted_display,
+                supporting_display,
                 first_span.seq,
                 first_span.ts,
                 last_span.seq,
@@ -9125,6 +9128,85 @@ mod tests {
             assert!(!cite.source.is_empty());
         }
         assert!(!text.contains("independent_incident_count:"));
+    }
+
+    #[test]
+    fn broad_log_triage_cancels_during_exception_episode_scan() {
+        // Abort at the exception_episodes checkpoint so cancellation is observed
+        // by the cancellation-aware analyzer, not merely before it starts.
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("in");
+        fs::create_dir_all(&src).unwrap();
+        let mut app = String::new();
+        let mut err = String::new();
+        for i in 0..12u32 {
+            let base = 12 * 3600 + i * 2;
+            let h = (base / 3600) % 24;
+            let m = (base / 60) % 60;
+            let s = base % 60;
+            app.push_str(&format!(
+                "2026-03-15T{h:02}:{m:02}:{s:02}.000Z ERROR java.lang.RuntimeException: XYZ_CANCEL id={i}\n  at com.xyz.A.m(A.java:1)\n"
+            ));
+            for j in 0..20u32 {
+                err.push_str(&format!(
+                    "2026-03-15T{h:02}:{m:02}:{s:02}.{:03}Z ERROR at com.xyz.F{j}.m(F.java:{j})\n",
+                    j % 1000
+                ));
+            }
+            err.push_str(&format!(
+                "2026-03-15T{h:02}:{m:02}:{s:02}.000Z ERROR java.lang.RuntimeException: XYZ_CANCEL id={i}\n"
+            ));
+        }
+        fs::write(src.join("XYZ_app.log"), app).unwrap();
+        fs::write(src.join("XYZ_server.stderr"), err).unwrap();
+        let cache = dir.path().join("cache");
+        let policy = crate::log_analysis::LogEmbedPolicy {
+            mode: crate::log_analysis::LogEmbedMode::None,
+            cloud_content_leaves_machine: false,
+            cloud_base_url: None,
+            model_id: "test-none".into(),
+            defer_above_source_bytes: None,
+        };
+        let report = crate::log_analysis::ingest_path_with_policy(
+            &cache,
+            &src,
+            "xyz-cancel-brief",
+            &policy,
+            None,
+        )
+        .unwrap();
+        let corpus_id = report.corpus_id;
+        let corpus = Arc::new(crate::log_analysis::LogCorpus::open(&cache, &corpus_id).unwrap());
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut host = ToolHost::new(
+            Workspace::new("broad-triage-cancel-ep", vec![workspace]),
+            KeywordIndex::new(),
+            None,
+        );
+        host.set_log_analysis(true, Some(cache));
+        host.set_log_corpus_scope(Some(corpus_id.clone()));
+        host.set_active_log_corpus(Some(corpus_id.clone()));
+        host.seed_log_corpus_handle(&corpus_id, Arc::clone(&corpus))
+            .unwrap();
+        host.pin_log_suppression_lens(&corpus_id).unwrap();
+
+        let mut job = host.prepare_broad_log_triage_brief().unwrap();
+        job.phase_hook = Some(Arc::new(|phase, abort| {
+            if phase == "exception_episodes" {
+                abort.abort();
+            }
+        }));
+        let err = job
+            .build()
+            .expect_err("cancelled exception episode scan must not succeed");
+        let msg = err.to_string();
+        assert!(
+            matches!(err, CoreError::Cancelled)
+                || msg.contains("cancel")
+                || msg.contains("Cancelled"),
+            "expected cancelled terminal class, got {err}"
+        );
     }
 
     #[test]
