@@ -4545,3 +4545,53 @@ export async function hostInstallUpdate(): Promise<void> {
   }
   await update.downloadAndInstall();
 }
+
+// ─── Logging Quality Assessment (deterministic; no provider) ─────────────────
+
+export type {
+  LoggingQualityAssessment,
+  LoggingQualityAssessmentHostDto,
+  LoggingQualityExportStatus,
+  LoggingQualityFinding,
+  LoggingQualityRunPhase,
+} from "./loggingQuality/types";
+
+/** Run pure host assessor for one imported corpus. */
+export async function hostAssessLoggingQuality(
+  corpusId: string,
+): Promise<import("./loggingQuality/types").LoggingQualityAssessmentHostDto> {
+  if (!isTauri()) {
+    throw new Error("Logging quality assessment requires the desktop host");
+  }
+  const id = corpusId.trim();
+  if (!id) {
+    throw new Error("No corpus selected. Import or open a log corpus first.");
+  }
+  return invoke<import("./loggingQuality/types").LoggingQualityAssessmentHostDto>(
+    "log_assess_logging_quality",
+    { corpusId: id },
+  );
+}
+
+/**
+ * Host-owned Save panel + atomic no-clobber export.
+ * Destination path never returns to the renderer.
+ */
+export async function hostExportLoggingQualityAssessment(
+  corpusId: string,
+  format: "json" | "markdown",
+): Promise<import("./loggingQuality/types").LoggingQualityExportStatus> {
+  if (!isTauri()) {
+    throw new Error("Logging quality export requires the desktop host");
+  }
+  const id = corpusId.trim();
+  if (!id) {
+    throw new Error("No corpus selected. Import or open a log corpus first.");
+  }
+  return invoke<import("./loggingQuality/types").LoggingQualityExportStatus>(
+    "log_export_logging_quality_assessment",
+    {
+      request: { corpusId: id, format },
+    },
+  );
+}

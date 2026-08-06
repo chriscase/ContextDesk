@@ -210,6 +210,10 @@ import { LogDiagnosticDialog } from "../panes/LogDiagnosticDialog";
 import { ExplorerTimeResolutionDialog } from "./ExplorerTimeResolutionDialog";
 import { NoisePolicyControl, SuppressTemplateDialog } from "./NoisePolicy";
 import {
+  LoggingQualityPanel,
+  LoggingQualityToolbarButton,
+} from "./LoggingQualityPanel";
+import {
   centeredLiteralExcerpt,
   eventRowHeight,
   VirtualizedEventList,
@@ -916,6 +920,7 @@ export function LogExplorer({ corpusId }: Props) {
   const [wallTimePreferred, setWallTimePreferred] = useState(true);
   const [timeResolutionOpen, setTimeResolutionOpen] = useState(false);
   const timeResolutionTriggerRef = useRef<HTMLButtonElement>(null);
+  const [loggingQualityOpen, setLoggingQualityOpen] = useState(false);
   const [totalMatched, setTotalMatched] = useState(0);
   /** Unfiltered corpus event total for truthful count labeling (#534). */
   const [corpusTotal, setCorpusTotal] = useState(0);
@@ -6183,6 +6188,10 @@ export function LogExplorer({ corpusId }: Props) {
           await refreshSuppressionPolicy();
         }}
       />
+      <LoggingQualityToolbarButton
+        corpusId={corpusId}
+        onOpen={() => setLoggingQualityOpen(true)}
+      />
     </>
   );
 
@@ -8553,6 +8562,39 @@ export function LogExplorer({ corpusId }: Props) {
           corpusId={corpusId}
           triggerRef={timeResolutionTriggerRef}
           onDismiss={() => setTimeResolutionOpen(false)}
+        />
+      ) : null}
+
+      {loggingQualityOpen ? (
+        <LoggingQualityPanel
+          corpusId={corpusId}
+          open={loggingQualityOpen}
+          onDismiss={() => setLoggingQualityOpen(false)}
+          onShowInExplorer={(plan) => {
+            const nextLanes = plan.lanes.slice(0, 4).map((lane, i) => ({
+              id: lane.id || `lane-${i}`,
+              label: lane.label,
+              sources: [...lane.sources],
+            }));
+            if (nextLanes.length < 1) {
+              setStatus(
+                plan.note ??
+                  "Logging quality evidence could not be applied to lanes.",
+              );
+              return;
+            }
+            setPreferredLaneCount(nextLanes.length);
+            setLaneCount(Math.min(nextLanes.length, maxLaneCount));
+            setLanes(nextLanes);
+            saveLanes(corpusId, nextLanes);
+            setLoggingQualityOpen(false);
+            setStatus(
+              plan.note ??
+                `Logging quality · ${nextLanes.length} evidence lane${
+                  nextLanes.length === 1 ? "" : "s"
+                }`,
+            );
+          }}
         />
       ) : null}
 
