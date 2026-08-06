@@ -1,6 +1,6 @@
 # GUI demo checklist (public fixtures only)
 
-Worktree base: ContextDesk `main` @ `9eb9fa29`.  
+Worktree base: ContextDesk `main` @ `9eb9fa29`.
 Use only public fixtures under `fixtures/` (for example `fixtures/cli-release-demo`, `fixtures/company-import-lab`, `fixtures/log-lab`). Do **not** load private corpora.
 
 ## Preflight
@@ -44,8 +44,8 @@ Use only public fixtures under `fixtures/` (for example `fixtures/cli-release-de
 
 ## Done when
 
-- [ ] Import/timezone: single progress path, honest terminal states  
-- [ ] No menu/popover hidden under composer or chat rail  
-- [ ] Cancel never leaves “streaming” chrome  
-- [ ] Only public fixtures used  
-- [ ] `npm run typecheck && npm run lint && npm run test && npm run build` green in `desktop/`  
+- [ ] Import/timezone: single progress path, honest terminal states
+- [ ] No menu/popover hidden under composer or chat rail
+- [ ] Cancel never leaves “streaming” chrome
+- [ ] Only public fixtures used
+- [ ] `npm run typecheck && npm run lint && npm run test && npm run build` green in `desktop/`
