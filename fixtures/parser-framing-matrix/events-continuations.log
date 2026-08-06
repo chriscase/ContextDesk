@@ -1,0 +1,12 @@
+2026-03-15 12:10:00,000 ERROR [org.example.Worker] (thread-1) operation failed
+java.lang.RuntimeException: boom
+	at org.example.Worker.run(Worker.java:42)
+	at java.base/java.lang.Thread.run(Thread.java:840)
+Caused by: java.sql.SQLException: constraint
+	at org.example.Dao.save(Dao.java:17)
+2026-03-15 12:10:01,000 INFO [org.example.Sql] (thread-1) sending statement: SELECT id FROM items
+WHERE active = 1
+ORDER BY id
+COMMIT;
+arbitrary producer note after terminator
+2026-03-15 12:10:02,000 INFO [org.example.Sql] (thread-1) next event after continuations

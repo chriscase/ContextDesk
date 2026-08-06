@@ -1,0 +1,5 @@
+2026-03-15 12:00:00,123 INFO [org.example.Boot] (main) wildfly offsetless local
+2026-03-15 12:00:01,456Z INFO [org.example.Boot] (main) wildfly with z
+2026-03-15 12:00:02,789+00:00 WARN [org.example.Boot] (main) wildfly plus zero
+2026-03-15 12:00:03,12 INFO [org.example.Short] (main) short fraction must fail closed
+2026-03-15 12:00:04.1234 ERROR [org.example.Long] (main) overlong fraction must fail closed
