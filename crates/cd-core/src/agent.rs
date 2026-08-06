@@ -655,9 +655,18 @@ fn linked_broad_log_triage_requested(user_text: &str) -> bool {
     // Broad triage is reserved for corpus-wide inventory/overview requests.
     let has_focused_causal_question = [
         " what caused ",
+        " what explains this ",
+        " what explains that ",
+        " what explains the failure ",
+        " what led to this ",
+        " what led to the failure ",
+        " what is causing this ",
         " why did ",
+        " why is this ",
         " cause of this ",
         " caused this ",
+        " explain this failure ",
+        " explains this failure ",
         " root cause of this ",
         " root cause of the failure ",
     ]
@@ -4903,6 +4912,15 @@ mod tests {
             "Why did this request fail in these logs?"
         ));
         assert!(!linked_broad_log_triage_requested(
+            "What explains this failure in these logs?"
+        ));
+        assert!(!linked_broad_log_triage_requested(
+            "What led to this failure in the logs?"
+        ));
+        assert!(!linked_broad_log_triage_requested(
+            "Please explain this failure using these logs."
+        ));
+        assert!(!linked_broad_log_triage_requested(
             "What problems do you see around trace_id=trace-7f3a?"
         ));
         assert!(!linked_broad_log_triage_requested(
@@ -4918,6 +4936,9 @@ mod tests {
 
         assert!(linked_broad_log_triage_requested(
             "Review root causes and failures across everything in these logs."
+        ));
+        assert!(linked_broad_log_triage_requested(
+            "What explains the failures and anomalies across the whole corpus?"
         ));
     }
 

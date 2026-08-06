@@ -297,14 +297,14 @@ pub fn parse_structured_triage_answer(text: &str) -> Result<StructuredTriageAnsw
         return Err("terminal answer is empty".into());
     }
     if let Ok(answer) = serde_json::from_str::<StructuredTriageAnswer>(trimmed) {
-        return Ok(answer);
+        return Ok(derive_boolean_assertions(answer, trimmed));
     }
     if let Some(fenced) = trimmed
         .strip_prefix("```json")
         .and_then(|value| value.strip_suffix("```"))
     {
         if let Ok(answer) = serde_json::from_str::<StructuredTriageAnswer>(fenced.trim()) {
-            return Ok(answer);
+            return Ok(derive_boolean_assertions(answer, fenced));
         }
     }
 
@@ -324,13 +324,14 @@ pub fn parse_structured_triage_answer(text: &str) -> Result<StructuredTriageAnsw
             answer.asserts_earliest_error_is_root_cause = true;
             continue;
         }
-        if assertion.contains("root cause is established") && !contains_claim_negation(&assertion) {
+        if text_has_unnegated_phrase(&assertion, &["root cause is established"]) {
             answer.asserts_root_cause_established = true;
             continue;
         }
-        if assertion.contains("cross source wall clock order is confidently known")
-            && !contains_claim_negation(&assertion)
-        {
+        if text_has_unnegated_phrase(
+            &assertion,
+            &["cross source wall clock order is confidently known"],
+        ) {
             answer.asserts_confident_wall_clock_order = true;
             continue;
         }
@@ -343,7 +344,7 @@ pub fn parse_structured_triage_answer(text: &str) -> Result<StructuredTriageAnsw
         }
         if assertion.starts_with("observed source ")
             && assertion.ends_with(" in the imported evidence")
-            && !contains_claim_negation(&assertion)
+            && text_has_unnegated_phrase(&assertion, &["observed source "])
         {
             let source = assertion
                 .strip_prefix("observed source ")
@@ -389,7 +390,47 @@ pub fn parse_structured_triage_answer(text: &str) -> Result<StructuredTriageAnsw
             _ => {}
         }
     }
-    Ok(answer)
+    Ok(derive_boolean_assertions(answer, trimmed))
+}
+
+fn derive_boolean_assertions(
+    mut answer: StructuredTriageAnswer,
+    model_text: &str,
+) -> StructuredTriageAnswer {
+    // These booleans are evaluator state, never model authority. JSON may carry
+    // the fields for round-trip compatibility, but only textual claims set them.
+    answer.asserts_all_events_are_errors = false;
+    answer.asserts_earliest_error_is_root_cause = false;
+    answer.asserts_confident_wall_clock_order = false;
+    answer.asserts_root_cause_established = false;
+
+    let mut texts = model_text.lines().map(str::to_string).collect::<Vec<_>>();
+    texts.extend(
+        answer
+            .observations
+            .iter()
+            .chain(answer.causal_candidates.iter())
+            .map(|claim| claim.text.clone()),
+    );
+    for text in texts {
+        let assertion = normalize_assertion_text(&text);
+        if is_positive_all_events_error_claim(&assertion) {
+            answer.asserts_all_events_are_errors = true;
+        }
+        if is_positive_earliest_error_root_claim(&assertion) {
+            answer.asserts_earliest_error_is_root_cause = true;
+        }
+        if text_has_unnegated_phrase(&assertion, &["root cause is established"]) {
+            answer.asserts_root_cause_established = true;
+        }
+        if text_has_unnegated_phrase(
+            &assertion,
+            &["cross source wall clock order is confidently known"],
+        ) {
+            answer.asserts_confident_wall_clock_order = true;
+        }
+    }
+    answer
 }
 
 fn strip_bullet(line: &str) -> &str {
@@ -424,10 +465,22 @@ fn normalize_assertion_text(line: &str) -> String {
         .to_string()
 }
 
-fn contains_claim_negation(text: &str) -> bool {
+fn phrase_is_negated(text: &str, phrase_at: usize) -> bool {
+    let prefix = text.get(..phrase_at).unwrap_or_default();
+    let punctuation_boundary = prefix
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| matches!(ch, '.' | '!' | '?' | ';'))
+        .map_or(0, |(idx, ch)| idx + ch.len_utf8());
+    let contrast_boundary = [", but ", ", yet ", " however ", " actually "]
+        .iter()
+        .filter_map(|marker| prefix.rfind(marker).map(|idx| idx + marker.len()))
+        .max()
+        .unwrap_or(0);
+    let boundary = punctuation_boundary.max(contrast_boundary);
+    let scope = prefix.get(boundary..).unwrap_or(prefix);
     [
-        "not all ",
-        "not every ",
+        "not ",
         "no evidence",
         "cannot ",
         "can't ",
@@ -438,34 +491,50 @@ fn contains_claim_negation(text: &str) -> bool {
         "isn't ",
         "unsupported",
         "unproven",
+        "wrong to say",
+        "wrong to claim",
+        "wrong to conclude",
+        "incorrect to say",
+        "incorrect to claim",
+        "would be wrong",
+        "would be incorrect",
+        "must not claim",
+        "should not say",
     ]
     .iter()
-    .any(|marker| text.contains(marker))
+    .any(|marker| scope.contains(marker))
+}
+
+fn text_has_unnegated_phrase(text: &str, phrases: &[&str]) -> bool {
+    phrases.iter().any(|phrase| {
+        text.match_indices(phrase)
+            .any(|(idx, _)| !phrase_is_negated(text, idx))
+    })
 }
 
 fn is_positive_all_events_error_claim(text: &str) -> bool {
-    !contains_claim_negation(text)
-        && [
+    text_has_unnegated_phrase(
+        text,
+        &[
             "all events in this corpus are errors",
             "all events in the corpus are errors",
             "every event in this corpus is an error",
             "every event in the corpus is an error",
             "the corpus contains only error events",
             "the corpus consists only of error events",
-        ]
-        .iter()
-        .any(|claim| text.contains(claim))
+        ],
+    )
 }
 
 fn is_positive_earliest_error_root_claim(text: &str) -> bool {
-    !contains_claim_negation(text)
-        && [
+    text_has_unnegated_phrase(
+        text,
+        &[
             "the earliest error is the root cause",
             "the first error is the root cause",
             "earliest observed error is the root cause",
-        ]
-        .iter()
-        .any(|claim| text.contains(claim))
+        ],
+    )
 }
 
 fn parse_claim_line(line: &str) -> TriageClaim {
@@ -851,25 +920,28 @@ pub fn score_structured_triage_answer(
 }
 
 fn observation_is_explicitly_non_material(claim: &TriageClaim) -> bool {
-    matches!(
-        claim
-            .role
-            .as_deref()
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("zero_evidence" | "limitation")
-    )
+    let text = normalize_assertion_text(&claim.text);
+    [
+        "zero unsuppressed events",
+        "no unsuppressed events",
+        "no event evidence is available",
+        "no events were returned",
+    ]
+    .iter()
+    .any(|disclosure| text.contains(disclosure))
 }
 
 fn causal_claim_is_explicitly_non_material(claim: &TriageClaim) -> bool {
-    matches!(
-        claim
-            .role
-            .as_deref()
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("unknown" | "zero_evidence" | "limitation")
-    )
+    let text = normalize_assertion_text(&claim.text);
+    [
+        "no establishable trigger",
+        "no causal candidate can be established",
+        "root cause is not establishable",
+        "insufficient evidence to identify a causal candidate",
+        "zero unsuppressed events",
+    ]
+    .iter()
+    .any(|disclosure| text.contains(disclosure))
 }
 
 fn find_token_seq(host: &TriageHostFacts, token: &str) -> Option<(u64, String)> {
@@ -1058,7 +1130,18 @@ mod tests {
 
         stripped.observations[0].role = Some("zero_evidence".into());
         let score = score_structured_triage_answer(&stripped, &key, &host);
+        assert!(score.failed_ids().contains(&"citation_validity"));
+
+        stripped.observations[0].text = "Host reports zero unsuppressed events".into();
+        let score = score_structured_triage_answer(&stripped, &key, &host);
         assert!(!score.failed_ids().contains(&"citation_validity"));
+
+        let mut self_labelled = good_answer();
+        self_labelled.causal_candidates[0].seq = None;
+        self_labelled.causal_candidates[0].source = None;
+        self_labelled.causal_candidates[0].role = Some("unknown".into());
+        let score = score_structured_triage_answer(&self_labelled, &key, &host);
+        assert!(score.failed_ids().contains(&"citation_validity"));
     }
 
     #[test]

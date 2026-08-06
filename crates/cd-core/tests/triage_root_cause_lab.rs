@@ -527,6 +527,35 @@ fn adversarial_mutations_fail_evaluator_with_dimension_reasons() {
             neutral_text.replacen(&exact_citation, "", 1),
             "citation_validity",
         ),
+        (
+            "material_observation_self_labelled_zero_evidence_actual_text",
+            neutral_text
+                .replacen(&exact_citation, "", 1)
+                .replacen("role=observation", "role=zero_evidence", 1),
+            "citation_validity",
+        ),
+        (
+            "material_causal_claim_self_labelled_unknown_actual_text",
+            {
+                let causal = good.causal_candidates.first().expect("causal citation");
+                let citation = format!(
+                    "seq={} source=\"{}\"",
+                    causal.seq.expect("causal seq"),
+                    causal.source.as_deref().expect("causal source")
+                );
+                neutral_text
+                    .replacen(&citation, "", 1)
+                    .replacen("role=trigger", "role=unknown", 1)
+            },
+            "citation_validity",
+        ),
+        (
+            "negated_then_reasserted_actual_text",
+            format!(
+                "{neutral_text}\nIt would be wrong to say all events in this corpus are errors. However, all events in this corpus are errors.\n"
+            ),
+            "unsupported_claims",
+        ),
         ("missing_competing_section_actual_text", without_competing, "contract_shape"),
         ("missing_evidence_section_actual_text", without_missing, "contract_shape"),
     ];
@@ -554,6 +583,9 @@ fn caveated_false_claim_wording_is_not_misclassified_as_a_positive_assertion() {
     for caveat in [
         "- Not all events in this corpus are errors.",
         "### Caveat: There is no evidence that every event in the corpus is an error.",
+        "It would be wrong to say all events in this corpus are errors.",
+        "It would be incorrect to claim every event in the corpus is an error.",
+        "We must not claim that all events in the corpus are errors.",
         "The earliest error is not the root cause.",
     ] {
         let text = format!("{neutral_text}\n{caveat}\n");
@@ -565,6 +597,48 @@ fn caveated_false_claim_wording_is_not_misclassified_as_a_positive_assertion() {
             score.failed_ids()
         );
     }
+}
+
+#[test]
+fn json_answers_derive_forbidden_assertions_from_claim_text_not_model_booleans() {
+    let (key, host, _) = exercise_case("decoy-before-trigger");
+    let good = good_answer_for(&key, &host);
+
+    let mut untrusted_flags = good.clone();
+    untrusted_flags.asserts_all_events_are_errors = true;
+    untrusted_flags.asserts_earliest_error_is_root_cause = true;
+    untrusted_flags.asserts_confident_wall_clock_order = true;
+    let json = serde_json::to_string(&untrusted_flags).expect("serialize JSON answer");
+    let parsed = parse_structured_triage_answer(&json).expect("parse JSON answer");
+    assert!(!parsed.asserts_all_events_are_errors);
+    assert!(!parsed.asserts_earliest_error_is_root_cause);
+    assert!(!parsed.asserts_confident_wall_clock_order);
+    assert!(!parsed.asserts_root_cause_established);
+
+    let mut text_mutation = good.clone();
+    text_mutation.observations[0].text =
+        "Evidence conclusion: every event in this corpus is an error.".into();
+    text_mutation.asserts_all_events_are_errors = false;
+    let json = serde_json::to_string(&text_mutation).expect("serialize text mutation");
+    let parsed = parse_structured_triage_answer(&json).expect("parse text-mutated JSON");
+    let score = score_structured_triage_answer(&parsed, &key, &host);
+    assert!(!score.passed);
+    assert!(score.failed_ids().contains(&"unsupported_claims"));
+
+    let mut fenced_mutation = good;
+    fenced_mutation.causal_candidates[0].text = "The first error is the root cause!".into();
+    fenced_mutation.asserts_earliest_error_is_root_cause = false;
+    let fenced = format!(
+        "```json\n{}\n```",
+        serde_json::to_string(&fenced_mutation).expect("serialize fenced mutation")
+    );
+    let parsed = parse_structured_triage_answer(&fenced).expect("parse fenced JSON mutation");
+    let score = score_structured_triage_answer(&parsed, &key, &host);
+    assert!(!score.passed);
+    assert!(
+        score.failed_ids().contains(&"symptom_vs_cause")
+            || score.failed_ids().contains(&"unsupported_claims")
+    );
 }
 
 #[test]
