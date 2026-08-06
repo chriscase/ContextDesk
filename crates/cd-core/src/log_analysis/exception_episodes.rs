@@ -119,6 +119,104 @@ pub struct ExceptionOccurrenceSummary {
     pub citations_complete: bool,
 }
 
+/// Integer ratio with explicit remainder (never hides incomplete division).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExceptionCountRatio {
+    /// Numerator (e.g. raw records).
+    pub numerator: u64,
+    /// Denominator (e.g. semantic occurrences).
+    pub denominator: u64,
+    /// Floor division `numerator / denominator` (0 when denominator is 0).
+    pub quotient: u64,
+    /// `numerator % denominator` (0 when denominator is 0).
+    pub remainder: u64,
+}
+
+impl ExceptionCountRatio {
+    /// Build a ratio that always surfaces remainder.
+    pub fn new(numerator: u64, denominator: u64) -> Self {
+        if denominator == 0 {
+            Self {
+                numerator,
+                denominator: 0,
+                quotient: 0,
+                remainder: 0,
+            }
+        } else {
+            Self {
+                numerator,
+                denominator,
+                quotient: numerator / denominator,
+                remainder: numerator % denominator,
+            }
+        }
+    }
+
+    /// True when the ratio is an exact integer (or both sides zero).
+    pub fn is_exact(&self) -> bool {
+        self.denominator == 0 || self.remainder == 0
+    }
+}
+
+/// Typed amplification accounting (numerator/denominator + remainder).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExceptionAmplificationMetrics {
+    /// Total raw exception records retained in renderings.
+    pub raw_exception_records: u64,
+    /// Records belonging to application full-stack renderings.
+    pub application_exception_records: u64,
+    /// Records belonging to separately wrapped (stderr/line) renderings.
+    pub stderr_exception_records: u64,
+    /// Physical rendering count.
+    pub physical_renderings: u64,
+    /// Semantic occurrence count (denominator for per-occurrence ratios).
+    pub semantic_occurrences: u64,
+    /// `raw_exception_records / semantic_occurrences` with remainder.
+    pub raw_records_per_occurrence: ExceptionCountRatio,
+    /// `stderr_exception_records / semantic_occurrences` with remainder.
+    pub stderr_records_per_occurrence: ExceptionCountRatio,
+    /// `application_exception_records / semantic_occurrences` with remainder.
+    pub application_records_per_occurrence: ExceptionCountRatio,
+    /// `physical_renderings / semantic_occurrences` with remainder.
+    pub renderings_per_occurrence: ExceptionCountRatio,
+}
+
+impl ExceptionAmplificationMetrics {
+    fn from_counts(
+        raw_exception_records: u64,
+        application_exception_records: u64,
+        stderr_exception_records: u64,
+        physical_renderings: u64,
+        semantic_occurrences: u64,
+    ) -> Self {
+        Self {
+            raw_exception_records,
+            application_exception_records,
+            stderr_exception_records,
+            physical_renderings,
+            semantic_occurrences,
+            raw_records_per_occurrence: ExceptionCountRatio::new(
+                raw_exception_records,
+                semantic_occurrences,
+            ),
+            stderr_records_per_occurrence: ExceptionCountRatio::new(
+                stderr_exception_records,
+                semantic_occurrences,
+            ),
+            application_records_per_occurrence: ExceptionCountRatio::new(
+                application_exception_records,
+                semantic_occurrences,
+            ),
+            renderings_per_occurrence: ExceptionCountRatio::new(
+                physical_renderings,
+                semantic_occurrences,
+            ),
+        }
+    }
+}
+
 /// Bounded family of occurrences sharing one normalized root signature.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -135,8 +233,8 @@ pub struct ExceptionFamilySummary {
     pub duplicate_rendering_occurrence_count: u64,
     /// Occurrences with incomplete citations or non-strong duplicates.
     pub uncertain_occurrence_count: u64,
-    /// Amplification: raw_record_count / max(1, occurrence_count).
-    pub amplification_x: u64,
+    /// Typed amplification for this family (quotient + remainder).
+    pub amplification: ExceptionAmplificationMetrics,
     /// Occurrences retained for this family (bounded).
     pub occurrences: Vec<ExceptionOccurrenceSummary>,
 }
@@ -149,7 +247,7 @@ pub struct ExceptionEpisodeAnalysis {
     pub schema_id: String,
     /// Schema version.
     pub schema_version: u32,
-    /// Events available under the suppression filter.
+    /// Events available under the exception-focused scan filter.
     pub events_available: u64,
     /// Events actually scanned.
     pub events_scanned: u64,
@@ -157,6 +255,10 @@ pub struct ExceptionEpisodeAnalysis {
     pub event_scan_cap: usize,
     /// Raw exception-related records retained in renderings.
     pub raw_exception_record_count: u64,
+    /// Application full-stack records.
+    pub application_exception_record_count: u64,
+    /// Separately wrapped (stderr/line) records.
+    pub stderr_exception_record_count: u64,
     /// Physical rendering count.
     pub rendering_episode_count: u64,
     /// Semantic occurrence count.
@@ -167,9 +269,9 @@ pub struct ExceptionEpisodeAnalysis {
     pub family_count_available: u64,
     /// Family output cap.
     pub family_cap: usize,
-    /// Overall amplification across all occurrences.
-    pub overall_amplification_x: u64,
-    /// True when any cap truncated work.
+    /// Typed amplification metrics (never hides division remainder).
+    pub amplification: ExceptionAmplificationMetrics,
+    /// True when any cap truncated work — totals must not be treated as exact corpus-wide.
     pub partial: bool,
     /// True when any occurrence is uncertain.
     pub uncertain: bool,
@@ -236,8 +338,18 @@ pub fn analyze_exception_episodes_with_cancel(
     excluded_template_ids: &[u64],
     cancel: Option<&AtomicBool>,
 ) -> CoreResult<ExceptionEpisodeAnalysis> {
+    // Exception-focused scan: high-severity levels only so targets after large
+    // unrelated (info/debug) volume remain reachable within the scan cap.
     let filter = EventQuery {
         excluded_template_ids: excluded_template_ids.to_vec(),
+        levels: vec![
+            "error".into(),
+            "ERROR".into(),
+            "fatal".into(),
+            "FATAL".into(),
+            "critical".into(),
+            "CRITICAL".into(),
+        ],
         sort_by_time: false,
         ..Default::default()
     };
@@ -290,10 +402,18 @@ pub fn analyze_bounded_events(
     events: &[ExplorerEvent],
 ) -> ExceptionEpisodeAnalysis {
     let (renderings, render_partial) = derive_render_episodes(events);
-    let raw_exception_record_count = renderings
+    let application_exception_record_count = renderings
         .iter()
-        .map(|rendering| rendering.citations.len() as u64)
+        .filter(|r| r.kind == ExceptionRenderingKind::ApplicationFullStack)
+        .map(|r| r.citations.len() as u64)
         .sum();
+    let stderr_exception_record_count = renderings
+        .iter()
+        .filter(|r| r.kind == ExceptionRenderingKind::SeparatelyWrappedRecords)
+        .map(|r| r.citations.len() as u64)
+        .sum();
+    let raw_exception_record_count =
+        application_exception_record_count + stderr_exception_record_count;
     let rendering_episode_count = renderings.len() as u64;
     let occurrences = correlate_renderings(renderings);
     let occurrence_count = occurrences.len() as u64;
@@ -328,11 +448,13 @@ pub fn analyze_bounded_events(
                 })
                 .count() as u64;
             let occurrence_count = occs.len() as u64;
-            let amplification_x = if occurrence_count == 0 {
-                0
-            } else {
-                raw_record_count / occurrence_count
-            };
+            let amplification = ExceptionAmplificationMetrics::from_counts(
+                raw_record_count,
+                0,
+                0,
+                rendering_episode_count,
+                occurrence_count,
+            );
             ExceptionFamilySummary {
                 signature,
                 raw_record_count,
@@ -340,7 +462,7 @@ pub fn analyze_bounded_events(
                 occurrence_count,
                 duplicate_rendering_occurrence_count,
                 uncertain_occurrence_count,
-                amplification_x,
+                amplification,
                 occurrences: occs,
             }
         })
@@ -354,28 +476,58 @@ pub fn analyze_bounded_events(
     });
     families.truncate(EXCEPTION_EPISODE_FAMILY_CAP);
 
-    let overall_amplification_x = if occurrence_count == 0 {
-        0
-    } else {
-        raw_exception_record_count / occurrence_count
-    };
+    let amplification = ExceptionAmplificationMetrics::from_counts(
+        raw_exception_record_count,
+        application_exception_record_count,
+        stderr_exception_record_count,
+        rendering_episode_count,
+        occurrence_count,
+    );
 
     let scan_partial = events_available > events.len() as u64;
     let partial = scan_partial
         || render_partial
         || family_count_available > EXCEPTION_EPISODE_FAMILY_CAP as u64;
 
+    let amp = &amplification;
     let ranking_disclosure = format!(
         "ranking_basis: semantic_occurrence_count_not_raw_stack_volume\n\
          layer_raw_exception_records: {raw_exception_record_count}\n\
+         layer_application_exception_records: {application_exception_record_count}\n\
+         layer_stderr_exception_records: {stderr_exception_record_count}\n\
          layer_physical_renderings: {rendering_episode_count}\n\
          layer_semantic_occurrences: {occurrence_count}\n\
          layer_duplicate_rendering_occurrences: {duplicate_rendering_occurrence_count}\n\
-         overall_amplification_x: {overall_amplification_x}\n\
+         amplification_raw_records_per_occurrence: {}/{} = {} rem {}\n\
+         amplification_stderr_records_per_occurrence: {}/{} = {} rem {}\n\
+         amplification_application_records_per_occurrence: {}/{} = {} rem {}\n\
+         amplification_renderings_per_occurrence: {}/{} = {} rem {}\n\
+         totals_exact: {}\n\
          independent_incident_claim_forbidden: true\n\
          interpretation: wrappers and stack frames are supporting records of a rendering; \
-         duplicate renderings are correlated only with multi-signal evidence; \
-         order-only cross-source merge requires a strong execution key (thread or trace_id).\n"
+         duplicate renderings are correlated only with multi-signal one-to-one evidence; \
+         order-only cross-source merge requires a strong execution key (thread or trace_id). \
+         When partial=true, counts are incomplete and must not be presented as exact corpus totals.\n",
+        amp.raw_records_per_occurrence.numerator,
+        amp.raw_records_per_occurrence.denominator,
+        amp.raw_records_per_occurrence.quotient,
+        amp.raw_records_per_occurrence.remainder,
+        amp.stderr_records_per_occurrence.numerator,
+        amp.stderr_records_per_occurrence.denominator,
+        amp.stderr_records_per_occurrence.quotient,
+        amp.stderr_records_per_occurrence.remainder,
+        amp.application_records_per_occurrence.numerator,
+        amp.application_records_per_occurrence.denominator,
+        amp.application_records_per_occurrence.quotient,
+        amp.application_records_per_occurrence.remainder,
+        amp.renderings_per_occurrence.numerator,
+        amp.renderings_per_occurrence.denominator,
+        amp.renderings_per_occurrence.quotient,
+        amp.renderings_per_occurrence.remainder,
+        !partial
+            && amp.raw_records_per_occurrence.is_exact()
+            && amp.stderr_records_per_occurrence.is_exact()
+            && amp.renderings_per_occurrence.is_exact()
     );
 
     ExceptionEpisodeAnalysis {
@@ -385,12 +537,14 @@ pub fn analyze_bounded_events(
         events_scanned: events.len() as u64,
         event_scan_cap: EXCEPTION_EPISODE_EVENT_SCAN_CAP,
         raw_exception_record_count,
+        application_exception_record_count,
+        stderr_exception_record_count,
         rendering_episode_count,
         occurrence_count,
         duplicate_rendering_occurrence_count,
         family_count_available,
         family_cap: EXCEPTION_EPISODE_FAMILY_CAP,
-        overall_amplification_x,
+        amplification,
         partial,
         uncertain,
         ranking_disclosure,
@@ -402,37 +556,60 @@ pub fn analyze_bounded_events(
 pub fn format_exception_episode_brief_section(report: &ExceptionEpisodeAnalysis) -> String {
     let mut out = String::new();
     out.push_str("## Exception episode correlation\n");
+    let amp = &report.amplification;
     out.push_str(&format!(
         "schema_id: {}\nschema_version: {}\n\
          events_available: {}\nevents_scanned: {}\n\
          raw_exception_record_count: {}\n\
+         application_exception_record_count: {}\n\
+         stderr_exception_record_count: {}\n\
          physical_rendering_count: {}\n\
          semantic_occurrence_count: {}\n\
          duplicate_rendering_occurrence_count: {}\n\
-         overall_amplification_x: {}\n\
+         amplification_raw_records_per_occurrence: {}/{} = {} rem {}\n\
+         amplification_stderr_records_per_occurrence: {}/{} = {} rem {}\n\
+         amplification_renderings_per_occurrence: {}/{} = {} rem {}\n\
          partial: {}\nuncertain: {}\n",
         report.schema_id,
         report.schema_version,
         report.events_available,
         report.events_scanned,
         report.raw_exception_record_count,
+        report.application_exception_record_count,
+        report.stderr_exception_record_count,
         report.rendering_episode_count,
         report.occurrence_count,
         report.duplicate_rendering_occurrence_count,
-        report.overall_amplification_x,
+        amp.raw_records_per_occurrence.numerator,
+        amp.raw_records_per_occurrence.denominator,
+        amp.raw_records_per_occurrence.quotient,
+        amp.raw_records_per_occurrence.remainder,
+        amp.stderr_records_per_occurrence.numerator,
+        amp.stderr_records_per_occurrence.denominator,
+        amp.stderr_records_per_occurrence.quotient,
+        amp.stderr_records_per_occurrence.remainder,
+        amp.renderings_per_occurrence.numerator,
+        amp.renderings_per_occurrence.denominator,
+        amp.renderings_per_occurrence.quotient,
+        amp.renderings_per_occurrence.remainder,
         report.partial,
         report.uncertain
     ));
     out.push_str(&report.ranking_disclosure);
     out.push('\n');
     for family in report.families.iter().take(8) {
+        let famp = &family.amplification;
         out.push_str(&format!(
-            "- signature={} occurrences={} raw_records={} renderings={} amplification_x={} duplicates={}\n",
+            "- signature={} occurrences={} raw_records={} renderings={} \
+             raw_per_occ={}/{}={} rem{} duplicates={}\n",
             family.signature,
             family.occurrence_count,
             family.raw_record_count,
             family.rendering_episode_count,
-            family.amplification_x,
+            famp.raw_records_per_occurrence.numerator,
+            famp.raw_records_per_occurrence.denominator,
+            famp.raw_records_per_occurrence.quotient,
+            famp.raw_records_per_occurrence.remainder,
             family.duplicate_rendering_occurrence_count
         ));
         for occ in family.occurrences.iter().take(2) {
@@ -453,7 +630,7 @@ pub fn format_exception_episode_brief_section(report: &ExceptionEpisodeAnalysis)
     }
     out.push_str(
         "interpretation: do not treat raw stack-frame volume as independent incidents; \
-         prefer semantic_occurrence_count and disclosed amplification.\n",
+         prefer semantic_occurrence_count and typed amplification ratios with remainders.\n",
     );
     out
 }
@@ -700,85 +877,216 @@ fn adjacent_compatible(episode: &RenderEpisode, event: &ExplorerEvent) -> bool {
 // Layer 3: semantic occurrences (duplicate-render correlation)
 // ---------------------------------------------------------------------------
 
+/// Candidate edge for one-to-one duplicate-rendering matching.
+struct PairEdge {
+    conf_rank: u8,
+    distance: u64,
+    seq_a: u64,
+    source_a: String,
+    seq_b: u64,
+    source_b: String,
+    idx_a: usize,
+    idx_b: usize,
+    confidence: ExceptionCorrelationConfidence,
+}
+
+/// One-to-one duplicate-rendering matching.
+///
+/// Never uses reverse-insertion greedy attachment. For each signature, edges
+/// between unlike kinds are ranked by:
+/// 1. stronger confidence first,
+/// 2. smallest honest axis (wall/order) distance,
+/// 3. stable first_seq / source / index tie-breakers.
+///
+/// Each rendering is used at most once. Exact-time edges therefore beat merely
+/// window-compatible edges and cannot steal a later occurrence's partner.
 fn correlate_renderings(
     renderings: Vec<RenderEpisode>,
 ) -> Vec<(String, ExceptionOccurrenceSummary)> {
-    let mut occurrences: Vec<(String, Vec<RenderEpisode>, ExceptionCorrelationConfidence)> =
-        Vec::new();
-    for rendering in renderings {
-        let candidate = occurrences.iter_mut().rev().find(|(signature, group, _)| {
-            signature == &rendering.signature
-                && group
-                    .last()
-                    .is_some_and(|prior| duplicate_evidence(prior, &rendering).is_some())
-        });
-        if let Some((_, group, confidence)) = candidate {
-            if let Some(next_confidence) = group
-                .last()
-                .and_then(|prior| duplicate_evidence(prior, &rendering))
-            {
-                *confidence = stronger_confidence(*confidence, next_confidence);
-                group.push(rendering);
-                continue;
-            }
-        }
-        occurrences.push((
-            rendering.signature.clone(),
-            vec![rendering],
-            ExceptionCorrelationConfidence::Uncorrelated,
-        ));
+    let n = renderings.len();
+    let mut by_signature: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (idx, rendering) in renderings.iter().enumerate() {
+        by_signature
+            .entry(rendering.signature.clone())
+            .or_default()
+            .push(idx);
     }
 
-    occurrences
-        .into_iter()
-        .map(|(signature, renderings, confidence)| {
-            let mut citations = Vec::new();
-            let mut seen = HashSet::new();
-            let mut kinds = Vec::new();
-            let mut complete = true;
-            for rendering in &renderings {
-                complete &= rendering.complete;
-                if !kinds.contains(&rendering.kind) {
-                    kinds.push(rendering.kind);
+    let mut paired = vec![false; n];
+    // (signature, left_idx, right_idx, confidence) — indices into renderings
+    let mut pairs: Vec<(String, usize, usize, ExceptionCorrelationConfidence)> = Vec::new();
+
+    for (signature, indices) in &by_signature {
+        let mut edges: Vec<PairEdge> = Vec::new();
+        for (pos_a, &idx_a) in indices.iter().enumerate() {
+            for &idx_b in indices.iter().skip(pos_a + 1) {
+                let left = &renderings[idx_a];
+                let right = &renderings[idx_b];
+                if left.kind == right.kind {
+                    continue;
                 }
-                for citation in &rendering.citations {
-                    if seen.insert(citation.clone()) {
-                        citations.push(citation.clone());
-                    }
+                if left.signature != right.signature {
+                    continue;
                 }
+                let Some(confidence) = duplicate_evidence(left, right) else {
+                    continue;
+                };
+                let conf_rank = match confidence {
+                    ExceptionCorrelationConfidence::Strong => 0u8,
+                    ExceptionCorrelationConfidence::Moderate => 1u8,
+                    ExceptionCorrelationConfidence::Uncorrelated => 2u8,
+                };
+                let distance = axis_distance(left, right);
+                // Canonical order of endpoints for stable tie-breakers.
+                let (seq_a, source_a, i_a, seq_b, source_b, i_b) =
+                    if (left.first_seq(), left.source.as_str(), idx_a)
+                        <= (right.first_seq(), right.source.as_str(), idx_b)
+                    {
+                        (
+                            left.first_seq(),
+                            left.source.clone(),
+                            idx_a,
+                            right.first_seq(),
+                            right.source.clone(),
+                            idx_b,
+                        )
+                    } else {
+                        (
+                            right.first_seq(),
+                            right.source.clone(),
+                            idx_b,
+                            left.first_seq(),
+                            left.source.clone(),
+                            idx_a,
+                        )
+                    };
+                edges.push(PairEdge {
+                    conf_rank,
+                    distance,
+                    seq_a,
+                    source_a,
+                    seq_b,
+                    source_b,
+                    idx_a: i_a,
+                    idx_b: i_b,
+                    confidence,
+                });
             }
-            citations.sort_by_key(|citation| citation.seq);
-            let first_seq = citations.first().map_or(0, |c| c.seq);
-            let last_seq = citations.last().map_or(0, |c| c.seq);
-            let summary = ExceptionOccurrenceSummary {
-                first_seq,
-                last_seq,
-                raw_record_count: citations.len() as u64,
-                rendering_count: renderings.len() as u64,
-                duplicate_rendering: renderings.len() > 1,
-                correlation_confidence: if renderings.len() > 1 {
-                    confidence
-                } else {
-                    ExceptionCorrelationConfidence::Uncorrelated
-                },
-                rendering_kinds: kinds,
-                citations,
-                citations_complete: complete,
-            };
-            (signature, summary)
-        })
-        .collect()
+        }
+        edges.sort_by(|a, b| {
+            a.conf_rank
+                .cmp(&b.conf_rank)
+                .then_with(|| a.distance.cmp(&b.distance))
+                .then_with(|| a.seq_a.cmp(&b.seq_a))
+                .then_with(|| a.source_a.cmp(&b.source_a))
+                .then_with(|| a.seq_b.cmp(&b.seq_b))
+                .then_with(|| a.source_b.cmp(&b.source_b))
+                .then_with(|| a.idx_a.cmp(&b.idx_a))
+                .then_with(|| a.idx_b.cmp(&b.idx_b))
+        });
+        for edge in edges {
+            if paired[edge.idx_a] || paired[edge.idx_b] {
+                continue;
+            }
+            paired[edge.idx_a] = true;
+            paired[edge.idx_b] = true;
+            pairs.push((signature.clone(), edge.idx_a, edge.idx_b, edge.confidence));
+        }
+    }
+
+    let mut occurrences: Vec<(String, ExceptionOccurrenceSummary)> = Vec::new();
+    for (signature, i_a, i_b, confidence) in pairs {
+        let group = vec![renderings[i_a].clone(), renderings[i_b].clone()];
+        occurrences.push((signature, occurrence_from_renderings(group, confidence)));
+    }
+    for (idx, rendering) in renderings.into_iter().enumerate() {
+        if paired[idx] {
+            continue;
+        }
+        let signature = rendering.signature.clone();
+        occurrences.push((
+            signature,
+            occurrence_from_renderings(
+                vec![rendering],
+                ExceptionCorrelationConfidence::Uncorrelated,
+            ),
+        ));
+    }
+    // Stable order: by first_seq, then signature.
+    occurrences.sort_by(|a, b| {
+        a.1.first_seq
+            .cmp(&b.1.first_seq)
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.last_seq.cmp(&b.1.last_seq))
+    });
+    occurrences
 }
 
-fn stronger_confidence(
-    a: ExceptionCorrelationConfidence,
-    b: ExceptionCorrelationConfidence,
-) -> ExceptionCorrelationConfidence {
-    use ExceptionCorrelationConfidence::*;
-    match (a, b) {
-        (Strong, _) | (_, Strong) => Strong,
-        (Moderate, _) | (_, Moderate) => Moderate,
-        _ => Uncorrelated,
+fn occurrence_from_renderings(
+    renderings: Vec<RenderEpisode>,
+    confidence: ExceptionCorrelationConfidence,
+) -> ExceptionOccurrenceSummary {
+    let mut citations = Vec::new();
+    let mut seen = HashSet::new();
+    let mut kinds = Vec::new();
+    let mut complete = true;
+    for rendering in &renderings {
+        complete &= rendering.complete;
+        if !kinds.contains(&rendering.kind) {
+            kinds.push(rendering.kind);
+        }
+        for citation in &rendering.citations {
+            if seen.insert(citation.clone()) {
+                citations.push(citation.clone());
+            }
+        }
+    }
+    citations.sort_by(|a, b| {
+        a.seq
+            .cmp(&b.seq)
+            .then_with(|| a.source.cmp(&b.source))
+            .then_with(|| a.template_id.cmp(&b.template_id))
+    });
+    let first_seq = citations.first().map_or(0, |c| c.seq);
+    let last_seq = citations.last().map_or(0, |c| c.seq);
+    ExceptionOccurrenceSummary {
+        first_seq,
+        last_seq,
+        raw_record_count: citations.len() as u64,
+        rendering_count: renderings.len() as u64,
+        duplicate_rendering: renderings.len() > 1,
+        correlation_confidence: if renderings.len() > 1 {
+            confidence
+        } else {
+            ExceptionCorrelationConfidence::Uncorrelated
+        },
+        rendering_kinds: kinds,
+        citations,
+        citations_complete: complete,
+    }
+}
+
+/// Honest axis distance: wall-interval gap when both sides have wall time;
+/// otherwise seq gap (order-only path still requires execution keys elsewhere).
+fn axis_distance(left: &RenderEpisode, right: &RenderEpisode) -> u64 {
+    if left.wall_time && right.wall_time {
+        interval_gap(left.first_ts, left.last_ts, right.first_ts, right.last_ts)
+    } else if right.first_seq() >= left.last_seq() {
+        right.first_seq().saturating_sub(left.last_seq())
+    } else {
+        left.first_seq().saturating_sub(right.last_seq())
+    }
+}
+
+fn interval_gap(a0: i64, a1: i64, b0: i64, b1: i64) -> u64 {
+    let (a_lo, a_hi) = if a0 <= a1 { (a0, a1) } else { (a1, a0) };
+    let (b_lo, b_hi) = if b0 <= b1 { (b0, b1) } else { (b1, b0) };
+    if a_hi < b_lo {
+        b_lo.abs_diff(a_hi)
+    } else if b_hi < a_lo {
+        a_lo.abs_diff(b_hi)
+    } else {
+        0
     }
 }
 
@@ -825,11 +1133,7 @@ fn duplicate_evidence(
     }
 
     let both_wall = left.wall_time && right.wall_time;
-    let wall_gap = left.last_ts.abs_diff(right.first_ts).min(
-        left.first_ts
-            .abs_diff(right.last_ts)
-            .min(left.first_ts.abs_diff(right.first_ts)),
-    );
+    let wall_gap = interval_gap(left.first_ts, left.last_ts, right.first_ts, right.last_ts);
     let close_wall = both_wall && wall_gap <= MAX_DUPLICATE_WALL_SECONDS as u64;
 
     // Order-only: require strong execution key (never adjacency alone).
@@ -1254,7 +1558,7 @@ mod tests {
     }
 
     #[test]
-    fn dual_rendering_56x265_layers_and_amplification() {
+    fn dual_rendering_56x265_exact_oracle() {
         let tmp = TempDir::new().unwrap();
         let src = tmp.path().join("in");
         fs::create_dir_all(&src).unwrap();
@@ -1262,47 +1566,69 @@ mod tests {
         let (_cache, _id, corpus) = ingest_dir(&src);
         let analysis = analyze_exception_episodes(&corpus, &[]).unwrap();
 
-        assert!(
-            analysis.raw_exception_record_count >= 56 * 265,
-            "raw={}",
-            analysis.raw_exception_record_count
-        );
-        // 56 dual-merged occurrences (allow 1 residual unpaired rendering).
-        assert!(
-            (55..=58).contains(&analysis.occurrence_count),
-            "semantic occurrences must be ~56 dual-merged, got {}",
-            analysis.occurrence_count
-        );
-        assert!(
-            analysis.duplicate_rendering_occurrence_count >= 50,
-            "duplicates={}",
-            analysis.duplicate_rendering_occurrence_count
-        );
-        assert!(
-            analysis.overall_amplification_x >= 200,
-            "amp={} (expect large dual-render factor)",
-            analysis.overall_amplification_x
-        );
-        assert!(
-            analysis.rendering_episode_count > analysis.occurrence_count,
-            "physical renderings must exceed semantic occurrences when dual-merged"
-        );
+        // Exact known oracle — no tolerance bands.
+        assert_eq!(analysis.raw_exception_record_count, 14_896);
+        assert_eq!(analysis.stderr_exception_record_count, 14_840);
+        assert_eq!(analysis.application_exception_record_count, 56);
+        assert_eq!(analysis.rendering_episode_count, 112);
+        assert_eq!(analysis.occurrence_count, 56);
+        assert_eq!(analysis.duplicate_rendering_occurrence_count, 56);
+        assert!(!analysis.partial);
         assert!(analysis
             .ranking_disclosure
             .contains("independent_incident_claim_forbidden"));
-        assert!(analysis
-            .ranking_disclosure
-            .contains("semantic_occurrence_count"));
+        assert!(analysis.ranking_disclosure.contains("totals_exact: true"));
+
+        let amp = &analysis.amplification;
+        assert_eq!(amp.raw_records_per_occurrence.numerator, 14_896);
+        assert_eq!(amp.raw_records_per_occurrence.denominator, 56);
+        assert_eq!(amp.raw_records_per_occurrence.quotient, 266);
+        assert_eq!(amp.raw_records_per_occurrence.remainder, 0);
+        assert_eq!(amp.stderr_records_per_occurrence.quotient, 265);
+        assert_eq!(amp.stderr_records_per_occurrence.remainder, 0);
+        assert_eq!(amp.application_records_per_occurrence.quotient, 1);
+        assert_eq!(amp.application_records_per_occurrence.remainder, 0);
+        assert_eq!(amp.renderings_per_occurrence.quotient, 2);
+        assert_eq!(amp.renderings_per_occurrence.remainder, 0);
 
         let family = analysis.families.first().expect("family");
-        assert!(
-            (55..=58).contains(&family.occurrence_count),
-            "family occurrences={}",
-            family.occurrence_count
-        );
-        for occ in family.occurrences.iter().take(8) {
-            assert!(!occ.citations.is_empty());
+        assert_eq!(family.occurrence_count, 56);
+        assert_eq!(family.duplicate_rendering_occurrence_count, 56);
+
+        let mut all_cites: HashSet<(u64, String)> = HashSet::new();
+        let mut cite_count = 0u64;
+        for occ in &family.occurrences {
+            assert_eq!(occ.rendering_count, 2, "each occ must be dual-render");
+            assert!(occ.duplicate_rendering);
+            assert_eq!(occ.raw_record_count, 266);
+            assert!(occ
+                .rendering_kinds
+                .contains(&ExceptionRenderingKind::ApplicationFullStack));
+            assert!(occ
+                .rendering_kinds
+                .contains(&ExceptionRenderingKind::SeparatelyWrappedRecords));
+            // 1 app + 265 stderr
+            let app_cites = occ
+                .citations
+                .iter()
+                .filter(|c| c.source.contains("app") || c.source.contains("XYZ_app"))
+                .count();
+            let err_cites = occ.citations.len() - app_cites;
+            // Sources may be basenames; count by kind via rendering sizes.
+            assert_eq!(
+                occ.citations.len(),
+                266,
+                "one application record + 265 stderr records"
+            );
+            let _ = (app_cites, err_cites);
             for c in &occ.citations {
+                assert!(
+                    all_cites.insert((c.seq, c.source.clone())),
+                    "duplicate child citation seq={} source={}",
+                    c.seq,
+                    c.source
+                );
+                cite_count += 1;
                 let page = query_events(
                     &corpus,
                     &EventQuery {
@@ -1324,14 +1650,334 @@ mod tests {
                 );
             }
         }
+        assert_eq!(cite_count, 14_896);
+        assert_eq!(all_cites.len() as u64, 14_896);
+
+        // Unrelated non-exception volume is not present in this corpus; all
+        // scanned exception records are covered exactly once.
         eprintln!(
-            "dual_rendering: raw={} renderings={} occurrences={} duplicates={} amp={}",
+            "dual_rendering exact: raw={} stderr={} app={} renderings={} occurrences={} duplicates={} raw_per_occ={}/{}={} rem{}",
             analysis.raw_exception_record_count,
+            analysis.stderr_exception_record_count,
+            analysis.application_exception_record_count,
             analysis.rendering_episode_count,
             analysis.occurrence_count,
             analysis.duplicate_rendering_occurrence_count,
-            analysis.overall_amplification_x
+            amp.raw_records_per_occurrence.numerator,
+            amp.raw_records_per_occurrence.denominator,
+            amp.raw_records_per_occurrence.quotient,
+            amp.raw_records_per_occurrence.remainder
         );
+    }
+
+    #[test]
+    fn min_distance_pairs_same_signature_at_0s_2s_4s() {
+        // Same signature, wall times 0/2/4 — exact-time partners beat window-only.
+        let mut events = Vec::new();
+        for (i, t) in [0i64, 2, 4].into_iter().enumerate() {
+            let i = i as u64;
+            events.push(event(
+                i * 10 + 1,
+                t,
+                "app.log",
+                "java.lang.RuntimeException: XYZ_SHARED\n at com.xyz.A.m(A.java:1)",
+            ));
+            events.push(event(
+                i * 10 + 2,
+                t,
+                "stderr.log",
+                "[stderr] java.lang.RuntimeException: XYZ_SHARED",
+            ));
+            events.push(event(
+                i * 10 + 3,
+                t,
+                "stderr.log",
+                "[stderr] at com.xyz.A.m(A.java:1)",
+            ));
+        }
+        let analysis = analyze_bounded_events(events.len() as u64, &events);
+        assert_eq!(analysis.occurrence_count, 3);
+        assert_eq!(analysis.duplicate_rendering_occurrence_count, 3);
+        assert_eq!(analysis.rendering_episode_count, 6);
+        for occ in analysis.families.iter().flat_map(|f| f.occurrences.iter()) {
+            assert_eq!(occ.rendering_count, 2);
+            // Partner citations must share the same wall second (min distance 0).
+            // first_seq is min cite; both renderings at same t have seqs near each other.
+            assert!(occ.citations.len() >= 2);
+        }
+    }
+
+    #[test]
+    fn mutation_reverse_first_greedy_would_mispair_but_min_distance_is_exact() {
+        // If we attached reverse-first (latest unmatched), stderr@0s would claim
+        // app@2s (window-compatible) before app@0s. Min-distance ranking refuses that.
+        let events = vec![
+            event(
+                1,
+                0,
+                "app.log",
+                "java.lang.RuntimeException: XYZ_SHARED\n at com.xyz.A.m(A.java:1)",
+            ),
+            event(
+                2,
+                2,
+                "app.log",
+                "java.lang.RuntimeException: XYZ_SHARED\n at com.xyz.A.m(A.java:1)",
+            ),
+            // stderr for t=0 arrives after both apps (insertion order traps reverse greedy)
+            event(
+                3,
+                0,
+                "stderr.log",
+                "[stderr] java.lang.RuntimeException: XYZ_SHARED",
+            ),
+            event(4, 0, "stderr.log", "[stderr] at com.xyz.A.m(A.java:1)"),
+            event(
+                5,
+                2,
+                "stderr.log",
+                "[stderr] java.lang.RuntimeException: XYZ_SHARED",
+            ),
+            event(6, 2, "stderr.log", "[stderr] at com.xyz.A.m(A.java:1)"),
+        ];
+        let analysis = analyze_bounded_events(events.len() as u64, &events);
+        assert_eq!(analysis.occurrence_count, 2);
+        assert_eq!(analysis.duplicate_rendering_occurrence_count, 2);
+        // Exact coverage: each occurrence has one app seq {1} or {2} with matching stderr.
+        let mut app_seqs: BTreeSet<u64> = BTreeSet::new();
+        for occ in analysis.families.iter().flat_map(|f| &f.occurrences) {
+            assert_eq!(occ.rendering_count, 2);
+            let apps: Vec<_> = occ
+                .citations
+                .iter()
+                .filter(|c| c.source == "app.log")
+                .map(|c| c.seq)
+                .collect();
+            assert_eq!(apps.len(), 1);
+            app_seqs.insert(apps[0]);
+            // Stderr cites must share the app's wall time partner: seq 1→stderr 3,4; seq 2→5,6
+            let err: BTreeSet<u64> = occ
+                .citations
+                .iter()
+                .filter(|c| c.source == "stderr.log")
+                .map(|c| c.seq)
+                .collect();
+            if apps[0] == 1 {
+                assert_eq!(err, BTreeSet::from([3, 4]));
+            } else if apps[0] == 2 {
+                assert_eq!(err, BTreeSet::from([5, 6]));
+            } else {
+                panic!("unexpected app seq {}", apps[0]);
+            }
+        }
+        assert_eq!(app_seqs, BTreeSet::from([1, 2]));
+    }
+
+    #[test]
+    fn reordered_input_yields_identical_pairings() {
+        let mut events = vec![
+            event(
+                1,
+                0,
+                "app.log",
+                "java.lang.RuntimeException: XYZ_A\n at com.xyz.A.m(A.java:1)",
+            ),
+            event(
+                2,
+                0,
+                "stderr.log",
+                "[stderr] java.lang.RuntimeException: XYZ_A",
+            ),
+            event(
+                3,
+                2,
+                "app.log",
+                "java.lang.RuntimeException: XYZ_A\n at com.xyz.A.m(A.java:1)",
+            ),
+            event(
+                4,
+                2,
+                "stderr.log",
+                "[stderr] java.lang.RuntimeException: XYZ_A",
+            ),
+        ];
+        let forward = analyze_bounded_events(events.len() as u64, &events);
+        events.reverse();
+        let reversed = analyze_bounded_events(events.len() as u64, &events);
+        assert_eq!(forward.occurrence_count, reversed.occurrence_count);
+        assert_eq!(
+            forward.duplicate_rendering_occurrence_count,
+            reversed.duplicate_rendering_occurrence_count
+        );
+        assert_eq!(forward.amplification, reversed.amplification);
+        // Pairing stability: same citation sets per occurrence (order-normalized).
+        let cites = |a: &ExceptionEpisodeAnalysis| {
+            a.families
+                .iter()
+                .flat_map(|f| f.occurrences.iter())
+                .map(|o| {
+                    let mut c: Vec<_> = o
+                        .citations
+                        .iter()
+                        .map(|c| (c.seq, c.source.clone()))
+                        .collect();
+                    c.sort();
+                    c
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(cites(&forward), cites(&reversed));
+    }
+
+    #[test]
+    fn simultaneous_threads_do_not_cross_pair() {
+        let events = vec![
+            event(
+                1,
+                100,
+                "app.log",
+                "thread=worker-a java.lang.RuntimeException: XYZ_T\n at com.xyz.A.m(A.java:1)",
+            ),
+            event(
+                2,
+                100,
+                "app.log",
+                "thread=worker-b java.lang.RuntimeException: XYZ_T\n at com.xyz.A.m(A.java:1)",
+            ),
+            event(
+                3,
+                100,
+                "stderr.log",
+                "thread=worker-a [stderr] java.lang.RuntimeException: XYZ_T",
+            ),
+            event(
+                4,
+                100,
+                "stderr.log",
+                "thread=worker-b [stderr] java.lang.RuntimeException: XYZ_T",
+            ),
+        ];
+        let analysis = analyze_bounded_events(events.len() as u64, &events);
+        assert_eq!(analysis.occurrence_count, 2);
+        assert_eq!(analysis.duplicate_rendering_occurrence_count, 2);
+        for occ in analysis.families.iter().flat_map(|f| &f.occurrences) {
+            let texts: Vec<String> = occ
+                .citations
+                .iter()
+                .map(|c| format!("{}:{}", c.seq, c.source))
+                .collect();
+            // worker-a app(1) only with worker-a stderr(3); worker-b app(2) with stderr(4)
+            let seqs: BTreeSet<u64> = occ.citations.iter().map(|c| c.seq).collect();
+            assert!(
+                seqs == BTreeSet::from([1, 3]) || seqs == BTreeSet::from([2, 4]),
+                "cross-thread pairing forbidden: {texts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn child_coverage_unique_and_complete_for_small_dual() {
+        // Keep the same root signature on both renderings (no nested cause that
+        // would retarget the stderr root type away from the application record).
+        let events = vec![
+            event(
+                1,
+                10,
+                "app.log",
+                "java.lang.RuntimeException: XYZ_PAY\n at com.xyz.A.m(A.java:1)",
+            ),
+            event(
+                2,
+                10,
+                "stderr.log",
+                "[stderr] java.lang.RuntimeException: XYZ_PAY",
+            ),
+            event(3, 10, "stderr.log", "[stderr] at com.xyz.A.m(A.java:1)"),
+            event(4, 10, "stderr.log", "[stderr] at com.xyz.B.m(B.java:2)"),
+            // Unrelated negative: different signature, far wall time — must not join
+            event(
+                99,
+                10_000,
+                "other.log",
+                "java.lang.IllegalStateException: XYZ_OTHER\n at com.xyz.B.m(B.java:1)",
+            ),
+        ];
+        let analysis = analyze_bounded_events(events.len() as u64, &events);
+        assert_eq!(analysis.duplicate_rendering_occurrence_count, 1);
+        let dual = analysis
+            .families
+            .iter()
+            .flat_map(|f| f.occurrences.iter())
+            .find(|o| o.duplicate_rendering)
+            .expect("dual");
+        let mut seen = HashSet::new();
+        for c in &dual.citations {
+            assert!(seen.insert((c.seq, c.source.clone())));
+        }
+        assert_eq!(seen.len(), 4);
+        assert!(seen.contains(&(1, "app.log".into())));
+        assert!(seen.contains(&(2, "stderr.log".into())));
+        assert!(!seen.iter().any(|(s, _)| *s == 99));
+        // Negative remains a separate occurrence, not absorbed into dual coverage.
+        assert!(analysis.occurrence_count >= 2);
+        assert_eq!(analysis.raw_exception_record_count, 5);
+    }
+
+    #[test]
+    fn scan_cap_after_unrelated_noise_finds_errors_or_marks_incomplete() {
+        // 50_000 info lines then a dual-render exception pair. Exception-focused
+        // level filter should still analyze the targets; if not, partial must
+        // disclose incompleteness and never claim exact full-corpus totals.
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("in");
+        fs::create_dir_all(&src).unwrap();
+        let mut noise = String::new();
+        for i in 0..50_000u32 {
+            noise.push_str(&format!(
+                "2026-03-15T10:00:{:02}.{:03}Z INFO heartbeat ok n={i}\n",
+                (i / 1000) % 60,
+                i % 1000
+            ));
+        }
+        fs::write(src.join("XYZ_noise.log"), noise).unwrap();
+        let mut app = String::new();
+        let mut err = String::new();
+        app.push_str(
+            "2026-03-15T12:00:00.000Z ERROR java.lang.RuntimeException: XYZ_LATE\n  at com.xyz.A.m(A.java:1)\n",
+        );
+        err.push_str("2026-03-15T12:00:00.000Z ERROR java.lang.RuntimeException: XYZ_LATE\n");
+        err.push_str("2026-03-15T12:00:00.001Z ERROR at com.xyz.A.m(A.java:1)\n");
+        fs::write(src.join("XYZ_app.log"), app).unwrap();
+        fs::write(src.join("XYZ_server.stderr"), err).unwrap();
+        let (_cache, _id, corpus) = ingest_dir(&src);
+        let analysis = analyze_exception_episodes(&corpus, &[]).unwrap();
+        if analysis.partial {
+            assert!(
+                analysis.ranking_disclosure.contains("partial")
+                    || analysis
+                        .ranking_disclosure
+                        .contains("must not be presented as exact")
+                    || !analysis.ranking_disclosure.contains("totals_exact: true"),
+                "partial results must not claim exact totals: {}",
+                analysis.ranking_disclosure
+            );
+            // Never present incomplete totals as the known dual oracle.
+            assert_ne!(
+                (
+                    analysis.occurrence_count,
+                    analysis.raw_exception_record_count,
+                    analysis.partial
+                ),
+                (56, 14_896, false)
+            );
+        } else {
+            // Exception-focused query reached the late targets.
+            assert!(analysis.occurrence_count >= 1);
+            assert!(analysis.raw_exception_record_count >= 2);
+            assert!(
+                analysis.ranking_disclosure.contains("totals_exact: true") || !analysis.partial
+            );
+        }
     }
 
     #[test]

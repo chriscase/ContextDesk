@@ -17,17 +17,22 @@ impl Render for ExceptionEpisodesOutput {
         let r = &self.report;
         let mut out = String::new();
         out.push_str("Exception episode correlation\n\n");
+        let amp = &r.amplification;
         out.push_str(&format!(
             "  Schema           {} v{}\n\
              \nLayers\n\n\
                Events available            {}\n\
                Events scanned              {}\n\
                Raw exception records       {}\n\
+               Application records         {}\n\
+               Stderr records              {}\n\
                Physical renderings         {}\n\
                Semantic occurrences        {}\n\
                Duplicate-render occurrences {}\n\
                Families                    {}\n\
-               Overall amplification       {}x\n\
+               Raw records / occurrence    {}/{} = {} rem {}\n\
+               Stderr records / occurrence {}/{} = {} rem {}\n\
+               Renderings / occurrence     {}/{} = {} rem {}\n\
                Partial                     {}\n\
                Uncertain                   {}\n",
             r.schema_id,
@@ -35,24 +40,41 @@ impl Render for ExceptionEpisodesOutput {
             r.events_available,
             r.events_scanned,
             r.raw_exception_record_count,
+            r.application_exception_record_count,
+            r.stderr_exception_record_count,
             r.rendering_episode_count,
             r.occurrence_count,
             r.duplicate_rendering_occurrence_count,
             r.families.len(),
-            r.overall_amplification_x,
+            amp.raw_records_per_occurrence.numerator,
+            amp.raw_records_per_occurrence.denominator,
+            amp.raw_records_per_occurrence.quotient,
+            amp.raw_records_per_occurrence.remainder,
+            amp.stderr_records_per_occurrence.numerator,
+            amp.stderr_records_per_occurrence.denominator,
+            amp.stderr_records_per_occurrence.quotient,
+            amp.stderr_records_per_occurrence.remainder,
+            amp.renderings_per_occurrence.numerator,
+            amp.renderings_per_occurrence.denominator,
+            amp.renderings_per_occurrence.quotient,
+            amp.renderings_per_occurrence.remainder,
             r.partial,
             r.uncertain
         ));
         if !r.families.is_empty() {
             out.push_str("\nFamilies\n");
             for f in r.families.iter().take(12) {
+                let famp = &f.amplification;
                 out.push_str(&format!(
-                    "\n  {} occurrences={} raw={} renderings={} amplification={}x duplicates={}\n",
+                    "\n  {} occurrences={} raw={} renderings={} raw_per_occ={}/{}={} rem{} duplicates={}\n",
                     f.signature,
                     f.occurrence_count,
                     f.raw_record_count,
                     f.rendering_episode_count,
-                    f.amplification_x,
+                    famp.raw_records_per_occurrence.numerator,
+                    famp.raw_records_per_occurrence.denominator,
+                    famp.raw_records_per_occurrence.quotient,
+                    famp.raw_records_per_occurrence.remainder,
                     f.duplicate_rendering_occurrence_count
                 ));
                 for occ in f.occurrences.iter().take(2) {

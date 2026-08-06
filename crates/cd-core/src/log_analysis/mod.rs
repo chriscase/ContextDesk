@@ -83,11 +83,11 @@ pub use event_revision::{
 pub use exception_episodes::{
     analyze_bounded_events, analyze_exception_episodes, analyze_exception_episodes_with_cancel,
     analyze_exception_episodes_with_cancel_flag, format_exception_episode_brief_section,
-    ExceptionCorrelationConfidence, ExceptionEpisodeAnalysis, ExceptionEpisodeReport,
-    ExceptionEventCitation, ExceptionFamilySummary, ExceptionOccurrenceSummary,
-    ExceptionRenderingKind, EXCEPTION_EPISODE_EVENT_SCAN_CAP, EXCEPTION_EPISODE_FAMILY_CAP,
-    EXCEPTION_EPISODE_RECORD_CAP, EXCEPTION_EPISODE_RENDER_CAP, EXCEPTION_EPISODE_SCHEMA_ID,
-    EXCEPTION_EPISODE_SCHEMA_VERSION,
+    ExceptionAmplificationMetrics, ExceptionCorrelationConfidence, ExceptionCountRatio,
+    ExceptionEpisodeAnalysis, ExceptionEpisodeReport, ExceptionEventCitation,
+    ExceptionFamilySummary, ExceptionOccurrenceSummary, ExceptionRenderingKind,
+    EXCEPTION_EPISODE_EVENT_SCAN_CAP, EXCEPTION_EPISODE_FAMILY_CAP, EXCEPTION_EPISODE_RECORD_CAP,
+    EXCEPTION_EPISODE_RENDER_CAP, EXCEPTION_EPISODE_SCHEMA_ID, EXCEPTION_EPISODE_SCHEMA_VERSION,
 };
 pub use format_profile::{
     fingerprint_format, BuiltInFormatProfile, BuiltInGrammar, FormatFingerprint,

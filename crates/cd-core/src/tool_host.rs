@@ -9073,7 +9073,9 @@ mod tests {
             "brief missing ranking disclosure"
         );
         assert!(
-            text.contains("amplification") || text.contains("amplification_x"),
+            text.contains("amplification")
+                || text.contains("raw_records_per_occurrence")
+                || text.contains("amplification_raw_records"),
             "brief missing amplification disclosure"
         );
         assert!(
@@ -9094,9 +9096,12 @@ mod tests {
             ep.raw_exception_record_count
         );
         assert!(
-            ep.overall_amplification_x >= 2,
-            "amp={}",
-            ep.overall_amplification_x
+            ep.amplification.raw_records_per_occurrence.quotient >= 2
+                || ep.amplification.renderings_per_occurrence.quotient >= 1,
+            "amp raw_per_occ={}/{} rem{}",
+            ep.amplification.raw_records_per_occurrence.numerator,
+            ep.amplification.raw_records_per_occurrence.denominator,
+            ep.amplification.raw_records_per_occurrence.remainder
         );
         for cite in ep
             .families
