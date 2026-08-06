@@ -53,30 +53,27 @@ pub const EXCEPTION_EPISODE_ROW_WALK_CAP: usize = 250_000;
 
 /// Effective candidate retention cap (test override when non-zero).
 fn effective_candidate_cap() -> usize {
-    #[cfg(test)]
-    {
-        let override_cap = TEST_CANDIDATE_CAP_OVERRIDE.with(|c| *c.borrow());
-        if override_cap > 0 {
-            return override_cap;
-        }
+    let override_cap = TEST_CANDIDATE_CAP_OVERRIDE.with(|c| *c.borrow());
+    if override_cap > 0 {
+        override_cap
+    } else {
+        EXCEPTION_EPISODE_EVENT_SCAN_CAP
     }
-    EXCEPTION_EPISODE_EVENT_SCAN_CAP
 }
 
 /// Effective store row-walk cap (test override when non-zero).
 fn effective_row_walk_cap() -> usize {
-    #[cfg(test)]
-    {
-        let override_cap = TEST_ROW_WALK_CAP_OVERRIDE.with(|c| *c.borrow());
-        if override_cap > 0 {
-            return override_cap;
-        }
+    let override_cap = TEST_ROW_WALK_CAP_OVERRIDE.with(|c| *c.borrow());
+    if override_cap > 0 {
+        override_cap
+    } else {
+        EXCEPTION_EPISODE_ROW_WALK_CAP
     }
-    EXCEPTION_EPISODE_ROW_WALK_CAP
 }
 
-// Thread-local so parallel unit tests cannot race caps/hooks.
-#[cfg(test)]
+// Thread-local scan test controls (default 0 / None = production path).
+// Available outside cfg(test) so integration acceptance labs can exercise
+// mid-scan revision and cap fail-closed without changing default behavior.
 std::thread_local! {
     static TEST_CANDIDATE_CAP_OVERRIDE: std::cell::RefCell<usize> = const { std::cell::RefCell::new(0) };
     static TEST_ROW_WALK_CAP_OVERRIDE: std::cell::RefCell<usize> = const { std::cell::RefCell::new(0) };
@@ -87,28 +84,27 @@ std::thread_local! {
 
 /// Test-only: override candidate retention cap (`0` restores production default).
 ///
-/// Thread-local: safe for parallel unit tests.
-#[cfg(test)]
-fn set_test_candidate_cap_override(cap: usize) {
+/// Thread-local; no-op for production callers that never set it.
+#[doc(hidden)]
+pub fn set_test_candidate_cap_override(cap: usize) {
     TEST_CANDIDATE_CAP_OVERRIDE.with(|c| *c.borrow_mut() = cap);
 }
 
 /// Test-only: override row-walk cap (`0` restores production default).
-#[cfg(test)]
-fn set_test_row_walk_cap_override(cap: usize) {
+#[doc(hidden)]
+pub fn set_test_row_walk_cap_override(cap: usize) {
     TEST_ROW_WALK_CAP_OVERRIDE.with(|c| *c.borrow_mut() = cap);
 }
 
 /// Test-only RAII reset for cap/hook overrides.
-#[cfg(test)]
-pub(crate) struct TestScanOverrideGuard {
+#[doc(hidden)]
+pub struct TestScanOverrideGuard {
     _private: (),
 }
 
-#[cfg(test)]
 impl TestScanOverrideGuard {
     /// Clear prior overrides/hooks on this thread.
-    pub(crate) fn acquire() -> Self {
+    pub fn acquire() -> Self {
         set_test_candidate_cap_override(0);
         set_test_row_walk_cap_override(0);
         set_episode_scan_page_hook_for_test(None);
@@ -116,7 +112,6 @@ impl TestScanOverrideGuard {
     }
 }
 
-#[cfg(test)]
 impl Drop for TestScanOverrideGuard {
     fn drop(&mut self) {
         set_test_candidate_cap_override(0);
@@ -127,13 +122,13 @@ impl Drop for TestScanOverrideGuard {
 
 /// Install or clear the test-only episode-scan page hook (thread-local).
 ///
-/// The hook is not required to be `Send` — it runs on the analysis thread only.
-#[cfg(test)]
-pub(crate) fn set_episode_scan_page_hook_for_test(hook: Option<Box<dyn FnMut(usize)>>) {
+/// Invoked after each store page is fetched during
+/// [`analyze_exception_episodes_with_cancel`]. Runs on the analysis thread only.
+#[doc(hidden)]
+pub fn set_episode_scan_page_hook_for_test(hook: Option<Box<dyn FnMut(usize)>>) {
     EPISODE_SCAN_PAGE_HOOK.with(|cell| *cell.borrow_mut() = hook);
 }
 
-#[cfg(test)]
 fn invoke_episode_scan_page_hook(page_index: usize) {
     EPISODE_SCAN_PAGE_HOOK.with(|cell| {
         if let Some(hook) = cell.borrow_mut().as_mut() {
@@ -611,7 +606,6 @@ pub fn analyze_exception_episodes_with_cancel(
                 ..filter.clone()
             },
         )?;
-        #[cfg(test)]
         invoke_episode_scan_page_hook(page_index);
         page_index = page_index.saturating_add(1);
 

@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "case_id": "xyz-real-format-56-execution-wildfly-chain",
+  "red_acceptance_checkpoint": true,
+  "ship": false,
+  "base_commit": "50cd50409dd30bd23f39b578ea9d7481c6506a4c",
+  "description": "Fail-closed real-format acceptance oracle: 56 executions × (7 application full-stack renderings + 265 WildFly/JBoss [stderr] (thread) records). Current main must fail for documented semantic reasons; do not weaken.",
+  "format": {
+    "timestamp_shape": "YYYY-MM-DD HH:mm:ss,SSS",
+    "stderr_envelope": "LEVEL [stderr] (pool-N-thread-M) payload",
+    "app_envelope": "LEVEL [XYZ_app] (default task-K) payload",
+    "neutral_markers_only": "XYZ_*"
+  },
+  "geometry": {
+    "executions": 56,
+    "application_renderings_per_execution": 7,
+    "stderr_records_per_execution": 265,
+    "stderr_at_frames_per_execution": 189,
+    "stderr_auxiliary_wrapper_per_execution": 72,
+    "stderr_header_cause_per_execution": 4,
+    "renderings_per_episode": 8,
+    "raw_records_per_episode": 272,
+    "stderr_records_per_episode": 265,
+    "application_renderings_per_episode": 7
+  },
+  "exact_totals": {
+    "stderr_raw_records": 14840,
+    "application_raw_records": 392,
+    "total_exception_raw_records": 15232,
+    "stderr_physical_renderings": 56,
+    "application_physical_renderings": 392,
+    "total_physical_renderings": 448,
+    "strongly_supported_derived_episodes": 56,
+    "global_citation_union": 15232
+  },
+  "conservation_partitions": {
+    "at_frame_identities": 10584,
+    "auxiliary_wrapper_identities": 4032,
+    "stderr_header_cause_identities": 224
+  },
+  "conservation_equations": [
+    "raw = application_raw + stderr_raw",
+    "raw = unique_citation_union",
+    "physical_renderings = sum(episode.rendering_count)",
+    "at_stored = at_cited = 10584",
+    "aux_stored = aux_cited = 4032",
+    "header_cause_stored = header_cause_cited = 224"
+  ],
+  "execution_keys": {
+    "within_cycle": "shared pool-40-thread-{1000+execution} on all records of that execution",
+    "between_cycles": "distinct thread id per execution; non-overlapping wall windows of 10s"
+  },
+  "required_product_apis": [
+    "cd_core::log_analysis::ingest_path_with_policy",
+    "cd_core::log_analysis::analyze_exception_episodes",
+    "cd_core::tool_host::ToolHost::build_broad_log_triage_brief",
+    "cd_core::triage_quality::score_structured_triage_answer"
+  ],
+  "known_current_main_failure_classes": [
+    "wildfly_envelope_drops_at_frames: payload after `[stderr] (thread)` does not match is_stack_continuation(`at `), so 10584 at-frames are stored but not retained in renderings (often stderr_raw_in_analysis = 56×76 = 4256)",
+    "app_renderings_per_episode_under_counted: bipartite 1:1 dual-only merge cannot attach 7 ApplicationFullStack + 1 SeparatelyWrappedRecords into one episode",
+    "wildfly_comma_timestamp_not_wall: OrderOnly basis breaks wall-close dual merge",
+    "parentheses_thread_not_extracted: (pool-N-thread-M) is not a strong_execution_key source",
+    "episode_count_not_56: under-merge or over-fragment of multi-app chains (observed ~616 unpaired renderings)",
+    "citation_union_not_15232_or_duplicates: incomplete multi-rendering assembly"
+  ],
+  "integration_instructions": [
+    "1. Check out this branch tip on an isolated worktree.",
+    "2. cargo test -p cd-core --test real_format_exception_episode_acceptance_lab -- --nocapture",
+    "3. Expect red_acceptance_checkpoint failures with semantic labels until product episode assembly supports multi-app chains + WildFly envelopes.",
+    "4. Do not weaken assert_eq! truth tables to green the suite.",
+    "5. Product fix work belongs on a separate goal/branch; this fixture is the acceptance gate."
+  ]
+}
