@@ -64,6 +64,8 @@ DEMO_SHIPPED_VERBS = {
     "doctor",
     "help",
     "logging-assessment",
+    "exception-episodes",
+    "episodes",
 }
 
 SHIPPED_COMMANDS = {
@@ -82,6 +84,7 @@ SHIPPED_COMMANDS = {
     "doctor",
     "help",
     "logging-assessment",
+    "exception-episodes",
 }
 
 HUB_LINKS = [

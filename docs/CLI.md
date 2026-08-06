@@ -520,7 +520,9 @@ contextdesk config validate|show|path
 contextdesk capabilities
 contextdesk doctor [--timeout <seconds>] [--skip-live-turn]
 contextdesk logging-assessment [corpus-id] [--report-format json|markdown] [--output <file>]
-# Friendly aliases: ask=chat, search=explore, assess=logging-assessment
+contextdesk exception-episodes [corpus-id]
+# Friendly aliases: ask=chat, search=explore, assess=logging-assessment,
+#                   episodes=exception-episodes
 ```
 
 Global flags (available on every subcommand): `--format`, `--json`,
@@ -528,11 +530,53 @@ Global flags (available on every subcommand): `--format`, `--json`,
 `--data-dir <path>` (alias `--profile-dir`), `--profile <id>`, `--model
 <id>`.
 
+## Exception episodes and duplicate renderings
+
+`exception-episodes` is a deterministic, offline analysis of an imported
+corpus. It uses no provider and never rewrites, suppresses, or deletes raw
+events:
+
+```bash
+contextdesk exception-episodes              # current corpus
+contextdesk episodes <corpus-id>            # friendly alias + explicit corpus
+contextdesk --json exception-episodes <corpus-id>
+```
+
+It reports four deliberately separate layers:
+
+1. **Raw records** — durable exception-looking events and exact citations.
+2. **Physical renderings** — full application stacks versus separately
+   wrapped stderr/line records.
+3. **Semantic occurrences** — conservative one-to-one correlations supported
+   by time and execution identity; adjacency, matching text, divisibility, or
+   rotated filenames alone never merge records.
+4. **Signature families** — bounded impact-ranked groups of occurrences.
+
+Use `raw_exception_record_count` for actual stored volume and
+`occurrence_count` for the estimated independent failure count. The report
+also exposes application/stderr/rendering amplification ratios with numerator,
+denominator, quotient, and remainder—no hidden rounding. Every occurrence
+retains citations back to the underlying `seq` + `source` events.
+
+Treat the result as incomplete whenever `counts_complete=false` or
+`partial=true`. `uncertain=true` and `matching_ambiguous=true` disclose weaker
+correlation geometry rather than silently forcing a single explanation. A
+family is a correlated signature group, not proof of business root cause;
+chat synthesis can use these host facts but still labels interpretation as
+unverified.
+
+This distinction matters for application servers that emit one exception as
+both a normal multiline log entry and hundreds of individually wrapped stderr
+frames. ContextDesk preserves all those records while reporting the supported
+incident count separately, so record amplification is not presented as
+hundreds of independent outages.
+
 ## Ingest-pipeline provenance (stale corpora)
 
-New corpora persist `ingest_pipeline_identity` (e.g.
-`contextdesk.ingest_pipeline.v1`) in `meta.json`. This is a **semantic** stamp
-for parse/frame/normalize/template/storage behavior — **not** the Git SHA from
+New corpora persist `ingestPipelineIdentity` (e.g.
+`contextdesk.ingest_pipeline.v1`) in `meta.json`; CLI JSON projects it as
+`ingest_pipeline_identity`. This is a **semantic** stamp for
+parse/frame/normalize/template/storage behavior — **not** the Git SHA from
 `capabilities.git_sha`.
 
 | `ingest_pipeline_compatibility` | Meaning |
@@ -567,6 +611,10 @@ contextdesk --data-dir "$DATA" doctor --skip-live-turn   # exit 8 expected witho
 # Logging quality assessment (synthetic import first)
 # contextdesk --data-dir "$DATA" logging-assessment <corpus-id> --json
 # contextdesk --data-dir "$DATA" logging-assessment <corpus-id> --report-format markdown --output plan.md
+
+# Exception volume versus independent occurrences (offline, deterministic)
+# contextdesk --data-dir "$DATA" exception-episodes <corpus-id>
+# contextdesk --data-dir "$DATA" --json episodes <corpus-id>
 
 # Timezone (after import of ambiguous local logs)
 contextdesk --data-dir "$DATA" timezone status --corpus <id>

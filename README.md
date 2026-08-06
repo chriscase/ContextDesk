@@ -54,7 +54,8 @@ normative contract: [`docs/specs/NORMALIZED_LOG_EVENTS_V1.md`](docs/specs/NORMAL
 
 The **ContextDesk CLI** (`contextdesk`) is the headless adapter over the same
 production engine the desktop uses: import logs, explore a corpus, assemble
-context, chat with grounding, and **normalize**
+context, distinguish raw exception volume from correlated failure episodes,
+chat with grounding, and **normalize**
 raw files/folders/ZIPs into portable `contextdesk.normalized_log_events.v1`
 JSONL — offline, with no provider or keychain reads.
 
@@ -75,6 +76,7 @@ JSONL — offline, with no provider or keychain reads.
 | ---------- | --------------------------- |
 | Two-command happy path: `import` → `chat` | **Shipped** |
 | `corpus`, `timezone`, `explore`, `context`, `session`, `config`, `capabilities`, `doctor` | **Shipped** |
+| Offline exception-episode / duplicate-rendering correlation (`exception-episodes`, alias `episodes`) | **Shipped** — raw events preserved; exact citations and uncertainty/completeness disclosed in the [CLI guide](docs/CLI.md#exception-episodes-and-duplicate-renderings) |
 | `contextdesk.normalized_log_events.v1` contract + JSON Schema + producer examples | **Shipped** (portable handoff; ordinary raw import still applies) |
 | Offline `contextdesk normalize` (raw file/folder/ZIP → JSONL + manifest + report) | **Shipped** — grammar and output layout documented in [NORMALIZATION.md](docs/NORMALIZATION.md) |
 | Multi-platform CLI release workflow (draft archives) | **Shipped in repo** (`.github/workflows/cli-release.yml`); published signed downloads are **not** claimed until a real draft/publish run exists |
@@ -94,8 +96,9 @@ contextdesk --data-dir ./cd-demo-data ask "what timed out?"
 ```
 
 Short aliases keep everyday use simple: `ask` = `chat`, `search` = `explore`,
-and `assess` = `logging-assessment` (using the current corpus when its id is
-omitted). The full command names remain supported for scripts.
+`assess` = `logging-assessment`, and `episodes` = `exception-episodes`
+(using the current corpus when its id is omitted). The full command names
+remain supported for scripts.
 
 Requires a configured provider for `chat` (see `contextdesk config init` or
 `contextdesk doctor`). For a **network-free** five-minute path, use import →

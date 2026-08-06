@@ -16,7 +16,7 @@ git rev-parse HEAD
 ./target/debug/contextdesk --json capabilities
 # Expect data.git_sha prefix matching HEAD; commands must include import,
 # normalize, corpus, timezone, explore, context, chat, doctor, and
-# logging-assessment.
+# logging-assessment, and exception-episodes.
 ```
 
 Related: [DEMO_ACCEPTANCE.md](DEMO_ACCEPTANCE.md) (longer GUI checklist +
@@ -33,6 +33,7 @@ Help [demo datasets](help/log-analysis/demo-datasets.md).
 | Timezone status / apply / apply-all | **Host (deterministic)** | Explicit operator declaration; no silent guessing |
 | `explore`, `context`, Log Explorer search/filter/lanes | **Host (deterministic)** | Retrieval and evidence assembly on the host |
 | `normalize` → JSONL + manifest + report | **Host (deterministic)** | Offline; zero provider / keychain |
+| `exception-episodes` | **Host (deterministic)** | Separates raw exception records, physical renderings, semantic occurrences, and families; preserves raw citations |
 | Activity Inspector / `chat --activity` | **Host capture** of a turn | Process-lifetime; not durable after quit |
 | Grounded answer text in `chat` / desktop chat | **LLM** (when not `--dry-run`) | Model synthesizes; citations must still resolve to **host** evidence ids |
 | `chat --dry-run` | **Host only** | Builds bounded context; guarantees no provider request |
@@ -228,6 +229,21 @@ findings with fixed improvement hints, mandatory limitations, and a Markdown
 projection of the JSON report. Re-run either export against the same path:
 ContextDesk refuses to overwrite it.
 
+### G. Exception amplification versus independent occurrences
+
+```bash
+$BIN --data-dir "$DATA" exception-episodes "$CORPUS"
+$BIN --data-dir "$DATA" --json episodes "$CORPUS"
+```
+
+**Expect:** the text report clearly separates raw exception records, physical
+renderings, semantic occurrences, and families. The JSON report uses schema
+`contextdesk.exception_episode_report.v1`, retains `seq` + `source` citations,
+and exposes `counts_complete`, `partial`, `uncertain`, and
+`matching_ambiguous`. The public CLI fixture may contain no dual-rendered
+exception; zero/low amplification is honest. Use the dedicated synthetic
+exception lab for the exact 56×265 oracle—never substitute private logs.
+
 ---
 
 ## 3. Troubleshooting
@@ -253,6 +269,15 @@ versioned JSON report and the improvement hints are fixed templates, not a
 free-form LLM plan. CLI and desktop share the same `cd-core` DTO via
 `cd-workflow`: use CLI for headless automation and Log Explorer → **Assess
 quality** for interactive evidence/lane review.
+
+## 5. Exception-episode scope
+
+`exception-episodes` is also deterministic and offline. Correlation requires
+multiple host signals and never changes stored events. Its occurrence count is
+an evidence-supported estimate of independent failures, not proof of business
+root cause. Any incomplete cap, ambiguous matching geometry, cancellation, or
+revision change is disclosed or fails closed; see
+[CLI.md](CLI.md#exception-episodes-and-duplicate-renderings).
 
 ---
 
