@@ -315,45 +315,50 @@ pub fn parse_structured_triage_answer(text: &str) -> Result<StructuredTriageAnsw
         if line.is_empty() || line == "```" || line.eq_ignore_ascii_case("```json") {
             continue;
         }
-        if let Some(heading) = line.strip_prefix('#') {
-            section = heading
-                .trim_start_matches('#')
-                .trim()
-                .to_ascii_lowercase()
-                .replace([' ', '-'], "_");
-            continue;
-        }
-
-        let lower = line.to_ascii_lowercase();
-        if lower == "all events in this corpus are errors." {
+        let assertion = normalize_assertion_text(line);
+        if is_positive_all_events_error_claim(&assertion) {
             answer.asserts_all_events_are_errors = true;
             continue;
         }
-        if lower == "the earliest error is the root cause." {
+        if is_positive_earliest_error_root_claim(&assertion) {
             answer.asserts_earliest_error_is_root_cause = true;
             continue;
         }
-        if lower == "root cause is established." {
+        if assertion.contains("root cause is established") && !contains_claim_negation(&assertion) {
             answer.asserts_root_cause_established = true;
             continue;
         }
-        if lower == "cross-source wall-clock order is confidently known." {
+        if assertion.contains("cross source wall clock order is confidently known")
+            && !contains_claim_negation(&assertion)
+        {
             answer.asserts_confident_wall_clock_order = true;
             continue;
         }
-        if let Some(count) = lower
+        if let Some(count) = assertion
             .strip_prefix("total events:")
             .and_then(|v| v.trim().trim_end_matches('.').parse::<u64>().ok())
         {
             answer.asserted_event_count = Some(count);
             continue;
         }
-        if lower.starts_with("observed source ") && lower.ends_with(" in the imported evidence.") {
-            let start = "Observed source ".len();
-            let end = line.len() - " in the imported evidence.".len();
-            answer
-                .asserts_observed_sources
-                .push(line.get(start..end).unwrap_or_default().to_string());
+        if assertion.starts_with("observed source ")
+            && assertion.ends_with(" in the imported evidence")
+            && !contains_claim_negation(&assertion)
+        {
+            let source = assertion
+                .strip_prefix("observed source ")
+                .and_then(|value| value.strip_suffix(" in the imported evidence"))
+                .unwrap_or_default();
+            answer.asserts_observed_sources.push(source.to_string());
+            continue;
+        }
+
+        if let Some(heading) = line.strip_prefix('#') {
+            section = heading
+                .trim_start_matches('#')
+                .trim()
+                .to_ascii_lowercase()
+                .replace([' ', '-'], "_");
             continue;
         }
 
@@ -389,6 +394,78 @@ pub fn parse_structured_triage_answer(text: &str) -> Result<StructuredTriageAnsw
 
 fn strip_bullet(line: &str) -> &str {
     line.strip_prefix("- ").unwrap_or(line).trim()
+}
+
+fn normalize_assertion_text(line: &str) -> String {
+    let mut unwrapped = line.trim().trim_start_matches('#').trim();
+    loop {
+        let next = ["- ", "* ", "+ ", "> "]
+            .iter()
+            .find_map(|prefix| unwrapped.strip_prefix(prefix))
+            .unwrap_or(unwrapped)
+            .trim();
+        if next.len() == unwrapped.len() {
+            break;
+        }
+        unwrapped = next;
+    }
+    let unwrapped = unwrapped.trim_matches(|ch: char| matches!(ch, '*' | '_' | '`'));
+    unwrapped
+        .chars()
+        .map(|ch| match ch {
+            '-' | '–' | '—' => ' ',
+            other => other.to_ascii_lowercase(),
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(|ch: char| matches!(ch, '.' | '!' | '?' | ':' | ';' | ','))
+        .to_string()
+}
+
+fn contains_claim_negation(text: &str) -> bool {
+    [
+        "not all ",
+        "not every ",
+        "no evidence",
+        "cannot ",
+        "can't ",
+        "could not ",
+        "does not ",
+        "do not ",
+        "is not ",
+        "isn't ",
+        "unsupported",
+        "unproven",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+}
+
+fn is_positive_all_events_error_claim(text: &str) -> bool {
+    !contains_claim_negation(text)
+        && [
+            "all events in this corpus are errors",
+            "all events in the corpus are errors",
+            "every event in this corpus is an error",
+            "every event in the corpus is an error",
+            "the corpus contains only error events",
+            "the corpus consists only of error events",
+        ]
+        .iter()
+        .any(|claim| text.contains(claim))
+}
+
+fn is_positive_earliest_error_root_claim(text: &str) -> bool {
+    !contains_claim_negation(text)
+        && [
+            "the earliest error is the root cause",
+            "the first error is the root cause",
+            "earliest observed error is the root cause",
+        ]
+        .iter()
+        .any(|claim| text.contains(claim))
 }
 
 fn parse_claim_line(line: &str) -> TriageClaim {
@@ -516,17 +593,25 @@ pub fn score_structured_triage_answer(
         .map(|e| (e.seq, e.source.clone()))
         .collect();
     let mut citation_ok = true;
-    for claim in answer
-        .observations
-        .iter()
-        .chain(answer.causal_candidates.iter())
-    {
+    for claim in &answer.observations {
         match (claim.seq, claim.source.as_ref()) {
             (Some(seq), Some(source)) if evidence_set.contains(&(seq, source.clone())) => {}
-            (None, None) => {}
+            (None, None) if observation_is_explicitly_non_material(claim) => {}
             _ => {
                 citation_ok = false;
                 break;
+            }
+        }
+    }
+    if citation_ok {
+        for claim in &answer.causal_candidates {
+            match (claim.seq, claim.source.as_ref()) {
+                (Some(seq), Some(source)) if evidence_set.contains(&(seq, source.clone())) => {}
+                (None, None) if causal_claim_is_explicitly_non_material(claim) => {}
+                _ => {
+                    citation_ok = false;
+                    break;
+                }
             }
         }
     }
@@ -765,6 +850,28 @@ pub fn score_structured_triage_answer(
     }
 }
 
+fn observation_is_explicitly_non_material(claim: &TriageClaim) -> bool {
+    matches!(
+        claim
+            .role
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("zero_evidence" | "limitation")
+    )
+}
+
+fn causal_claim_is_explicitly_non_material(claim: &TriageClaim) -> bool {
+    matches!(
+        claim
+            .role
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("unknown" | "zero_evidence" | "limitation")
+    )
+}
+
 fn find_token_seq(host: &TriageHostFacts, token: &str) -> Option<(u64, String)> {
     host.messages_by_seq
         .iter()
@@ -937,6 +1044,21 @@ mod tests {
     fn good_answer_passes_rubric() {
         let score = score_structured_triage_answer(&good_answer(), &sample_key(), &sample_host());
         assert!(score.passed, "failed={:?}", score.failed_ids());
+    }
+
+    #[test]
+    fn material_claims_need_citations_but_explicit_zero_evidence_does_not_invent_one() {
+        let key = sample_key();
+        let host = sample_host();
+        let mut stripped = good_answer();
+        stripped.observations[0].seq = None;
+        stripped.observations[0].source = None;
+        let score = score_structured_triage_answer(&stripped, &key, &host);
+        assert!(score.failed_ids().contains(&"citation_validity"));
+
+        stripped.observations[0].role = Some("zero_evidence".into());
+        let score = score_structured_triage_answer(&stripped, &key, &host);
+        assert!(!score.failed_ids().contains(&"citation_validity"));
     }
 
     #[test]

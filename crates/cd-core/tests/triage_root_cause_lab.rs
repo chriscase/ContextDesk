@@ -458,8 +458,35 @@ fn adversarial_mutations_fail_evaluator_with_dimension_reasons() {
             "unsupported_claims",
         ),
         (
+            "all_errors_bullet_actual_text",
+            format!("{neutral_text}\n- All events in this corpus are errors.\n"),
+            "unsupported_claims",
+        ),
+        (
+            "all_errors_heading_case_punctuation_actual_text",
+            format!("{neutral_text}\n### Finding: ALL EVENTS IN THIS CORPUS ARE ERRORS!!!\n"),
+            "unsupported_claims",
+        ),
+        (
+            "all_errors_whitespace_actual_text",
+            format!("{neutral_text}\n-   All   events in this corpus   are errors .\n"),
+            "unsupported_claims",
+        ),
+        (
+            "all_errors_equivalent_embedded_prose_actual_text",
+            format!(
+                "{neutral_text}\nEvidence conclusion: every event in the corpus is an error, so no level distinction remains.\n"
+            ),
+            "unsupported_claims",
+        ),
+        (
             "earliest_root_actual_text",
             format!("{neutral_text}\nThe earliest error is the root cause.\nRoot cause is established.\n"),
+            "symptom_vs_cause",
+        ),
+        (
+            "earliest_root_bullet_equivalent_actual_text",
+            format!("{neutral_text}\n- The first error is the root cause!\n"),
             "symptom_vs_cause",
         ),
         (
@@ -495,6 +522,11 @@ fn adversarial_mutations_fail_evaluator_with_dimension_reasons() {
             neutral_text.replacen(&exact_citation, &partial_citation, 1),
             "citation_validity",
         ),
+        (
+            "missing_both_citation_identities_actual_text",
+            neutral_text.replacen(&exact_citation, "", 1),
+            "citation_validity",
+        ),
         ("missing_competing_section_actual_text", without_competing, "contract_shape"),
         ("missing_evidence_section_actual_text", without_missing, "contract_shape"),
     ];
@@ -511,6 +543,26 @@ fn adversarial_mutations_fail_evaluator_with_dimension_reasons() {
                         || failed.contains(&"symptom_vs_cause"))),
             "{name}: expected dim {expected_dim}, failed={failed:?} reasons={:?}",
             score.dimensions
+        );
+    }
+}
+
+#[test]
+fn caveated_false_claim_wording_is_not_misclassified_as_a_positive_assertion() {
+    let (key, host, _) = exercise_case("decoy-before-trigger");
+    let neutral_text = good_answer_for(&key, &host).to_markdown();
+    for caveat in [
+        "- Not all events in this corpus are errors.",
+        "### Caveat: There is no evidence that every event in the corpus is an error.",
+        "The earliest error is not the root cause.",
+    ] {
+        let text = format!("{neutral_text}\n{caveat}\n");
+        let answer = parse_structured_triage_answer(&text).expect("parse caveated answer");
+        let score = score_structured_triage_answer(&answer, &key, &host);
+        assert!(
+            score.passed,
+            "caveat={caveat:?} failed={:?}",
+            score.failed_ids()
         );
     }
 }
@@ -873,6 +925,83 @@ fn budget_exhaustion_final_synthesis_reserves_real_path_headroom() {
     );
     assert!(events.iter().any(|event| {
         matches!(event, StreamEvent::TurnCompleted { reason } if reason == "budget_rounds_answer")
+    }));
+}
+
+#[test]
+fn minimum_custom_budget_reserves_proportional_headroom_on_real_agent_path() {
+    let case = "decoy-before-trigger";
+    let key = load_answer_key(case);
+    let (cache, corpus_id, corpus) = ingest_case(case);
+    let mut host_facts = host_facts_for(&corpus, &key);
+    host_facts.evidence = build_brief(cache.path(), &corpus_id).evidence;
+    let markdown = good_answer_for(&key, &host_facts).to_markdown();
+
+    let mut tool_host = ToolHost::new(
+        Workspace::new("triage-lab-small-budget", vec![cache.path().to_path_buf()]),
+        KeywordIndex::new(),
+        None,
+    );
+    tool_host.set_log_analysis(true, Some(cache.path().to_path_buf()));
+    tool_host.set_log_corpus_scope(Some(corpus_id.clone()));
+    tool_host.set_active_log_corpus(Some(corpus_id.clone()));
+    tool_host
+        .seed_log_corpus_handle(
+            &corpus_id,
+            Arc::new(LogCorpus::open(cache.path(), &corpus_id).unwrap()),
+        )
+        .unwrap();
+    tool_host.pin_log_suppression_lens(&corpus_id).unwrap();
+
+    let backend = ScriptedBackend::new(vec![ChatCompletion {
+        content: markdown,
+        tool_calls: vec![],
+        finish_reason: "stop".into(),
+    }]);
+    let mut history = Vec::new();
+    let minimum_budget = cd_core::model_context::MIN_CONTEXT_CHAR_BUDGET;
+    assert_eq!(minimum_budget, 24_000, "fixture expectation changed");
+    let opts = AgentOptions {
+        session_id: "triage-lab-small-budget".into(),
+        model: Some("scripted-lab".into()),
+        max_rounds: 4,
+        context_char_budget: minimum_budget,
+        ambient_recall_enabled: false,
+        log_explorer_context: Some(
+            LogExplorerTurnContext::for_main_chat(&corpus_id).expect("main chat context"),
+        ),
+        ..Default::default()
+    };
+    let events = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run_agent_turn(
+            &backend,
+            &mut tool_host,
+            "Broad triage this corpus: what problems stand out?",
+            &mut history,
+            &opts,
+        ))
+        .expect("small-budget broad turn");
+
+    let trail = events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::SearchTrail { steps } => Some(steps.as_slice()),
+            _ => None,
+        })
+        .flatten()
+        .find(|step| step.starts_with("context_budget:"))
+        .unwrap_or_else(|| panic!("missing small-budget context measurement: {events:?}"));
+    assert!(
+        trail.contains("budget=24000")
+            && trail.contains("packing_budget=21600")
+            && trail.contains("reserved=2400"),
+        "real path reclamped or lost proportional reserve: {trail}"
+    );
+    assert!(events.iter().any(|event| {
+        matches!(event, StreamEvent::TurnCompleted { reason } if reason == "stop")
     }));
 }
 

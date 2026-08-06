@@ -650,6 +650,23 @@ fn linked_broad_log_triage_requested(user_text: &str) -> bool {
         return false;
     }
 
+    // Causal questions about one described failure are focused linked-log
+    // investigation, even when the user naturally adds "in these logs".
+    // Broad triage is reserved for corpus-wide inventory/overview requests.
+    let has_focused_causal_question = [
+        " what caused ",
+        " why did ",
+        " cause of this ",
+        " caused this ",
+        " root cause of this ",
+        " root cause of the failure ",
+    ]
+    .iter()
+    .any(|cue| padded.contains(cue));
+    if has_focused_causal_question {
+        return false;
+    }
+
     let has_broad_action = [
         " triage ",
         " analyze ",
@@ -4877,6 +4894,15 @@ mod tests {
             "What caused the checkout incident?"
         ));
         assert!(!linked_broad_log_triage_requested(
+            "What caused this failure in these logs?"
+        ));
+        assert!(!linked_broad_log_triage_requested(
+            "Can you find the root cause of this failure in the logs?"
+        ));
+        assert!(!linked_broad_log_triage_requested(
+            "Why did this request fail in these logs?"
+        ));
+        assert!(!linked_broad_log_triage_requested(
             "What problems do you see around trace_id=trace-7f3a?"
         ));
         assert!(!linked_broad_log_triage_requested(
@@ -4888,6 +4914,10 @@ mod tests {
         ));
         assert!(!linked_broad_log_triage_requested(
             "What errors mention request_id=req-a?"
+        ));
+
+        assert!(linked_broad_log_triage_requested(
+            "Review root causes and failures across everything in these logs."
         ));
     }
 
