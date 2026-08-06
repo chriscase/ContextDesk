@@ -70,9 +70,14 @@ fn exception_episodes_json_discloses_occurrence_vs_raw() {
         report["schemaId"],
         "contextdesk.exception_episode_report.v1"
     );
-    let occurrences = report["correlatedOccurrenceTotal"].as_u64().unwrap_or(0);
-    let raw = report["rawRecordTotal"].as_u64().unwrap_or(0);
+    let occurrences = report["occurrenceCount"].as_u64().unwrap_or(0);
+    let raw = report["rawExceptionRecordCount"].as_u64().unwrap_or(0);
+    let renderings = report["renderingEpisodeCount"].as_u64().unwrap_or(0);
     assert!(raw > occurrences, "raw={raw} occurrences={occurrences}");
+    assert!(
+        renderings >= occurrences,
+        "renderings={renderings} occurrences={occurrences}"
+    );
     assert!(report["rankingDisclosure"]
         .as_str()
         .unwrap_or("")

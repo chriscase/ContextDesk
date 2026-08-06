@@ -1,18 +1,15 @@
-//! `contextdesk exception-episodes` — deterministic exception family/episode
-//! correlation over an imported corpus (no provider / keychain).
+//! `contextdesk exception-episodes` — four-layer exception rendering analysis
+//! (raw records / physical renderings / semantic occurrences / families).
 
 use crate::cli::ExceptionEpisodesArgs;
 use crate::envelope::{CliError, CliResult, Render};
-use cd_core::log_analysis::{
-    correlate_exception_episodes_from_corpus, ExceptionCorrelationOptions, ExceptionEpisodeReport,
-    LogCorpus,
-};
+use cd_core::log_analysis::{analyze_exception_episodes, ExceptionEpisodeAnalysis, LogCorpus};
 use serde::Serialize;
 use std::path::Path;
 
 #[derive(Debug, Serialize)]
 pub struct ExceptionEpisodesOutput {
-    pub report: ExceptionEpisodeReport,
+    pub report: ExceptionEpisodeAnalysis,
 }
 
 impl Render for ExceptionEpisodesOutput {
@@ -22,49 +19,53 @@ impl Render for ExceptionEpisodesOutput {
         out.push_str("Exception episode correlation\n\n");
         out.push_str(&format!(
             "  Schema           {} v{}\n\
-             \nCounts\n\n\
+             \nLayers\n\n\
+               Events available            {}\n\
                Events scanned              {}\n\
-               Events classified           {}\n\
-               Episodes                    {}\n\
+               Raw exception records       {}\n\
+               Physical renderings         {}\n\
+               Semantic occurrences        {}\n\
+               Duplicate-render occurrences {}\n\
                Families                    {}\n\
-               Raw records (scanned)       {}\n\
-               Correlated occurrences      {}\n\
-               Correlated raw records      {}\n\
                Overall amplification       {}x\n\
                Partial                     {}\n\
-               Truncated                   {}\n\
-               Confidence                  {:?}\n",
+               Uncertain                   {}\n",
             r.schema_id,
             r.schema_version,
+            r.events_available,
             r.events_scanned,
-            r.events_classified,
-            r.episode_count,
-            r.family_count,
-            r.raw_record_total,
-            r.correlated_occurrence_total,
-            r.correlated_raw_record_total,
+            r.raw_exception_record_count,
+            r.rendering_episode_count,
+            r.occurrence_count,
+            r.duplicate_rendering_occurrence_count,
+            r.families.len(),
             r.overall_amplification_x,
             r.partial,
-            r.truncated,
-            r.confidence
+            r.uncertain
         ));
         if !r.families.is_empty() {
             out.push_str("\nFamilies\n");
             for f in r.families.iter().take(12) {
                 out.push_str(&format!(
-                    "\n  {} occurrences={} raw={} amplification={}x class={}\n    confidence={:?}\n",
-                    f.family_id,
+                    "\n  {} occurrences={} raw={} renderings={} amplification={}x duplicates={}\n",
+                    f.signature,
                     f.occurrence_count,
                     f.raw_record_count,
+                    f.rendering_episode_count,
                     f.amplification_x,
-                    f.exception_class.as_deref().unwrap_or("<unknown>"),
-                    f.confidence
+                    f.duplicate_rendering_occurrence_count
                 ));
-                for lead in f.lead_citations.iter().take(3) {
+                for occ in f.occurrences.iter().take(2) {
                     out.push_str(&format!(
-                        "    lead seq={} source={} role={:?}\n",
-                        lead.seq, lead.source, lead.role
+                        "    occurrence raw={} renderings={} duplicate={} confidence={:?}\n",
+                        occ.raw_record_count,
+                        occ.rendering_count,
+                        occ.duplicate_rendering,
+                        occ.correlation_confidence
                     ));
+                    for c in occ.citations.iter().take(3) {
+                        out.push_str(&format!("      cite seq={} source={}\n", c.seq, c.source));
+                    }
                 }
             }
         }
@@ -76,8 +77,9 @@ impl Render for ExceptionEpisodesOutput {
                 .join("\n  "),
         );
         out.push_str(
-            "\n\nNote\n\n  Wrappers and stack frames are supporting records of an episode, \
-             not independent incidents. Raw events are unchanged.\n",
+            "\n\nNote\n\n  Four layers: raw records, physical renderings, semantic occurrences, \
+             families. Duplicate renderings require multi-signal evidence. Order-only \
+             cross-source merge requires a strong execution key. Raw events are unchanged.\n",
         );
         out.trim_end().to_string()
     }
@@ -106,13 +108,8 @@ pub fn run(
             CliError::internal(e.to_string())
         }
     })?;
-    let report = correlate_exception_episodes_from_corpus(
-        &corpus,
-        &ExceptionCorrelationOptions::default(),
-        None,
-    )
-    .map_err(|e| {
-        if e.to_string().contains("cancelled") {
+    let report = analyze_exception_episodes(&corpus, &[]).map_err(|e| {
+        if matches!(e, cd_core::error::CoreError::Cancelled) || e.to_string().contains("cancel") {
             CliError::cancelled(e.to_string())
         } else {
             CliError::internal(e.to_string())

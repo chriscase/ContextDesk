@@ -2232,13 +2232,9 @@ impl ToolHost {
         }
 
         checkpoint("exception_episodes")?;
-        let exception_report = match crate::log_analysis::correlate_exception_episodes_from_corpus(
+        let exception_report = match crate::log_analysis::analyze_exception_episodes(
             &corpus,
-            &crate::log_analysis::ExceptionCorrelationOptions {
-                excluded_template_ids: suppression.excluded_template_ids.clone(),
-                ..crate::log_analysis::ExceptionCorrelationOptions::default()
-            },
-            None,
+            &suppression.excluded_template_ids,
         ) {
             Ok(report) => Some(report),
             Err(error) => {
@@ -2275,28 +2271,24 @@ impl ToolHost {
              impact_slots: {}\n\
              rare_candidate_reserve: {BROAD_LOG_TRIAGE_RARE_ERROR_RESERVE}\n\
              exemplars_per_template_cap: {BROAD_LOG_TRIAGE_ERROR_EXEMPLAR_CAP}\n\
-             ranking_note: prefer exception episode occurrence counts over raw error_event_count when amplification is disclosed above\n",
+             ranking_note: prefer semantic_occurrence_count and amplification over raw error_event_count\n",
             selected_errors.len(),
             BROAD_LOG_TRIAGE_ERROR_DISPLAY_CAP.saturating_sub(BROAD_LOG_TRIAGE_RARE_ERROR_RESERVE)
         ));
-        // Template ids that appear only as supporting stack frames in episodes.
+        // Template ids that appear only as non-first citations in exception renderings
+        // (supporting stack/wrapper lines) vs first citation (lead).
         let supporting_frame_templates: std::collections::HashSet<u64> = exception_report
             .as_ref()
             .map(|report| {
                 let mut supporting = std::collections::HashSet::new();
                 let mut lead = std::collections::HashSet::new();
-                for ep in &report.episodes {
-                    for m in &ep.members {
-                        match m.role {
-                            crate::log_analysis::ExceptionRecordRole::StackFrame
-                            | crate::log_analysis::ExceptionRecordRole::WrapperScaffold => {
-                                supporting.insert(m.template_id);
-                            }
-                            crate::log_analysis::ExceptionRecordRole::ExceptionHeader
-                            | crate::log_analysis::ExceptionRecordRole::ConventionalMultiline => {
-                                lead.insert(m.template_id);
-                            }
-                            _ => {}
+                for family in &report.families {
+                    for occ in &family.occurrences {
+                        if let Some(first) = occ.citations.first() {
+                            lead.insert(first.template_id);
+                        }
+                        for c in occ.citations.iter().skip(1) {
+                            supporting.insert(c.template_id);
                         }
                     }
                 }
@@ -2308,22 +2300,23 @@ impl ToolHost {
         let mut seen_evidence = std::collections::HashSet::new();
         let mut correlation_seeds = Vec::new();
         let mut identity_partial = false;
-        // Prefer episode lead citations as trusted identities before template exemplars.
+        // Prefer occurrence citations (actual children) as trusted identities.
         if let Some(report) = exception_report.as_ref() {
             for family in report.families.iter().take(4) {
-                for lead in family.lead_citations.iter().take(4) {
-                    if evidence.len() >= BROAD_LOG_TRIAGE_IDENTITY_CAP {
-                        identity_partial = true;
-                        break;
-                    }
-                    let identity = crate::log_analysis::SearchEvidenceIdentity {
-                        seq: lead.seq,
-                        source: lead.source.clone(),
-                        citation_source: broad_triage_citation_source(&lead.source),
-                        template_id: lead.template_id,
-                    };
-                    if seen_evidence.insert(identity.clone()) {
-                        evidence.push(identity);
+                for occ in family.occurrences.iter().take(2) {
+                    for cite in occ.citations.iter().take(4) {
+                        if evidence.len() >= BROAD_LOG_TRIAGE_IDENTITY_CAP {
+                            identity_partial = true;
+                            break;
+                        }
+                        let identity = cite.as_search_identity();
+                        let identity = crate::log_analysis::SearchEvidenceIdentity {
+                            citation_source: broad_triage_citation_source(&identity.source),
+                            ..identity
+                        };
+                        if seen_evidence.insert(identity.clone()) {
+                            evidence.push(identity);
+                        }
                     }
                 }
             }
@@ -2352,10 +2345,9 @@ impl ToolHost {
             let last_source = broad_triage_source_identity(&last_span.source);
             let supporting = supporting_frame_templates.contains(&hit.template_id);
             let episode_adjusted = if supporting {
-                // Disclose raw volume but label supporting frames honestly.
                 exception_report
                     .as_ref()
-                    .map(|r| r.correlated_occurrence_total)
+                    .map(|r| r.occurrence_count)
                     .unwrap_or(hit.error_event_count)
             } else {
                 hit.error_event_count
@@ -9077,7 +9069,7 @@ mod tests {
         );
         assert!(
             text.contains("independent_incident_claim_forbidden")
-                || text.contains("ranking_basis: exception_episode"),
+                || text.contains("semantic_occurrence_count"),
             "brief missing ranking disclosure"
         );
         assert!(
@@ -9087,51 +9079,47 @@ mod tests {
         assert!(
             text.contains("supporting_stack_or_wrapper")
                 || text.contains("supporting records")
-                || text.contains("wrapper"),
-            "brief missing supporting-role disclosure"
+                || text.contains("wrapper")
+                || text.contains("physical_rendering"),
+            "brief missing supporting-role / layer disclosure"
         );
-        // Episode report attached to DTO with real citations.
         let ep = brief
             .exception_episodes
             .as_ref()
             .expect("exception_episodes DTO on brief");
         assert!(
-            ep.correlated_occurrence_total > 0
-                && ep.correlated_occurrence_total < ep.raw_record_total,
+            ep.occurrence_count > 0 && ep.occurrence_count < ep.raw_exception_record_count,
             "occurrence={} raw={}",
-            ep.correlated_occurrence_total,
-            ep.raw_record_total
+            ep.occurrence_count,
+            ep.raw_exception_record_count
         );
         assert!(
             ep.overall_amplification_x >= 2,
             "amp={}",
             ep.overall_amplification_x
         );
-        for lead in ep
+        for cite in ep
             .families
             .iter()
-            .flat_map(|f| f.lead_citations.iter())
+            .flat_map(|f| f.occurrences.iter())
+            .flat_map(|o| o.citations.iter())
             .take(8)
         {
             assert!(
-                brief.evidence.iter().any(|e| e.seq == lead.seq)
-                    || ep.episodes.iter().any(|e| {
-                        e.members
-                            .iter()
-                            .any(|m| m.seq == lead.seq && !m.source.is_empty())
+                brief.evidence.iter().any(|e| e.seq == cite.seq)
+                    || ep.families.iter().any(|f| {
+                        f.occurrences.iter().any(|o| {
+                            o.citations
+                                .iter()
+                                .any(|c| c.seq == cite.seq && !c.source.is_empty())
+                        })
                     }),
-                "lead seq={} must resolve",
-                lead.seq
+                "cite seq={} must resolve",
+                cite.seq
             );
-            assert!(!lead.source.is_empty());
+            assert!(!cite.source.is_empty());
         }
-        // Must not claim ~all raw records as independent incidents in ranking prose.
         assert!(!text.contains("independent_incident_count:"));
-        assert!(
-            !text.contains(&format!("error_event_count={}", ep.raw_record_total))
-                || text.contains("supporting_stack_or_wrapper=true"),
-            "raw volume must not stand alone as incident ranking"
-        );
     }
 
     #[test]

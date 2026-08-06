@@ -81,12 +81,13 @@ pub use event_revision::{
     EVENT_REVISION_METADATA_SCHEMA_VERSION, MAX_EVENT_REVISION_METADATA_BYTES,
 };
 pub use exception_episodes::{
-    correlate_exception_episodes, correlate_exception_episodes_from_corpus,
-    format_exception_episode_brief_section, ExceptionCorrelationConfidence,
-    ExceptionCorrelationOptions, ExceptionEpisode, ExceptionEpisodeCompleteness,
-    ExceptionEpisodeMember, ExceptionEpisodeReport, ExceptionFamily, ExceptionRecordRole,
-    EXCEPTION_EPISODE_SCHEMA_ID, EXCEPTION_EPISODE_SCHEMA_VERSION, MAX_CORRELATION_EVENTS,
-    MAX_EPISODES, MAX_EVENTS_PER_EPISODE,
+    analyze_bounded_events, analyze_exception_episodes, analyze_exception_episodes_with_cancel,
+    analyze_exception_episodes_with_cancel_flag, format_exception_episode_brief_section,
+    ExceptionCorrelationConfidence, ExceptionEpisodeAnalysis, ExceptionEpisodeReport,
+    ExceptionEventCitation, ExceptionFamilySummary, ExceptionOccurrenceSummary,
+    ExceptionRenderingKind, EXCEPTION_EPISODE_EVENT_SCAN_CAP, EXCEPTION_EPISODE_FAMILY_CAP,
+    EXCEPTION_EPISODE_RECORD_CAP, EXCEPTION_EPISODE_RENDER_CAP, EXCEPTION_EPISODE_SCHEMA_ID,
+    EXCEPTION_EPISODE_SCHEMA_VERSION,
 };
 pub use format_profile::{
     fingerprint_format, BuiltInFormatProfile, BuiltInGrammar, FormatFingerprint,

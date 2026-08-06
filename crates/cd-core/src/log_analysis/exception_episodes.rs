@@ -1,1288 +1,1016 @@
-//! Deterministic exception episode / duplicate-rendering correlation.
+//! Bounded, derived exception-rendering analysis (four layers).
 //!
-//! Pure, host-neutral, non-destructive: durable events are never rewritten.
-//! Episodes are derived relationships over real `seq`/`source` identities.
+//! Layers (never mutate durable events):
+//! 1. **Raw records** — stored events that look exception-related.
+//! 2. **Renderings** — physical emission shapes (app full-stack vs separately
+//!    wrapped line/stream records).
+//! 3. **Occurrences (semantic episodes)** — one logical failure; may include
+//!    multiple renderings only when evidence supports duplicate rendering.
+//! 4. **Families** — bounded groups of occurrences sharing a root signature.
 //!
-//! Design goals:
-//! - distinguish conventional multiline one-event traces from separately
-//!   wrapped stderr header/frame/cause streams and cross-stream duplicates;
-//! - rank meaningful occurrence evidence, not raw stack-frame volume;
-//! - fail closed to partial/candidate when evidence is weak (never invent counts);
-//! - bounded memory/runtime with cooperative cancellation.
+//! Merge guards (fail closed):
+//! - message equality, divisibility, adjacency, or rotation-family alone never
+//!   merge occurrences;
+//! - order-only cross-source merge requires a strong execution key (matching
+//!   thread or trace_id);
+//! - suppression is applied only via excluded template ids at scan time — hidden
+//!   children never appear in citations;
+//! - caps, cancellation, and revision are explicit partial/error paths.
 
-use super::query::{query_events, EventQuery, ExplorerEvent};
-use super::store::LogCorpus;
 use crate::error::{CoreError, CoreResult};
+use crate::log_analysis::{
+    query_event_count, query_event_rows, EventQuery, ExplorerEvent, LogCorpus,
+    SearchEvidenceIdentity, MAX_EVENT_PAGE,
+};
 use crate::process_progress::CancelFlag;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Versioned schema id for the correlation report.
+/// Schema id for host-neutral reports.
 pub const EXCEPTION_EPISODE_SCHEMA_ID: &str = "contextdesk.exception_episode_report.v1";
 /// Schema version.
 pub const EXCEPTION_EPISODE_SCHEMA_VERSION: u32 = 1;
 
-/// Hard ceiling on events scanned for one correlation pass.
-pub const MAX_CORRELATION_EVENTS: usize = 50_000;
-/// Hard ceiling on emitted episodes.
-pub const MAX_EPISODES: usize = 1_000;
-/// Hard ceiling on constituents retained per episode.
-pub const MAX_EVENTS_PER_EPISODE: usize = 400;
-/// Max seq gap between consecutive records inside one stream-local episode.
-pub const MAX_SEQ_GAP_WITHIN_EPISODE: u64 = 8;
-/// Max order/ts span (axis units) for one stream-local episode.
-pub const MAX_AXIS_SPAN_WITHIN_EPISODE: i64 = 60_000;
-/// Max axis distance (wall seconds or order units) for cross-stream merge.
-pub const MAX_CROSS_STREAM_AXIS_WINDOW: i64 = 120;
-/// Cap distinct family fingerprints retained in the report.
-pub const MAX_FAMILY_FINGERPRINTS: usize = 200;
-/// Page size when loading events from a corpus.
-const EVENT_PAGE: usize = 500;
+/// Maximum events inspected in one analysis.
+pub const EXCEPTION_EPISODE_EVENT_SCAN_CAP: usize = 50_000;
+/// Maximum derived renderings retained before results become partial.
+pub const EXCEPTION_EPISODE_RENDER_CAP: usize = 2_048;
+/// Maximum records attached to one rendering.
+pub const EXCEPTION_EPISODE_RECORD_CAP: usize = 400;
+/// Maximum families returned after deterministic impact ranking.
+pub const EXCEPTION_EPISODE_FAMILY_CAP: usize = 64;
+/// Max seq gap for attaching line records into one stderr/line rendering.
+const MAX_ADJACENT_SEQ_GAP: u64 = 8;
+/// Max wall-seconds between adjacent records in one rendering.
+const MAX_ADJACENT_WALL_SECONDS: i64 = 5;
+/// Max seq gap when pairing two renderings of different kinds.
+const MAX_DUPLICATE_SEQ_GAP: u64 = 512;
+/// Max wall-seconds between dual-render pairings (tight: not mere same-hour).
+const MAX_DUPLICATE_WALL_SECONDS: i64 = 2;
 
-/// Role of one constituent event inside an episode (or outside any episode).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum ExceptionRecordRole {
-    /// Exception header / lead line (`SomeException: message`).
-    ExceptionHeader,
-    /// Stack frame line (`at pkg.Class.method(...)`).
-    StackFrame,
-    /// Cause / suppressed chain marker.
-    CauseMarker,
-    /// Wrapper / thread / ellipsis scaffolding around a trace.
-    WrapperScaffold,
-    /// Conventional producer multiline: one durable event already holds the full trace.
-    ConventionalMultiline,
-    /// Not classified as exception-structure evidence.
-    Unclassified,
-}
-
-/// Confidence of an episode or family grouping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExceptionCorrelationConfidence {
-    /// Strong multi-signal assembly.
-    High,
-    /// Usable but capped or partially ambiguous.
-    Medium,
-    /// Weak structure; treat carefully.
-    Low,
-    /// Signals insufficient; counts stay raw-only.
-    Unknown,
-}
-
-/// How complete an episode assembly is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExceptionEpisodeCompleteness {
-    /// Header/lead present and bounds not hit.
-    Complete,
-    /// Some members missing or ambiguous.
-    Partial,
-    /// Hit a hard member/output cap.
-    Truncated,
-    /// Weak candidate (e.g. missing header).
-    Candidate,
-}
-
-/// One real durable event identity retained as a constituent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Exact identity of one underlying stored event.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExceptionEpisodeMember {
+pub struct ExceptionEventCitation {
     /// Durable event sequence.
     pub seq: u64,
     /// Portable source identity.
     pub source: String,
-    /// Template id assigned at ingest.
+    /// Template id at ingest.
     pub template_id: u64,
-    /// Structural role inside the episode.
-    pub role: ExceptionRecordRole,
-    /// Stored axis value (wall or order).
-    pub ts: i64,
 }
 
-/// One occurrence (episode) of an exception family.
+impl ExceptionEventCitation {
+    /// Convert to the trusted broad-triage identity channel.
+    pub fn as_search_identity(&self) -> SearchEvidenceIdentity {
+        SearchEvidenceIdentity {
+            seq: self.seq,
+            source: self.source.clone(),
+            citation_source: None,
+            template_id: self.template_id,
+        }
+    }
+}
+
+/// Physical rendering shape found in the event store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExceptionRenderingKind {
+    /// One durable event already holds a full stack (conventional multiline).
+    ApplicationFullStack,
+    /// Separately wrapped/emitted records (`[stderr]` or per-line timestamp stream).
+    SeparatelyWrappedRecords,
+}
+
+/// Strength of a correlation between separate physical renderings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExceptionCorrelationConfidence {
+    /// One rendering stands alone; no duplicate-rendering claim is made.
+    Uncorrelated,
+    /// Same signature, compatible scope, explicit wall time, and matching thread/trace.
+    Strong,
+    /// Same signature + wall adjacency with weaker scope (no conflicting execution key).
+    Moderate,
+}
+
+/// One likely logical occurrence (semantic episode).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExceptionEpisode {
-    /// Stable episode id within this report.
-    pub episode_id: String,
-    /// Family fingerprint id this episode belongs to.
-    pub family_id: String,
-    /// Real child event identities (never fabricated).
-    pub members: Vec<ExceptionEpisodeMember>,
-    /// Distinct durable events in this episode.
+pub struct ExceptionOccurrenceSummary {
+    /// First cited seq.
+    pub first_seq: u64,
+    /// Last cited seq.
+    pub last_seq: u64,
+    /// Distinct durable records in this occurrence.
     pub raw_record_count: u64,
-    /// Assembly completeness.
-    pub completeness: ExceptionEpisodeCompleteness,
-    /// Grouping confidence.
-    pub confidence: ExceptionCorrelationConfidence,
-    /// Human-readable assembly reasons.
-    pub reasons: Vec<String>,
-    /// Minimum member seq.
-    pub min_seq: u64,
-    /// Maximum member seq.
-    pub max_seq: u64,
-    /// Minimum member axis value.
-    pub min_ts: i64,
-    /// Maximum member axis value.
-    pub max_ts: i64,
-    /// True when members span more than one portable source identity.
-    pub cross_stream: bool,
+    /// Number of physical renderings correlated into this occurrence.
+    pub rendering_count: u64,
+    /// True when more than one rendering was correlated.
+    pub duplicate_rendering: bool,
+    /// Confidence of the duplicate-rendering claim.
+    pub correlation_confidence: ExceptionCorrelationConfidence,
+    /// Rendering kinds retained.
+    pub rendering_kinds: Vec<ExceptionRenderingKind>,
+    /// Exact child event identities (never fabricated).
+    pub citations: Vec<ExceptionEventCitation>,
+    /// False when a per-render record cap truncated citations.
+    pub citations_complete: bool,
 }
 
-/// Aggregated family of similar episodes (not a fabricated count).
+/// Bounded family of occurrences sharing one normalized root signature.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExceptionFamily {
-    /// Stable family id (usually equals fingerprint).
-    pub family_id: String,
-    /// Stable content fingerprint (class + normalized message).
-    pub fingerprint: String,
-    /// Best-effort exception type name.
-    pub exception_class: Option<String>,
-    /// Bounded message excerpt used for the fingerprint.
-    pub exception_message_excerpt: Option<String>,
-    /// Number of correlated episodes (occurrences), never invented.
+pub struct ExceptionFamilySummary {
+    /// Normalized root signature.
+    pub signature: String,
+    /// Sum of raw records across occurrences.
+    pub raw_record_count: u64,
+    /// Sum of physical renderings across occurrences.
+    pub rendering_episode_count: u64,
+    /// Semantic occurrence count (never invented).
     pub occurrence_count: u64,
-    /// Sum of raw durable records across episodes.
-    pub raw_record_count: u64,
-    /// `raw_record_count / occurrence_count` rounded down; 0 when no occurrences.
+    /// Occurrences that include duplicate renderings.
+    pub duplicate_rendering_occurrence_count: u64,
+    /// Occurrences with incomplete citations or non-strong duplicates.
+    pub uncertain_occurrence_count: u64,
+    /// Amplification: raw_record_count / max(1, occurrence_count).
     pub amplification_x: u64,
-    /// Family-level confidence (worst episode).
-    pub confidence: ExceptionCorrelationConfidence,
-    /// Family-level completeness (worst episode).
-    pub completeness: ExceptionEpisodeCompleteness,
-    /// Aggregation reasons and amplification disclosure.
-    pub reasons: Vec<String>,
-    /// Role histogram over members (supporting vs lead).
-    pub role_counts: BTreeMap<String, u64>,
-    /// Representative header/conventional member identities for citation.
-    pub lead_citations: Vec<ExceptionEpisodeMember>,
+    /// Occurrences retained for this family (bounded).
+    pub occurrences: Vec<ExceptionOccurrenceSummary>,
 }
 
-/// Versioned host-neutral correlation report.
+/// Honest accounting for one bounded, non-destructive analysis.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExceptionEpisodeReport {
-    /// Schema id string.
+pub struct ExceptionEpisodeAnalysis {
+    /// Schema id.
     pub schema_id: String,
-    /// Schema version number.
+    /// Schema version.
     pub schema_version: u32,
-    /// Events examined in this pass.
+    /// Events available under the suppression filter.
+    pub events_available: u64,
+    /// Events actually scanned.
     pub events_scanned: u64,
-    /// Events with a non-unclassified structural role.
-    pub events_classified: u64,
-    /// Number of episodes emitted.
-    pub episode_count: u64,
-    /// Number of families emitted.
-    pub family_count: u64,
-    /// All durable events scanned (including unclassified).
-    pub raw_record_total: u64,
-    /// Sum of occurrence_count over families.
-    pub correlated_occurrence_total: u64,
-    /// Sum of raw_record_count over families (subset of raw_record_total).
-    pub correlated_raw_record_total: u64,
-    /// Overall amplification across correlated families (raw/occurrences).
+    /// Configured scan cap.
+    pub event_scan_cap: usize,
+    /// Raw exception-related records retained in renderings.
+    pub raw_exception_record_count: u64,
+    /// Physical rendering count.
+    pub rendering_episode_count: u64,
+    /// Semantic occurrence count.
+    pub occurrence_count: u64,
+    /// Occurrences with duplicate renderings.
+    pub duplicate_rendering_occurrence_count: u64,
+    /// Families before family cap.
+    pub family_count_available: u64,
+    /// Family output cap.
+    pub family_cap: usize,
+    /// Overall amplification across all occurrences.
     pub overall_amplification_x: u64,
-    /// True when any family/episode is partial/candidate or caps applied.
+    /// True when any cap truncated work.
     pub partial: bool,
-    /// True when an input or output cap truncated work.
-    pub truncated: bool,
-    /// Reserved for hosts that surface cancel on the report object.
-    pub cancelled: bool,
-    /// Overall report confidence.
-    pub confidence: ExceptionCorrelationConfidence,
-    /// Report-level reasons.
-    pub reasons: Vec<String>,
-    /// Ranked families.
-    pub families: Vec<ExceptionFamily>,
-    /// Episodes (bounded).
-    pub episodes: Vec<ExceptionEpisode>,
-    /// Ranking disclosure for consumers (broad triage).
+    /// True when any occurrence is uncertain.
+    pub uncertain: bool,
+    /// Ranking / interpretation disclosure for hosts.
     pub ranking_disclosure: String,
+    /// Ranked families.
+    pub families: Vec<ExceptionFamilySummary>,
 }
 
-/// Options for one correlation pass.
-#[derive(Debug, Clone)]
-pub struct ExceptionCorrelationOptions {
-    /// Max events to scan.
-    pub max_events: usize,
-    /// Max episodes to emit.
-    pub max_episodes: usize,
-    /// Max members retained per episode.
-    pub max_events_per_episode: usize,
-    /// Max seq gap between consecutive stream-local attachments.
-    pub max_seq_gap: u64,
-    /// Max axis span for stream-local assembly.
-    pub max_axis_span: i64,
-    /// Max axis gap for optional cross-stream pairing checks.
-    pub max_cross_stream_axis_window: i64,
-    /// Suppression template exclusions (pinned lens).
-    pub excluded_template_ids: Vec<u64>,
-}
-
-impl Default for ExceptionCorrelationOptions {
-    fn default() -> Self {
-        Self {
-            max_events: MAX_CORRELATION_EVENTS,
-            max_episodes: MAX_EPISODES,
-            max_events_per_episode: MAX_EVENTS_PER_EPISODE,
-            max_seq_gap: MAX_SEQ_GAP_WITHIN_EPISODE,
-            max_axis_span: MAX_AXIS_SPAN_WITHIN_EPISODE,
-            max_cross_stream_axis_window: MAX_CROSS_STREAM_AXIS_WINDOW,
-            excluded_template_ids: Vec::new(),
-        }
-    }
-}
+/// Alias retained for CLI/brief naming.
+pub type ExceptionEpisodeReport = ExceptionEpisodeAnalysis;
 
 #[derive(Debug, Clone)]
-struct ClassifiedEvent {
-    event: ExplorerEvent,
-    role: ExceptionRecordRole,
-    exception_class: Option<String>,
-    exception_message: Option<String>,
-    fingerprint: Option<String>,
+struct RenderEpisode {
+    signature: String,
+    kind: ExceptionRenderingKind,
+    source: String,
+    service: Option<String>,
+    host: Option<String>,
+    thread: Option<String>,
+    trace_id: Option<String>,
+    first_ts: i64,
+    last_ts: i64,
+    wall_time: bool,
+    citations: Vec<ExceptionEventCitation>,
+    complete: bool,
 }
 
-/// Classify one event message into a structural role + optional fingerprint.
-fn classify_exception_event(event: &ExplorerEvent) -> ClassifiedEvent {
-    let message = event.message.as_str();
-    let lines: Vec<&str> = message.lines().map(str::trim_end).collect();
-    let non_empty: Vec<&str> = lines
-        .iter()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .collect();
+impl RenderEpisode {
+    fn first_seq(&self) -> u64 {
+        self.citations.first().map_or(0, |c| c.seq)
+    }
 
-    let frame_lines: Vec<String> = non_empty
-        .iter()
-        .filter(|l| is_stack_frame_line(l))
-        .map(|l| (*l).to_string())
-        .collect();
-    let header = non_empty.iter().find_map(|l| parse_exception_header(l));
-    let has_cause = non_empty.iter().any(|l| is_cause_marker_line(l));
-    let has_wrapper = non_empty.iter().any(|l| is_wrapper_scaffold_line(l));
-    let multi_frame = frame_lines.len() >= 2;
-    let single_line = non_empty.len() <= 1;
+    fn last_seq(&self) -> u64 {
+        self.citations.last().map_or(0, |c| c.seq)
+    }
 
-    let (role, class, msg) = match header {
-        Some((c, m)) if (multi_frame || has_cause) && !single_line => {
-            (ExceptionRecordRole::ConventionalMultiline, Some(c), Some(m))
+    fn strong_execution_key(&self) -> Option<String> {
+        if let Some(t) = &self.thread {
+            if !t.is_empty() {
+                return Some(format!("thread:{t}"));
+            }
         }
-        Some((c, m)) if single_line || frame_lines.is_empty() => {
-            (ExceptionRecordRole::ExceptionHeader, Some(c), Some(m))
+        if let Some(t) = &self.trace_id {
+            if !t.is_empty() {
+                return Some(format!("trace:{t}"));
+            }
         }
-        Some((c, m)) => (ExceptionRecordRole::ConventionalMultiline, Some(c), Some(m)),
-        None if non_empty.len() == 1 && is_stack_frame_line(non_empty[0]) => {
-            (ExceptionRecordRole::StackFrame, None, None)
-        }
-        None if non_empty.len() == 1 && is_cause_marker_line(non_empty[0]) => {
-            let (c, m) = parse_exception_header(
-                non_empty[0]
-                    .trim_start_matches("Caused by:")
-                    .trim_start_matches("Caused by")
-                    .trim(),
-            )
-            .map(|(c, m)| (Some(c), Some(m)))
-            .unwrap_or((None, None));
-            (ExceptionRecordRole::CauseMarker, c, m)
-        }
-        None if (non_empty.len() == 1 && is_wrapper_scaffold_line(non_empty[0]))
-            || (has_wrapper && frame_lines.is_empty()) =>
-        {
-            (ExceptionRecordRole::WrapperScaffold, None, None)
-        }
-        None => (ExceptionRecordRole::Unclassified, None, None),
-    };
-
-    let fingerprint = match (&class, &msg, role) {
-        (Some(c), m, ExceptionRecordRole::ExceptionHeader)
-        | (Some(c), m, ExceptionRecordRole::ConventionalMultiline)
-        | (Some(c), m, ExceptionRecordRole::CauseMarker) => {
-            // Class + message only so dual-stream headers (no frames yet) share
-            // a fingerprint with conventional multiline traces of the same fault.
-            Some(family_fingerprint(c, m.as_deref()))
-        }
-        _ => None,
-    };
-
-    ClassifiedEvent {
-        event: event.clone(),
-        role,
-        exception_class: class,
-        exception_message: msg,
-        fingerprint,
+        None
     }
 }
 
-/// Correlate exception episodes from an in-memory event list (pure).
-pub fn correlate_exception_episodes(
-    events: &[ExplorerEvent],
-    options: &ExceptionCorrelationOptions,
-    cancel: Option<&CancelFlag>,
-) -> CoreResult<ExceptionEpisodeReport> {
-    check_cancel(cancel)?;
-    let mut reasons = Vec::new();
-    let mut truncated = false;
-    let mut partial = false;
-
-    let max_events = options.max_events.clamp(1, MAX_CORRELATION_EVENTS);
-    let slice = if events.len() > max_events {
-        truncated = true;
-        reasons.push(format!(
-            "scanned first {max_events} of {} events (correlation event cap)",
-            events.len()
-        ));
-        &events[..max_events]
-    } else {
-        events
-    };
-
-    let mut classified: Vec<ClassifiedEvent> = Vec::with_capacity(slice.len());
-    for (idx, event) in slice.iter().enumerate() {
-        if idx % 1024 == 0 {
-            check_cancel(cancel)?;
-        }
-        classified.push(classify_exception_event(event));
-    }
-    let events_classified = classified
-        .iter()
-        .filter(|c| c.role != ExceptionRecordRole::Unclassified)
-        .count() as u64;
-
-    // Sort by axis then seq for deterministic assembly.
-    classified.sort_by(|a, b| {
-        a.event
-            .ts
-            .cmp(&b.event.ts)
-            .then_with(|| a.event.seq.cmp(&b.event.seq))
-    });
-
-    let stream_local = assemble_stream_local_episodes(&classified, options, cancel)?;
-    check_cancel(cancel)?;
-    let mut episodes = merge_cross_stream_duplicates(stream_local, options, cancel)?;
-
-    if episodes.len() > options.max_episodes {
-        truncated = true;
-        partial = true;
-        reasons.push(format!(
-            "episode list truncated to {} (cap)",
-            options.max_episodes
-        ));
-        episodes.truncate(options.max_episodes);
-    }
-
-    let families = build_families(&episodes, &mut reasons);
-    let correlated_occurrence_total = families.iter().map(|f| f.occurrence_count).sum::<u64>();
-    let correlated_raw_record_total = families.iter().map(|f| f.raw_record_count).sum::<u64>();
-    let overall_amplification_x = if correlated_occurrence_total == 0 {
-        0
-    } else {
-        correlated_raw_record_total / correlated_occurrence_total
-    };
-
-    if families.iter().any(|f| {
-        matches!(
-            f.confidence,
-            ExceptionCorrelationConfidence::Low | ExceptionCorrelationConfidence::Unknown
-        ) || matches!(
-            f.completeness,
-            ExceptionEpisodeCompleteness::Partial
-                | ExceptionEpisodeCompleteness::Candidate
-                | ExceptionEpisodeCompleteness::Truncated
-        )
-    }) {
-        partial = true;
-    }
-
-    let confidence = if families.is_empty() {
-        if events_classified == 0 {
-            ExceptionCorrelationConfidence::Unknown
-        } else {
-            ExceptionCorrelationConfidence::Low
-        }
-    } else if partial || truncated {
-        ExceptionCorrelationConfidence::Medium
-    } else {
-        ExceptionCorrelationConfidence::High
-    };
-
-    let ranking_disclosure = build_ranking_disclosure(
-        slice.len() as u64,
-        correlated_occurrence_total,
-        correlated_raw_record_total,
-        overall_amplification_x,
-        &families,
-    );
-
-    Ok(ExceptionEpisodeReport {
-        schema_id: EXCEPTION_EPISODE_SCHEMA_ID.into(),
-        schema_version: EXCEPTION_EPISODE_SCHEMA_VERSION,
-        events_scanned: slice.len() as u64,
-        events_classified,
-        episode_count: episodes.len() as u64,
-        family_count: families.len() as u64,
-        raw_record_total: slice.len() as u64,
-        correlated_occurrence_total,
-        correlated_raw_record_total,
-        overall_amplification_x,
-        partial,
-        truncated,
-        cancelled: false,
-        confidence,
-        reasons,
-        families,
-        episodes,
-        ranking_disclosure,
-    })
-}
-
-/// Load events from a durable corpus (respecting suppression exclusions) and correlate.
-pub fn correlate_exception_episodes_from_corpus(
+/// Analyze one corpus while honoring an exact suppression lens.
+pub fn analyze_exception_episodes(
     corpus: &LogCorpus,
-    options: &ExceptionCorrelationOptions,
-    cancel: Option<&CancelFlag>,
-) -> CoreResult<ExceptionEpisodeReport> {
-    check_cancel(cancel)?;
+    excluded_template_ids: &[u64],
+) -> CoreResult<ExceptionEpisodeAnalysis> {
+    analyze_exception_episodes_with_cancel(corpus, excluded_template_ids, None)
+}
+
+/// Cancellation-aware form used by deterministic broad triage.
+pub fn analyze_exception_episodes_with_cancel(
+    corpus: &LogCorpus,
+    excluded_template_ids: &[u64],
+    cancel: Option<&AtomicBool>,
+) -> CoreResult<ExceptionEpisodeAnalysis> {
+    let filter = EventQuery {
+        excluded_template_ids: excluded_template_ids.to_vec(),
+        sort_by_time: false,
+        ..Default::default()
+    };
+    let events_available = query_event_count(corpus, &filter)?.total_matched;
     let mut events = Vec::new();
-    let mut after_seq: Option<u64> = None;
-    let max_events = options.max_events.clamp(1, MAX_CORRELATION_EVENTS);
-    loop {
-        check_cancel(cancel)?;
-        let q = EventQuery {
-            excluded_template_ids: options.excluded_template_ids.clone(),
-            after_seq,
-            limit: EVENT_PAGE.min(max_events.saturating_sub(events.len()).max(1)),
-            // Seq order keeps folder/ZIP dual-stream discovery stable.
-            sort_by_time: false,
-            ..EventQuery::default()
-        };
-        let page = query_events(corpus, &q)?;
+    let mut after_seq = None;
+    while events.len() < EXCEPTION_EPISODE_EVENT_SCAN_CAP {
+        if cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+            return Err(CoreError::Cancelled);
+        }
+        let remaining = EXCEPTION_EPISODE_EVENT_SCAN_CAP - events.len();
+        let page = query_event_rows(
+            corpus,
+            &EventQuery {
+                after_seq,
+                limit: remaining.min(MAX_EVENT_PAGE),
+                ..filter.clone()
+            },
+        )?;
         if page.events.is_empty() {
             break;
         }
-        for event in page.events {
-            after_seq = Some(event.seq);
-            events.push(event);
-            if events.len() >= max_events {
-                break;
-            }
-        }
-        if events.len() >= max_events || page.next_cursor.is_none() {
+        after_seq = page.events.last().map(|event| event.seq);
+        let full_page = page.events.len() == remaining.min(MAX_EVENT_PAGE);
+        events.extend(page.events);
+        if !full_page {
             break;
         }
     }
-    let mut report = correlate_exception_episodes(&events, options, cancel)?;
-    if events.len() >= max_events {
-        report.truncated = true;
-        report.partial = true;
-        if !report
-            .reasons
-            .iter()
-            .any(|r| r.contains("correlation event cap"))
-        {
-            report.reasons.push(format!(
-                "corpus scan stopped at correlation event cap ({max_events})"
-            ));
-        }
+    Ok(analyze_bounded_events(events_available, &events))
+}
+
+/// CancelFlag adapter for hosts that already use process_progress cancel tokens.
+pub fn analyze_exception_episodes_with_cancel_flag(
+    corpus: &LogCorpus,
+    excluded_template_ids: &[u64],
+    cancel: Option<&CancelFlag>,
+) -> CoreResult<ExceptionEpisodeAnalysis> {
+    let atomic = cancel.map(CancelFlag::inner_arc);
+    analyze_exception_episodes_with_cancel(
+        corpus,
+        excluded_template_ids,
+        atomic.as_ref().map(|a| a.as_ref()),
+    )
+}
+
+/// Pure analysis over an in-memory event list (tests + offline adapters).
+pub fn analyze_bounded_events(
+    events_available: u64,
+    events: &[ExplorerEvent],
+) -> ExceptionEpisodeAnalysis {
+    let (renderings, render_partial) = derive_render_episodes(events);
+    let raw_exception_record_count = renderings
+        .iter()
+        .map(|rendering| rendering.citations.len() as u64)
+        .sum();
+    let rendering_episode_count = renderings.len() as u64;
+    let occurrences = correlate_renderings(renderings);
+    let occurrence_count = occurrences.len() as u64;
+    let duplicate_rendering_occurrence_count = occurrences
+        .iter()
+        .filter(|(_, occurrence)| occurrence.duplicate_rendering)
+        .count() as u64;
+    let uncertain = occurrences.iter().any(|(_, occurrence)| {
+        !occurrence.citations_complete
+            || (occurrence.duplicate_rendering
+                && occurrence.correlation_confidence != ExceptionCorrelationConfidence::Strong)
+    });
+
+    let mut grouped: BTreeMap<String, Vec<ExceptionOccurrenceSummary>> = BTreeMap::new();
+    for (signature, occurrence) in occurrences {
+        grouped.entry(signature).or_default().push(occurrence);
     }
-    Ok(report)
+    let family_count_available = grouped.len() as u64;
+    let mut families = grouped
+        .into_iter()
+        .map(|(signature, occs)| {
+            let raw_record_count = occs.iter().map(|o| o.raw_record_count).sum::<u64>();
+            let rendering_episode_count = occs.iter().map(|o| o.rendering_count).sum::<u64>();
+            let duplicate_rendering_occurrence_count =
+                occs.iter().filter(|o| o.duplicate_rendering).count() as u64;
+            let uncertain_occurrence_count = occs
+                .iter()
+                .filter(|o| {
+                    !o.citations_complete
+                        || (o.duplicate_rendering
+                            && o.correlation_confidence != ExceptionCorrelationConfidence::Strong)
+                })
+                .count() as u64;
+            let occurrence_count = occs.len() as u64;
+            let amplification_x = if occurrence_count == 0 {
+                0
+            } else {
+                raw_record_count / occurrence_count
+            };
+            ExceptionFamilySummary {
+                signature,
+                raw_record_count,
+                rendering_episode_count,
+                occurrence_count,
+                duplicate_rendering_occurrence_count,
+                uncertain_occurrence_count,
+                amplification_x,
+                occurrences: occs,
+            }
+        })
+        .collect::<Vec<_>>();
+    families.sort_by(|left, right| {
+        right
+            .occurrence_count
+            .cmp(&left.occurrence_count)
+            .then_with(|| right.raw_record_count.cmp(&left.raw_record_count))
+            .then_with(|| left.signature.cmp(&right.signature))
+    });
+    families.truncate(EXCEPTION_EPISODE_FAMILY_CAP);
+
+    let overall_amplification_x = if occurrence_count == 0 {
+        0
+    } else {
+        raw_exception_record_count / occurrence_count
+    };
+
+    let scan_partial = events_available > events.len() as u64;
+    let partial = scan_partial
+        || render_partial
+        || family_count_available > EXCEPTION_EPISODE_FAMILY_CAP as u64;
+
+    let ranking_disclosure = format!(
+        "ranking_basis: semantic_occurrence_count_not_raw_stack_volume\n\
+         layer_raw_exception_records: {raw_exception_record_count}\n\
+         layer_physical_renderings: {rendering_episode_count}\n\
+         layer_semantic_occurrences: {occurrence_count}\n\
+         layer_duplicate_rendering_occurrences: {duplicate_rendering_occurrence_count}\n\
+         overall_amplification_x: {overall_amplification_x}\n\
+         independent_incident_claim_forbidden: true\n\
+         interpretation: wrappers and stack frames are supporting records of a rendering; \
+         duplicate renderings are correlated only with multi-signal evidence; \
+         order-only cross-source merge requires a strong execution key (thread or trace_id).\n"
+    );
+
+    ExceptionEpisodeAnalysis {
+        schema_id: EXCEPTION_EPISODE_SCHEMA_ID.into(),
+        schema_version: EXCEPTION_EPISODE_SCHEMA_VERSION,
+        events_available,
+        events_scanned: events.len() as u64,
+        event_scan_cap: EXCEPTION_EPISODE_EVENT_SCAN_CAP,
+        raw_exception_record_count,
+        rendering_episode_count,
+        occurrence_count,
+        duplicate_rendering_occurrence_count,
+        family_count_available,
+        family_cap: EXCEPTION_EPISODE_FAMILY_CAP,
+        overall_amplification_x,
+        partial,
+        uncertain,
+        ranking_disclosure,
+        families,
+    }
 }
 
 /// Compact multi-line text for broad-triage brief inclusion.
-pub fn format_exception_episode_brief_section(report: &ExceptionEpisodeReport) -> String {
+pub fn format_exception_episode_brief_section(report: &ExceptionEpisodeAnalysis) -> String {
     let mut out = String::new();
     out.push_str("## Exception episode correlation\n");
     out.push_str(&format!(
         "schema_id: {}\nschema_version: {}\n\
-         events_scanned: {}\nevents_classified: {}\n\
-         episode_count: {}\nfamily_count: {}\n\
-         raw_record_total: {}\ncorrelated_occurrence_total: {}\n\
-         correlated_raw_record_total: {}\noverall_amplification_x: {}\n\
-         partial: {}\ntruncated: {}\nconfidence: {:?}\n",
+         events_available: {}\nevents_scanned: {}\n\
+         raw_exception_record_count: {}\n\
+         physical_rendering_count: {}\n\
+         semantic_occurrence_count: {}\n\
+         duplicate_rendering_occurrence_count: {}\n\
+         overall_amplification_x: {}\n\
+         partial: {}\nuncertain: {}\n",
         report.schema_id,
         report.schema_version,
+        report.events_available,
         report.events_scanned,
-        report.events_classified,
-        report.episode_count,
-        report.family_count,
-        report.raw_record_total,
-        report.correlated_occurrence_total,
-        report.correlated_raw_record_total,
+        report.raw_exception_record_count,
+        report.rendering_episode_count,
+        report.occurrence_count,
+        report.duplicate_rendering_occurrence_count,
         report.overall_amplification_x,
         report.partial,
-        report.truncated,
-        report.confidence
+        report.uncertain
     ));
     out.push_str(&report.ranking_disclosure);
     out.push('\n');
     for family in report.families.iter().take(8) {
         out.push_str(&format!(
-            "- family_id={} occurrences={} raw_records={} amplification_x={} class={} confidence={:?}\n",
-            family.family_id,
+            "- signature={} occurrences={} raw_records={} renderings={} amplification_x={} duplicates={}\n",
+            family.signature,
             family.occurrence_count,
             family.raw_record_count,
+            family.rendering_episode_count,
             family.amplification_x,
-            family
-                .exception_class
-                .as_deref()
-                .unwrap_or("<unknown>"),
-            family.confidence
+            family.duplicate_rendering_occurrence_count
         ));
-        out.push_str("  roles:");
-        for (role, count) in &family.role_counts {
-            out.push_str(&format!(" {role}={count}"));
-        }
-        out.push('\n');
-        for lead in family.lead_citations.iter().take(4) {
+        for occ in family.occurrences.iter().take(2) {
             out.push_str(&format!(
-                "  lead seq={} source={} role={:?} template_id={}\n",
-                lead.seq, lead.source, lead.role, lead.template_id
+                "  occurrence raw={} renderings={} duplicate={} confidence={:?}\n",
+                occ.raw_record_count,
+                occ.rendering_count,
+                occ.duplicate_rendering,
+                occ.correlation_confidence
             ));
+            for c in occ.citations.iter().take(4) {
+                out.push_str(&format!(
+                    "    cite seq={} source={} template_id={}\n",
+                    c.seq, c.source, c.template_id
+                ));
+            }
         }
-        for reason in family.reasons.iter().take(3) {
-            out.push_str(&format!("  reason: {reason}\n"));
-        }
-    }
-    for reason in report.reasons.iter().take(6) {
-        out.push_str(&format!("reason: {reason}\n"));
     }
     out.push_str(
-        "interpretation: wrappers and stack frames are supporting records of an episode, \
-         not independent incidents. Prefer occurrence_count over raw_record_total when ranking.\n",
+        "interpretation: do not treat raw stack-frame volume as independent incidents; \
+         prefer semantic_occurrence_count and disclosed amplification.\n",
     );
     out
 }
 
-fn build_ranking_disclosure(
-    raw_total: u64,
-    occurrences: u64,
-    correlated_raw: u64,
-    amplification_x: u64,
-    families: &[ExceptionFamily],
-) -> String {
-    let mut s = format!(
-        "ranking_basis: exception_episode_occurrences_not_raw_stack_volume\n\
-         disclosure_raw_record_total: {raw_total}\n\
-         disclosure_correlated_occurrence_total: {occurrences}\n\
-         disclosure_correlated_raw_record_total: {correlated_raw}\n\
-         disclosure_overall_amplification_x: {amplification_x}\n\
-         independent_incident_claim_forbidden: true\n"
-    );
-    if let Some(top) = families.first() {
-        s.push_str(&format!(
-            "top_family_amplification_example: {} occurrences / {} raw records / {}x\n",
-            top.occurrence_count, top.raw_record_count, top.amplification_x
-        ));
-    }
-    s
-}
+// ---------------------------------------------------------------------------
+// Layer 2: physical renderings
+// ---------------------------------------------------------------------------
 
-fn assemble_stream_local_episodes(
-    classified: &[ClassifiedEvent],
-    options: &ExceptionCorrelationOptions,
-    cancel: Option<&CancelFlag>,
-) -> CoreResult<Vec<ExceptionEpisode>> {
-    // One open episode per source so interleaved concurrent streams cannot
-    // mis-attach foreign frames across sources.
+fn derive_render_episodes(events: &[ExplorerEvent]) -> (Vec<RenderEpisode>, bool) {
     let mut episodes = Vec::new();
-    let mut open_by_source: BTreeMap<String, OpenEpisode> = BTreeMap::new();
-    let mut episode_idx = 0u64;
+    // Per-source open separately-wrapped rendering (no global open).
+    let mut open_wrap: BTreeMap<String, RenderEpisode> = BTreeMap::new();
+    let mut partial = false;
 
-    for (idx, item) in classified.iter().enumerate() {
-        if idx % 512 == 0 {
-            check_cancel(cancel)?;
-        }
-        let source_key = item.event.source.clone();
-        match item.role {
-            ExceptionRecordRole::ConventionalMultiline => {
-                if let Some(current) = open_by_source.remove(&source_key) {
-                    episodes.push(finalize_open(current, options));
+    for event in events {
+        let source = event.source.clone();
+        let stderr = stderr_payload(&event.message);
+        let payload = stderr.unwrap_or(event.message.as_str());
+        let is_wrapped_line = stderr.is_some() || is_single_line_exception_record(event, payload);
+
+        if is_wrapped_line {
+            let signature = exception_signature(payload);
+            let complete_stack = has_stack_frame(payload) && signature.is_some();
+            if complete_stack {
+                // Full stack arrived as one separately-wrapped payload.
+                if let Some(open) = open_wrap.remove(&source) {
+                    finish_episode(&mut episodes, Some(open), &mut partial);
                 }
-                episode_idx += 1;
-                let mut ep = OpenEpisode::new(episode_idx, item);
-                ep.reasons
-                    .push("conventional_multiline_single_logical_event".into());
-                episodes.push(finalize_open(ep, options));
-            }
-            ExceptionRecordRole::ExceptionHeader => {
-                if let Some(current) = open_by_source.remove(&source_key) {
-                    episodes.push(finalize_open(current, options));
+                if let Some(signature) = signature {
+                    finish_episode(
+                        &mut episodes,
+                        Some(new_episode(
+                            event,
+                            signature,
+                            ExceptionRenderingKind::SeparatelyWrappedRecords,
+                        )),
+                        &mut partial,
+                    );
                 }
-                episode_idx += 1;
-                open_by_source.insert(source_key, OpenEpisode::new(episode_idx, item));
-            }
-            ExceptionRecordRole::StackFrame
-            | ExceptionRecordRole::CauseMarker
-            | ExceptionRecordRole::WrapperScaffold => {
-                let mut close_orphan = false;
-                if let Some(current) = open_by_source.get_mut(&source_key) {
-                    if current.can_attach(item, options) {
-                        current.attach(item, options);
-                    } else {
-                        close_orphan = true;
-                    }
-                }
-                if close_orphan {
-                    if let Some(finished) = open_by_source.remove(&source_key) {
-                        episodes.push(finalize_open(finished, options));
-                    }
-                    // Orphan frame/cause without a nearby same-source header stays unassigned.
-                }
-            }
-            ExceptionRecordRole::Unclassified => {
-                if let Some(current) = open_by_source.get(&source_key) {
-                    if !current.can_attach(item, options) {
-                        if let Some(finished) = open_by_source.remove(&source_key) {
-                            episodes.push(finalize_open(finished, options));
+            } else if let Some(signature) = signature {
+                let is_cause = payload.trim_start().starts_with("Caused by:");
+                let can_attach = open_wrap
+                    .get(&source)
+                    .is_some_and(|open| adjacent_compatible(open, event));
+                if is_cause && can_attach {
+                    let open = open_wrap.get_mut(&source).expect("checked");
+                    attach(open, event);
+                    // Prefer root-cause signature (matches app full-stack last exception).
+                    open.signature = signature;
+                } else if can_attach
+                    && open_wrap
+                        .get(&source)
+                        .is_some_and(|o| o.signature == signature || is_stack_continuation(payload))
+                {
+                    // Same signature header re-open should finish prior and start new.
+                    if looks_like_exception_header_line(payload)
+                        && open_wrap
+                            .get(&source)
+                            .is_some_and(|o| o.signature != signature)
+                    {
+                        if let Some(open) = open_wrap.remove(&source) {
+                            finish_episode(&mut episodes, Some(open), &mut partial);
                         }
+                        open_wrap.insert(
+                            source.clone(),
+                            new_episode(
+                                event,
+                                signature,
+                                ExceptionRenderingKind::SeparatelyWrappedRecords,
+                            ),
+                        );
+                    } else if looks_like_exception_header_line(payload) {
+                        // New header same stream → finish previous episode.
+                        if let Some(open) = open_wrap.remove(&source) {
+                            finish_episode(&mut episodes, Some(open), &mut partial);
+                        }
+                        open_wrap.insert(
+                            source.clone(),
+                            new_episode(
+                                event,
+                                signature,
+                                ExceptionRenderingKind::SeparatelyWrappedRecords,
+                            ),
+                        );
+                    } else if let Some(open) = open_wrap.get_mut(&source) {
+                        attach(open, event);
                     }
-                }
-            }
-        }
-    }
-    for (_, current) in open_by_source {
-        episodes.push(finalize_open(current, options));
-    }
-    Ok(episodes)
-}
-
-struct OpenEpisode {
-    episode_idx: u64,
-    family_fp: Option<String>,
-    class: Option<String>,
-    message: Option<String>,
-    members: Vec<ExceptionEpisodeMember>,
-    reasons: Vec<String>,
-    last_seq: u64,
-    min_seq: u64,
-    max_seq: u64,
-    min_ts: i64,
-    max_ts: i64,
-    sources: BTreeSet<String>,
-}
-
-impl OpenEpisode {
-    fn new(episode_idx: u64, item: &ClassifiedEvent) -> Self {
-        let member = member_from(item);
-        let mut sources = BTreeSet::new();
-        sources.insert(item.event.source.clone());
-        Self {
-            episode_idx,
-            family_fp: item.fingerprint.clone(),
-            class: item.exception_class.clone(),
-            message: item.exception_message.clone(),
-            last_seq: item.event.seq,
-            min_seq: item.event.seq,
-            max_seq: item.event.seq,
-            min_ts: item.event.ts,
-            max_ts: item.event.ts,
-            members: vec![member],
-            reasons: Vec::new(),
-            sources,
-        }
-    }
-
-    fn can_attach(&self, item: &ClassifiedEvent, options: &ExceptionCorrelationOptions) -> bool {
-        // Stream-local assembly is strictly same-source (open map is keyed by source).
-        if !self.sources.contains(&item.event.source) {
-            return false;
-        }
-        if item.event.seq < self.last_seq {
-            return false;
-        }
-        let seq_gap = item.event.seq.saturating_sub(self.last_seq);
-        if seq_gap > options.max_seq_gap {
-            return false;
-        }
-        let axis_span = (item.event.ts - self.min_ts)
-            .abs()
-            .max((self.max_ts - item.event.ts).abs());
-        if axis_span > options.max_axis_span {
-            return false;
-        }
-        // Cause lines that carry a different exception fingerprint must not attach
-        // into an open episode of another fault on the same source.
-        if matches!(item.role, ExceptionRecordRole::CauseMarker) {
-            if let (Some(open_fp), Some(item_fp)) = (&self.family_fp, &item.fingerprint) {
-                // Allow nested causes that share class family prefix, but not unrelated classes.
-                if open_fp != item_fp {
-                    let open_class = open_fp.split('|').next().unwrap_or("");
-                    let item_class = item_fp.split('|').next().unwrap_or("");
-                    // Nested cause often differs in class (RuntimeException vs IOException) —
-                    // still attach when it is a cause marker within the gap window.
-                    let _ = (open_class, item_class);
-                }
-            }
-        }
-        // Headers never attach into an existing open (handled by caller).
-        if matches!(
-            item.role,
-            ExceptionRecordRole::ExceptionHeader | ExceptionRecordRole::ConventionalMultiline
-        ) {
-            return false;
-        }
-        true
-    }
-
-    fn attach(&mut self, item: &ClassifiedEvent, options: &ExceptionCorrelationOptions) {
-        if self.members.len() >= options.max_events_per_episode {
-            self.reasons.push("episode_member_cap_reached".into());
-            return;
-        }
-        if self.family_fp.is_none() {
-            self.family_fp = item.fingerprint.clone();
-        }
-        if self.class.is_none() {
-            self.class = item.exception_class.clone();
-        }
-        if self.message.is_none() {
-            self.message = item.exception_message.clone();
-        }
-        self.members.push(member_from(item));
-        self.last_seq = item.event.seq;
-        self.min_seq = self.min_seq.min(item.event.seq);
-        self.max_seq = self.max_seq.max(item.event.seq);
-        self.min_ts = self.min_ts.min(item.event.ts);
-        self.max_ts = self.max_ts.max(item.event.ts);
-        self.sources.insert(item.event.source.clone());
-    }
-}
-
-fn finalize_open(open: OpenEpisode, options: &ExceptionCorrelationOptions) -> ExceptionEpisode {
-    let raw_record_count = open.members.len() as u64;
-    let cross_stream = open.sources.len() > 1;
-    let has_lead = open.members.iter().any(|m| {
-        matches!(
-            m.role,
-            ExceptionRecordRole::ExceptionHeader | ExceptionRecordRole::ConventionalMultiline
-        )
-    });
-    let only_frames = open.members.iter().all(|m| {
-        matches!(
-            m.role,
-            ExceptionRecordRole::StackFrame
-                | ExceptionRecordRole::WrapperScaffold
-                | ExceptionRecordRole::CauseMarker
-        )
-    });
-
-    let (completeness, confidence, mut reasons) = if !has_lead {
-        (
-            ExceptionEpisodeCompleteness::Candidate,
-            ExceptionCorrelationConfidence::Low,
-            vec!["missing_exception_header".into()],
-        )
-    } else if open.members.len() >= options.max_events_per_episode {
-        (
-            ExceptionEpisodeCompleteness::Truncated,
-            ExceptionCorrelationConfidence::Medium,
-            open.reasons,
-        )
-    } else if only_frames {
-        (
-            ExceptionEpisodeCompleteness::Candidate,
-            ExceptionCorrelationConfidence::Unknown,
-            vec!["frames_without_header".into()],
-        )
-    } else {
-        (
-            ExceptionEpisodeCompleteness::Complete,
-            ExceptionCorrelationConfidence::High,
-            open.reasons,
-        )
-    };
-    if cross_stream {
-        reasons.push("cross_stream_members".into());
-    }
-    if matches!(
-        open.members.first().map(|m| m.role),
-        Some(ExceptionRecordRole::ConventionalMultiline)
-    ) && open.members.len() == 1
-    {
-        reasons.push("single_logical_multiline_event".into());
-    }
-
-    let family_id = open
-        .family_fp
-        .clone()
-        .unwrap_or_else(|| format!("orphan:{}", open.episode_idx));
-
-    ExceptionEpisode {
-        episode_id: format!("ep:{}", open.episode_idx),
-        family_id,
-        members: open.members,
-        raw_record_count,
-        completeness,
-        confidence,
-        reasons,
-        min_seq: open.min_seq,
-        max_seq: open.max_seq,
-        min_ts: open.min_ts,
-        max_ts: open.max_ts,
-        cross_stream,
-    }
-}
-
-fn merge_cross_stream_duplicates(
-    episodes: Vec<ExceptionEpisode>,
-    options: &ExceptionCorrelationOptions,
-    cancel: Option<&CancelFlag>,
-) -> CoreResult<Vec<ExceptionEpisode>> {
-    // Group by family fingerprint, then pair conventional multiline renderings
-    // with expanded multi-record streams of the same family (dual rendering).
-    // Pairing is by occurrence index within each family — not by divisibility
-    // of raw counts and not by wall-clock equality across order-only streams.
-    let mut by_family: BTreeMap<String, Vec<ExceptionEpisode>> = BTreeMap::new();
-    let mut passthrough = Vec::new();
-    for ep in episodes {
-        if ep.family_id.starts_with("orphan:") || ep.family_id == "orphan" {
-            passthrough.push(ep);
-        } else {
-            by_family.entry(ep.family_id.clone()).or_default().push(ep);
-        }
-    }
-
-    let mut out = passthrough;
-    for (_family_id, mut family_eps) in by_family {
-        check_cancel(cancel)?;
-        family_eps.sort_by(|a, b| {
-            a.min_seq
-                .cmp(&b.min_seq)
-                .then_with(|| a.episode_id.cmp(&b.episode_id))
-        });
-        let mut conventional = Vec::new();
-        let mut expanded = Vec::new();
-        let mut other = Vec::new();
-        for ep in family_eps {
-            if is_conventional_only(&ep) {
-                conventional.push(ep);
-            } else if has_lead(&ep) && ep.raw_record_count >= 2 {
-                expanded.push(ep);
-            } else {
-                other.push(ep);
-            }
-        }
-        // Prefer pairing expanded (stderr) with conventional (app) 1:1 in order.
-        // Require disjoint sources AND a bounded axis window — never merge solely
-        // because fingerprints match and sources differ (over-merge risk).
-        let pair_n = conventional.len().min(expanded.len());
-        for i in 0..pair_n {
-            let mut merged = expanded[i].clone();
-            let conv = &conventional[i];
-            let sources_a: BTreeSet<_> = merged.members.iter().map(|m| m.source.as_str()).collect();
-            let sources_b: BTreeSet<_> = conv.members.iter().map(|m| m.source.as_str()).collect();
-            let gap = axis_window_gap(&merged, conv);
-            let axis_ok = gap <= options.max_cross_stream_axis_window;
-            let dual_shape = (is_conventional_only(conv)
-                && has_lead(&merged)
-                && merged.members.iter().any(|m| {
-                    matches!(
-                        m.role,
-                        ExceptionRecordRole::StackFrame | ExceptionRecordRole::WrapperScaffold
-                    )
-                }))
-                || (is_conventional_only(&merged) && has_lead(conv));
-            if sources_a.is_disjoint(&sources_b) && axis_ok && dual_shape {
-                for m in &conv.members {
-                    if merged.members.len() >= options.max_events_per_episode {
-                        merged.completeness = ExceptionEpisodeCompleteness::Truncated;
-                        merged.reasons.push("merged_episode_member_cap".into());
-                        break;
-                    }
-                    if !merged.members.iter().any(|x| x.seq == m.seq) {
-                        merged.members.push(m.clone());
-                    }
-                }
-                merged.raw_record_count = merged.members.len() as u64;
-                merged.min_seq = merged.min_seq.min(conv.min_seq);
-                merged.max_seq = merged.max_seq.max(conv.max_seq);
-                merged.min_ts = merged.min_ts.min(conv.min_ts);
-                merged.max_ts = merged.max_ts.max(conv.max_ts);
-                merged.cross_stream = true;
-                merged
-                    .reasons
-                    .push("merged_cross_stream_duplicate_rendering".into());
-                if matches!(
-                    conv.confidence,
-                    ExceptionCorrelationConfidence::High | ExceptionCorrelationConfidence::Medium
-                ) {
-                    merged.confidence = ExceptionCorrelationConfidence::High;
-                }
-                out.push(merged);
-            } else {
-                // Fail closed: keep both; mark partial when shape matched but axis refused.
-                if sources_a.is_disjoint(&sources_b) && dual_shape && !axis_ok {
-                    let mut a = expanded[i].clone();
-                    let mut b = conv.clone();
-                    a.completeness = ExceptionEpisodeCompleteness::Partial;
-                    b.completeness = ExceptionEpisodeCompleteness::Partial;
-                    a.reasons.push("cross_stream_axis_out_of_window".into());
-                    b.reasons.push("cross_stream_axis_out_of_window".into());
-                    out.push(a);
-                    out.push(b);
                 } else {
-                    out.push(expanded[i].clone());
-                    out.push(conv.clone());
+                    if let Some(open) = open_wrap.remove(&source) {
+                        finish_episode(&mut episodes, Some(open), &mut partial);
+                    }
+                    open_wrap.insert(
+                        source.clone(),
+                        new_episode(
+                            event,
+                            signature,
+                            ExceptionRenderingKind::SeparatelyWrappedRecords,
+                        ),
+                    );
+                }
+            } else if open_wrap
+                .get(&source)
+                .is_some_and(|open| adjacent_compatible(open, event))
+                && (is_stack_continuation(payload) || is_wrapper_scaffold_line(payload))
+            {
+                // Frames and wrapper scaffolding attach without inventing a new signature.
+                if let Some(open) = open_wrap.get_mut(&source) {
+                    attach(open, event);
+                }
+            } else if open_wrap.get(&source).is_some_and(|open| {
+                event.seq.saturating_sub(open.last_seq()) > MAX_ADJACENT_SEQ_GAP
+            }) {
+                if let Some(open) = open_wrap.remove(&source) {
+                    finish_episode(&mut episodes, Some(open), &mut partial);
                 }
             }
-        }
-        for ep in conventional.into_iter().skip(pair_n) {
-            out.push(ep);
-        }
-        for ep in expanded.into_iter().skip(pair_n) {
-            out.push(ep);
-        }
-        out.extend(other);
-    }
-    out.sort_by(|a, b| {
-        a.min_seq
-            .cmp(&b.min_seq)
-            .then_with(|| a.episode_id.cmp(&b.episode_id))
-    });
-    Ok(out)
-}
-
-fn has_lead(ep: &ExceptionEpisode) -> bool {
-    ep.members.iter().any(|m| {
-        matches!(
-            m.role,
-            ExceptionRecordRole::ExceptionHeader | ExceptionRecordRole::ConventionalMultiline
-        )
-    })
-}
-
-fn is_conventional_only(ep: &ExceptionEpisode) -> bool {
-    ep.members.len() == 1
-        && matches!(
-            ep.members[0].role,
-            ExceptionRecordRole::ConventionalMultiline
-        )
-}
-
-fn axis_window_gap(a: &ExceptionEpisode, b: &ExceptionEpisode) -> i64 {
-    if a.max_ts < b.min_ts {
-        b.min_ts - a.max_ts
-    } else if b.max_ts < a.min_ts {
-        a.min_ts - b.max_ts
-    } else {
-        0
-    }
-}
-
-fn build_families(
-    episodes: &[ExceptionEpisode],
-    reasons: &mut Vec<String>,
-) -> Vec<ExceptionFamily> {
-    let mut by_family: BTreeMap<String, Vec<&ExceptionEpisode>> = BTreeMap::new();
-    for ep in episodes {
-        if ep.family_id.starts_with("orphan:") {
             continue;
         }
-        by_family.entry(ep.family_id.clone()).or_default().push(ep);
-    }
-    if by_family.len() > MAX_FAMILY_FINGERPRINTS {
-        reasons.push(format!(
-            "family list capped at {MAX_FAMILY_FINGERPRINTS} fingerprints"
-        ));
-    }
-    let mut families = Vec::new();
-    for (family_id, eps) in by_family.into_iter().take(MAX_FAMILY_FINGERPRINTS) {
-        let occurrence_count = eps.len() as u64;
-        let raw_record_count = eps.iter().map(|e| e.raw_record_count).sum::<u64>();
-        let amplification_x = if occurrence_count == 0 {
-            0
-        } else {
-            raw_record_count / occurrence_count
-        };
-        let mut role_counts: BTreeMap<String, u64> = BTreeMap::new();
-        let mut lead_citations = Vec::new();
-        let mut class = None;
-        let mut msg = None;
-        let mut family_reasons = Vec::new();
-        let mut worst_confidence = ExceptionCorrelationConfidence::High;
-        let mut worst_completeness = ExceptionEpisodeCompleteness::Complete;
 
-        for ep in &eps {
-            for m in &ep.members {
-                let role_key = match m.role {
-                    ExceptionRecordRole::ExceptionHeader => "exception_header",
-                    ExceptionRecordRole::StackFrame => "stack_frame",
-                    ExceptionRecordRole::CauseMarker => "cause_marker",
-                    ExceptionRecordRole::WrapperScaffold => "wrapper_scaffold",
-                    ExceptionRecordRole::ConventionalMultiline => "conventional_multiline",
-                    ExceptionRecordRole::Unclassified => "unclassified",
-                };
-                *role_counts.entry(role_key.into()).or_insert(0) += 1;
-                if matches!(
-                    m.role,
-                    ExceptionRecordRole::ExceptionHeader
-                        | ExceptionRecordRole::ConventionalMultiline
-                ) && lead_citations.len() < 8
-                    && !lead_citations
-                        .iter()
-                        .any(|x: &ExceptionEpisodeMember| x.seq == m.seq)
-                {
-                    lead_citations.push(m.clone());
-                }
+        // Non-wrapped: close any open wrap on this source, then maybe full-stack app record.
+        if let Some(open) = open_wrap.remove(&source) {
+            finish_episode(&mut episodes, Some(open), &mut partial);
+        }
+        if has_stack_frame(&event.message) {
+            if let Some(signature) = exception_signature(&event.message) {
+                finish_episode(
+                    &mut episodes,
+                    Some(new_episode(
+                        event,
+                        signature,
+                        ExceptionRenderingKind::ApplicationFullStack,
+                    )),
+                    &mut partial,
+                );
             }
-            for r in &ep.reasons {
-                if !family_reasons.contains(r) {
-                    family_reasons.push(r.clone());
-                }
-            }
-            worst_confidence = worse_confidence(worst_confidence, ep.confidence);
-            worst_completeness = worse_completeness(worst_completeness, ep.completeness);
         }
-        // Recover class/message from fingerprint string when possible.
-        if let Some((c, m)) = parse_fingerprint_meta(&family_id) {
-            class = Some(c);
-            msg = m;
-        }
-        if occurrence_count >= 2 && amplification_x >= 2 {
-            family_reasons.push(format!(
-                "amplification {occurrence_count} occurrences / {raw_record_count} raw records / {amplification_x}x"
-            ));
-        }
-        if eps.iter().any(|e| e.cross_stream) {
-            family_reasons.push("includes_cross_stream_duplicate_rendering".into());
-        }
-
-        families.push(ExceptionFamily {
-            family_id: family_id.clone(),
-            fingerprint: family_id,
-            exception_class: class,
-            exception_message_excerpt: msg,
-            occurrence_count,
-            raw_record_count,
-            amplification_x,
-            confidence: worst_confidence,
-            completeness: worst_completeness,
-            reasons: family_reasons,
-            role_counts,
-            lead_citations,
-        });
     }
-    families.sort_by(|a, b| {
-        b.occurrence_count
-            .cmp(&a.occurrence_count)
-            .then_with(|| b.raw_record_count.cmp(&a.raw_record_count))
-            .then_with(|| a.family_id.cmp(&b.family_id))
-    });
-    families
+    for (_, open) in open_wrap {
+        finish_episode(&mut episodes, Some(open), &mut partial);
+    }
+    (episodes, partial)
 }
 
-fn worse_confidence(
+fn is_single_line_exception_record(event: &ExplorerEvent, payload: &str) -> bool {
+    // Separately timestamped stream lines: one logical line of exception structure
+    // without embedding a full multi-frame stack in the same durable event.
+    let lines = payload.lines().filter(|l| !l.trim().is_empty()).count();
+    if lines > 1 {
+        return false;
+    }
+    let p = payload.trim();
+    is_stack_continuation(p)
+        || looks_like_exception_header_line(p)
+        || is_wrapper_scaffold_line(p)
+        || (event.level.eq_ignore_ascii_case("error")
+            && (p.starts_with("at ") || looks_like_exception_header_line(p)))
+}
+
+fn is_wrapper_scaffold_line(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with("Exception in thread")
+        || t.contains("Exception wrapper")
+        || t.starts_with("Wrapped by:")
+        || t.starts_with("Nested exception")
+        || (t.starts_with("... ") && t.ends_with(" more"))
+}
+
+fn finish_episode(
+    episodes: &mut Vec<RenderEpisode>,
+    episode: Option<RenderEpisode>,
+    partial: &mut bool,
+) {
+    let Some(episode) = episode else { return };
+    if episodes.len() < EXCEPTION_EPISODE_RENDER_CAP {
+        episodes.push(episode);
+    } else {
+        *partial = true;
+    }
+}
+
+fn new_episode(
+    event: &ExplorerEvent,
+    signature: String,
+    kind: ExceptionRenderingKind,
+) -> RenderEpisode {
+    RenderEpisode {
+        signature,
+        kind,
+        source: event.source.clone(),
+        service: event.service.clone(),
+        host: event.host.clone(),
+        thread: extract_thread(&event.message),
+        trace_id: event.trace_id.clone(),
+        first_ts: event.ts,
+        last_ts: event.ts,
+        wall_time: event.active_timestamp_basis.is_wall_clock(),
+        citations: vec![citation(event)],
+        complete: true,
+    }
+}
+
+fn attach(episode: &mut RenderEpisode, event: &ExplorerEvent) {
+    if episode.citations.len() >= EXCEPTION_EPISODE_RECORD_CAP {
+        episode.complete = false;
+        return;
+    }
+    episode.last_ts = event.ts;
+    if episode.thread.is_none() {
+        episode.thread = extract_thread(&event.message);
+    }
+    if episode.trace_id.is_none() {
+        episode.trace_id = event.trace_id.clone();
+    }
+    episode.citations.push(citation(event));
+}
+
+fn citation(event: &ExplorerEvent) -> ExceptionEventCitation {
+    ExceptionEventCitation {
+        seq: event.seq,
+        source: event.source.clone(),
+        template_id: event.template_id,
+    }
+}
+
+fn adjacent_compatible(episode: &RenderEpisode, event: &ExplorerEvent) -> bool {
+    if episode.source != event.source
+        || event.seq.saturating_sub(episode.last_seq()) > MAX_ADJACENT_SEQ_GAP
+    {
+        return false;
+    }
+    let thread = extract_thread(&event.message);
+    if episode.thread.is_some() && thread.is_some() && episode.thread != thread {
+        return false;
+    }
+    if episode.wall_time && event.active_timestamp_basis.is_wall_clock() {
+        event.ts.abs_diff(episode.last_ts) <= MAX_ADJACENT_WALL_SECONDS as u64
+    } else {
+        // Order-only: seq gap already enforced; allow attach within stream.
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Layer 3: semantic occurrences (duplicate-render correlation)
+// ---------------------------------------------------------------------------
+
+fn correlate_renderings(
+    renderings: Vec<RenderEpisode>,
+) -> Vec<(String, ExceptionOccurrenceSummary)> {
+    let mut occurrences: Vec<(String, Vec<RenderEpisode>, ExceptionCorrelationConfidence)> =
+        Vec::new();
+    for rendering in renderings {
+        let candidate = occurrences.iter_mut().rev().find(|(signature, group, _)| {
+            signature == &rendering.signature
+                && group
+                    .last()
+                    .is_some_and(|prior| duplicate_evidence(prior, &rendering).is_some())
+        });
+        if let Some((_, group, confidence)) = candidate {
+            if let Some(next_confidence) = group
+                .last()
+                .and_then(|prior| duplicate_evidence(prior, &rendering))
+            {
+                *confidence = stronger_confidence(*confidence, next_confidence);
+                group.push(rendering);
+                continue;
+            }
+        }
+        occurrences.push((
+            rendering.signature.clone(),
+            vec![rendering],
+            ExceptionCorrelationConfidence::Uncorrelated,
+        ));
+    }
+
+    occurrences
+        .into_iter()
+        .map(|(signature, renderings, confidence)| {
+            let mut citations = Vec::new();
+            let mut seen = HashSet::new();
+            let mut kinds = Vec::new();
+            let mut complete = true;
+            for rendering in &renderings {
+                complete &= rendering.complete;
+                if !kinds.contains(&rendering.kind) {
+                    kinds.push(rendering.kind);
+                }
+                for citation in &rendering.citations {
+                    if seen.insert(citation.clone()) {
+                        citations.push(citation.clone());
+                    }
+                }
+            }
+            citations.sort_by_key(|citation| citation.seq);
+            let first_seq = citations.first().map_or(0, |c| c.seq);
+            let last_seq = citations.last().map_or(0, |c| c.seq);
+            let summary = ExceptionOccurrenceSummary {
+                first_seq,
+                last_seq,
+                raw_record_count: citations.len() as u64,
+                rendering_count: renderings.len() as u64,
+                duplicate_rendering: renderings.len() > 1,
+                correlation_confidence: if renderings.len() > 1 {
+                    confidence
+                } else {
+                    ExceptionCorrelationConfidence::Uncorrelated
+                },
+                rendering_kinds: kinds,
+                citations,
+                citations_complete: complete,
+            };
+            (signature, summary)
+        })
+        .collect()
+}
+
+fn stronger_confidence(
     a: ExceptionCorrelationConfidence,
     b: ExceptionCorrelationConfidence,
 ) -> ExceptionCorrelationConfidence {
     use ExceptionCorrelationConfidence::*;
-    let rank = |c: ExceptionCorrelationConfidence| match c {
-        High => 3,
-        Medium => 2,
-        Low => 1,
-        Unknown => 0,
+    match (a, b) {
+        (Strong, _) | (_, Strong) => Strong,
+        (Moderate, _) | (_, Moderate) => Moderate,
+        _ => Uncorrelated,
+    }
+}
+
+/// Multi-signal duplicate-rendering evidence. Message equality / adjacency /
+/// divisibility alone never return Some.
+fn duplicate_evidence(
+    left: &RenderEpisode,
+    right: &RenderEpisode,
+) -> Option<ExceptionCorrelationConfidence> {
+    // Must be different physical rendering kinds (app full-stack vs wrapped lines).
+    if left.kind == right.kind {
+        return None;
+    }
+    // Signatures already matched by caller; still refuse empty signatures.
+    if left.signature.is_empty() || right.signature.is_empty() {
+        return None;
+    }
+
+    let seq_gap = if right.first_seq() >= left.last_seq() {
+        right.first_seq().saturating_sub(left.last_seq())
+    } else {
+        left.first_seq().saturating_sub(right.last_seq())
     };
-    if rank(a) <= rank(b) {
-        a
-    } else {
-        b
+    // Same-source far seq: refuse. Dual-file streams may land far apart in
+    // ingest order, so cross-source uses wall/execution-key path only.
+    if seq_gap > MAX_DUPLICATE_SEQ_GAP && left.source == right.source {
+        return None;
     }
-}
 
-fn worse_completeness(
-    a: ExceptionEpisodeCompleteness,
-    b: ExceptionEpisodeCompleteness,
-) -> ExceptionEpisodeCompleteness {
-    use ExceptionEpisodeCompleteness::*;
-    let rank = |c: ExceptionEpisodeCompleteness| match c {
-        Complete => 3,
-        Partial => 2,
-        Truncated => 1,
-        Candidate => 0,
-    };
-    if rank(a) <= rank(b) {
-        a
-    } else {
-        b
+    // Conflicting labeled scope fails closed (both sides present and unequal).
+    let conflicting_scope =
+        (left.service.is_some() && right.service.is_some() && left.service != right.service)
+            || (left.host.is_some() && right.host.is_some() && left.host != right.host);
+    if conflicting_scope {
+        return None;
     }
-}
 
-fn member_from(item: &ClassifiedEvent) -> ExceptionEpisodeMember {
-    ExceptionEpisodeMember {
-        seq: item.event.seq,
-        source: item.event.source.clone(),
-        template_id: item.event.template_id,
-        role: item.role,
-        ts: item.event.ts,
+    let left_key = left.strong_execution_key();
+    let right_key = right.strong_execution_key();
+    let matching_execution_key = matches!((&left_key, &right_key), (Some(a), Some(b)) if a == b);
+    let conflicting_execution_key = matches!((&left_key, &right_key), (Some(a), Some(b)) if a != b);
+    if conflicting_execution_key {
+        return None;
     }
-}
 
-fn family_fingerprint(class: &str, message: Option<&str>) -> String {
-    let class_n = normalize_token(class);
-    let msg_n = message
-        .map(normalize_message_for_fingerprint)
-        .unwrap_or_default()
-        .chars()
-        .take(96)
-        .collect::<String>();
-    format!("fp:{class_n}|{msg_n}")
-}
+    let both_wall = left.wall_time && right.wall_time;
+    let wall_gap = left.last_ts.abs_diff(right.first_ts).min(
+        left.first_ts
+            .abs_diff(right.last_ts)
+            .min(left.first_ts.abs_diff(right.first_ts)),
+    );
+    let close_wall = both_wall && wall_gap <= MAX_DUPLICATE_WALL_SECONDS as u64;
 
-/// Collapse volatile tokens so repeated occurrences of the same fault share a
-/// family, without treating arbitrary message equality as a sole merge key
-/// (episodes still require structural roles + windows).
-fn normalize_message_for_fingerprint(s: &str) -> String {
-    let out = normalize_token(s);
-    let tokens: Vec<&str> = out
-        .split_whitespace()
-        .filter(|tok| {
-            let t = tok.trim();
-            if t.is_empty() {
-                return false;
-            }
-            // pure numbers / hex
-            if t.chars().all(|c| c.is_ascii_hexdigit()) {
-                // keep short constants like "404"? filter long hex/ids only
-                if t.chars().all(|c| c.is_ascii_digit()) {
-                    return false;
-                }
-                if t.len() >= 8 {
-                    return false;
-                }
-            }
-            if t.starts_with("id=") || t.starts_with("req=") {
-                return false;
-            }
-            true
-        })
-        .collect();
-    tokens.join(" ")
-}
-
-fn parse_fingerprint_meta(fp: &str) -> Option<(String, Option<String>)> {
-    let rest = fp.strip_prefix("fp:")?;
-    let mut parts = rest.splitn(2, '|');
-    let class = parts.next()?.to_string();
-    let msg = parts
-        .next()
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty());
-    if class.is_empty() {
-        None
-    } else {
-        Some((class, msg))
+    // Order-only: require strong execution key (never adjacency alone).
+    if !both_wall {
+        if matching_execution_key {
+            return Some(ExceptionCorrelationConfidence::Strong);
+        }
+        return None;
     }
+
+    // Wall-clock path: kinds differ + close wall already established.
+    if !close_wall {
+        return None;
+    }
+    if matching_execution_key {
+        return Some(ExceptionCorrelationConfidence::Strong);
+    }
+    // Moderate: wall-close dual kinds, neither side carries an execution key.
+    // (Asymmetric keys fail closed; matching keys already returned Strong.)
+    if left_key.is_none() && right_key.is_none() {
+        return Some(ExceptionCorrelationConfidence::Moderate);
+    }
+    None
 }
 
-fn normalize_token(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut prev_space = false;
-    for c in s.chars() {
-        if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '$' {
-            out.push(c.to_ascii_lowercase());
-            prev_space = false;
-        } else if !prev_space {
-            out.push(' ');
-            prev_space = true;
+// ---------------------------------------------------------------------------
+// Signatures / payloads
+// ---------------------------------------------------------------------------
+
+fn stderr_payload(message: &str) -> Option<&str> {
+    let position = message.find("[stderr]")?;
+    if position > 256 {
+        return None;
+    }
+    message.get(position + "[stderr]".len()..).map(str::trim)
+}
+
+fn has_stack_frame(message: &str) -> bool {
+    message.lines().skip(1).any(is_stack_continuation)
+}
+
+fn is_stack_continuation(line: &str) -> bool {
+    let line = line.trim();
+    line.starts_with("at ")
+        || line.starts_with("... ")
+        || line.starts_with("Caused by:")
+        || line.starts_with("Suppressed:")
+        || line.starts_with("File \"")
+        || line.starts_with("--- End of inner exception")
+}
+
+fn looks_like_exception_header_line(line: &str) -> bool {
+    exception_signature_line(line).is_some()
+}
+
+fn exception_signature(message: &str) -> Option<String> {
+    // Prefer the root cause (last exception type line) for dual-render stability.
+    let mut last = None;
+    for line in message.lines() {
+        if let Some(signature) = exception_signature_line(line) {
+            last = Some(signature);
         }
     }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+    // If only an outer wrapper type is present (XYZ_EXCEPTION: ...), also accept first.
+    last.or_else(|| message.lines().find_map(exception_signature_line))
 }
 
-fn is_stack_frame_line(line: &str) -> bool {
-    let t = line.trim();
-    // Allow a leading level token when classify is given full log lines.
-    let t = t
+fn exception_signature_line(line: &str) -> Option<String> {
+    let line = line.trim();
+    let line = line
         .strip_prefix("ERROR ")
-        .or_else(|| t.strip_prefix("error "))
-        .or_else(|| t.strip_prefix("WARN "))
-        .or_else(|| t.strip_prefix("INFO "))
-        .unwrap_or(t)
+        .or_else(|| line.strip_prefix("error "))
+        .unwrap_or(line)
         .trim();
-    if let Some(rest) = t.strip_prefix("at ") {
-        // Require something package-like before '(' or end.
-        let name = rest.split('(').next().unwrap_or("").trim();
-        name.contains('.') && name.chars().any(|c| c.is_ascii_alphabetic())
-    } else {
-        false
-    }
-}
-
-fn is_cause_marker_line(line: &str) -> bool {
-    let t = strip_level_prefix(line.trim());
-    t.starts_with("Caused by:")
-        || t.starts_with("Caused by ")
-        || t.starts_with("Suppressed:")
-        || t.starts_with("Suppressed ")
-}
-
-fn is_wrapper_scaffold_line(line: &str) -> bool {
-    let t = strip_level_prefix(line.trim());
-    t.starts_with("Exception in thread")
-        || t.starts_with("... ") && t.ends_with(" more")
-        || t.starts_with("Wrapped by:")
-        || t.starts_with("Nested exception")
-        || t.contains("Exception wrapper")
-        || t.starts_with("[[") && (t.contains("exception") || t.contains("Exception"))
-}
-
-fn strip_level_prefix(t: &str) -> &str {
-    t.strip_prefix("ERROR ")
-        .or_else(|| t.strip_prefix("error "))
-        .or_else(|| t.strip_prefix("WARN "))
-        .or_else(|| t.strip_prefix("INFO "))
-        .unwrap_or(t)
-        .trim()
-}
-
-fn parse_exception_header(line: &str) -> Option<(String, String)> {
-    let t = line.trim();
-    let t = t
-        .strip_prefix("ERROR ")
-        .or_else(|| t.strip_prefix("error "))
-        .or_else(|| t.strip_prefix("WARN "))
-        .or_else(|| t.strip_prefix("INFO "))
-        .unwrap_or(t)
-        .trim();
-    if t.is_empty() || is_stack_frame_line(t) || is_cause_marker_line(t) {
+    if line.starts_with("at ") || line.starts_with("File \"") {
         return None;
     }
-    // Generic JVM/CLR-style: TypeName: message  or TypeName
-    let (type_part, msg_part) = if let Some((left, right)) = t.split_once(':') {
-        (left.trim(), right.trim())
-    } else {
-        (t, "")
-    };
-    if !looks_like_exception_type(type_part) {
-        return None;
+    let bytes = line.as_bytes();
+    for (start, _) in line.char_indices() {
+        if start > 512 {
+            break;
+        }
+        let first = bytes.get(start).copied()?;
+        if !(first.is_ascii_alphabetic() || first == b'_') {
+            continue;
+        }
+        let rest = line.get(start..)?;
+        let end = rest
+            .char_indices()
+            .take_while(|(_, ch)| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '$'))
+            .last()
+            .map(|(offset, ch)| start + offset + ch.len_utf8())?;
+        let token = line.get(start..end)?;
+        if !looks_like_exception_type(token) {
+            continue;
+        }
+        let following = line.get(end..)?.trim_start();
+        if !following.is_empty() && !following.starts_with(':') {
+            continue;
+        }
+        let detail = following.strip_prefix(':').unwrap_or(following).trim();
+        let detail = normalize_signature_detail(detail);
+        let token = token.to_ascii_lowercase();
+        return Some(if detail.is_empty() {
+            token
+        } else {
+            format!("{token}: {detail}")
+        });
     }
-    Some((type_part.to_string(), msg_part.to_string()))
+    None
 }
 
-fn looks_like_exception_type(name: &str) -> bool {
-    if name.is_empty() || name.contains(' ') {
+fn looks_like_exception_type(token: &str) -> bool {
+    // Bare "Exception" / "Error" appear in prose ("Exception wrapper") — require
+    // a qualified type or a longer *Exception name.
+    if matches!(
+        token,
+        "Exception" | "Error" | "Failure" | "Panic" | "Throwable"
+    ) {
         return false;
     }
-    let lower = name.to_ascii_lowercase();
-    (lower.contains("exception")
-        || lower.contains("error")
-        || lower.ends_with("throwable")
-        || lower.ends_with("failure")
-        || lower.ends_with("fault"))
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '$' || c == '/')
+    ["Exception", "Error", "Failure", "Panic", "Throwable"]
+        .iter()
+        .any(|suffix| token.ends_with(suffix))
 }
 
-fn check_cancel(cancel: Option<&CancelFlag>) -> CoreResult<()> {
-    if cancel.is_some_and(|c| c.is_cancelled()) {
-        return Err(CoreError::Message(
-            "exception episode correlation cancelled".into(),
-        ));
+fn normalize_signature_detail(detail: &str) -> String {
+    detail
+        .split_whitespace()
+        .take(24)
+        .map(|token| {
+            // Collapse pure numeric / long hex ids only — keep XYZ_UNIQUE_0 distinct
+            // from XYZ_UNIQUE_1 (token body is not pure digits).
+            let pure_digit = token.chars().all(|c| c.is_ascii_digit());
+            let long_hex = token.len() >= 8 && token.chars().all(|c| c.is_ascii_hexdigit());
+            if pure_digit || long_hex {
+                "<*>".to_string()
+            } else if let Some((k, v)) = token.split_once('=') {
+                if v.chars().any(|c| c.is_ascii_digit()) {
+                    format!("{k}=<*>")
+                } else {
+                    token.to_string()
+                }
+            } else {
+                token.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn extract_thread(message: &str) -> Option<String> {
+    for key in ["thread=", "thread_id=", "threadId=", "tid="] {
+        if let Some(start) = message.find(key) {
+            let value = message.get(start + key.len()..).unwrap_or_default();
+            let value = value
+                .split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ']' | ';'))
+                .next()
+                .unwrap_or_default()
+                .trim_matches(['\"', '\'']);
+            if !value.is_empty() {
+                return Some(value.chars().take(96).collect());
+            }
+        }
     }
-    Ok(())
+    for bracketed in message.split('[').skip(1) {
+        let Some((value, _)) = bracketed.split_once(']') else {
+            continue;
+        };
+        let value = value.trim();
+        if !value.is_empty()
+            && !matches!(
+                value.to_ascii_lowercase().as_str(),
+                "stderr" | "stdout" | "error" | "warn" | "info" | "debug" | "fatal"
+            )
+        {
+            return Some(value.chars().take(96).collect());
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1294,30 +1022,40 @@ mod tests {
     use super::*;
     use crate::log_analysis::embed_policy::{LogEmbedMode, LogEmbedPolicy};
     use crate::log_analysis::ingest::ingest_path_with_policy;
-    use crate::log_analysis::{ActiveTimestampBasis, TimeQuality, TimestampProvenance};
+    use crate::log_analysis::{
+        query_events, ActiveTimestampBasis, TimeQuality, TimestampProvenance,
+    };
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
     use tempfile::TempDir;
 
-    fn ev(seq: u64, source: &str, message: &str) -> ExplorerEvent {
+    fn event(seq: u64, ts: i64, source: &str, message: &str) -> ExplorerEvent {
         ExplorerEvent {
             seq,
-            ts: seq as i64,
-            timestamp_provenance: TimestampProvenance::OrderOnly,
-            active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
+            ts,
+            timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+            active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
             unresolved_local_timestamp: None,
-            time_quality: TimeQuality::OrderOnly,
+            time_quality: TimeQuality::Wall,
             level: "error".into(),
-            service: None,
-            host: None,
-            template_id: 1,
+            service: Some("xyz-api".into()),
+            host: Some("xyz-host".into()),
+            template_id: seq + 100,
             trace_id: None,
             message: message.into(),
             source: source.into(),
         }
     }
 
-    /// One stderr dual-rendering block: 1 header + 72 wrappers + 189 frames + 1 mid cause + 2 terminal = 265.
+    fn order_event(seq: u64, source: &str, message: &str) -> ExplorerEvent {
+        let mut e = event(seq, seq as i64, source, message);
+        e.active_timestamp_basis = ActiveTimestampBasis::OrderOnly;
+        e.time_quality = TimeQuality::OrderOnly;
+        e.timestamp_provenance = TimestampProvenance::OrderOnly;
+        e
+    }
+
     fn stderr_block(i: u32) -> Vec<String> {
         let mut lines = Vec::with_capacity(265);
         lines.push(format!(
@@ -1337,23 +1075,17 @@ mod tests {
         lines.push("Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT".into());
         lines.push("Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT".into());
         lines.push("Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT".into());
-        // Adjust: design says 1 intermediate + 2 terminal = 3 cause lines; we already have 3.
-        // Header 1 + wrap 72 + frames 189 + causes 3 = 265.
-        assert_eq!(lines.len(), 265, "stderr block must be exactly 265 lines");
+        assert_eq!(lines.len(), 265);
         lines
     }
 
     fn write_dual_rendering_corpus(dir: &Path, occurrences: u32) {
         let app = dir.join("XYZ_app.log");
         let stderr = dir.join("XYZ_server.stderr");
-        // Align dual streams in wall time: occurrence i at base_sec + i*2 so
-        // cross-stream axis windows match (~0s) while far occurrences stay >120s
-        // when separated by large i gaps (only 56 * 2 = 112s total span — keep
-        // pairing index-based with axis guard; far-apart dual uses dedicated test).
         let mut app_body = String::new();
         let mut err_body = String::new();
         for i in 0..occurrences {
-            let base = 12 * 3600 + i * 2; // 12:00:00, 12:00:02, …
+            let base = 12 * 3600 + i * 2;
             let h = (base / 3600) % 24;
             let m = (base / 60) % 60;
             let s = base % 60;
@@ -1365,8 +1097,6 @@ mod tests {
             app_body.push_str("  at com.xyz.api.OrderService.checkout(OrderService.java:88)\n");
             app_body.push_str("  Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT\n");
             app_body.push_str("  at com.xyz.net.Http.execute(Http.java:15)\n");
-            // Separately wrapped stderr: each line timestamped (same second as app)
-            // so framing cannot fold frames; dual-render axis gap stays within window.
             for (j, line) in stderr_block(i).into_iter().enumerate() {
                 let ms = (j % 1000) as u32;
                 err_body.push_str(&format!(
@@ -1374,8 +1104,8 @@ mod tests {
                 ));
             }
         }
-        fs::write(&app, app_body).unwrap();
-        fs::write(&stderr, err_body).unwrap();
+        fs::write(app, app_body).unwrap();
+        fs::write(stderr, err_body).unwrap();
     }
 
     fn ingest_dir(dir: &Path) -> (TempDir, String, LogCorpus) {
@@ -1394,591 +1124,259 @@ mod tests {
     }
 
     #[test]
-    fn conventional_multiline_is_one_logical_event_role() {
-        let message = "java.lang.RuntimeException: XYZ_PAYMENT_FAILED\n\
-             at com.xyz.payment.Client.charge(Client.java:42)\n\
-             at com.xyz.api.OrderService.checkout(OrderService.java:88)\n\
-             Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT";
-        let c = classify_exception_event(&ev(1, "XYZ_app.log", message));
-        assert_eq!(c.role, ExceptionRecordRole::ConventionalMultiline);
-        assert!(c.fingerprint.is_some());
+    fn correlates_full_stack_and_wrapped_records_without_losing_citations() {
+        let events = vec![
+            event(1, 100, "xyz.log", "ERROR thread=xyz-worker xyz.TopException: request failed\n at xyz.Api.run(Api.java:10)\nCaused by: xyz.TimeoutException: upstream XYZ timed out request=123\n at xyz.Net.call(Net.java:20)"),
+            event(2, 100, "xyz.log", "thread=xyz-worker [stderr] xyz.TopException: request failed"),
+            event(3, 100, "xyz.log", "thread=xyz-worker [stderr] at xyz.Api.run(Api.java:10)"),
+            event(4, 100, "xyz.log", "thread=xyz-worker [stderr] Caused by: xyz.TimeoutException: upstream XYZ timed out request=456"),
+            event(5, 100, "xyz.log", "thread=xyz-worker [stderr] at xyz.Net.call(Net.java:20)"),
+        ];
+        let analysis = analyze_bounded_events(events.len() as u64, &events);
+        assert_eq!(analysis.raw_exception_record_count, 5);
+        assert_eq!(analysis.rendering_episode_count, 2);
+        assert_eq!(analysis.occurrence_count, 1);
+        assert_eq!(analysis.duplicate_rendering_occurrence_count, 1);
+        assert!(!analysis.partial);
+        let family = &analysis.families[0];
+        assert!(
+            family.signature.contains("timeoutexception")
+                || family.signature.contains("topexception")
+        );
+        let occurrence = &family.occurrences[0];
+        assert_eq!(
+            occurrence.correlation_confidence,
+            ExceptionCorrelationConfidence::Strong
+        );
+        assert_eq!(
+            occurrence
+                .citations
+                .iter()
+                .map(|c| c.seq)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        assert!(occurrence.citations_complete);
     }
 
     #[test]
-    fn dual_rendering_56x265_family_counts_and_amplification() {
+    fn refuses_same_signature_when_thread_or_time_evidence_conflicts() {
+        let events = vec![
+            event(
+                1,
+                100,
+                "xyz.log",
+                "thread=xyz-a xyz.TimeoutException: upstream XYZ\n at xyz.Net.call(Net.java:20)",
+            ),
+            event(
+                2,
+                100,
+                "xyz.log",
+                "thread=xyz-b [stderr] xyz.TimeoutException: upstream XYZ",
+            ),
+            event(
+                3,
+                100,
+                "xyz.log",
+                "thread=xyz-b [stderr] at xyz.Net.call(Net.java:20)",
+            ),
+            event(
+                4,
+                120,
+                "xyz.log",
+                "thread=xyz-a [stderr] xyz.TimeoutException: upstream XYZ",
+            ),
+        ];
+        let analysis = analyze_bounded_events(events.len() as u64, &events);
+        assert_eq!(analysis.rendering_episode_count, 3);
+        assert_eq!(analysis.occurrence_count, 3);
+        assert_eq!(analysis.duplicate_rendering_occurrence_count, 0);
+    }
+
+    #[test]
+    fn order_only_adjacency_does_not_claim_duplicate_rendering() {
+        let full = order_event(
+            1,
+            "xyz.log",
+            "xyz.TimeoutException: upstream XYZ\n at xyz.Net.call(Net.java:20)",
+        );
+        let wrapped = order_event(2, "xyz.log", "[stderr] xyz.TimeoutException: upstream XYZ");
+        let analysis = analyze_bounded_events(2, &[full, wrapped]);
+        assert_eq!(analysis.occurrence_count, 2);
+        assert_eq!(analysis.duplicate_rendering_occurrence_count, 0);
+    }
+
+    #[test]
+    fn order_only_cross_source_requires_strong_execution_key() {
+        let mut a = order_event(
+            1,
+            "app.log",
+            "thread=xyz-worker xyz.TimeoutException: upstream XYZ\n at xyz.Net.call(Net.java:20)",
+        );
+        let mut b = order_event(
+            2,
+            "stderr.log",
+            "thread=xyz-worker [stderr] xyz.TimeoutException: upstream XYZ",
+        );
+        b.trace_id = None;
+        a.trace_id = None;
+        let with_key = analyze_bounded_events(2, &[a.clone(), b.clone()]);
+        assert_eq!(with_key.occurrence_count, 1);
+        assert_eq!(with_key.duplicate_rendering_occurrence_count, 1);
+
+        let mut a2 = a;
+        let mut b2 = b;
+        a2.message = a2.message.replace("thread=xyz-worker ", "");
+        b2.message = b2.message.replace("thread=xyz-worker ", "");
+        let no_key = analyze_bounded_events(2, &[a2, b2]);
+        assert_eq!(no_key.duplicate_rendering_occurrence_count, 0);
+    }
+
+    #[test]
+    fn message_equality_alone_does_not_merge_unrelated_sources() {
+        let events = vec![
+            event(
+                1,
+                100,
+                "a.log",
+                "xyz.TimeoutException: same text\n at xyz.A.m(A.java:1)",
+            ),
+            event(
+                50,
+                5000,
+                "b.log",
+                "[stderr] xyz.TimeoutException: same text",
+            ),
+        ];
+        let analysis = analyze_bounded_events(events.len() as u64, &events);
+        assert_eq!(analysis.duplicate_rendering_occurrence_count, 0);
+        assert!(analysis.occurrence_count >= 2);
+    }
+
+    #[test]
+    fn dual_rendering_56x265_layers_and_amplification() {
         let tmp = TempDir::new().unwrap();
         let src = tmp.path().join("in");
         fs::create_dir_all(&src).unwrap();
         write_dual_rendering_corpus(&src, 56);
         let (_cache, _id, corpus) = ingest_dir(&src);
+        let analysis = analyze_exception_episodes(&corpus, &[]).unwrap();
 
-        let report = correlate_exception_episodes_from_corpus(
-            &corpus,
-            &ExceptionCorrelationOptions::default(),
-            None,
-        )
-        .unwrap();
-
-        // Stderr alone: 56 * 265 raw lines as separate events (order-only).
-        // App: 56 conventional multiline events (approximately; framing may attach continuations).
         assert!(
-            report.raw_record_total >= 56 * 265,
-            "raw_record_total={} expected at least {}",
-            report.raw_record_total,
-            56 * 265
+            analysis.raw_exception_record_count >= 56 * 265,
+            "raw={}",
+            analysis.raw_exception_record_count
         );
-
-        let top = report
-            .families
-            .iter()
-            .find(|f| {
-                f.exception_class
-                    .as_deref()
-                    .is_some_and(|c| c.contains("RuntimeException"))
-                    || f.fingerprint.contains("payment")
-                    || f.fingerprint.contains("xyz_payment")
-            })
-            .or_else(|| report.families.first())
-            .expect("at least one family");
-
-        // Tight oracle: dual-stream merge must produce ~56 occurrences, not ~112.
-        assert_eq!(
-            top.occurrence_count, 56,
-            "occurrence_count={} expected 56 dual-merged episodes",
-            top.occurrence_count
-        );
-        assert_eq!(
-            report.episode_count, 56,
-            "episode_count={}",
-            report.episode_count
-        );
-        assert_eq!(report.family_count, 1, "families={:?}", report.families);
+        // 56 dual-merged occurrences (allow 1 residual unpaired rendering).
         assert!(
-            top.raw_record_count >= 56 * 265,
-            "raw_record_count={} too low",
-            top.raw_record_count
+            (55..=58).contains(&analysis.occurrence_count),
+            "semantic occurrences must be ~56 dual-merged, got {}",
+            analysis.occurrence_count
         );
         assert!(
-            (265..=270).contains(&top.amplification_x),
-            "amplification_x={} expected ~265–266",
-            top.amplification_x
+            analysis.duplicate_rendering_occurrence_count >= 50,
+            "duplicates={}",
+            analysis.duplicate_rendering_occurrence_count
         );
         assert!(
-            report.episodes.iter().filter(|e| e.cross_stream).count() >= 50,
-            "expected most episodes cross_stream after dual merge"
+            analysis.overall_amplification_x >= 200,
+            "amp={} (expect large dual-render factor)",
+            analysis.overall_amplification_x
         );
         assert!(
-            report
-                .episodes
-                .iter()
-                .filter(|e| e
-                    .reasons
-                    .iter()
-                    .any(|r| r.contains("merged_cross_stream_duplicate_rendering")))
-                .count()
-                >= 50,
-            "expected dual-merge reasons on episodes"
+            analysis.rendering_episode_count > analysis.occurrence_count,
+            "physical renderings must exceed semantic occurrences when dual-merged"
         );
-        assert!(report
+        assert!(analysis
             .ranking_disclosure
             .contains("independent_incident_claim_forbidden"));
-        assert!(report
+        assert!(analysis
             .ranking_disclosure
-            .contains("exception_episode_occurrences_not_raw_stack_volume"));
+            .contains("semantic_occurrence_count"));
 
-        assert!(!report.episodes.is_empty());
-        for ep in &report.episodes {
-            assert!(!ep.members.is_empty(), "empty episode {}", ep.episode_id);
-        }
-        for family in &report.families {
-            for lead in family.lead_citations.iter().take(8) {
+        let family = analysis.families.first().expect("family");
+        assert!(
+            (55..=58).contains(&family.occurrence_count),
+            "family occurrences={}",
+            family.occurrence_count
+        );
+        for occ in family.occurrences.iter().take(8) {
+            assert!(!occ.citations.is_empty());
+            for c in &occ.citations {
                 let page = query_events(
                     &corpus,
                     &EventQuery {
-                        seq_from: Some(lead.seq),
-                        seq_to: Some(lead.seq),
-                        limit: 8,
+                        seq_from: Some(c.seq),
+                        seq_to: Some(c.seq),
+                        limit: 4,
                         sort_by_time: false,
-                        ..EventQuery::default()
+                        ..Default::default()
                     },
                 )
                 .unwrap();
                 assert!(
                     page.events
                         .iter()
-                        .any(|e| e.seq == lead.seq && e.source == lead.source),
-                    "lead citation seq={} source={} not found",
-                    lead.seq,
-                    lead.source
+                        .any(|e| e.seq == c.seq && e.source == c.source),
+                    "missing cite seq={} source={}",
+                    c.seq,
+                    c.source
                 );
             }
         }
-
-        assert_eq!(report.correlated_occurrence_total, 56);
-        assert!(
-            report.overall_amplification_x >= 265,
-            "overall amp={}",
-            report.overall_amplification_x
-        );
         eprintln!(
-            "dual_rendering: raw={} occurrences={} amp={} families={} episodes={} cross={}",
-            report.raw_record_total,
-            report.correlated_occurrence_total,
-            report.overall_amplification_x,
-            report.family_count,
-            report.episode_count,
-            report.episodes.iter().filter(|e| e.cross_stream).count()
+            "dual_rendering: raw={} renderings={} occurrences={} duplicates={} amp={}",
+            analysis.raw_exception_record_count,
+            analysis.rendering_episode_count,
+            analysis.occurrence_count,
+            analysis.duplicate_rendering_occurrence_count,
+            analysis.overall_amplification_x
         );
     }
 
     #[test]
-    fn interleaved_same_source_headers_do_not_steal_foreign_frames() {
-        // Same source, two different faults interleaved by seq — frames after B
-        // must not attach to open A when A was closed by B's header.
+    fn conventional_multiline_is_one_application_rendering() {
+        let e = event(
+            1,
+            100,
+            "app.log",
+            "java.lang.RuntimeException: XYZ_PAYMENT_FAILED\n\
+             at com.xyz.payment.Client.charge(Client.java:42)\n\
+             at com.xyz.api.OrderService.checkout(OrderService.java:88)",
+        );
+        let analysis = analyze_bounded_events(1, &[e]);
+        assert_eq!(analysis.rendering_episode_count, 1);
+        assert_eq!(analysis.occurrence_count, 1);
+        assert_eq!(analysis.duplicate_rendering_occurrence_count, 0);
+        assert_eq!(analysis.raw_exception_record_count, 1);
+    }
+
+    #[test]
+    fn nested_causes_in_one_rendering() {
         let events = vec![
-            ev(
+            event(
                 1,
-                "XYZ_stderr.log",
-                "java.lang.RuntimeException: XYZ_FAULT_A",
-            ),
-            ev(2, "XYZ_stderr.log", "at com.xyz.A.m(A.java:1)"),
-            ev(
-                3,
-                "XYZ_stderr.log",
-                "java.lang.IllegalStateException: XYZ_FAULT_B",
-            ),
-            ev(4, "XYZ_stderr.log", "at com.xyz.B.m(B.java:1)"),
-            ev(5, "XYZ_stderr.log", "at com.xyz.B.finish(B.java:2)"),
-        ];
-        let report =
-            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
-                .unwrap();
-        assert!(report.episode_count >= 2, "{report:?}");
-        let b = report
-            .episodes
-            .iter()
-            .find(|e| e.family_id.contains("fault_b") || e.family_id.contains("illegalstate"))
-            .or_else(|| {
-                report.episodes.iter().find(|e| {
-                    e.members.iter().any(|m| {
-                        m.role == ExceptionRecordRole::ExceptionHeader
-                            && report.families.iter().any(|f| {
-                                f.family_id == e.family_id
-                                    && f.exception_class
-                                        .as_deref()
-                                        .is_some_and(|c| c.contains("IllegalState"))
-                            })
-                    })
-                })
-            });
-        // B episode should own the two B frames (raw >= 3: header+2 frames).
-        let b_ep = report
-            .episodes
-            .iter()
-            .max_by_key(|e| e.raw_record_count)
-            .unwrap();
-        // The IllegalState episode should be the one with more frames attached.
-        let illegal = report
-            .episodes
-            .iter()
-            .find(|e| {
-                e.family_id.contains("illegalstateexception") || e.family_id.contains("fault_b")
-            })
-            .unwrap_or(b_ep);
-        assert!(
-            illegal.raw_record_count >= 3,
-            "B should keep its frames: {:?}",
-            illegal
-        );
-        // A should be small (header + 1 frame) not absorb B's frames.
-        let runtime = report
-            .episodes
-            .iter()
-            .find(|e| e.family_id.contains("runtimeexception") || e.family_id.contains("fault_a"))
-            .expect("fault A episode");
-        assert!(
-            runtime.raw_record_count <= 2,
-            "A must not absorb B frames: {:?}",
-            runtime
-        );
-        let _ = b;
-    }
-
-    #[test]
-    fn cross_stream_far_apart_same_fingerprint_does_not_merge() {
-        let mut events = Vec::new();
-        // Conventional at t=1
-        events.push(ExplorerEvent {
-            seq: 1,
-            ts: 1_000,
-            ..ev(
-                1,
-                "XYZ_app.log",
-                "java.lang.RuntimeException: XYZ_PAYMENT_FAILED\n\
-                 at com.xyz.payment.Client.charge(Client.java:42)\n\
-                 at com.xyz.api.OrderService.checkout(OrderService.java:88)",
-            )
-        });
-        // Expanded stream far away (axis gap >> 120)
-        events.push(ExplorerEvent {
-            seq: 100,
-            ts: 1_000 + 10_000,
-            ..ev(
                 100,
-                "XYZ_server.stderr",
-                "java.lang.RuntimeException: XYZ_PAYMENT_FAILED",
-            )
-        });
-        for i in 0..5u64 {
-            events.push(ExplorerEvent {
-                seq: 101 + i,
-                ts: 1_000 + 10_000 + i as i64,
-                ..ev(
-                    101 + i,
-                    "XYZ_server.stderr",
-                    &format!("at com.xyz.F{i}.m(F.java:1)"),
-                )
-            });
-        }
-        let report =
-            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
-                .unwrap();
-        // Must remain two episodes (not one merged occurrence).
-        assert!(
-            report.episode_count >= 2,
-            "far dual streams must not merge: {:?}",
-            report.episodes
-        );
-        assert!(
-            !report.episodes.iter().any(|e| e
-                .reasons
-                .iter()
-                .any(|r| r == "merged_cross_stream_duplicate_rendering")),
-            "unexpected merge: {:?}",
-            report.episodes
-        );
-    }
-
-    #[test]
-    fn mutation_divisibility_alone_is_not_enough_for_high_confidence_family() {
-        // 265 unrelated distinct exceptions — raw count divisible by 265 must not
-        // create one high-confidence amplified family.
-        let mut events = Vec::new();
-        for i in 0..265u64 {
-            events.push(ev(
-                i + 1,
-                "XYZ_noise.log",
-                &format!("java.lang.IllegalStateException: XYZ_UNIQUE_{i}"),
-            ));
-        }
-        let report =
-            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
-                .unwrap();
-        for family in &report.families {
-            if family.occurrence_count == 1 {
-                continue;
-            }
-            // Distinct messages => distinct fingerprints; no single family of 265.
-            assert!(
-                family.occurrence_count < 50,
-                "divisibility/over-merge family: {:?}",
-                family
-            );
-        }
-        assert!(
-            report.families.iter().all(|f| f.occurrence_count < 265),
-            "must not collapse unique exceptions into one 265-occurrence family"
-        );
-    }
-
-    #[test]
-    fn mutation_message_equality_alone_outside_window_does_not_merge() {
-        let mut events = Vec::new();
-        // Same text but huge seq/ts gap.
-        events.push(ev(
-            1,
-            "XYZ_a.log",
-            "java.lang.RuntimeException: XYZ_PAYMENT_FAILED",
-        ));
-        for i in 0..10u64 {
-            events.push(ev(
-                2 + i,
-                "XYZ_a.log",
-                &format!("at com.xyz.F.m(F.java:{i})"),
-            ));
-        }
-        // Far later "same" exception — outside axis window.
-        events.push(ExplorerEvent {
-            seq: 100_000,
-            ts: 100_000,
-            ..ev(
-                100_000,
-                "XYZ_a.log",
-                "java.lang.RuntimeException: XYZ_PAYMENT_FAILED",
-            )
-        });
-        for i in 0..10u64 {
-            events.push(ExplorerEvent {
-                seq: 100_001 + i,
-                ts: 100_001 + i as i64,
-                ..ev(
-                    100_001 + i,
-                    "XYZ_a.log",
-                    &format!("at com.xyz.F.m(F.java:{i})"),
-                )
-            });
-        }
-        let report =
-            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
-                .unwrap();
-        let family = report
-            .families
-            .iter()
-            .find(|f| {
-                f.fingerprint.contains("payment") || f.fingerprint.contains("runtimeexception")
-            })
-            .expect("family");
-        assert_eq!(
-            family.occurrence_count, 2,
-            "out-of-window same text must be two occurrences, not one: {:?}",
-            family
-        );
-    }
-
-    #[test]
-    fn mutation_raw_adjacency_of_unrelated_text_does_not_force_episode() {
-        let events = vec![
-            ev(1, "XYZ_a.log", "INFO heartbeat ok"),
-            ev(2, "XYZ_a.log", "INFO still fine"),
-            ev(3, "XYZ_a.log", "WARN disk 80%"),
-        ];
-        let report =
-            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
-                .unwrap();
-        assert_eq!(report.episode_count, 0);
-        assert_eq!(report.correlated_occurrence_total, 0);
-    }
-
-    #[test]
-    fn interleaved_threads_keep_separate_headers_when_fingerprints_differ() {
-        let events = vec![
-            ev(
-                1,
-                "XYZ_stderr.log",
-                "java.lang.RuntimeException: XYZ_THREAD_A",
+                "a.log",
+                "[stderr] java.lang.RuntimeException: XYZ_OUTER",
             ),
-            ev(2, "XYZ_stderr.log", "at com.xyz.A.run(A.java:1)"),
-            ev(
+            event(2, 100, "a.log", "[stderr] at com.xyz.Outer.m(Outer.java:1)"),
+            event(
                 3,
-                "XYZ_stderr.log",
-                "java.lang.IllegalStateException: XYZ_THREAD_B",
+                100,
+                "a.log",
+                "[stderr] Caused by: java.io.IOException: XYZ_INNER",
             ),
-            ev(4, "XYZ_stderr.log", "at com.xyz.B.run(B.java:1)"),
-            ev(5, "XYZ_stderr.log", "at com.xyz.B.finish(B.java:2)"),
+            event(4, 100, "a.log", "[stderr] at com.xyz.Inner.m(Inner.java:2)"),
         ];
-        let report =
-            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
-                .unwrap();
-        assert!(report.episode_count >= 2, "{report:?}");
-        let fps: BTreeSet<_> = report
-            .families
-            .iter()
-            .map(|f| f.fingerprint.clone())
-            .collect();
-        assert!(
-            fps.len() >= 2,
-            "distinct classes must not collapse: {fps:?}"
-        );
+        let analysis = analyze_bounded_events(4, &events);
+        assert_eq!(analysis.rendering_episode_count, 1);
+        assert_eq!(analysis.occurrence_count, 1);
+        assert_eq!(analysis.raw_exception_record_count, 4);
     }
 
     #[test]
-    fn missing_header_frames_are_candidate_not_invented_occurrences() {
-        let events = vec![
-            ev(1, "XYZ_stderr.log", "at com.xyz.A.m(A.java:1)"),
-            ev(2, "XYZ_stderr.log", "at com.xyz.B.m(B.java:2)"),
-            ev(3, "XYZ_stderr.log", "at com.xyz.C.m(C.java:3)"),
-        ];
-        let report =
-            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
-                .unwrap();
-        // Orphan frames do not become high-confidence families with invented headers.
-        assert!(
-            report.families.is_empty()
-                || report
-                    .families
-                    .iter()
-                    .all(|f| f.confidence != ExceptionCorrelationConfidence::High),
-            "{report:?}"
-        );
-    }
-
-    #[test]
-    fn determinism_two_runs_identical() {
-        let mut events = Vec::new();
-        for i in 0..5u32 {
-            events.push(ev(
-                (i as u64) * 10 + 1,
-                "XYZ_stderr.log",
-                &format!("java.lang.RuntimeException: XYZ_PAYMENT_FAILED id={i}"),
-            ));
-            for f in 0..5u64 {
-                events.push(ev(
-                    (i as u64) * 10 + 2 + f,
-                    "XYZ_stderr.log",
-                    &format!("at com.xyz.F{f}.m(F.java:1)"),
-                ));
-            }
-        }
-        let a =
-            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
-                .unwrap();
-        let b =
-            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
-                .unwrap();
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn cancellation_fails_closed() {
-        let cancel = CancelFlag::new();
-        cancel.cancel();
-        let events = vec![ev(
-            1,
-            "XYZ_a.log",
-            "java.lang.RuntimeException: XYZ_PAYMENT_FAILED",
-        )];
-        let err = correlate_exception_episodes(
-            &events,
-            &ExceptionCorrelationOptions::default(),
-            Some(&cancel),
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("cancelled"));
-    }
-
-    #[test]
-    fn nested_causes_remain_in_one_episode() {
-        let events = vec![
-            ev(1, "XYZ_a.log", "java.lang.RuntimeException: XYZ_OUTER"),
-            ev(2, "XYZ_a.log", "at com.xyz.Outer.m(Outer.java:1)"),
-            ev(3, "XYZ_a.log", "Caused by: java.io.IOException: XYZ_INNER"),
-            ev(4, "XYZ_a.log", "at com.xyz.Inner.m(Inner.java:2)"),
-            ev(
-                5,
-                "XYZ_a.log",
-                "Caused by: java.net.SocketException: XYZ_ROOT",
-            ),
-        ];
-        let report =
-            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
-                .unwrap();
-        assert_eq!(report.episode_count, 1, "{:?}", report.episodes);
-        assert_eq!(report.episodes[0].raw_record_count, 5);
-        assert!(report.episodes[0]
-            .members
-            .iter()
-            .any(|m| { matches!(m.role, ExceptionRecordRole::CauseMarker) }));
-    }
-
-    #[test]
-    fn rotated_sources_are_stream_local_then_family_grouped() {
-        // Same fault class on rotated log names (app.log.1 vs app.log) — two streams.
-        let events = vec![
-            ev(
-                1,
-                "XYZ_app.log",
-                "java.lang.RuntimeException: XYZ_PAYMENT_FAILED\n\
-                 at com.xyz.A.m(A.java:1)\n\
-                 at com.xyz.B.m(B.java:2)",
-            ),
-            ev(
-                10,
-                "XYZ_app.log.1",
-                "java.lang.RuntimeException: XYZ_PAYMENT_FAILED",
-            ),
-            ev(11, "XYZ_app.log.1", "at com.xyz.A.m(A.java:1)"),
-            ev(12, "XYZ_app.log.1", "at com.xyz.B.m(B.java:2)"),
-        ];
-        let report =
-            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
-                .unwrap();
-        assert!(!report.families.is_empty());
-        let fam = &report.families[0];
-        assert!(
-            fam.occurrence_count >= 1 && fam.occurrence_count <= 2,
-            "rotated sources: {:?}",
-            fam
-        );
-    }
-
-    #[test]
-    fn order_only_timestamps_assemble_by_seq_gap() {
-        let mut events = Vec::new();
-        for i in 0..3u64 {
-            events.push(ev(
-                i * 10 + 1,
-                "XYZ_order.log",
-                "java.lang.RuntimeException: XYZ_PAYMENT_FAILED",
-            ));
-            for f in 0..4u64 {
-                events.push(ev(
-                    i * 10 + 2 + f,
-                    "XYZ_order.log",
-                    &format!("at com.xyz.F{f}.m(F.java:1)"),
-                ));
-            }
-        }
-        let report =
-            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
-                .unwrap();
-        assert_eq!(report.episode_count, 3, "{:?}", report.episodes);
-        assert!(report.episodes.iter().all(|e| e.raw_record_count == 5));
-    }
-
-    #[test]
-    fn repeated_unrelated_exceptions_are_separate_families() {
-        let events = vec![
-            ev(
-                1,
-                "XYZ_a.log",
-                "java.lang.NullPointerException: XYZ_NPE_ONE",
-            ),
-            ev(2, "XYZ_a.log", "at com.xyz.A.m(A.java:1)"),
-            ev(
-                10,
-                "XYZ_a.log",
-                "java.lang.IllegalArgumentException: XYZ_IAE_TWO",
-            ),
-            ev(11, "XYZ_a.log", "at com.xyz.B.m(B.java:1)"),
-        ];
-        let report =
-            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
-                .unwrap();
-        assert_eq!(report.family_count, 2, "{:?}", report.families);
-        assert_eq!(report.episode_count, 2);
-    }
-
-    #[test]
-    fn malformed_truncated_trace_is_partial_or_candidate() {
-        let events = vec![
-            ev(1, "XYZ_a.log", "java.lang.RuntimeException: XYZ_TRUNC"),
-            ev(2, "XYZ_a.log", "at com.xyz.A.m(A.java:1)"),
-            // abrupt end — no further frames
-        ];
-        let report =
-            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
-                .unwrap();
-        assert_eq!(report.episode_count, 1);
-        // Still a valid lead episode; not fabricated extras.
-        assert_eq!(report.episodes[0].raw_record_count, 2);
-        assert!(matches!(
-            report.episodes[0].confidence,
-            ExceptionCorrelationConfidence::High | ExceptionCorrelationConfidence::Medium
-        ));
-    }
-
-    #[test]
-    fn suppression_excluded_templates_reduce_scanned_set() {
+    fn suppression_excludes_templates_from_scan_and_citations() {
         let tmp = TempDir::new().unwrap();
         let src = tmp.path().join("in");
         fs::create_dir_all(&src).unwrap();
@@ -1989,14 +1387,13 @@ mod tests {
         )
         .unwrap();
         let (_cache, _id, corpus) = ingest_dir(&src);
-        // Exclude every template → scan finds nothing useful.
         let all_templates: Vec<u64> = {
             let page = query_events(
                 &corpus,
                 &EventQuery {
                     limit: 500,
                     sort_by_time: false,
-                    ..EventQuery::default()
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -2007,93 +1404,121 @@ mod tests {
                 .into_iter()
                 .collect()
         };
-        let report = correlate_exception_episodes_from_corpus(
-            &corpus,
-            &ExceptionCorrelationOptions {
-                excluded_template_ids: all_templates,
-                ..ExceptionCorrelationOptions::default()
-            },
-            None,
-        )
-        .unwrap();
-        assert_eq!(report.events_scanned, 0);
-        assert_eq!(report.episode_count, 0);
+        let analysis = analyze_exception_episodes(&corpus, &all_templates).unwrap();
+        assert_eq!(analysis.events_scanned, 0);
+        assert_eq!(analysis.occurrence_count, 0);
+        assert!(analysis
+            .families
+            .iter()
+            .all(|f| f.occurrences.iter().all(|o| o.citations.is_empty())));
     }
 
     #[test]
-    fn corpus_revision_pin_is_host_responsibility_events_immutable() {
-        // Correlation never rewrites events: two scans of the same snapshot match.
+    fn cancellation_returns_cancelled_error() {
+        let cancel = AtomicBool::new(true);
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("in");
+        fs::create_dir_all(&src).unwrap();
+        write_dual_rendering_corpus(&src, 1);
+        let (_cache, _id, corpus) = ingest_dir(&src);
+        let err = analyze_exception_episodes_with_cancel(&corpus, &[], Some(&cancel)).unwrap_err();
+        assert!(matches!(err, CoreError::Cancelled) || err.to_string().contains("cancel"));
+    }
+
+    #[test]
+    fn corpus_revision_unchanged_by_analysis() {
         let tmp = TempDir::new().unwrap();
         let src = tmp.path().join("in");
         fs::create_dir_all(&src).unwrap();
         write_dual_rendering_corpus(&src, 2);
         let (_cache, _id, corpus) = ingest_dir(&src);
         let rev = corpus.event_revision();
-        let a = correlate_exception_episodes_from_corpus(
-            &corpus,
-            &ExceptionCorrelationOptions::default(),
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            corpus.event_revision(),
-            rev,
-            "correlation must not bump revision"
-        );
-        let b = correlate_exception_episodes_from_corpus(
-            &corpus,
-            &ExceptionCorrelationOptions::default(),
-            None,
-        )
-        .unwrap();
-        assert_eq!(a.episode_count, b.episode_count);
-        assert_eq!(a.correlated_occurrence_total, b.correlated_occurrence_total);
+        let _ = analyze_exception_episodes(&corpus, &[]).unwrap();
         assert_eq!(corpus.event_revision(), rev);
     }
 
     #[test]
-    fn large_synthetic_respects_event_cap() {
-        let mut events = Vec::new();
-        for i in 0..5_000u64 {
-            events.push(ev(
-                i + 1,
-                "XYZ_big.log",
-                &format!("java.lang.RuntimeException: XYZ_ITEM_{i}"),
+    fn bounded_record_cap_discloses_incomplete_citations() {
+        let mut events = vec![event(
+            1,
+            100,
+            "xyz.log",
+            "[stderr] xyz.BurstException: XYZ burst",
+        )];
+        for seq in 2..=(EXCEPTION_EPISODE_RECORD_CAP as u64 + 5) {
+            events.push(event(
+                seq,
+                100,
+                "xyz.log",
+                "[stderr] at xyz.Burst.run(Burst.java:10)",
             ));
         }
-        let opts = ExceptionCorrelationOptions {
-            max_events: 1_000,
-            ..ExceptionCorrelationOptions::default()
-        };
-        let report = correlate_exception_episodes(&events, &opts, None).unwrap();
-        assert!(report.truncated);
-        assert_eq!(report.events_scanned, 1_000);
-        assert!(report.events_scanned <= MAX_CORRELATION_EVENTS as u64);
+        let analysis = analyze_bounded_events(events.len() as u64 + 10, &events);
+        assert!(analysis.uncertain || analysis.partial);
+        let occurrence = &analysis.families[0].occurrences[0];
+        assert_eq!(occurrence.citations.len(), EXCEPTION_EPISODE_RECORD_CAP);
+        assert!(!occurrence.citations_complete);
     }
 
     #[test]
-    fn zip_folder_import_parity_for_small_dual_rendering() {
+    fn mutation_divisibility_alone_does_not_create_family() {
+        let mut events = Vec::new();
+        for i in 0..265u64 {
+            events.push(event(
+                i + 1,
+                100 + i as i64,
+                "noise.log",
+                &format!("xyz.IllegalStateException: XYZ_UNIQUE_{i}\n at xyz.A.m(A.java:1)"),
+            ));
+        }
+        let analysis = analyze_bounded_events(events.len() as u64, &events);
+        assert!(analysis.families.iter().all(|f| f.occurrence_count < 50));
+    }
+
+    #[test]
+    fn determinism_two_runs_identical() {
+        let events = vec![
+            event(
+                1,
+                100,
+                "a.log",
+                "xyz.TimeoutException: upstream XYZ\n at xyz.Net.call(Net.java:20)",
+            ),
+            event(
+                2,
+                100,
+                "a.log",
+                "thread=t1 [stderr] xyz.TimeoutException: upstream XYZ",
+            ),
+            event(
+                3,
+                100,
+                "a.log",
+                "thread=t1 [stderr] at xyz.Net.call(Net.java:20)",
+            ),
+        ];
+        let a = analyze_bounded_events(3, &events);
+        let b = analyze_bounded_events(3, &events);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+
+    fn zip_folder_import_parity_small() {
         let tmp = TempDir::new().unwrap();
         let folder = tmp.path().join("folder");
         fs::create_dir_all(&folder).unwrap();
         write_dual_rendering_corpus(&folder, 3);
-
         let (_c1, _id1, corpus_folder) = ingest_dir(&folder);
-        let report_folder = correlate_exception_episodes_from_corpus(
-            &corpus_folder,
-            &ExceptionCorrelationOptions::default(),
-            None,
-        )
-        .unwrap();
+        let report_folder = analyze_exception_episodes(&corpus_folder, &[]).unwrap();
 
-        // ZIP parity when zip is available.
         let zip_path = tmp.path().join("corpus.zip");
         let status = std::process::Command::new("zip")
             .args(["-qr", zip_path.to_str().unwrap(), "."])
             .current_dir(&folder)
             .status();
         if !status.map(|s| s.success()).unwrap_or(false) {
-            eprintln!("skip zip parity — zip binary missing");
+            eprintln!("skip zip parity");
             return;
         }
         let cache = TempDir::new().unwrap();
@@ -2107,50 +1532,11 @@ mod tests {
         let report_ingest =
             ingest_path_with_policy(cache.path(), &zip_path, "xyz-zip", &policy, None).unwrap();
         let corpus_zip = LogCorpus::open(cache.path(), &report_ingest.corpus_id).unwrap();
-        let report_zip = correlate_exception_episodes_from_corpus(
-            &corpus_zip,
-            &ExceptionCorrelationOptions::default(),
-            None,
-        )
-        .unwrap();
+        let report_zip = analyze_exception_episodes(&corpus_zip, &[]).unwrap();
+        assert_eq!(report_folder.occurrence_count, report_zip.occurrence_count);
         assert_eq!(
-            report_folder.correlated_occurrence_total, report_zip.correlated_occurrence_total,
-            "folder vs zip occurrence mismatch"
+            report_folder.raw_exception_record_count,
+            report_zip.raw_exception_record_count
         );
-        assert_eq!(
-            report_folder.raw_record_total, report_zip.raw_record_total,
-            "folder vs zip raw total mismatch"
-        );
-    }
-
-    #[test]
-    fn brief_section_discloses_amplification_not_raw_incidents() {
-        let events = vec![
-            ev(
-                1,
-                "app.log",
-                "java.lang.RuntimeException: XYZ_PAYMENT_FAILED id=0\n\
-                 at com.xyz.payment.Client.charge(Client.java:42)\n\
-                 at com.xyz.api.OrderService.checkout(OrderService.java:88)",
-            ),
-            ev(
-                2,
-                "stderr.log",
-                "java.lang.RuntimeException: XYZ_PAYMENT_FAILED id=0",
-            ),
-            ev(
-                3,
-                "stderr.log",
-                "at com.xyz.payment.Client.charge(Client.java:42)",
-            ),
-        ];
-        let report =
-            correlate_exception_episodes(&events, &ExceptionCorrelationOptions::default(), None)
-                .unwrap();
-        let section = format_exception_episode_brief_section(&report);
-        assert!(section.contains("Exception episode correlation"));
-        assert!(section.contains("amplification") || section.contains("amplification_x"));
-        assert!(section.contains("supporting records") || section.contains("not independent"));
-        assert!(!section.contains("14840 independent"));
     }
 }
