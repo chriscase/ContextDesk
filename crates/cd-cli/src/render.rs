@@ -147,6 +147,13 @@ impl TerminalTextSanitizer {
             }
             _ => cfg!(windows),
         };
+        Self::with_ascii(ascii)
+    }
+
+    /// Construct with an explicit ASCII-typography flag (no env lookup).
+    /// Used by hierarchy renderers so leaf values follow the same scrubbing
+    /// rules as streamed model text without re-reading process environment.
+    pub fn with_ascii(ascii: bool) -> Self {
         Self {
             state: EscapeState::Text,
             ascii,
@@ -155,10 +162,7 @@ impl TerminalTextSanitizer {
 
     #[cfg(test)]
     fn ascii() -> Self {
-        Self {
-            state: EscapeState::Text,
-            ascii: true,
-        }
+        Self::with_ascii(true)
     }
 
     pub fn push(&mut self, chunk: &str) -> String {

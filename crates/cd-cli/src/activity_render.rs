@@ -87,38 +87,13 @@ fn wire_enum<T: serde::Serialize>(value: &T) -> String {
 
 /// Human-readable multi-line summary (no ANSI). Suitable for stderr or text
 /// mode after the answer. Bodies never appear at Summary.
+///
+/// Delegates to [`crate::human_hierarchy::render_human_activity`] so Activity
+/// is a causal hierarchy (turn → phase → model round → tool lifecycle), not
+/// a flat event list. JSON/JSONL callers never enter this path.
+#[allow(dead_code)] // public plain-API entry; chat uses styled hierarchy directly
 pub fn render_human_summary(record: &TurnActivityRecord) -> String {
-    let mut out = String::new();
-    out.push_str(&format!(
-        "activity: turn={} status={:?} events={} omitted={} elapsed_ms={}\n",
-        record.turn_id,
-        record.status,
-        record.events.len(),
-        record.dropped_events,
-        record.total_elapsed_ms
-    ));
-    for event in &record.events {
-        out.push_str(&format!(
-            "  [{seq}] {origin:?}/{determinism:?} {phase:?} {status:?} - {label}",
-            seq = event.seq,
-            origin = event.origin,
-            determinism = event.determinism,
-            phase = event.phase,
-            status = event.status,
-            label = event.label,
-        ));
-        if let Some(detail) = &event.detail {
-            out.push_str(&format!(" ({detail})"));
-        }
-        out.push('\n');
-    }
-    if record.is_truncated() {
-        out.push_str(&format!(
-            "  ... truncated: {} event(s) omitted by hard bound\n",
-            record.dropped_events
-        ));
-    }
-    out
+    crate::human_hierarchy::render_human_activity(record)
 }
 
 /// Structural guard used by tests: a finished record must contain the causal
@@ -399,8 +374,12 @@ mod tests {
             }
         }
         let human = render_human_summary(&record);
-        assert!(human.contains("activity:"));
+        assert!(human.contains("Activity") || human.contains("activity"));
         assert!(!human.contains("sk-"));
+        assert!(
+            !human.contains('\u{1b}'),
+            "human activity summary must be ANSI-free by default"
+        );
     }
 
     #[test]
