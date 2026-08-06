@@ -9,15 +9,14 @@ import a Log Lab `truth/` directory.
 | [GUI path](#1-gui-path-manual-10–15-min) | **Manual** (native desktop) | Yes for grounded chat |
 | [CLI path](#2-cli-path-automated-proof-10–15-min) | **Automated** (copy/paste) | Optional (`chat --dry-run` needs a configured profile shape; live chat needs a working provider) |
 
-**Tip identity (this document’s verification base):** `main` @
-`9eb9fa2952fe53d7a2f1a970b83a46f1aea8115f`. Confirm before demos:
+**Tip identity:** confirm the built binary matches the commit you intend to demo:
 
 ```bash
 git rev-parse HEAD
 ./target/debug/contextdesk --json capabilities
 # Expect data.git_sha prefix matching HEAD; commands must include import,
-# normalize, corpus, timezone, explore, context, chat, doctor — and must
-# *not* list the residual LQA subcommand on this tip (see §4).
+# normalize, corpus, timezone, explore, context, chat, doctor, and
+# logging-assessment.
 ```
 
 Related: [DEMO_ACCEPTANCE.md](DEMO_ACCEPTANCE.md) (longer GUI checklist +
@@ -108,11 +107,9 @@ Label: **[MANUAL GUI]** — not claimed by CLI scripts.
      Activity from the previous process is **gone** (corpus/session remain).
 
 7. **Logging-quality assessment**
-   - **Not available in the desktop UI on this tip.** The CLI assessment
-     subcommand is also absent on `main` @ `9eb9fa2` (see
-     [§4 residual](#4-residual-logging-quality-assessment-not-on-this-tip)).
-   - Rehearse it only on a tip whose `capabilities` lists that subcommand, or
-     after it lands on `main`.
+   - The deterministic assessment is available through the CLI path below.
+     The desktop assessment UI is still in development, so do not claim it in
+     this GUI walkthrough yet.
 
 ---
 
@@ -211,9 +208,20 @@ non-empty output directory (no-clobber).
 
 ### F. Logging-quality assessment JSON/Markdown export
 
-**Deferred — not on this tip.** See
-[§4](#4-residual-logging-quality-assessment-not-on-this-tip). Do not invent the
-subcommand against a binary whose `capabilities` omit it.
+```bash
+$BIN --data-dir "$DATA" --json logging-assessment "$CORPUS"
+REPORT_JSON=$(mktemp).json
+REPORT_MD=$(mktemp).md
+$BIN --data-dir "$DATA" logging-assessment "$CORPUS" \
+  --output "$REPORT_JSON" --report-format json
+$BIN --data-dir "$DATA" logging-assessment "$CORPUS" \
+  --output "$REPORT_MD" --report-format markdown
+```
+
+**Expect:** schema id `contextdesk.logging_quality_assessment.v1`, deterministic
+findings with fixed improvement hints, mandatory limitations, and a Markdown
+projection of the JSON report. Re-run either export against the same path:
+ContextDesk refuses to overwrite it.
 
 ---
 
@@ -226,52 +234,19 @@ subcommand against a binary whose `capabilities` omit it.
 | Stale build identity | `capabilities` `git_sha` / `git_describe` must match `git rev-parse HEAD`. Rebuild: `cargo build -p cd-cli`. Exact-head gate: `scripts/exact_head_cli_acceptance.sh` / [DEMO_ACCEPTANCE.md](DEMO_ACCEPTANCE.md). |
 | Timezone uncertainty | Zone-less locals need explicit `timezone apply` / `apply-all` or Settings default **before** treating wall time as certain. Unusable/yearless stamps can remain unresolved after apply. |
 | Unsupported inputs | Import summary `sources_unsupported` / ignored ≠ “partial success” of those files. Binary noise may be excluded; see import-diagnose fixtures. Never import `truth/`. |
-| Export no-clobber | `normalize --output` must be empty/absent. When a tip ships LQA export, its `--output` path also refuses an existing file. Pick a fresh path. |
+| Export no-clobber | `normalize --output` must be empty/absent. LQA `--output` also refuses an existing file. Pick a fresh path. |
 | Activity empty after relaunch | Expected — process-lifetime only. Corpus and sessions persist. |
 | `chat` fails offline | Use `explore` / `context` / `chat --dry-run` for network-free proof. |
 
 ---
 
-## 4. Residual: logging-quality assessment (Not on this tip)
+## 4. Logging-quality assessment scope
 
-**Not on this tip.** Status on `main` @ `9eb9fa2`: the
-`logging-assessment` command is **absent** (`capabilities` does not list it;
-no desktop LQA UI).
-
-**Known tip with the command (do not merge assumptions into this doc’s base):**
-branch `cursor/logging-quality-assessment-5197` @
-`9869508d5d42c97d33aa2fd7f74d4fe8bcaf8f95` — verify locally:
-
-```bash
-contextdesk --json capabilities   # must list logging-assessment
-contextdesk logging-assessment --help
-```
-
-When that command exists, a public-fixture rehearsal is:
-
-```bash
-BIN=./target/debug/contextdesk   # build from the LQA tip
-DATA=$(mktemp -d)
-$BIN --data-dir "$DATA" import \
-  ./fixtures/log-lab/scenarios/mixed-time-quality/import
-ID=$($BIN --data-dir "$DATA" --json corpus list | python3 -c \
-  'import json,sys; print(json.load(sys.stdin)["data"]["corpora"][0]["id"])')
-$BIN --data-dir "$DATA" --json logging-assessment "$ID"
-REPORT_JSON=$(mktemp).json
-REPORT_MD=$(mktemp).md
-$BIN --data-dir "$DATA" logging-assessment "$ID" \
-  --output "$REPORT_JSON" --report-format json
-$BIN --data-dir "$DATA" logging-assessment "$ID" \
-  --output "$REPORT_MD" --report-format markdown
-# Re-run either export → refuse existing file (no-clobber)
-```
-
-**Expect:** assessment `schemaId` `contextdesk.logging_quality_assessment.v1`;
-Markdown is a projection of fixed finding hints (not a free-form LLM plan);
-no provider/keychain use.
-
-Until that lands on `main`, treat LQA as **residual** — not part of the
-shipped GUI/CLI paths above.
+`logging-assessment` is a deterministic CLI capability: it uses the imported
+corpus only, never a provider or keychain. Markdown is a projection of its
+versioned JSON report and the improvement hints are fixed templates, not a
+free-form LLM plan. The desktop LQA UI is still in development; use the CLI
+path above for this demo until it lands.
 
 ---
 

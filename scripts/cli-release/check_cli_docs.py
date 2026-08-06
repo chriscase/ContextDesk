@@ -47,7 +47,7 @@ DEMO_PUBLIC_FIXTURES = [
     "fixtures/log-lab/scenarios/mixed-time-quality/import",
 ]
 
-# Top-level CLI verbs the demo runbook may invoke outside the residual LQA section.
+# Top-level CLI verbs the demo runbook may invoke.
 DEMO_SHIPPED_VERBS = {
     "import",
     "normalize",
@@ -62,6 +62,7 @@ DEMO_SHIPPED_VERBS = {
     "capabilities",
     "doctor",
     "help",
+    "logging-assessment",
 }
 
 SHIPPED_COMMANDS = {
@@ -78,6 +79,7 @@ SHIPPED_COMMANDS = {
     "capabilities",
     "doctor",
     "help",
+    "logging-assessment",
 }
 
 HUB_LINKS = [
@@ -222,31 +224,7 @@ def check_demo_runbook_contract() -> None:
         else:
             fail(f"fixture path missing on disk: {rel}")
 
-    # Split residual LQA section so primary path cannot invent logging-assessment.
-    residual_idx = text.find("## 4. Residual")
-    if residual_idx < 0:
-        fail("DEMO_RUNBOOK missing ## 4. Residual logging-quality section")
-        primary, residual = text, ""
-    else:
-        primary, residual = text[:residual_idx], text[residual_idx:]
-        ok("DEMO_RUNBOOK has residual LQA section")
-
-    if "logging-assessment" in primary:
-        fail(
-            "DEMO_RUNBOOK primary paths invoke logging-assessment "
-            "(must stay in residual section only on tips without the command)"
-        )
-    else:
-        ok("primary DEMO_RUNBOOK paths omit logging-assessment")
-
-    if "logging-assessment" in residual and re.search(
-        r"not on this tip|not on `main`", residual, re.I
-    ):
-        ok("residual section documents logging-assessment honesty")
-    elif "logging-assessment" not in text:
-        ok("DEMO_RUNBOOK does not claim logging-assessment at all")
-    else:
-        fail("logging-assessment mentioned without residual honesty wording")
+    primary = text
 
     # Command verbs in fenced/code-ish contextdesk invocations (primary only).
     verbs: set[str] = set()
@@ -276,12 +254,12 @@ def check_demo_runbook_contract() -> None:
         else:
             fail(f"demo verb {v} not in binary --help")
     if "logging-assessment" in cmds:
-        fail(
-            "binary exposes logging-assessment but DEMO_RUNBOOK residual claims "
-            "absent on this tip — update runbook tip identity"
-        )
+        if "logging-assessment" not in text or "desktop LQA UI is still in development" not in text:
+            fail("LQA-capable binary needs an accurate CLI path and desktop-scope note")
+        else:
+            ok("LQA-capable binary matches runbook CLI path and desktop-scope note")
     else:
-        ok("binary lacks logging-assessment (matches residual honesty on this tip)")
+        fail("binary lacks documented logging-assessment command")
 
 
 def help_commands(bin_path: str) -> set[str]:
