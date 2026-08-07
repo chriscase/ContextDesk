@@ -422,6 +422,7 @@ impl ChatStatusRenderer {
             StreamEvent::TextDelta { .. } => unreachable!("handled above"),
             StreamEvent::ThoughtDelta { .. }
             | StreamEvent::Citation { .. }
+            | StreamEvent::InvestigationAnswer { .. }
             | StreamEvent::SearchTrail { .. }
             | StreamEvent::ContextBudget { .. }
             | StreamEvent::ProviderTelemetry { .. } => return,
