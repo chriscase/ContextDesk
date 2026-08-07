@@ -1,0 +1,239 @@
+{
+  "base_ts": 1740729840,
+  "baseline_expectation": {
+    "class": "pass",
+    "gates": {
+      "max_decoy_share_at_25": 0.25,
+      "min_recall_at_25": 0.7,
+      "queries_expected_below_floor": []
+    },
+    "limitation_reason": null
+  },
+  "case_id": "rb12-semantic-near-miss",
+  "case_version": 1,
+  "competing_explanations": [],
+  "evaluator_isolation": "Everything under truth/ is an answer key. Import only the sibling import/ directory and never attach truth or queries to model context.",
+  "evaluator_only": true,
+  "evidence_groups": [
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb12-semantic-near-miss-g01",
+      "incident_id": "rb12-semantic-near-miss-inca",
+      "notes": "payments-side stall is the cause of the payments incident",
+      "role": "trigger",
+      "sources": [
+        "payments/api.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "shard-FC1597C8",
+      "ts": 1740731840
+    },
+    {
+      "expected_occurrences": 3,
+      "expected_raw_records": 3,
+      "expected_token_records": 3,
+      "group_id": "rb12-semantic-near-miss-g02",
+      "incident_id": "rb12-semantic-near-miss-inca",
+      "notes": "payments settlement timeouts",
+      "role": "symptom",
+      "sources": [
+        "payments/api.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "batch-DE7F518F",
+      "ts": 1740731940
+    },
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb12-semantic-near-miss-g03",
+      "incident_id": "rb12-semantic-near-miss-incb",
+      "notes": "payouts settlement timeout during announced provider maintenance — unrelated to payments",
+      "role": "neutral",
+      "sources": [
+        "payouts/api.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "batch-5D59B79A",
+      "ts": 1740733440
+    }
+  ],
+  "expected": {
+    "bytes": 73191,
+    "events": 435,
+    "excluded_files": [],
+    "files": 2,
+    "files_by_path": {
+      "payments/api.jsonl": {
+        "bytes": 40887,
+        "events": 244,
+        "sha256": "59ad235ce0cb6a13d30430d3a51085ef08993198d604638655a39e534630bef6"
+      },
+      "payouts/api.jsonl": {
+        "bytes": 32304,
+        "events": 191,
+        "sha256": "47b8171d8cd8e6d7151d54cf5e6b52f4232845d48fd1d7d788a7346f8cebd25b"
+      }
+    },
+    "severities": {
+      "error": 4,
+      "info": 430,
+      "warn": 1
+    },
+    "source_count": 2,
+    "sources": {
+      "payments/api.jsonl": 244,
+      "payouts/api.jsonl": 191
+    },
+    "time_quality": "wall"
+  },
+  "forbidden_claims": [
+    "the payouts maintenance caused the payments timeouts",
+    "one merged settlement incident spans both services"
+  ],
+  "generator_version": "contextdesk.log_lab.retrieval_ablation.generator.v1",
+  "import_tree_sha256": "cbf1e42853b5834bee9d32be5198a9f8728815d5467e0bb5ad8a35698a8a4401",
+  "incidents": [
+    {
+      "incident_id": "rb12-semantic-near-miss-inca",
+      "root_cause_status": "established",
+      "summary": "Payments settlements timed out behind a stalled processor shard.",
+      "trigger_group_ids": [
+        "rb12-semantic-near-miss-g01"
+      ],
+      "window_from_ts": 1740731840,
+      "window_to_ts": 1740732120
+    },
+    {
+      "incident_id": "rb12-semantic-near-miss-incb",
+      "root_cause_status": "established",
+      "summary": "A payouts settlement timed out during announced provider maintenance.",
+      "trigger_group_ids": [
+        "rb12-semantic-near-miss-g03"
+      ],
+      "window_from_ts": 1740733440,
+      "window_to_ts": 1740733500
+    }
+  ],
+  "intended_probe": "highly similar messages belong to different services and incidents; embeddings must not merge them",
+  "known_counts": {
+    "corpus_completeness": "complete",
+    "known_missing_references": 0,
+    "total_events_known": true
+  },
+  "per_query_relevance": {
+    "rb12-semantic-near-miss-q1": {
+      "answerable": true,
+      "contaminating_groups": [
+        "rb12-semantic-near-miss-g03"
+      ],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb12-semantic-near-miss-g01"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb12-semantic-near-miss-g02"
+        }
+      ]
+    },
+    "rb12-semantic-near-miss-q2": {
+      "answerable": true,
+      "contaminating_groups": [
+        "rb12-semantic-near-miss-g03"
+      ],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb12-semantic-near-miss-g01"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb12-semantic-near-miss-g02"
+        }
+      ]
+    },
+    "rb12-semantic-near-miss-q3": {
+      "answerable": true,
+      "contaminating_groups": [
+        "rb12-semantic-near-miss-g03"
+      ],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb12-semantic-near-miss-g02"
+        }
+      ]
+    },
+    "rb12-semantic-near-miss-q4": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb12-semantic-near-miss-g02"
+        }
+      ]
+    },
+    "rb12-semantic-near-miss-q5": {
+      "answerable": false,
+      "contaminating_groups": [
+        "rb12-semantic-near-miss-g03"
+      ],
+      "relevant": []
+    },
+    "rb12-semantic-near-miss-q6": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb12-semantic-near-miss-g01"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb12-semantic-near-miss-g03"
+        }
+      ]
+    },
+    "rb12-semantic-near-miss-q7": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb12-semantic-near-miss-g01"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb12-semantic-near-miss-g03"
+        }
+      ]
+    }
+  },
+  "permitted_uncertainty": [
+    "nothing links the two services in this corpus"
+  ],
+  "privacy": {
+    "marker": "LOG-LAB-INVALID",
+    "secret_tokens": []
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no customer, employer, developer-machine, production, or third-party log material.",
+  "required_claims": [
+    "the payments and payouts timeouts are different incidents in different services",
+    "the payouts event has its own benign explanation"
+  ],
+  "retrieval_exclusions": [],
+  "schema_id": "contextdesk.log_lab.retrieval_truth.v1",
+  "schema_version": 1,
+  "seed": 92026080701,
+  "semantic_truth_digest": "bc041969554a377d2852e92801f118dd753e7c792445b73df4d26c903737f4b6",
+  "suite_id": "contextdesk.log_lab.retrieval_ablation",
+  "suite_version": 1,
+  "tier": "small",
+  "title": "Semantic near-miss"
+}

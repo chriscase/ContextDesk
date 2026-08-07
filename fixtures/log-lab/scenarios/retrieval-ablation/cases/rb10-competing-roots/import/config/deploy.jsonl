@@ -1,0 +1,1 @@
+{"host":"control-02.example","level":"warn","message":"config change chg-D080531E applied cache ttl lowered from 300s to 5s","service":"deploy-audit","trace_id":"trace-909117f0","ts":1740559540}

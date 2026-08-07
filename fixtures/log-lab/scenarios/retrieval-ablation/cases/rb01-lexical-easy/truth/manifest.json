@@ -1,0 +1,246 @@
+{
+  "base_ts": 1739779440,
+  "baseline_expectation": {
+    "class": "pass",
+    "gates": {
+      "max_decoy_share_at_25": 0.25,
+      "min_recall_at_25": 0.75,
+      "queries_expected_below_floor": []
+    },
+    "limitation_reason": null
+  },
+  "case_id": "rb01-lexical-easy",
+  "case_version": 1,
+  "competing_explanations": [],
+  "evaluator_isolation": "Everything under truth/ is an answer key. Import only the sibling import/ directory and never attach truth or queries to model context.",
+  "evaluator_only": true,
+  "evidence_groups": [
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb01-lexical-easy-g01",
+      "incident_id": "rb01-lexical-easy-inc1",
+      "notes": "config change shrank the checkout timeout budget",
+      "role": "trigger",
+      "sources": [
+        "api/checkout.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "chg-B43C8E4E",
+      "ts": 1739782500
+    },
+    {
+      "expected_occurrences": 3,
+      "expected_raw_records": 3,
+      "expected_token_records": 3,
+      "group_id": "rb01-lexical-easy-g02",
+      "incident_id": "rb01-lexical-easy-inc1",
+      "notes": "payment authorize retries breach the shrunken timeout",
+      "role": "propagation",
+      "sources": [
+        "api/checkout.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "txn-42894EEB",
+      "ts": 1739782560
+    },
+    {
+      "expected_occurrences": 2,
+      "expected_raw_records": 2,
+      "expected_token_records": 2,
+      "group_id": "rb01-lexical-easy-g03",
+      "incident_id": "rb01-lexical-easy-inc1",
+      "notes": "edge returns 504 for checkout requests",
+      "role": "symptom",
+      "sources": [
+        "edge/gateway.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "req-B0C63AF7",
+      "ts": 1739782640
+    },
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb01-lexical-easy-g04",
+      "incident_id": "rb01-lexical-easy-inc1",
+      "notes": "threshold restored; checkout latency normal again",
+      "role": "recovery",
+      "sources": [
+        "api/checkout.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "chg-7F52BA4B",
+      "ts": 1739783040
+    }
+  ],
+  "expected": {
+    "bytes": 71055,
+    "events": 387,
+    "excluded_files": [],
+    "files": 2,
+    "files_by_path": {
+      "api/checkout.jsonl": {
+        "bytes": 49727,
+        "events": 245,
+        "sha256": "bfc84ebd8561e713c62d323c8136e67a60ccd1ec108ab2862280b8fa100326eb"
+      },
+      "edge/gateway.jsonl": {
+        "bytes": 21328,
+        "events": 142,
+        "sha256": "e785856535bd5f80ed0cfc29415dfa24ce3ac00e2e7f944bc9ab3de96b0d920e"
+      }
+    },
+    "severities": {
+      "error": 5,
+      "info": 377,
+      "warn": 5
+    },
+    "source_count": 2,
+    "sources": {
+      "api/checkout.jsonl": 245,
+      "edge/gateway.jsonl": 142
+    },
+    "time_quality": "wall"
+  },
+  "forbidden_claims": [
+    "the edge gateway itself failed",
+    "a database outage caused the checkout timeouts"
+  ],
+  "generator_version": "contextdesk.log_lab.retrieval_ablation.generator.v1",
+  "import_tree_sha256": "38f9f493a593e49f464c99539e124a7b6c26741e3c57650b3e4810fb1ff031f4",
+  "incidents": [
+    {
+      "incident_id": "rb01-lexical-easy-inc1",
+      "root_cause_status": "established",
+      "summary": "A config change lowered the checkout timeout threshold; payment authorize calls then exceeded it, surfacing as edge 504s until the threshold was restored.",
+      "trigger_group_ids": [
+        "rb01-lexical-easy-g01"
+      ],
+      "window_from_ts": 1739782500,
+      "window_to_ts": 1739783100
+    }
+  ],
+  "intended_probe": "control: query and causal evidence share obvious terminology",
+  "known_counts": {
+    "corpus_completeness": "complete",
+    "known_missing_references": 0,
+    "total_events_known": true
+  },
+  "per_query_relevance": {
+    "rb01-lexical-easy-q1": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb01-lexical-easy-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb01-lexical-easy-g02"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb01-lexical-easy-g03"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb01-lexical-easy-g04"
+        }
+      ]
+    },
+    "rb01-lexical-easy-q2": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb01-lexical-easy-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb01-lexical-easy-g02"
+        }
+      ]
+    },
+    "rb01-lexical-easy-q3": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb01-lexical-easy-g03"
+        }
+      ]
+    },
+    "rb01-lexical-easy-q4": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 2,
+          "group_id": "rb01-lexical-easy-g02"
+        }
+      ]
+    },
+    "rb01-lexical-easy-q5": {
+      "answerable": false,
+      "contaminating_groups": [],
+      "relevant": []
+    },
+    "rb01-lexical-easy-q6": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb01-lexical-easy-g01"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb01-lexical-easy-g03"
+        }
+      ]
+    },
+    "rb01-lexical-easy-q7": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb01-lexical-easy-g01"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb01-lexical-easy-g04"
+        }
+      ]
+    }
+  },
+  "permitted_uncertainty": [
+    "exact user impact counts are not derivable from these logs"
+  ],
+  "privacy": {
+    "marker": "LOG-LAB-INVALID",
+    "secret_tokens": []
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no customer, employer, developer-machine, production, or third-party log material.",
+  "required_claims": [
+    "the checkout timeout threshold was lowered by a config change before the failures",
+    "payment authorize calls exceeded the lowered threshold",
+    "the edge 504s were symptoms, not the cause",
+    "restoring the threshold preceded recovery"
+  ],
+  "retrieval_exclusions": [],
+  "schema_id": "contextdesk.log_lab.retrieval_truth.v1",
+  "schema_version": 1,
+  "seed": 92026080701,
+  "semantic_truth_digest": "371ab0637b6b650ba1f137b3a4f0dacd6fe967eb11b2e2f8adfa70327ac50540",
+  "suite_id": "contextdesk.log_lab.retrieval_ablation",
+  "suite_version": 1,
+  "tier": "small",
+  "title": "Lexically easy trigger"
+}

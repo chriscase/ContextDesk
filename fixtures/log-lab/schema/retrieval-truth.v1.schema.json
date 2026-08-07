@@ -1,0 +1,61 @@
+{
+  "$id": "https://contextdesk.example/schemas/contextdesk.log_lab.retrieval_truth.v1.json",
+  "authority": "crates/cd-core/tests/support/retrieval_ablation.rs::RaTruthManifest (serde, deny_unknown_fields)",
+  "compatibility": {
+    "corpus_completeness": [
+      "complete",
+      "partial_lower_bound"
+    ],
+    "event_reference": "unique message token resolved to (seq, source) at scoring time",
+    "relation_to_log_lab_truth_v1": "successor contract for retrieval benchmarking; log-lab truth.schema.json v1 remains frozen and unchanged",
+    "roles": [
+      "trigger",
+      "propagation",
+      "symptom",
+      "recovery",
+      "decoy",
+      "neutral"
+    ],
+    "timestamp_certainty": [
+      "wall",
+      "order_only",
+      "ambiguous_local",
+      "skewed"
+    ]
+  },
+  "evaluator_only": true,
+  "required": [
+    "schema_id",
+    "schema_version",
+    "suite_id",
+    "suite_version",
+    "case_id",
+    "case_version",
+    "generator_version",
+    "seed",
+    "tier",
+    "provenance",
+    "evaluator_only",
+    "evaluator_isolation",
+    "intended_probe",
+    "title",
+    "base_ts",
+    "expected",
+    "incidents",
+    "evidence_groups",
+    "known_counts",
+    "required_claims",
+    "forbidden_claims",
+    "competing_explanations",
+    "permitted_uncertainty",
+    "privacy",
+    "retrieval_exclusions",
+    "per_query_relevance",
+    "baseline_expectation",
+    "semantic_truth_digest",
+    "import_tree_sha256"
+  ],
+  "schema_id": "contextdesk.log_lab.retrieval_truth.v1",
+  "schema_version": 1,
+  "title": "ContextDesk retrieval-ablation truth manifest"
+}

@@ -1,0 +1,239 @@
+{
+  "base_ts": 1741334640,
+  "baseline_expectation": {
+    "class": "pass",
+    "gates": {
+      "max_decoy_share_at_25": 0.25,
+      "min_recall_at_25": 0.5,
+      "queries_expected_below_floor": []
+    },
+    "limitation_reason": null
+  },
+  "case_id": "rb19-severity-isolated",
+  "case_version": 1,
+  "competing_explanations": [],
+  "evaluator_isolation": "Everything under truth/ is an answer key. Import only the sibling import/ directory and never attach truth or queries to model context.",
+  "evaluator_only": true,
+  "evidence_groups": [
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb19-severity-isolated-g00",
+      "incident_id": null,
+      "notes": "isolated FATAL on an unrelated host agent, hours before the incident",
+      "role": "decoy",
+      "sources": [
+        "infra/agent.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "watchdog unrecoverable",
+      "ts": 1741335240
+    },
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb19-severity-isolated-g01",
+      "incident_id": "rb19-severity-isolated-inc1",
+      "notes": "expired provider certificate",
+      "role": "trigger",
+      "sources": [
+        "api/checkout.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "cert-DB452DD0",
+      "ts": 1741337640
+    },
+    {
+      "expected_occurrences": 2,
+      "expected_raw_records": 2,
+      "expected_token_records": 2,
+      "group_id": "rb19-severity-isolated-g02",
+      "incident_id": "rb19-severity-isolated-inc1",
+      "notes": "retries against the refused handshake",
+      "role": "propagation",
+      "sources": [
+        "api/checkout.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "rty-1C12E8E9",
+      "ts": 1741337700
+    },
+    {
+      "expected_occurrences": 3,
+      "expected_raw_records": 3,
+      "expected_token_records": 3,
+      "group_id": "rb19-severity-isolated-g03",
+      "incident_id": "rb19-severity-isolated-inc1",
+      "notes": "checkout failures",
+      "role": "symptom",
+      "sources": [
+        "api/checkout.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "req-052ABB02",
+      "ts": 1741337820
+    }
+  ],
+  "expected": {
+    "bytes": 57810,
+    "events": 417,
+    "excluded_files": [],
+    "files": 2,
+    "files_by_path": {
+      "api/checkout.jsonl": {
+        "bytes": 52228,
+        "events": 326,
+        "sha256": "cbecb438749b79cbead63630f275e6bb08472f3aefd74edb6ad79ac544dd5464"
+      },
+      "infra/agent.log": {
+        "bytes": 5582,
+        "events": 91,
+        "sha256": "54479bfaea678f9dd6c67dbfd23a6f14c268abb96fd4066529d10acbda72f679"
+      }
+    },
+    "severities": {
+      "error": 4,
+      "fatal": 1,
+      "info": 410,
+      "warn": 2
+    },
+    "source_count": 2,
+    "sources": {
+      "api/checkout.jsonl": 326,
+      "infra/agent.log": 91
+    },
+    "time_quality": "wall"
+  },
+  "forbidden_claims": [
+    "the watchdog FATAL caused the checkout failures"
+  ],
+  "generator_version": "contextdesk.log_lab.retrieval_ablation.generator.v1",
+  "import_tree_sha256": "af3ff8bdd293a350e0aa757c505ad3ef92341e3932187b88399af0e244dae0e2",
+  "incidents": [
+    {
+      "incident_id": "rb19-severity-isolated-inc1",
+      "root_cause_status": "established",
+      "summary": "An expired provider certificate refused handshakes; checkouts failed after retries. The infra FATAL is unrelated to this incident.",
+      "trigger_group_ids": [
+        "rb19-severity-isolated-g01"
+      ],
+      "window_from_ts": 1741337640,
+      "window_to_ts": 1741338000
+    }
+  ],
+  "intended_probe": "a dramatic FATAL record unrelated to the incident must not outrank a supported causal chain",
+  "known_counts": {
+    "corpus_completeness": "complete",
+    "known_missing_references": 0,
+    "total_events_known": true
+  },
+  "per_query_relevance": {
+    "rb19-severity-isolated-q1": {
+      "answerable": true,
+      "contaminating_groups": [
+        "rb19-severity-isolated-g00"
+      ],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb19-severity-isolated-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb19-severity-isolated-g02"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb19-severity-isolated-g03"
+        }
+      ]
+    },
+    "rb19-severity-isolated-q2": {
+      "answerable": true,
+      "contaminating_groups": [
+        "rb19-severity-isolated-g00"
+      ],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb19-severity-isolated-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb19-severity-isolated-g02"
+        }
+      ]
+    },
+    "rb19-severity-isolated-q3": {
+      "answerable": true,
+      "contaminating_groups": [
+        "rb19-severity-isolated-g00"
+      ],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb19-severity-isolated-g03"
+        }
+      ]
+    },
+    "rb19-severity-isolated-q4": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb19-severity-isolated-g01"
+        }
+      ]
+    },
+    "rb19-severity-isolated-q5": {
+      "answerable": false,
+      "contaminating_groups": [],
+      "relevant": []
+    },
+    "rb19-severity-isolated-q6": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb19-severity-isolated-g01"
+        }
+      ]
+    },
+    "rb19-severity-isolated-q7": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb19-severity-isolated-g01"
+        }
+      ]
+    }
+  },
+  "permitted_uncertainty": [
+    "host-agent internals are outside this corpus"
+  ],
+  "privacy": {
+    "marker": "LOG-LAB-INVALID",
+    "secret_tokens": []
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no customer, employer, developer-machine, production, or third-party log material.",
+  "required_claims": [
+    "the certificate expiry chain is fully supported by cross-referenced records",
+    "the FATAL is hours earlier, on another host, with no connecting evidence",
+    "severity alone must not promote the FATAL to root cause"
+  ],
+  "retrieval_exclusions": [],
+  "schema_id": "contextdesk.log_lab.retrieval_truth.v1",
+  "schema_version": 1,
+  "seed": 92026080701,
+  "semantic_truth_digest": "3cffa54bfd86f30b99aa6a5df484f4c28be51eb68dba8c126d64ac81534e8442",
+  "suite_id": "contextdesk.log_lab.retrieval_ablation",
+  "suite_version": 1,
+  "tier": "small",
+  "title": "High-severity isolated event"
+}

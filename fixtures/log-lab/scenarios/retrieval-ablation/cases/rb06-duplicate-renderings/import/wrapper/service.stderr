@@ -1,0 +1,200 @@
+2025-02-22T08:54:01.000Z ERROR [stderr] PaymentGatewayException: settlement post failed txn-9B74CB61
+2025-02-22T08:54:01.001Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.002Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.003Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.004Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.005Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.006Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.007Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.008Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.009Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.010Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.011Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.012Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.013Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.014Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.015Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.016Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.017Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.018Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.019Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.020Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.021Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.022Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.023Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.024Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.025Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.026Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.027Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.028Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.029Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.030Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.031Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.032Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.033Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.034Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.035Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.036Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.037Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.038Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.039Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.040Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.041Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.042Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.043Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.044Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.045Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.046Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.047Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.048Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.049Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.050Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.051Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.052Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.053Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.054Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.055Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.056Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.057Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.058Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.059Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.060Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.061Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.062Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.063Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.064Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.065Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.066Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.067Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.068Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.069Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.070Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.071Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.072Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.073Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.074Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.075Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.076Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.077Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.078Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.079Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.080Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.081Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.082Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.083Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.084Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.085Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.086Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.087Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.088Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.089Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.090Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.091Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.092Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.093Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.094Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.095Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.096Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.097Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.098Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.099Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.100Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.101Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.102Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.103Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.104Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.105Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.106Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.107Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.108Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.109Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.110Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.111Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.112Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.113Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.114Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.115Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.116Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.117Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.118Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.119Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.120Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.121Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.122Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.123Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.124Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.125Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.126Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.127Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.128Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.129Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.130Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.131Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.132Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.133Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.134Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.135Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.136Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.137Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.138Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.139Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.140Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.141Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.142Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.143Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.144Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.145Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.146Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.147Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.148Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.149Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.150Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.151Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.152Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.153Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.154Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.155Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.156Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.157Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.158Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.159Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.160Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.161Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.162Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.163Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.164Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.165Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.166Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.167Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.168Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.169Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.170Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.171Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.172Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.173Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.174Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.175Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.176Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.177Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.178Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.179Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.180Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.181Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.182Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.183Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.184Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.185Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.186Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.187Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.188Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.189Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.190Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.191Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.192Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.193Z ERROR [stderr] at charge in checkout/service.go:42
+2025-02-22T08:54:01.194Z ERROR [stderr] at process in worker/loop.go:311
+2025-02-22T08:54:01.195Z ERROR [stderr] Caused by: TimeoutError: upstream deadline exceeded
+2025-02-22T08:54:01.196Z ERROR [stderr] at await_response in gateway/transport.go:129
+2025-02-22T08:54:01.197Z ERROR [stderr] at flush in gateway/buffer.go:77
+2025-02-22T08:54:01.198Z ERROR [stderr] at run in runtime/task.go:19
+2025-02-22T08:54:01.199Z ERROR [stderr] at charge in checkout/service.go:42

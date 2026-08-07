@@ -1,0 +1,225 @@
+{
+  "base_ts": 1739952240,
+  "baseline_expectation": {
+    "class": "limitation",
+    "gates": {
+      "max_decoy_share_at_25": 0.5,
+      "min_recall_at_25": null,
+      "queries_expected_below_floor": [
+        "rb03-rare-causal-q2"
+      ]
+    },
+    "limitation_reason": "the causal 507/disk_free_mb records share the routine completion template and none of the natural causal query terms; they are reachable by identifier or storage vocabulary only"
+  },
+  "case_id": "rb03-rare-causal",
+  "case_version": 1,
+  "competing_explanations": [],
+  "evaluator_isolation": "Everything under truth/ is an answer key. Import only the sibling import/ directory and never attach truth or queries to model context.",
+  "evaluator_only": true,
+  "evidence_groups": [
+    {
+      "expected_occurrences": 3,
+      "expected_raw_records": 3,
+      "expected_token_records": 3,
+      "group_id": "rb03-rare-causal-g01",
+      "incident_id": "rb03-rare-causal-inc1",
+      "notes": "storage exhaustion surfaces inside the generic completion template",
+      "role": "trigger",
+      "sources": [
+        "api/requests.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "req-695ECE86",
+      "ts": 1739954640
+    },
+    {
+      "expected_occurrences": 2,
+      "expected_raw_records": 2,
+      "expected_token_records": 2,
+      "group_id": "rb03-rare-causal-g02",
+      "incident_id": "rb03-rare-causal-inc1",
+      "notes": "worker aborts uploads on insufficient storage",
+      "role": "propagation",
+      "sources": [
+        "worker/uploads.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "job-E22229D4",
+      "ts": 1739954840
+    },
+    {
+      "expected_occurrences": 4,
+      "expected_raw_records": 4,
+      "expected_token_records": 4,
+      "group_id": "rb03-rare-causal-g03",
+      "incident_id": "rb03-rare-causal-inc1",
+      "notes": "user-visible upload failures",
+      "role": "symptom",
+      "sources": [
+        "api/requests.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "req-847DF32D",
+      "ts": 1739955040
+    }
+  ],
+  "expected": {
+    "bytes": 174137,
+    "events": 864,
+    "excluded_files": [],
+    "files": 2,
+    "files_by_path": {
+      "api/requests.jsonl": {
+        "bytes": 167888,
+        "events": 822,
+        "sha256": "fdfe7f5e2dd62514f7456f7d774427d0ca64347b25c57e3ffcd4ce2624ba7565"
+      },
+      "worker/uploads.log": {
+        "bytes": 6249,
+        "events": 42,
+        "sha256": "2b3714833bfb82960a03b046bac018609d849e1b117ef48dd64249838659a396"
+      }
+    },
+    "severities": {
+      "error": 6,
+      "info": 858
+    },
+    "source_count": 2,
+    "sources": {
+      "api/requests.jsonl": 822,
+      "worker/uploads.log": 42
+    },
+    "time_quality": "wall"
+  },
+  "forbidden_claims": [
+    "upload volume alone caused the failures"
+  ],
+  "generator_version": "contextdesk.log_lab.retrieval_ablation.generator.v1",
+  "import_tree_sha256": "9c63ff36c27d9f6ab3ae30e7f4207849e967c1029e0dbb9802ff48774318c8b2",
+  "incidents": [
+    {
+      "incident_id": "rb03-rare-causal-inc1",
+      "root_cause_status": "established",
+      "summary": "Storage exhaustion (507 with disk_free_mb collapsing) inside the routine completion template caused worker aborts and then 500s on uploads.",
+      "trigger_group_ids": [
+        "rb03-rare-causal-g01"
+      ],
+      "window_from_ts": 1739954640,
+      "window_to_ts": 1739955280
+    }
+  ],
+  "intended_probe": "a handful of causal records hide inside a high-volume wildcard template family",
+  "known_counts": {
+    "corpus_completeness": "complete",
+    "known_missing_references": 0,
+    "total_events_known": true
+  },
+  "per_query_relevance": {
+    "rb03-rare-causal-q1": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb03-rare-causal-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb03-rare-causal-g02"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb03-rare-causal-g03"
+        }
+      ]
+    },
+    "rb03-rare-causal-q2": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb03-rare-causal-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb03-rare-causal-g02"
+        }
+      ]
+    },
+    "rb03-rare-causal-q3": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb03-rare-causal-g03"
+        }
+      ]
+    },
+    "rb03-rare-causal-q4": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb03-rare-causal-g01"
+        }
+      ]
+    },
+    "rb03-rare-causal-q5": {
+      "answerable": false,
+      "contaminating_groups": [],
+      "relevant": []
+    },
+    "rb03-rare-causal-q6": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb03-rare-causal-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb03-rare-causal-g02"
+        }
+      ]
+    },
+    "rb03-rare-causal-q7": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 2,
+          "group_id": "rb03-rare-causal-g02"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb03-rare-causal-g03"
+        }
+      ]
+    }
+  },
+  "permitted_uncertainty": [
+    "absolute disk capacity is not in the corpus; only the free-space trend is"
+  ],
+  "privacy": {
+    "marker": "LOG-LAB-INVALID",
+    "secret_tokens": []
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no customer, employer, developer-machine, production, or third-party log material.",
+  "required_claims": [
+    "disk_free_mb collapsing to single digits precedes every user-visible failure",
+    "the 507 completions inside the routine template are the earliest causal evidence"
+  ],
+  "retrieval_exclusions": [],
+  "schema_id": "contextdesk.log_lab.retrieval_truth.v1",
+  "schema_version": 1,
+  "seed": 92026080701,
+  "semantic_truth_digest": "ad7fb04e7ccd61d002c29f4f8d2fed68b048e9741e85b836cefc7067de70b0f3",
+  "suite_id": "contextdesk.log_lab.retrieval_ablation",
+  "suite_version": 1,
+  "tier": "small",
+  "title": "Rare causal evidence"
+}

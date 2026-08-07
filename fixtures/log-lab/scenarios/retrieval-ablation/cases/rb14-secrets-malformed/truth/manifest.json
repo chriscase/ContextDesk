@@ -1,0 +1,237 @@
+{
+  "base_ts": 1740902640,
+  "baseline_expectation": {
+    "class": "pass",
+    "gates": {
+      "max_decoy_share_at_25": 0.3,
+      "min_recall_at_25": 0.6,
+      "queries_expected_below_floor": []
+    },
+    "limitation_reason": null
+  },
+  "case_id": "rb14-secrets-malformed",
+  "case_version": 1,
+  "competing_explanations": [],
+  "evaluator_isolation": "Everything under truth/ is an answer key. Import only the sibling import/ directory and never attach truth or queries to model context.",
+  "evaluator_only": true,
+  "evidence_groups": [
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb14-secrets-malformed-g01",
+      "incident_id": null,
+      "notes": "datasource URL with an embedded credential-shaped value (redaction probe)",
+      "role": "neutral",
+      "sources": [
+        "app/datasource.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "ds-AFE5B849",
+      "ts": 1740903840
+    },
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb14-secrets-malformed-g02",
+      "incident_id": "rb14-secrets-malformed-inc1",
+      "notes": "signing key rotated; old key id keeps arriving",
+      "role": "trigger",
+      "sources": [
+        "auth/tokens.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "kid-9A4EF591",
+      "ts": 1740904640
+    },
+    {
+      "expected_occurrences": 3,
+      "expected_raw_records": 3,
+      "expected_token_records": 3,
+      "group_id": "rb14-secrets-malformed-g03",
+      "incident_id": "rb14-secrets-malformed-inc1",
+      "notes": "verification failures after the rotation",
+      "role": "symptom",
+      "sources": [
+        "auth/tokens.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "signature rejected",
+      "ts": 1740904740
+    }
+  ],
+  "expected": {
+    "bytes": 60726,
+    "events": 405,
+    "excluded_files": [
+      "garbled/malformed.log",
+      "noise/binary.log",
+      "markup/export.xml"
+    ],
+    "files": 2,
+    "files_by_path": {
+      "app/datasource.log": {
+        "bytes": 36503,
+        "events": 261,
+        "sha256": "d2d6c5f6acdd99e3d9599910e25125de3586cf7c6fe7f63c554dd2f37ae586c9"
+      },
+      "auth/tokens.jsonl": {
+        "bytes": 24223,
+        "events": 144,
+        "sha256": "cedba3e9e2de496227771e219e313f7d1ebcdb4162349e18f23a0d4091c82106"
+      }
+    },
+    "severities": {
+      "error": 3,
+      "info": 401,
+      "warn": 1
+    },
+    "source_count": 2,
+    "sources": {
+      "app/datasource.log": 261,
+      "auth/tokens.jsonl": 144
+    },
+    "time_quality": "wall"
+  },
+  "forbidden_claims": [
+    "the datasource password caused the failures"
+  ],
+  "generator_version": "contextdesk.log_lab.retrieval_ablation.generator.v1",
+  "import_tree_sha256": "037d1be3344740d0582e45d2f28fc1767355b3e6646d2336d83067d0992516c3",
+  "incidents": [
+    {
+      "incident_id": "rb14-secrets-malformed-inc1",
+      "root_cause_status": "established",
+      "summary": "A signing-key rotation left clients presenting a stale key id; verification failures followed. The datasource URL credential and api_key values are synthetic secrets that must stay redacted.",
+      "trigger_group_ids": [
+        "rb14-secrets-malformed-g02"
+      ],
+      "window_from_ts": 1740904640,
+      "window_to_ts": 1740904920
+    }
+  ],
+  "intended_probe": "credential-shaped values, malformed Unicode, binary noise and markup distractions",
+  "known_counts": {
+    "corpus_completeness": "complete",
+    "known_missing_references": 0,
+    "total_events_known": true
+  },
+  "per_query_relevance": {
+    "rb14-secrets-malformed-q1": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb14-secrets-malformed-g02"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb14-secrets-malformed-g03"
+        }
+      ]
+    },
+    "rb14-secrets-malformed-q2": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb14-secrets-malformed-g02"
+        }
+      ]
+    },
+    "rb14-secrets-malformed-q3": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb14-secrets-malformed-g03"
+        }
+      ]
+    },
+    "rb14-secrets-malformed-q4": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb14-secrets-malformed-g02"
+        }
+      ]
+    },
+    "rb14-secrets-malformed-q5": {
+      "answerable": false,
+      "contaminating_groups": [],
+      "relevant": []
+    },
+    "rb14-secrets-malformed-q6": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb14-secrets-malformed-g02"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb14-secrets-malformed-g01"
+        }
+      ]
+    },
+    "rb14-secrets-malformed-q7": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb14-secrets-malformed-g02"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb14-secrets-malformed-g03"
+        }
+      ]
+    }
+  },
+  "permitted_uncertainty": [
+    "client-side key caching behaviour is not in the corpus"
+  ],
+  "privacy": {
+    "marker": "LOG-LAB-INVALID",
+    "secret_tokens": [
+      "LOG-LAB-INVALID-5E9B4F56",
+      "sk-LOG-LAB-INVALID-3CBFDE47"
+    ]
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no customer, employer, developer-machine, production, or third-party log material.",
+  "required_claims": [
+    "the key rotation precedes every verification failure",
+    "the malformed file is rejected as a unit without corrupting sibling sources",
+    "credential-shaped values are synthetic and must remain redacted"
+  ],
+  "retrieval_exclusions": [
+    {
+      "reason": "invalid UTF-8 makes the reviewed import reject the file as a unit; valid sibling files still import",
+      "token": "garbled/malformed.log"
+    },
+    {
+      "reason": "binary bytes are unsupported input, not events",
+      "token": "noise/binary.log"
+    },
+    {
+      "reason": "markup export is a distraction, not a log",
+      "token": "markup/export.xml"
+    }
+  ],
+  "schema_id": "contextdesk.log_lab.retrieval_truth.v1",
+  "schema_version": 1,
+  "seed": 92026080701,
+  "semantic_truth_digest": "5c74b6c7b74996c018f308a5d73e088c121dea35fe0f7d5b1775a88262f00eda",
+  "suite_id": "contextdesk.log_lab.retrieval_ablation",
+  "suite_version": 1,
+  "tier": "small",
+  "title": "Secrets and malformed input"
+}

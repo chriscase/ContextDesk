@@ -1,0 +1,281 @@
+{
+  "base_ts": 1740125040,
+  "baseline_expectation": {
+    "class": "pass",
+    "gates": {
+      "max_decoy_share_at_25": 0.25,
+      "min_recall_at_25": 0.6,
+      "queries_expected_below_floor": []
+    },
+    "limitation_reason": null
+  },
+  "case_id": "rb05-cross-source",
+  "case_version": 1,
+  "competing_explanations": [],
+  "evaluator_isolation": "Everything under truth/ is an answer key. Import only the sibling import/ directory and never attach truth or queries to model context.",
+  "evaluator_only": true,
+  "evidence_groups": [
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb05-cross-source-g01",
+      "incident_id": "rb05-cross-source-inc1",
+      "notes": "database-side vocabulary only",
+      "role": "trigger",
+      "sources": [
+        "db/postgres.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "smart shutdown request",
+      "ts": 1740127540
+    },
+    {
+      "expected_occurrences": 2,
+      "expected_raw_records": 2,
+      "expected_token_records": 2,
+      "group_id": "rb05-cross-source-g02",
+      "incident_id": "rb05-cross-source-inc1",
+      "notes": "app-server vocabulary: managed connection acquisition",
+      "role": "propagation",
+      "sources": [
+        "appserver/wildfly.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "IJ000453",
+      "ts": 1740127600
+    },
+    {
+      "expected_occurrences": 2,
+      "expected_raw_records": 2,
+      "expected_token_records": 2,
+      "group_id": "rb05-cross-source-g03",
+      "incident_id": "rb05-cross-source-inc1",
+      "notes": "worker vocabulary: retries on refused connections",
+      "role": "propagation",
+      "sources": [
+        "worker/jobs.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "job-4955AA99",
+      "ts": 1740127720
+    },
+    {
+      "expected_occurrences": 3,
+      "expected_raw_records": 3,
+      "expected_token_records": 3,
+      "group_id": "rb05-cross-source-g04",
+      "incident_id": "rb05-cross-source-inc1",
+      "notes": "client vocabulary: 502 upstream connect",
+      "role": "symptom",
+      "sources": [
+        "client/edge.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "req-6297C960",
+      "ts": 1740127840
+    },
+    {
+      "expected_occurrences": 2,
+      "expected_raw_records": 2,
+      "expected_token_records": 2,
+      "group_id": "rb05-cross-source-g05",
+      "incident_id": "rb05-cross-source-inc1",
+      "notes": "recovery across two sources",
+      "role": "recovery",
+      "sources": [
+        "appserver/wildfly.log",
+        "db/postgres.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "database system is ready",
+      "ts": 1740128440
+    }
+  ],
+  "expected": {
+    "bytes": 98826,
+    "events": 670,
+    "excluded_files": [],
+    "files": 4,
+    "files_by_path": {
+      "appserver/wildfly.log": {
+        "bytes": 7012,
+        "events": 93,
+        "sha256": "96b56a534ef85e90d26bfd0af5172d69b065bdeab1b3bf7f04afd2e04485f5be"
+      },
+      "client/edge.jsonl": {
+        "bytes": 49158,
+        "events": 263,
+        "sha256": "a667c8ec8775e8d2a885c288f9362af6cbccb6c06c04a3538b0c4238f6693b25"
+      },
+      "db/postgres.log": {
+        "bytes": 6250,
+        "events": 92,
+        "sha256": "f5c5f03b712eb32815ae9aa358198969eeef8dec9a0bd46eb9b9aa74ccb0dca6"
+      },
+      "worker/jobs.jsonl": {
+        "bytes": 36406,
+        "events": 222,
+        "sha256": "8227b920f35b1f8f242f9e42dd51e0fa9be9b62525dabbbd0be07cf4eeb9de65"
+      }
+    },
+    "severities": {
+      "error": 5,
+      "info": 662,
+      "warn": 3
+    },
+    "source_count": 4,
+    "sources": {
+      "appserver/wildfly.log": 93,
+      "client/edge.jsonl": 263,
+      "db/postgres.log": 92,
+      "worker/jobs.jsonl": 222
+    },
+    "time_quality": "wall"
+  },
+  "forbidden_claims": [
+    "the client edge caused the 502s",
+    "the worker retry loop caused the outage"
+  ],
+  "generator_version": "contextdesk.log_lab.retrieval_ablation.generator.v1",
+  "import_tree_sha256": "006e4198f11aa155519216659d884b526a03e4efaa350a491479739e1599feab",
+  "incidents": [
+    {
+      "incident_id": "rb05-cross-source-inc1",
+      "root_cause_status": "established",
+      "summary": "A database smart shutdown propagated through the app server (IJ000453), the worker (refused connections) and the client edge (502s) until readiness returned.",
+      "trigger_group_ids": [
+        "rb05-cross-source-g01"
+      ],
+      "window_from_ts": 1740127540,
+      "window_to_ts": 1740128560
+    }
+  ],
+  "intended_probe": "trigger, propagation, symptoms and recovery use different vocabulary in database, app server, worker and client logs",
+  "known_counts": {
+    "corpus_completeness": "complete",
+    "known_missing_references": 0,
+    "total_events_known": true
+  },
+  "per_query_relevance": {
+    "rb05-cross-source-q1": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb05-cross-source-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb05-cross-source-g02"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb05-cross-source-g03"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb05-cross-source-g04"
+        }
+      ]
+    },
+    "rb05-cross-source-q2": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb05-cross-source-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb05-cross-source-g02"
+        }
+      ]
+    },
+    "rb05-cross-source-q3": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb05-cross-source-g04"
+        }
+      ]
+    },
+    "rb05-cross-source-q4": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 2,
+          "group_id": "rb05-cross-source-g03"
+        }
+      ]
+    },
+    "rb05-cross-source-q5": {
+      "answerable": false,
+      "contaminating_groups": [],
+      "relevant": []
+    },
+    "rb05-cross-source-q6": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb05-cross-source-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb05-cross-source-g02"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb05-cross-source-g03"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb05-cross-source-g04"
+        }
+      ]
+    },
+    "rb05-cross-source-q7": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb05-cross-source-g01"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb05-cross-source-g05"
+        }
+      ]
+    }
+  },
+  "permitted_uncertainty": [
+    "why the smart shutdown was requested is not in the corpus"
+  ],
+  "privacy": {
+    "marker": "LOG-LAB-INVALID",
+    "secret_tokens": []
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no customer, employer, developer-machine, production, or third-party log material.",
+  "required_claims": [
+    "the database shutdown is the earliest causal record",
+    "IJ000453, worker retries, and client 502s are the same incident seen from different tiers",
+    "recovery is anchored by the readiness record"
+  ],
+  "retrieval_exclusions": [],
+  "schema_id": "contextdesk.log_lab.retrieval_truth.v1",
+  "schema_version": 1,
+  "seed": 92026080701,
+  "semantic_truth_digest": "d877eb953f8b4ca2357e3da9990422d4e9e48780eb40ae3cd64eb9a95894a9e5",
+  "suite_id": "contextdesk.log_lab.retrieval_ablation",
+  "suite_version": 1,
+  "tier": "small",
+  "title": "Cross-source propagation"
+}

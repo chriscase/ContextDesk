@@ -1,0 +1,244 @@
+{
+  "base_ts": 1740557040,
+  "baseline_expectation": {
+    "class": "pass",
+    "gates": {
+      "max_decoy_share_at_25": 0.3,
+      "min_recall_at_25": 0.6,
+      "queries_expected_below_floor": []
+    },
+    "limitation_reason": null
+  },
+  "case_id": "rb10-competing-roots",
+  "case_version": 1,
+  "competing_explanations": [
+    "ttl shrink emptied the cache",
+    "eviction storm emptied the cache"
+  ],
+  "evaluator_isolation": "Everything under truth/ is an answer key. Import only the sibling import/ directory and never attach truth or queries to model context.",
+  "evaluator_only": true,
+  "evidence_groups": [
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb10-competing-roots-g01",
+      "incident_id": "rb10-competing-roots-inca",
+      "notes": "explanation A: TTL shrink deployed minutes before the latency rise",
+      "role": "trigger",
+      "sources": [
+        "config/deploy.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "chg-D080531E",
+      "ts": 1740559540
+    },
+    {
+      "expected_occurrences": 2,
+      "expected_raw_records": 2,
+      "expected_token_records": 2,
+      "group_id": "rb10-competing-roots-g02",
+      "incident_id": "rb10-competing-roots-incb",
+      "notes": "explanation B: eviction storm at memory limit in the same window",
+      "role": "trigger",
+      "sources": [
+        "cache/redis.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "ev-A3A89DF3",
+      "ts": 1740559560
+    },
+    {
+      "expected_occurrences": 4,
+      "expected_raw_records": 4,
+      "expected_token_records": 4,
+      "group_id": "rb10-competing-roots-g03",
+      "incident_id": null,
+      "notes": "shared symptom compatible with either explanation",
+      "role": "symptom",
+      "sources": [
+        "api/service.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "req-07AAE3C0",
+      "ts": 1740559640
+    }
+  ],
+  "expected": {
+    "bytes": 68728,
+    "events": 427,
+    "excluded_files": [],
+    "files": 3,
+    "files_by_path": {
+      "api/service.jsonl": {
+        "bytes": 52329,
+        "events": 304,
+        "sha256": "7b2a78f5771823688b3c94656f702cbf0177010a1a5a433d482547e7bef7e8a4"
+      },
+      "cache/redis.log": {
+        "bytes": 16204,
+        "events": 122,
+        "sha256": "658850edec2621b7d7417fee914ca9211e009fee9576922afc4fbd7ca71bdc83"
+      },
+      "config/deploy.jsonl": {
+        "bytes": 195,
+        "events": 1,
+        "sha256": "7d70cc39349ea78b6570a4ae8db0e1ab7995daa731d9fdcff5e0fafd9687bd48"
+      }
+    },
+    "severities": {
+      "error": 4,
+      "info": 420,
+      "warn": 3
+    },
+    "source_count": 3,
+    "sources": {
+      "api/service.jsonl": 304,
+      "cache/redis.log": 122,
+      "config/deploy.jsonl": 1
+    },
+    "time_quality": "wall"
+  },
+  "forbidden_claims": [
+    "the TTL change is confidently the root cause",
+    "the eviction storm is confidently the root cause"
+  ],
+  "generator_version": "contextdesk.log_lab.retrieval_ablation.generator.v1",
+  "import_tree_sha256": "df2e22ed055478b79dc1c16eb4330a9ca823566c6c9927185fc0cb8b0d0b5984",
+  "incidents": [
+    {
+      "incident_id": "rb10-competing-roots-inca",
+      "root_cause_status": "competing",
+      "summary": "Explanation A: the TTL shrink emptied the cache.",
+      "trigger_group_ids": [
+        "rb10-competing-roots-g01"
+      ],
+      "window_from_ts": 1740559540,
+      "window_to_ts": 1740559880
+    },
+    {
+      "incident_id": "rb10-competing-roots-incb",
+      "root_cause_status": "competing",
+      "summary": "Explanation B: the eviction storm emptied the cache.",
+      "trigger_group_ids": [
+        "rb10-competing-roots-g02"
+      ],
+      "window_from_ts": 1740559540,
+      "window_to_ts": 1740559880
+    }
+  ],
+  "intended_probe": "two equally supported explanations must both survive retrieval and analysis",
+  "known_counts": {
+    "corpus_completeness": "complete",
+    "known_missing_references": 0,
+    "total_events_known": true
+  },
+  "per_query_relevance": {
+    "rb10-competing-roots-q1": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb10-competing-roots-g01"
+        },
+        {
+          "gain": 3,
+          "group_id": "rb10-competing-roots-g02"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb10-competing-roots-g03"
+        }
+      ]
+    },
+    "rb10-competing-roots-q2": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb10-competing-roots-g01"
+        },
+        {
+          "gain": 3,
+          "group_id": "rb10-competing-roots-g02"
+        }
+      ]
+    },
+    "rb10-competing-roots-q3": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb10-competing-roots-g03"
+        }
+      ]
+    },
+    "rb10-competing-roots-q4": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb10-competing-roots-g01"
+        }
+      ]
+    },
+    "rb10-competing-roots-q5": {
+      "answerable": false,
+      "contaminating_groups": [],
+      "relevant": []
+    },
+    "rb10-competing-roots-q6": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb10-competing-roots-g01"
+        },
+        {
+          "gain": 3,
+          "group_id": "rb10-competing-roots-g02"
+        }
+      ]
+    },
+    "rb10-competing-roots-q7": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb10-competing-roots-g01"
+        },
+        {
+          "gain": 3,
+          "group_id": "rb10-competing-roots-g02"
+        }
+      ]
+    }
+  },
+  "permitted_uncertainty": [
+    "the corpus cannot break the tie between the two explanations"
+  ],
+  "privacy": {
+    "marker": "LOG-LAB-INVALID",
+    "secret_tokens": []
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no customer, employer, developer-machine, production, or third-party log material.",
+  "required_claims": [
+    "both the TTL shrink and the eviction storm are supported causal candidates",
+    "the 20-second gap between them is within source skew and not decisive"
+  ],
+  "retrieval_exclusions": [],
+  "schema_id": "contextdesk.log_lab.retrieval_truth.v1",
+  "schema_version": 1,
+  "seed": 92026080701,
+  "semantic_truth_digest": "cdbfc7c5d760ecc44835ba471ed0e51a3f533e30ea6d64907158081b902ea296",
+  "suite_id": "contextdesk.log_lab.retrieval_ablation",
+  "suite_version": 1,
+  "tier": "small",
+  "title": "Competing roots"
+}

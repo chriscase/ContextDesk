@@ -1,0 +1,211 @@
+{
+  "base_ts": 1741161840,
+  "baseline_expectation": {
+    "class": "pass",
+    "gates": {
+      "max_decoy_share_at_25": 0.25,
+      "min_recall_at_25": 0.7,
+      "queries_expected_below_floor": []
+    },
+    "limitation_reason": null
+  },
+  "case_id": "rb17-provider-interruption",
+  "case_version": 1,
+  "competing_explanations": [],
+  "evaluator_isolation": "Everything under truth/ is an answer key. Import only the sibling import/ directory and never attach truth or queries to model context.",
+  "evaluator_only": true,
+  "evidence_groups": [
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb17-provider-interruption-g01",
+      "incident_id": "rb17-provider-interruption-inc1",
+      "notes": "provider maintenance notice precedes throttling",
+      "role": "trigger",
+      "sources": [
+        "api/payments.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "ntc-5669A24E",
+      "ts": 1741164040
+    },
+    {
+      "expected_occurrences": 4,
+      "expected_raw_records": 4,
+      "expected_token_records": 4,
+      "group_id": "rb17-provider-interruption-g02",
+      "incident_id": "rb17-provider-interruption-inc1",
+      "notes": "429 burst during the provider window",
+      "role": "symptom",
+      "sources": [
+        "api/payments.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "req-B76E412B",
+      "ts": 1741164140
+    },
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb17-provider-interruption-g03",
+      "incident_id": "rb17-provider-interruption-inc1",
+      "notes": "provider lifts the throttle",
+      "role": "recovery",
+      "sources": [
+        "api/payments.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "throttle lifted",
+      "ts": 1741164740
+    }
+  ],
+  "expected": {
+    "bytes": 53000,
+    "events": 306,
+    "excluded_files": [],
+    "files": 1,
+    "files_by_path": {
+      "api/payments.jsonl": {
+        "bytes": 53000,
+        "events": 306,
+        "sha256": "4d38b9d6b9c1a1ccf13eabfcb68d3348b8068794c63009374667628792c40450"
+      }
+    },
+    "severities": {
+      "error": 4,
+      "info": 301,
+      "warn": 1
+    },
+    "source_count": 1,
+    "sources": {
+      "api/payments.jsonl": 306
+    },
+    "time_quality": "wall"
+  },
+  "forbidden_claims": [
+    "the 429 burst indicates an edge crash"
+  ],
+  "generator_version": "contextdesk.log_lab.retrieval_ablation.generator.v1",
+  "import_tree_sha256": "69de0921f9db58bfccb6d4a1648a416d4a104d9b2b71871af614ff9a7e7304bf",
+  "incidents": [
+    {
+      "incident_id": "rb17-provider-interruption-inc1",
+      "root_cause_status": "established",
+      "summary": "An announced provider maintenance window throttled authorizations (429s) until the throttle lifted.",
+      "trigger_group_ids": [
+        "rb17-provider-interruption-g01"
+      ],
+      "window_from_ts": 1741164040,
+      "window_to_ts": 1741164800
+    }
+  ],
+  "intended_probe": "retrieval quality stays distinct from transport failure and semantic-attempt failure",
+  "known_counts": {
+    "corpus_completeness": "complete",
+    "known_missing_references": 0,
+    "total_events_known": true
+  },
+  "per_query_relevance": {
+    "rb17-provider-interruption-q1": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb17-provider-interruption-g01"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb17-provider-interruption-g02"
+        }
+      ]
+    },
+    "rb17-provider-interruption-q2": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb17-provider-interruption-g01"
+        }
+      ]
+    },
+    "rb17-provider-interruption-q3": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb17-provider-interruption-g02"
+        }
+      ]
+    },
+    "rb17-provider-interruption-q4": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb17-provider-interruption-g01"
+        }
+      ]
+    },
+    "rb17-provider-interruption-q5": {
+      "answerable": false,
+      "contaminating_groups": [],
+      "relevant": []
+    },
+    "rb17-provider-interruption-q6": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb17-provider-interruption-g01"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb17-provider-interruption-g02"
+        }
+      ]
+    },
+    "rb17-provider-interruption-q7": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb17-provider-interruption-g03"
+        },
+        {
+          "gain": 3,
+          "group_id": "rb17-provider-interruption-g01"
+        }
+      ]
+    }
+  },
+  "permitted_uncertainty": [
+    "provider-side capacity details are not in the corpus"
+  ],
+  "privacy": {
+    "marker": "LOG-LAB-INVALID",
+    "secret_tokens": []
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no customer, employer, developer-machine, production, or third-party log material.",
+  "required_claims": [
+    "the maintenance notice precedes the 429 burst",
+    "a transport-layer interruption of an analysis provider is never evidence about this corpus",
+    "retrieval metrics must be reported separately from any provider transport status"
+  ],
+  "retrieval_exclusions": [],
+  "schema_id": "contextdesk.log_lab.retrieval_truth.v1",
+  "schema_version": 1,
+  "seed": 92026080701,
+  "semantic_truth_digest": "365bd7344cc501a7e4bae6a4424b1a3d25bb56e2f3bdb919c3bef938d00bb3f1",
+  "suite_id": "contextdesk.log_lab.retrieval_ablation",
+  "suite_version": 1,
+  "tier": "small",
+  "title": "Rate-limit and provider interruption"
+}

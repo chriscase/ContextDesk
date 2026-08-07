@@ -151,6 +151,13 @@ fn generated_subset_hashes(root: &Path) -> BTreeMap<String, String> {
     hashes.remove(".gitignore");
     hashes.remove("README.md");
     hashes.retain(|path, _| !path.starts_with("acceptance/"));
+    // The retrieval-ablation suite and its contract documents are frozen by
+    // their own regeneration test (retrieval_ablation_lab.rs); they are not
+    // generate_compact products.
+    hashes.retain(|path, _| !path.starts_with("scenarios/retrieval-ablation/"));
+    hashes.retain(|path, _| {
+        !(path.starts_with("schema/retrieval-") && path.ends_with(".schema.json"))
+    });
     hashes
 }
 

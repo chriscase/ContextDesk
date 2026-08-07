@@ -1,0 +1,268 @@
+{
+  "base_ts": 1741248240,
+  "baseline_expectation": {
+    "class": "limitation",
+    "gates": {
+      "max_decoy_share_at_25": 0.6,
+      "min_recall_at_25": null,
+      "queries_expected_below_floor": [
+        "rb18-template-heterogeneity-q3"
+      ]
+    },
+    "limitation_reason": "the material depth samples share the wildcard template and its vocabulary; broad depth queries drown them in chronological noise. They stay reachable via identifiers and the redrive vocabulary"
+  },
+  "case_id": "rb18-template-heterogeneity",
+  "case_version": 1,
+  "competing_explanations": [],
+  "evaluator_isolation": "Everything under truth/ is an answer key. Import only the sibling import/ directory and never attach truth or queries to model context.",
+  "evaluator_only": true,
+  "evidence_groups": [
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb18-template-heterogeneity-g01",
+      "incident_id": "rb18-template-heterogeneity-inc1",
+      "notes": "rare material sample sharing the wildcard template",
+      "role": "symptom",
+      "sources": [
+        "queue/depth.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "smp-61DA7A8E",
+      "ts": 1741250640
+    },
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb18-template-heterogeneity-g02",
+      "incident_id": "rb18-template-heterogeneity-inc1",
+      "notes": "rare material sample sharing the wildcard template",
+      "role": "symptom",
+      "sources": [
+        "queue/depth.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "smp-AE9E6EC5",
+      "ts": 1741250700
+    },
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb18-template-heterogeneity-g03",
+      "incident_id": "rb18-template-heterogeneity-inc1",
+      "notes": "rare material sample sharing the wildcard template",
+      "role": "symptom",
+      "sources": [
+        "queue/depth.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "smp-9E125667",
+      "ts": 1741250760
+    },
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb18-template-heterogeneity-g04",
+      "incident_id": "rb18-template-heterogeneity-inc1",
+      "notes": "rare material sample sharing the wildcard template",
+      "role": "symptom",
+      "sources": [
+        "queue/depth.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "smp-B114A4A8",
+      "ts": 1741250820
+    },
+    {
+      "expected_occurrences": 2,
+      "expected_raw_records": 2,
+      "expected_token_records": 2,
+      "group_id": "rb18-template-heterogeneity-g05",
+      "incident_id": "rb18-template-heterogeneity-inc1",
+      "notes": "the redrive that flooded the main queue",
+      "role": "trigger",
+      "sources": [
+        "queue/redrive.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "rd-3FEABBF9",
+      "ts": 1741250590
+    }
+  ],
+  "expected": {
+    "bytes": 146402,
+    "events": 766,
+    "excluded_files": [],
+    "files": 2,
+    "files_by_path": {
+      "queue/depth.jsonl": {
+        "bytes": 146000,
+        "events": 764,
+        "sha256": "887babea798c94f76ae4a6c4980549432b9a0b02d8a5e41e013547dccb3ecccf"
+      },
+      "queue/redrive.jsonl": {
+        "bytes": 402,
+        "events": 2,
+        "sha256": "c4dee5d9973b80cb58398bda401be169d341bf585ab5a1b33c205c9ed45b1e74"
+      }
+    },
+    "severities": {
+      "info": 764,
+      "warn": 2
+    },
+    "source_count": 2,
+    "sources": {
+      "queue/depth.jsonl": 764,
+      "queue/redrive.jsonl": 2
+    },
+    "time_quality": "wall"
+  },
+  "forbidden_claims": [
+    "queue depth sampling noise constitutes the incident"
+  ],
+  "generator_version": "contextdesk.log_lab.retrieval_ablation.generator.v1",
+  "import_tree_sha256": "d171980070b126e9ec95d168b5c290d95df0f24be6e0b4d74796194f7b9891da",
+  "incidents": [
+    {
+      "incident_id": "rb18-template-heterogeneity-inc1",
+      "root_cause_status": "established",
+      "summary": "A dead-letter redrive flooded orders-main; four depth samples record the backlog inside the otherwise-boring wildcard template.",
+      "trigger_group_ids": [
+        "rb18-template-heterogeneity-g05"
+      ],
+      "window_from_ts": 1741250590,
+      "window_to_ts": 1741250940
+    }
+  ],
+  "intended_probe": "rare operationally material events share one wildcard-heavy template with repetitive noise and must remain retrievable",
+  "known_counts": {
+    "corpus_completeness": "complete",
+    "known_missing_references": 0,
+    "total_events_known": true
+  },
+  "per_query_relevance": {
+    "rb18-template-heterogeneity-q1": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb18-template-heterogeneity-g05"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb18-template-heterogeneity-g01"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb18-template-heterogeneity-g02"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb18-template-heterogeneity-g03"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb18-template-heterogeneity-g04"
+        }
+      ]
+    },
+    "rb18-template-heterogeneity-q2": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb18-template-heterogeneity-g05"
+        }
+      ]
+    },
+    "rb18-template-heterogeneity-q3": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb18-template-heterogeneity-g01"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb18-template-heterogeneity-g02"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb18-template-heterogeneity-g03"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb18-template-heterogeneity-g04"
+        }
+      ]
+    },
+    "rb18-template-heterogeneity-q4": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb18-template-heterogeneity-g01"
+        }
+      ]
+    },
+    "rb18-template-heterogeneity-q5": {
+      "answerable": false,
+      "contaminating_groups": [],
+      "relevant": []
+    },
+    "rb18-template-heterogeneity-q6": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb18-template-heterogeneity-g05"
+        }
+      ]
+    },
+    "rb18-template-heterogeneity-q7": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb18-template-heterogeneity-g05"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb18-template-heterogeneity-g01"
+        }
+      ]
+    }
+  },
+  "permitted_uncertainty": [
+    "consumer throughput limits are not in the corpus"
+  ],
+  "privacy": {
+    "marker": "LOG-LAB-INVALID",
+    "secret_tokens": []
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no customer, employer, developer-machine, production, or third-party log material.",
+  "required_claims": [
+    "the four extreme depth samples are materially different from their template siblings",
+    "whole-template dismissal of the depth family would hide the backlog evidence",
+    "the redrive precedes the extreme samples"
+  ],
+  "retrieval_exclusions": [],
+  "schema_id": "contextdesk.log_lab.retrieval_truth.v1",
+  "schema_version": 1,
+  "seed": 92026080701,
+  "semantic_truth_digest": "395a4af873d36b08f15292fe15947148a5f5513086d14b982a32cb0a6743462f",
+  "suite_id": "contextdesk.log_lab.retrieval_ablation",
+  "suite_version": 1,
+  "tier": "small",
+  "title": "Generic-template heterogeneity"
+}

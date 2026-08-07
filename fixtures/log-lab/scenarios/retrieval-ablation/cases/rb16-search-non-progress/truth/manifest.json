@@ -1,0 +1,215 @@
+{
+  "base_ts": 1741075440,
+  "baseline_expectation": {
+    "class": "pass",
+    "gates": {
+      "max_decoy_share_at_25": 0.25,
+      "min_recall_at_25": 0.7,
+      "queries_expected_below_floor": []
+    },
+    "limitation_reason": null
+  },
+  "case_id": "rb16-search-non-progress",
+  "case_version": 1,
+  "competing_explanations": [],
+  "evaluator_isolation": "Everything under truth/ is an answer key. Import only the sibling import/ directory and never attach truth or queries to model context.",
+  "evaluator_only": true,
+  "evidence_groups": [
+    {
+      "expected_occurrences": 3,
+      "expected_raw_records": 3,
+      "expected_token_records": 3,
+      "group_id": "rb16-search-non-progress-g01",
+      "incident_id": "rb16-search-non-progress-inc1",
+      "notes": "the only quota-exceeded evidence in the corpus",
+      "role": "trigger",
+      "sources": [
+        "api/search.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "tn-CD8C6CA6",
+      "ts": 1741077840
+    },
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb16-search-non-progress-g02",
+      "incident_id": "rb16-search-non-progress-inc1",
+      "notes": "limiter engagement for the offending tenant",
+      "role": "propagation",
+      "sources": [
+        "api/search.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "lmt-48CC2A60",
+      "ts": 1741078020
+    }
+  ],
+  "expected": {
+    "bytes": 54422,
+    "events": 324,
+    "excluded_files": [],
+    "files": 1,
+    "files_by_path": {
+      "api/search.jsonl": {
+        "bytes": 54422,
+        "events": 324,
+        "sha256": "cdac48d8773a16479ed9aaf3f16a7771803ce947ae9059e8df4b40125b391dcf"
+      }
+    },
+    "severities": {
+      "error": 3,
+      "info": 274,
+      "warn": 47
+    },
+    "source_count": 1,
+    "sources": {
+      "api/search.jsonl": 324
+    },
+    "time_quality": "wall"
+  },
+  "forbidden_claims": [
+    "repeating an equivalent search constitutes investigation progress"
+  ],
+  "generator_version": "contextdesk.log_lab.retrieval_ablation.generator.v1",
+  "import_tree_sha256": "e8abb2f86828f66b63e25eb76801103ac056ae8a37a3479c5dd29b1a2ab1a198",
+  "incidents": [
+    {
+      "incident_id": "rb16-search-non-progress-inc1",
+      "root_cause_status": "established",
+      "summary": "One tenant exhausted its quota; the limiter engaged. Re-phrasing the same search yields no new evidence.",
+      "trigger_group_ids": [
+        "rb16-search-non-progress-g01"
+      ],
+      "window_from_ts": 1741077840,
+      "window_to_ts": 1741078080
+    }
+  ],
+  "intended_probe": "cosmetically different but equivalent searches must return identical evidence; workflows must change strategy or stop",
+  "known_counts": {
+    "corpus_completeness": "complete",
+    "known_missing_references": 0,
+    "total_events_known": true
+  },
+  "per_query_relevance": {
+    "rb16-search-non-progress-q1": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb16-search-non-progress-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb16-search-non-progress-g02"
+        }
+      ]
+    },
+    "rb16-search-non-progress-q2": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb16-search-non-progress-g01"
+        }
+      ]
+    },
+    "rb16-search-non-progress-q2b": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb16-search-non-progress-g01"
+        }
+      ]
+    },
+    "rb16-search-non-progress-q2c": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb16-search-non-progress-g01"
+        }
+      ]
+    },
+    "rb16-search-non-progress-q3": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb16-search-non-progress-g01"
+        }
+      ]
+    },
+    "rb16-search-non-progress-q4": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb16-search-non-progress-g01"
+        }
+      ]
+    },
+    "rb16-search-non-progress-q5": {
+      "answerable": false,
+      "contaminating_groups": [],
+      "relevant": []
+    },
+    "rb16-search-non-progress-q6": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 2,
+          "group_id": "rb16-search-non-progress-g02"
+        },
+        {
+          "gain": 3,
+          "group_id": "rb16-search-non-progress-g01"
+        }
+      ]
+    },
+    "rb16-search-non-progress-q7": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb16-search-non-progress-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb16-search-non-progress-g02"
+        }
+      ]
+    }
+  },
+  "permitted_uncertainty": [
+    "per-tenant quota configuration values are not in the corpus"
+  ],
+  "privacy": {
+    "marker": "LOG-LAB-INVALID",
+    "secret_tokens": []
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no customer, employer, developer-machine, production, or third-party log material.",
+  "required_claims": [
+    "equivalent searches with cosmetic argument changes return identical evidence",
+    "one tenant is responsible for every quota-exceeded record"
+  ],
+  "retrieval_exclusions": [],
+  "schema_id": "contextdesk.log_lab.retrieval_truth.v1",
+  "schema_version": 1,
+  "seed": 92026080701,
+  "semantic_truth_digest": "cb399878961f534e7d9bc83a5dde077d0659ca789d85b6b1f35b1b2cc447c9e1",
+  "suite_id": "contextdesk.log_lab.retrieval_ablation",
+  "suite_version": 1,
+  "tier": "small",
+  "title": "Tool-search non-progress"
+}

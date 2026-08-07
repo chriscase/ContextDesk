@@ -1,0 +1,24 @@
+{
+  "$id": "https://contextdesk.example/schemas/contextdesk.log_lab.retrieval_queries.v1.json",
+  "authority": "crates/cd-core/tests/support/retrieval_ablation.rs::RaQuerySet (serde, deny_unknown_fields)",
+  "model_safe": true,
+  "query_kinds": [
+    "broad",
+    "causal",
+    "symptom",
+    "identifier",
+    "negative",
+    "competing",
+    "chronology"
+  ],
+  "required": [
+    "schema_id",
+    "schema_version",
+    "suite_id",
+    "case_id",
+    "queries"
+  ],
+  "schema_id": "contextdesk.log_lab.retrieval_queries.v1",
+  "schema_version": 1,
+  "title": "ContextDesk retrieval-ablation query set"
+}

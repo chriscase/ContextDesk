@@ -1,0 +1,127 @@
+{
+  "case_id": "rb04-frequency-decoy",
+  "queries": [
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "orders",
+          "error",
+          "failed"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "broad",
+      "query_id": "rb04-frequency-decoy-q1",
+      "question": "What is wrong with the orders system?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "order",
+          "placement",
+          "failed",
+          "shutdown"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "causal",
+      "query_id": "rb04-frequency-decoy-q2",
+      "question": "What caused order placement to fail?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "placement",
+          "failed",
+          "refused"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "symptom",
+      "query_id": "rb04-frequency-decoy-q3",
+      "question": "Show failed order placements."
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "mw-22E28B2E"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "identifier",
+      "query_id": "rb04-frequency-decoy-q4",
+      "question": "Show all events for maintenance window mw-22E28B2E."
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "missing",
+          "index",
+          "outage"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "negative",
+      "query_id": "rb04-frequency-decoy-q5",
+      "question": "Did a missing index cause the outage?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "missing",
+          "index",
+          "shutdown",
+          "maintenance"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "competing",
+      "query_id": "rb04-frequency-decoy-q6",
+      "question": "Is the missing-index noise or the maintenance restart the better explanation for the failures?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "accepting",
+          "connections",
+          "normalized"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "chronology",
+      "query_id": "rb04-frequency-decoy-q7",
+      "question": "Did the system recover, and what marked recovery?"
+    }
+  ],
+  "schema_id": "contextdesk.log_lab.retrieval_queries.v1",
+  "schema_version": 1,
+  "suite_id": "contextdesk.log_lab.retrieval_ablation"
+}

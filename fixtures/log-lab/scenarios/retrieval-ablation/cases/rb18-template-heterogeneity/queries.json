@@ -1,0 +1,124 @@
+{
+  "case_id": "rb18-template-heterogeneity",
+  "queries": [
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "queue",
+          "depth",
+          "redrive"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "broad",
+      "query_id": "rb18-template-heterogeneity-q1",
+      "question": "Is the orders queue healthy?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "redrive",
+          "queue",
+          "messages"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "causal",
+      "query_id": "rb18-template-heterogeneity-q2",
+      "question": "What flooded the orders queue?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "depth",
+          "queue",
+          "sample"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "symptom",
+      "query_id": "rb18-template-heterogeneity-q3",
+      "question": "Show the abnormal queue depth samples."
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "smp-61DA7A8E"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "identifier",
+      "query_id": "rb18-template-heterogeneity-q4",
+      "question": "Find sample smp-61DA7A8E."
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "consumer",
+          "crash",
+          "panic"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "negative",
+      "query_id": "rb18-template-heterogeneity-q5",
+      "question": "Did consumers crash?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "redrive",
+          "depth",
+          "orders-dlq"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "competing",
+      "query_id": "rb18-template-heterogeneity-q6",
+      "question": "Is the backlog organic load or the redrive?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "redrive",
+          "depth"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "chronology",
+      "query_id": "rb18-template-heterogeneity-q7",
+      "question": "Did the backlog start before or after the redrive?"
+    }
+  ],
+  "schema_id": "contextdesk.log_lab.retrieval_queries.v1",
+  "schema_version": 1,
+  "suite_id": "contextdesk.log_lab.retrieval_ablation"
+}

@@ -1,0 +1,130 @@
+{
+  "case_id": "rb12-semantic-near-miss",
+  "queries": [
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [
+          "payments-api"
+        ],
+        "sources": [],
+        "terms": [
+          "settlement",
+          "timeout",
+          "stalled"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "broad",
+      "query_id": "rb12-semantic-near-miss-q1",
+      "question": "What is failing in payment processing?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [
+          "payments-api"
+        ],
+        "sources": [],
+        "terms": [
+          "settlement",
+          "timeout",
+          "stalled"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "causal",
+      "query_id": "rb12-semantic-near-miss-q2",
+      "question": "Why are payments settlements timing out?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [
+          "payments-api"
+        ],
+        "sources": [],
+        "terms": [
+          "settlement",
+          "batch",
+          "timeout"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "symptom",
+      "query_id": "rb12-semantic-near-miss-q3",
+      "question": "Show payments settlement timeouts."
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "batch-DE7F518F"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "identifier",
+      "query_id": "rb12-semantic-near-miss-q4",
+      "question": "Find batch-DE7F518F."
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "payouts",
+          "incident"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "negative",
+      "query_id": "rb12-semantic-near-miss-q5",
+      "question": "Are payout settlements part of the payments incident?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "settlement",
+          "timeout",
+          "maintenance"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "competing",
+      "query_id": "rb12-semantic-near-miss-q6",
+      "question": "Could the payouts timeout explain the payments timeouts?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "settlement",
+          "stalled",
+          "maintenance"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "chronology",
+      "query_id": "rb12-semantic-near-miss-q7",
+      "question": "Did the payments incident end before the payouts event?"
+    }
+  ],
+  "schema_id": "contextdesk.log_lab.retrieval_queries.v1",
+  "schema_version": 1,
+  "suite_id": "contextdesk.log_lab.retrieval_ablation"
+}

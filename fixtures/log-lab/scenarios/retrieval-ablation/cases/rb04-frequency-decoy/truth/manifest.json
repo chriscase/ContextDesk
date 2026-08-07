@@ -1,0 +1,276 @@
+{
+  "base_ts": 1740038640,
+  "baseline_expectation": {
+    "class": "limitation",
+    "gates": {
+      "max_decoy_share_at_25": null,
+      "min_recall_at_25": null,
+      "queries_expected_below_floor": [
+        "rb04-frequency-decoy-q1"
+      ]
+    },
+    "limitation_reason": "chronological keyword retrieval floods top-k with the high-frequency missing-index decoy for broad/causal phrasing; the cascade stays reachable via identifier and shutdown vocabulary"
+  },
+  "case_id": "rb04-frequency-decoy",
+  "case_version": 1,
+  "competing_explanations": [],
+  "evaluator_isolation": "Everything under truth/ is an answer key. Import only the sibling import/ directory and never attach truth or queries to model context.",
+  "evaluator_only": true,
+  "evidence_groups": [
+    {
+      "expected_occurrences": 1200,
+      "expected_raw_records": 1200,
+      "expected_token_records": 1200,
+      "group_id": "rb04-frequency-decoy-g00",
+      "incident_id": null,
+      "notes": "missing-index noise: loud, frequent, irrelevant to the outage",
+      "role": "decoy",
+      "sources": [
+        "db/database.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "orders_search_idx",
+      "ts": 1740038700
+    },
+    {
+      "expected_occurrences": 2,
+      "expected_raw_records": 2,
+      "expected_token_records": 2,
+      "group_id": "rb04-frequency-decoy-g01",
+      "incident_id": "rb04-frequency-decoy-inc1",
+      "notes": "maintenance-driven shutdown request",
+      "role": "trigger",
+      "sources": [
+        "db/database.log",
+        "ops/maintenance.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "mw-22E28B2E",
+      "ts": 1740041940
+    },
+    {
+      "expected_occurrences": 3,
+      "expected_raw_records": 3,
+      "expected_token_records": 3,
+      "group_id": "rb04-frequency-decoy-g02",
+      "incident_id": "rb04-frequency-decoy-inc1",
+      "notes": "restart exhausts connection slots",
+      "role": "propagation",
+      "sources": [
+        "db/database.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "connection slots exhausted",
+      "ts": 1740041980
+    },
+    {
+      "expected_occurrences": 5,
+      "expected_raw_records": 5,
+      "expected_token_records": 5,
+      "group_id": "rb04-frequency-decoy-g03",
+      "incident_id": "rb04-frequency-decoy-inc1",
+      "notes": "order placement fails while the database restarts",
+      "role": "symptom",
+      "sources": [
+        "api/orders.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "txn-1AB70828",
+      "ts": 1740042040
+    },
+    {
+      "expected_occurrences": 2,
+      "expected_raw_records": 2,
+      "expected_token_records": 2,
+      "group_id": "rb04-frequency-decoy-g04",
+      "incident_id": "rb04-frequency-decoy-inc1",
+      "notes": "database returns and latency normalises",
+      "role": "recovery",
+      "sources": [
+        "api/orders.jsonl",
+        "db/database.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "accepting connections again",
+      "ts": 1740042290
+    }
+  ],
+  "expected": {
+    "bytes": 258413,
+    "events": 1572,
+    "excluded_files": [],
+    "files": 3,
+    "files_by_path": {
+      "api/orders.jsonl": {
+        "bytes": 35046,
+        "events": 206,
+        "sha256": "46eafd9002626659efc0686a11faed43ee785f2383d03c4c40106e81384cc0f7"
+      },
+      "db/database.log": {
+        "bytes": 223175,
+        "events": 1365,
+        "sha256": "9e8febf05ba6463985d07dc8ffc32396171eec7559c16fb0b103fbd2cdcb4e1b"
+      },
+      "ops/maintenance.jsonl": {
+        "bytes": 192,
+        "events": 1,
+        "sha256": "acccf6385d7b4e621311be4b1525704f3ac293b4870594d6890ef41c361addb5"
+      }
+    },
+    "severities": {
+      "error": 1208,
+      "info": 363,
+      "warn": 1
+    },
+    "source_count": 3,
+    "sources": {
+      "api/orders.jsonl": 206,
+      "db/database.log": 1365,
+      "ops/maintenance.jsonl": 1
+    },
+    "time_quality": "wall"
+  },
+  "forbidden_claims": [
+    "the missing orders_search_idx index caused the order placement failures",
+    "error volume implies the missing-index family is the incident"
+  ],
+  "generator_version": "contextdesk.log_lab.retrieval_ablation.generator.v1",
+  "import_tree_sha256": "6fd4af3f69a2e598d50891dbbe6db276901a7e0b5b1868dc507e114a7206585b",
+  "incidents": [
+    {
+      "incident_id": "rb04-frequency-decoy-inc1",
+      "root_cause_status": "established",
+      "summary": "A maintenance failover drill restarted the orders database; order placement failed during the restart. The missing-index errors are constant background noise and unrelated.",
+      "trigger_group_ids": [
+        "rb04-frequency-decoy-g01"
+      ],
+      "window_from_ts": 1740041940,
+      "window_to_ts": 1740042400
+    }
+  ],
+  "intended_probe": "thousands of high-severity repetitive errors compete with a small shutdown cascade",
+  "known_counts": {
+    "corpus_completeness": "complete",
+    "known_missing_references": 0,
+    "total_events_known": true
+  },
+  "per_query_relevance": {
+    "rb04-frequency-decoy-q1": {
+      "answerable": true,
+      "contaminating_groups": [
+        "rb04-frequency-decoy-g00"
+      ],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb04-frequency-decoy-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb04-frequency-decoy-g02"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb04-frequency-decoy-g03"
+        }
+      ]
+    },
+    "rb04-frequency-decoy-q2": {
+      "answerable": true,
+      "contaminating_groups": [
+        "rb04-frequency-decoy-g00"
+      ],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb04-frequency-decoy-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb04-frequency-decoy-g02"
+        }
+      ]
+    },
+    "rb04-frequency-decoy-q3": {
+      "answerable": true,
+      "contaminating_groups": [
+        "rb04-frequency-decoy-g00"
+      ],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb04-frequency-decoy-g03"
+        }
+      ]
+    },
+    "rb04-frequency-decoy-q4": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb04-frequency-decoy-g01"
+        }
+      ]
+    },
+    "rb04-frequency-decoy-q5": {
+      "answerable": false,
+      "contaminating_groups": [
+        "rb04-frequency-decoy-g00"
+      ],
+      "relevant": []
+    },
+    "rb04-frequency-decoy-q6": {
+      "answerable": true,
+      "contaminating_groups": [
+        "rb04-frequency-decoy-g00"
+      ],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb04-frequency-decoy-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb04-frequency-decoy-g02"
+        }
+      ]
+    },
+    "rb04-frequency-decoy-q7": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb04-frequency-decoy-g04"
+        },
+        {
+          "gain": 3,
+          "group_id": "rb04-frequency-decoy-g01"
+        }
+      ]
+    }
+  },
+  "permitted_uncertainty": [
+    "the drill's intent is recorded; its authorisation chain is not"
+  ],
+  "privacy": {
+    "marker": "LOG-LAB-INVALID",
+    "secret_tokens": []
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no customer, employer, developer-machine, production, or third-party log material.",
+  "required_claims": [
+    "the maintenance shutdown request precedes the connection failures",
+    "missing-index errors run at a constant rate before, during, and after the incident",
+    "order placement recovered when the database accepted connections again"
+  ],
+  "retrieval_exclusions": [],
+  "schema_id": "contextdesk.log_lab.retrieval_truth.v1",
+  "schema_version": 1,
+  "seed": 92026080701,
+  "semantic_truth_digest": "03cd2c3c849f28055d78226a4531edda995a83d6ec2ee9b82d082ca6146be53c",
+  "suite_id": "contextdesk.log_lab.retrieval_ablation",
+  "suite_version": 1,
+  "tier": "small",
+  "title": "Frequency and severity decoy"
+}

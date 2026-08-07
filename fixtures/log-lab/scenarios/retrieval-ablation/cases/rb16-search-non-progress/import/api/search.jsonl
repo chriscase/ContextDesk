@@ -1,0 +1,324 @@
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-f23dc7a5 used_pct=93","service":"quota-service","trace_id":"trace-8c286bb4","ts":1741075440}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-3bbb514a","service":"quota-service","trace_id":"trace-ffd6cf15","ts":1741075451}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-b13191c1","service":"quota-service","trace_id":"trace-ee3021de","ts":1741075462}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-10b9d893","service":"quota-service","trace_id":"trace-38abf20d","ts":1741075473}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-bdb2c5df","service":"quota-service","trace_id":"trace-ce38739d","ts":1741075485}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-71303439","service":"quota-service","trace_id":"trace-d6005d45","ts":1741075496}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-3e6c86a5","service":"quota-service","trace_id":"trace-10f1539e","ts":1741075507}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-dd60ec8d used_pct=85","service":"quota-service","trace_id":"trace-db73d90a","ts":1741075518}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-2f60a08f","service":"quota-service","trace_id":"trace-a14acb0c","ts":1741075530}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-83ff92b6","service":"quota-service","trace_id":"trace-f432e917","ts":1741075541}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-28740626","service":"quota-service","trace_id":"trace-049d1ac6","ts":1741075552}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-060eff3e","service":"quota-service","trace_id":"trace-ce587ec4","ts":1741075563}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-c4fe90cb","service":"quota-service","trace_id":"trace-0b0c171b","ts":1741075575}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-437738c6","service":"quota-service","trace_id":"trace-bd64d284","ts":1741075586}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-f22a7ff6 used_pct=86","service":"quota-service","trace_id":"trace-a79272cd","ts":1741075597}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-d76e8d49","service":"quota-service","trace_id":"trace-52990f1e","ts":1741075608}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-87a2b368","service":"quota-service","trace_id":"trace-9edbd3b6","ts":1741075620}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-21b1cacd","service":"quota-service","trace_id":"trace-ca0cc48a","ts":1741075631}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-dc446947","service":"quota-service","trace_id":"trace-1f0dabf8","ts":1741075642}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-721bb2dd","service":"quota-service","trace_id":"trace-5d4528f7","ts":1741075653}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-43802114","service":"quota-service","trace_id":"trace-4c74c568","ts":1741075665}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-6a7f9cd4 used_pct=83","service":"quota-service","trace_id":"trace-f4eb5a1a","ts":1741075676}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-6e06a67c","service":"quota-service","trace_id":"trace-f03a27bb","ts":1741075687}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-2020e2bb","service":"quota-service","trace_id":"trace-2d77c722","ts":1741075698}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-1f8caaef","service":"quota-service","trace_id":"trace-d57d51fa","ts":1741075710}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-e72940da","service":"quota-service","trace_id":"trace-75d0111f","ts":1741075721}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-ce780b3a","service":"quota-service","trace_id":"trace-05757bc4","ts":1741075732}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-b02ffdf0","service":"quota-service","trace_id":"trace-968fbe87","ts":1741075743}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-1a862761 used_pct=90","service":"quota-service","trace_id":"trace-f82b96d8","ts":1741075755}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-e27e778b","service":"quota-service","trace_id":"trace-9c495eae","ts":1741075766}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-8603664e","service":"quota-service","trace_id":"trace-b671ca35","ts":1741075777}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-a5e392e0","service":"quota-service","trace_id":"trace-aaccc539","ts":1741075788}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-273a6bdb","service":"quota-service","trace_id":"trace-95077bf8","ts":1741075800}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-5f7c1313","service":"quota-service","trace_id":"trace-8945c8ec","ts":1741075811}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-37992f6a","service":"quota-service","trace_id":"trace-f5c05978","ts":1741075822}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-ee95915c used_pct=93","service":"quota-service","trace_id":"trace-04d86195","ts":1741075833}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-e84bc241","service":"quota-service","trace_id":"trace-9c16cd54","ts":1741075845}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-77d6a48b","service":"quota-service","trace_id":"trace-a1f8ab2a","ts":1741075856}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-a947b792","service":"quota-service","trace_id":"trace-eebeb6ca","ts":1741075867}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-94d7007e","service":"quota-service","trace_id":"trace-e1fe7345","ts":1741075878}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-df1920e5","service":"quota-service","trace_id":"trace-07786c6d","ts":1741075890}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-1ddcd63c","service":"quota-service","trace_id":"trace-bd1709ed","ts":1741075901}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-51133157 used_pct=91","service":"quota-service","trace_id":"trace-33923143","ts":1741075912}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-528fb0c9","service":"quota-service","trace_id":"trace-7445d6ea","ts":1741075923}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-1a7c9db1","service":"quota-service","trace_id":"trace-e01b20a9","ts":1741075935}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-c0e481a4","service":"quota-service","trace_id":"trace-1afcb8e9","ts":1741075946}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-77e9bda3","service":"quota-service","trace_id":"trace-1417b14b","ts":1741075957}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-cbbc46e0","service":"quota-service","trace_id":"trace-7ce1af08","ts":1741075968}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-86dd4ec7","service":"quota-service","trace_id":"trace-fd3e88c2","ts":1741075980}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-4da042e3 used_pct=88","service":"quota-service","trace_id":"trace-02a3489c","ts":1741075991}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-85aea70c","service":"quota-service","trace_id":"trace-ebaad45d","ts":1741076002}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-a9eff1fd","service":"quota-service","trace_id":"trace-7c662c8b","ts":1741076013}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-8bda566f","service":"quota-service","trace_id":"trace-d04214db","ts":1741076025}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-6e91d34c","service":"quota-service","trace_id":"trace-e5d0c16a","ts":1741076036}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-6f16bc34","service":"quota-service","trace_id":"trace-c7edb192","ts":1741076047}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-a839b3bf","service":"quota-service","trace_id":"trace-7290644f","ts":1741076058}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-2e04fe94 used_pct=88","service":"quota-service","trace_id":"trace-8d219cd6","ts":1741076070}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-67ef6f60","service":"quota-service","trace_id":"trace-9798f81f","ts":1741076081}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-b4fde2d7","service":"quota-service","trace_id":"trace-5608777f","ts":1741076092}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-185266b8","service":"quota-service","trace_id":"trace-6e42dcd9","ts":1741076103}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-cbfa1e35","service":"quota-service","trace_id":"trace-b0d74433","ts":1741076115}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-57a3a163","service":"quota-service","trace_id":"trace-8baa3140","ts":1741076126}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-9cff1e1a","service":"quota-service","trace_id":"trace-23e803fd","ts":1741076137}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-e3ab8792 used_pct=91","service":"quota-service","trace_id":"trace-66ebf7f0","ts":1741076148}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-2cd30b38","service":"quota-service","trace_id":"trace-b8a06522","ts":1741076160}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-8c2dd1d7","service":"quota-service","trace_id":"trace-a39d9720","ts":1741076171}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-2c31a6a4","service":"quota-service","trace_id":"trace-d555285c","ts":1741076182}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-c71f8e8a","service":"quota-service","trace_id":"trace-d38b2728","ts":1741076193}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-bb4804ea","service":"quota-service","trace_id":"trace-fabdc03b","ts":1741076205}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-ceeb58fd","service":"quota-service","trace_id":"trace-260908e9","ts":1741076216}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-dcf13b9c used_pct=93","service":"quota-service","trace_id":"trace-e95bb636","ts":1741076227}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-421c7ed9","service":"quota-service","trace_id":"trace-2ccc0708","ts":1741076238}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-ce1eae4d","service":"quota-service","trace_id":"trace-a4d03239","ts":1741076250}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-44157ec7","service":"quota-service","trace_id":"trace-e3e99bad","ts":1741076261}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-a16cf3f9","service":"quota-service","trace_id":"trace-2451d47a","ts":1741076272}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-e34d11b7","service":"quota-service","trace_id":"trace-d8eb3e3c","ts":1741076283}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-347c04e3","service":"quota-service","trace_id":"trace-96cacf64","ts":1741076295}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-cd8405f8 used_pct=83","service":"quota-service","trace_id":"trace-58aa3b1c","ts":1741076306}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-fc8afa3a","service":"quota-service","trace_id":"trace-9c9892d4","ts":1741076317}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-0ba0ac02","service":"quota-service","trace_id":"trace-6b8555f4","ts":1741076328}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-4ddc2cae","service":"quota-service","trace_id":"trace-3b4b0715","ts":1741076340}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-c2a6c1a6","service":"quota-service","trace_id":"trace-8cfa786c","ts":1741076351}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-1dca313c","service":"quota-service","trace_id":"trace-ce6053be","ts":1741076362}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-98b3b522","service":"quota-service","trace_id":"trace-b2900cce","ts":1741076373}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-926d5162 used_pct=92","service":"quota-service","trace_id":"trace-eb47729b","ts":1741076385}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-4e18af4a","service":"quota-service","trace_id":"trace-5c5c5aef","ts":1741076396}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-9fb6fc63","service":"quota-service","trace_id":"trace-d43909da","ts":1741076407}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-24d2f80e","service":"quota-service","trace_id":"trace-9572e30c","ts":1741076418}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-cb840bf8","service":"quota-service","trace_id":"trace-3c786dcc","ts":1741076430}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-95647f8b","service":"quota-service","trace_id":"trace-a959d992","ts":1741076441}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-effcd08f","service":"quota-service","trace_id":"trace-4783905f","ts":1741076452}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-050900aa used_pct=94","service":"quota-service","trace_id":"trace-9809bd08","ts":1741076463}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-f861865c","service":"quota-service","trace_id":"trace-29b67c6c","ts":1741076475}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-57a3cca7","service":"quota-service","trace_id":"trace-b701e173","ts":1741076486}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-76518717","service":"quota-service","trace_id":"trace-a1d5f7ab","ts":1741076497}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-f0adf6c6","service":"quota-service","trace_id":"trace-0e4f6fcf","ts":1741076508}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-e25aea73","service":"quota-service","trace_id":"trace-b91d783c","ts":1741076520}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-c3b963c1","service":"quota-service","trace_id":"trace-3d71650d","ts":1741076531}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-07a51a34 used_pct=91","service":"quota-service","trace_id":"trace-c2629673","ts":1741076542}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-8f2ac9e4","service":"quota-service","trace_id":"trace-844f7ecb","ts":1741076553}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-34a9045f","service":"quota-service","trace_id":"trace-7b1d83ff","ts":1741076565}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-964725b6","service":"quota-service","trace_id":"trace-92c7228a","ts":1741076576}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-4ac3d1e6","service":"quota-service","trace_id":"trace-77a053d4","ts":1741076587}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-366254f5","service":"quota-service","trace_id":"trace-7d3290dc","ts":1741076598}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-2a3f3707","service":"quota-service","trace_id":"trace-147a9d92","ts":1741076610}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-0b583d98 used_pct=89","service":"quota-service","trace_id":"trace-d1174481","ts":1741076621}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-78868906","service":"quota-service","trace_id":"trace-4f2d3035","ts":1741076632}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-a6d6090a","service":"quota-service","trace_id":"trace-654bd560","ts":1741076643}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-ffc9cc73","service":"quota-service","trace_id":"trace-80cbb991","ts":1741076655}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-16424fb5","service":"quota-service","trace_id":"trace-e087d7b7","ts":1741076666}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-26fddb65","service":"quota-service","trace_id":"trace-32f8cce4","ts":1741076677}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-eecca3b2","service":"quota-service","trace_id":"trace-261d45b5","ts":1741076688}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-58dcf55a used_pct=86","service":"quota-service","trace_id":"trace-91e13226","ts":1741076700}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-5fac0f2e","service":"quota-service","trace_id":"trace-d1c9e19d","ts":1741076711}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-abeb69fe","service":"quota-service","trace_id":"trace-b72862b5","ts":1741076722}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-ef672795","service":"quota-service","trace_id":"trace-a1e45b9c","ts":1741076733}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-377cf275","service":"quota-service","trace_id":"trace-da4d6421","ts":1741076745}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-ac071922","service":"quota-service","trace_id":"trace-0fb2258a","ts":1741076756}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-6754f2a8","service":"quota-service","trace_id":"trace-884c0dde","ts":1741076767}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-c2ae5248 used_pct=85","service":"quota-service","trace_id":"trace-066a8f3c","ts":1741076778}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-4241306f","service":"quota-service","trace_id":"trace-0500a6a7","ts":1741076790}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-437ea764","service":"quota-service","trace_id":"trace-94d39bb6","ts":1741076801}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-eb361e67","service":"quota-service","trace_id":"trace-b7dc400e","ts":1741076812}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-1ffe217f","service":"quota-service","trace_id":"trace-1a8109cb","ts":1741076823}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-f3e9a789","service":"quota-service","trace_id":"trace-cc8329ff","ts":1741076835}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-b473a677","service":"quota-service","trace_id":"trace-bdb84da4","ts":1741076846}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-2dd24977 used_pct=89","service":"quota-service","trace_id":"trace-1d3129b1","ts":1741076857}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-75fa3dce","service":"quota-service","trace_id":"trace-f8233787","ts":1741076868}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-dfcb202b","service":"quota-service","trace_id":"trace-e9080834","ts":1741076880}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-f6aab5dd","service":"quota-service","trace_id":"trace-248c2c0e","ts":1741076891}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-9abd9fa1","service":"quota-service","trace_id":"trace-a3ae0240","ts":1741076902}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-e375ce87","service":"quota-service","trace_id":"trace-06abce00","ts":1741076913}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-c44481c5","service":"quota-service","trace_id":"trace-51b58315","ts":1741076925}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-82d3710e used_pct=80","service":"quota-service","trace_id":"trace-8a5e049f","ts":1741076936}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-577b786f","service":"quota-service","trace_id":"trace-d94af2eb","ts":1741076947}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-62ceb19b","service":"quota-service","trace_id":"trace-a31cf363","ts":1741076958}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-e8e064dd","service":"quota-service","trace_id":"trace-9e1d821f","ts":1741076970}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-c1ab17e4","service":"quota-service","trace_id":"trace-d11dd577","ts":1741076981}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-a20cf7ab","service":"quota-service","trace_id":"trace-3d6be817","ts":1741076992}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-26d57267","service":"quota-service","trace_id":"trace-602e9da0","ts":1741077003}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-14a53e08 used_pct=80","service":"quota-service","trace_id":"trace-fc3f007c","ts":1741077015}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-ae084cb3","service":"quota-service","trace_id":"trace-6d6f8d59","ts":1741077026}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-003b0570","service":"quota-service","trace_id":"trace-bee99ee8","ts":1741077037}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-05a5fb23","service":"quota-service","trace_id":"trace-126632cf","ts":1741077048}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-8a047509","service":"quota-service","trace_id":"trace-4cf8ae35","ts":1741077060}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-2797a103","service":"quota-service","trace_id":"trace-44c9bb95","ts":1741077071}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-b95f1ac4","service":"quota-service","trace_id":"trace-425e8d6e","ts":1741077082}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-e9719cbf used_pct=88","service":"quota-service","trace_id":"trace-217e5791","ts":1741077093}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-33cb0241","service":"quota-service","trace_id":"trace-1751acaf","ts":1741077105}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-e7be9999","service":"quota-service","trace_id":"trace-eb81cc34","ts":1741077116}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-91f05b53","service":"quota-service","trace_id":"trace-14717092","ts":1741077127}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-ae02611e","service":"quota-service","trace_id":"trace-7cc75a36","ts":1741077138}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-b1a38645","service":"quota-service","trace_id":"trace-3fece679","ts":1741077150}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-3edfa2a5","service":"quota-service","trace_id":"trace-a8d930c2","ts":1741077161}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-d97fe78d used_pct=88","service":"quota-service","trace_id":"trace-288be98d","ts":1741077172}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-320efd7b","service":"quota-service","trace_id":"trace-8daf496c","ts":1741077183}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-63b85b16","service":"quota-service","trace_id":"trace-e03d9738","ts":1741077195}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-dae98cd6","service":"quota-service","trace_id":"trace-af74a613","ts":1741077206}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-3afcf650","service":"quota-service","trace_id":"trace-ef5250d3","ts":1741077217}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-5893dbc6","service":"quota-service","trace_id":"trace-fb403eaf","ts":1741077228}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-fdce6d46","service":"quota-service","trace_id":"trace-ad0defdb","ts":1741077240}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-888d56ec used_pct=91","service":"quota-service","trace_id":"trace-84cd0d7a","ts":1741077251}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-528290bf","service":"quota-service","trace_id":"trace-d944952d","ts":1741077262}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-45e4824e","service":"quota-service","trace_id":"trace-f04874fe","ts":1741077273}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-1504441c","service":"quota-service","trace_id":"trace-92322363","ts":1741077285}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-887745fb","service":"quota-service","trace_id":"trace-cd9e67b0","ts":1741077296}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-cf7b081d","service":"quota-service","trace_id":"trace-ef735b8c","ts":1741077307}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-3fa9d262","service":"quota-service","trace_id":"trace-d96d2ad0","ts":1741077318}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-37f226d3 used_pct=91","service":"quota-service","trace_id":"trace-abfd397e","ts":1741077330}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-db46a988","service":"quota-service","trace_id":"trace-213098d3","ts":1741077341}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-992126a3","service":"quota-service","trace_id":"trace-9764c0fe","ts":1741077352}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-e35d4b37","service":"quota-service","trace_id":"trace-b51e060c","ts":1741077363}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-8a29e9db","service":"quota-service","trace_id":"trace-f358de77","ts":1741077375}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-8fac88ac","service":"quota-service","trace_id":"trace-47ba2d8b","ts":1741077386}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-1fd97013","service":"quota-service","trace_id":"trace-d4eb5476","ts":1741077397}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-3bb4d6f5 used_pct=85","service":"quota-service","trace_id":"trace-2e6a4940","ts":1741077408}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-69418b49","service":"quota-service","trace_id":"trace-a75fc58e","ts":1741077420}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-fcc01682","service":"quota-service","trace_id":"trace-7b5409f8","ts":1741077431}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-f6591e76","service":"quota-service","trace_id":"trace-e698cf8c","ts":1741077442}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-9acaa420","service":"quota-service","trace_id":"trace-38a60d40","ts":1741077453}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-af6e89ff","service":"quota-service","trace_id":"trace-14a56300","ts":1741077465}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-f7b56028","service":"quota-service","trace_id":"trace-49062103","ts":1741077476}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-7acc10c8 used_pct=93","service":"quota-service","trace_id":"trace-6f042073","ts":1741077487}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-b6df488b","service":"quota-service","trace_id":"trace-533e1bb5","ts":1741077498}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-299690c9","service":"quota-service","trace_id":"trace-92decf8e","ts":1741077510}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-827949b1","service":"quota-service","trace_id":"trace-06ee8c11","ts":1741077521}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-089df944","service":"quota-service","trace_id":"trace-eed64b09","ts":1741077532}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-3910f40c","service":"quota-service","trace_id":"trace-eda663b7","ts":1741077543}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-2e3613a3","service":"quota-service","trace_id":"trace-10ffd1c5","ts":1741077555}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-a1a02ee6 used_pct=84","service":"quota-service","trace_id":"trace-9560ef0a","ts":1741077566}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-2e6a33d9","service":"quota-service","trace_id":"trace-74716ef8","ts":1741077577}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-d7ac626c","service":"quota-service","trace_id":"trace-32f57137","ts":1741077588}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-6561f29d","service":"quota-service","trace_id":"trace-08642fbc","ts":1741077600}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-b787a3f3","service":"quota-service","trace_id":"trace-2daa3fec","ts":1741077611}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-e0eecebe","service":"quota-service","trace_id":"trace-33c8db73","ts":1741077622}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-6b2b8f3f","service":"quota-service","trace_id":"trace-c6dc1cc6","ts":1741077633}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-f2781dd2 used_pct=83","service":"quota-service","trace_id":"trace-1c9d80ee","ts":1741077645}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-7597b2c2","service":"quota-service","trace_id":"trace-4e56d018","ts":1741077656}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-a6eabe7e","service":"quota-service","trace_id":"trace-4f1fcc15","ts":1741077667}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-8a560b03","service":"quota-service","trace_id":"trace-973fff5e","ts":1741077678}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-d2fd04bf","service":"quota-service","trace_id":"trace-7665d241","ts":1741077690}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-eb53cefc","service":"quota-service","trace_id":"trace-da8402f1","ts":1741077701}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-06e8f527","service":"quota-service","trace_id":"trace-7bc68888","ts":1741077712}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-b4fae7ad used_pct=85","service":"quota-service","trace_id":"trace-f706f502","ts":1741077723}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-81cefe0e","service":"quota-service","trace_id":"trace-aedc7d04","ts":1741077735}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-0ee3cf2f","service":"quota-service","trace_id":"trace-cfbff16f","ts":1741077746}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-622e9a04","service":"quota-service","trace_id":"trace-837580ee","ts":1741077757}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-6c2279de","service":"quota-service","trace_id":"trace-1f8e594d","ts":1741077768}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-f1d6e33c","service":"quota-service","trace_id":"trace-40f13904","ts":1741077780}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-e24ec88c","service":"quota-service","trace_id":"trace-d2de08bf","ts":1741077791}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-f7d352ef used_pct=89","service":"quota-service","trace_id":"trace-af3a1d46","ts":1741077802}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-d71a2bf5","service":"quota-service","trace_id":"trace-2c17dc37","ts":1741077813}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-799a141b","service":"quota-service","trace_id":"trace-63790f69","ts":1741077825}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-da261d45","service":"quota-service","trace_id":"trace-7f093650","ts":1741077836}
+{"host":"quota-01.example","level":"error","message":"quota exceeded for tenant tn-CD8C6CA6 request rejected","service":"quota-service","trace_id":"trace-004a2c9f","ts":1741077840}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-2461c669","service":"quota-service","trace_id":"trace-ef7338a6","ts":1741077847}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-ad48963d","service":"quota-service","trace_id":"trace-54f865d4","ts":1741077858}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-03db1f0e","service":"quota-service","trace_id":"trace-b1a0b492","ts":1741077870}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-a9b9faae used_pct=85","service":"quota-service","trace_id":"trace-2fb4856c","ts":1741077881}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-b9704fea","service":"quota-service","trace_id":"trace-5dedc4ff","ts":1741077892}
+{"host":"quota-01.example","level":"error","message":"quota exceeded for tenant tn-CD8C6CA6 request rejected","service":"quota-service","trace_id":"trace-004a2c9f","ts":1741077900}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-07f73c92","service":"quota-service","trace_id":"trace-f8e4e9a2","ts":1741077903}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-abcad28d","service":"quota-service","trace_id":"trace-22a468d8","ts":1741077915}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-f53dfd67","service":"quota-service","trace_id":"trace-dbe9cdce","ts":1741077926}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-bcc5aa61","service":"quota-service","trace_id":"trace-dcf6e119","ts":1741077937}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-58bf2d21","service":"quota-service","trace_id":"trace-5c4483f7","ts":1741077948}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-94be0ffe used_pct=93","service":"quota-service","trace_id":"trace-fcc1c40c","ts":1741077960}
+{"host":"quota-01.example","level":"error","message":"quota exceeded for tenant tn-CD8C6CA6 request rejected","service":"quota-service","trace_id":"trace-004a2c9f","ts":1741077960}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-8273cf2e","service":"quota-service","trace_id":"trace-c31ce721","ts":1741077971}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-bb6adddf","service":"quota-service","trace_id":"trace-79e0def6","ts":1741077982}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-c2e6a60c","service":"quota-service","trace_id":"trace-48bcc389","ts":1741077993}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-379dec82","service":"quota-service","trace_id":"trace-4317a5bc","ts":1741078005}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-b1ff8804","service":"quota-service","trace_id":"trace-abcd8d3c","ts":1741078016}
+{"host":"quota-01.example","level":"warn","message":"quota limiter engaged limiter=lmt-48CC2A60 shedding load for the offending tenant","service":"quota-service","trace_id":"trace-0470abd4","ts":1741078020}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-31acf7dd","service":"quota-service","trace_id":"trace-d98ddafe","ts":1741078027}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-b8b6a116 used_pct=88","service":"quota-service","trace_id":"trace-34f42b5c","ts":1741078038}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-06116d61","service":"quota-service","trace_id":"trace-8a364506","ts":1741078050}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-d146791c","service":"quota-service","trace_id":"trace-3a3b843c","ts":1741078061}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-7ad1c134","service":"quota-service","trace_id":"trace-2946ee95","ts":1741078072}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-ee85e4f5","service":"quota-service","trace_id":"trace-52e8bf88","ts":1741078083}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-46e089c4","service":"quota-service","trace_id":"trace-a2444c92","ts":1741078095}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-6cdbb80c","service":"quota-service","trace_id":"trace-fc944d63","ts":1741078106}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-733a4bfd used_pct=90","service":"quota-service","trace_id":"trace-b37bfb80","ts":1741078117}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-d703e8d2","service":"quota-service","trace_id":"trace-999c739a","ts":1741078128}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-37b5bf74","service":"quota-service","trace_id":"trace-b5a8df15","ts":1741078140}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-b554182e","service":"quota-service","trace_id":"trace-148f42a9","ts":1741078151}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-be784820","service":"quota-service","trace_id":"trace-16e191c1","ts":1741078162}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-62534f92","service":"quota-service","trace_id":"trace-3a0d1fa0","ts":1741078173}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-c9a26a20","service":"quota-service","trace_id":"trace-9dc135a1","ts":1741078185}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-5b9a44f7 used_pct=90","service":"quota-service","trace_id":"trace-15b074e8","ts":1741078196}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-67b1e339","service":"quota-service","trace_id":"trace-7e69525b","ts":1741078207}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-e67d8cb5","service":"quota-service","trace_id":"trace-36020f59","ts":1741078218}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-50af5179","service":"quota-service","trace_id":"trace-034cddad","ts":1741078230}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-cec16eab","service":"quota-service","trace_id":"trace-f1500103","ts":1741078241}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-ccecd405","service":"quota-service","trace_id":"trace-1541dabc","ts":1741078252}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-d5e237ac","service":"quota-service","trace_id":"trace-38ebcc53","ts":1741078263}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-46a04dda used_pct=81","service":"quota-service","trace_id":"trace-1ba33514","ts":1741078275}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-4b3920d5","service":"quota-service","trace_id":"trace-3d47e1d6","ts":1741078286}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-af11f009","service":"quota-service","trace_id":"trace-71a43c95","ts":1741078297}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-e6edfcaf","service":"quota-service","trace_id":"trace-05a7cea3","ts":1741078308}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-e1d77dcb","service":"quota-service","trace_id":"trace-6b00ad88","ts":1741078320}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-01da01f3","service":"quota-service","trace_id":"trace-88c55921","ts":1741078331}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-f8123570","service":"quota-service","trace_id":"trace-1e3cc34f","ts":1741078342}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-bd88d4eb used_pct=85","service":"quota-service","trace_id":"trace-98051371","ts":1741078353}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-12a02b98","service":"quota-service","trace_id":"trace-9c8a870a","ts":1741078365}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-45af77c8","service":"quota-service","trace_id":"trace-4627c908","ts":1741078376}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-34602fb2","service":"quota-service","trace_id":"trace-0f909650","ts":1741078387}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-f33a6d25","service":"quota-service","trace_id":"trace-0d5e28e9","ts":1741078398}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-5dd73ce8","service":"quota-service","trace_id":"trace-e10b923e","ts":1741078410}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-59a7c98a","service":"quota-service","trace_id":"trace-b9ce1cc8","ts":1741078421}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-88ab9b10 used_pct=86","service":"quota-service","trace_id":"trace-3ad7a1b8","ts":1741078432}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-eed84345","service":"quota-service","trace_id":"trace-8729a855","ts":1741078443}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-86d2f5be","service":"quota-service","trace_id":"trace-6b08bedd","ts":1741078455}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-a2d3c33f","service":"quota-service","trace_id":"trace-db862fc8","ts":1741078466}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-5a851d7b","service":"quota-service","trace_id":"trace-0eb97c20","ts":1741078477}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-dc6fb3b8","service":"quota-service","trace_id":"trace-b3f77821","ts":1741078488}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-f3ce5234","service":"quota-service","trace_id":"trace-3967f62e","ts":1741078500}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-eb16def4 used_pct=88","service":"quota-service","trace_id":"trace-680d7d92","ts":1741078511}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-e3b28131","service":"quota-service","trace_id":"trace-8be677b2","ts":1741078522}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-f60352d0","service":"quota-service","trace_id":"trace-5f3e4adf","ts":1741078533}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-89bf34d4","service":"quota-service","trace_id":"trace-fd4701e5","ts":1741078545}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-50caa7aa","service":"quota-service","trace_id":"trace-97f68eb2","ts":1741078556}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-c72937e3","service":"quota-service","trace_id":"trace-6b448538","ts":1741078567}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-de42b8ba","service":"quota-service","trace_id":"trace-16d99cd3","ts":1741078578}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-79cf9b73 used_pct=92","service":"quota-service","trace_id":"trace-c7291618","ts":1741078590}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-352e1be8","service":"quota-service","trace_id":"trace-4fa088a6","ts":1741078601}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-c0c88286","service":"quota-service","trace_id":"trace-661db0b1","ts":1741078612}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-737f4964","service":"quota-service","trace_id":"trace-cffb0c93","ts":1741078623}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-90bb9c77","service":"quota-service","trace_id":"trace-056ce75e","ts":1741078635}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-0f09d787","service":"quota-service","trace_id":"trace-04f00dc4","ts":1741078646}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-18cecc53","service":"quota-service","trace_id":"trace-33cf1456","ts":1741078657}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-010b49d1 used_pct=80","service":"quota-service","trace_id":"trace-2f32b3f2","ts":1741078668}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-c16fc08f","service":"quota-service","trace_id":"trace-f9eb10b0","ts":1741078680}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-06b7bd72","service":"quota-service","trace_id":"trace-555e22af","ts":1741078691}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-b1b6a417","service":"quota-service","trace_id":"trace-1173d25d","ts":1741078702}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-856f6883","service":"quota-service","trace_id":"trace-fb844c45","ts":1741078713}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-4b60c7d7","service":"quota-service","trace_id":"trace-35311922","ts":1741078725}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-18817d2b","service":"quota-service","trace_id":"trace-a634a490","ts":1741078736}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-4f1a75f6 used_pct=89","service":"quota-service","trace_id":"trace-e0872920","ts":1741078747}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-9e3a4b84","service":"quota-service","trace_id":"trace-ea40d0e1","ts":1741078758}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-79680252","service":"quota-service","trace_id":"trace-cb59c19a","ts":1741078770}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-094f2143","service":"quota-service","trace_id":"trace-d7f849dc","ts":1741078781}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-854ebf25","service":"quota-service","trace_id":"trace-50ee2c58","ts":1741078792}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-066a0b8c","service":"quota-service","trace_id":"trace-dc2f0155","ts":1741078803}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-3eeb55de","service":"quota-service","trace_id":"trace-dafd9ef7","ts":1741078815}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-166b32de used_pct=82","service":"quota-service","trace_id":"trace-fc137e94","ts":1741078826}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-6713947d","service":"quota-service","trace_id":"trace-69a6de58","ts":1741078837}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-1560b521","service":"quota-service","trace_id":"trace-3823854d","ts":1741078848}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-67b2a5b3","service":"quota-service","trace_id":"trace-e5a8db8f","ts":1741078860}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-3ae96bbb","service":"quota-service","trace_id":"trace-800741fb","ts":1741078871}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-2208df13","service":"quota-service","trace_id":"trace-f107bbb3","ts":1741078882}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-96410f3a","service":"quota-service","trace_id":"trace-de49ed63","ts":1741078893}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-e097eeac used_pct=90","service":"quota-service","trace_id":"trace-f293f0b5","ts":1741078905}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-c937a44d","service":"quota-service","trace_id":"trace-efa2fe1e","ts":1741078916}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-6e9b5046","service":"quota-service","trace_id":"trace-72eb56dc","ts":1741078927}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-4a4dd873","service":"quota-service","trace_id":"trace-d4fde4f4","ts":1741078938}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-2b1f490e","service":"quota-service","trace_id":"trace-a5bb6076","ts":1741078950}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-f84c862d","service":"quota-service","trace_id":"trace-49e09596","ts":1741078961}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-68bbe772","service":"quota-service","trace_id":"trace-c49690b6","ts":1741078972}
+{"host":"quota-01.example","level":"warn","message":"rate limit approached tenant=tn-ef4a6141 used_pct=85","service":"quota-service","trace_id":"trace-0dba9cde","ts":1741078983}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-60b24892","service":"quota-service","trace_id":"trace-289d8058","ts":1741078995}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-d79c3ebf","service":"quota-service","trace_id":"trace-4bd01f28","ts":1741079006}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-de21de5e","service":"quota-service","trace_id":"trace-a0085a16","ts":1741079017}
+{"host":"quota-01.example","level":"info","message":"capacity check passed tenant=tn-b1c91b21","service":"quota-service","trace_id":"trace-1078131a","ts":1741079028}

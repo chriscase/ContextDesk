@@ -1,0 +1,268 @@
+{
+  "base_ts": 1739865840,
+  "baseline_expectation": {
+    "class": "limitation",
+    "gates": {
+      "max_decoy_share_at_25": 0.4,
+      "min_recall_at_25": null,
+      "queries_expected_below_floor": [
+        "rb02-semantic-gap-q2",
+        "rb02-semantic-gap-q6"
+      ]
+    },
+    "limitation_reason": "causal evidence uses JDBC/IceCube/managed-connection vocabulary; the words `database` and `unavailable` never appear in any causal record, so keyword retrieval cannot bridge q2/q6"
+  },
+  "case_id": "rb02-semantic-gap",
+  "case_version": 1,
+  "competing_explanations": [],
+  "evaluator_isolation": "Everything under truth/ is an answer key. Import only the sibling import/ directory and never attach truth or queries to model context.",
+  "evaluator_only": true,
+  "evidence_groups": [
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb02-semantic-gap-g01",
+      "incident_id": "rb02-semantic-gap-inc1",
+      "notes": "database process terminated sessions; wording never says database/outage/unavailable",
+      "role": "trigger",
+      "sources": [
+        "platform/pg.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "administrator command",
+      "ts": 1739868940
+    },
+    {
+      "expected_occurrences": 3,
+      "expected_raw_records": 3,
+      "expected_token_records": 3,
+      "group_id": "rb02-semantic-gap-g02",
+      "incident_id": "rb02-semantic-gap-inc1",
+      "notes": "IceCube managed-connection pool exhaustion",
+      "role": "propagation",
+      "sources": [
+        "appserver/server.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "txn-92250654",
+      "ts": 1739869000
+    },
+    {
+      "expected_occurrences": 2,
+      "expected_raw_records": 2,
+      "expected_token_records": 2,
+      "group_id": "rb02-semantic-gap-g03",
+      "incident_id": "rb02-semantic-gap-inc1",
+      "notes": "JDBC connect refusals to the documentation-range address",
+      "role": "propagation",
+      "sources": [
+        "appserver/server.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "cause-2B3C55DA",
+      "ts": 1739869080
+    },
+    {
+      "expected_occurrences": 2,
+      "expected_raw_records": 2,
+      "expected_token_records": 2,
+      "group_id": "rb02-semantic-gap-g04",
+      "incident_id": "rb02-semantic-gap-inc1",
+      "notes": "order submission fails at persistence time",
+      "role": "symptom",
+      "sources": [
+        "appserver/server.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "ord-259F3CD6",
+      "ts": 1739869160
+    },
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb02-semantic-gap-g05",
+      "incident_id": "rb02-semantic-gap-inc1",
+      "notes": "database process announces readiness",
+      "role": "recovery",
+      "sources": [
+        "platform/pg.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "ready to accept",
+      "ts": 1739869540
+    }
+  ],
+  "expected": {
+    "bytes": 56742,
+    "events": 429,
+    "excluded_files": [],
+    "files": 2,
+    "files_by_path": {
+      "appserver/server.log": {
+        "bytes": 35256,
+        "events": 267,
+        "sha256": "18dcf61108f4ac7c1037033aa88159ae3a7183e0e8f062d234bfa318805967eb"
+      },
+      "platform/pg.log": {
+        "bytes": 21486,
+        "events": 162,
+        "sha256": "32edb5dcbc6674a2a0d56c0e3db81c0662553874d03b016cda252a544ec59b66"
+      }
+    },
+    "severities": {
+      "debug": 10,
+      "error": 6,
+      "info": 411,
+      "warn": 2
+    },
+    "source_count": 2,
+    "sources": {
+      "appserver/server.log": 267,
+      "platform/pg.log": 162
+    },
+    "time_quality": "wall"
+  },
+  "forbidden_claims": [
+    "the application server leaked memory",
+    "a network partition caused the refusals"
+  ],
+  "generator_version": "contextdesk.log_lab.retrieval_ablation.generator.v1",
+  "import_tree_sha256": "28cd7e97e63592d4c9034033cc69d61295430d8017e2bbacfaee1d1256b53f06",
+  "incidents": [
+    {
+      "incident_id": "rb02-semantic-gap-inc1",
+      "root_cause_status": "established",
+      "summary": "The platform database terminated connections on an administrator command; the app server exhausted its IceCube managed-connection pool and refused JDBC connects until the database announced readiness.",
+      "trigger_group_ids": [
+        "rb02-semantic-gap-g01"
+      ],
+      "window_from_ts": 1739868940,
+      "window_to_ts": 1739869600
+    }
+  ],
+  "intended_probe": "query vocabulary (database availability) never appears in causal evidence (JDBC / IceCube / managed-connection vocabulary)",
+  "known_counts": {
+    "corpus_completeness": "complete",
+    "known_missing_references": 0,
+    "total_events_known": true
+  },
+  "per_query_relevance": {
+    "rb02-semantic-gap-q1": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb02-semantic-gap-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb02-semantic-gap-g02"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb02-semantic-gap-g03"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb02-semantic-gap-g04"
+        }
+      ]
+    },
+    "rb02-semantic-gap-q2": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb02-semantic-gap-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb02-semantic-gap-g02"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb02-semantic-gap-g03"
+        }
+      ]
+    },
+    "rb02-semantic-gap-q3": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb02-semantic-gap-g04"
+        }
+      ]
+    },
+    "rb02-semantic-gap-q4": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 2,
+          "group_id": "rb02-semantic-gap-g02"
+        }
+      ]
+    },
+    "rb02-semantic-gap-q5": {
+      "answerable": false,
+      "contaminating_groups": [],
+      "relevant": []
+    },
+    "rb02-semantic-gap-q6": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb02-semantic-gap-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb02-semantic-gap-g03"
+        }
+      ]
+    },
+    "rb02-semantic-gap-q7": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb02-semantic-gap-g05"
+        },
+        {
+          "gain": 3,
+          "group_id": "rb02-semantic-gap-g01"
+        }
+      ]
+    }
+  },
+  "permitted_uncertainty": [
+    "the reason for the administrator command is outside this corpus"
+  ],
+  "privacy": {
+    "marker": "LOG-LAB-INVALID",
+    "secret_tokens": []
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no customer, employer, developer-machine, production, or third-party log material.",
+  "required_claims": [
+    "connection terminations on the database side preceded the pool exhaustion",
+    "the IceCube pool exhaustion and JDBC refusals were propagation, not the root",
+    "recovery corresponds to the readiness announcement"
+  ],
+  "retrieval_exclusions": [],
+  "schema_id": "contextdesk.log_lab.retrieval_truth.v1",
+  "schema_version": 1,
+  "seed": 92026080701,
+  "semantic_truth_digest": "35bc9096f020e379d66de6f7bb3277837ff9d51dd5d34ef570381f5a2333341b",
+  "suite_id": "contextdesk.log_lab.retrieval_ablation",
+  "suite_version": 1,
+  "tier": "small",
+  "title": "Semantic wording gap"
+}

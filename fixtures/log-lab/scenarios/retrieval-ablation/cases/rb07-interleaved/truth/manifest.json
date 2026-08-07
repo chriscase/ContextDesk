@@ -1,0 +1,219 @@
+{
+  "base_ts": 1740297840,
+  "baseline_expectation": {
+    "class": "pass",
+    "gates": {
+      "max_decoy_share_at_25": 0.3,
+      "min_recall_at_25": 0.7,
+      "queries_expected_below_floor": []
+    },
+    "limitation_reason": null
+  },
+  "case_id": "rb07-interleaved",
+  "case_version": 1,
+  "competing_explanations": [],
+  "evaluator_isolation": "Everything under truth/ is an answer key. Import only the sibling import/ directory and never attach truth or queries to model context.",
+  "evaluator_only": true,
+  "evidence_groups": [
+    {
+      "expected_occurrences": 3,
+      "expected_raw_records": 3,
+      "expected_token_records": 3,
+      "group_id": "rb07-interleaved-g01",
+      "incident_id": "rb07-interleaved-inca",
+      "notes": "thread-A null pointer on discount lookup",
+      "role": "trigger",
+      "sources": [
+        "app/server.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "txn-5E83A255",
+      "ts": 1740300840
+    },
+    {
+      "expected_occurrences": 3,
+      "expected_raw_records": 3,
+      "expected_token_records": 3,
+      "group_id": "rb07-interleaved-g02",
+      "incident_id": "rb07-interleaved-incb",
+      "notes": "thread-B null pointer with identical frames but a different request",
+      "role": "trigger",
+      "sources": [
+        "app/server.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "txn-97C05BDA",
+      "ts": 1740300841
+    }
+  ],
+  "expected": {
+    "bytes": 67815,
+    "events": 466,
+    "excluded_files": [],
+    "files": 2,
+    "files_by_path": {
+      "api/orders.jsonl": {
+        "bytes": 61180,
+        "events": 380,
+        "sha256": "cd2dcc3a4fb2de8e1eba2d9675fd155aeb87e75dba4be80966380641db90d5af"
+      },
+      "app/server.log": {
+        "bytes": 6635,
+        "events": 86,
+        "sha256": "545df66b1db5d8107968ef4fe679c2b9da285e68f262ee6cfa41d6f35347849e"
+      }
+    },
+    "severities": {
+      "error": 6,
+      "info": 460
+    },
+    "source_count": 2,
+    "sources": {
+      "api/orders.jsonl": 380,
+      "app/server.log": 86
+    },
+    "time_quality": "wall"
+  },
+  "forbidden_claims": [
+    "the six exception records are one incident",
+    "lane-a caused lane-b"
+  ],
+  "generator_version": "contextdesk.log_lab.retrieval_ablation.generator.v1",
+  "import_tree_sha256": "6aef7fed47bf2751fd876b5b701ba97a1c507b7b353f8ad941f32b4b19342531",
+  "incidents": [
+    {
+      "incident_id": "rb07-interleaved-inca",
+      "root_cause_status": "established",
+      "summary": "Thread lane-a repeatedly hit a null discount for one request.",
+      "trigger_group_ids": [
+        "rb07-interleaved-g01"
+      ],
+      "window_from_ts": 1740300840,
+      "window_to_ts": 1740300970
+    },
+    {
+      "incident_id": "rb07-interleaved-incb",
+      "root_cause_status": "established",
+      "summary": "Thread lane-b hit the same code path for an unrelated request.",
+      "trigger_group_ids": [
+        "rb07-interleaved-g02"
+      ],
+      "window_from_ts": 1740300840,
+      "window_to_ts": 1740300970
+    }
+  ],
+  "intended_probe": "similar exceptions from unrelated threads/requests must remain separate",
+  "known_counts": {
+    "corpus_completeness": "complete",
+    "known_missing_references": 0,
+    "total_events_known": true
+  },
+  "per_query_relevance": {
+    "rb07-interleaved-q1": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb07-interleaved-g01"
+        },
+        {
+          "gain": 3,
+          "group_id": "rb07-interleaved-g02"
+        }
+      ]
+    },
+    "rb07-interleaved-q2": {
+      "answerable": true,
+      "contaminating_groups": [
+        "rb07-interleaved-g02"
+      ],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb07-interleaved-g01"
+        }
+      ]
+    },
+    "rb07-interleaved-q3": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb07-interleaved-g01"
+        },
+        {
+          "gain": 3,
+          "group_id": "rb07-interleaved-g02"
+        }
+      ]
+    },
+    "rb07-interleaved-q4": {
+      "answerable": true,
+      "contaminating_groups": [
+        "rb07-interleaved-g01"
+      ],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb07-interleaved-g02"
+        }
+      ]
+    },
+    "rb07-interleaved-q5": {
+      "answerable": false,
+      "contaminating_groups": [],
+      "relevant": []
+    },
+    "rb07-interleaved-q6": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb07-interleaved-g01"
+        },
+        {
+          "gain": 3,
+          "group_id": "rb07-interleaved-g02"
+        }
+      ]
+    },
+    "rb07-interleaved-q7": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb07-interleaved-g01"
+        },
+        {
+          "gain": 3,
+          "group_id": "rb07-interleaved-g02"
+        }
+      ]
+    }
+  },
+  "permitted_uncertainty": [
+    "whether both requests came from the same client is unknowable here"
+  ],
+  "privacy": {
+    "marker": "LOG-LAB-INVALID",
+    "secret_tokens": []
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no customer, employer, developer-machine, production, or third-party log material.",
+  "required_claims": [
+    "lane-a and lane-b failures belong to different requests despite identical frames",
+    "each thread shows three occurrences"
+  ],
+  "retrieval_exclusions": [],
+  "schema_id": "contextdesk.log_lab.retrieval_truth.v1",
+  "schema_version": 1,
+  "seed": 92026080701,
+  "semantic_truth_digest": "e7275ba8c7f3d25ff95856fb3bf271d477538875f888d4cfcf2cc9c854fd18a3",
+  "suite_id": "contextdesk.log_lab.retrieval_ablation",
+  "suite_version": 1,
+  "tier": "small",
+  "title": "Interleaved executions"
+}
