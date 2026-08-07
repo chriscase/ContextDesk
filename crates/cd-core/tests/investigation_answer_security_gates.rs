@@ -99,7 +99,7 @@ fn scenario_rows(names: &ScenarioNames) -> Vec<HostEvidenceEntry> {
             source_label: names.sources[0].clone(),
             locator: names.locators[0].clone(),
             corpus_id: names.corpus.clone(),
-            revision: names.revision.clone(),
+            revision: names.revision,
             role: EvidenceRole::Cause,
             content: names.contents[0].clone(),
         },
@@ -109,7 +109,7 @@ fn scenario_rows(names: &ScenarioNames) -> Vec<HostEvidenceEntry> {
             source_label: names.sources[1].clone(),
             locator: names.locators[1].clone(),
             corpus_id: names.corpus.clone(),
-            revision: names.revision.clone(),
+            revision: names.revision,
             role: EvidenceRole::Symptom,
             content: names.contents[1].clone(),
         },
@@ -119,22 +119,26 @@ fn scenario_rows(names: &ScenarioNames) -> Vec<HostEvidenceEntry> {
             source_label: names.sources[2].clone(),
             locator: names.locators[2].clone(),
             corpus_id: names.corpus.clone(),
-            revision: names.revision.clone(),
+            revision: names.revision,
             role: EvidenceRole::Neutral,
             content: names.contents[2].clone(),
         },
     ]
 }
 
-fn ledger_from_rows(names: &ScenarioNames, rows: Vec<HostEvidenceEntry>) -> HostEvidenceLedger {
-    let binding = AnswerBindingV1 {
+fn binding_for_rows(names: &ScenarioNames, rows: &[HostEvidenceEntry]) -> AnswerBindingV1 {
+    AnswerBindingV1 {
         session_id: names.session.clone(),
         turn_id: names.turn.clone(),
         corpus_id: names.corpus.clone(),
-        revision: names.revision.clone(),
-        ledger_digest: HostEvidenceLedger::digest(&rows),
-    };
-    HostEvidenceLedger::new(binding, rows).expect("generated ledger must be valid")
+        revision: names.revision,
+        ledger_digest: HostEvidenceLedger::digest(rows),
+    }
+}
+
+fn ledger_from_rows(names: &ScenarioNames, rows: Vec<HostEvidenceEntry>) -> HostEvidenceLedger {
+    HostEvidenceLedger::new(binding_for_rows(names, &rows), rows)
+        .expect("generated ledger must be valid")
 }
 
 fn scenario_proposal(names: &ScenarioNames) -> String {
@@ -313,21 +317,65 @@ fn scope_digest_and_identifier_mutations_fail_closed() {
     let rows = scenario_rows(&names);
     let ledger = ledger_from_rows(&names, rows.clone());
 
-    let mut wrong_corpus_rows = rows.clone();
-    wrong_corpus_rows[0].corpus_id = opaque(0x33, 90);
-    let wrong_corpus = ledger_from_rows(&names, wrong_corpus_rows);
-    assert_eq!(
-        validate_model_answer(&scenario_proposal(&names), &wrong_corpus),
-        Err(ValidationError::WrongRevision)
-    );
+    let proposal_citing_only_first_row = json!({
+        "schema": SCHEMA_V1,
+        "candidates": [{
+            "candidate_id": names.candidates[0],
+            "observations": [{
+                "claim_id": names.claims[0],
+                "text": names.texts[0],
+                "evidence_ids": [names.evidence[0]],
+            }],
+        }],
+    })
+    .to_string();
+    assert!(!proposal_citing_only_first_row.contains(&names.evidence[1]));
+    let same_candidate_rows = rows[..2].to_vec();
+    let same_candidate_ledger = HostEvidenceLedger::new(
+        binding_for_rows(&names, &same_candidate_rows),
+        same_candidate_rows,
+    )
+    .expect("fully bound unreferenced row is allowed");
+    validate_model_answer(&proposal_citing_only_first_row, &same_candidate_ledger)
+        .expect("the first row is a valid citation and the second is intentionally unreferenced");
 
-    let mut wrong_revision_rows = rows.clone();
-    wrong_revision_rows[0].revision.event_revision += 1;
-    let wrong_revision = ledger_from_rows(&names, wrong_revision_rows);
-    assert_eq!(
-        validate_model_answer(&scenario_proposal(&names), &wrong_revision),
-        Err(ValidationError::WrongRevision)
-    );
+    let unreferenced_scope_mutations: [fn(&mut HostEvidenceEntry); 2] = [
+        |row: &mut HostEvidenceEntry| row.corpus_id = opaque(0x33, 90),
+        |row: &mut HostEvidenceEntry| row.revision.event_revision += 1,
+    ];
+    for mutate in unreferenced_scope_mutations {
+        // The proposal cites row zero only. Mutate another row for the same
+        // candidate so claim-level validation could not observe it; ledger
+        // construction must still reject it before any envelope can exist.
+        let mut unreferenced_bad_rows = rows[..2].to_vec();
+        mutate(&mut unreferenced_bad_rows[1]);
+        assert!(matches!(
+            HostEvidenceLedger::new(
+                binding_for_rows(&names, &unreferenced_bad_rows),
+                unreferenced_bad_rows,
+            ),
+            Err(ValidationError::WrongRevision)
+        ));
+    }
+
+    let mut blank_evidence_rows = rows.clone();
+    blank_evidence_rows[0].evidence_id = " \t".into();
+    assert!(matches!(
+        HostEvidenceLedger::new(
+            binding_for_rows(&names, &blank_evidence_rows),
+            blank_evidence_rows,
+        ),
+        Err(ValidationError::DuplicateId)
+    ));
+    let mut blank_candidate_rows = rows.clone();
+    blank_candidate_rows[0].candidate_id = " \t".into();
+    assert!(matches!(
+        HostEvidenceLedger::new(
+            binding_for_rows(&names, &blank_candidate_rows),
+            blank_candidate_rows,
+        ),
+        Err(ValidationError::WrongScope)
+    ));
 
     let mut transplanted: Value =
         serde_json::from_str(&scenario_proposal(&names)).expect("proposal json");
@@ -385,7 +433,7 @@ fn frequency_rows(names: &ScenarioNames, roles: &[EvidenceRole]) -> Vec<HostEvid
             source_label: names.sources[0].clone(),
             locator: names.locators[0].clone(),
             corpus_id: names.corpus.clone(),
-            revision: names.revision.clone(),
+            revision: names.revision,
             role: *role,
             // Deliberately frequency-like duplicate evidence content.
             content: names.contents[0].clone(),
@@ -451,7 +499,7 @@ fn only_explicit_host_cause_establishes_root_despite_order_or_frequency() {
         source_label: names.sources[1].clone(),
         locator: names.locators[1].clone(),
         corpus_id: names.corpus.clone(),
-        revision: names.revision.clone(),
+        revision: names.revision,
         role: EvidenceRole::Cause,
         content: names.contents[1].clone(),
     });
@@ -509,8 +557,24 @@ fn collect_files(root: &Path, suffix: &str, output: &mut Vec<PathBuf>) {
     }
 }
 
-fn production_prefix(source: &str) -> &str {
-    source.split("\n#[cfg(test)]").next().unwrap_or(source)
+fn runtime_leak_scan_source(source: &str) -> &str {
+    // Scan the complete file. Test-only declarations can appear before later
+    // production items (`search.rs` and `tool_host.rs` both do this), so
+    // truncating at an arbitrary `#[cfg(test)]` creates a false-negative hole.
+    // A conservative full-file scan may reject fixture vocabulary in tests,
+    // but it can never silently omit reachable production ranking or prompts.
+    source
+}
+
+#[test]
+fn runtime_source_scan_does_not_stop_at_an_early_cfg_test_item() {
+    let source = "before\n#[cfg(test)]\nuse crate::test_support;\nruntime_marker_after_cfg\n";
+    let scanned = runtime_leak_scan_source(source);
+    assert!(scanned.contains("runtime_marker_after_cfg"));
+    assert_eq!(
+        scanned, source,
+        "the leak scan must cover the complete file"
+    );
 }
 
 fn collect_oracle_strings(value: &Value, output: &mut BTreeSet<String>) {
@@ -548,7 +612,7 @@ fn runtime_ranking_and_prompts_do_not_embed_or_import_answer_key_vocabulary() {
         .iter()
         .map(|path| {
             let source = fs::read_to_string(path).expect("runtime source");
-            (path, production_prefix(&source).to_ascii_lowercase())
+            (path, runtime_leak_scan_source(&source).to_ascii_lowercase())
         })
         .collect::<Vec<_>>();
 

@@ -184,15 +184,28 @@ impl HostEvidenceLedger {
         }
         let mut entries = BTreeMap::new();
         for entry in evidence {
-            if entry.evidence_id.is_empty()
-                || entries.insert(entry.evidence_id.clone(), entry).is_some()
-            {
+            if entry.evidence_id.trim().is_empty() {
+                return Err(ValidationError::DuplicateId);
+            }
+            if entries.insert(entry.evidence_id.clone(), entry).is_some() {
                 return Err(ValidationError::DuplicateId);
             }
         }
         let canonical = entries.values().cloned().collect::<Vec<_>>();
         if binding.ledger_digest != Self::digest(&canonical) {
             return Err(ValidationError::DigestMismatch);
+        }
+        // Every row is persisted in the authoritative envelope, including
+        // rows the model elects not to cite. Bind the complete ledger here so
+        // an unreferenced stale or cross-corpus row cannot bypass the
+        // claim-level checks in `validate_model_answer`.
+        for entry in entries.values() {
+            if entry.candidate_id.trim().is_empty() {
+                return Err(ValidationError::WrongScope);
+            }
+            if entry.corpus_id != binding.corpus_id || entry.revision != binding.revision {
+                return Err(ValidationError::WrongRevision);
+            }
         }
         Ok(Self { binding, entries })
     }
@@ -435,14 +448,10 @@ mod tests {
         stale[0].revision.event_revision += 1;
         let mut stale_binding = l.binding().clone();
         stale_binding.ledger_digest = HostEvidenceLedger::digest(&stale);
-        let stale = HostEvidenceLedger::new(stale_binding, stale).unwrap();
-        let both = format!(
-            r#"{{"schema":"{SCHEMA_V1}","candidates":[{{"candidate_id":"a","observations":[{{"claim_id":"a","text":"x","evidence_ids":["e-a"]}}]}},{{"candidate_id":"b","observations":[{{"claim_id":"b","text":"x","evidence_ids":["e-b"]}}]}}]}}"#
-        );
-        assert_eq!(
-            validate_model_answer(&both, &stale),
+        assert!(matches!(
+            HostEvidenceLedger::new(stale_binding, stale),
             Err(ValidationError::WrongRevision)
-        );
+        ));
     }
     #[test]
     fn duplicate_candidate_and_claim_ids_fail() {
