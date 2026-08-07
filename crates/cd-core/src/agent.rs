@@ -860,7 +860,7 @@ fn multi_stage_candidate_messages(
     correction: bool,
 ) -> Vec<ChatMessage> {
     let correction_text = if correction {
-        "Your previous draft was withheld because it did not cite only this group's trusted identities. Correct it now."
+        "Your previous draft was withheld. Correct the analysis, but DO NOT emit `seq=`, `source=`, `template_id=`, bracketed citations, or an evidence list. The trusted host will attach this group's canonical identities after validation."
     } else {
         ""
     };
@@ -897,7 +897,7 @@ fn multi_stage_comparison_messages(
     correction: bool,
 ) -> Vec<ChatMessage> {
     let correction_text = if correction {
-        "Your previous comparison was withheld. Keep every group separate, include every exact group id, and rank them."
+        "Your previous comparison was withheld. Keep every group separate, include every exact group id, and rank them. DO NOT emit `seq=`, `source=`, `template_id=`, bracketed citations, or an evidence list. The trusted host will attach canonical identities after validation."
     } else {
         ""
     };
@@ -1055,9 +1055,20 @@ async fn run_multi_stage_broad_triage(
                 completion.content
             };
             let evidence = candidate.evidence.iter().cloned().collect::<HashSet<_>>();
-            if !content.trim().is_empty()
-                && linked_grounded_answer_is_valid(&content, &evidence, false)
+            let accepted_content = if content.trim().is_empty() {
+                None
+            } else if linked_grounded_answer_is_valid(&content, &evidence, false) {
+                Some(content)
+            } else if attempt > 0
+                && linked_answer_citation_status(&content, &evidence, false)
+                    == LinkedAnswerCitationStatus::Missing
+                && !linked_answer_mistakes_wrapper_for_evidence(&content)
             {
+                Some(attach_host_evidence_appendix(&content, &evidence))
+            } else {
+                None
+            };
+            if let Some(content) = accepted_content {
                 accepted = Some(CandidateSynthesisDraft {
                     group_id: candidate.group_id.clone(),
                     text: content
@@ -1124,7 +1135,25 @@ async fn run_multi_stage_broad_triage(
         } else {
             completion.content
         };
-        if !content.trim().is_empty() && multi_stage_comparison_is_valid(&content, &drafts) {
+        let all_evidence = drafts
+            .iter()
+            .flat_map(|draft| draft.evidence.iter().cloned())
+            .collect::<HashSet<_>>();
+        let group_ids_present = drafts.iter().all(|draft| content.contains(&draft.group_id));
+        let accepted_content = if content.trim().is_empty() || !group_ids_present {
+            None
+        } else if multi_stage_comparison_is_valid(&content, &drafts) {
+            Some(content)
+        } else if attempt > 0
+            && linked_answer_citation_status(&content, &all_evidence, false)
+                == LinkedAnswerCitationStatus::Missing
+            && !linked_answer_mistakes_wrapper_for_evidence(&content)
+        {
+            Some(attach_host_evidence_appendix(&content, &all_evidence))
+        } else {
+            None
+        };
+        if let Some(content) = accepted_content {
             return Ok(MultiStageTriageOutcome::Completed {
                 content,
                 accepted_groups: drafts.into_iter().map(|draft| draft.group_id).collect(),
@@ -11702,5 +11731,60 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         .unwrap();
         assert!(matches!(outcome, MultiStageTriageOutcome::FailedClosed(_)));
         assert_eq!(contexts.len(), 3, "both candidate attempts remain bounded");
+    }
+
+    #[tokio::test]
+    async fn bounded_multi_stage_correction_can_be_citation_free_and_host_cited() {
+        let candidates = vec![
+            multi_stage_candidate("trace:alpha", 11),
+            multi_stage_candidate("trace:bravo", 22),
+        ];
+        let backend = ScriptedBackend::new(vec![
+            multi_stage_completion("wrong seq=999 source=fabricated.log template_id=999"),
+            multi_stage_completion("trace:alpha is a plausible independent failure group."),
+            multi_stage_completion("trace:bravo seq=22 source=trace:bravo.log template_id=22"),
+            multi_stage_completion(
+                "trace:alpha then trace:bravo. seq=999 source=fabricated.log template_id=999",
+            ),
+            multi_stage_completion(
+                "Rank 1: trace:alpha. Rank 2: trace:bravo. Keep both groups independent.",
+            ),
+        ]);
+        let opts = AgentOptions {
+            max_rounds: 5,
+            ..Default::default()
+        };
+        let clock = TurnClock::new(opts.effective_deadline_plan(), None);
+        let mut contexts = Vec::new();
+        let outcome = run_multi_stage_broad_triage(
+            &backend,
+            "triage",
+            &opts,
+            &clock,
+            &candidates,
+            &mut |telemetry| contexts.push(telemetry),
+        )
+        .await
+        .unwrap();
+        match outcome {
+            MultiStageTriageOutcome::Completed {
+                content,
+                accepted_groups,
+                rejected_groups,
+                provider_rounds,
+            } => {
+                assert_eq!(accepted_groups, vec!["trace:alpha", "trace:bravo"]);
+                assert!(rejected_groups.is_empty());
+                assert_eq!(provider_rounds, 5);
+                assert!(content.contains("seq=11"));
+                assert!(content.contains("source=\"trace:alpha.log\""));
+                assert!(content.contains("seq=22"));
+                assert!(content.contains("source=\"trace:bravo.log\""));
+                assert!(!content.contains("seq=999"));
+                assert!(!content.contains("fabricated.log"));
+                assert_eq!(contexts.len(), provider_rounds);
+            }
+            other => panic!("expected host-cited corrected comparison, got {other:?}"),
+        }
     }
 }

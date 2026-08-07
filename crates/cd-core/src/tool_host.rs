@@ -113,6 +113,11 @@ const BROAD_LOG_TRIAGE_CORRELATION_SEED_CAP: usize = 3;
 const BROAD_LOG_TRIAGE_CORRELATION_RESULT_CAP: usize = 5;
 const BROAD_LOG_TRIAGE_TRACE_CHAIN_CAP: usize = 4;
 const BROAD_LOG_TRIAGE_TRACE_CHAIN_TEMPLATE_CAP: usize = 12;
+// Candidate ledgers retain the full bounded template sample above. The global
+// brief only needs a compact preview; repeating every candidate identity here
+// can consume the 32 KiB whole-brief allowance before later deterministic
+// sections are emitted.
+const BROAD_LOG_TRIAGE_TRACE_CHAIN_DISPLAY_CAP: usize = 6;
 const BROAD_LOG_TRIAGE_NOISE_SUGGESTION_CAP: usize = 6;
 const BROAD_LOG_TRIAGE_LINE_MAX_BYTES: usize = 192;
 
@@ -2327,9 +2332,9 @@ impl ToolHost {
         ));
         body.push_str(
             "identity_basis: parser_true_trace_id_only\n\
-             trace_key_semantics: parser-populated key; uniqueness and execution boundaries are not independently verified\n\
-             interpretation: ordered correlation evidence only; one key may be reused across unrelated executions\n\
-             independence_rule: never merge different groups; never assume one group is one incident without corroboration\n\
+             trace_key_semantics: parser field; uniqueness and execution boundaries are unverified\n\
+             interpretation: correlation clue only; one key may be reused\n\
+             independence_rule: keep groups separate; a group is not a certified incident\n\
              privacy: raw trace-key values withheld; stable ordinals are model-facing\n\
              ranking: distinct sources DESC, ERROR/FATAL count DESC, event count DESC, trace id ASC\n",
         );
@@ -2362,21 +2367,26 @@ impl ToolHost {
                 .filter(|event| seen_templates.insert(event.template_id))
                 .take(BROAD_LOG_TRIAGE_TRACE_CHAIN_TEMPLATE_CAP)
                 .collect::<Vec<_>>();
-            let templates_partial = available_templates > representatives.len() || row_partial;
+            let displayed_templates = representatives
+                .len()
+                .min(BROAD_LOG_TRIAGE_TRACE_CHAIN_DISPLAY_CAP);
+            let templates_partial = available_templates > displayed_templates || row_partial;
             body.push_str(&format!(
                 "- trace_group={} event_count={} source_count={} error_or_fatal_count={} \
-                 first_axis_value={} last_axis_value={} representative_templates={} partial={}\n",
+                 first_axis_value={} last_axis_value={} displayed_templates={} \
+                 candidate_ledger_templates={} partial={}\n",
                 chain_index.saturating_add(1),
                 chain.event_count,
                 chain.source_count,
                 chain.error_or_fatal_count,
                 chain.first_ts,
                 chain.last_ts,
+                displayed_templates,
                 representatives.len(),
                 templates_partial
             ));
             let mut candidate_evidence = Vec::new();
-            for event in &representatives {
+            for (representative_index, event) in representatives.iter().enumerate() {
                 let source = broad_triage_source_identity(&event.source);
                 let service =
                     broad_triage_bounded_line(event.service.as_deref().unwrap_or("<unset>"));
@@ -2388,16 +2398,18 @@ impl ToolHost {
                 let pattern = broad_triage_bounded_line(&pattern);
                 let pattern =
                     serde_json::to_string(&pattern).unwrap_or_else(|_| "\"<invalid>\"".into());
-                body.push_str(&format!(
-                    "  - axis_value={} seq={} source={} service={} level={} template_id={} pattern={}\n",
-                    event.ts,
-                    event.seq,
-                    source,
-                    service,
-                    event.level,
-                    event.template_id,
-                    pattern
-                ));
+                if representative_index < BROAD_LOG_TRIAGE_TRACE_CHAIN_DISPLAY_CAP {
+                    body.push_str(&format!(
+                        "  - axis_value={} seq={} source={} service={} level={} template_id={} pattern={}\n",
+                        event.ts,
+                        event.seq,
+                        source,
+                        service,
+                        event.level,
+                        event.template_id,
+                        pattern
+                    ));
+                }
                 if candidate_evidence.len() < BROAD_LOG_TRIAGE_CANDIDATE_IDENTITY_CAP {
                     let identity = crate::log_analysis::SearchEvidenceIdentity {
                         seq: event.seq,
@@ -2427,9 +2439,10 @@ impl ToolHost {
             if !candidate_evidence.is_empty()
                 && candidate_groups.len() < BROAD_LOG_TRIAGE_CANDIDATE_CAP
             {
+                let group_id = format!("trace_group:{}", chain_index.saturating_add(1));
                 let mut candidate_text = format!(
-                    "source_kind: deterministic_broad_log_candidate\nstructural_kind: trace\ngroup_id: trace:{}\ntrace_event_count: {}\ntrace_source_count: {}\ntrace_error_or_fatal_count: {}\ntrusted_citations_only:\n",
-                    broad_triage_bounded_line(&chain.trace_id),
+                    "source_kind: deterministic_broad_log_candidate\nstructural_kind: unverified_trace_key_group\ngroup_id: {}\ntrace_key_value_withheld: true\ntrace_key_is_not_execution_proof: true\ntrace_event_count: {}\ntrace_source_count: {}\ntrace_error_or_fatal_count: {}\ntrusted_citations_only:\n",
+                    group_id,
                     chain.event_count,
                     chain.source_count,
                     chain.error_or_fatal_count,
@@ -2448,8 +2461,8 @@ impl ToolHost {
                     ));
                 }
                 candidate_groups.push(BroadLogTriageCandidate {
-                    group_id: format!("trace:{}", chain.trace_id),
-                    structural_kind: "trace",
+                    group_id,
+                    structural_kind: "unverified_trace_key_group",
                     model_text: candidate_text,
                     evidence: candidate_evidence,
                 });
