@@ -12,6 +12,14 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Stable schema for model proposals and validated answers.
 pub const SCHEMA_V1: &str = "contextdesk.investigation_answer.v1";
 
+/// Exact log-analysis snapshot which grounds one typed answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LogSnapshotRevisionV1 {
+    pub event_revision: u64,
+    pub template_analysis_revision: u64,
+    pub suppression_revision: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaimKind {
@@ -97,7 +105,7 @@ pub struct CanonicalCitationV1 {
     pub source_label: String,
     pub locator: String,
     pub corpus_id: String,
-    pub revision: String,
+    pub revision: LogSnapshotRevisionV1,
     /// Host-owned bounded excerpt used by future renderers.
     pub content: String,
 }
@@ -117,7 +125,7 @@ pub struct HostEvidenceEntry {
     pub source_label: String,
     pub locator: String,
     pub corpus_id: String,
-    pub revision: String,
+    pub revision: LogSnapshotRevisionV1,
     pub role: EvidenceRole,
     /// Host-owned bounded excerpt; never supplied by the model.
     pub content: String,
@@ -127,7 +135,7 @@ pub struct AnswerBindingV1 {
     pub session_id: String,
     pub turn_id: String,
     pub corpus_id: String,
-    pub revision: String,
+    pub revision: LogSnapshotRevisionV1,
     pub ledger_digest: String,
 }
 /// Persistable authoritative state for later host-only CLI/GUI/session lookup.
@@ -167,7 +175,6 @@ impl HostEvidenceLedger {
         if binding.session_id.trim().is_empty()
             || binding.turn_id.trim().is_empty()
             || binding.corpus_id.trim().is_empty()
-            || binding.revision.trim().is_empty()
             || binding.ledger_digest.trim().is_empty()
         {
             return Err(ValidationError::InvalidBinding);
@@ -209,12 +216,14 @@ impl HostEvidenceLedger {
                 &e.source_label,
                 &e.locator,
                 &e.corpus_id,
-                &e.revision,
                 &e.content,
             ] {
                 h.update(part.as_bytes());
                 h.update([0]);
             }
+            h.update(e.revision.event_revision.to_le_bytes());
+            h.update(e.revision.template_analysis_revision.to_le_bytes());
+            h.update(e.revision.suppression_revision.to_le_bytes());
         }
         format!("{:x}", h.finalize())
     }
@@ -299,7 +308,7 @@ pub fn validate_model_answer(
                             source_label: entry.source_label.clone(),
                             locator: entry.locator.clone(),
                             corpus_id: entry.corpus_id.clone(),
-                            revision: entry.revision.clone(),
+                            revision: entry.revision,
                             content: entry.content.clone(),
                         });
                 }
@@ -359,6 +368,13 @@ pub fn authoritative_json(envelope: &AnswerEnvelopeV1) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn revision() -> LogSnapshotRevisionV1 {
+        LogSnapshotRevisionV1 {
+            event_revision: 1,
+            template_analysis_revision: 2,
+            suppression_revision: 3,
+        }
+    }
     fn ledger() -> HostEvidenceLedger {
         ledger_with_roles(EvidenceRole::Cause, EvidenceRole::Symptom)
     }
@@ -370,7 +386,7 @@ mod tests {
                 source_label: "one".into(),
                 locator: "line 1".into(),
                 corpus_id: "c".into(),
-                revision: "r".into(),
+                revision: revision(),
                 role: role_a,
                 content: "host excerpt one".into(),
             },
@@ -380,7 +396,7 @@ mod tests {
                 source_label: "two".into(),
                 locator: "line 2".into(),
                 corpus_id: "c".into(),
-                revision: "r".into(),
+                revision: revision(),
                 role: role_b,
                 content: "host excerpt two".into(),
             },
@@ -389,7 +405,7 @@ mod tests {
             session_id: "s".into(),
             turn_id: "t".into(),
             corpus_id: "c".into(),
-            revision: "r".into(),
+            revision: revision(),
             ledger_digest: HostEvidenceLedger::digest(&evidence),
         };
         HostEvidenceLedger::new(binding, evidence).unwrap()
@@ -416,7 +432,7 @@ mod tests {
             assert!(validate_model_answer(&proposal(b), &l).is_err());
         }
         let mut stale = l.entries();
-        stale[0].revision = "old".into();
+        stale[0].revision.event_revision += 1;
         let mut stale_binding = l.binding().clone();
         stale_binding.ledger_digest = HostEvidenceLedger::digest(&stale);
         let stale = HostEvidenceLedger::new(stale_binding, stale).unwrap();
@@ -453,7 +469,7 @@ mod tests {
                 session_id: "s".into(),
                 turn_id: "t".into(),
                 corpus_id: "c".into(),
-                revision: "r".into(),
+                revision: revision(),
                 ledger_digest: "x".into(),
             },
             Vec::new(),

@@ -1291,6 +1291,7 @@ mod tests {
             provider_profile_id: "p".to_string(),
             chat_model: "m".to_string(),
             corpus_revision: None,
+            corpus_snapshot_revision: None,
             history_messages: 4,
         };
         let calls = vec![call_with_messages(&[&format!(
@@ -1320,6 +1321,7 @@ mod tests {
             provider_profile_id: "p".to_string(),
             chat_model: "m".to_string(),
             corpus_revision: None,
+            corpus_snapshot_revision: None,
             history_messages: 2,
         };
         let calls = vec![call_with_messages(&[

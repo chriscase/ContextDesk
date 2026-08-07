@@ -632,9 +632,9 @@ fn withheld_cli_error(events: &[StreamEvent]) -> Option<CliError> {
 
 /// Return only the typed host event. In particular, no `TextDelta` is parsed
 /// as JSON here: visible transcript text is never evidence authority.
-fn investigation_answer_from_events<'a>(
-    events: &'a [StreamEvent],
-) -> Option<&'a cd_core::investigation_answer::AnswerEnvelopeV1> {
+fn investigation_answer_from_events(
+    events: &[StreamEvent],
+) -> Option<&cd_core::investigation_answer::AnswerEnvelopeV1> {
     events.iter().rev().find_map(|event| match event {
         StreamEvent::InvestigationAnswer { envelope } => Some(envelope),
         _ => None,
@@ -1282,6 +1282,7 @@ mod grounding_tests {
             provider_profile_id: "profile-a".into(),
             chat_model: "model-a".into(),
             corpus_revision: Some(3),
+            corpus_snapshot_revision: None,
             history_messages: 3,
         };
         let calls = vec![TracedCall {
@@ -1369,6 +1370,7 @@ mod grounding_tests {
             provider_profile_id: "p".into(),
             chat_model: "m".into(),
             corpus_revision: None,
+            corpus_snapshot_revision: None,
             history_messages: 1,
         };
         let lines = build_trace_lines(

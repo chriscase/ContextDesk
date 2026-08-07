@@ -179,6 +179,8 @@ pub struct LinkedCorpusBinding {
     /// dry-run summary's "which corpus content this turn was grounded
     /// against," since the corpus can keep receiving imports afterward.
     pub revision: u64,
+    /// Exact event/template/suppression snapshot used by typed authority.
+    pub snapshot_revision: cd_core::investigation_answer::LogSnapshotRevisionV1,
 }
 
 /// Bind one corpus to the tool host for a linked turn: pin log-tool scope,
@@ -199,11 +201,13 @@ pub fn bind_linked_corpus(
     let revision = corpus.revision();
     host.seed_log_corpus_handle(corpus_id, corpus)?;
     host.pin_log_suppression_lens(corpus_id)?;
+    let snapshot_revision = host.linked_log_snapshot_revision(corpus_id)?;
 
     Ok(LinkedCorpusBinding {
         previous_scope,
         previous_active,
         revision,
+        snapshot_revision,
     })
 }
 

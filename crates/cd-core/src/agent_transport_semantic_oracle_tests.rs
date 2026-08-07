@@ -137,7 +137,11 @@ async fn run_two_candidate_triage(
             session_id: "s".into(),
             turn_id: "t".into(),
             corpus_id: "c".into(),
-            revision: "r".into(),
+            revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                event_revision: 1,
+                template_analysis_revision: 2,
+                suppression_revision: 3,
+            },
             ledger_digest: String::new(),
         },
         &mut |telemetry| contexts.push(telemetry),

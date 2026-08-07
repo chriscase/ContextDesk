@@ -125,6 +125,8 @@ pub struct ChatWorkflowOutcome {
     /// The linked corpus's event revision at bind time, if this turn was
     /// corpus-linked.
     pub corpus_revision: Option<u64>,
+    /// Exact event/template/suppression revision for typed answer authority.
+    pub corpus_snapshot_revision: Option<cd_core::investigation_answer::LogSnapshotRevisionV1>,
     /// Total messages in this session's chat history after the turn
     /// (system preamble + every prior + new turn) — a trace summary's
     /// "history count."
@@ -167,23 +169,24 @@ fn investigation_answer_for_turn<'a>(
     turn_id: &str,
     request_corpus_id: Option<&str>,
     session_corpus_id: Option<&str>,
-    corpus_revision: Option<u64>,
+    corpus_snapshot_revision: Option<cd_core::investigation_answer::LogSnapshotRevisionV1>,
 ) -> Option<&'a cd_core::investigation_answer::AnswerEnvelopeV1> {
-    let (Some(request_corpus_id), Some(session_corpus_id), Some(corpus_revision)) =
-        (request_corpus_id, session_corpus_id, corpus_revision)
-    else {
+    let (Some(request_corpus_id), Some(session_corpus_id), Some(corpus_snapshot_revision)) = (
+        request_corpus_id,
+        session_corpus_id,
+        corpus_snapshot_revision,
+    ) else {
         return None;
     };
     if request_corpus_id != session_corpus_id {
         return None;
     }
-    let revision = corpus_revision.to_string();
     events.iter().rev().find_map(|event| match event {
         StreamEvent::InvestigationAnswer { envelope }
             if envelope.binding.session_id == session_id
                 && envelope.binding.turn_id == turn_id
                 && envelope.binding.corpus_id == request_corpus_id
-                && envelope.binding.revision == revision =>
+                && envelope.binding.revision == corpus_snapshot_revision =>
         {
             Some(envelope)
         }
@@ -385,6 +388,7 @@ pub async fn run_chat_workflow(
     all_events.push(telemetry_event);
 
     let corpus_revision = binding.as_ref().map(|b| b.revision);
+    let corpus_snapshot_revision = binding.as_ref().map(|b| b.snapshot_revision);
     if let Some(binding) = binding {
         unbind_linked_corpus(host, binding);
     }
@@ -405,7 +409,7 @@ pub async fn run_chat_workflow(
             &turn_id,
             request.corpus_id,
             session.linked_corpus_id.as_deref(),
-            corpus_revision,
+            corpus_snapshot_revision,
         );
         for message in &history[before_len..] {
             session.messages.push(stored_from_chat(
@@ -437,6 +441,7 @@ pub async fn run_chat_workflow(
         provider_profile_id: resolved.profile.id.clone(),
         chat_model: resolved.profile.chat_model.clone(),
         corpus_revision,
+        corpus_snapshot_revision,
         history_messages: history.len(),
         final_text,
     })
@@ -464,7 +469,7 @@ mod tests {
         session_id: &str,
         turn_id: &str,
         corpus_id: &str,
-        revision: &str,
+        revision: cd_core::investigation_answer::LogSnapshotRevisionV1,
     ) -> StreamEvent {
         use cd_core::investigation_answer::{
             AnswerBindingV1, AnswerEnvelopeV1, InvestigationAnswerV1, SCHEMA_V1,
@@ -475,7 +480,7 @@ mod tests {
                     session_id: session_id.into(),
                     turn_id: turn_id.into(),
                     corpus_id: corpus_id.into(),
-                    revision: revision.into(),
+                    revision,
                     ledger_digest: "host-digest".into(),
                 },
                 evidence: Vec::new(),
@@ -492,21 +497,66 @@ mod tests {
 
     #[test]
     fn investigation_answer_persistence_requires_exact_linked_scope_and_revision() {
-        let events = vec![typed_answer_event("session", "turn", "corpus-a", "7")];
+        let revision = cd_core::investigation_answer::LogSnapshotRevisionV1 {
+            event_revision: 7,
+            template_analysis_revision: 11,
+            suppression_revision: 13,
+        };
+        let events = vec![typed_answer_event("session", "turn", "corpus-a", revision)];
         assert!(investigation_answer_for_turn(
             &events,
             "session",
             "turn",
             Some("corpus-a"),
             Some("corpus-a"),
-            Some(7),
+            Some(revision),
         )
         .is_some());
-        for (request_corpus, session_corpus, revision) in [
-            (None, Some("corpus-a"), Some(7)),
-            (Some("corpus-a"), None, Some(7)),
-            (Some("corpus-a"), Some("corpus-b"), Some(7)),
-            (Some("corpus-a"), Some("corpus-a"), Some(8)),
+        assert!(investigation_answer_for_turn(
+            &events,
+            "session",
+            "next-turn",
+            Some("corpus-a"),
+            Some("corpus-a"),
+            Some(revision),
+        )
+        .is_none());
+        for changed in [
+            cd_core::investigation_answer::LogSnapshotRevisionV1 {
+                event_revision: revision.event_revision + 1,
+                ..revision
+            },
+            cd_core::investigation_answer::LogSnapshotRevisionV1 {
+                template_analysis_revision: revision.template_analysis_revision + 1,
+                ..revision
+            },
+            cd_core::investigation_answer::LogSnapshotRevisionV1 {
+                suppression_revision: revision.suppression_revision + 1,
+                ..revision
+            },
+        ] {
+            assert!(investigation_answer_for_turn(
+                &events,
+                "session",
+                "turn",
+                Some("corpus-a"),
+                Some("corpus-a"),
+                Some(changed),
+            )
+            .is_none());
+        }
+        for (request_corpus, session_corpus, snapshot_revision) in [
+            (None, Some("corpus-a"), Some(revision)),
+            (Some("corpus-a"), None, Some(revision)),
+            (Some("corpus-a"), Some("corpus-b"), Some(revision)),
+            (
+                Some("corpus-a"),
+                Some("corpus-a"),
+                Some(cd_core::investigation_answer::LogSnapshotRevisionV1 {
+                    template_analysis_revision: 12,
+                    ..revision
+                }),
+            ),
             (Some("corpus-a"), Some("corpus-a"), None),
         ] {
             assert!(investigation_answer_for_turn(
@@ -515,7 +565,7 @@ mod tests {
                 "turn",
                 request_corpus,
                 session_corpus,
-                revision,
+                snapshot_revision,
             )
             .is_none());
         }

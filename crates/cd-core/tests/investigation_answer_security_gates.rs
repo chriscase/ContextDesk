@@ -6,7 +6,8 @@
 
 use cd_core::investigation_answer::{
     parse_model_json, validate_model_answer, AnswerBindingV1, AnswerEnvelopeV1, ClaimStatus,
-    EvidenceRole, HostEvidenceEntry, HostEvidenceLedger, ValidationError, SCHEMA_V1,
+    EvidenceRole, HostEvidenceEntry, HostEvidenceLedger, LogSnapshotRevisionV1, ValidationError,
+    SCHEMA_V1,
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,7 +23,7 @@ struct ScenarioNames {
     session: String,
     turn: String,
     corpus: String,
-    revision: String,
+    revision: LogSnapshotRevisionV1,
     candidates: Vec<String>,
     evidence: Vec<String>,
     sources: Vec<String>,
@@ -39,7 +40,11 @@ impl ScenarioNames {
             session: token(0),
             turn: token(1),
             corpus: token(2),
-            revision: token(3),
+            revision: LogSnapshotRevisionV1 {
+                event_revision: 3,
+                template_analysis_revision: 5,
+                suppression_revision: 7,
+            },
             candidates: vec![token(10), token(11)],
             evidence: vec![token(20), token(21), token(22)],
             sources: vec![token(30), token(31), token(32)],
@@ -56,7 +61,6 @@ impl ScenarioNames {
             (&self.session, &original.session),
             (&self.turn, &original.turn),
             (&self.corpus, &original.corpus),
-            (&self.revision, &original.revision),
         ] {
             inverse.insert(renamed.clone(), base.clone());
         }
@@ -182,7 +186,6 @@ fn apply_inverse_mapping(
     map_token(&mut envelope.binding.session_id, inverse);
     map_token(&mut envelope.binding.turn_id, inverse);
     map_token(&mut envelope.binding.corpus_id, inverse);
-    map_token(&mut envelope.binding.revision, inverse);
     envelope.binding.ledger_digest = original_digest.to_string();
     for entry in &mut envelope.evidence {
         map_token(&mut entry.evidence_id, inverse);
@@ -190,7 +193,6 @@ fn apply_inverse_mapping(
         map_token(&mut entry.source_label, inverse);
         map_token(&mut entry.locator, inverse);
         map_token(&mut entry.corpus_id, inverse);
-        map_token(&mut entry.revision, inverse);
         map_token(&mut entry.content, inverse);
     }
     for candidate in &mut envelope.answer.candidates {
@@ -210,7 +212,6 @@ fn apply_inverse_mapping(
         map_token(&mut citation.source_label, inverse);
         map_token(&mut citation.locator, inverse);
         map_token(&mut citation.corpus_id, inverse);
-        map_token(&mut citation.revision, inverse);
         map_token(&mut citation.content, inverse);
     }
 }
@@ -321,7 +322,7 @@ fn scope_digest_and_identifier_mutations_fail_closed() {
     );
 
     let mut wrong_revision_rows = rows.clone();
-    wrong_revision_rows[0].revision = opaque(0x33, 91);
+    wrong_revision_rows[0].revision.event_revision += 1;
     let wrong_revision = ledger_from_rows(&names, wrong_revision_rows);
     assert_eq!(
         validate_model_answer(&scenario_proposal(&names), &wrong_revision),
@@ -344,7 +345,7 @@ fn scope_digest_and_identifier_mutations_fail_closed() {
             2 => tampered[0].source_label.push('x'),
             3 => tampered[0].locator.push('x'),
             4 => tampered[0].corpus_id.push('x'),
-            5 => tampered[0].revision.push('x'),
+            5 => tampered[0].revision.suppression_revision += 1,
             6 => tampered[0].role = EvidenceRole::Supporting,
             _ => tampered[0].content.push('x'),
         }

@@ -3334,6 +3334,20 @@ impl ToolHost {
         ))
     }
 
+    /// Exact pinned log-analysis snapshot for a linked host turn.
+    pub fn linked_log_snapshot_revision(
+        &self,
+        corpus_id: &str,
+    ) -> CoreResult<crate::investigation_answer::LogSnapshotRevisionV1> {
+        let (event_revision, template_analysis_revision, suppression_revision, _) =
+            self.pinned_linked_log_revisions(corpus_id)?;
+        Ok(crate::investigation_answer::LogSnapshotRevisionV1 {
+            event_revision,
+            template_analysis_revision,
+            suppression_revision,
+        })
+    }
+
     /// Current turn-scoped log corpus, when a linked Explorer turn is active.
     pub fn log_corpus_scope(&self) -> Option<&str> {
         self.scoped_log_corpus.as_deref()

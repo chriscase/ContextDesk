@@ -5131,6 +5131,9 @@ async fn agent_turn(
         host.set_log_corpus_scope(None);
         host.set_active_log_corpus(None);
     }
+    let linked_snapshot_revision = log_explorer_context.as_ref().and_then(|context| {
+        host.linked_log_snapshot_revision(&context.corpus_id).ok()
+    });
     let mut next_synthesis_checkpoint = linked_synthesis_retry.clone();
     // Activity capture seam. `TracingChatBackend` wraps the same backend and
     // forwards every call unchanged, so this cannot alter execution, tool
@@ -5247,6 +5250,7 @@ async fn agent_turn(
             &req.session_id,
             req.client_assistant_message_id.as_deref(),
             &turn_id,
+            linked_snapshot_revision,
             events,
         )?;
     }
@@ -5439,8 +5443,13 @@ fn persist_investigation_answer_at(
     session_id: &str,
     assistant_message_id: Option<&str>,
     turn_id: &str,
+    expected_snapshot_revision:
+        Option<cd_core::investigation_answer::LogSnapshotRevisionV1>,
     events: &[cd_core::events::StreamEvent],
 ) -> Result<bool, String> {
+    let Some(expected_snapshot_revision) = expected_snapshot_revision else {
+        return Ok(false);
+    };
     let Some(assistant_message_id) = assistant_message_id.filter(|id| !id.trim().is_empty()) else {
         return Ok(false);
     };
@@ -5452,7 +5461,8 @@ fn persist_investigation_answer_at(
         cd_core::events::StreamEvent::InvestigationAnswer { envelope }
             if envelope.binding.session_id == session_id
                 && envelope.binding.turn_id == turn_id
-                && envelope.binding.corpus_id == linked_corpus_id =>
+                && envelope.binding.corpus_id == linked_corpus_id
+                && envelope.binding.revision == expected_snapshot_revision =>
         {
             Some(envelope)
         }
@@ -16168,7 +16178,7 @@ mod startup_host_tests {
         session_id: &str,
         turn_id: &str,
         corpus_id: &str,
-        revision: &str,
+        revision: cd_core::investigation_answer::LogSnapshotRevisionV1,
     ) -> cd_core::investigation_answer::AnswerEnvelopeV1 {
         use cd_core::investigation_answer::{
             validate_model_answer, AnswerBindingV1, EvidenceRole, HostEvidenceEntry,
@@ -16180,7 +16190,7 @@ mod startup_host_tests {
             source_label: "host log".into(),
             locator: "seq=1".into(),
             corpus_id: corpus_id.into(),
-            revision: revision.into(),
+            revision,
             role: EvidenceRole::Supporting,
             content: "host-owned evidence".into(),
         }];
@@ -16188,7 +16198,7 @@ mod startup_host_tests {
             session_id: session_id.into(),
             turn_id: turn_id.into(),
             corpus_id: corpus_id.into(),
-            revision: revision.into(),
+            revision,
             ledger_digest: HostEvidenceLedger::digest(&evidence),
         };
         let ledger = HostEvidenceLedger::new(binding, evidence).expect("host ledger");
@@ -16215,7 +16225,13 @@ mod startup_host_tests {
         let session_id = session.id.clone();
         store.save(&session).expect("seed");
         let turn_id = format!("{session_id}::assistant-1");
-        let envelope = validated_investigation_envelope(&session_id, &turn_id, "corpus-a", "7");
+        let snapshot = cd_core::investigation_answer::LogSnapshotRevisionV1 {
+            event_revision: 7,
+            template_analysis_revision: 11,
+            suppression_revision: 13,
+        };
+        let envelope =
+            validated_investigation_envelope(&session_id, &turn_id, "corpus-a", snapshot);
         let events = vec![StreamEvent::InvestigationAnswer {
             envelope: envelope.clone(),
         }];
@@ -16225,6 +16241,7 @@ mod startup_host_tests {
                 &session_id,
                 Some("assistant-1"),
                 &turn_id,
+                Some(snapshot),
                 &events
             )
             .expect("unlinked rejection"),
@@ -16239,6 +16256,7 @@ mod startup_host_tests {
                 &session_id,
                 Some("assistant-1"),
                 &turn_id,
+                Some(snapshot),
                 &events
             )
             .expect("mismatched rejection"),
@@ -16247,12 +16265,34 @@ mod startup_host_tests {
         let mut correct_scope = store.load(&session_id).expect("wrong-scope session");
         correct_scope.set_linked_corpus_id(Some("corpus-a".into()));
         store.save(&correct_scope).expect("save correct scope");
+        assert!(!persist_investigation_answer_at(
+            &store,
+            &session_id,
+            Some("assistant-1"),
+            &turn_id,
+            Some(cd_core::investigation_answer::LogSnapshotRevisionV1 {
+                template_analysis_revision: snapshot.template_analysis_revision + 1,
+                ..snapshot
+            }),
+            &events,
+        )
+        .expect("stale snapshot rejection"));
+        assert!(!persist_investigation_answer_at(
+            &store,
+            &session_id,
+            Some("assistant-1"),
+            &turn_id,
+            None,
+            &events,
+        )
+        .expect("event-only rejection"));
         assert!(
             persist_investigation_answer_at(
                 &store,
                 &session_id,
                 Some("assistant-1"),
                 &turn_id,
+                Some(snapshot),
                 &events
             )
             .expect("host persistence"),
