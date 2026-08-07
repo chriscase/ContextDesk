@@ -2199,7 +2199,8 @@ fn terminal_budget_time(
     out.push(StreamEvent::Error {
         code: "budget_time".into(),
         message: format!(
-            "This turn reached its {deadline_ms} ms deadline while {operation}. \
+            "This turn exhausted a phase time budget within its {deadline_ms} ms whole-turn \
+             ceiling while {operation}. \
              Retry with a narrower request or increase the turn deadline in Settings."
         ),
     });
@@ -9018,7 +9019,10 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
     #[tokio::test]
     async fn first_call_linked_provider_failure_preserves_turn_without_grounding_or_retry() {
         let (_dir, mut host, context) = linked_timeout_fixture();
-        let question = "What caused the worker failure?";
+        // Keep this on the focused path: broad triage retrieves a deterministic
+        // host brief before the first provider call, which would make a first-call
+        // provider failure eligible for synthesis-only retry by design.
+        let question = "Find the earliest serious error in worker.log.";
         let mut history = Vec::new();
         let mut checkpoint = None;
 
@@ -9434,7 +9438,9 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         let events = run_agent_turn_with_sink_and_checkpoint(
             &backend,
             &mut host,
-            "What caused the worker failure?",
+            // Exercise the focused search_logs path, not the deterministic broad
+            // triage path with its optional deepening phase.
+            "Find the earliest serious error in worker.log.",
             &mut history,
             &AgentOptions {
                 session_id: "linked-timeout".into(),

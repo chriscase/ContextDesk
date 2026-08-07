@@ -200,7 +200,10 @@ impl TurnDeadlinePlan {
             Self {
                 total_ms,
                 choosing_ms: phase(3, 8),
-                retrieving_ms: phase(1, 4),
+                // Large deterministic corpus scans run on the trusted host and
+                // can legitimately need more than 30 seconds. The whole-turn
+                // ceiling still bounds retrieval plus the later provider call.
+                retrieving_ms: phase(3, 5),
                 synthesizing_ms: phase(5, 8),
                 explicit: budget.deadline_is_explicit,
             }
@@ -359,6 +362,7 @@ mod tests {
         managed.base_url = "https://models.example.com/v1".into();
         let managed = TurnDeadlinePlan::for_profile(&budget, &managed);
         assert_eq!(managed.total_ms, 120_000);
+        assert_eq!(managed.retrieving_ms, 72_000);
 
         for host in [
             "gateway.internal",
