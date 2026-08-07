@@ -820,6 +820,7 @@ fn shared_timeline_preserves_model_tool_model_order_and_separates_latency() {
         },
         transport: Default::default(),
         empty_visible_answer: false,
+        application_retry_reason: None,
     };
     let timeline = vec![
         TracedTimelineEntry {

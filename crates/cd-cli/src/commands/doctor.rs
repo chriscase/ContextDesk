@@ -1242,6 +1242,7 @@ mod tests {
             },
             transport: Default::default(),
             empty_visible_answer: false,
+            application_retry_reason: None,
         }
     }
 

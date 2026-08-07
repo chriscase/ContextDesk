@@ -820,6 +820,12 @@ pub struct TracedCall {
     /// Visible assistant text emptiness for this round (completed rounds only).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub empty_visible_answer: bool,
+    /// Application retry reason that caused **this** provider round, captured
+    /// at the host retry decision point (e.g. `tools_unsupported`). Absent for
+    /// ordinary tool-call continuations and synthesis rounds — never invented
+    /// from round index alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_retry_reason: Option<String>,
 }
 
 fn provider_transport_empty(tel: &crate::provider_telemetry::ProviderTransportTelemetry) -> bool {
@@ -908,6 +914,7 @@ pub enum TracedHostEvent {
 
 /// One item on the shared provider/host capture timeline.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // ProviderCall carries full TracedCall; boxing would churn every timeline consumer.
 pub enum TracedTimelineItem {
     /// A completed or failed provider call.
     ProviderCall(TracedCall),
@@ -937,6 +944,20 @@ pub struct TracedTimelineEntry {
 pub trait TurnTraceSink: Send + Sync {
     /// Record one completed (or failed) backend call.
     fn record(&self, call: TracedCall);
+
+    /// Note that the **next** provider round is an application retry with this
+    /// stable reason code. Ordinary tool continuations must not call this.
+    ///
+    /// Default: no-op. Recording sinks + [`TracingChatBackend`] consume the
+    /// pending reason when the next call is recorded.
+    fn note_application_retry(&self, reason: &str) {
+        let _ = reason;
+    }
+
+    /// Take and clear any pending application-retry reason for the next call.
+    fn take_pending_application_retry(&self) -> Option<String> {
+        None
+    }
 
     /// Whether the caller should construct content-bearing developer detail.
     fn developer_detail_enabled(&self) -> bool {
@@ -975,6 +996,11 @@ impl TurnTraceObserver {
     pub fn record_developer(&self, detail: DeveloperDetailDraft) {
         self.0.record_developer(detail);
     }
+
+    /// Mark the next provider round as an application retry (decision point).
+    pub fn note_application_retry(&self, reason: &str) {
+        self.0.note_application_retry(reason);
+    }
 }
 
 impl fmt::Debug for TurnTraceObserver {
@@ -997,12 +1023,18 @@ impl TurnTraceSink for NoopTurnTrace {
 /// [`TracedCall`] values.
 pub struct FanoutTurnTrace {
     sinks: Vec<Arc<dyn TurnTraceSink>>,
+    /// Pending application-retry reason for the next provider round (decision
+    /// point capture). Taken once by [`TracingChatBackend`] into [`TracedCall`].
+    pending_application_retry: Mutex<Option<String>>,
 }
 
 impl FanoutTurnTrace {
     /// Forward every record to each sink in order.
     pub fn new(sinks: Vec<Arc<dyn TurnTraceSink>>) -> Self {
-        Self { sinks }
+        Self {
+            sinks,
+            pending_application_retry: Mutex::new(None),
+        }
     }
 }
 
@@ -1011,6 +1043,20 @@ impl TurnTraceSink for FanoutTurnTrace {
         for sink in &self.sinks {
             sink.record(call.clone());
         }
+    }
+
+    fn note_application_retry(&self, reason: &str) {
+        let scrubbed = crate::provider_telemetry::sanitize_configured_identity(reason);
+        if let Ok(mut slot) = self.pending_application_retry.lock() {
+            *slot = Some(scrubbed);
+        }
+    }
+
+    fn take_pending_application_retry(&self) -> Option<String> {
+        self.pending_application_retry
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
     }
 
     fn developer_detail_enabled(&self) -> bool {
@@ -1112,6 +1158,8 @@ pub struct RecordingTurnTrace {
     /// first place, so this counter is the recorder's own honest tally of
     /// that separate loss point.
     developer_dropped: AtomicUsize,
+    /// Pending application-retry reason for the next [`TracedCall`].
+    pending_application_retry: Mutex<Option<String>>,
 }
 
 impl fmt::Debug for RecordingTurnTrace {
@@ -1146,6 +1194,7 @@ impl RecordingTurnTrace {
             developer: Mutex::new(Vec::new()),
             developer_observer: None,
             developer_dropped: AtomicUsize::new(0),
+            pending_application_retry: Mutex::new(None),
         }
     }
 
@@ -1172,6 +1221,7 @@ impl RecordingTurnTrace {
             developer: Mutex::new(Vec::new()),
             developer_observer: Some(observer),
             developer_dropped: AtomicUsize::new(0),
+            pending_application_retry: Mutex::new(None),
         }
     }
 
@@ -1549,6 +1599,20 @@ fn bound_developer_event(
 impl TurnTraceSink for RecordingTurnTrace {
     fn record(&self, call: TracedCall) {
         self.push(TracedTimelineItem::ProviderCall(call));
+    }
+
+    fn note_application_retry(&self, reason: &str) {
+        let scrubbed = crate::provider_telemetry::sanitize_configured_identity(reason);
+        if let Ok(mut slot) = self.pending_application_retry.lock() {
+            *slot = Some(scrubbed);
+        }
+    }
+
+    fn take_pending_application_retry(&self) -> Option<String> {
+        self.pending_application_retry
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
     }
 
     fn developer_detail_enabled(&self) -> bool {
@@ -1981,6 +2045,7 @@ impl TracingChatBackend {
                 false,
             ),
         };
+        let application_retry_reason = self.sink.take_pending_application_retry();
         let (stored_messages, context_used_chars, messages_capped) = traced_messages(messages);
         let call = TracedCall {
             seq,
@@ -1992,6 +2057,7 @@ impl TracingChatBackend {
             outcome,
             transport,
             empty_visible_answer,
+            application_retry_reason,
         };
         let developer = self.sink.developer_detail_enabled().then(|| {
             let request = messages
@@ -2164,6 +2230,37 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn application_retry_note_attaches_only_to_next_provider_round() {
+        let sink = Arc::new(RecordingTurnTrace::new());
+        let backend = TracingChatBackend::new(Box::new(DryRunBackend), sink.clone());
+        backend
+            .complete(&[msg(Role::User, "first")], &[])
+            .await
+            .unwrap();
+        sink.note_application_retry("tools_unsupported");
+        backend
+            .complete(&[msg(Role::User, "retry")], &[])
+            .await
+            .unwrap();
+        backend
+            .complete(&[msg(Role::User, "continuation")], &[])
+            .await
+            .unwrap();
+
+        let calls = sink.calls();
+        assert_eq!(calls.len(), 3);
+        assert!(calls[0].application_retry_reason.is_none());
+        assert_eq!(
+            calls[1].application_retry_reason.as_deref(),
+            Some("tools_unsupported")
+        );
+        assert!(
+            calls[2].application_retry_reason.is_none(),
+            "ordinary continuation must not inherit a spent retry note"
+        );
     }
 
     #[tokio::test]

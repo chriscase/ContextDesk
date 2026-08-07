@@ -7,12 +7,35 @@
 //! snapshots, and final turn outcome into the shared
 //! [`ProviderTurnTelemetry`] DTO. CLI and Tauri must project that DTO; they
 //! must not invent token counts, costs, or observed routes.
+//!
+//! # Aggregation policy
+//!
+//! - Every provider round’s transport is preserved on
+//!   [`ProviderTurnTelemetry::rounds`].
+//! - Turn-level prompt / completion / reasoning / cached / total tokens and
+//!   cost are **sums across all rounds only when every round reports that
+//!   metric**. Any omission → that turn-level field is absent/unknown (never
+//!   a partial sum, never invented as zero).
+//! - Identity fields (`response_model`, `provider_request_id`,
+//!   `observed_route`, `finish_reason`) are **not** summed: they come from the
+//!   last round that authoritatively reported them (finish reason from the
+//!   last completed round).
+//!
+//! # Round / retry semantics
+//!
+//! - Ordinary tool-call continuation and tool-result synthesis are **not**
+//!   retries and must not carry an application retry reason.
+//! - An application retry reason is emitted only when a causal retry decision
+//!   was recorded on the [`TracedCall`] at the decision point (e.g.
+//!   `tools_unsupported`, `context_compacted`). Missing cause → absent, never
+//!   invented as `"application_round"`.
 
 use cd_core::context_budgeting::ContextBudgetTelemetry;
 use cd_core::events::StreamEvent;
 use cd_core::provider_telemetry::{
-    finish_reason_is_length, ApplicationRetryReason, ProviderRoundTelemetry,
-    ProviderTransportTelemetry, ProviderTurnTelemetry,
+    finish_reason_is_length, sanitize_configured_identity, sum_reported_f64_all,
+    sum_reported_u64_all, ApplicationRetryReason, ObservedRoute, ProviderRoundTelemetry,
+    ProviderTurnTelemetry,
 };
 use cd_core::turn_trace::{TracedCall, TracedOutcome};
 
@@ -29,49 +52,6 @@ pub struct ProviderTelemetryAggregateInput<'a> {
     pub events: &'a [StreamEvent],
 }
 
-/// Stable application retry reason codes derived only from host stream signals.
-fn application_retry_reason_from_error_code(code: &str) -> Option<&'static str> {
-    match code {
-        "tools_unsupported" => Some("tools_unsupported"),
-        "context_compacted" => Some("context_compacted"),
-        "context_too_long" => Some("context_too_long"),
-        _ => None,
-    }
-}
-
-/// Map stream error codes that precede a later provider round onto that round.
-fn application_retries_for_calls(
-    calls: &[TracedCall],
-    events: &[StreamEvent],
-) -> Vec<ApplicationRetryReason> {
-    if calls.len() < 2 {
-        return Vec::new();
-    }
-    let mut reasons: Vec<String> = Vec::new();
-    for event in events {
-        if let StreamEvent::Error { code, .. } = event {
-            if let Some(reason) = application_retry_reason_from_error_code(code) {
-                reasons.push(reason.to_string());
-            }
-        }
-    }
-    // Assign reasons in order to rounds 1..N (round 0 has no prior retry).
-    let mut out = Vec::new();
-    for (idx, call) in calls.iter().enumerate().skip(1) {
-        let reason = reasons.get(idx - 1).cloned().unwrap_or_else(|| {
-            // A subsequent application round without a classified error is still
-            // an application retry (tool loop / synthesis), not a gateway-internal
-            // count — label it honestly as host-driven continuation.
-            "application_round".to_string()
-        });
-        out.push(ApplicationRetryReason {
-            round: u32::try_from(call.seq).unwrap_or(u32::MAX),
-            reason,
-        });
-    }
-    out
-}
-
 fn last_context_budget(events: &[StreamEvent]) -> Option<ContextBudgetTelemetry> {
     events.iter().rev().find_map(|e| match e {
         StreamEvent::ContextBudget { telemetry } => Some(telemetry.clone()),
@@ -86,7 +66,7 @@ fn final_turn_outcome(events: &[StreamEvent]) -> Option<String> {
     })
 }
 
-fn round_from_call(call: &TracedCall, retry_reason: Option<String>) -> ProviderRoundTelemetry {
+fn round_from_call(call: &TracedCall) -> ProviderRoundTelemetry {
     let (outcome, finish_reason, tool_call_count, error) = match &call.outcome {
         TracedOutcome::Completed {
             finish_reason,
@@ -114,16 +94,52 @@ fn round_from_call(call: &TracedCall, retry_reason: Option<String>) -> ProviderR
         empty_visible_answer: call.empty_visible_answer,
         truncated_by_length: truncated,
         transport: call.transport.clone(),
-        application_retry_reason: retry_reason,
+        // Only the reason captured at the retry decision point — never inferred
+        // from round index / ordinary multi-round continuation.
+        application_retry_reason: call.application_retry_reason.clone(),
     }
 }
 
-fn fold_transport(rounds: &[ProviderRoundTelemetry]) -> ProviderTransportTelemetry {
-    let mut folded = ProviderTransportTelemetry::default();
-    for round in rounds {
-        folded.merge_from(&round.transport);
-    }
-    folded
+/// Last non-empty identity from the chronologically last round that reported it.
+fn last_response_model(rounds: &[ProviderRoundTelemetry]) -> Option<String> {
+    rounds
+        .iter()
+        .rev()
+        .find_map(|r| r.transport.response_model.clone())
+}
+
+fn last_provider_request_id(rounds: &[ProviderRoundTelemetry]) -> Option<String> {
+    rounds
+        .iter()
+        .rev()
+        .find_map(|r| r.transport.provider_request_id.clone())
+}
+
+fn last_observed_route(rounds: &[ProviderRoundTelemetry]) -> ObservedRoute {
+    rounds
+        .iter()
+        .rev()
+        .find_map(|r| match &r.transport.observed_route {
+            ObservedRoute::Unknown => None,
+            reported @ ObservedRoute::Reported { .. } => Some(reported.clone()),
+        })
+        .unwrap_or(ObservedRoute::Unknown)
+}
+
+fn application_retries_from_rounds(
+    rounds: &[ProviderRoundTelemetry],
+) -> Vec<ApplicationRetryReason> {
+    rounds
+        .iter()
+        .filter_map(|r| {
+            r.application_retry_reason
+                .as_ref()
+                .map(|reason| ApplicationRetryReason {
+                    round: r.round,
+                    reason: reason.clone(),
+                })
+        })
+        .collect()
 }
 
 /// Aggregate host-neutral provider-turn telemetry.
@@ -134,22 +150,9 @@ fn fold_transport(rounds: &[ProviderRoundTelemetry]) -> ProviderTransportTelemet
 pub fn aggregate_provider_turn_telemetry(
     input: ProviderTelemetryAggregateInput<'_>,
 ) -> ProviderTurnTelemetry {
-    let retries = application_retries_for_calls(input.calls, input.events);
-    let retry_by_round: std::collections::HashMap<u32, String> = retries
-        .iter()
-        .map(|r| (r.round, r.reason.clone()))
-        .collect();
+    let rounds: Vec<ProviderRoundTelemetry> = input.calls.iter().map(round_from_call).collect();
 
-    let rounds: Vec<ProviderRoundTelemetry> = input
-        .calls
-        .iter()
-        .map(|call| {
-            let round = u32::try_from(call.seq).unwrap_or(u32::MAX);
-            round_from_call(call, retry_by_round.get(&round).cloned())
-        })
-        .collect();
-
-    let folded = fold_transport(&rounds);
+    let retries = application_retries_from_rounds(&rounds);
     let last_completed = rounds.iter().rev().find(|r| r.outcome == "completed");
     let tool_call_count = rounds
         .iter()
@@ -162,17 +165,17 @@ pub fn aggregate_provider_turn_telemetry(
     };
 
     ProviderTurnTelemetry {
-        configured_profile_id: input.configured_profile_id.to_string(),
-        configured_model: input.configured_model.to_string(),
-        response_model: folded.response_model.clone(),
-        provider_request_id: folded.provider_request_id.clone(),
-        observed_route: folded.observed_route.clone(),
-        prompt_tokens: folded.prompt_tokens,
-        completion_tokens: folded.completion_tokens,
-        reasoning_tokens: folded.reasoning_tokens,
-        cached_tokens: folded.cached_tokens,
-        total_tokens: folded.total_tokens,
-        cost: folded.cost,
+        configured_profile_id: sanitize_configured_identity(input.configured_profile_id),
+        configured_model: sanitize_configured_identity(input.configured_model),
+        response_model: last_response_model(&rounds),
+        provider_request_id: last_provider_request_id(&rounds),
+        observed_route: last_observed_route(&rounds),
+        prompt_tokens: sum_reported_u64_all(&rounds, |r| r.transport.prompt_tokens),
+        completion_tokens: sum_reported_u64_all(&rounds, |r| r.transport.completion_tokens),
+        reasoning_tokens: sum_reported_u64_all(&rounds, |r| r.transport.reasoning_tokens),
+        cached_tokens: sum_reported_u64_all(&rounds, |r| r.transport.cached_tokens),
+        total_tokens: sum_reported_u64_all(&rounds, |r| r.transport.total_tokens),
+        cost: sum_reported_f64_all(&rounds, |r| r.transport.cost),
         context_budget: last_context_budget(input.events),
         provider_round_count: u32::try_from(rounds.len()).unwrap_or(u32::MAX),
         application_retry_reasons: retries,
@@ -204,11 +207,10 @@ pub fn aggregate_provider_telemetry_event(
     provider_telemetry_stream_event(aggregate_provider_turn_telemetry(input))
 }
 
-/// Ensure observed route stays unknown when only a configured model exists.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cd_core::provider_telemetry::ObservedRoute;
+    use cd_core::provider_telemetry::{ObservedRoute, ProviderTransportTelemetry};
     use cd_core::turn_trace::{TracedCall, TracedMessage, TracedOutcome};
 
     fn call_with_transport(
@@ -216,6 +218,16 @@ mod tests {
         transport: ProviderTransportTelemetry,
         finish: &str,
         content_empty: bool,
+    ) -> TracedCall {
+        call_with_retry(seq, transport, finish, content_empty, None)
+    }
+
+    fn call_with_retry(
+        seq: usize,
+        transport: ProviderTransportTelemetry,
+        finish: &str,
+        content_empty: bool,
+        application_retry_reason: Option<&str>,
     ) -> TracedCall {
         TracedCall {
             seq,
@@ -235,6 +247,33 @@ mod tests {
             },
             transport,
             empty_visible_answer: content_empty,
+            application_retry_reason: application_retry_reason.map(str::to_string),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn full_transport(
+        prompt: u64,
+        completion: u64,
+        reasoning: u64,
+        cached: u64,
+        total: u64,
+        cost: f64,
+        model: &str,
+        req: &str,
+    ) -> ProviderTransportTelemetry {
+        ProviderTransportTelemetry {
+            response_model: Some(model.into()),
+            provider_request_id: Some(req.into()),
+            observed_route: ObservedRoute::Reported {
+                value: "anthropic".into(),
+            },
+            prompt_tokens: Some(prompt),
+            completion_tokens: Some(completion),
+            reasoning_tokens: Some(reasoning),
+            cached_tokens: Some(cached),
+            total_tokens: Some(total),
+            cost: Some(cost),
         }
     }
 
@@ -264,19 +303,16 @@ mod tests {
 
     #[test]
     fn vercel_shaped_round_preserves_cost_and_route() {
-        let transport = ProviderTransportTelemetry {
-            response_model: Some("anthropic/claude-sonnet-4".into()),
-            provider_request_id: Some("chatcmpl-1".into()),
-            observed_route: ObservedRoute::Reported {
-                value: "anthropic".into(),
-            },
-            prompt_tokens: Some(10),
-            completion_tokens: Some(20),
-            reasoning_tokens: Some(8),
-            cached_tokens: Some(4),
-            total_tokens: Some(30),
-            cost: Some(0.00123),
-        };
+        let transport = full_transport(
+            10,
+            20,
+            8,
+            4,
+            30,
+            0.00123,
+            "anthropic/claude-sonnet-4",
+            "chatcmpl-1",
+        );
         let calls = vec![call_with_transport(0, transport, "stop", false)];
         let events = vec![StreamEvent::TurnCompleted {
             reason: "stop".into(),
@@ -345,10 +381,289 @@ mod tests {
     }
 
     #[test]
-    fn application_retry_reasons_from_host_errors_only() {
+    fn two_fully_reported_rounds_sum_exactly() {
+        let calls = vec![
+            call_with_transport(
+                0,
+                full_transport(10, 20, 2, 1, 30, 0.10, "m-a", "req-a"),
+                "tool_calls",
+                false,
+            ),
+            call_with_transport(
+                1,
+                full_transport(5, 7, 3, 2, 12, 0.05, "m-b", "req-b"),
+                "stop",
+                false,
+            ),
+        ];
+        let events = vec![StreamEvent::TurnCompleted {
+            reason: "stop".into(),
+        }];
+        let tel = aggregate_provider_turn_telemetry(ProviderTelemetryAggregateInput {
+            configured_profile_id: "openai-compatible",
+            configured_model: "configured",
+            calls: &calls,
+            events: &events,
+        });
+        assert_eq!(tel.prompt_tokens, Some(15));
+        assert_eq!(tel.completion_tokens, Some(27));
+        assert_eq!(tel.reasoning_tokens, Some(5));
+        assert_eq!(tel.cached_tokens, Some(3));
+        assert_eq!(tel.total_tokens, Some(42));
+        assert!((tel.cost.unwrap() - 0.15).abs() < 1e-9);
+        // Identity is last reported, not a sum/conflation.
+        assert_eq!(tel.response_model.as_deref(), Some("m-b"));
+        assert_eq!(tel.provider_request_id.as_deref(), Some("req-b"));
+        assert_eq!(tel.finish_reason.as_deref(), Some("stop"));
+        // Per-round preservation.
+        assert_eq!(tel.rounds.len(), 2);
+        assert_eq!(tel.rounds[0].transport.prompt_tokens, Some(10));
+        assert_eq!(tel.rounds[1].transport.prompt_tokens, Some(5));
+        assert_eq!(
+            tel.rounds[0].transport.provider_request_id.as_deref(),
+            Some("req-a")
+        );
+        assert!(tel.application_retry_reasons.is_empty());
+    }
+
+    #[test]
+    fn three_fully_reported_rounds_sum_exactly() {
+        let calls = vec![
+            call_with_transport(
+                0,
+                full_transport(1, 2, 0, 0, 3, 0.01, "m1", "r1"),
+                "tool_calls",
+                false,
+            ),
+            call_with_transport(
+                1,
+                full_transport(4, 5, 1, 1, 9, 0.02, "m2", "r2"),
+                "tool_calls",
+                false,
+            ),
+            call_with_transport(
+                2,
+                full_transport(6, 7, 2, 3, 13, 0.03, "m3", "r3"),
+                "stop",
+                false,
+            ),
+        ];
+        let events = vec![StreamEvent::TurnCompleted {
+            reason: "stop".into(),
+        }];
+        let tel = aggregate_provider_turn_telemetry(ProviderTelemetryAggregateInput {
+            configured_profile_id: "p",
+            configured_model: "m",
+            calls: &calls,
+            events: &events,
+        });
+        assert_eq!(tel.provider_round_count, 3);
+        assert_eq!(tel.prompt_tokens, Some(11));
+        assert_eq!(tel.completion_tokens, Some(14));
+        assert_eq!(tel.reasoning_tokens, Some(3));
+        assert_eq!(tel.cached_tokens, Some(4));
+        assert_eq!(tel.total_tokens, Some(25));
+        assert!((tel.cost.unwrap() - 0.06).abs() < 1e-9);
+        assert_eq!(tel.rounds.len(), 3);
+        assert!(tel.application_retry_reasons.is_empty());
+    }
+
+    #[test]
+    fn one_missing_metric_makes_only_that_aggregate_unknown() {
+        let mut incomplete = full_transport(10, 20, 1, 1, 30, 0.1, "m", "r1");
+        incomplete.reasoning_tokens = None;
+        let calls = vec![
+            call_with_transport(0, incomplete, "tool_calls", false),
+            call_with_transport(
+                1,
+                full_transport(5, 5, 2, 2, 10, 0.05, "m", "r2"),
+                "stop",
+                false,
+            ),
+        ];
+        let events = vec![StreamEvent::TurnCompleted {
+            reason: "stop".into(),
+        }];
+        let tel = aggregate_provider_turn_telemetry(ProviderTelemetryAggregateInput {
+            configured_profile_id: "p",
+            configured_model: "m",
+            calls: &calls,
+            events: &events,
+        });
+        assert!(tel.reasoning_tokens.is_none());
+        assert_eq!(tel.prompt_tokens, Some(15));
+        assert_eq!(tel.completion_tokens, Some(25));
+        assert_eq!(tel.cached_tokens, Some(3));
+        assert_eq!(tel.total_tokens, Some(40));
+        assert!((tel.cost.unwrap() - 0.15).abs() < 1e-9);
+        // Per-round still preserves the known reasoning on round 1.
+        assert!(tel.rounds[0].transport.reasoning_tokens.is_none());
+        assert_eq!(tel.rounds[1].transport.reasoning_tokens, Some(2));
+    }
+
+    #[test]
+    fn cost_aggregation_requires_every_round() {
+        let with_cost = full_transport(1, 1, 0, 0, 2, 0.25, "m", "r1");
+        let mut without_cost = full_transport(1, 1, 0, 0, 2, 0.0, "m", "r2");
+        without_cost.cost = None;
+        let calls = vec![
+            call_with_transport(0, with_cost.clone(), "tool_calls", false),
+            call_with_transport(1, without_cost, "stop", false),
+        ];
+        let events = vec![StreamEvent::TurnCompleted {
+            reason: "stop".into(),
+        }];
+        let tel = aggregate_provider_turn_telemetry(ProviderTelemetryAggregateInput {
+            configured_profile_id: "p",
+            configured_model: "m",
+            calls: &calls,
+            events: &events,
+        });
+        assert!(tel.cost.is_none());
+        assert_eq!(tel.rounds[0].transport.cost, Some(0.25));
+        assert!(tel.rounds[1].transport.cost.is_none());
+
+        let both = vec![
+            call_with_transport(0, with_cost, "tool_calls", false),
+            call_with_transport(
+                1,
+                full_transport(1, 1, 0, 0, 2, 0.75, "m", "r2"),
+                "stop",
+                false,
+            ),
+        ];
+        let tel2 = aggregate_provider_turn_telemetry(ProviderTelemetryAggregateInput {
+            configured_profile_id: "p",
+            configured_model: "m",
+            calls: &both,
+            events: &events,
+        });
+        assert!((tel2.cost.unwrap() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn single_round_aggregate_matches_that_round() {
+        let transport = full_transport(9, 8, 7, 6, 15, 0.42, "solo", "solo-id");
+        let calls = vec![call_with_transport(0, transport.clone(), "stop", false)];
+        let events = vec![StreamEvent::TurnCompleted {
+            reason: "stop".into(),
+        }];
+        let tel = aggregate_provider_turn_telemetry(ProviderTelemetryAggregateInput {
+            configured_profile_id: "p",
+            configured_model: "m",
+            calls: &calls,
+            events: &events,
+        });
+        assert_eq!(tel.provider_round_count, 1);
+        assert_eq!(tel.prompt_tokens, transport.prompt_tokens);
+        assert_eq!(tel.completion_tokens, transport.completion_tokens);
+        assert_eq!(tel.reasoning_tokens, transport.reasoning_tokens);
+        assert_eq!(tel.cached_tokens, transport.cached_tokens);
+        assert_eq!(tel.total_tokens, transport.total_tokens);
+        assert_eq!(tel.cost, transport.cost);
+        assert_eq!(tel.rounds[0].transport, transport);
+    }
+
+    #[test]
+    fn per_round_transport_is_preserved_independently() {
+        let calls = vec![
+            call_with_transport(
+                0,
+                full_transport(1, 2, 0, 0, 3, 0.01, "first", "id-1"),
+                "tool_calls",
+                false,
+            ),
+            call_with_transport(
+                1,
+                full_transport(4, 5, 1, 1, 9, 0.02, "second", "id-2"),
+                "stop",
+                false,
+            ),
+        ];
+        let events = vec![StreamEvent::TurnCompleted {
+            reason: "stop".into(),
+        }];
+        let tel = aggregate_provider_turn_telemetry(ProviderTelemetryAggregateInput {
+            configured_profile_id: "p",
+            configured_model: "m",
+            calls: &calls,
+            events: &events,
+        });
+        assert_eq!(
+            tel.rounds[0].transport.response_model.as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            tel.rounds[1].transport.response_model.as_deref(),
+            Some("second")
+        );
+        assert_eq!(tel.rounds[0].transport.cost, Some(0.01));
+        assert_eq!(tel.rounds[1].transport.cost, Some(0.02));
+        // Turn identity stays last-reported, not a merge of both.
+        assert_eq!(tel.response_model.as_deref(), Some("second"));
+        assert_eq!(tel.provider_request_id.as_deref(), Some("id-2"));
+    }
+
+    #[test]
+    fn ordinary_tool_continuation_has_no_retry_reason() {
+        let calls = vec![
+            call_with_transport(
+                0,
+                full_transport(1, 1, 0, 0, 2, 0.01, "m", "r0"),
+                "tool_calls",
+                false,
+            ),
+            call_with_transport(
+                1,
+                full_transport(2, 2, 0, 0, 4, 0.02, "m", "r1"),
+                "stop",
+                false,
+            ),
+            call_with_transport(
+                2,
+                full_transport(3, 3, 0, 0, 6, 0.03, "m", "r2"),
+                "stop",
+                false,
+            ),
+        ];
+        // Even if unrelated errors appear, without a decision-point capture on
+        // TracedCall we must not invent retry reasons from round index.
+        let events = vec![
+            StreamEvent::Error {
+                code: "some_other_error".into(),
+                message: "not a retry decision".into(),
+            },
+            StreamEvent::TurnCompleted {
+                reason: "stop".into(),
+            },
+        ];
+        let tel = aggregate_provider_turn_telemetry(ProviderTelemetryAggregateInput {
+            configured_profile_id: "p",
+            configured_model: "m",
+            calls: &calls,
+            events: &events,
+        });
+        assert_eq!(tel.provider_round_count, 3);
+        assert!(tel.application_retry_reasons.is_empty());
+        assert!(tel
+            .rounds
+            .iter()
+            .all(|r| r.application_retry_reason.is_none()));
+        let dumped = tel.to_json().to_string();
+        assert!(!dumped.contains("application_round"));
+    }
+
+    #[test]
+    fn real_application_retry_carries_actual_reason() {
         let calls = vec![
             call_with_transport(0, ProviderTransportTelemetry::default(), "stop", false),
-            call_with_transport(1, ProviderTransportTelemetry::default(), "stop", false),
+            call_with_retry(
+                1,
+                full_transport(1, 1, 0, 0, 2, 0.01, "m", "r1"),
+                "stop",
+                false,
+                Some("tools_unsupported"),
+            ),
         ];
         let events = vec![
             StreamEvent::Error {
@@ -365,10 +680,43 @@ mod tests {
             calls: &calls,
             events: &events,
         });
-        assert_eq!(tel.provider_round_count, 2);
         assert_eq!(tel.application_retry_reasons.len(), 1);
         assert_eq!(tel.application_retry_reasons[0].round, 1);
         assert_eq!(tel.application_retry_reasons[0].reason, "tools_unsupported");
+        assert_eq!(
+            tel.rounds[1].application_retry_reason.as_deref(),
+            Some("tools_unsupported")
+        );
+        assert!(tel.rounds[0].application_retry_reason.is_none());
+    }
+
+    #[test]
+    fn multiple_ordinary_rounds_remain_ordinary() {
+        let calls: Vec<_> = (0..4)
+            .map(|i| {
+                call_with_transport(
+                    i,
+                    full_transport(1, 1, 0, 0, 2, 0.01, "m", &format!("r{i}")),
+                    if i == 3 { "stop" } else { "tool_calls" },
+                    false,
+                )
+            })
+            .collect();
+        let events = vec![StreamEvent::TurnCompleted {
+            reason: "stop".into(),
+        }];
+        let tel = aggregate_provider_turn_telemetry(ProviderTelemetryAggregateInput {
+            configured_profile_id: "p",
+            configured_model: "m",
+            calls: &calls,
+            events: &events,
+        });
+        assert_eq!(tel.provider_round_count, 4);
+        assert!(tel.application_retry_reasons.is_empty());
+        assert!(tel
+            .rounds
+            .iter()
+            .all(|r| r.application_retry_reason.is_none()));
     }
 
     #[test]
@@ -401,5 +749,92 @@ mod tests {
         let dumped = a.to_json().to_string();
         assert!(!dumped.contains("Authorization"));
         assert!(!dumped.contains("sk-"));
+    }
+
+    #[test]
+    fn cli_and_tauri_agree_on_retry_and_continuation_semantics() {
+        let calls = vec![
+            call_with_transport(
+                0,
+                full_transport(1, 1, 0, 0, 2, 0.01, "m", "r0"),
+                "tool_calls",
+                false,
+            ),
+            call_with_retry(
+                1,
+                full_transport(2, 2, 0, 0, 4, 0.02, "m", "r1"),
+                "stop",
+                false,
+                Some("context_compacted"),
+            ),
+        ];
+        let events = vec![StreamEvent::TurnCompleted {
+            reason: "stop".into(),
+        }];
+        let cli = aggregate_provider_turn_telemetry(ProviderTelemetryAggregateInput {
+            configured_profile_id: "openai-compatible",
+            configured_model: "gpt-test",
+            calls: &calls,
+            events: &events,
+        });
+        let StreamEvent::ProviderTelemetry { telemetry: tauri } =
+            aggregate_provider_telemetry_event(ProviderTelemetryAggregateInput {
+                configured_profile_id: "openai-compatible",
+                configured_model: "gpt-test",
+                calls: &calls,
+                events: &events,
+            })
+        else {
+            panic!("expected provider telemetry");
+        };
+        assert_eq!(cli.to_json(), tauri.to_json());
+        assert_eq!(cli.application_retry_reasons.len(), 1);
+        assert_eq!(cli.application_retry_reasons[0].reason, "context_compacted");
+        assert!(cli.rounds[0].application_retry_reason.is_none());
+    }
+
+    #[test]
+    fn configured_identity_is_scrubbed_and_bounded() {
+        let calls = vec![call_with_transport(
+            0,
+            ProviderTransportTelemetry::default(),
+            "stop",
+            false,
+        )];
+        let events = vec![StreamEvent::TurnCompleted {
+            reason: "stop".into(),
+        }];
+        let tel = aggregate_provider_turn_telemetry(ProviderTelemetryAggregateInput {
+            configured_profile_id: "profile-with-Bearer tokentokentoken12345",
+            configured_model: "override-sk-abcdefghijklmnop-extra",
+            calls: &calls,
+            events: &events,
+        });
+        let dumped = tel.to_json().to_string();
+        assert!(!dumped.contains("tokentokentoken12345"));
+        assert!(!dumped.contains("sk-abcdefghijklmnop"));
+        assert!(!tel.configured_model.contains("sk-abcdefghijklmnop"));
+        assert!(!tel.configured_profile_id.contains("tokentokentoken12345"));
+
+        let long_model = format!("model-{}", "x".repeat(500));
+        let tel2 = aggregate_provider_turn_telemetry(ProviderTelemetryAggregateInput {
+            configured_profile_id: "p",
+            configured_model: &long_model,
+            calls: &calls,
+            events: &events,
+        });
+        assert!(
+            tel2.configured_model.chars().count()
+                <= cd_core::provider_telemetry::MAX_TELEMETRY_STRING_CHARS
+        );
+        // Legitimate ids unchanged.
+        let tel3 = aggregate_provider_turn_telemetry(ProviderTelemetryAggregateInput {
+            configured_profile_id: "openai-compatible",
+            configured_model: "anthropic/claude-sonnet-4",
+            calls: &calls,
+            events: &events,
+        });
+        assert_eq!(tel3.configured_profile_id, "openai-compatible");
+        assert_eq!(tel3.configured_model, "anthropic/claude-sonnet-4");
     }
 }
