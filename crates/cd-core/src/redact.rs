@@ -61,6 +61,9 @@ pub fn redact_candidate(s: &str) -> RedactionResult {
     if redact_bearer(&mut out) {
         push_class(&mut classes, "bearer");
     }
+    if redact_url_embedded_credentials(&mut out) {
+        push_class(&mut classes, "url_credentials");
+    }
     if redact_high_entropy(&mut out) {
         push_class(&mut classes, "high_entropy");
     }
@@ -419,6 +422,53 @@ fn redact_bearer(out: &mut String) -> bool {
     changed
 }
 
+/// Redact credential values embedded in connection strings or URL query parameters.
+///
+/// These values are often too short for the high-entropy heuristic, but must not
+/// reach durable stores or model-visible context.
+fn redact_url_embedded_credentials(out: &mut String) -> bool {
+    const KEYS: &[&str] = &[
+        "password=",
+        "passwd=",
+        "pwd=",
+        "secret=",
+        "api_key=",
+        "apikey=",
+        "access_token=",
+        "client_secret=",
+    ];
+
+    let mut changed = false;
+    for key in KEYS {
+        let mut search_from = 0usize;
+        let mut lower = out.to_ascii_lowercase();
+        while let Some(rel) = lower[search_from..].find(key) {
+            let start = search_from + rel;
+            let value_start = start + key.len();
+            let rest = &out[value_start..];
+            let value_len = rest
+                .chars()
+                .take_while(|c| {
+                    !matches!(*c, '&' | ';' | ' ' | '\t' | '\n' | '\r' | '"' | '\'' | ')')
+                })
+                .map(char::len_utf8)
+                .sum::<usize>();
+            if value_len == 0 {
+                search_from = value_start;
+                continue;
+            }
+
+            out.replace_range(value_start..value_start + value_len, "***");
+            changed = true;
+            // Replacement text and keys are ASCII, keeping this byte position
+            // at a UTF-8 boundary for the next lowercase scan.
+            search_from = value_start + 3;
+            lower = out.to_ascii_lowercase();
+        }
+    }
+    changed
+}
+
 fn redact_high_entropy(out: &mut String) -> bool {
     let mut changed = false;
     let bytes = out.clone();
@@ -473,6 +523,16 @@ fn looks_high_entropy(tok: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrubs_connection_string_credential_values_preserving_other_parameters() {
+        let raw = "url=jdbc:postgresql://host:5432/orders?user=svc_orders&database=orders&password=hunter2-not-real";
+        let scrubbed = scrub_secrets(raw);
+        assert!(!scrubbed.contains("hunter2-not-real"), "{scrubbed}");
+        assert!(scrubbed.contains("password=***"), "{scrubbed}");
+        assert!(scrubbed.contains("user=svc_orders"), "{scrubbed}");
+        assert!(scrubbed.contains("database=orders"), "{scrubbed}");
+    }
 
     #[test]
     fn scrubs_openai_and_bearer_like_audit() {
