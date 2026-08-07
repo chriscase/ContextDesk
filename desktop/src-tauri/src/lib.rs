@@ -5444,9 +5444,15 @@ fn persist_investigation_answer_at(
     let Some(assistant_message_id) = assistant_message_id.filter(|id| !id.trim().is_empty()) else {
         return Ok(false);
     };
+    let mut session = store.load(session_id).map_err(|error| error.to_string())?;
+    let Some(linked_corpus_id) = session.linked_corpus_id.as_deref() else {
+        return Ok(false);
+    };
     let Some(envelope) = events.iter().rev().find_map(|event| match event {
         cd_core::events::StreamEvent::InvestigationAnswer { envelope }
-            if envelope.binding.session_id == session_id && envelope.binding.turn_id == turn_id =>
+            if envelope.binding.session_id == session_id
+                && envelope.binding.turn_id == turn_id
+                && envelope.binding.corpus_id == linked_corpus_id =>
         {
             Some(envelope)
         }
@@ -5454,7 +5460,6 @@ fn persist_investigation_answer_at(
     }) else {
         return Ok(false);
     };
-    let mut session = store.load(session_id).map_err(|error| error.to_string())?;
     if !session
         .messages
         .iter()
@@ -16214,14 +16219,45 @@ mod startup_host_tests {
         let events = vec![StreamEvent::InvestigationAnswer {
             envelope: envelope.clone(),
         }];
-        assert!(persist_investigation_answer_at(
-            &store,
-            &session_id,
-            Some("assistant-1"),
-            &turn_id,
-            &events
-        )
-        .expect("host persistence"));
+        assert!(
+            !persist_investigation_answer_at(
+                &store,
+                &session_id,
+                Some("assistant-1"),
+                &turn_id,
+                &events
+            )
+            .expect("unlinked rejection"),
+            "an unlinked session cannot persist typed investigation authority"
+        );
+        let mut wrong_scope = store.load(&session_id).expect("unlinked session");
+        wrong_scope.set_linked_corpus_id(Some("corpus-b".into()));
+        store.save(&wrong_scope).expect("save wrong scope");
+        assert!(
+            !persist_investigation_answer_at(
+                &store,
+                &session_id,
+                Some("assistant-1"),
+                &turn_id,
+                &events
+            )
+            .expect("mismatched rejection"),
+            "an event for another corpus cannot persist typed authority"
+        );
+        let mut correct_scope = store.load(&session_id).expect("wrong-scope session");
+        correct_scope.set_linked_corpus_id(Some("corpus-a".into()));
+        store.save(&correct_scope).expect("save correct scope");
+        assert!(
+            persist_investigation_answer_at(
+                &store,
+                &session_id,
+                Some("assistant-1"),
+                &turn_id,
+                &events
+            )
+            .expect("host persistence"),
+            "the exact linked corpus persists"
+        );
         let mut renderer_save = store.load(&session_id).expect("reload");
         renderer_save.messages[0].meta = Some(serde_json::json!({
             INVESTIGATION_ANSWER_META_KEY: { "forged": true }
@@ -16251,6 +16287,25 @@ mod startup_host_tests {
             .as_ref()
             .and_then(|meta| meta.get(INVESTIGATION_ANSWER_META_KEY))
             .is_none());
+
+        let cache = tempfile::tempdir().expect("cache");
+        let detached = set_chat_linked_corpus_at(
+            &store,
+            cache.path(),
+            &session_id,
+            None,
+            None,
+            Some(wire_session_revision(&saved)),
+        )
+        .expect("detach linked corpus");
+        assert!(
+            detached.messages[0]
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get(INVESTIGATION_ANSWER_META_KEY))
+                .is_none(),
+            "detaching the host-owned corpus makes the historical envelope unavailable"
+        );
     }
 
     #[test]

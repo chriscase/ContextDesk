@@ -165,10 +165,25 @@ fn investigation_answer_for_turn<'a>(
     events: &'a [StreamEvent],
     session_id: &str,
     turn_id: &str,
+    request_corpus_id: Option<&str>,
+    session_corpus_id: Option<&str>,
+    corpus_revision: Option<u64>,
 ) -> Option<&'a cd_core::investigation_answer::AnswerEnvelopeV1> {
+    let (Some(request_corpus_id), Some(session_corpus_id), Some(corpus_revision)) =
+        (request_corpus_id, session_corpus_id, corpus_revision)
+    else {
+        return None;
+    };
+    if request_corpus_id != session_corpus_id {
+        return None;
+    }
+    let revision = corpus_revision.to_string();
     events.iter().rev().find_map(|event| match event {
         StreamEvent::InvestigationAnswer { envelope }
-            if envelope.binding.session_id == session_id && envelope.binding.turn_id == turn_id =>
+            if envelope.binding.session_id == session_id
+                && envelope.binding.turn_id == turn_id
+                && envelope.binding.corpus_id == request_corpus_id
+                && envelope.binding.revision == revision =>
         {
             Some(envelope)
         }
@@ -384,8 +399,14 @@ pub async fn run_chat_workflow(
         // The event is the sole authority boundary.  In particular, do not
         // parse `TextDelta` back into JSON: transcript text is presentation,
         // while this envelope was validated against this turn's fresh ledger.
-        let investigation_answer =
-            investigation_answer_for_turn(&all_events, &session_id, &turn_id);
+        let investigation_answer = investigation_answer_for_turn(
+            &all_events,
+            &session_id,
+            &turn_id,
+            request.corpus_id,
+            session.linked_corpus_id.as_deref(),
+            corpus_revision,
+        );
         for message in &history[before_len..] {
             session.messages.push(stored_from_chat(
                 message,
@@ -438,6 +459,67 @@ mod tests {
         "data: {\"choices\":[{\"delta\":{\"content\":\"hello from the mock model\"}}]}\n\n\
          data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
          data: [DONE]\n\n";
+
+    fn typed_answer_event(
+        session_id: &str,
+        turn_id: &str,
+        corpus_id: &str,
+        revision: &str,
+    ) -> StreamEvent {
+        use cd_core::investigation_answer::{
+            AnswerBindingV1, AnswerEnvelopeV1, InvestigationAnswerV1, SCHEMA_V1,
+        };
+        StreamEvent::InvestigationAnswer {
+            envelope: AnswerEnvelopeV1 {
+                binding: AnswerBindingV1 {
+                    session_id: session_id.into(),
+                    turn_id: turn_id.into(),
+                    corpus_id: corpus_id.into(),
+                    revision: revision.into(),
+                    ledger_digest: "host-digest".into(),
+                },
+                evidence: Vec::new(),
+                answer: InvestigationAnswerV1 {
+                    schema: SCHEMA_V1.into(),
+                    candidates: Vec::new(),
+                    canonical_citations: Vec::new(),
+                    root_cause_established: false,
+                },
+                semantic_attempts: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn investigation_answer_persistence_requires_exact_linked_scope_and_revision() {
+        let events = vec![typed_answer_event("session", "turn", "corpus-a", "7")];
+        assert!(investigation_answer_for_turn(
+            &events,
+            "session",
+            "turn",
+            Some("corpus-a"),
+            Some("corpus-a"),
+            Some(7),
+        )
+        .is_some());
+        for (request_corpus, session_corpus, revision) in [
+            (None, Some("corpus-a"), Some(7)),
+            (Some("corpus-a"), None, Some(7)),
+            (Some("corpus-a"), Some("corpus-b"), Some(7)),
+            (Some("corpus-a"), Some("corpus-a"), Some(8)),
+            (Some("corpus-a"), Some("corpus-a"), None),
+        ] {
+            assert!(investigation_answer_for_turn(
+                &events,
+                "session",
+                "turn",
+                request_corpus,
+                session_corpus,
+                revision,
+            )
+            .is_none());
+        }
+    }
 
     /// End to end, offline: a `ChatWorkflowRequest` with no linked corpus
     /// reaches a real `OpenAiCompatibleClient` HTTP call (via
