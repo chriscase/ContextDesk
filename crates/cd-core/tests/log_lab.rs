@@ -1263,6 +1263,45 @@ async fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
             .any(|signal| broad_triage.model_text.contains(signal)),
         "bounded deterministic brief lost every labeled rare severe incident"
     );
+    let incident_families = ["CDLAB200", "CDLAB310", "CDLAB420"];
+    let mut matched_group_ids = Vec::new();
+    for family in incident_families {
+        let matches = broad_triage
+            .candidate_groups
+            .iter()
+            .filter(|candidate| candidate.model_text.contains(family))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matches.len(),
+            1,
+            "{family} must appear in one candidate only"
+        );
+        let candidate = matches[0];
+        assert!(candidate.model_text.contains("bounded_observations:"));
+        assert!(candidate.model_text.contains("axis_value="));
+        assert!(candidate.model_text.contains("level="));
+        assert!(candidate.model_text.contains("service="));
+        assert!(candidate.model_text.contains("pattern="));
+        assert!(
+            candidate.model_text.len()
+                < cd_core::context_budgeting::synthesis_packing_budget(
+                    cd_core::sessions::DEFAULT_CONTEXT_CHAR_BUDGET,
+                )
+        );
+        assert!(!candidate.model_text.contains("trace-fixture-"));
+        for other in incident_families {
+            if other != family {
+                assert!(
+                    !candidate.model_text.contains(other),
+                    "{family} candidate leaked {other}"
+                );
+            }
+        }
+        matched_group_ids.push(candidate.group_id.clone());
+    }
+    matched_group_ids.sort();
+    matched_group_ids.dedup();
+    assert_eq!(matched_group_ids.len(), 3, "incidents must remain separate");
 
     let linked_backend = Literal250kLinkedBackend {
         calls: AtomicUsize::new(0),

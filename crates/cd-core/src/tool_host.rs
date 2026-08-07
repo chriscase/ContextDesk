@@ -393,6 +393,34 @@ fn broad_triage_source_identity(value: &str) -> String {
         .unwrap_or_else(|_| "\"<invalid source identity>\"".into())
 }
 
+/// Model-facing observation for one trusted candidate identity.
+///
+/// The template pattern is redacted and bounded by the ingest pipeline. It
+/// carries the operational facts a synthesis model needs without exposing a
+/// raw trace key or inviting it to infer content from opaque event ids.
+fn broad_triage_candidate_observation(
+    corpus: &crate::log_analysis::LogCorpus,
+    axis_value: i64,
+    level: &str,
+    source: &str,
+    service: Option<&str>,
+    template_id: u64,
+    fallback_message: &str,
+) -> String {
+    let source = broad_triage_source_identity(source);
+    let service = broad_triage_bounded_line(service.unwrap_or("<unset>"));
+    let service = serde_json::to_string(&service).unwrap_or_else(|_| "\"<invalid>\"".into());
+    let pattern = corpus
+        .template_pattern(template_id)
+        .unwrap_or_else(|| fallback_message.to_string());
+    let pattern = broad_triage_bounded_line(&pattern);
+    let pattern = serde_json::to_string(&pattern).unwrap_or_else(|_| "\"<invalid>\"".into());
+    format!(
+        "- axis_value={} level={} source={} service={} template_id={} pattern={}\n",
+        axis_value, level, source, service, template_id, pattern
+    )
+}
+
 /// Correlation ranking score documented in the brief.
 ///
 /// `score = count * (1.2 if precedes_focus else 1.0)`. Ranking is score DESC,
@@ -2386,6 +2414,7 @@ impl ToolHost {
                 templates_partial
             ));
             let mut candidate_evidence = Vec::new();
+            let mut candidate_observations = Vec::new();
             for (representative_index, event) in representatives.iter().enumerate() {
                 let source = broad_triage_source_identity(&event.source);
                 let service =
@@ -2419,6 +2448,15 @@ impl ToolHost {
                     };
                     if !candidate_evidence.contains(&identity) {
                         candidate_evidence.push(identity);
+                        candidate_observations.push(broad_triage_candidate_observation(
+                            &corpus,
+                            event.ts,
+                            &event.level,
+                            &event.source,
+                            event.service.as_deref(),
+                            event.template_id,
+                            &event.message,
+                        ));
                     }
                 }
                 trace_candidate_template_ids.insert(event.template_id);
@@ -2441,12 +2479,16 @@ impl ToolHost {
             {
                 let group_id = format!("trace_group:{}", chain_index.saturating_add(1));
                 let mut candidate_text = format!(
-                    "source_kind: deterministic_broad_log_candidate\nstructural_kind: unverified_trace_key_group\ngroup_id: {}\ntrace_key_value_withheld: true\ntrace_key_is_not_execution_proof: true\ntrace_event_count: {}\ntrace_source_count: {}\ntrace_error_or_fatal_count: {}\ntrusted_citations_only:\n",
+                    "source_kind: deterministic_broad_log_candidate\nstructural_kind: unverified_trace_key_group\ngroup_id: {}\ntrace_key_value_withheld: true\ntrace_key_is_not_execution_proof: true\ntrace_event_count: {}\ntrace_source_count: {}\ntrace_error_or_fatal_count: {}\nanalysis_contract: patterns are host-derived observations; distinguish explicit failure text from hypotheses; do not invent causes absent from patterns\nbounded_observations:\n",
                     group_id,
                     chain.event_count,
                     chain.source_count,
                     chain.error_or_fatal_count,
                 );
+                for observation in &candidate_observations {
+                    candidate_text.push_str(observation);
+                }
+                candidate_text.push_str("trusted_citations_only:\n");
                 for identity in &candidate_evidence {
                     candidate_text.push_str(&format!(
                         "- seq={} source={} template_id={}\n",
@@ -2629,6 +2671,7 @@ impl ToolHost {
                 && candidate_groups.len() < BROAD_LOG_TRIAGE_CANDIDATE_CAP
             {
                 let mut candidate_evidence = Vec::new();
+                let mut candidate_observations = Vec::new();
                 for event in [&first_span, &last_span] {
                     let identity = crate::log_analysis::SearchEvidenceIdentity {
                         seq: event.seq,
@@ -2638,6 +2681,15 @@ impl ToolHost {
                     };
                     if !candidate_evidence.contains(&identity) {
                         candidate_evidence.push(identity);
+                        candidate_observations.push(broad_triage_candidate_observation(
+                            &corpus,
+                            event.ts,
+                            "ERROR",
+                            &event.source,
+                            None,
+                            event.template_id,
+                            "<template metadata unavailable>",
+                        ));
                     }
                 }
                 for event in &exemplars {
@@ -2652,13 +2704,26 @@ impl ToolHost {
                     };
                     if !candidate_evidence.contains(&identity) {
                         candidate_evidence.push(identity);
+                        candidate_observations.push(broad_triage_candidate_observation(
+                            &corpus,
+                            event.ts,
+                            "ERROR",
+                            &event.source,
+                            None,
+                            event.template_id,
+                            "<template metadata unavailable>",
+                        ));
                     }
                 }
                 if !candidate_evidence.is_empty() {
                     let mut candidate_text = format!(
-                        "source_kind: deterministic_broad_log_candidate\nstructural_kind: template\ngroup_id: template:{}\ntemplate_id: {}\nseverity: {}\nerror_event_count: {}\ntrusted_citations_only:\n",
+                        "source_kind: deterministic_broad_log_candidate\nstructural_kind: template\ngroup_id: template:{}\ntemplate_id: {}\nseverity: {}\nerror_event_count: {}\nanalysis_contract: patterns are host-derived observations; distinguish explicit failure text from hypotheses; do not invent causes absent from patterns\nbounded_observations:\n",
                         hit.template_id, hit.template_id, hit.severity, hit.error_event_count
                     );
+                    for observation in &candidate_observations {
+                        candidate_text.push_str(observation);
+                    }
+                    candidate_text.push_str("trusted_citations_only:\n");
                     for identity in &candidate_evidence {
                         candidate_text.push_str(&format!(
                             "- seq={} source={} template_id={}\n",
@@ -9274,6 +9339,12 @@ mod tests {
             .windows(2)
             .all(|pair| pair[0].group_id != pair[1].group_id));
         assert!(brief.candidate_groups.len() <= BROAD_LOG_TRIAGE_CANDIDATE_CAP);
+        for candidate in &brief.candidate_groups {
+            assert!(candidate.model_text.contains("bounded_observations:"));
+            assert!(candidate.model_text.contains("level=ERROR"));
+            assert!(candidate.model_text.contains("pattern="));
+            assert!(candidate.model_text.contains("trusted_citations_only:"));
+        }
     }
 
     #[test]
@@ -9599,6 +9670,19 @@ mod tests {
                 && !first.model_text.contains("execution chains"),
             "raw/reused trace keys must not be presented as certified executions"
         );
+        let trace_candidate = first
+            .candidate_groups
+            .iter()
+            .find(|candidate| candidate.group_id == "trace_group:1")
+            .expect("cross-source trace candidate");
+        assert!(trace_candidate.model_text.contains("bounded_observations:"));
+        assert!(trace_candidate
+            .model_text
+            .contains("checkout connection refused"));
+        assert!(trace_candidate
+            .model_text
+            .contains("database page corruption sentinel"));
+        assert!(!trace_candidate.model_text.contains("trace-incident"));
         for identity in [(21_u64, "api/app.log"), (22_u64, "db/database.log")] {
             assert!(
                 first
