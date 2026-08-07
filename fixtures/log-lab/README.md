@@ -335,6 +335,34 @@ regenerate the default profile, compare every generated log and primary-truth
 byte, and compare the JSON meaning of the metric and evaluator fixtures. This
 keeps log identity exact while allowing harmless JSON formatting changes.
 
+## Retrieval-ablation benchmark suite (`scenarios/retrieval-ablation/`)
+
+A permanent deterministic hidden-truth benchmark measuring the incremental
+value of structured/keyword retrieval, semantic embeddings, reranking, and
+bounded multi-stage analysis. Twenty cases (`rb01`–`rb20`) live under
+`scenarios/retrieval-ablation/cases/<case-id>/` with the standard split:
+import only `import/`; `queries.json` is harness input; `truth/` is
+evaluator-only and must never reach model context. Contract documents live in
+`schema/retrieval-*.v1.schema.json`; the pinned small-tier baseline report is
+under `scenarios/retrieval-ablation/reports/baseline/`.
+
+The committed small tier (~11k events, seed `92026080701`) regenerates
+byte-identically:
+
+```sh
+cargo run -p cd-core --example generate_log_lab -- \
+  --profile retrieval-ablation --tier small --output /tmp/contextdesk-ra-small
+```
+
+Medium (~250k) and large (>=1M) tiers generate on demand into the git-ignored
+`generated/` directory via `scripts/retrieval-ablation-benchmark.sh
+medium|large`. Only neutral noise scales with tier; truth events are constant,
+and a different `--seed` changes neutral identities but never semantic truth.
+Gates, metrics, mutations, and the mode contract are documented in
+[`docs/benchmarks/MULTI_MODEL_RETRIEVAL_BENCHMARK.md`](../../docs/benchmarks/MULTI_MODEL_RETRIEVAL_BENCHMARK.md);
+tests live in `crates/cd-core/tests/retrieval_ablation_lab.rs` and run in
+default CI at the small tier.
+
 ## Import and investigate
 
 1. In ContextDesk, open **Logs**.
