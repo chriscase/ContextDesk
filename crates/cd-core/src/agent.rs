@@ -1057,14 +1057,12 @@ async fn run_multi_stage_broad_triage(
             let evidence = candidate.evidence.iter().cloned().collect::<HashSet<_>>();
             let accepted_content = if content.trim().is_empty() {
                 None
-            } else if linked_grounded_answer_is_valid(&content, &evidence, false) {
+            } else if attempt == 0 && linked_grounded_answer_is_valid(&content, &evidence, false) {
                 Some(content)
-            } else if attempt > 0
-                && linked_answer_citation_status(&content, &evidence, false)
-                    == LinkedAnswerCitationStatus::Missing
-                && !linked_answer_mistakes_wrapper_for_evidence(&content)
-            {
-                Some(attach_host_evidence_appendix(&content, &evidence))
+            } else if attempt > 0 && !linked_answer_mistakes_wrapper_for_evidence(&content) {
+                let sanitized = strip_model_authored_log_citations(&content);
+                (!sanitized.is_empty() && sanitized.contains(&candidate.group_id))
+                    .then(|| attach_host_evidence_appendix(&sanitized, &evidence))
             } else {
                 None
             };
@@ -1142,14 +1140,14 @@ async fn run_multi_stage_broad_triage(
         let group_ids_present = drafts.iter().all(|draft| content.contains(&draft.group_id));
         let accepted_content = if content.trim().is_empty() || !group_ids_present {
             None
-        } else if multi_stage_comparison_is_valid(&content, &drafts) {
+        } else if attempt == 0 && multi_stage_comparison_is_valid(&content, &drafts) {
             Some(content)
-        } else if attempt > 0
-            && linked_answer_citation_status(&content, &all_evidence, false)
-                == LinkedAnswerCitationStatus::Missing
-            && !linked_answer_mistakes_wrapper_for_evidence(&content)
-        {
-            Some(attach_host_evidence_appendix(&content, &all_evidence))
+        } else if attempt > 0 && !linked_answer_mistakes_wrapper_for_evidence(&content) {
+            let sanitized = strip_model_authored_log_citations(&content);
+            drafts
+                .iter()
+                .all(|draft| sanitized.contains(&draft.group_id))
+                .then(|| attach_host_evidence_appendix(&sanitized, &all_evidence))
         } else {
             None
         };
@@ -1770,6 +1768,51 @@ _Host-attached event identities; the model's interpretation above is not indepen
     }
     answer.push('\n');
     answer
+}
+
+/// Remove model-authored log identity syntax from a corrected synthesis.
+///
+/// Correction mode deliberately treats every such token as untrusted—even a
+/// coincidentally valid one. The host appends the candidate's canonical
+/// ledger afterward. Keeping only the prose before the first reserved marker
+/// on each line is conservative and avoids trying to repair or reinterpret a
+/// small model's malformed citation tuples.
+fn strip_model_authored_log_citations(text: &str) -> String {
+    let mut kept = Vec::new();
+    for line in text.lines() {
+        let lower = line.to_ascii_lowercase();
+        let cut = ["seq=", "source=", "template_id=", "template id="]
+            .iter()
+            .filter_map(|marker| lower.find(marker))
+            .min()
+            .unwrap_or(line.len());
+        let prefix = line
+            .get(..cut)
+            .unwrap_or(line)
+            .trim_end_matches(|character: char| {
+                character.is_whitespace()
+                    || matches!(
+                        character,
+                        '`' | '['
+                            | ']'
+                            | '('
+                            | ')'
+                            | '{'
+                            | '}'
+                            | '<'
+                            | '>'
+                            | '⟦'
+                            | '⟧'
+                            | ':'
+                            | '-'
+                            | '•'
+                    )
+            });
+        if !prefix.trim().is_empty() {
+            kept.push(prefix);
+        }
+    }
+    kept.join("\n").trim().to_string()
 }
 
 fn evidence_requires_cause_not_established(evidence_text: &str) -> bool {
@@ -11741,13 +11784,17 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         ];
         let backend = ScriptedBackend::new(vec![
             multi_stage_completion("wrong seq=999 source=fabricated.log template_id=999"),
-            multi_stage_completion("trace:alpha is a plausible independent failure group."),
+            multi_stage_completion(
+                "trace:alpha is a plausible independent failure group. \
+                 seq=999 source=fabricated-again.log template_id=999",
+            ),
             multi_stage_completion("trace:bravo seq=22 source=trace:bravo.log template_id=22"),
             multi_stage_completion(
                 "trace:alpha then trace:bravo. seq=999 source=fabricated.log template_id=999",
             ),
             multi_stage_completion(
-                "Rank 1: trace:alpha. Rank 2: trace:bravo. Keep both groups independent.",
+                "Rank 1: trace:alpha. Rank 2: trace:bravo. Keep both groups independent. \
+                 seq=999 source=fabricated-final.log template_id=999",
             ),
         ]);
         let opts = AgentOptions {
@@ -11782,6 +11829,8 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 assert!(content.contains("source=\"trace:bravo.log\""));
                 assert!(!content.contains("seq=999"));
                 assert!(!content.contains("fabricated.log"));
+                assert!(!content.contains("fabricated-again.log"));
+                assert!(!content.contains("fabricated-final.log"));
                 assert_eq!(contexts.len(), provider_rounds);
             }
             other => panic!("expected host-cited corrected comparison, got {other:?}"),
