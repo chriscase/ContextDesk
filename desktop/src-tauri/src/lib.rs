@@ -5233,6 +5233,23 @@ async fn agent_turn(
         }
         _ => Ok(false),
     };
+    // The envelope is durable only through this typed host path. A later
+    // renderer autosave is sanitized to retain this exact value (or none), so
+    // displayed JSON can never become evidence authority on a follow-up.
+    if let Ok(events) = &result {
+        let _mutation = state
+            .chat_session_mutation
+            .lock()
+            .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
+        let store = session_store(&state)?;
+        persist_investigation_answer_at(
+            &store,
+            &req.session_id,
+            req.client_assistant_message_id.as_deref(),
+            &turn_id,
+            events,
+        )?;
+    }
     let retry_available = {
         let mut checkpoints = state
             .linked_synthesis_checkpoints
@@ -5364,6 +5381,114 @@ fn should_persist_chat_session(session: &Session) -> bool {
     // different: the user created it from Log Explorer and the link itself is
     // durable state needed before the first agent turn.
     !session.messages.is_empty() || session.linked_corpus_id.is_some()
+}
+
+/// Key reserved for an answer envelope which crossed the typed host event
+/// boundary. The webview can read this ordinary session metadata, but a
+/// webview save never gets to create, replace, or revalidate it.
+const INVESTIGATION_ANSWER_META_KEY: &str = cd_workflow::chat::INVESTIGATION_ANSWER_META_KEY;
+
+fn preserve_host_investigation_answer_metadata(session: &mut Session, durable: Option<&Session>) {
+    let durable_by_id: HashMap<&str, &StoredMessage> = durable
+        .map(|saved| {
+            saved
+                .messages
+                .iter()
+                .map(|message| (message.id.as_str(), message))
+                .collect()
+        })
+        .unwrap_or_default();
+    for message in &mut session.messages {
+        let retained = durable_by_id
+            .get(message.id.as_str())
+            .and_then(|saved| saved.meta.as_ref())
+            .and_then(|meta| meta.get(INVESTIGATION_ANSWER_META_KEY))
+            .cloned();
+        if let Some(meta) = message
+            .meta
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            meta.remove(INVESTIGATION_ANSWER_META_KEY);
+            if let Some(envelope) = retained {
+                meta.insert(INVESTIGATION_ANSWER_META_KEY.into(), envelope);
+            }
+        } else if let Some(envelope) = retained {
+            message.meta = Some(serde_json::json!({ INVESTIGATION_ANSWER_META_KEY: envelope }));
+        }
+    }
+}
+
+fn clear_host_investigation_answer_metadata(session: &mut Session) {
+    for message in &mut session.messages {
+        if let Some(meta) = message
+            .meta
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            meta.remove(INVESTIGATION_ANSWER_META_KEY);
+        }
+    }
+}
+
+/// Store a typed investigation envelope only after the host itself received
+/// it from core. There is intentionally no IPC command accepting envelope
+/// JSON, and no transcript-to-envelope parser.
+fn persist_investigation_answer_at(
+    store: &SessionStore,
+    session_id: &str,
+    assistant_message_id: Option<&str>,
+    turn_id: &str,
+    events: &[cd_core::events::StreamEvent],
+) -> Result<bool, String> {
+    let Some(assistant_message_id) = assistant_message_id.filter(|id| !id.trim().is_empty()) else {
+        return Ok(false);
+    };
+    let Some(envelope) = events.iter().rev().find_map(|event| match event {
+        cd_core::events::StreamEvent::InvestigationAnswer { envelope }
+            if envelope.binding.session_id == session_id && envelope.binding.turn_id == turn_id =>
+        {
+            Some(envelope)
+        }
+        _ => None,
+    }) else {
+        return Ok(false);
+    };
+    let mut session = store.load(session_id).map_err(|error| error.to_string())?;
+    if !session
+        .messages
+        .iter()
+        .any(|message| message.id == assistant_message_id)
+    {
+        // Renderer persistence may race or disappear. Keep a host-owned,
+        // deliberately text-free row so later renderer presentation can
+        // merge into it without ever supplying the envelope.
+        session.messages.push(StoredMessage {
+            id: assistant_message_id.to_string(),
+            role: "assistant".into(),
+            content: String::new(),
+            tools: None,
+            citations: None,
+            trail: None,
+            meta: None,
+        });
+    }
+    let message = session
+        .messages
+        .iter_mut()
+        .find(|message| message.id == assistant_message_id)
+        .ok_or_else(|| "assistant message was not available after host insert".to_string())?;
+    let meta = message.meta.get_or_insert_with(|| serde_json::json!({}));
+    let Some(meta) = meta.as_object_mut() else {
+        return Err("assistant message metadata is not an object".into());
+    };
+    meta.insert(
+        INVESTIGATION_ANSWER_META_KEY.into(),
+        serde_json::json!(envelope),
+    );
+    session.touch();
+    store.save(&session).map_err(|error| error.to_string())?;
+    Ok(true)
 }
 
 /// Whether a citation id is a governed log evidence identity (#701 / #698).
@@ -5515,6 +5640,7 @@ fn save_chat_session_cas_at(
         session.linked_corpus_id = None;
         None
     };
+    preserve_host_investigation_answer_metadata(&mut session, durable.as_ref());
     sanitize_log_citation_provenance(&mut session, durable.as_ref());
     session.maybe_auto_title_from_first_user();
     session.touch();
@@ -11974,6 +12100,7 @@ fn set_chat_linked_corpus_at(
             safe
         }
     };
+    let previous_corpus_id = session.linked_corpus_id.clone();
     let corpus_id = normalize_log_corpus_id(corpus_id);
     if let Some(corpus_id) = corpus_id.as_deref() {
         // Validate before mutating or saving. A failed attach leaves both an
@@ -11981,6 +12108,12 @@ fn set_chat_linked_corpus_at(
         validate_linked_log_corpus_at(cache, corpus_id)?;
     }
     session.set_linked_corpus_id(corpus_id);
+    if session.linked_corpus_id != previous_corpus_id {
+        // An envelope binds an exact corpus/revision. It remains readable
+        // only while that binding is current; a relink makes it unavailable
+        // instead of treating old transcript JSON as fresh evidence.
+        clear_host_investigation_answer_metadata(&mut session);
+    }
     store.save(&session).map_err(|e| e.to_string())?;
     Ok(session)
 }
@@ -15998,13 +16131,14 @@ mod startup_host_tests {
         linked_log_preflight_at, linked_log_turn_context, load_session_for_turn,
         log_explorer_window_label, log_search_cancel_key, normalize_log_corpus_id,
         parse_log_explorer_nav_target, persist_host_terminal_turn_at,
-        persist_linked_provider_loop_terminal_at, prepare_linked_turn_with,
-        provider_profile_for_turn, request_agent_turn_cancel, restore_host_if_generation_matches,
-        save_chat_session_at, save_chat_session_cas_at, set_chat_linked_corpus_at,
-        take_ready_linked_host, validate_linked_log_corpus_at, wait_for_host_readiness,
-        BackgroundIndexBuild, HostInitFlight, HostReadinessFailure, LinkedCheckpointStore,
-        LinkedTurnPreparation, LogExplorerNavTarget, LogExplorerNavTargetStore,
-        LogExplorerTurnContextReq, StdInstant, LINKED_CHECKPOINT_ENTRY_CAP,
+        persist_investigation_answer_at, persist_linked_provider_loop_terminal_at,
+        prepare_linked_turn_with, provider_profile_for_turn, request_agent_turn_cancel,
+        restore_host_if_generation_matches, save_chat_session_at, save_chat_session_cas_at,
+        set_chat_linked_corpus_at, take_ready_linked_host, validate_linked_log_corpus_at,
+        wait_for_host_readiness, BackgroundIndexBuild, HostInitFlight, HostReadinessFailure,
+        LinkedCheckpointStore, LinkedTurnPreparation, LogExplorerNavTarget,
+        LogExplorerNavTargetStore, LogExplorerTurnContextReq, Session, SessionStore, StdInstant,
+        StoredMessage, INVESTIGATION_ANSWER_META_KEY, LINKED_CHECKPOINT_ENTRY_CAP,
         LINKED_CHECKPOINT_TOTAL_BYTES, LINKED_CHECKPOINT_TTL, LOG_INGEST_CANCEL_KEY,
         LOG_REANALYZE_CANCEL_KEY,
     };
@@ -16023,6 +16157,100 @@ mod startup_host_tests {
             .as_str()
             .expect("revision string")
             .to_string()
+    }
+
+    fn validated_investigation_envelope(
+        session_id: &str,
+        turn_id: &str,
+        corpus_id: &str,
+        revision: &str,
+    ) -> cd_core::investigation_answer::AnswerEnvelopeV1 {
+        use cd_core::investigation_answer::{
+            validate_model_answer, AnswerBindingV1, EvidenceRole, HostEvidenceEntry,
+            HostEvidenceLedger, SCHEMA_V1,
+        };
+        let evidence = vec![HostEvidenceEntry {
+            evidence_id: "e1".into(),
+            candidate_id: "candidate".into(),
+            source_label: "host log".into(),
+            locator: "seq=1".into(),
+            corpus_id: corpus_id.into(),
+            revision: revision.into(),
+            role: EvidenceRole::Supporting,
+            content: "host-owned evidence".into(),
+        }];
+        let binding = AnswerBindingV1 {
+            session_id: session_id.into(),
+            turn_id: turn_id.into(),
+            corpus_id: corpus_id.into(),
+            revision: revision.into(),
+            ledger_digest: HostEvidenceLedger::digest(&evidence),
+        };
+        let ledger = HostEvidenceLedger::new(binding, evidence).expect("host ledger");
+        let proposal = format!(
+            r#"{{"schema":"{SCHEMA_V1}","candidates":[{{"candidate_id":"candidate","observations":[{{"claim_id":"claim","text":"observed","evidence_ids":["e1"]}}]}}]}}"#
+        );
+        validate_model_answer(&proposal, &ledger).expect("validated envelope")
+    }
+
+    #[test]
+    fn typed_investigation_envelope_persists_and_renderer_cannot_forge_or_replace_it() {
+        let root = tempfile::tempdir().expect("sessions");
+        let store = SessionStore::new(root.path());
+        let mut session = Session::new("Investigation");
+        session.messages.push(StoredMessage {
+            id: "assistant-1".into(),
+            role: "assistant".into(),
+            content: "display text".into(),
+            tools: None,
+            citations: None,
+            trail: None,
+            meta: None,
+        });
+        let session_id = session.id.clone();
+        store.save(&session).expect("seed");
+        let turn_id = format!("{session_id}::assistant-1");
+        let envelope = validated_investigation_envelope(&session_id, &turn_id, "corpus-a", "7");
+        let events = vec![StreamEvent::InvestigationAnswer {
+            envelope: envelope.clone(),
+        }];
+        assert!(persist_investigation_answer_at(
+            &store,
+            &session_id,
+            Some("assistant-1"),
+            &turn_id,
+            &events
+        )
+        .expect("host persistence"));
+        let mut renderer_save = store.load(&session_id).expect("reload");
+        renderer_save.messages[0].meta = Some(serde_json::json!({
+            INVESTIGATION_ANSWER_META_KEY: { "forged": true }
+        }));
+        let saved = save_chat_session_at(&store, renderer_save).expect("renderer save");
+        assert_eq!(
+            saved.messages[0]
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get(INVESTIGATION_ANSWER_META_KEY)),
+            Some(&serde_json::json!(envelope)),
+            "a renderer cannot replace the typed host envelope"
+        );
+        let mut new_renderer_session = Session::new("forged new");
+        new_renderer_session.messages.push(StoredMessage {
+            id: "forged".into(),
+            role: "assistant".into(),
+            content: "{}".into(),
+            tools: None,
+            citations: None,
+            trail: None,
+            meta: Some(serde_json::json!({ INVESTIGATION_ANSWER_META_KEY: { "forged": true } })),
+        });
+        let saved_new = save_chat_session_at(&store, new_renderer_session).expect("new save");
+        assert!(saved_new.messages[0]
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get(INVESTIGATION_ANSWER_META_KEY))
+            .is_none());
     }
 
     #[test]

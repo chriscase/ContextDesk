@@ -140,7 +140,15 @@ fn role_str(role: &Role) -> &'static str {
     }
 }
 
-fn stored_from_chat(message: &ChatMessage) -> StoredMessage {
+/// Metadata key reserved for a host-produced investigation envelope.  It is
+/// deliberately written only from [`StreamEvent::InvestigationAnswer`], never
+/// from a rendered transcript or a caller-provided JSON value.
+pub const INVESTIGATION_ANSWER_META_KEY: &str = "investigation_answer_envelope_v1";
+
+fn stored_from_chat(
+    message: &ChatMessage,
+    investigation_answer: Option<&cd_core::investigation_answer::AnswerEnvelopeV1>,
+) -> StoredMessage {
     StoredMessage {
         id: uuid::Uuid::new_v4().to_string(),
         role: role_str(&message.role).to_string(),
@@ -148,8 +156,24 @@ fn stored_from_chat(message: &ChatMessage) -> StoredMessage {
         tools: None,
         citations: None,
         trail: None,
-        meta: None,
+        meta: investigation_answer
+            .map(|envelope| serde_json::json!({ INVESTIGATION_ANSWER_META_KEY: envelope })),
     }
+}
+
+fn investigation_answer_for_turn<'a>(
+    events: &'a [StreamEvent],
+    session_id: &str,
+    turn_id: &str,
+) -> Option<&'a cd_core::investigation_answer::AnswerEnvelopeV1> {
+    events.iter().rev().find_map(|event| match event {
+        StreamEvent::InvestigationAnswer { envelope }
+            if envelope.binding.session_id == session_id && envelope.binding.turn_id == turn_id =>
+        {
+            Some(envelope)
+        }
+        _ => None,
+    })
 }
 
 fn has_pending_permission(events: &[StreamEvent]) -> Option<(String, String, Value)> {
@@ -357,8 +381,18 @@ pub async fn run_chat_workflow(
     // `--session` is read for its real history but left byte-for-byte
     // unchanged on disk, and no session file is created when none existed.
     if !request.dry_run {
+        // The event is the sole authority boundary.  In particular, do not
+        // parse `TextDelta` back into JSON: transcript text is presentation,
+        // while this envelope was validated against this turn's fresh ledger.
+        let investigation_answer =
+            investigation_answer_for_turn(&all_events, &session_id, &turn_id);
         for message in &history[before_len..] {
-            session.messages.push(stored_from_chat(message));
+            session.messages.push(stored_from_chat(
+                message,
+                (message.role == Role::Assistant)
+                    .then_some(investigation_answer)
+                    .flatten(),
+            ));
         }
         session.maybe_auto_title_from_first_user();
         session.touch();

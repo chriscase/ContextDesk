@@ -389,6 +389,10 @@ pub enum StreamLine<'a> {
         code: &'a str,
         message: &'a str,
     },
+    /// Exact host-validated investigation answer from the typed event.
+    InvestigationAnswer {
+        envelope: &'a cd_core::investigation_answer::AnswerEnvelopeV1,
+    },
     /// `--trace summary` (and above). See [`TraceSummaryLine`].
     TraceSummary(TraceSummaryLine),
     /// `--trace context` (and `full`). See [`TraceContextLine`].

@@ -156,6 +156,16 @@ preserves both links. Client timestamps more than five minutes in the future are
 rejected. This is the server contract only; the desktop cache/offline worker remains
 open under #287.
 
+### Typed investigation answers
+
+`StreamEvent::InvestigationAnswer` carries an `AnswerEnvelopeV1` only after core validates a
+model proposal against the host-built evidence ledger for that exact session, turn, corpus, and
+revision. Hosts may persist the exact envelope in assistant-message metadata and may project it
+to human text, JSON, JSONL, or IPC. Those projections are display/read APIs only: hosts must not
+parse displayed transcript JSON, or accept client-supplied envelope JSON, to create or revalidate
+authority. A subsequent turn builds a fresh ledger. If an envelope's session/corpus/revision no
+longer matches host state, it is unavailable (or explicitly stale), never silently reused.
+
 ### Telegram chat bridge
 
 Telegram chat/thread ids map to process-lifetime `telegram-*` sessions. Research replies are

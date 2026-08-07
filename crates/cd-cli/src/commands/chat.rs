@@ -580,8 +580,14 @@ pub async fn run(
                     trace: Option<Vec<StreamLine<'static>>>,
                     #[serde(skip_serializing_if = "Option::is_none")]
                     activity: Option<&'a cd_core::activity::TurnActivityRecord>,
+                    /// Exact host-validated envelope. `final_text` is only a
+                    /// display projection and is never parsed as authority.
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    investigation_answer:
+                        Option<&'a cd_core::investigation_answer::AnswerEnvelopeV1>,
                 }
                 let context_used = context_used_from_events(&outcome.events);
+                let investigation_answer = investigation_answer_from_events(&outcome.events);
                 let envelope = Envelope::ok(
                     "chat",
                     ChatSummaryWithActivity {
@@ -590,6 +596,7 @@ pub async fn run(
                         context_used,
                         trace: trace_lines,
                         activity: activity_record.as_ref(),
+                        investigation_answer,
                     },
                 );
                 println!(
@@ -620,6 +627,17 @@ fn withheld_cli_error(events: &[StreamEvent]) -> Option<CliError> {
         CliError::provider(message)
     } else {
         CliError::new(ExitCategory::NotReady, message)
+    })
+}
+
+/// Return only the typed host event. In particular, no `TextDelta` is parsed
+/// as JSON here: visible transcript text is never evidence authority.
+fn investigation_answer_from_events<'a>(
+    events: &'a [StreamEvent],
+) -> Option<&'a cd_core::investigation_answer::AnswerEnvelopeV1> {
+    events.iter().rev().find_map(|event| match event {
+        StreamEvent::InvestigationAnswer { envelope } => Some(envelope),
+        _ => None,
     })
 }
 
@@ -869,6 +887,10 @@ fn emit_jsonl(event: &StreamEvent) {
         StreamEvent::Error { code, message } => Some((
             "error",
             crate::envelope::StreamLine::Error { code, message },
+        )),
+        StreamEvent::InvestigationAnswer { envelope } => Some((
+            "investigation_answer",
+            crate::envelope::StreamLine::InvestigationAnswer { envelope },
         )),
         _ => None,
     };

@@ -460,6 +460,11 @@ On failure, `ok` is `false`, `data` is `null`, and `error` is
 
 ### Streaming lines (`--jsonl`)
 
+When a linked investigation completes, JSON output includes `investigation_answer` and JSONL
+emits an `investigation_answer` line containing the same host-validated `AnswerEnvelopeV1`.
+`final_text` is a display projection only; scripts must not feed it, or a displayed envelope,
+back into a later chat turn as evidence authority. Every new turn creates a fresh ledger.
+
 Every streaming command's own `type`-tagged vocabulary is closed and
 command-specific — a reader must not assume one shared line grammar across
 commands, only that every line always parses independently and the last
