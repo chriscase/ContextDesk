@@ -108,9 +108,7 @@ fn oracle_candidate(group_id: &str, seq: u64) -> crate::tool_host::BroadLogTriag
 
 const DRAFT_ALPHA: &str = "trace:alpha is an operational incident";
 const DRAFT_BRAVO: &str = "trace:bravo is an operational incident";
-const COMPARISON_VALID: &str =
-    "Ranked: trace:alpha (seq=11 source=trace:alpha.log template_id=11); \
-     trace:bravo (seq=22 source=trace:bravo.log template_id=22).";
+const COMPARISON_VALID: &str = r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"trace:alpha","observations":[{"claim_id":"a","text":"observed","evidence_ids":["e:trace:alpha:11"]}]},{"candidate_id":"trace:bravo","observations":[{"claim_id":"b","text":"observed","evidence_ids":["e:trace:bravo:22"]}]}]}"#;
 
 fn two_candidates() -> Vec<crate::tool_host::BroadLogTriageCandidate> {
     vec![
@@ -135,6 +133,13 @@ async fn run_two_candidate_triage(
         opts,
         &clock,
         &candidates,
+        crate::investigation_answer::AnswerBindingV1 {
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            corpus_id: "c".into(),
+            revision: "r".into(),
+            ledger_digest: String::new(),
+        },
         &mut |telemetry| contexts.push(telemetry),
     )
     .await;

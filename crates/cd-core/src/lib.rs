@@ -41,6 +41,8 @@ pub mod incident_evidence_archive;
 pub mod index;
 pub mod index_watch;
 pub mod injection;
+/// Strict host-validated typed investigation answers.
+pub mod investigation_answer;
 pub mod investigations;
 /// Keychain / in-memory credential store (module name avoids gitignore `*secret*`).
 pub mod keychain_store;

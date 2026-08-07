@@ -758,8 +758,10 @@ const BROAD_TRIAGE_MAX_SEARCH_RESULTS: usize = 20;
 const BROAD_TRIAGE_BRIEF_ERROR_TEMPLATE_CAP: usize = 16;
 /// A candidate gets one correction attempt and the comparison gets one. The
 /// shared `max_rounds` budget may reduce this further, but never increase it.
-const MULTI_STAGE_CANDIDATE_ATTEMPT_CAP: usize = 2;
-const MULTI_STAGE_COMPARISON_ATTEMPT_CAP: usize = 2;
+const MULTI_STAGE_CANDIDATE_ATTEMPT_CAP: usize = 1;
+/// One semantic repair is permitted for the entire user turn. Transport
+/// retries are performed below this boundary and do not consume it.
+const MULTI_STAGE_SEMANTIC_CORRECTION_CAP: usize = 1;
 const MULTI_STAGE_CANDIDATE_CAP: usize = crate::tool_host::BROAD_LOG_TRIAGE_CANDIDATE_CAP;
 /// Keep private draft text compact so multiple incidents cannot consume the
 /// final comparison context. The model never gets another group's raw brief.
@@ -775,6 +777,7 @@ enum MultiStageTriageOutcome {
     FailedClosed(String),
     Completed {
         content: String,
+        envelope: Box<crate::investigation_answer::AnswerEnvelopeV1>,
         accepted_groups: Vec<String>,
         rejected_groups: Vec<String>,
         provider_rounds: usize,
@@ -852,7 +855,6 @@ struct CandidateSynthesisDraft {
     group_id: String,
     text: String,
     evidence: HashSet<crate::log_analysis::SearchEvidenceIdentity>,
-    allowed_code_like_identifiers: HashSet<String>,
 }
 
 fn code_like_identifiers(text: &str) -> HashSet<String> {
@@ -928,7 +930,7 @@ fn multi_stage_comparison_messages(
     correction: bool,
 ) -> Vec<ChatMessage> {
     let correction_text = if correction {
-        "Your previous comparison was withheld. Keep every group separate and include every exact group id. Rank only supported incidents; place likely noise/decoys in their own section. DO NOT emit `seq=`, `source=`, `template_id=`, bracketed citations, tables, or an evidence list. The trusted host will attach canonical identities after validation."
+        "Your previous answer failed host validation. Return exactly one corrected JSON object and use only supplied evidence ids."
     } else {
         ""
     };
@@ -943,13 +945,12 @@ fn multi_stage_comparison_messages(
         ChatMessage {
             role: Role::System,
             content: format!(
-                "You are completing a bounded comparison of independent incident candidates. \\
-                 Do not fuse candidate groups or transfer evidence between them. Include a distinct section for \\
-                 every `group_id` below. Rank supported operational incidents strongest-to-weakest, then put weak, \\
-                 isolated, or likely noise/decoy groups in a separate `Likely noise or isolated observations` \\
-                 section instead of ranking them as incidents. Preserve exact error codes and mechanisms; do not \\
-                 replace them with generic speculation. Use short Markdown headings and bullets; do not use tables, \\
-                 box art, or multi-column layouts. Cite only the supplied candidate citations. {correction_text}"
+                "You are completing a bounded comparison of independent candidates. Do not transfer evidence. Return \\
+                 exactly one JSON object with schema `contextdesk.investigation_answer.v1`. Each candidate has only \\
+                 `candidate_id` and optional `observations`, `symptoms`, `causal_candidates`, `initiating_causes`, \\
+                 `competing_explanations`, or `missing_evidence`; each claim has only `claim_id`, `text`, and \\
+                 `evidence_ids`. Cite only supplied host ids belonging to that candidate. Do not include citations, \\
+                 status, confidence, corpus, revision, session, or prose outside JSON. {correction_text}"
             ),
             tool_call_id: None,
             tool_calls: None,
@@ -969,19 +970,37 @@ fn multi_stage_comparison_messages(
     ]
 }
 
-fn multi_stage_comparison_is_valid(text: &str, drafts: &[CandidateSynthesisDraft]) -> bool {
-    let all_evidence = drafts
-        .iter()
-        .flat_map(|draft| draft.evidence.iter().cloned())
-        .collect::<HashSet<_>>();
-    linked_grounded_answer_is_valid(text, &all_evidence, false)
-        && drafts.iter().all(|draft| text.contains(&draft.group_id))
-        && code_like_identifiers(text).is_subset(
-            &drafts
-                .iter()
-                .flat_map(|draft| draft.allowed_code_like_identifiers.iter().cloned())
-                .collect(),
-        )
+fn multi_stage_ledger(
+    drafts: &[CandidateSynthesisDraft],
+    binding: crate::investigation_answer::AnswerBindingV1,
+) -> Result<
+    crate::investigation_answer::HostEvidenceLedger,
+    crate::investigation_answer::ValidationError,
+> {
+    use crate::investigation_answer::{EvidenceRole, HostEvidenceEntry, HostEvidenceLedger};
+    let mut evidence = Vec::new();
+    for draft in drafts {
+        for identity in &draft.evidence {
+            evidence.push(HostEvidenceEntry {
+                evidence_id: format!("e:{}:{}", draft.group_id, identity.seq),
+                candidate_id: draft.group_id.clone(),
+                source_label: identity
+                    .citation_source
+                    .clone()
+                    .unwrap_or_else(|| identity.source.clone()),
+                locator: format!("seq={}", identity.seq),
+                corpus_id: binding.corpus_id.clone(),
+                revision: binding.revision.clone(),
+                // No generic classifier establishes causes from these rows.
+                role: EvidenceRole::Neutral,
+            });
+        }
+    }
+    let binding = crate::investigation_answer::AnswerBindingV1 {
+        ledger_digest: HostEvidenceLedger::digest(&evidence),
+        ..binding
+    };
+    HostEvidenceLedger::new(binding, evidence)
 }
 
 fn multi_stage_context_telemetry(
@@ -1030,6 +1049,7 @@ async fn run_multi_stage_broad_triage(
     opts: &AgentOptions,
     clock: &TurnClock,
     candidates: &[crate::tool_host::BroadLogTriageCandidate],
+    binding: crate::investigation_answer::AnswerBindingV1,
     on_context: &mut (dyn FnMut(crate::context_budgeting::ContextBudgetTelemetry) + Send),
 ) -> CoreResult<MultiStageTriageOutcome> {
     let candidates = candidates
@@ -1114,7 +1134,6 @@ async fn run_multi_stage_broad_triage(
                         .take(MULTI_STAGE_CANDIDATE_DRAFT_CHAR_CAP)
                         .collect(),
                     evidence,
-                    allowed_code_like_identifiers: code_like_identifiers(&candidate.model_text),
                 });
                 break;
             }
@@ -1145,11 +1164,20 @@ async fn run_multi_stage_broad_triage(
             "comparison_context_budget_insufficient",
         ));
     }
-    for attempt in 0..MULTI_STAGE_COMPARISON_ATTEMPT_CAP {
+    let ledger = match multi_stage_ledger(&drafts, binding) {
+        Ok(ledger) => ledger,
+        Err(_) => {
+            return Ok(MultiStageTriageOutcome::FailedClosed(
+                "host evidence ledger was invalid".into(),
+            ))
+        }
+    };
+    let mut semantic_attempts = 0usize;
+    loop {
         if used_rounds >= opts.max_rounds {
             break;
         }
-        let messages = multi_stage_comparison_messages(user_text, &drafts, attempt > 0);
+        let messages = multi_stage_comparison_messages(user_text, &drafts, semantic_attempts > 0);
         let comparison_evidence = messages
             .last()
             .map(|message| message.content.as_str())
@@ -1179,38 +1207,22 @@ async fn run_multi_stage_broad_triage(
         } else {
             completion.content
         };
-        let all_evidence = drafts
-            .iter()
-            .flat_map(|draft| draft.evidence.iter().cloned())
-            .collect::<HashSet<_>>();
-        let group_ids_present = drafts.iter().all(|draft| content.contains(&draft.group_id));
-        let accepted_content = if content.trim().is_empty() || !group_ids_present {
-            None
-        } else if attempt == 0 && multi_stage_comparison_is_valid(&content, &drafts) {
-            Some(content)
-        } else if attempt > 0 && !linked_answer_mistakes_wrapper_for_evidence(&content) {
-            let sanitized = strip_model_authored_log_citations(&content);
-            (drafts
-                .iter()
-                .all(|draft| sanitized.contains(&draft.group_id))
-                && code_like_identifiers(&sanitized).is_subset(
-                    &drafts
-                        .iter()
-                        .flat_map(|draft| draft.allowed_code_like_identifiers.iter().cloned())
-                        .collect(),
-                ))
-            .then(|| attach_host_evidence_appendix(&sanitized, &all_evidence))
-        } else {
-            None
-        };
-        if let Some(content) = accepted_content {
+        if let Ok(mut envelope) =
+            crate::investigation_answer::validate_model_answer(&content, &ledger)
+        {
+            envelope.semantic_attempts = u8::try_from(semantic_attempts).unwrap_or(u8::MAX);
             return Ok(MultiStageTriageOutcome::Completed {
-                content,
+                content: crate::investigation_answer::authoritative_json(&envelope),
+                envelope: Box::new(envelope),
                 accepted_groups: drafts.into_iter().map(|draft| draft.group_id).collect(),
                 rejected_groups,
                 provider_rounds: used_rounds,
             });
         }
+        if semantic_attempts >= MULTI_STAGE_SEMANTIC_CORRECTION_CAP {
+            break;
+        }
+        semantic_attempts += 1;
     }
     Ok(MultiStageTriageOutcome::FailedClosed(
         "comparison synthesis failed bounded citation/separation validation".into(),
@@ -3556,6 +3568,18 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                         opts,
                         &clock,
                         &brief.candidate_groups,
+                        crate::investigation_answer::AnswerBindingV1 {
+                            session_id: opts.session_id.clone(),
+                            turn_id: opts.turn_id.clone(),
+                            corpus_id: brief.corpus_id.clone(),
+                            revision: format!(
+                                "{}:{}:{}",
+                                brief.event_revision,
+                                brief.template_analysis_revision,
+                                brief.suppression_revision
+                            ),
+                            ledger_digest: String::new(),
+                        },
                         &mut publish_multi_stage_context,
                     )
                     .await?
@@ -3605,6 +3629,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                         }
                         MultiStageTriageOutcome::Completed {
                             content,
+                            envelope,
                             accepted_groups,
                             rejected_groups,
                             provider_rounds,
@@ -3630,6 +3655,8 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                         "rejected_groups": rejected_groups,
                                         "retry_class": "candidate_or_final_bounded",
                                         "final_citation_confinement": "valid",
+                                        "answer_binding": envelope.binding,
+                                        "semantic_attempts": envelope.semantic_attempts,
                                     })
                                     .to_string(),
                                 ),
@@ -11752,7 +11779,6 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             group_id: candidate.group_id.clone(),
             text: "likely noise".into(),
             evidence: candidate.evidence.into_iter().collect(),
-            allowed_code_like_identifiers: HashSet::new(),
         };
         let comparison_prompt = multi_stage_comparison_messages("triage", &[draft], false)[0]
             .content
@@ -11779,10 +11805,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             multi_stage_completion("trace:charlie is an operational incident"),
             multi_stage_completion("template:decoy is likely repetitive noise"),
             multi_stage_completion(
-                "Ranked: trace:alpha (seq=11 source=trace:alpha.log template_id=11); \\
-                 trace:bravo (seq=22 source=trace:bravo.log template_id=22); \\
-                 trace:charlie (seq=33 source=trace:charlie.log template_id=33); \\
-                 template:decoy is noise (seq=99 source=template:decoy.log template_id=99).",
+                r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"trace:alpha","observations":[{"claim_id":"a","text":"x","evidence_ids":["e:trace:alpha:11"]}]},{"candidate_id":"trace:bravo","observations":[{"claim_id":"b","text":"x","evidence_ids":["e:trace:bravo:22"]}]},{"candidate_id":"trace:charlie","observations":[{"claim_id":"c","text":"x","evidence_ids":["e:trace:charlie:33"]}]},{"candidate_id":"template:decoy","observations":[{"claim_id":"d","text":"x","evidence_ids":["e:template:decoy:99"]}]}]}"#,
             ),
         ]);
         let opts = AgentOptions {
@@ -11797,6 +11820,13 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             &opts,
             &clock,
             &candidates,
+            crate::investigation_answer::AnswerBindingV1 {
+                session_id: "s".into(),
+                turn_id: "t".into(),
+                corpus_id: "c".into(),
+                revision: "r".into(),
+                ledger_digest: String::new(),
+            },
             &mut |telemetry| contexts.push(telemetry),
         )
         .await
@@ -11807,6 +11837,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 accepted_groups,
                 rejected_groups,
                 provider_rounds,
+                ..
             } => {
                 assert_eq!(
                     accepted_groups,
@@ -11855,33 +11886,39 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             &opts,
             &clock,
             &candidates,
+            crate::investigation_answer::AnswerBindingV1 {
+                session_id: "s".into(),
+                turn_id: "t".into(),
+                corpus_id: "c".into(),
+                revision: "r".into(),
+                ledger_digest: String::new(),
+            },
             &mut |telemetry| contexts.push(telemetry),
         )
         .await
         .unwrap();
         assert!(matches!(outcome, MultiStageTriageOutcome::FailedClosed(_)));
-        assert_eq!(contexts.len(), 3, "both candidate attempts remain bounded");
+        assert_eq!(
+            contexts.len(),
+            2,
+            "one candidate attempt is permitted per turn"
+        );
     }
 
     #[tokio::test]
-    async fn bounded_multi_stage_correction_can_be_citation_free_and_host_cited() {
+    async fn multi_stage_uses_one_semantic_correction_and_keeps_transport_separate() {
         let candidates = vec![
             multi_stage_candidate("trace:alpha", 11),
             multi_stage_candidate("trace:bravo", 22),
         ];
         let backend = ScriptedBackend::new(vec![
-            multi_stage_completion("- seq=999 source=fabricated.log template_id=999"),
+            multi_stage_completion("trace:alpha is independent"),
+            multi_stage_completion("trace:bravo is independent"),
             multi_stage_completion(
-                "trace:alpha is a plausible independent failure group. \
-                 seq=999 source=fabricated-again.log template_id=999",
-            ),
-            multi_stage_completion("trace:bravo seq=22 source=trace:bravo.log template_id=22"),
-            multi_stage_completion(
-                "trace:alpha then trace:bravo. seq=999 source=fabricated.log template_id=999",
+                r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"trace:alpha","observations":[{"claim_id":"a","text":"x","evidence_ids":["forged"]}]},{"candidate_id":"trace:bravo","observations":[{"claim_id":"b","text":"x","evidence_ids":["e:trace:bravo:22"]}]}]}"#,
             ),
             multi_stage_completion(
-                "Rank 1: trace:alpha. Rank 2: trace:bravo. Keep both groups independent. \
-                 seq=999 source=fabricated-final.log template_id=999",
+                r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"trace:alpha","observations":[{"claim_id":"a","text":"x","evidence_ids":["e:trace:alpha:11"]}]},{"candidate_id":"trace:bravo","observations":[{"claim_id":"b","text":"x","evidence_ids":["e:trace:bravo:22"]}]}]}"#,
             ),
         ]);
         let opts = AgentOptions {
@@ -11896,6 +11933,13 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             &opts,
             &clock,
             &candidates,
+            crate::investigation_answer::AnswerBindingV1 {
+                session_id: "s".into(),
+                turn_id: "t".into(),
+                corpus_id: "c".into(),
+                revision: "r".into(),
+                ledger_digest: String::new(),
+            },
             &mut |telemetry| contexts.push(telemetry),
         )
         .await
@@ -11903,21 +11947,18 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         match outcome {
             MultiStageTriageOutcome::Completed {
                 content,
+                envelope,
                 accepted_groups,
                 rejected_groups,
                 provider_rounds,
+                ..
             } => {
                 assert_eq!(accepted_groups, vec!["trace:alpha", "trace:bravo"]);
                 assert!(rejected_groups.is_empty());
-                assert_eq!(provider_rounds, 5);
-                assert!(content.contains("seq=11"));
-                assert!(content.contains("source=\"trace:alpha.log\""));
-                assert!(content.contains("seq=22"));
-                assert!(content.contains("source=\"trace:bravo.log\""));
-                assert!(!content.contains("seq=999"));
-                assert!(!content.contains("fabricated.log"));
-                assert!(!content.contains("fabricated-again.log"));
-                assert!(!content.contains("fabricated-final.log"));
+                assert_eq!(provider_rounds, 4);
+                assert_eq!(envelope.semantic_attempts, 1);
+                assert!(content.contains("contextdesk.investigation_answer.v1"));
+                assert!(!content.contains("forged"));
                 assert_eq!(contexts.len(), provider_rounds);
             }
             other => panic!("expected host-cited corrected comparison, got {other:?}"),
