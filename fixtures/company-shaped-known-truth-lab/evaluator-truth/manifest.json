@@ -1,0 +1,14 @@
+{
+  "schemaId": "contextdesk.company_shaped_known_truth.v1",
+  "schemaVersion": 1,
+  "evaluatorOnly": true,
+  "sourceTimezoneIana": "America/Chicago",
+  "smallCi": {
+    "appRenderings": 4,
+    "stderrRuns": [60, 71, 81, 226],
+    "stderrRecords": 438,
+    "citableRecords": 442,
+    "explicitUtcRows": 2,
+    "orderOnlyRows": 3
+  }
+}
