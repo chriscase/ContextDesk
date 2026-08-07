@@ -396,6 +396,10 @@ impl ChatBackend for OpenAiBackend {
             .await
         {
             Ok(c) => Ok(c),
+            // `complete_stream_cb` already used its full bounded 429 budget.
+            // Do not immediately replay the same turn as non-streaming and
+            // multiply a provider free-tier throttle.
+            Err(e) if e.to_string().contains("HTTP 429") => Err(e),
             Err(_) => self.0.complete(messages, Some(tools)).await,
         }
     }
@@ -425,6 +429,10 @@ impl ChatBackend for OpenAiBackend {
         {
             Ok(c) => Ok(c),
             Err(e) if e.to_string().contains("cancelled") => Err(e),
+            // Keep exhausted rate limits terminal for this turn. A caller may
+            // retry deliberately after the surfaced cooldown, but automatic
+            // SSE-to-non-stream fallback must not spend another 3 attempts.
+            Err(e) if e.to_string().contains("HTTP 429") => Err(e),
             Err(_) => {
                 // Fall back to non-stream; emit once.
                 let c = self.0.complete(messages, Some(tools)).await?;

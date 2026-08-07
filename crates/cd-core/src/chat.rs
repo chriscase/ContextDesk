@@ -3,8 +3,75 @@
 use crate::error::{CoreError, CoreResult};
 use crate::ssrf::{build_pinned_client_for_url, SsrfPolicy, SystemResolver};
 use crate::tools::ToolSpec;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+// Vercel free-tier throttles may last a full minute. Keep retries bounded to
+// one initial request plus two retries while giving that short outage a real
+// chance to recover instead of amplifying it with rapid repeat requests.
+const OPENAI_COMPATIBLE_MAX_429_RETRIES: u32 = 2;
+const OPENAI_COMPATIBLE_RETRY_BASE_DELAY: Duration = Duration::from_secs(30);
+const OPENAI_COMPATIBLE_RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
+const OPENAI_COMPATIBLE_MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+
+fn bounded_openai_retry_after(
+    headers: &reqwest::header::HeaderMap,
+    retry: u32,
+) -> (Duration, &'static str) {
+    let fallback = OPENAI_COMPATIBLE_RETRY_BASE_DELAY
+        .checked_mul(1u32 << retry.min(3))
+        .unwrap_or(OPENAI_COMPATIBLE_RETRY_MAX_DELAY)
+        .min(OPENAI_COMPATIBLE_RETRY_MAX_DELAY);
+    let Some(value) = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+    else {
+        return (fallback, "fallback");
+    };
+    if let Ok(seconds) = value.parse::<u64>() {
+        return (
+            Duration::from_secs(seconds).min(OPENAI_COMPATIBLE_MAX_RETRY_AFTER),
+            "retry_after",
+        );
+    }
+    let date_delay = DateTime::parse_from_rfc2822(value)
+        .ok()
+        .and_then(|at| {
+            at.with_timezone(&Utc)
+                .signed_duration_since(Utc::now())
+                .to_std()
+                .ok()
+        })
+        .map(|delay| delay.min(OPENAI_COMPATIBLE_MAX_RETRY_AFTER));
+    date_delay
+        .map(|delay| (delay, "retry_after"))
+        .unwrap_or((fallback, "fallback"))
+}
+
+async fn wait_for_openai_429_retry(delay: Duration, cancel: Option<&AtomicBool>) -> CoreResult<()> {
+    if cancel
+        .map(|flag| flag.load(Ordering::SeqCst))
+        .unwrap_or(false)
+    {
+        return Err(CoreError::Message("cancelled".into()));
+    }
+    let Some(cancel) = cancel else {
+        tokio::time::sleep(delay).await;
+        return Ok(());
+    };
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => Ok(()),
+        _ = async {
+            while !cancel.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        } => Err(CoreError::Message("cancelled".into())),
+    }
+}
 
 /// Chat message role.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -532,6 +599,81 @@ impl OpenAiCompatibleClient {
         req
     }
 
+    /// POST one completion request, retrying only bounded HTTP 429 responses.
+    ///
+    /// A fresh request builder is created for every attempt so JSON/auth body
+    /// replay is explicit. Other 4xx responses (and transport failures) return
+    /// immediately to preserve their provider body and avoid retry storms.
+    async fn post_completion_with_429_retry(
+        &self,
+        body: &Value,
+        operation: &str,
+        cancel: Option<&AtomicBool>,
+    ) -> CoreResult<reqwest::Response> {
+        let mut retry = 0;
+        loop {
+            if cancel
+                .map(|flag| flag.load(Ordering::SeqCst))
+                .unwrap_or(false)
+            {
+                return Err(CoreError::Message("cancelled".into()));
+            }
+            let response = self
+                .apply_auth(self.http.post(self.chat_url()).json(body))
+                .send()
+                .await
+                .map_err(|error| CoreError::Message(format!("{operation}: {error}")))?;
+            if response.status().as_u16() != 429 {
+                if retry > 0 {
+                    tracing::info!(
+                        target: "cd_core::chat",
+                        provider = "openai_compatible",
+                        operation,
+                        attempt = retry + 1,
+                        max_attempts = OPENAI_COMPATIBLE_MAX_429_RETRIES + 1,
+                        "provider rate limit recovered"
+                    );
+                }
+                return Ok(response);
+            }
+            let request_id = response
+                .headers()
+                .get("x-request-id")
+                .or_else(|| response.headers().get("request-id"))
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            if retry >= OPENAI_COMPATIBLE_MAX_429_RETRIES {
+                tracing::warn!(
+                    target: "cd_core::chat",
+                    provider = "openai_compatible",
+                    http_status = 429,
+                    operation,
+                    attempt = retry + 1,
+                    max_attempts = OPENAI_COMPATIBLE_MAX_429_RETRIES + 1,
+                    provider_request_id = request_id,
+                    "provider rate limit exhausted"
+                );
+                return Ok(response);
+            }
+            let (delay, delay_source) = bounded_openai_retry_after(response.headers(), retry);
+            retry += 1;
+            tracing::warn!(
+                target: "cd_core::chat",
+                provider = "openai_compatible",
+                http_status = 429,
+                operation,
+                attempt = retry + 1,
+                max_attempts = OPENAI_COMPATIBLE_MAX_429_RETRIES + 1,
+                delay_ms = delay.as_millis() as u64,
+                delay_source,
+                provider_request_id = request_id,
+                cancellable = cancel.is_some(),
+                "waiting due to provider rate limit before retry"
+            );
+            wait_for_openai_429_retry(delay, cancel).await?;
+        }
+    }
+
     /// Non-streaming chat completion.
     pub async fn complete(
         &self,
@@ -549,11 +691,9 @@ impl OpenAiCompatibleClient {
                 body["tool_choice"] = json!("auto");
             }
         }
-        let req = self.apply_auth(self.http.post(self.chat_url()).json(&body));
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| CoreError::Message(format!("chat request: {e}")))?;
+        let resp = self
+            .post_completion_with_429_retry(&body, "chat request", None)
+            .await?;
         let status = resp.status();
         let header_tel = crate::provider_telemetry::capture_safe_response_headers(
             resp.headers().iter().filter_map(|(k, v)| {
@@ -600,11 +740,9 @@ impl OpenAiCompatibleClient {
                 body["tool_choice"] = json!("auto");
             }
         }
-        let req = self.apply_auth(self.http.post(self.chat_url()).json(&body));
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| CoreError::Message(format!("stream request: {e}")))?;
+        let resp = self
+            .post_completion_with_429_retry(&body, "stream request", None)
+            .await?;
         let status = resp.status();
         let header_tel = crate::provider_telemetry::capture_safe_response_headers(
             resp.headers().iter().filter_map(|(k, v)| {
@@ -655,7 +793,6 @@ impl OpenAiCompatibleClient {
     {
         use crate::sse::{BoundedBodyAccumulator, SseLineDecoder};
         use futures_util::StreamExt;
-        use std::sync::atomic::Ordering;
 
         let mut body = json!({
             "model": self.model,
@@ -668,11 +805,9 @@ impl OpenAiCompatibleClient {
                 body["tool_choice"] = json!("auto");
             }
         }
-        let req = self.apply_auth(self.http.post(self.chat_url()).json(&body));
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| CoreError::Message(format!("stream request: {e}")))?;
+        let resp = self
+            .post_completion_with_429_retry(&body, "stream request", cancel)
+            .await?;
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
@@ -1747,6 +1882,34 @@ impl AnthropicClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn openai_429_delay_honors_bounded_retry_after_and_conservative_fallback() {
+        let empty = reqwest::header::HeaderMap::new();
+        assert_eq!(
+            bounded_openai_retry_after(&empty, 0),
+            (Duration::from_secs(30), "fallback")
+        );
+        assert_eq!(
+            bounded_openai_retry_after(&empty, 1),
+            (Duration::from_secs(60), "fallback")
+        );
+
+        let mut seconds = reqwest::header::HeaderMap::new();
+        seconds.insert(reqwest::header::RETRY_AFTER, "120".parse().unwrap());
+        assert_eq!(
+            bounded_openai_retry_after(&seconds, 0),
+            (Duration::from_secs(60), "retry_after"),
+            "Retry-After must be honored but never exceed the one-minute bound"
+        );
+
+        let mut date = reqwest::header::HeaderMap::new();
+        let future = (Utc::now() + chrono::Duration::seconds(1)).to_rfc2822();
+        date.insert(reqwest::header::RETRY_AFTER, future.parse().unwrap());
+        let (delay, source) = bounded_openai_retry_after(&date, 0);
+        assert_eq!(source, "retry_after");
+        assert!(delay <= Duration::from_secs(1));
+    }
 
     #[test]
     fn parse_fixture_with_tools() {

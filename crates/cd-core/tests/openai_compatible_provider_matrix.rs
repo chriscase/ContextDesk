@@ -14,13 +14,66 @@
 //! `wiremock::MockServer` binds to an ephemeral loopback port.
 
 use cd_core::chat::{ChatMessage, OpenAiCompatibleClient, Role, StreamDelta};
+use cd_core::providers::{ProviderCapabilities, ProviderKind, ProviderProfile};
+use cd_core::research::backend_for;
 use cd_core::ssrf::SsrfPolicy;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+const JSON_COMPLETION: &str = r#"{"choices":[{"message":{"role":"assistant","content":"recovered"},"finish_reason":"stop"}]}"#;
+
+#[derive(Clone, Copy)]
+struct SequenceResponse {
+    status: u16,
+    body: &'static str,
+    retry_after: Option<&'static str>,
+}
+
+struct SequenceResponder {
+    calls: Arc<AtomicUsize>,
+    responses: Vec<SequenceResponse>,
+}
+
+impl Respond for SequenceResponder {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        let index = self.calls.fetch_add(1, Ordering::SeqCst);
+        let response = self
+            .responses
+            .get(index)
+            .copied()
+            .unwrap_or_else(|| *self.responses.last().expect("non-empty response sequence"));
+        let mut template = ResponseTemplate::new(response.status).set_body_string(response.body);
+        if let Some(retry_after) = response.retry_after {
+            template = template.insert_header("retry-after", retry_after);
+        }
+        if response.status == 200 {
+            template = template.insert_header("content-type", "application/json");
+        }
+        template
+    }
+}
 
 fn client(base_url: &str) -> OpenAiCompatibleClient {
     OpenAiCompatibleClient::new(base_url, None, "matrix-test-model", &SsrfPolicy::default())
         .expect("client construction")
+}
+
+fn openai_profile(base_url: &str) -> ProviderProfile {
+    ProviderProfile {
+        id: "matrix-openai-compatible".into(),
+        label: "matrix OpenAI-compatible".into(),
+        kind: ProviderKind::OpenAiCompatible,
+        base_url: base_url.into(),
+        api_key_ref: None,
+        chat_model: "matrix-test-model".into(),
+        embedding_model: None,
+        embedding_base_url: None,
+        capabilities: ProviderCapabilities::chat_remote(),
+        local_only: true,
+        deadline_preference: Default::default(),
+    }
 }
 
 fn one_user_message(text: &str) -> Vec<ChatMessage> {
@@ -42,6 +95,176 @@ async fn mount_sse(server: &MockServer, body: &str) {
         )
         .mount(server)
         .await;
+}
+
+async fn mount_sequence(server: &MockServer, responses: Vec<SequenceResponse>) -> Arc<AtomicUsize> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(SequenceResponder {
+            calls: calls.clone(),
+            responses,
+        })
+        .mount(server)
+        .await;
+    calls
+}
+
+/// Bounded HTTP 429 recovery is shared by buffered, streamed, and callback
+/// completion paths. Retry-After: 0 keeps this hermetic test instantaneous.
+#[tokio::test]
+async fn rate_limit_recovers_across_all_openai_completion_paths() {
+    for path_kind in ["complete", "stream", "callback"] {
+        let server = MockServer::start().await;
+        let calls = mount_sequence(
+            &server,
+            vec![
+                SequenceResponse {
+                    status: 429,
+                    body: "synthetic rate limit",
+                    retry_after: Some("0"),
+                },
+                SequenceResponse {
+                    status: 200,
+                    body: JSON_COMPLETION,
+                    retry_after: None,
+                },
+            ],
+        )
+        .await;
+        let completion = match path_kind {
+            "complete" => {
+                client(&server.uri())
+                    .complete(&one_user_message("hi"), None)
+                    .await
+            }
+            "stream" => {
+                client(&server.uri())
+                    .complete_stream(&one_user_message("hi"), None)
+                    .await
+            }
+            "callback" => {
+                client(&server.uri())
+                    .complete_stream_cb(&one_user_message("hi"), None, |_| {}, None)
+                    .await
+            }
+            _ => unreachable!("fixed path-kind fixture"),
+        }
+        .expect("429 followed by success must recover");
+        assert_eq!(completion.content, "recovered", "path={path_kind}");
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "path={path_kind}");
+    }
+}
+
+#[tokio::test]
+async fn repeated_429_exhaustion_preserves_final_error_body() {
+    let server = MockServer::start().await;
+    let calls = mount_sequence(
+        &server,
+        vec![SequenceResponse {
+            status: 429,
+            body: "synthetic final rate-limit body",
+            retry_after: Some("0"),
+        }],
+    )
+    .await;
+    let error = client(&server.uri())
+        .complete(&one_user_message("hi"), None)
+        .await
+        .expect_err("persistent 429 must fail after the bounded retry budget");
+    assert!(error.to_string().contains("HTTP 429"));
+    assert!(error
+        .to_string()
+        .contains("synthetic final rate-limit body"));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "initial request plus two retries"
+    );
+}
+
+#[tokio::test]
+async fn non_429_client_error_is_not_retried_and_preserves_body() {
+    let server = MockServer::start().await;
+    let calls = mount_sequence(
+        &server,
+        vec![SequenceResponse {
+            status: 400,
+            body: "synthetic invalid request body",
+            retry_after: None,
+        }],
+    )
+    .await;
+    let error = client(&server.uri())
+        .complete_stream(&one_user_message("hi"), None)
+        .await
+        .expect_err("non-429 4xx must return immediately");
+    assert!(error.to_string().contains("HTTP 400"));
+    assert!(error.to_string().contains("synthetic invalid request body"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn exhausted_streaming_429_does_not_trigger_a_second_non_stream_retry_budget() {
+    let server = MockServer::start().await;
+    let calls = mount_sequence(
+        &server,
+        vec![SequenceResponse {
+            status: 429,
+            body: "synthetic terminal rate limit",
+            retry_after: Some("0"),
+        }],
+    )
+    .await;
+    let backend = backend_for(&openai_profile(&server.uri()), None)
+        .await
+        .expect("build local mock backend");
+    let mut on_text = |_text: String| {};
+    let error = backend
+        .complete_streaming(&one_user_message("hi"), &[], &mut on_text, None)
+        .await
+        .expect_err("exhausted 429 remains terminal instead of falling back");
+    assert!(error.to_string().contains("HTTP 429"));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "the OpenAI backend must not replay an exhausted streaming 429 as non-stream"
+    );
+}
+
+#[tokio::test]
+async fn callback_retry_wait_observes_cancellation() {
+    let server = MockServer::start().await;
+    let calls = mount_sequence(
+        &server,
+        vec![SequenceResponse {
+            status: 429,
+            body: "synthetic rate limit",
+            retry_after: Some("1"),
+        }],
+    )
+    .await;
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let client = client(&server.uri());
+    let cancel_for_task = cancel.clone();
+    let task = tokio::spawn(async move {
+        client
+            .complete_stream_cb(
+                &one_user_message("hi"),
+                None,
+                |_| {},
+                Some(cancel_for_task.as_ref()),
+            )
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    cancel.store(true, Ordering::SeqCst);
+    let error = task
+        .await
+        .expect("retry task joins")
+        .expect_err("cancellation must interrupt callback retry wait");
+    assert_eq!(error.to_string(), "cancelled");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 /// Baseline: an ordinary conformant SSE stream produces the expected text.
@@ -567,7 +790,6 @@ use cd_core::agent::ChatBackend;
 use cd_core::events::StreamEvent;
 use cd_core::provider_telemetry::ObservedRoute;
 use cd_core::turn_trace::{RecordingTurnTrace, TracingChatBackend};
-use std::sync::Arc;
 
 fn client_with_secret(base_url: &str) -> OpenAiCompatibleClient {
     OpenAiCompatibleClient::new(
