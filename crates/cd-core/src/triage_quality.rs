@@ -144,6 +144,10 @@ pub struct TriageKnownAnswerKey {
     /// Message token that identifies the true causal trigger, when establishable.
     #[serde(default)]
     pub true_trigger_message_token: Option<String>,
+    /// When multiple triggers are equally supported, every identifying token
+    /// must remain represented among the causal candidates.
+    #[serde(default)]
+    pub competing_trigger_message_tokens: Vec<String>,
     /// Tokens that identify downstream symptoms (not causes).
     #[serde(default)]
     pub symptom_message_tokens: Vec<String>,
