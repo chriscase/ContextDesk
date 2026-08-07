@@ -809,6 +809,49 @@ pub fn score_structured_triage_answer(
         },
     });
 
+    // A real (seq, source) identity alone does not prove that the cited row
+    // supports the text of its attached claim.  Evaluate this integrity check
+    // only when host message text is available; it is not a causal classifier.
+    let mut correspondence_ok = true;
+    let mut correspondence_reason = "cited rows support their claim text".to_string();
+    if !host.messages_by_seq.is_empty() {
+        for claim in answer
+            .observations
+            .iter()
+            .chain(answer.causal_candidates.iter())
+        {
+            let (Some(seq), Some(source)) = (claim.seq, claim.source.as_ref()) else {
+                continue;
+            };
+            let Some((_, _, message)) =
+                host.messages_by_seq
+                    .iter()
+                    .find(|(candidate_seq, candidate_source, _)| {
+                        *candidate_seq == seq && candidate_source == source
+                    })
+            else {
+                continue;
+            };
+            if !claim_corresponds_to_cited_message(
+                &claim.text,
+                message,
+                seq,
+                source,
+                &host.messages_by_seq,
+            ) {
+                correspondence_ok = false;
+                correspondence_reason =
+                    format!("claim text is not supported by cited seq={seq} source={source}");
+                break;
+            }
+        }
+    }
+    dimensions.push(RubricDimension {
+        id: "claim_evidence_correspondence".into(),
+        passed: correspondence_ok,
+        reason: correspondence_reason,
+    });
+
     // 3) Trigger identification (when establishable)
     let trigger_seq = key
         .true_trigger_message_token
@@ -1092,6 +1135,85 @@ fn find_token_seq(host: &TriageHostFacts, token: &str) -> Option<(u64, String)> 
                 None
             }
         })
+}
+
+/// Material tokens used for deterministic text-to-citation binding.
+fn material_tokens(text: &str) -> BTreeSet<String> {
+    text.to_ascii_lowercase()
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|token| token.len() >= 4)
+        .filter(|token| {
+            !matches!(
+                *token,
+                "that"
+                    | "this"
+                    | "with"
+                    | "from"
+                    | "into"
+                    | "about"
+                    | "have"
+                    | "been"
+                    | "were"
+                    | "will"
+                    | "when"
+                    | "where"
+                    | "which"
+                    | "their"
+                    | "there"
+                    | "would"
+                    | "could"
+                    | "should"
+                    | "error"
+                    | "level"
+                    | "info"
+                    | "warn"
+                    | "debug"
+                    | "trace"
+                    | "report"
+                    | "reports"
+                    | "detected"
+            )
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// Check that a cited host row supports the claim it is attached to.
+///
+/// Containment and shared material tokens provide direct support.  A claim
+/// with no overlap is rejected only when another host row is a stronger match,
+/// retaining support for high-level inventory observations.
+fn claim_corresponds_to_cited_message(
+    claim_text: &str,
+    cited_message: &str,
+    cited_seq: u64,
+    cited_source: &str,
+    all_messages: &[(u64, String, String)],
+) -> bool {
+    let claim_lower = claim_text.to_ascii_lowercase();
+    let cited_lower = cited_message.to_ascii_lowercase();
+    if claim_lower.trim().is_empty() || cited_lower.trim().is_empty() {
+        return false;
+    }
+    if claim_lower.contains(cited_lower.trim()) || cited_lower.contains(claim_lower.trim()) {
+        return true;
+    }
+
+    let claim_tokens = material_tokens(claim_text);
+    let cited_hits = claim_tokens
+        .intersection(&material_tokens(cited_message))
+        .count();
+    if cited_hits > 0 {
+        return true;
+    }
+
+    all_messages.iter().all(|(seq, source, other_message)| {
+        (*seq == cited_seq && source == cited_source)
+            || claim_tokens
+                .intersection(&material_tokens(other_message))
+                .count()
+                <= cited_hits
+    })
 }
 
 fn answer_text_blob(answer: &StructuredTriageAnswer) -> String {
