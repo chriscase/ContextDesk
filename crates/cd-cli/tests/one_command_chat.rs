@@ -100,6 +100,26 @@ async fn blank_questions_close_each_output_contract_without_provider_calls() {
     let data = TempDir::new().unwrap();
     let app_config = data.path().join("configured-provider.json");
 
+    let invalid_project = TempDir::new().unwrap();
+    std::fs::write(
+        invalid_project.path().join(".contextdesk.toml"),
+        "this is not valid toml = [",
+    )
+    .unwrap();
+    let before_project_config_load = isolated_command(&data)
+        .current_dir(invalid_project.path())
+        .args(["--json", "   "])
+        .output()
+        .unwrap();
+    assert_eq!(before_project_config_load.status.code(), Some(1));
+    assert!(before_project_config_load.stderr.is_empty());
+    let envelope: Value = serde_json::from_slice(&before_project_config_load.stdout).unwrap();
+    assert_eq!(envelope["ok"], false);
+    assert!(envelope["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("question cannot be blank"));
+
     std::fs::write(&app_config, "not valid app config").unwrap();
     let before_config_load = isolated_command(&data)
         .args(["--app-config", app_config.to_str().unwrap(), "   "])

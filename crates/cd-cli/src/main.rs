@@ -21,6 +21,18 @@ use std::path::PathBuf;
 async fn main() {
     let (args, invocation) = cli::normalize_invocation_args(std::env::args_os());
     let cli = Cli::parse_from(args);
+    if let Command::Chat(args) = &cli.command {
+        let format = if cli.global.json {
+            OutputFormat::Json
+        } else if cli.global.jsonl {
+            OutputFormat::Jsonl
+        } else {
+            cli.global.format.unwrap_or(OutputFormat::Text)
+        };
+        if let Err(error) = commands::chat::validate_question(args, format) {
+            std::process::exit(error.category.code());
+        }
+    }
     let code = run(cli, invocation).await;
     std::process::exit(code);
 }
@@ -69,12 +81,6 @@ async fn run(cli: Cli, invocation: InvocationMode) -> i32 {
     };
     let resolved = config::resolve(global_layer.as_ref(), project_layer.as_ref(), &overrides);
     let format = resolved.output_format.value;
-
-    if let Command::Chat(args) = &cli.command {
-        if let Err(error) = commands::chat::validate_question(args, format) {
-            return error.category.code();
-        }
-    }
 
     let app_cfg = match adapters::load_app_config(&paths) {
         Ok(c) => c,
