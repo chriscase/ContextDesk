@@ -897,30 +897,27 @@ async fn qualification_retries_and_typed_retry_reasons_agree_on_attempt_counts()
     );
     let telemetry = provider_turn_telemetry(&events);
     let calls = recorder.calls();
-    let final_text = events
-        .iter()
-        .filter_map(|event| match event {
-            StreamEvent::TextDelta { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<String>();
-    let observation = cd_workflow::qualification::project_live_turn_from_parts(
-        &resolved.profile.id,
-        &resolved.profile.chat_model,
-        &final_text,
-        &events,
-        &calls,
+    let observation = cd_workflow::provider_telemetry::aggregate_provider_turn_telemetry(
+        cd_workflow::provider_telemetry::ProviderTelemetryAggregateInput {
+            configured_profile_id: &resolved.profile.id,
+            configured_model: &resolved.profile.chat_model,
+            events: &events,
+            calls: &calls,
+        },
     );
 
-    assert_eq!(observation.provider_calls, calls.len());
     assert_eq!(
-        observation.retries,
+        usize::try_from(observation.provider_round_count).expect("provider rounds fit usize"),
+        calls.len()
+    );
+    assert_eq!(
+        observation.application_retry_reasons.len(),
         telemetry.application_retry_reasons.len(),
         "RED (known gap at base): the qualification projection's window-heuristic \
-         `retries` ({}) disagrees with the typed application_retry_reasons ({:?}) for \
+         application retry count ({}) disagrees with the typed application_retry_reasons ({:?}) for \
          the same capture — CLI provider-qualify / Tauri live_turn would report a \
          different attempt count than the shared provider_telemetry DTO",
-        observation.retries,
+        observation.application_retry_reasons.len(),
         telemetry.application_retry_reasons,
     );
 }
@@ -1005,19 +1002,21 @@ async fn genuine_application_retry_is_counted_once_by_both_projections() {
     );
 
     let calls = recorder.calls();
-    let observation = cd_workflow::qualification::project_live_turn_from_parts(
-        &resolved.profile.id,
-        &resolved.profile.chat_model,
-        "hello",
-        &events,
-        &calls,
+    let observation = cd_workflow::provider_telemetry::aggregate_provider_turn_telemetry(
+        cd_workflow::provider_telemetry::ProviderTelemetryAggregateInput {
+            configured_profile_id: &resolved.profile.id,
+            configured_model: &resolved.profile.chat_model,
+            events: &events,
+            calls: &calls,
+        },
     );
     assert_eq!(
-        observation.retries, 1,
-        "a genuine application retry is exactly one retry in the qualification projection"
+        observation.application_retry_reasons.len(),
+        1,
+        "a genuine application retry is exactly one retry in the shared host projection"
     );
     assert_eq!(
-        observation.retries,
+        observation.application_retry_reasons.len(),
         telemetry.application_retry_reasons.len(),
         "both host-visible counters agree on a genuine application retry"
     );
