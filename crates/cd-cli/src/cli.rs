@@ -143,6 +143,10 @@ pub enum Command {
     /// for an imported corpus (no provider / LLM). Does not rewrite events.
     #[command(visible_alias = "episodes")]
     ExceptionEpisodes(ExceptionEpisodesArgs),
+    /// Optional retrieval-role diagnostics (embedding / reranking):
+    /// configured state, optional live health probe, and the retrieval mode
+    /// configuration would select (no provider / LLM).
+    RetrievalStatus(RetrievalStatusArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -182,6 +186,22 @@ pub struct ExceptionEpisodesArgs {
     /// Corpus id to correlate. Defaults to the current corpus selected by the
     /// most recent import or `contextdesk corpus use`.
     pub corpus_id: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct RetrievalStatusArgs {
+    /// Actively probe enabled role endpoints (network to those endpoints
+    /// only). Without this flag the report is offline and states are
+    /// configuration-derived.
+    #[arg(long)]
+    pub probe: bool,
+    /// Inspect this corpus id for embedded-template state.
+    #[arg(long)]
+    pub corpus_id: Option<String>,
+    /// Inspect the current corpus (from the most recent import or
+    /// `contextdesk corpus use`).
+    #[arg(long)]
+    pub corpus: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -456,6 +476,7 @@ where
         "assess",
         "exception-episodes",
         "episodes",
+        "retrieval-status",
     ];
     let value_options = [
         "--format",

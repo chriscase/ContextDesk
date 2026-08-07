@@ -322,6 +322,17 @@ async fn dispatch(
             );
             emit(format, resolved.color.value, "exception_episodes", result)
         }
+        Command::RetrievalStatus(args) => {
+            let secrets = adapters::secret_store();
+            let result = commands::retrieval_status::run(
+                args,
+                &paths.cache_root,
+                app_cfg,
+                &cli_state.current_corpus_id,
+                &secrets,
+            );
+            emit(format, resolved.color.value, "retrieval_status", result)
+        }
     }
 }
 

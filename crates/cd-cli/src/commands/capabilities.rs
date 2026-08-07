@@ -127,6 +127,7 @@ const COMMANDS: &[&str] = &[
     "config path",
     "capabilities",
     "doctor",
+    "retrieval-status",
     "logging-assessment",
     "exception-episodes",
 ];

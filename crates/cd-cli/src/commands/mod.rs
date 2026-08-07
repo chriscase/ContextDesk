@@ -11,5 +11,6 @@ pub mod import;
 pub mod logging_assessment;
 pub mod normalize;
 pub mod normalized;
+pub mod retrieval_status;
 pub mod session;
 pub mod timezone;
