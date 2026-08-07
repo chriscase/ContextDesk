@@ -83,11 +83,11 @@ fn no_embed_policy() -> LogEmbedPolicy {
 fn stderr_block(occurrence: usize) -> Vec<String> {
     let mut lines = Vec::with_capacity(STDERR_RECORDS_PER_OCCURRENCE);
     lines.push(format!(
-        "XYZ_EXCEPTION: java.lang.RuntimeException: XYZ_PAYMENT_FAILED id={occurrence}"
+        "XYZ_EXCEPTION: java.lang.RuntimeException: XYZ_PAYMENT_FAILED request_id=req-{occurrence}"
     ));
     for w in 0..MISC_LINES {
         lines.push(format!(
-            "Exception wrapper XYZ_WRAP#{w} for payment failure id={occurrence}"
+            "Exception wrapper XYZ_WRAP#{w} for payment failure request_id=req-{occurrence}"
         ));
     }
     for f in 0..AT_FRAMES {
@@ -116,7 +116,7 @@ fn write_cascade_import(root: &Path) {
         let s = base % 60;
         let ts = format!("2026-03-15T{h:02}:{m:02}:{s:02}.000Z");
         app.push_str(&format!(
-            "{ts} ERROR XYZ_EXCEPTION: java.lang.RuntimeException: XYZ_PAYMENT_FAILED id={occurrence}\n"
+            "{ts} ERROR XYZ_EXCEPTION: java.lang.RuntimeException: XYZ_PAYMENT_FAILED request_id=req-{occurrence}\n"
         ));
         app.push_str("  at com.xyz.payment.Client.charge(Client.java:42)\n");
         app.push_str("  at com.xyz.api.OrderService.checkout(OrderService.java:88)\n");

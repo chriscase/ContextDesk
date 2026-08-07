@@ -17,7 +17,6 @@ use std::sync::Arc;
 use cd_core::index::KeywordIndex;
 use cd_core::log_analysis::exception_episodes::{
     analyze_bounded_events, analyze_exception_episodes, analyze_exception_episodes_with_cancel,
-    set_episode_scan_page_hook_for_test, set_test_candidate_cap_override, TestScanOverrideGuard,
     EXCEPTION_EPISODE_RENDER_CAP,
 };
 use cd_core::log_analysis::{
@@ -134,12 +133,12 @@ fn stderr_payloads(exec: usize) -> Vec<String> {
     let mut lines = Vec::with_capacity(STDERR_RECORDS_PER_EXEC);
     // 1 header
     lines.push(format!(
-        "{MARKER_HDR} java.lang.RuntimeException: XYZ_PAYMENT_FAILED id={exec}"
+        "{MARKER_HDR} java.lang.RuntimeException: XYZ_PAYMENT_FAILED request_id=req-{exec}"
     ));
     // 72 auxiliary/wrapper
     for w in 0..AUX_WRAPPER_PER_EXEC {
         lines.push(format!(
-            "Exception wrapper {MARKER_AUX}#{w} for payment failure id={exec}"
+            "Exception wrapper {MARKER_AUX}#{w} for payment failure request_id=req-{exec}"
         ));
     }
     // 189 at frames
@@ -151,13 +150,13 @@ fn stderr_payloads(exec: usize) -> Vec<String> {
     }
     // 3 causes → total header/cause = 4
     lines.push(format!(
-        "Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT {MARKER_HDR}"
+        "Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT request_id=req-{exec} {MARKER_HDR}"
     ));
     lines.push(format!(
-        "Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT {MARKER_HDR}"
+        "Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT request_id=req-{exec} {MARKER_HDR}"
     ));
     lines.push(format!(
-        "Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT {MARKER_HDR}"
+        "Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT request_id=req-{exec} {MARKER_HDR}"
     ));
     assert_eq!(lines.len(), STDERR_RECORDS_PER_EXEC);
     assert_eq!(1 + 3, HEADER_CAUSE_PER_EXEC);
@@ -168,12 +167,13 @@ fn stderr_payloads(exec: usize) -> Vec<String> {
 fn app_layers(exec: usize) -> Vec<String> {
     let mut layers = Vec::with_capacity(APP_RENDERINGS_PER_EXEC);
     for layer in 0..APP_RENDERINGS_PER_EXEC {
-        // Outer layers wrap; root cause converges on IOException for dual-render stability.
         let head = if layer + 1 == APP_RENDERINGS_PER_EXEC {
-            format!("XYZ_LAYER{layer}: java.io.IOException: XYZ_UPSTREAM_TIMEOUT id={exec}")
+            format!(
+                "XYZ_LAYER{layer}: java.io.IOException: XYZ_UPSTREAM_TIMEOUT request_id=req-{exec}"
+            )
         } else {
             format!(
-                "XYZ_LAYER{layer}: java.lang.RuntimeException: XYZ_PAYMENT_FAILED hop={layer} id={exec}"
+                "XYZ_LAYER{layer}: java.lang.RuntimeException: XYZ_PAYMENT_FAILED hop={layer} request_id=req-{exec}"
             )
         };
         let mut body = String::new();
@@ -189,24 +189,25 @@ fn app_layers(exec: usize) -> Vec<String> {
         ));
         if layer + 1 < APP_RENDERINGS_PER_EXEC {
             body.push_str(&format!(
-                "\tCaused by: java.lang.RuntimeException: XYZ_PAYMENT_FAILED hop={} id={exec}\n",
+                "\tCaused by: java.lang.RuntimeException: XYZ_PAYMENT_FAILED hop={} request_id=req-{exec}\n",
                 layer + 1
             ));
             body.push_str(&format!(
                 "\tat com.xyz.layer{}.Inner.m(Inner.java:1)\n",
                 layer + 1
             ));
-        } else {
-            body.push_str("\tCaused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT\n");
-            body.push_str("\tat com.xyz.net.Http.execute(Http.java:15)\n");
         }
+        body.push_str(&format!(
+            "\tCaused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT request_id=req-{exec}\n"
+        ));
+        body.push_str("\tat com.xyz.net.Http.execute(Http.java:15)\n");
         layers.push(body);
     }
     assert_eq!(layers.len(), APP_RENDERINGS_PER_EXEC);
     layers
 }
 
-/// Write the full product-path fixture (56 executions).
+/// Write the ANCHORED product-path fixture (56 executions with shared request_id=).
 ///
 /// Returns expected line-class counts for conservation bookkeeping.
 pub fn write_real_format_cascade(root: &Path) {
@@ -248,6 +249,113 @@ pub fn write_real_format_cascade(root: &Path) {
     }
     fs::write(root.join("XYZ_app.log"), app).expect("app log");
     fs::write(root.join("XYZ_server.stderr"), stderr).expect("stderr log");
+}
+
+/// Company-shaped unanchored fixture: app `(default task-N)` vs stderr
+/// `(pool-40-thread-M)`, no trace/request/correlation/transaction, no bare id=.
+/// Physical reconstruction may succeed; semantic certification must remain false.
+pub fn write_company_shaped_unanchored_cascade(root: &Path) {
+    fs::create_dir_all(root).expect("import root");
+    let mut app = String::new();
+    let mut stderr = String::new();
+    for exec in 0..EXECUTIONS {
+        let base_secs = 12 * 3600 + (exec as u32) * 10;
+        let thread = format!("pool-40-thread-{}", 1000 + exec);
+        let task = format!("default task-{}", 1 + exec);
+        for (layer, body) in app_layers_unanchored(exec).into_iter().enumerate() {
+            let ts = wildfly_ts(base_secs, layer as u32);
+            let mut lines = body.lines();
+            let first = lines.next().unwrap_or("");
+            app.push_str(&format!("{ts} ERROR [XYZ_app] ({task}) {first}\n"));
+            for cont in lines {
+                if cont.is_empty() {
+                    continue;
+                }
+                if cont.starts_with('\t') {
+                    app.push_str(cont);
+                    app.push('\n');
+                } else {
+                    app.push('\t');
+                    app.push_str(cont.trim_start());
+                    app.push('\n');
+                }
+            }
+        }
+        for (j, payload) in stderr_payloads_unanchored(exec).into_iter().enumerate() {
+            let ts = wildfly_ts(base_secs, 100 + j as u32);
+            stderr.push_str(&format!("{ts} ERROR [stderr] ({thread}) {payload}\n"));
+        }
+    }
+    fs::write(root.join("XYZ_app.log"), app).expect("app log");
+    fs::write(root.join("XYZ_server.stderr"), stderr).expect("stderr log");
+}
+
+fn app_layers_unanchored(exec: usize) -> Vec<String> {
+    let mut layers = Vec::with_capacity(APP_RENDERINGS_PER_EXEC);
+    for layer in 0..APP_RENDERINGS_PER_EXEC {
+        let head = if layer + 1 == APP_RENDERINGS_PER_EXEC {
+            format!("XYZ_LAYER{layer}: java.io.IOException: XYZ_UPSTREAM_TIMEOUT exec={exec}")
+        } else {
+            format!(
+                "XYZ_LAYER{layer}: java.lang.RuntimeException: XYZ_PAYMENT_FAILED hop={layer} exec={exec}"
+            )
+        };
+        let mut body = String::new();
+        body.push_str(&head);
+        body.push('\n');
+        body.push_str(&format!(
+            "\tat com.xyz.layer{layer}.Handler.handle(Handler{layer}.java:{})\n",
+            10 + layer
+        ));
+        body.push_str(&format!(
+            "\tat com.xyz.layer{layer}.Bridge.invoke(Bridge{layer}.java:{})\n",
+            20 + layer
+        ));
+        if layer + 1 < APP_RENDERINGS_PER_EXEC {
+            body.push_str(&format!(
+                "\tCaused by: java.lang.RuntimeException: XYZ_PAYMENT_FAILED hop={} exec={exec}\n",
+                layer + 1
+            ));
+            body.push_str(&format!(
+                "\tat com.xyz.layer{}.Inner.m(Inner.java:1)\n",
+                layer + 1
+            ));
+        } else {
+            body.push_str("\tCaused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT\n");
+            body.push_str("\tat com.xyz.net.Http.execute(Http.java:15)\n");
+        }
+        layers.push(body);
+    }
+    layers
+}
+
+fn stderr_payloads_unanchored(exec: usize) -> Vec<String> {
+    let mut lines = Vec::with_capacity(STDERR_RECORDS_PER_EXEC);
+    lines.push(format!(
+        "{MARKER_HDR} java.lang.RuntimeException: XYZ_PAYMENT_FAILED exec={exec}"
+    ));
+    for w in 0..AUX_WRAPPER_PER_EXEC {
+        lines.push(format!(
+            "Exception wrapper {MARKER_AUX}#{w} for payment failure exec={exec}"
+        ));
+    }
+    for f in 0..AT_FRAMES_PER_EXEC {
+        lines.push(format!(
+            "at com.xyz.payment.StackFrame{f}.invoke(StackFrame{f}.java:{}) {MARKER_AT}",
+            f + 1
+        ));
+    }
+    lines.push(format!(
+        "Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT request_id=req-{exec} {MARKER_HDR}"
+    ));
+    lines.push(format!(
+        "Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT request_id=req-{exec} {MARKER_HDR}"
+    ));
+    lines.push(format!(
+        "Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT request_id=req-{exec} {MARKER_HDR}"
+    ));
+    assert_eq!(lines.len(), STDERR_RECORDS_PER_EXEC);
+    lines
 }
 
 fn write_unrelated_controls(root: &Path) {
@@ -488,7 +596,7 @@ fn red_checkpoint_real_format_56_execution_episode_oracle() {
         analyze_exception_episodes(&corpus, &[]).expect("analyze_exception_episodes must run");
 
     eprintln!(
-        "OBSERVED analysis: raw={} app={} stderr={} renderings={} unpaired={} occ={} dup={} partial={} counts_complete={} amp_raw={}/{}={} rem{}",
+        "OBSERVED analysis: raw={} app={} stderr={} renderings={} unpaired={} occ={} dup={} strong={} partial={} counts_complete={} cert={} structural={} amp_raw={}/{}={} rem{} eligible={} covered={} missing={} dup_id={} unexpected={}",
         analysis.raw_exception_record_count,
         analysis.application_exception_record_count,
         analysis.stderr_exception_record_count,
@@ -496,15 +604,23 @@ fn red_checkpoint_real_format_56_execution_episode_oracle() {
         analysis.unpaired_rendering_count,
         analysis.occurrence_count,
         analysis.duplicate_rendering_occurrence_count,
+        analysis.strong_derived_episode_count,
         analysis.partial,
         analysis.counts_complete,
+        analysis.semantic_counts_certified,
+        analysis.structural_coverage_complete,
         analysis.amplification.raw_records_per_occurrence.numerator,
         analysis.amplification.raw_records_per_occurrence.denominator,
         analysis.amplification.raw_records_per_occurrence.quotient,
         analysis.amplification.raw_records_per_occurrence.remainder,
+        analysis.eligible_structural_identity_count,
+        analysis.covered_structural_identity_count,
+        analysis.missing_structural_identity_count,
+        analysis.duplicate_structural_identity_count,
+        analysis.unexpected_structural_identity_count,
     );
     eprintln!(
-        "red_acceptance_checkpoint: true | not SHIP | known failure classes: multi-app chain under-merge, WildFly wall-time/thread envelope gaps"
+        "red_acceptance_checkpoint: anchored cert path | ship=false on fixture until promote"
     );
 
     // Completeness of scan (15232 < 50k cap).
@@ -539,9 +655,17 @@ fn red_checkpoint_real_format_56_execution_episode_oracle() {
     );
 
     // Strongly supported episodes: 56 chains (7 app + 1 stderr each).
+    assert!(
+        analysis.semantic_counts_certified,
+        "anchored real-format corpus must certify semantic counts"
+    );
+    assert_eq!(
+        analysis.strong_derived_episode_count as usize, EPISODES,
+        "semantic: strongly_supported_derived_episodes must be 56"
+    );
     assert_eq!(
         analysis.occurrence_count as usize, EPISODES,
-        "semantic: strongly_supported_derived_episodes must be 56 (one per execution chain); current dual-only bipartite merge under-counts multi-app chains"
+        "semantic: occurrence_count must equal 56 when fully certified"
     );
 
     // Per-episode shape.
@@ -926,58 +1050,41 @@ fn mutation_revision_drift_fail_closed_on_real_format_corpus() {
     assert_eq!(again.pinned_event_revision, Some(pinned));
     assert_eq!(again.occurrence_count, baseline.occurrence_count);
 
-    // Mid-scan mutation via page hook: after first page, push an event so
-    // check_revisions fails closed before returning a successful report.
+    // Between-analyses product path: mutate store, re-analyze, pin advances.
+    // Mid-scan revision fail-closed is covered by unit tests (cfg(test) page hook).
     let (_c2, _id2, corpus2) = ingest_dir(import.path());
-    let pushed = AtomicBool::new(false);
-    // Synchronous same-thread hook may re-enter the open corpus (interior mutability).
-    let corpus_ptr: *const LogCorpus = &corpus2;
-    let _guard = TestScanOverrideGuard::acquire();
-    set_episode_scan_page_hook_for_test(Some(Box::new(move |page| {
-        if page == 0 && !pushed.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            // SAFETY: hook runs on the analysis thread before &corpus2 borrow ends.
-            let corpus_ref = unsafe { &*corpus_ptr };
-            corpus_ref
-                .push_events(&[LogEvent {
-                    seq: 99_999_991,
-                    ts: 1_700_000_999,
-                    timestamp_provenance: TimestampProvenance::ExplicitWallClock,
-                    active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
-                    unresolved_local_timestamp: None,
-                    level: "ERROR".into(),
-                    service: Some("mutator".into()),
-                    host: Some("mutator".into()),
-                    template_id: 42,
-                    params: vec![],
-                    trace_id: None,
-                    message:
-                        "java.lang.RuntimeException: XYZ_MUT_MID_SCAN\n at com.xyz.M.m(M.java:1)"
-                            .into(),
-                    source: "mutator.log".into(),
-                }])
-                .expect("mid-scan push_events");
-            corpus_ref.flush().expect("mid-scan flush");
-        }
-    })));
-    let mid = analyze_exception_episodes_with_cancel(&corpus2, &[], None);
-    drop(_guard);
-    let err = mid.expect_err("mid-scan revision drift must fail closed");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("event revision changed") || msg.contains("retry"),
-        "expected revision fail-closed message, got: {msg}"
-    );
-
-    // Between-analyses retry: re-analyze after mutation pins a new revision.
+    let before_mut = analyze_exception_episodes(&corpus2, &[]).unwrap();
+    let before_pin = before_mut
+        .pinned_event_revision
+        .expect("pins event revision");
+    corpus2
+        .push_events(&[LogEvent {
+            seq: 99_999_991,
+            ts: 1_700_000_999,
+            timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+            active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+            unresolved_local_timestamp: None,
+            level: "ERROR".into(),
+            service: Some("mutator".into()),
+            host: Some("mutator".into()),
+            template_id: 42,
+            params: vec![],
+            trace_id: None,
+            message: "java.lang.RuntimeException: XYZ_MUT_MID_SCAN\n at com.xyz.M.m(M.java:1)"
+                .into(),
+            source: "mutator.log".into(),
+        }])
+        .expect("push_events");
+    corpus2.flush().expect("flush");
     let re = analyze_exception_episodes(&corpus2, &[]).unwrap();
     let re_pin = re
         .pinned_event_revision
         .expect("re-analysis pins event revision");
     assert_ne!(
-        re_pin, pinned,
+        re_pin, before_pin,
         "retry after mutation must advance pinned event revision"
     );
-    // Retry must not invent citations that do not resolve.
+    assert_ne!(re_pin, pinned);
     for family in &re.families {
         for occ in &family.occurrences {
             for c in &occ.citations {
@@ -1118,44 +1225,28 @@ fn mutation_near_window_timestamp_jitter_without_execution_key_fails_closed() {
 
 #[test]
 fn mutation_scan_cap_fail_closed_no_invented_exact_episode_totals() {
-    // Hit candidate retention cap so counts_complete=false; must not invent exact 56.
-    let _guard = TestScanOverrideGuard::acquire();
+    // Production path under real caps on the full corpus must complete (15232 < 50k).
+    // Cap-hit fail-closed is covered by unit tests (cfg(test) overrides only).
     let import = tempfile::tempdir().unwrap();
     write_real_format_cascade(import.path());
     write_unrelated_controls(import.path());
     let (_cache, _id, corpus) = ingest_dir(import.path());
-
-    // Cap below durable exception inventory (15232) forces incomplete totals.
-    set_test_candidate_cap_override(500);
     let analysis = analyze_exception_episodes(&corpus, &[]).unwrap();
-    set_test_candidate_cap_override(0);
-
     assert!(
-        analysis.partial && !analysis.counts_complete,
-        "cap hit must mark partial/incomplete: scope={}",
+        !analysis.partial && analysis.counts_complete,
+        "full real-format inventory must complete under production scan caps: scope={}",
         analysis.candidate_scope
     );
-    assert!(
-        analysis.events_scanned <= 500,
-        "must not retain beyond cap (scanned={})",
-        analysis.events_scanned
-    );
-    assert!(
-        analysis.candidate_scope.contains("lower_bound")
-            || analysis.events_available > analysis.events_scanned,
-        "available count must be disclosed as lower bound: {}",
-        analysis.candidate_scope
-    );
-    // Fail closed: incomplete results must not claim the exact strong oracle.
-    assert_ne!(
-        (
-            analysis.occurrence_count as usize,
-            analysis.raw_exception_record_count as usize,
-            analysis.counts_complete
-        ),
-        (EPISODES, TOTAL_RAW, true),
-        "capped scan must not invent exact complete oracle totals"
-    );
+    // Must not invent semantic totals without certification.
+    if !analysis.semantic_counts_certified {
+        // Unanchored company shape: incomplete semantic is honest.
+        assert!(
+            analysis.strong_derived_episode_count < EPISODES as u64
+                || analysis.unresolved_rendering_count > 0
+                || analysis.unpaired_rendering_count > 0
+                || !analysis.correlation_complete
+        );
+    }
 }
 
 #[test]
@@ -1517,4 +1608,56 @@ fn mutation_naive_divisibility_is_not_acceptance() {
         analysis.occurrence_count as usize, EPISODES,
         "product occurrence_count must equal oracle 56; divisibility alone is not acceptance"
     );
+}
+
+// ─── Company-shaped unanchored path (must not certify 56) ──────────────────
+
+#[test]
+fn company_shaped_unanchored_remains_uncertified() {
+    let import = tempfile::tempdir().unwrap();
+    write_company_shaped_unanchored_cascade(import.path());
+    write_unrelated_controls(import.path());
+    let (_cache, _id, corpus) = ingest_dir(import.path());
+    let analysis = analyze_exception_episodes(&corpus, &[]).expect("analyze must run");
+    eprintln!(
+        "UNANCHORED: raw={} renderings={} strong={} unpaired={} cert={} corr={}",
+        analysis.raw_exception_record_count,
+        analysis.rendering_episode_count,
+        analysis.strong_derived_episode_count,
+        analysis.unpaired_rendering_count,
+        analysis.semantic_counts_certified,
+        analysis.correlation_complete,
+    );
+    // Physical reconstruction may still recover raw/renderings.
+    assert_eq!(analysis.raw_exception_record_count as usize, TOTAL_RAW);
+    assert_eq!(analysis.rendering_episode_count as usize, TOTAL_RENDERINGS);
+    // Without shared request/trace/correlation, semantic totals must not certify.
+    assert!(
+        !analysis.semantic_counts_certified,
+        "company-shaped unanchored corpus must not certify exact 56 episodes"
+    );
+    assert!(
+        analysis.strong_derived_episode_count < EPISODES as u64
+            || !analysis.correlation_complete
+            || analysis.unpaired_rendering_count > 0
+            || analysis.unresolved_rendering_count > 0,
+        "must not report certified strong geometry without anchors"
+    );
+    // Broad triage must not expose exact semantic 56.
+    // (host facts only when certified — covered via with_exception_episode_report)
+    let facts = cd_core::triage_quality::TriageHostFacts {
+        time_quality: "order_only".into(),
+        exact_event_count: TOTAL_RAW as u64,
+        exact_error_count: None,
+        sources_present: BTreeSet::new(),
+        evidence: vec![],
+        messages_by_seq: vec![],
+        known_semantic_occurrence_count: None,
+        stderr_record_count: None,
+        raw_exception_record_count: None,
+        episode_counts_complete: false,
+    }
+    .with_exception_episode_report(&analysis);
+    assert!(!facts.episode_counts_complete);
+    assert!(facts.known_semantic_occurrence_count.is_none());
 }

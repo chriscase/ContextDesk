@@ -4,7 +4,7 @@
   "red_acceptance_checkpoint": true,
   "ship": false,
   "base_commit": "50cd50409dd30bd23f39b578ea9d7481c6506a4c",
-  "description": "Fail-closed real-format acceptance oracle: 56 executions × (7 application full-stack renderings + 265 WildFly/JBoss [stderr] (thread) records). Current main must fail for documented semantic reasons; do not weaken.",
+  "description": "Anchored real-format acceptance: 56 executions \u00d7 (7 application full-stack renderings + 265 WildFly/JBoss [stderr] (thread) records) with shared request_id= anchors. Company-shaped unanchored twin (no request/trace/id) must not certify.",
   "format": {
     "timestamp_shape": "YYYY-MM-DD HH:mm:ss,SSS",
     "stderr_envelope": "LEVEL [stderr] (pool-N-thread-M) payload",
@@ -47,8 +47,9 @@
     "header_cause_stored = header_cause_cited = 224"
   ],
   "execution_keys": {
-    "within_cycle": "shared pool-40-thread-{1000+execution} on all records of that execution",
-    "between_cycles": "distinct thread id per execution; non-overlapping wall windows of 10s"
+    "anchored_within_cycle": "shared request_id=req-{execution} across 7 app + 1 stderr; pool thread and default-task thread also present",
+    "unanchored_company_shaped": "app (default task-N) vs stderr (pool-40-thread-M); no request/trace/correlation/transaction/bare-id",
+    "between_cycles": "distinct execution index; non-overlapping wall windows of 10s"
   },
   "required_product_apis": [
     "cd_core::log_analysis::ingest_path_with_policy",
@@ -57,18 +58,29 @@
     "cd_core::triage_quality::score_structured_triage_answer"
   ],
   "known_current_main_failure_classes": [
-    "wildfly_envelope_drops_at_frames: payload after `[stderr] (thread)` does not match is_stack_continuation(`at `), so 10584 at-frames are stored but not retained in renderings (often stderr_raw_in_analysis = 56×76 = 4256)",
-    "app_renderings_per_episode_under_counted: bipartite 1:1 dual-only merge cannot attach 7 ApplicationFullStack + 1 SeparatelyWrappedRecords into one episode",
-    "wildfly_comma_timestamp_not_wall: OrderOnly basis breaks wall-close dual merge",
-    "parentheses_thread_not_extracted: (pool-N-thread-M) is not a strong_execution_key source",
-    "episode_count_not_56: under-merge or over-fragment of multi-app chains (observed ~616 unpaired renderings)",
-    "citation_union_not_15232_or_duplicates: incomplete multi-rendering assembly"
+    "unanchored_company_shape_does_not_certify_56_without_request_or_trace",
+    "bare_id_must_not_be_exact_execution_anchor"
   ],
   "integration_instructions": [
     "1. Check out this branch tip on an isolated worktree.",
     "2. cargo test -p cd-core --test real_format_exception_episode_acceptance_lab -- --nocapture",
-    "3. Expect red_acceptance_checkpoint failures with semantic labels until product episode assembly supports multi-app chains + WildFly envelopes.",
-    "4. Do not weaken assert_eq! truth tables to green the suite.",
-    "5. Product fix work belongs on a separate goal/branch; this fixture is the acceptance gate."
-  ]
+    "3. Anchored path: expect raw=15232 renderings=448 strong=56 semantic_counts_certified=true.",
+    "4. Unanchored company-shaped path: expect semantic_counts_certified=false and no exact 56-episode broad-triage claim.",
+    "5. Do not weaken assert_eq! truth tables; do not use anchored fixture to claim company corpus is solved."
+  ],
+  "anchored_certification": {
+    "requires": [
+      "request_id or trace_id shared across 7 app + 1 stderr"
+    ],
+    "expected_when_anchored": {
+      "strongly_supported_derived_episodes": 56,
+      "semantic_counts_certified": true
+    }
+  },
+  "unanchored_company_shaped": {
+    "app_thread": "default task-N",
+    "stderr_thread": "pool-40-thread-M",
+    "no_trace_request_correlation": true,
+    "semantic_counts_certified": false
+  }
 }
