@@ -61,6 +61,7 @@ pub async fn run(
     model_override: Option<&str>,
     implicit_chat: bool,
 ) -> CliResult<()> {
+    validate_question(args, format)?;
     let question = args.question.join(" ");
     // `full` exposes bounded, redacted conversation and tool-call content —
     // still never a secret or pre-redaction value, but real turn content
@@ -584,6 +585,18 @@ pub async fn run(
         }
     }
 
+    Ok(())
+}
+
+pub fn validate_question(args: &ChatArgs, format: OutputFormat) -> CliResult<()> {
+    if args.question.join(" ").trim().is_empty() {
+        return fail_before_turn(
+            format,
+            CliError::user(
+                "question cannot be blank; provide a question such as `contextdesk \"What caused the outage?\"`",
+            ),
+        );
+    }
     Ok(())
 }
 

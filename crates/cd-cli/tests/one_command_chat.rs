@@ -1,8 +1,11 @@
 //! Public-process proofs for the top-level question shorthand.
 
 use assert_cmd::Command;
+use cd_core::config::{save_config, AppConfig};
+use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
 use serde_json::Value;
 use tempfile::TempDir;
+use wiremock::MockServer;
 
 fn isolated_command(data: &TempDir) -> Command {
     let mut command = Command::cargo_bin("contextdesk").expect("contextdesk binary");
@@ -71,6 +74,101 @@ fn direct_question_accepts_shell_split_words_and_utf8() {
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("no active corpus"), "{stderr}");
+}
+
+#[test]
+fn end_of_options_allows_literal_and_hyphen_leading_questions() {
+    for question in ["-why", "question"] {
+        let data = TempDir::new().unwrap();
+        let output = isolated_command(&data)
+            .args(["--", question])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("no active corpus"),
+            "question={question:?} {stderr}"
+        );
+        assert!(!stderr.contains("unexpected argument"), "{stderr}");
+    }
+}
+
+#[tokio::test]
+async fn blank_questions_close_each_output_contract_without_provider_calls() {
+    let server = MockServer::start().await;
+    let data = TempDir::new().unwrap();
+    let app_config = data.path().join("configured-provider.json");
+
+    std::fs::write(&app_config, "not valid app config").unwrap();
+    let before_config_load = isolated_command(&data)
+        .args(["--app-config", app_config.to_str().unwrap(), "   "])
+        .output()
+        .unwrap();
+    assert_eq!(before_config_load.status.code(), Some(1));
+    assert!(String::from_utf8(before_config_load.stderr)
+        .unwrap()
+        .contains("question cannot be blank"));
+
+    let mut profile = ProviderProfile::ollama_local();
+    profile.kind = ProviderKind::OpenAiCompatible;
+    profile.base_url = server.uri();
+    profile.local_only = true;
+    profile.chat_model = "must-not-be-called".into();
+    let cfg = AppConfig {
+        providers: ProviderConfig {
+            active_id: Some(profile.id.clone()),
+            profiles: vec![profile],
+        },
+        ..AppConfig::default()
+    };
+    save_config(&app_config, &cfg).unwrap();
+
+    let text = isolated_command(&data)
+        .args(["--app-config", app_config.to_str().unwrap(), "   "])
+        .output()
+        .unwrap();
+    assert_eq!(text.status.code(), Some(1));
+    assert!(text.stdout.is_empty());
+    assert!(String::from_utf8(text.stderr)
+        .unwrap()
+        .contains("question cannot be blank"));
+
+    let json = isolated_command(&data)
+        .args(["--app-config", app_config.to_str().unwrap(), "--json", ""])
+        .output()
+        .unwrap();
+    assert_eq!(json.status.code(), Some(1));
+    assert!(json.stderr.is_empty());
+    let envelope: Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(envelope["ok"], false);
+    assert!(envelope["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("question cannot be blank"));
+
+    let jsonl = isolated_command(&data)
+        .args([
+            "--app-config",
+            app_config.to_str().unwrap(),
+            "--jsonl",
+            "\t",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(jsonl.status.code(), Some(1));
+    assert!(jsonl.stderr.is_empty());
+    let lines = String::from_utf8(jsonl.stdout).unwrap();
+    let values = lines
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 2, "{lines}");
+    assert_eq!(values[0]["type"], "error");
+    assert_eq!(values[1]["type"], "done");
+    assert_eq!(values[1]["ok"], false);
+
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[test]

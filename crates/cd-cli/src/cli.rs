@@ -472,6 +472,13 @@ where
         let Some(token) = args[index].to_str() else {
             return (args, InvocationMode::Explicit);
         };
+        if token == "--" {
+            if args.get(index + 1).is_none() {
+                return (args, InvocationMode::Explicit);
+            }
+            args.insert(index, OsString::from("chat"));
+            return (args, InvocationMode::ImplicitChat);
+        }
         if value_options.contains(&token) {
             index = index.saturating_add(2);
             continue;
@@ -675,5 +682,53 @@ mod tests {
             assert_eq!(mode, InvocationMode::Explicit, "argv={argv:?}");
             assert_eq!(normalized.len(), argv.len());
         }
+    }
+
+    #[test]
+    fn end_of_options_keeps_literal_questions_and_explicit_precedence() {
+        for argv in [
+            vec!["contextdesk", "--", "-why"],
+            vec!["contextdesk", "--", "question"],
+            vec!["contextdesk", "--", "chat", "question"],
+        ] {
+            let (normalized, mode) = normalize_invocation_args(argv);
+            assert_eq!(mode, InvocationMode::ImplicitChat);
+            assert_eq!(normalized[1], "chat");
+            assert_eq!(normalized[2], "--");
+            let parsed = Cli::try_parse_from(normalized).unwrap();
+            let Command::Chat(chat) = parsed.command else {
+                panic!("literal question did not select chat");
+            };
+            if chat.question[0] == "chat" {
+                assert_eq!(chat.question, ["chat", "question"]);
+            } else {
+                assert_eq!(chat.question.len(), 1);
+            }
+        }
+
+        for argv in [
+            vec!["contextdesk", "chat", "--", "-why"],
+            vec!["contextdesk", "--jsonl", "ask", "question"],
+        ] {
+            let (normalized, mode) = normalize_invocation_args(argv.clone());
+            assert_eq!(mode, InvocationMode::Explicit, "argv={argv:?}");
+            assert_eq!(normalized.len(), argv.len());
+        }
+
+        let (normalized, mode) = normalize_invocation_args([
+            "contextdesk",
+            "question",
+            "--dry-run",
+            "--trace",
+            "summary",
+        ]);
+        assert_eq!(mode, InvocationMode::ImplicitChat);
+        let parsed = Cli::try_parse_from(normalized).unwrap();
+        let Command::Chat(chat) = parsed.command else {
+            panic!("question did not select chat");
+        };
+        assert_eq!(chat.question, vec!["question"]);
+        assert!(chat.dry_run);
+        assert_eq!(chat.trace, Some(TraceLevel::Summary));
     }
 }

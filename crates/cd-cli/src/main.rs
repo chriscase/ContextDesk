@@ -70,6 +70,12 @@ async fn run(cli: Cli, invocation: InvocationMode) -> i32 {
     let resolved = config::resolve(global_layer.as_ref(), project_layer.as_ref(), &overrides);
     let format = resolved.output_format.value;
 
+    if let Command::Chat(args) = &cli.command {
+        if let Err(error) = commands::chat::validate_question(args, format) {
+            return error.category.code();
+        }
+    }
+
     let app_cfg = match adapters::load_app_config(&paths) {
         Ok(c) => c,
         Err(e) => return emit_error(format, "startup", e),
