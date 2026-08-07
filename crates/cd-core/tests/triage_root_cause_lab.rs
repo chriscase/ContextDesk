@@ -140,6 +140,68 @@ fn build_brief(cache: &Path, corpus_id: &str) -> cd_core::tool_host::BroadLogTri
         .expect("broad triage brief")
 }
 
+fn scripted_multi_stage_completions(
+    brief: &cd_core::tool_host::BroadLogTriageBrief,
+    final_text: &str,
+    max_rounds: usize,
+) -> Vec<ChatCompletion> {
+    let candidates = brief
+        .candidate_groups
+        .iter()
+        .take(cd_core::tool_host::BROAD_LOG_TRIAGE_CANDIDATE_CAP.min(max_rounds.saturating_sub(1)))
+        .collect::<Vec<_>>();
+    assert!(
+        candidates.len() >= 2,
+        "fixture must exercise staged comparison"
+    );
+    let mut completions = candidates
+        .iter()
+        .map(|candidate| ChatCompletion {
+            content: format!(
+                "{} is a bounded candidate; observations and causes remain separate.",
+                candidate.group_id
+            ),
+            tool_calls: vec![],
+            finish_reason: "stop".into(),
+            telemetry: Default::default(),
+        })
+        .collect::<Vec<_>>();
+    let group_ids = candidates
+        .iter()
+        .map(|candidate| candidate.group_id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    completions.push(ChatCompletion {
+        content: format!("{final_text}\n\nCompared independent groups: {group_ids}"),
+        tool_calls: vec![],
+        finish_reason: "stop".into(),
+        telemetry: Default::default(),
+    });
+    completions
+}
+
+fn assert_multi_stage_completed(events: &[StreamEvent], expected_rounds: u64) {
+    let detail = events
+        .iter()
+        .find_map(|event| match event {
+            StreamEvent::Tool {
+                name,
+                detail: Some(detail),
+                ok: Some(true),
+                ..
+            } if name == "broad_log_triage_multi_stage" && detail.contains("final_comparison") => {
+                Some(detail)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("multi-stage final comparison missing: {events:?}"));
+    let value: serde_json::Value = serde_json::from_str(detail).expect("multi-stage detail JSON");
+    assert_eq!(value["stage"], "final_comparison");
+    assert_eq!(value["provider_rounds"], expected_rounds);
+    assert_eq!(value["accepted_groups"].as_array().map(Vec::len), Some(3));
+    assert_eq!(value["rejected_groups"].as_array().map(Vec::len), Some(0));
+}
+
 fn good_answer_for(key: &TriageKnownAnswerKey, host: &TriageHostFacts) -> StructuredTriageAnswer {
     let first_visible = host.evidence.first().expect("brief exposes an identity");
     let mut observations = vec![TriageClaim {
@@ -844,14 +906,13 @@ fn scripted_broad_triage_turn_exposes_brief_and_accepts_structured_answer() {
         .unwrap();
     tool_host.pin_log_suppression_lens(&corpus_id).unwrap();
 
-    // Scripted path: host brief is prepared inside the turn; answer immediately
-    // with a structured contract-shaped reply (plumbing proof only).
-    let backend = ScriptedBackend::new(vec![ChatCompletion {
-        content: markdown.clone(),
-        tool_calls: vec![],
-        finish_reason: "stop".into(),
-        telemetry: Default::default(),
-    }]);
+    // Scripted path: the host prepares candidate-scoped briefs, then the
+    // backend supplies one bounded draft per selected group and a comparison.
+    let backend = ScriptedBackend::new(scripted_multi_stage_completions(
+        &visible_brief,
+        &markdown,
+        4,
+    ));
 
     let mut history = Vec::new();
     let opts = AgentOptions {
@@ -879,6 +940,7 @@ fn scripted_broad_triage_turn_exposes_brief_and_accepts_structured_answer() {
             &opts,
         ))
         .expect("run_agent_turn");
+    assert_multi_stage_completed(&events, 4);
 
     let trail: Vec<String> = events
         .iter()
@@ -1066,7 +1128,8 @@ fn minimum_custom_budget_reserves_proportional_headroom_on_real_agent_path() {
     let key = load_answer_key(case);
     let (cache, corpus_id, corpus) = ingest_case(case);
     let mut host_facts = host_facts_for(&corpus, &key);
-    host_facts.evidence = build_brief(cache.path(), &corpus_id).evidence;
+    let visible_brief = build_brief(cache.path(), &corpus_id);
+    host_facts.evidence = visible_brief.evidence.clone();
     let markdown = good_answer_for(&key, &host_facts).to_markdown();
 
     let mut tool_host = ToolHost::new(
@@ -1085,12 +1148,11 @@ fn minimum_custom_budget_reserves_proportional_headroom_on_real_agent_path() {
         .unwrap();
     tool_host.pin_log_suppression_lens(&corpus_id).unwrap();
 
-    let backend = ScriptedBackend::new(vec![ChatCompletion {
-        content: markdown,
-        tool_calls: vec![],
-        finish_reason: "stop".into(),
-        telemetry: Default::default(),
-    }]);
+    let backend = ScriptedBackend::new(scripted_multi_stage_completions(
+        &visible_brief,
+        &markdown,
+        4,
+    ));
     let mut history = Vec::new();
     let minimum_budget = cd_core::model_context::MIN_CONTEXT_CHAR_BUDGET;
     assert_eq!(minimum_budget, 24_000, "fixture expectation changed");
@@ -1117,6 +1179,7 @@ fn minimum_custom_budget_reserves_proportional_headroom_on_real_agent_path() {
             &opts,
         ))
         .expect("small-budget broad turn");
+    assert_multi_stage_completed(&events, 4);
 
     let trail = events
         .iter()
