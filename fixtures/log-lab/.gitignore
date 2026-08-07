@@ -2,3 +2,8 @@
 
 # Golden acceptance corpora intentionally include raw `.log` sources.
 !/acceptance/**/*.log
+
+# The retrieval-ablation benchmark corpus IS the fixture: its raw `.log`
+# sources must stay tracked despite the repo-wide `*.log` rule. Bulk
+# medium/large trees stay under /generated/ (ignored above).
+!/scenarios/retrieval-ablation/**/*.log

@@ -11,7 +11,13 @@ use std::path::{Path, PathBuf};
 
 #[path = "log_lab_behavior.rs"]
 mod log_lab_behavior;
+#[allow(unused_imports)]
 pub use log_lab_behavior::*;
+
+#[path = "retrieval_ablation.rs"]
+mod retrieval_ablation;
+#[allow(unused_imports)]
+pub use retrieval_ablation::*;
 
 pub type LabResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
