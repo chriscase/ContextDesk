@@ -1899,8 +1899,10 @@ describe("LinkedChatRail", () => {
       expect(screen.queryByTestId("linked-chat-switcher")).toBeNull();
       expect(screen.getByTestId("log-explorer-chat-thread")).toBeTruthy();
       expect(screen.getByTestId("log-explorer-chat-composer")).toBeTruthy();
-      expect(container.textContent).toMatch(
-        new RegExp(`${n} chat${n === 1 ? "" : "s"}`),
+      await waitFor(() =>
+        expect(container.textContent).toMatch(
+          new RegExp(`${n} chat${n === 1 ? "" : "s"}`),
+        ),
       );
 
       if (n > 0) {
