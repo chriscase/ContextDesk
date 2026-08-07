@@ -105,6 +105,15 @@ pub fn event_to_dto(e: &StreamEvent) -> EventDto {
                 .map(serde_json::Value::Object)
                 .unwrap_or_else(|| telemetry.to_json()),
         ),
+        StreamEvent::ProviderTelemetry { telemetry } => (
+            "provider_telemetry",
+            telemetry
+                .to_json()
+                .as_object()
+                .cloned()
+                .map(serde_json::Value::Object)
+                .unwrap_or_else(|| telemetry.to_json()),
+        ),
         StreamEvent::PermissionRequired {
             request_id,
             tool_name,
@@ -1272,6 +1281,8 @@ pub async fn research_scripted_tool_turn(
             },
         }],
         finish_reason: "tool_calls".into(),
+
+        telemetry: Default::default(),
     };
     // Second response filled after tool — use local synthesis in script:
     let backend = ScriptedBackend::new(vec![
@@ -1280,6 +1291,8 @@ pub async fn research_scripted_tool_turn(
             content: String::new(), // replaced below if empty
             tool_calls: vec![],
             finish_reason: "stop".into(),
+
+            telemetry: Default::default(),
         },
     ]);
     let mut history = vec![];
@@ -1624,6 +1637,8 @@ mod tests {
                     },
                     tool_calls: vec![],
                     finish_reason: "stop".into(),
+
+                    telemetry: Default::default(),
                 })
             }
         }
@@ -1845,6 +1860,8 @@ mod tests {
                     content: "ok".into(),
                     tool_calls: vec![],
                     finish_reason: "stop".into(),
+
+                    telemetry: Default::default(),
                 })
             }
             async fn complete_streaming(
@@ -2071,6 +2088,8 @@ mod tests {
             "tool",
             "citation",
             "search_trail",
+            "context_budget",
+            "provider_telemetry",
             "permission_required",
             "turn_completed",
             "error",
@@ -2108,6 +2127,34 @@ mod tests {
             },
             StreamEvent::SearchTrail {
                 steps: vec!["x".into()],
+            },
+            StreamEvent::ContextBudget {
+                telemetry: crate::context_budgeting::ContextBudgetTelemetry::default(),
+            },
+            StreamEvent::ProviderTelemetry {
+                telemetry: Box::new(crate::provider_telemetry::ProviderTurnTelemetry {
+                    configured_profile_id: "p".into(),
+                    configured_model: "m".into(),
+                    response_model: None,
+                    provider_request_id: None,
+                    observed_route: crate::provider_telemetry::ObservedRoute::Unknown,
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                    reasoning_tokens: None,
+                    cached_tokens: None,
+                    total_tokens: None,
+                    cost: None,
+                    context_budget: None,
+                    provider_round_count: 0,
+                    application_retry_reasons: vec![],
+                    final_turn_outcome: None,
+                    finish_reason: None,
+                    empty_visible_answer: false,
+                    truncated_by_length: false,
+                    tool_call_count: 0,
+                    latency_ms: None,
+                    rounds: vec![],
+                }),
             },
             StreamEvent::PermissionRequired {
                 request_id: "r".into(),

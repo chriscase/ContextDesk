@@ -562,3 +562,304 @@ async fn truncated_non_sse_json_body_fails_cleanly() {
         .unwrap_err();
     assert!(!error.to_string().is_empty());
 }
+
+use cd_core::agent::ChatBackend;
+use cd_core::events::StreamEvent;
+use cd_core::provider_telemetry::ObservedRoute;
+use cd_core::turn_trace::{RecordingTurnTrace, TracingChatBackend};
+use std::sync::Arc;
+
+fn client_with_secret(base_url: &str) -> OpenAiCompatibleClient {
+    OpenAiCompatibleClient::new(
+        base_url,
+        Some("sk-secret-must-never-leak".into()),
+        "configured-model-id",
+        &SsrfPolicy::default(),
+    )
+    .expect("client construction")
+}
+
+/// Non-streaming Vercel-shaped usage: cost, reasoning, cached, response model,
+/// finish reason, and a safe request id — without treating configured model
+/// as observed route.
+#[tokio::test]
+async fn non_streaming_vercel_shaped_usage_and_safe_request_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .insert_header("x-request-id", "hdr-req-1")
+                .insert_header("authorization", "Bearer should-not-capture")
+                .set_body_raw(
+                    serde_json::json!({
+                        "id": "chatcmpl-vercel-1",
+                        "model": "anthropic/claude-sonnet-4",
+                        "choices": [{
+                            "message": { "role": "assistant", "content": "ok" },
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 11,
+                            "completion_tokens": 22,
+                            "total_tokens": 33,
+                            "cost": 0.00123,
+                            "completion_tokens_details": { "reasoning_tokens": 9 },
+                            "prompt_tokens_details": { "cached_tokens": 5 }
+                        },
+                        "providerMetadata": {
+                            "gateway": {
+                                "routing": { "finalProvider": "anthropic" }
+                            }
+                        }
+                    })
+                    .to_string(),
+                    "application/json",
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let completion = client_with_secret(&server.uri())
+        .complete(&one_user_message("hi"), None)
+        .await
+        .unwrap();
+    assert_eq!(completion.content, "ok");
+    assert_eq!(completion.finish_reason, "stop");
+    let tel = &completion.telemetry;
+    assert_eq!(
+        tel.response_model.as_deref(),
+        Some("anthropic/claude-sonnet-4")
+    );
+    assert_eq!(
+        tel.provider_request_id.as_deref(),
+        Some("chatcmpl-vercel-1")
+    );
+    assert_eq!(
+        tel.observed_route,
+        ObservedRoute::Reported {
+            value: "anthropic".into()
+        }
+    );
+    assert_eq!(tel.prompt_tokens, Some(11));
+    assert_eq!(tel.completion_tokens, Some(22));
+    assert_eq!(tel.reasoning_tokens, Some(9));
+    assert_eq!(tel.cached_tokens, Some(5));
+    assert_eq!(tel.total_tokens, Some(33));
+    assert_eq!(tel.cost, Some(0.00123));
+    let dumped = format!("{tel:?}");
+    assert!(!dumped.contains("sk-secret"));
+    assert!(!dumped.contains("should-not-capture"));
+}
+
+/// Streaming path with a final usage-bearing chunk.
+#[tokio::test]
+async fn streaming_captures_final_usage_chunk() {
+    let server = MockServer::start().await;
+    mount_sse(
+        &server,
+        "data: {\"id\":\"chatcmpl-stream-1\",\"model\":\"openai/gpt-test\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+         data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+         data: {\"id\":\"chatcmpl-stream-1\",\"model\":\"openai/gpt-test\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1,\"total_tokens\":4,\"cost\":0.0}}\n\n\
+         data: [DONE]\n\n",
+    )
+    .await;
+
+    let completion = client(&server.uri())
+        .complete_stream_cb(&one_user_message("hi"), None, |_| {}, None)
+        .await
+        .unwrap();
+    assert_eq!(completion.content, "hi");
+    assert_eq!(completion.finish_reason, "stop");
+    assert_eq!(completion.telemetry.prompt_tokens, Some(3));
+    assert_eq!(completion.telemetry.completion_tokens, Some(1));
+    assert_eq!(completion.telemetry.total_tokens, Some(4));
+    assert_eq!(completion.telemetry.cost, Some(0.0));
+    assert_eq!(
+        completion.telemetry.response_model.as_deref(),
+        Some("openai/gpt-test")
+    );
+    assert_eq!(completion.telemetry.observed_route, ObservedRoute::Unknown);
+}
+
+/// Reasoning consumes the whole completion allowance: empty visible text + length.
+#[tokio::test]
+async fn reasoning_fills_completion_empty_visible_length_finish() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_raw(
+                    serde_json::json!({
+                        "id": "chatcmpl-len-1",
+                        "model": "openai/o1-test",
+                        "choices": [{
+                            "message": { "role": "assistant", "content": "" },
+                            "finish_reason": "length"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 100,
+                            "completion_tokens": 500,
+                            "total_tokens": 600,
+                            "completion_tokens_details": { "reasoning_tokens": 500 }
+                        }
+                    })
+                    .to_string(),
+                    "application/json",
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let completion = client(&server.uri())
+        .complete(&one_user_message("think hard"), None)
+        .await
+        .unwrap();
+    assert!(completion.content.trim().is_empty());
+    assert_eq!(completion.finish_reason, "length");
+    assert_eq!(completion.telemetry.reasoning_tokens, Some(500));
+    assert!(cd_core::provider_telemetry::visible_answer_empty(
+        &completion.content
+    ));
+    assert!(cd_core::provider_telemetry::finish_reason_is_length(
+        &completion.finish_reason
+    ));
+}
+
+/// Missing usage / route / cost stay explicitly unknown.
+#[tokio::test]
+async fn missing_metadata_stays_unknown_not_inferred_from_configured_model() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_raw(
+                    serde_json::json!({
+                        "choices": [{
+                            "message": { "role": "assistant", "content": "plain" },
+                            "finish_reason": "stop"
+                        }]
+                    })
+                    .to_string(),
+                    "application/json",
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let completion = client_with_secret(&server.uri())
+        .complete(&one_user_message("hi"), None)
+        .await
+        .unwrap();
+    let tel = &completion.telemetry;
+    assert!(tel.response_model.is_none());
+    assert!(tel.provider_request_id.is_none());
+    assert_eq!(tel.observed_route, ObservedRoute::Unknown);
+    assert!(tel.prompt_tokens.is_none());
+    assert!(tel.cost.is_none());
+}
+
+/// Secrets injected into auth never appear in traced transport DTOs / EventDto.
+#[tokio::test]
+async fn secrets_never_appear_in_traced_transport_dto() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .insert_header("set-cookie", "session=evil")
+                .set_body_raw(
+                    serde_json::json!({
+                        "id": "chatcmpl-safe",
+                        "choices": [{
+                            "message": { "role": "assistant", "content": "hi" },
+                            "finish_reason": "stop"
+                        }],
+                        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
+                    })
+                    .to_string(),
+                    "application/json",
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let recorder = Arc::new(RecordingTurnTrace::new());
+    let inner = client_with_secret(&server.uri());
+    struct Adapter(OpenAiCompatibleClient);
+    #[async_trait::async_trait]
+    impl ChatBackend for Adapter {
+        async fn complete(
+            &self,
+            messages: &[cd_core::chat::ChatMessage],
+            tools: &[cd_core::tools::ToolSpec],
+        ) -> cd_core::error::CoreResult<cd_core::chat::ChatCompletion> {
+            let tools = if tools.is_empty() { None } else { Some(tools) };
+            self.0.complete(messages, tools).await
+        }
+    }
+    let backend = TracingChatBackend::new(Box::new(Adapter(inner)), recorder.clone());
+    let _ = backend
+        .complete(&one_user_message("hi"), &[])
+        .await
+        .unwrap();
+    let calls = recorder.calls();
+    assert_eq!(calls.len(), 1);
+    let json = serde_json::to_string(&calls[0]).unwrap();
+    assert!(!json.contains("sk-secret"));
+    assert!(!json.contains("session=evil"));
+    assert_eq!(
+        calls[0].transport.provider_request_id.as_deref(),
+        Some("chatcmpl-safe")
+    );
+
+    // Shared DTO projection path used by Tauri (event_to_dto).
+    let turn_transport = calls[0].transport.clone();
+    let event = StreamEvent::ProviderTelemetry {
+        telemetry: Box::new(cd_core::provider_telemetry::ProviderTurnTelemetry {
+            configured_profile_id: "openai-compatible".into(),
+            configured_model: "configured-model-id".into(),
+            response_model: turn_transport.response_model.clone(),
+            provider_request_id: turn_transport.provider_request_id.clone(),
+            observed_route: turn_transport.observed_route.clone(),
+            prompt_tokens: turn_transport.prompt_tokens,
+            completion_tokens: turn_transport.completion_tokens,
+            reasoning_tokens: turn_transport.reasoning_tokens,
+            cached_tokens: turn_transport.cached_tokens,
+            total_tokens: turn_transport.total_tokens,
+            cost: turn_transport.cost,
+            context_budget: None,
+            provider_round_count: 1,
+            application_retry_reasons: vec![],
+            final_turn_outcome: Some("stop".into()),
+            finish_reason: Some("stop".into()),
+            empty_visible_answer: false,
+            truncated_by_length: false,
+            tool_call_count: 0,
+            latency_ms: Some(calls[0].elapsed_ms),
+            rounds: vec![],
+        }),
+    };
+    let dto = cd_core::research::event_to_dto(&event);
+    assert_eq!(dto.kind, "provider_telemetry");
+    let dumped = dto.payload.to_string();
+    assert!(!dumped.contains("sk-secret"));
+    assert!(!dumped.contains("session=evil"));
+    assert_eq!(
+        dto.payload.get("configuredModel").and_then(|v| v.as_str()),
+        Some("configured-model-id")
+    );
+    assert_eq!(
+        dto.payload
+            .get("observedRoute")
+            .and_then(|v| v.get("status"))
+            .and_then(|v| v.as_str()),
+        Some("unknown")
+    );
+}

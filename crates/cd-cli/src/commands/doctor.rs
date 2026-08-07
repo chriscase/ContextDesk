@@ -1240,6 +1240,8 @@ mod tests {
                 finish_reason: "stop".into(),
                 tool_call_count: 0,
             },
+            transport: Default::default(),
+            empty_visible_answer: false,
         }
     }
 

@@ -4854,6 +4854,7 @@ mod tests {
                 content: "ok".into(),
                 tool_calls: vec![],
                 finish_reason: "stop".into(),
+                telemetry: Default::default(),
             })
         }
     }
@@ -4957,6 +4958,7 @@ mod tests {
                 content: "ok".into(),
                 tool_calls: vec![],
                 finish_reason: "stop".into(),
+                telemetry: Default::default(),
             }]);
             let mut history = Vec::new();
             run_agent_turn(
@@ -5489,6 +5491,7 @@ mod tests {
                             .into(),
                         tool_calls: vec![],
                         finish_reason: "stop".into(),
+                        telemetry: Default::default(),
                     }]
                 .into(),
             ),
@@ -5619,6 +5622,7 @@ mod tests {
                         .into(),
                     tool_calls: Vec::new(),
                     finish_reason: "stop".into(),
+                    telemetry: Default::default(),
                 })
             }
         }
@@ -5763,11 +5767,13 @@ mod tests {
                 },
             }],
             finish_reason: "tool_calls".into(),
+            telemetry: Default::default(),
         };
         let final_resp = ChatCompletion {
             content: "Observed pool exhaustion at seq=0 source=worker.log.".into(),
             tool_calls: vec![],
             finish_reason: "stop".into(),
+            telemetry: Default::default(),
         };
         let backend = FocusedCaptureBackend {
             script: Mutex::new(vec![tool_resp, final_resp].into()),
@@ -6068,6 +6074,7 @@ trail={trail} synth_prefix={}",
                 },
             }],
             finish_reason: "tool_calls".into(),
+            telemetry: Default::default(),
         };
         let final_resp = ChatCompletion {
             content:
@@ -6075,6 +6082,7 @@ trail={trail} synth_prefix={}",
                     .into(),
             tool_calls: vec![],
             finish_reason: "stop".into(),
+            telemetry: Default::default(),
         };
         let backend = CaptureBackend {
             script: Mutex::new(vec![tool_resp, final_resp].into()),
@@ -6267,12 +6275,14 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 },
             }],
             finish_reason: "tool_calls".into(),
+            telemetry: Default::default(),
         };
         let final_resp = ChatCompletion {
             content: "Primary cause: db_pool_max changed 32→4; poison job-7f3a exhausted the pool (seq=0 source=worker.log)."
                 .into(),
             tool_calls: vec![],
             finish_reason: "stop".into(),
+            telemetry: Default::default(),
         };
         // Third script slot must not be needed; planning-only path is a separate test.
         let backend = ScriptedBackend::new(vec![tool_resp, final_resp]);
@@ -6401,6 +6411,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 },
             }],
             finish_reason: "tool_calls".into(),
+            telemetry: Default::default(),
         };
         // Round 1: first zero → Allow. Round 2: second zero → Stop.
         // Rounds 3–7: model keeps requesting search_logs (tools schemas empty
@@ -6417,6 +6428,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 content: "No matching events; refusing ungrounded answer.".into(),
                 tool_calls: vec![],
                 finish_reason: "stop".into(),
+                telemetry: Default::default(),
             },
         ]);
         let mut history = vec![];
@@ -6559,11 +6571,13 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                     },
                 ],
                 finish_reason: "tool_calls".into(),
+                telemetry: Default::default(),
             },
             ChatCompletion {
                 content: "Synthesis from first-hit host evidence.".into(),
                 tool_calls: vec![],
                 finish_reason: "stop".into(),
+                telemetry: Default::default(),
             },
         ]);
         let mut history = vec![];
@@ -6675,6 +6689,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 },
             }],
             finish_reason: "tool_calls".into(),
+            telemetry: Default::default(),
         };
         let backend = ScriptedBackend::new(vec![
             zero("s1", "missing-a"),
@@ -6703,11 +6718,13 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                     },
                 ],
                 finish_reason: "tool_calls".into(),
+                telemetry: Default::default(),
             },
             ChatCompletion {
                 content: "Workspace runbook covers pool sizing for job-7f3a.".into(),
                 tool_calls: vec![],
                 finish_reason: "stop".into(),
+                telemetry: Default::default(),
             },
         ]);
         let mut history = vec![];
@@ -7036,18 +7053,21 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                     },
                 }],
                 finish_reason: "tool_calls".into(),
+                telemetry: Default::default(),
             },
             ChatCompletion {
                 content: "The main problem is UNTRUSTED_DATA from an untrusted external data source; the nonce-bound wrapper proves it."
                     .into(),
                 tool_calls: vec![],
                 finish_reason: "stop".into(),
+                telemetry: Default::default(),
             },
             ChatCompletion {
                 content: "The logs show the worker pool exhausted while handling job-7f3a (seq=0 source=worker.log)."
                     .into(),
                 tool_calls: vec![],
                 finish_reason: "stop".into(),
+                telemetry: Default::default(),
             },
         ]);
         let context =
@@ -7180,6 +7200,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 },
             }],
             finish_reason: "tool_calls".into(),
+            telemetry: Default::default(),
         };
         let backend = StagedBackend {
             script: Mutex::new(
@@ -7208,6 +7229,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                             },
                         }],
                         finish_reason: "stop".into(),
+                        telemetry: Default::default(),
                     },
                 ]
                 .into(),
@@ -7275,6 +7297,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             content: "I'll investigate using the linked corpus. Calling the tool now.".into(),
             tool_calls: vec![],
             finish_reason: "stop".into(),
+            telemetry: Default::default(),
         };
         let tool_resp = ChatCompletion {
             content: String::new(),
@@ -7288,11 +7311,13 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 },
             }],
             finish_reason: "tool_calls".into(),
+            telemetry: Default::default(),
         };
         let final_resp = ChatCompletion {
             content: "No matching events were found in the linked corpus.".into(),
             tool_calls: vec![],
             finish_reason: "stop".into(),
+            telemetry: Default::default(),
         };
         let backend = ScriptedBackend::new(vec![plan, tool_resp, final_resp]);
         let mut history = vec![];
@@ -7353,12 +7378,14 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                     },
                 }],
                 finish_reason: "tool_calls".into(),
+                telemetry: Default::default(),
             },
             ChatCompletion {
                 content: "No successful log evidence was obtained; retry with a narrower query."
                     .into(),
                 tool_calls: vec![],
                 finish_reason: "stop".into(),
+                telemetry: Default::default(),
             },
         ]);
         let mut history = vec![];
@@ -7429,6 +7456,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 },
             }],
             finish_reason: "tool_calls".into(),
+            telemetry: Default::default(),
         };
         let backend = ScriptedBackend::new(vec![
             search("zero-1"),
@@ -7437,6 +7465,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 content: "No matching log events were found.".into(),
                 tool_calls: vec![],
                 finish_reason: "stop".into(),
+                telemetry: Default::default(),
             },
         ]);
         let context =
@@ -7514,11 +7543,13 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                     },
                 }],
                 finish_reason: "tool_calls".into(),
+                telemetry: Default::default(),
             },
             ChatCompletion {
                 content: "The root cause is proven by seq=999999 event_id=fabricated.".into(),
                 tool_calls: vec![],
                 finish_reason: "stop".into(),
+                telemetry: Default::default(),
             },
         ]);
         let context =
@@ -7782,6 +7813,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 },
             }],
             finish_reason: "tool_calls".into(),
+            telemetry: Default::default(),
         };
         let backend = InspectScriptedBackend {
             script: Mutex::new(
@@ -7811,6 +7843,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                             .into(),
                         tool_calls: vec![],
                         finish_reason: "stop".into(),
+                        telemetry: Default::default(),
                     },
                 ]
                 .into(),
@@ -8002,16 +8035,19 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                     },
                 }],
                 finish_reason: "tool_calls".into(),
+                telemetry: Default::default(),
             },
             ChatCompletion {
                 content: "The write tool was unavailable on this linked turn.".into(),
                 tool_calls: vec![],
                 finish_reason: "stop".into(),
+                telemetry: Default::default(),
             },
             ChatCompletion {
                 content: "I still cannot provide log-grounded evidence.".into(),
                 tool_calls: vec![],
                 finish_reason: "stop".into(),
+                telemetry: Default::default(),
             },
         ]);
         let mut history = vec![];
@@ -8104,11 +8140,13 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                     },
                 }],
                 finish_reason: "tool_calls".into(),
+                telemetry: Default::default(),
             },
             ChatCompletion {
                 content: "No corpus is linked to this ordinary chat.".into(),
                 tool_calls: vec![],
                 finish_reason: "stop".into(),
+                telemetry: Default::default(),
             },
         ]);
         let mut history = vec![];
@@ -8180,6 +8218,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                     },
                 }],
                 finish_reason: "tool_calls".into(),
+                telemetry: Default::default(),
             },
             // 2. Valid JSON, but not an object.
             ChatCompletion {
@@ -8193,6 +8232,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                     },
                 }],
                 finish_reason: "tool_calls".into(),
+                telemetry: Default::default(),
             },
             // 3. A well-formed call to a log tool from an ordinary
             //    (non-linked) chat — rejected by scope, not by arguments.
@@ -8207,12 +8247,14 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                     },
                 }],
                 finish_reason: "tool_calls".into(),
+                telemetry: Default::default(),
             },
             // 4. The model gives up and answers directly.
             ChatCompletion {
                 content: "done".into(),
                 tool_calls: vec![],
                 finish_reason: "stop".into(),
+                telemetry: Default::default(),
             },
         ]);
 
@@ -8362,11 +8404,13 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 },
             }],
             finish_reason: "tool_calls".into(),
+            telemetry: Default::default(),
         };
         let final_resp = ChatCompletion {
             content: "Billing lives in the payments service. [auth.md]".into(),
             tool_calls: vec![],
             finish_reason: "stop".into(),
+            telemetry: Default::default(),
         };
         let backend = ScriptedBackend::new(vec![tool_resp, final_resp]);
         let mut history = vec![];
@@ -8416,11 +8460,13 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 },
             }],
             finish_reason: "tool_calls".into(),
+            telemetry: Default::default(),
         };
         let answer = ChatCompletion {
             content: "Here is the story you requested.".into(),
             tool_calls: vec![],
             finish_reason: "stop".into(),
+            telemetry: Default::default(),
         };
         let backend = ScriptedBackend::new(vec![malformed, answer]);
         let mut history = Vec::new();
@@ -8475,6 +8521,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 },
             }],
             finish_reason: "tool_calls".into(),
+            telemetry: Default::default(),
         };
         let corrected = ChatCompletion {
             content: String::new(),
@@ -8489,6 +8536,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 },
             }],
             finish_reason: "tool_calls".into(),
+            telemetry: Default::default(),
         };
         let backend = ScriptedBackend::new(vec![malformed, corrected]);
         let mut history = Vec::new();
@@ -8550,6 +8598,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 },
             }],
             finish_reason: "tool_calls".into(),
+            telemetry: Default::default(),
         };
         let read = ChatCompletion {
             content: String::new(),
@@ -8562,12 +8611,14 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 },
             }],
             finish_reason: "tool_calls".into(),
+            telemetry: Default::default(),
         };
         let answer = ChatCompletion {
             content: "Log triage ingests, parses, redacts, templates, stores, embeds, and then analyzes the bounded corpus."
                 .into(),
             tool_calls: vec![],
             finish_reason: "stop".into(),
+            telemetry: Default::default(),
         };
         let backend = ScriptedBackend::new(vec![search, read, answer]);
         let mut history = Vec::new();
@@ -8622,6 +8673,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             content: "should not run".into(),
             tool_calls: vec![],
             finish_reason: "stop".into(),
+            telemetry: Default::default(),
         }]);
         let flag = Arc::new(AtomicBool::new(true));
         let mut history = vec![];
@@ -8694,6 +8746,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                         },
                     }],
                     finish_reason: "tool_calls".into(),
+                    telemetry: Default::default(),
                 });
             }
             std::future::pending().await
@@ -8723,6 +8776,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                         },
                     }],
                     finish_reason: "tool_calls".into(),
+                    telemetry: Default::default(),
                 });
             }
             Err(CoreError::Message("provider connection closed".into()))
@@ -8763,6 +8817,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 content: "I inspected the logs and everything is fine.".into(),
                 tool_calls: vec![],
                 finish_reason: "stop".into(),
+                telemetry: Default::default(),
             })
         }
     }
@@ -9269,6 +9324,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             content: "Observed pool exhaustion at seq=0 source=worker.log.".into(),
             tool_calls: vec![],
             finish_reason: "stop".into(),
+            telemetry: Default::default(),
         }]);
         let mut retry_checkpoint = Some(checkpoint.clone());
         let retry_events = run_agent_turn_with_sink_and_checkpoint(
@@ -9736,11 +9792,13 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 },
             }],
             finish_reason: "tool_calls".into(),
+            telemetry: Default::default(),
         };
         let final_answer = ChatCompletion {
             content: "Here is what I found from the tools.".into(),
             tool_calls: vec![],
             finish_reason: "stop".into(),
+            telemetry: Default::default(),
         };
         let backend = ScriptedBackend::new(vec![always_tool.clone(), always_tool, final_answer]);
         let mut history = vec![];
@@ -9795,6 +9853,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                         },
                     }],
                     finish_reason: "tool_calls".into(),
+                    telemetry: Default::default(),
                 })
             }
         }
@@ -9917,6 +9976,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 },
             }],
             finish_reason: "tool_calls".into(),
+            telemetry: Default::default(),
         }]);
         let mut history = vec![];
         let events = run_agent_turn(
@@ -10024,6 +10084,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                     content: "plain answer without tools".into(),
                     tool_calls: vec![],
                     finish_reason: "stop".into(),
+                    telemetry: Default::default(),
                 })
             }
         }
@@ -10080,6 +10141,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                     content: "recovered after compact".into(),
                     tool_calls: vec![],
                     finish_reason: "stop".into(),
+                    telemetry: Default::default(),
                 })
             }
         }
@@ -10134,6 +10196,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                     content: "ok".into(),
                     tool_calls: vec![],
                     finish_reason: "stop".into(),
+                    telemetry: Default::default(),
                 })
             }
         }
@@ -10227,6 +10290,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                     content: "bounded".into(),
                     tool_calls: vec![],
                     finish_reason: "stop".into(),
+                    telemetry: Default::default(),
                 })
             }
         }
@@ -10410,6 +10474,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                     content: "ok".into(),
                     tool_calls: vec![],
                     finish_reason: "stop".into(),
+                    telemetry: Default::default(),
                 })
             }
         }
@@ -10562,6 +10627,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                     content: "grounded retry".into(),
                     tool_calls: vec![],
                     finish_reason: "stop".into(),
+                    telemetry: Default::default(),
                 })
             }
         }
@@ -10765,11 +10831,13 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 },
             }],
             finish_reason: "tool_calls".into(),
+            telemetry: Default::default(),
         };
         let final_resp = ChatCompletion {
             content: "Found alpha.".into(),
             tool_calls: vec![],
             finish_reason: "stop".into(),
+            telemetry: Default::default(),
         };
         let backend = ScriptedBackend::new(vec![tool_resp, final_resp]);
         let mut history = vec![];

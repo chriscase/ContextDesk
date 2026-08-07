@@ -52,6 +52,11 @@ pub struct TurnExecutionOptions<'a> {
 /// Drive the shared provider/tool kernel for either an ordinary or a linked
 /// turn. Host-specific lifecycle remains outside this seam; all model-facing
 /// execution inputs cross it explicitly.
+///
+/// Always captures provider-round transport telemetry through a shared
+/// [`cd_core::turn_trace::RecordingTurnTrace`] (fan-out with any host sink) and
+/// appends one authoritative [`StreamEvent::ProviderTelemetry`] so CLI and
+/// Tauri project the same DTO without independently inferring provider facts.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_turn(
     host: &mut ToolHost,
@@ -60,31 +65,82 @@ pub async fn run_turn(
     history: &mut Vec<ChatMessage>,
     session_id: &str,
     options: TurnExecutionOptions<'_>,
-    live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+    mut live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
     checkpoint_out: Option<&mut Option<LinkedSynthesisCheckpoint>>,
 ) -> CoreResult<Vec<StreamEvent>> {
-    cd_core::research::research_turn_with_cancel_and_context_and_checkpoint_and_trace(
-        host,
-        &resolved.profile,
-        resolved.api_key.clone(),
-        user_text,
-        history,
-        session_id,
-        false,
-        options.cancel,
-        options.context,
-        options.linked_synthesis_retry,
-        checkpoint_out,
-        options.turn_started_at,
-        options.turn_prelude_emitted,
-        live,
-        options.dry_run,
-        options.trace_sink,
-        options.applied_skill_ids,
-        options.turn_id,
-        options.user_selection,
-    )
-    .await
+    use cd_core::turn_trace::{FanoutTurnTrace, RecordingTurnTrace, TurnTraceSink};
+    use std::sync::Arc;
+
+    let telemetry_recorder = Arc::new(RecordingTurnTrace::new());
+    let mut sinks: Vec<Arc<dyn TurnTraceSink>> =
+        vec![telemetry_recorder.clone() as Arc<dyn TurnTraceSink>];
+    if let Some(host_sink) = options.trace_sink.clone() {
+        sinks.push(host_sink);
+    }
+    let fanout: Arc<dyn TurnTraceSink> = Arc::new(FanoutTurnTrace::new(sinks));
+
+    let mut events = if let Some(sink) = live.as_mut() {
+        cd_core::research::research_turn_with_cancel_and_context_and_checkpoint_and_trace(
+            host,
+            &resolved.profile,
+            resolved.api_key.clone(),
+            user_text,
+            history,
+            session_id,
+            false,
+            options.cancel.clone(),
+            options.context.clone(),
+            options.linked_synthesis_retry.clone(),
+            checkpoint_out,
+            options.turn_started_at,
+            options.turn_prelude_emitted,
+            Some(sink),
+            options.dry_run,
+            Some(fanout.clone()),
+            options.applied_skill_ids,
+            options.turn_id.clone(),
+            options.user_selection,
+        )
+        .await?
+    } else {
+        cd_core::research::research_turn_with_cancel_and_context_and_checkpoint_and_trace(
+            host,
+            &resolved.profile,
+            resolved.api_key.clone(),
+            user_text,
+            history,
+            session_id,
+            false,
+            options.cancel,
+            options.context,
+            options.linked_synthesis_retry,
+            checkpoint_out,
+            options.turn_started_at,
+            options.turn_prelude_emitted,
+            None,
+            options.dry_run,
+            Some(fanout),
+            options.applied_skill_ids,
+            options.turn_id,
+            options.user_selection,
+        )
+        .await?
+    };
+
+    let calls = telemetry_recorder.calls();
+    let telemetry_event = crate::provider_telemetry::aggregate_provider_telemetry_event(
+        crate::provider_telemetry::ProviderTelemetryAggregateInput {
+            configured_profile_id: &resolved.profile.id,
+            configured_model: &resolved.profile.chat_model,
+            calls: &calls,
+            events: &events,
+        },
+    );
+    if let Some(sink) = live.as_mut() {
+        sink(telemetry_event.clone());
+    }
+    events.push(telemetry_event);
+    Ok(events)
 }
 
 /// Prior tool-host state captured by [`bind_linked_corpus`], so a caller can

@@ -812,6 +812,18 @@ pub struct TracedCall {
     pub messages_capped: bool,
     /// What came back.
     pub outcome: TracedOutcome,
+    /// Authoritative transport capture from the provider response, when any.
+    /// Absent / empty means the backend did not surface wire telemetry
+    /// (non-OpenAI path, dry-run, or the gateway omitted usage).
+    #[serde(default, skip_serializing_if = "provider_transport_empty")]
+    pub transport: crate::provider_telemetry::ProviderTransportTelemetry,
+    /// Visible assistant text emptiness for this round (completed rounds only).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub empty_visible_answer: bool,
+}
+
+fn provider_transport_empty(tel: &crate::provider_telemetry::ProviderTransportTelemetry) -> bool {
+    tel.is_empty()
 }
 
 /// Metadata-only host event retained beside provider calls so an inspector can
@@ -978,6 +990,44 @@ pub struct NoopTurnTrace;
 
 impl TurnTraceSink for NoopTurnTrace {
     fn record(&self, _call: TracedCall) {}
+}
+
+/// Fan-out sink so workflow can always capture transport telemetry while a
+/// host-supplied Activity/trace sink (when present) still receives the same
+/// [`TracedCall`] values.
+pub struct FanoutTurnTrace {
+    sinks: Vec<Arc<dyn TurnTraceSink>>,
+}
+
+impl FanoutTurnTrace {
+    /// Forward every record to each sink in order.
+    pub fn new(sinks: Vec<Arc<dyn TurnTraceSink>>) -> Self {
+        Self { sinks }
+    }
+}
+
+impl TurnTraceSink for FanoutTurnTrace {
+    fn record(&self, call: TracedCall) {
+        for sink in &self.sinks {
+            sink.record(call.clone());
+        }
+    }
+
+    fn developer_detail_enabled(&self) -> bool {
+        self.sinks.iter().any(|s| s.developer_detail_enabled())
+    }
+
+    fn record_provider(&self, call: TracedCall, detail: Option<DeveloperDetailDraft>) {
+        for sink in &self.sinks {
+            sink.record_provider(call.clone(), detail.clone());
+        }
+    }
+
+    fn record_developer(&self, detail: DeveloperDetailDraft) {
+        for sink in &self.sinks {
+            sink.record_developer(detail.clone());
+        }
+    }
 }
 
 struct DeveloperDetailCaptureGateState {
@@ -1857,6 +1907,8 @@ impl ChatBackend for DryRunBackend {
             content: String::new(),
             tool_calls: Vec::new(),
             finish_reason: "stop".to_string(),
+
+            telemetry: Default::default(),
         })
     }
 }
@@ -1919,6 +1971,16 @@ impl TracingChatBackend {
                 message: crate::redact::scrub_secrets(&error.to_string()),
             },
         };
+        let (transport, empty_visible_answer) = match result {
+            Ok(completion) => (
+                completion.telemetry.clone(),
+                crate::provider_telemetry::visible_answer_empty(&completion.content),
+            ),
+            Err(_) => (
+                crate::provider_telemetry::ProviderTransportTelemetry::default(),
+                false,
+            ),
+        };
         let (stored_messages, context_used_chars, messages_capped) = traced_messages(messages);
         let call = TracedCall {
             seq,
@@ -1928,6 +1990,8 @@ impl TracingChatBackend {
             context_used_chars,
             messages_capped,
             outcome,
+            transport,
+            empty_visible_answer,
         };
         let developer = self.sink.developer_detail_enabled().then(|| {
             let request = messages
@@ -1947,6 +2011,7 @@ impl TracingChatBackend {
                     "content": completion.content,
                     "tool_calls": completion.tool_calls,
                     "finish_reason": completion.finish_reason,
+                    "telemetry": completion.telemetry.to_json(),
                 })),
                 Err(error) => DeveloperPayload::text(&error.to_string()),
             };

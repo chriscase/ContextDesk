@@ -964,6 +964,11 @@ fn build_trace_lines(
         StreamEvent::ContextBudget { telemetry } => Some(telemetry.clone()),
         _ => None,
     });
+    // Authoritative provider telemetry — same DTO Tauri projects via EventDto.
+    let provider_telemetry = outcome.events.iter().rev().find_map(|e| match e {
+        StreamEvent::ProviderTelemetry { telemetry } => Some(telemetry.as_ref().clone()),
+        _ => None,
+    });
     // Human-facing hard budget: prefer typed telemetry hard when present so
     // packing vs hard is never mislabeled as the same number.
     let context_budget_chars = context_budget_telemetry
@@ -1007,10 +1012,26 @@ fn build_trace_lines(
         },
         interpretation_validated: false,
         context_used: context_used_from_events(&outcome.events),
+        provider_telemetry: provider_telemetry.map(Box::new),
     };
     lines.push(StreamLine::TraceSummary(summary));
 
     if matches!(level, TraceLevel::Context | TraceLevel::Full) {
+        let round_tel_by_seq: std::collections::HashMap<u32, _> = outcome
+            .events
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                StreamEvent::ProviderTelemetry { telemetry } => Some(telemetry.clone()),
+                _ => None,
+            })
+            .map(|t| {
+                t.rounds
+                    .into_iter()
+                    .map(|r| (r.round, r))
+                    .collect::<std::collections::HashMap<_, _>>()
+            })
+            .unwrap_or_default();
         for call in calls {
             let (outcome_str, finish_reason, tool_call_count, error) = match &call.outcome {
                 TracedOutcome::Completed {
@@ -1024,6 +1045,7 @@ fn build_trace_lines(
                 ),
                 TracedOutcome::Failed { message } => ("failed", None, None, Some(message.clone())),
             };
+            let round_key = u32::try_from(call.seq).unwrap_or(u32::MAX);
             let context = TraceContextLine {
                 round: call.seq,
                 elapsed_ms: call.elapsed_ms,
@@ -1042,6 +1064,7 @@ fn build_trace_lines(
                 finish_reason,
                 tool_call_count,
                 error,
+                provider_round_telemetry: round_tel_by_seq.get(&round_key).cloned(),
             };
             lines.push(StreamLine::TraceContext(context));
         }
@@ -1191,6 +1214,9 @@ mod grounding_tests {
                 finish_reason: "stop".into(),
                 tool_call_count: 0,
             },
+
+            transport: Default::default(),
+            empty_visible_answer: false,
         }];
 
         let lines = build_trace_lines(

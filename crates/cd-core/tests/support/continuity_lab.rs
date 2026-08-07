@@ -114,6 +114,7 @@ pub fn tool_call(id: &str, name: &str, arguments: &str) -> ChatCompletion {
             },
         }],
         finish_reason: "tool_calls".into(),
+        telemetry: Default::default(),
     }
 }
 
@@ -122,6 +123,7 @@ pub fn final_answer(text: impl Into<String>) -> ChatCompletion {
         content: text.into(),
         tool_calls: vec![],
         finish_reason: "stop".into(),
+        telemetry: Default::default(),
     }
 }
 

@@ -423,7 +423,8 @@ impl ChatStatusRenderer {
             StreamEvent::ThoughtDelta { .. }
             | StreamEvent::Citation { .. }
             | StreamEvent::SearchTrail { .. }
-            | StreamEvent::ContextBudget { .. } => return,
+            | StreamEvent::ContextBudget { .. }
+            | StreamEvent::ProviderTelemetry { .. } => return,
         };
         self.redraw(&mut state, phase_changed);
     }

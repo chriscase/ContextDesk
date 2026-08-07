@@ -98,6 +98,16 @@ pub enum StreamEvent {
         /// Full typed snapshot (camelCase on the wire).
         telemetry: crate::context_budgeting::ContextBudgetTelemetry,
     },
+    /// Authoritative provider-turn telemetry (transport + application fold-in).
+    ///
+    /// Emitted once per turn by `cd-workflow` aggregation so CLI and Tauri
+    /// project the same DTO. Hosts must not invent token/cost/route values.
+    /// Boxed to keep [`StreamEvent`] niche-friendly for clippy's large-variant
+    /// lint while still carrying the full turn snapshot.
+    ProviderTelemetry {
+        /// Full typed turn snapshot (camelCase on the wire).
+        telemetry: Box<crate::provider_telemetry::ProviderTurnTelemetry>,
+    },
     /// Host must obtain a user decision before a write.
     PermissionRequired {
         /// Request id for `permission.respond`.

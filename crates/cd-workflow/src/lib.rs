@@ -19,6 +19,7 @@ pub mod logging_quality;
 pub mod normalize;
 pub mod normalized;
 pub mod provider;
+pub mod provider_telemetry;
 pub mod session;
 pub mod timezone;
 pub mod tools;

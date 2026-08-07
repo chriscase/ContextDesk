@@ -296,5 +296,9 @@ not know. Character totals are labelled estimates, not provider token counts;
 ambient scores/reasons appear only when the host computed them. Provider
 responses are emitted after the streaming accumulator completes, so individual
 token/SSE chunks are not retained. Package installation and connector-internal
-work still do not gain fictional substeps, and a gateway that omits usage or
-internal retries remains `not reported`.
+work still do not gain fictional substeps. Authoritative OpenAI-compatible
+provider telemetry (`ProviderTurnTelemetry` via `cd-workflow` aggregation /
+`provider_telemetry` EventDto) reports usage, cost, response model, and
+observed route only when the gateway supplies them; omitted usage, cost, or
+gateway-internal retries remain explicitly unknown / `not reported` and are
+never inferred from the configured model.

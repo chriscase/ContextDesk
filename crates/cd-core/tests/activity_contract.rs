@@ -81,6 +81,7 @@ impl ChatBackend for ScriptedBackend {
             content: "answer".to_string(),
             tool_calls: Vec::new(),
             finish_reason: "stop".to_string(),
+            telemetry: Default::default(),
         })
     }
 }
@@ -463,6 +464,7 @@ async fn inspector_on_and_off_send_the_provider_identical_requests() {
                 content: "answer".to_string(),
                 tool_calls: Vec::new(),
                 finish_reason: "stop".to_string(),
+                telemetry: Default::default(),
             })
         }
     }
@@ -816,6 +818,8 @@ fn shared_timeline_preserves_model_tool_model_order_and_separates_latency() {
             finish_reason: "stop".into(),
             tool_call_count: usize::from(seq == 0),
         },
+        transport: Default::default(),
+        empty_visible_answer: false,
     };
     let timeline = vec![
         TracedTimelineEntry {
