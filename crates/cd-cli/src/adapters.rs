@@ -166,28 +166,6 @@ pub fn secret_store() -> CliSecretStore {
     CliSecretStore::new()
 }
 
-#[cfg(test)]
-mod credential_tests {
-    use super::*;
-
-    #[test]
-    fn process_override_is_provider_only() {
-        let store = CliSecretStore {
-            keychain: KeychainSecretStore::new(),
-            provider_override: Some("ephemeral-value".to_string()),
-        };
-
-        assert_eq!(
-            store
-                .provider_override("provider/vercel/api_key")
-                .as_deref(),
-            Some("ephemeral-value")
-        );
-        assert_eq!(store.provider_override("connector/confluence/pat"), None);
-        assert_eq!(store.provider_override("connector/postgres/password"), None);
-    }
-}
-
 /// Build a `ToolHost` for a headless process: an empty workspace (the CLI's
 /// first slice is corpus/chat-oriented, not workspace file search — a
 /// non-empty workspace is a later, explicit `--workspace` flag, not an
@@ -229,4 +207,26 @@ pub fn tool_host_with_app_config(
     let mut host = tool_host(cache_root)?;
     apply_app_connectors(&mut host, app_cfg, secrets);
     Ok(host)
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    #[test]
+    fn process_override_is_provider_only() {
+        let store = CliSecretStore {
+            keychain: KeychainSecretStore::new(),
+            provider_override: Some("ephemeral-value".to_string()),
+        };
+
+        assert_eq!(
+            store
+                .provider_override("provider/vercel/api_key")
+                .as_deref(),
+            Some("ephemeral-value")
+        );
+        assert_eq!(store.provider_override("connector/confluence/pat"), None);
+        assert_eq!(store.provider_override("connector/postgres/password"), None);
+    }
 }
