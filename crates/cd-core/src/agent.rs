@@ -852,6 +852,30 @@ struct CandidateSynthesisDraft {
     group_id: String,
     text: String,
     evidence: HashSet<crate::log_analysis::SearchEvidenceIdentity>,
+    allowed_code_like_identifiers: HashSet<String>,
+}
+
+fn code_like_identifiers(text: &str) -> HashSet<String> {
+    text.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'))
+        .filter(|token| {
+            token.len() >= 4
+                && token.starts_with(|ch: char| ch.is_ascii_uppercase())
+                && token.chars().any(|ch| ch.is_ascii_digit())
+                && token.chars().any(|ch| ch.is_ascii_uppercase())
+        })
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn code_like_identifiers_are_confined<'a>(
+    output: &str,
+    supplied_text: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    let allowed = supplied_text
+        .into_iter()
+        .flat_map(code_like_identifiers)
+        .collect::<HashSet<_>>();
+    code_like_identifiers(output).is_subset(&allowed)
 }
 
 fn multi_stage_candidate_messages(
@@ -952,6 +976,12 @@ fn multi_stage_comparison_is_valid(text: &str, drafts: &[CandidateSynthesisDraft
         .collect::<HashSet<_>>();
     linked_grounded_answer_is_valid(text, &all_evidence, false)
         && drafts.iter().all(|draft| text.contains(&draft.group_id))
+        && code_like_identifiers(text).is_subset(
+            &drafts
+                .iter()
+                .flat_map(|draft| draft.allowed_code_like_identifiers.iter().cloned())
+                .collect(),
+        )
 }
 
 fn multi_stage_context_telemetry(
@@ -1067,7 +1097,11 @@ async fn run_multi_stage_broad_triage(
             let evidence = candidate.evidence.iter().cloned().collect::<HashSet<_>>();
             let sanitized = strip_model_authored_log_citations(&content);
             let accepted_content = (!sanitized.is_empty()
-                && !linked_answer_mistakes_wrapper_for_evidence(&content))
+                && !linked_answer_mistakes_wrapper_for_evidence(&content)
+                && code_like_identifiers_are_confined(
+                    &sanitized,
+                    std::iter::once(candidate.model_text.as_str()),
+                ))
             .then(|| {
                 let host_scoped = format!("group_id: {}\n{}", candidate.group_id, sanitized);
                 attach_host_evidence_appendix(&host_scoped, &evidence)
@@ -1080,6 +1114,7 @@ async fn run_multi_stage_broad_triage(
                         .take(MULTI_STAGE_CANDIDATE_DRAFT_CHAR_CAP)
                         .collect(),
                     evidence,
+                    allowed_code_like_identifiers: code_like_identifiers(&candidate.model_text),
                 });
                 break;
             }
@@ -1155,10 +1190,16 @@ async fn run_multi_stage_broad_triage(
             Some(content)
         } else if attempt > 0 && !linked_answer_mistakes_wrapper_for_evidence(&content) {
             let sanitized = strip_model_authored_log_citations(&content);
-            drafts
+            (drafts
                 .iter()
                 .all(|draft| sanitized.contains(&draft.group_id))
-                .then(|| attach_host_evidence_appendix(&sanitized, &all_evidence))
+                && code_like_identifiers(&sanitized).is_subset(
+                    &drafts
+                        .iter()
+                        .flat_map(|draft| draft.allowed_code_like_identifiers.iter().cloned())
+                        .collect(),
+                ))
+            .then(|| attach_host_evidence_appendix(&sanitized, &all_evidence))
         } else {
             None
         };
@@ -11692,6 +11733,14 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
 
     #[test]
     fn multi_stage_prompts_keep_noise_out_of_incident_ranking_and_avoid_tables() {
+        assert!(code_like_identifiers_are_confined(
+            "CDLAB4206 was observed",
+            ["pattern=CDLAB4206 gateway returned status=503"],
+        ));
+        assert!(!code_like_identifiers_are_confined(
+            "CDLAB643 was observed",
+            ["pattern=CDLAB4206 gateway returned status=503 template_id=643"],
+        ));
         let candidate = multi_stage_candidate("trace:health", 7);
         let candidate_prompt = multi_stage_candidate_messages("triage", &candidate, false)[0]
             .content
@@ -11703,6 +11752,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             group_id: candidate.group_id.clone(),
             text: "likely noise".into(),
             evidence: candidate.evidence.into_iter().collect(),
+            allowed_code_like_identifiers: HashSet::new(),
         };
         let comparison_prompt = multi_stage_comparison_messages("triage", &[draft], false)[0]
             .content
