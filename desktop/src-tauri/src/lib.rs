@@ -4637,6 +4637,10 @@ async fn agent_turn(
             return Ok(());
         }
     };
+    // Authoritative turn identity is host-generated and never derived from a
+    // renderer transcript id. Client ids remain presentation correlation
+    // labels only.
+    let turn_id = format!("{}::{}", req.session_id, uuid::Uuid::new_v4());
     // Register the sensitive-capture generation immediately after turn
     // admission, before any fallible preflight or await. Its Drop covers
     // every completion/error/cancel path, and an Off/trash command can reach
@@ -4699,6 +4703,12 @@ async fn agent_turn(
     // ordinary main-chat turn request chooses or broadens corpus scope.
     let store = session_store(&state)?;
     let stored_session = load_session_for_turn(&store, &req.session_id)?;
+    let investigation_answer_reservation = reserve_investigation_answer_message(
+        stored_session.as_ref(),
+        &req.session_id,
+        &turn_id,
+        req.client_assistant_message_id.as_deref(),
+    );
     let log_explorer_context = match linked_log_turn_context(
         stored_session.as_ref(),
         window.label(),
@@ -4965,14 +4975,6 @@ async fn agent_turn(
         let mut histories = state.histories.lock().expect("hist");
         histories.entry(req.session_id.clone()).or_default().clone()
     };
-    let turn_id = req
-        .client_assistant_message_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|message_id| !message_id.is_empty())
-        .map(|message_id| format!("{}::{message_id}", req.session_id))
-        .unwrap_or_else(|| format!("{}::{}", req.session_id, uuid::Uuid::new_v4()));
-
     // One capture object timestamps both provider completions and the live
     // host stream against the real turn origin. This preserves the causal
     // model → tool → model sequence instead of concatenating two lists later.
@@ -5131,9 +5133,9 @@ async fn agent_turn(
         host.set_log_corpus_scope(None);
         host.set_active_log_corpus(None);
     }
-    let linked_snapshot_revision = log_explorer_context.as_ref().and_then(|context| {
-        host.linked_log_snapshot_revision(&context.corpus_id).ok()
-    });
+    let linked_snapshot_revision = log_explorer_context
+        .as_ref()
+        .and_then(|context| host.linked_log_snapshot_revision(&context.corpus_id).ok());
     let mut next_synthesis_checkpoint = linked_synthesis_retry.clone();
     // Activity capture seam. `TracingChatBackend` wraps the same backend and
     // forwards every call unchanged, so this cannot alter execution, tool
@@ -5247,9 +5249,7 @@ async fn agent_turn(
         let store = session_store(&state)?;
         persist_investigation_answer_at(
             &store,
-            &req.session_id,
-            req.client_assistant_message_id.as_deref(),
-            &turn_id,
+            investigation_answer_reservation.as_ref(),
             linked_snapshot_revision,
             events,
         )?;
@@ -5402,12 +5402,27 @@ fn preserve_host_investigation_answer_metadata(session: &mut Session, durable: O
                 .collect()
         })
         .unwrap_or_default();
+    let incoming_id_counts =
+        session
+            .messages
+            .iter()
+            .fold(HashMap::<String, usize>::new(), |mut counts, message| {
+                *counts.entry(message.id.clone()).or_default() += 1;
+                counts
+            });
     for message in &mut session.messages {
-        let retained = durable_by_id
-            .get(message.id.as_str())
-            .and_then(|saved| saved.meta.as_ref())
-            .and_then(|meta| meta.get(INVESTIGATION_ANSWER_META_KEY))
-            .cloned();
+        let retained = if message.role == "assistant"
+            && incoming_id_counts.get(message.id.as_str()) == Some(&1)
+        {
+            durable_by_id
+                .get(message.id.as_str())
+                .filter(|saved| saved.role == "assistant")
+                .and_then(|saved| saved.meta.as_ref())
+                .and_then(|meta| meta.get(INVESTIGATION_ANSWER_META_KEY))
+                .cloned()
+        } else {
+            None
+        };
         if let Some(meta) = message
             .meta
             .as_mut()
@@ -5435,32 +5450,71 @@ fn clear_host_investigation_answer_metadata(session: &mut Session) {
     }
 }
 
+/// Process-local proof that one presentation row id was unused when this
+/// host-admitted turn began. The renderer chooses the correlation label, but
+/// only the host creates this ownership record and the authoritative turn id.
+#[derive(Debug)]
+struct InvestigationAnswerMessageReservation {
+    session_id: String,
+    turn_id: String,
+    assistant_message_id: String,
+}
+
+fn reserve_investigation_answer_message(
+    session: Option<&Session>,
+    session_id: &str,
+    turn_id: &str,
+    assistant_message_id: Option<&str>,
+) -> Option<InvestigationAnswerMessageReservation> {
+    let raw_assistant_message_id = assistant_message_id?;
+    let assistant_message_id = raw_assistant_message_id.trim();
+    if assistant_message_id.is_empty()
+        || assistant_message_id.len() > 128
+        || assistant_message_id != raw_assistant_message_id
+    {
+        return None;
+    }
+    if session.is_some_and(|session| {
+        session.id != session_id
+            || session
+                .messages
+                .iter()
+                .any(|message| message.id == assistant_message_id)
+    }) {
+        return None;
+    }
+    Some(InvestigationAnswerMessageReservation {
+        session_id: session_id.to_string(),
+        turn_id: turn_id.to_string(),
+        assistant_message_id: assistant_message_id.to_string(),
+    })
+}
+
 /// Store a typed investigation envelope only after the host itself received
 /// it from core. There is intentionally no IPC command accepting envelope
 /// JSON, and no transcript-to-envelope parser.
 fn persist_investigation_answer_at(
     store: &SessionStore,
-    session_id: &str,
-    assistant_message_id: Option<&str>,
-    turn_id: &str,
-    expected_snapshot_revision:
-        Option<cd_core::investigation_answer::LogSnapshotRevisionV1>,
+    reservation: Option<&InvestigationAnswerMessageReservation>,
+    expected_snapshot_revision: Option<cd_core::investigation_answer::LogSnapshotRevisionV1>,
     events: &[cd_core::events::StreamEvent],
 ) -> Result<bool, String> {
     let Some(expected_snapshot_revision) = expected_snapshot_revision else {
         return Ok(false);
     };
-    let Some(assistant_message_id) = assistant_message_id.filter(|id| !id.trim().is_empty()) else {
+    let Some(reservation) = reservation else {
         return Ok(false);
     };
-    let mut session = store.load(session_id).map_err(|error| error.to_string())?;
+    let mut session = store
+        .load(&reservation.session_id)
+        .map_err(|error| error.to_string())?;
     let Some(linked_corpus_id) = session.linked_corpus_id.as_deref() else {
         return Ok(false);
     };
     let Some(envelope) = events.iter().rev().find_map(|event| match event {
         cd_core::events::StreamEvent::InvestigationAnswer { envelope }
-            if envelope.binding.session_id == session_id
-                && envelope.binding.turn_id == turn_id
+            if envelope.binding.session_id == reservation.session_id
+                && envelope.binding.turn_id == reservation.turn_id
                 && envelope.binding.corpus_id == linked_corpus_id
                 && envelope.binding.revision == expected_snapshot_revision =>
         {
@@ -5470,16 +5524,24 @@ fn persist_investigation_answer_at(
     }) else {
         return Ok(false);
     };
-    if !session
+    let matching_rows = session
         .messages
         .iter()
-        .any(|message| message.id == assistant_message_id)
+        .filter(|message| message.id == reservation.assistant_message_id)
+        .count();
+    if matching_rows > 1
+        || session.messages.iter().any(|message| {
+            message.id == reservation.assistant_message_id && message.role != "assistant"
+        })
     {
+        return Ok(false);
+    }
+    if matching_rows == 0 {
         // Renderer persistence may race or disappear. Keep a host-owned,
         // deliberately text-free row so later renderer presentation can
         // merge into it without ever supplying the envelope.
         session.messages.push(StoredMessage {
-            id: assistant_message_id.to_string(),
+            id: reservation.assistant_message_id.clone(),
             role: "assistant".into(),
             content: String::new(),
             tools: None,
@@ -5491,7 +5553,7 @@ fn persist_investigation_answer_at(
     let message = session
         .messages
         .iter_mut()
-        .find(|message| message.id == assistant_message_id)
+        .find(|message| message.id == reservation.assistant_message_id)
         .ok_or_else(|| "assistant message was not available after host insert".to_string())?;
     let meta = message.meta.get_or_insert_with(|| serde_json::json!({}));
     let Some(meta) = meta.as_object_mut() else {
@@ -16148,14 +16210,14 @@ mod startup_host_tests {
         parse_log_explorer_nav_target, persist_host_terminal_turn_at,
         persist_investigation_answer_at, persist_linked_provider_loop_terminal_at,
         prepare_linked_turn_with, provider_profile_for_turn, request_agent_turn_cancel,
-        restore_host_if_generation_matches, save_chat_session_at, save_chat_session_cas_at,
-        set_chat_linked_corpus_at, take_ready_linked_host, validate_linked_log_corpus_at,
-        wait_for_host_readiness, BackgroundIndexBuild, HostInitFlight, HostReadinessFailure,
-        LinkedCheckpointStore, LinkedTurnPreparation, LogExplorerNavTarget,
-        LogExplorerNavTargetStore, LogExplorerTurnContextReq, Session, SessionStore, StdInstant,
-        StoredMessage, INVESTIGATION_ANSWER_META_KEY, LINKED_CHECKPOINT_ENTRY_CAP,
-        LINKED_CHECKPOINT_TOTAL_BYTES, LINKED_CHECKPOINT_TTL, LOG_INGEST_CANCEL_KEY,
-        LOG_REANALYZE_CANCEL_KEY,
+        reserve_investigation_answer_message, restore_host_if_generation_matches,
+        save_chat_session_at, save_chat_session_cas_at, set_chat_linked_corpus_at,
+        take_ready_linked_host, validate_linked_log_corpus_at, wait_for_host_readiness,
+        BackgroundIndexBuild, HostInitFlight, HostReadinessFailure, LinkedCheckpointStore,
+        LinkedTurnPreparation, LogExplorerNavTarget, LogExplorerNavTargetStore,
+        LogExplorerTurnContextReq, Session, SessionStore, StdInstant, StoredMessage,
+        INVESTIGATION_ANSWER_META_KEY, LINKED_CHECKPOINT_ENTRY_CAP, LINKED_CHECKPOINT_TOTAL_BYTES,
+        LINKED_CHECKPOINT_TTL, LOG_INGEST_CANCEL_KEY, LOG_REANALYZE_CANCEL_KEY,
     };
     use cd_core::events::StreamEvent;
     use cd_core::index::{KeywordIndex, ReindexStats};
@@ -16209,22 +16271,30 @@ mod startup_host_tests {
     }
 
     #[test]
-    fn typed_investigation_envelope_persists_and_renderer_cannot_forge_or_replace_it() {
+    fn typed_investigation_envelope_requires_fresh_host_owned_message_reservation() {
         let root = tempfile::tempdir().expect("sessions");
         let store = SessionStore::new(root.path());
         let mut session = Session::new("Investigation");
-        session.messages.push(StoredMessage {
-            id: "assistant-1".into(),
-            role: "assistant".into(),
-            content: "display text".into(),
-            tools: None,
-            citations: None,
-            trail: None,
-            meta: None,
-        });
+        session.set_linked_corpus_id(Some("corpus-a".into()));
+        for (id, role) in [
+            ("old-assistant", "assistant"),
+            ("user-row", "user"),
+            ("already-duplicate", "assistant"),
+            ("already-duplicate", "assistant"),
+        ] {
+            session.messages.push(StoredMessage {
+                id: id.into(),
+                role: role.into(),
+                content: "prior transcript".into(),
+                tools: None,
+                citations: None,
+                trail: None,
+                meta: None,
+            });
+        }
         let session_id = session.id.clone();
         store.save(&session).expect("seed");
-        let turn_id = format!("{session_id}::assistant-1");
+        let turn_id = format!("{session_id}::{}", uuid::Uuid::new_v4());
         let snapshot = cd_core::investigation_answer::LogSnapshotRevisionV1 {
             event_revision: 7,
             template_analysis_revision: 11,
@@ -16235,31 +16305,50 @@ mod startup_host_tests {
         let events = vec![StreamEvent::InvestigationAnswer {
             envelope: envelope.clone(),
         }];
+        for stale_id in ["old-assistant", "user-row", "already-duplicate"] {
+            assert!(
+                reserve_investigation_answer_message(
+                    Some(&session),
+                    &session_id,
+                    &turn_id,
+                    Some(stale_id),
+                )
+                .is_none(),
+                "an existing {stale_id} row cannot be reassociated"
+            );
+        }
         assert!(
-            !persist_investigation_answer_at(
-                &store,
-                &session_id,
-                Some("assistant-1"),
-                &turn_id,
-                Some(snapshot),
-                &events
-            )
-            .expect("unlinked rejection"),
-            "an unlinked session cannot persist typed investigation authority"
+            reserve_investigation_answer_message(Some(&session), &session_id, &turn_id, None,)
+                .is_none()
         );
-        let mut wrong_scope = store.load(&session_id).expect("unlinked session");
+        let reservation = reserve_investigation_answer_message(
+            Some(&session),
+            &session_id,
+            &turn_id,
+            Some("assistant-current"),
+        )
+        .expect("fresh assistant correlation id");
+        let duplicate_current_reservation = reserve_investigation_answer_message(
+            Some(&session),
+            &session_id,
+            &turn_id,
+            Some("assistant-duplicate-current"),
+        )
+        .expect("initially fresh duplicate test id");
+        let user_race_reservation = reserve_investigation_answer_message(
+            Some(&session),
+            &session_id,
+            &turn_id,
+            Some("assistant-became-user"),
+        )
+        .expect("initially fresh role-race test id");
+
+        let mut wrong_scope = store.load(&session_id).expect("linked session");
         wrong_scope.set_linked_corpus_id(Some("corpus-b".into()));
         store.save(&wrong_scope).expect("save wrong scope");
         assert!(
-            !persist_investigation_answer_at(
-                &store,
-                &session_id,
-                Some("assistant-1"),
-                &turn_id,
-                Some(snapshot),
-                &events
-            )
-            .expect("mismatched rejection"),
+            !persist_investigation_answer_at(&store, Some(&reservation), Some(snapshot), &events)
+                .expect("mismatched rejection"),
             "an event for another corpus cannot persist typed authority"
         );
         let mut correct_scope = store.load(&session_id).expect("wrong-scope session");
@@ -16267,9 +16356,7 @@ mod startup_host_tests {
         store.save(&correct_scope).expect("save correct scope");
         assert!(!persist_investigation_answer_at(
             &store,
-            &session_id,
-            Some("assistant-1"),
-            &turn_id,
+            Some(&reservation),
             Some(cd_core::investigation_answer::LogSnapshotRevisionV1 {
                 template_analysis_revision: snapshot.template_analysis_revision + 1,
                 ..snapshot
@@ -16277,34 +16364,81 @@ mod startup_host_tests {
             &events,
         )
         .expect("stale snapshot rejection"));
+        assert!(
+            !persist_investigation_answer_at(&store, Some(&reservation), None, &events,)
+                .expect("event-only rejection")
+        );
+
+        let mut duplicate_current = store.load(&session_id).expect("current session");
+        duplicate_current.messages.push(StoredMessage {
+            id: "assistant-became-user".into(),
+            role: "user".into(),
+            content: "must never own assistant authority".into(),
+            tools: None,
+            citations: None,
+            trail: None,
+            meta: None,
+        });
+        for _ in 0..2 {
+            duplicate_current.messages.push(StoredMessage {
+                id: "assistant-duplicate-current".into(),
+                role: "assistant".into(),
+                content: String::new(),
+                tools: None,
+                citations: None,
+                trail: None,
+                meta: None,
+            });
+        }
+        store.save(&duplicate_current).expect("save duplicate race");
         assert!(!persist_investigation_answer_at(
             &store,
-            &session_id,
-            Some("assistant-1"),
-            &turn_id,
-            None,
+            Some(&user_race_reservation),
+            Some(snapshot),
             &events,
         )
-        .expect("event-only rejection"));
+        .expect("user-row race rejection"));
+        assert!(!persist_investigation_answer_at(
+            &store,
+            Some(&duplicate_current_reservation),
+            Some(snapshot),
+            &events,
+        )
+        .expect("duplicate current id rejection"));
         assert!(
-            persist_investigation_answer_at(
-                &store,
-                &session_id,
-                Some("assistant-1"),
-                &turn_id,
-                Some(snapshot),
-                &events
-            )
-            .expect("host persistence"),
+            persist_investigation_answer_at(&store, Some(&reservation), Some(snapshot), &events)
+                .expect("host persistence"),
             "the exact linked corpus persists"
         );
         let mut renderer_save = store.load(&session_id).expect("reload");
-        renderer_save.messages[0].meta = Some(serde_json::json!({
+        assert!(
+            renderer_save
+                .messages
+                .iter()
+                .filter(|message| message.id != "assistant-current")
+                .all(|message| message
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get(INVESTIGATION_ANSWER_META_KEY))
+                    .is_none()),
+            "no prior, user, or duplicate row may acquire current-turn authority"
+        );
+        let current = renderer_save
+            .messages
+            .iter_mut()
+            .find(|message| message.id == "assistant-current")
+            .expect("host-owned current assistant row");
+        current.meta = Some(serde_json::json!({
             INVESTIGATION_ANSWER_META_KEY: { "forged": true }
         }));
         let saved = save_chat_session_at(&store, renderer_save).expect("renderer save");
+        let current = saved
+            .messages
+            .iter()
+            .find(|message| message.id == "assistant-current")
+            .expect("saved current row");
         assert_eq!(
-            saved.messages[0]
+            current
                 .meta
                 .as_ref()
                 .and_then(|meta| meta.get(INVESTIGATION_ANSWER_META_KEY)),
@@ -16339,7 +16473,11 @@ mod startup_host_tests {
         )
         .expect("detach linked corpus");
         assert!(
-            detached.messages[0]
+            detached
+                .messages
+                .iter()
+                .find(|message| message.id == "assistant-current")
+                .expect("detached current row")
                 .meta
                 .as_ref()
                 .and_then(|meta| meta.get(INVESTIGATION_ANSWER_META_KEY))
@@ -18550,8 +18688,11 @@ mod chat_session_host_tests {
         assert!(agent_contract.contains("histories.entry(req.session_id.clone())"));
         assert!(agent_contract.contains("cd_workflow::turn::run_turn"));
         assert!(agent_contract.contains("client_assistant_message_id"));
-        assert!(agent_contract.contains("format!(\"{}::{message_id}\", req.session_id)"));
-        assert!(agent_contract.contains("uuid::Uuid::new_v4()"));
+        assert!(
+            agent_contract.contains("format!(\"{}::{}\", req.session_id, uuid::Uuid::new_v4())")
+        );
+        assert!(!agent_contract.contains("format!(\"{}::{message_id}\", req.session_id)"));
+        assert!(agent_contract.contains("reserve_investigation_answer_message"));
         assert!(agent_contract.contains("turn_id: Some(turn_id.clone())"));
         assert!(!agent_contract
             .contains("research_turn_with_cancel_and_context_and_checkpoint_and_trace"));

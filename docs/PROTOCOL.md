@@ -163,8 +163,10 @@ model proposal against the host-built evidence ledger for that exact session, tu
 revision. Hosts may persist the exact envelope in assistant-message metadata and may project it
 to human text, JSON, JSONL, or IPC. Those projections are display/read APIs only: hosts must not
 parse displayed transcript JSON, or accept client-supplied envelope JSON, to create or revalidate
-authority. A subsequent turn builds a fresh ledger. If an envelope's session/corpus/revision no
-longer matches host state, it is unavailable (or explicitly stale), never silently reused.
+authority. Authoritative turn ids and message-row ownership are host-created; renderer message ids
+are correlation labels and cannot select a prior transcript row for new authority. A subsequent
+turn builds a fresh ledger. If an envelope's session/corpus/revision no longer matches host state,
+it is unavailable (or explicitly stale), never silently reused.
 
 ### Telegram chat bridge
 
