@@ -4,6 +4,7 @@
 
 use crate::config::{ColorMode, OutputFormat};
 use clap::{Parser, Subcommand};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -13,7 +14,9 @@ use std::path::PathBuf;
     // build.rs embeds git SHA / describe / channel (CD_GIT_* / CD_CHANNEL).
     long_version = env!("CD_CLI_LONG_VERSION"),
     about = "ContextDesk CLI — import evidence, then ask questions grounded in it",
-    long_about = "The configured happy path is two commands:\n\n  contextdesk import <archive>\n  contextdesk chat \"<question>\"\n\nEverything else (corpus management, timezone review, exploration) is an\nescape hatch for when the defaults aren't enough — never required for the\nhappy path."
+    long_about = "After configuration and import, ask directly:\n\n  contextdesk \"What caused the outage?\"\n\nThis is a safe shorthand for the production chat workflow using the active\ncorpus and provider. Explicit `contextdesk chat` and `contextdesk ask` remain\navailable for corpus/session overrides and automation.",
+    override_usage = "contextdesk [OPTIONS] <COMMAND>\n       contextdesk [OPTIONS] <QUESTION...>",
+    after_help = "Examples:\n  contextdesk config init\n  contextdesk import ./logs\n  contextdesk \"What caused the outage?\"\n  contextdesk ask \"Compare the first symptom with the likely trigger\" --trace summary\n  contextdesk chat \"Show the evidence\" --jsonl\n\nQuote multi-word questions in your shell. Use an explicit `chat` or `ask` when\na question starts with a command name such as `import`."
 )]
 pub struct Cli {
     #[command(flatten)]
@@ -363,7 +366,11 @@ pub enum ActivityLevel {
 
 #[derive(Debug, clap::Args)]
 pub struct ChatArgs {
-    pub question: String,
+    /// Question to ask. Multiple shell words are joined with spaces, though
+    /// quoting is recommended so punctuation and shell metacharacters remain
+    /// literal on macOS, Linux, and Windows shells.
+    #[arg(required = true, num_args = 1.., value_name = "QUESTION")]
+    pub question: Vec<String>,
     /// Explicit text to include as one-turn client evidence in ordinary chat.
     /// It is not saved as transcript text and is never inferred from ambient
     /// or corpus state. Linked-log turns must use host-resolved corpus evidence.
@@ -410,6 +417,80 @@ pub struct ChatArgs {
     /// retains bounded, redacted message bodies (never credentials).
     #[arg(long)]
     pub activity_ack: bool,
+}
+
+/// How the user selected the production chat path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvocationMode {
+    Explicit,
+    ImplicitChat,
+}
+
+/// Insert the real `chat` subcommand before a top-level natural-language
+/// positional. Global options may precede the question. Recognized commands
+/// and their aliases are never rewritten, preserving every existing grammar
+/// and machine-output contract.
+pub fn normalize_invocation_args<I, T>(args: I) -> (Vec<OsString>, InvocationMode)
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    let mut args = args.into_iter().map(Into::into).collect::<Vec<_>>();
+    let commands = [
+        "import",
+        "normalize",
+        "normalized",
+        "corpus",
+        "timezone",
+        "explore",
+        "search",
+        "context",
+        "session",
+        "chat",
+        "ask",
+        "config",
+        "confluence",
+        "capabilities",
+        "doctor",
+        "logging-assessment",
+        "assess",
+        "exception-episodes",
+        "episodes",
+    ];
+    let value_options = [
+        "--format",
+        "--color",
+        "--config",
+        "--app-config",
+        "--data-dir",
+        "--profile-dir",
+        "--profile",
+        "--model",
+    ];
+    let mut index = 1usize;
+    while index < args.len() {
+        let Some(token) = args[index].to_str() else {
+            return (args, InvocationMode::Explicit);
+        };
+        if value_options.contains(&token) {
+            index = index.saturating_add(2);
+            continue;
+        }
+        if token.starts_with("--") && token.contains('=') {
+            index += 1;
+            continue;
+        }
+        if token.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if commands.contains(&token) {
+            return (args, InvocationMode::Explicit);
+        }
+        args.insert(index, OsString::from("chat"));
+        return (args, InvocationMode::ImplicitChat);
+    }
+    (args, InvocationMode::Explicit)
 }
 
 #[derive(Debug, Subcommand)]
@@ -562,5 +643,37 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn direct_question_normalizes_to_production_chat_across_shell_shapes() {
+        for argv in [
+            vec!["contextdesk", "What caused the outage?"],
+            vec!["contextdesk", "What", "caused", "the", "outage?"],
+            vec!["contextdesk", "--color", "never", "What caused it?"],
+            vec!["contextdesk", "--model=gpt-x", "What caused it?"],
+        ] {
+            let (normalized, mode) = normalize_invocation_args(argv);
+            assert_eq!(mode, InvocationMode::ImplicitChat);
+            let parsed = Cli::try_parse_from(normalized).unwrap();
+            let Command::Chat(chat) = parsed.command else {
+                panic!("implicit question did not select chat");
+            };
+            assert!(chat.question.join(" ").contains("caused"));
+        }
+    }
+
+    #[test]
+    fn explicit_commands_aliases_and_unknown_options_are_never_rewritten() {
+        for argv in [
+            vec!["contextdesk", "chat", "question"],
+            vec!["contextdesk", "ask", "question"],
+            vec!["contextdesk", "import", "logs"],
+            vec!["contextdesk", "--definitely-unknown"],
+        ] {
+            let (normalized, mode) = normalize_invocation_args(argv.clone());
+            assert_eq!(mode, InvocationMode::Explicit, "argv={argv:?}");
+            assert_eq!(normalized.len(), argv.len());
+        }
     }
 }

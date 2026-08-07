@@ -1,5 +1,6 @@
 mod activity_render;
 mod adapters;
+mod answer_render;
 mod cli;
 mod commands;
 mod config;
@@ -11,19 +12,20 @@ mod provider_probe;
 mod render;
 
 use clap::Parser;
-use cli::{Cli, Command};
+use cli::{Cli, Command, InvocationMode};
 use config::{CliOverrides, OutputFormat, ResolvedConfig};
 use envelope::{CliError, Envelope, ExitCategory, Render};
 use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
-    let code = run(cli).await;
+    let (args, invocation) = cli::normalize_invocation_args(std::env::args_os());
+    let cli = Cli::parse_from(args);
+    let code = run(cli, invocation).await;
     std::process::exit(code);
 }
 
-async fn run(cli: Cli) -> i32 {
+async fn run(cli: Cli, invocation: InvocationMode) -> i32 {
     if let Some(code) = run_state_free(&cli).await {
         return code;
     }
@@ -85,6 +87,7 @@ async fn run(cli: Cli) -> i32 {
         &project_path,
         format,
         &mut cli_state,
+        invocation,
     )
     .await;
 
@@ -144,6 +147,7 @@ async fn dispatch(
     project_path: &std::path::Path,
     format: OutputFormat,
     cli_state: &mut cd_workflow::session::CliState,
+    invocation: InvocationMode,
 ) -> i32 {
     match command {
         Command::Import(args) => {
@@ -206,6 +210,7 @@ async fn dispatch(
                 resolved.color.value,
                 resolved.default_provider_profile.value.as_deref(),
                 resolved.default_chat_model.value.as_deref(),
+                invocation == InvocationMode::ImplicitChat,
             )
             .await;
             match result {

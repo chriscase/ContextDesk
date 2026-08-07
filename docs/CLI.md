@@ -22,7 +22,13 @@ Top-level shape (regenerate any time with `contextdesk --help`):
 
 ```text
 contextdesk [OPTIONS] <COMMAND>
+contextdesk [OPTIONS] <QUESTION...>
 ```
+
+A top-level question is normalized to the same production `chat` workflow;
+it is not a second agent loop. Quote multi-word questions to keep shell
+metacharacters literal. If a question begins with a command name such as
+`import`, use explicit `contextdesk ask "import ..."` to disambiguate it.
 
 ### Global options
 
@@ -68,8 +74,16 @@ to a live binary when `CONTEXTDESK_BIN` is set.
 
 ```bash
 contextdesk import <archive>
-contextdesk ask "<question>"
+contextdesk "<question>"
 ```
+
+The direct form requires an active, existing corpus and an unambiguous
+provider/model selection. A successful import makes its corpus current;
+otherwise use `contextdesk corpus use <id>`. With multiple configured provider
+profiles and no active profile, pass `--profile <id>` or choose a default in
+configuration. Missing or stale selections fail before contacting a provider
+and print the exact recovery command. The built-in local Ollama profile remains
+the simple default when no provider profiles are configured.
 
 The original `chat`, `explore`, and `logging-assessment` names remain stable.
 The shorter `ask`, `search`, and `assess` aliases are equivalent conveniences:
@@ -77,6 +91,7 @@ The shorter `ask`, `search`, and `assess` aliases are equivalent conveniences:
 ```bash
 contextdesk search "timeout"
 contextdesk assess
+contextdesk ask "What caused the outage?" --trace summary
 ```
 
 A normal import needs no per-file selection — the CLI accepts the same
@@ -412,6 +427,16 @@ Every command supports `--format text|json|jsonl` (or the `--json`/
 `--jsonl` shorthands). Text is for humans; JSON/JSONL are the stable,
 documented machine contract below. `contextdesk capabilities` emits this
 same contract as data — probe it once rather than parsing `--help`.
+
+Direct-question text output buffers only the final answer projection, while
+progress remains on stderr. It renders Markdown headings, lists, quotes,
+tables, code blocks, and links/citations as readable terminal text, wrapping at
+`COLUMNS` (bounded to sensible narrow/wide limits). Redirected output,
+`--color never`, and `NO_COLOR` contain no ANSI sequences. UTF-8 content is
+preserved; on legacy Windows consoles only problematic typography is reduced to
+ASCII, while meaningful non-Latin text remains intact. Explicit `chat`/`ask`
+keeps its existing streaming presentation. JSON and JSONL bypass the human
+renderer entirely and are byte-for-byte governed by the existing contracts.
 
 ### One-shot envelope (`--json`, non-streaming commands)
 

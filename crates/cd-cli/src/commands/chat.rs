@@ -26,6 +26,7 @@ use crate::render::{
 use cd_core::config::AppConfig;
 use cd_core::events::StreamEvent;
 use cd_core::keychain_store::SecretStore;
+use cd_core::log_analysis::LogCorpus;
 use cd_core::permissions::PermissionDecision;
 use cd_core::sessions::SessionStore;
 use cd_core::turn_trace::{RecordingTurnTrace, TracedCall, TracedOutcome, TurnTraceSink};
@@ -58,7 +59,9 @@ pub async fn run(
     color: ColorMode,
     profile_override: Option<&str>,
     model_override: Option<&str>,
+    implicit_chat: bool,
 ) -> CliResult<()> {
+    let question = args.question.join(" ");
     // `full` exposes bounded, redacted conversation and tool-call content —
     // still never a secret or pre-redaction value, but real turn content
     // nonetheless. Refuse rather than let a script accidentally capture it.
@@ -109,6 +112,64 @@ pub async fn run(
         .corpus
         .clone()
         .or_else(|| cli_state.current_corpus_id.clone());
+    let implicit_profile = if implicit_chat {
+        match resolve_implicit_profile_override(cfg, profile_override) {
+            Ok(profile) => profile,
+            Err(error) => return fail_before_turn(format, error),
+        }
+    } else {
+        None
+    };
+    let effective_profile_override = profile_override.or(implicit_profile.as_deref());
+
+    if implicit_chat {
+        let selected_profile = match cd_workflow::provider::resolve_provider_profile(
+            cfg,
+            effective_profile_override,
+        ) {
+            Ok(profile) => profile,
+            Err(missing) => {
+                return fail_before_turn(
+                    format,
+                    CliError::user(format!(
+                        "provider profile '{missing}' is unavailable; run `contextdesk config show` or choose one with `--profile <id>`"
+                    )),
+                );
+            }
+        };
+        let selected_model = model_override
+            .or(cfg.default_chat_model.as_deref())
+            .unwrap_or(&selected_profile.chat_model)
+            .trim();
+        if selected_model.is_empty() {
+            return fail_before_turn(
+                format,
+                CliError::user(
+                    "no chat model is configured; use `--model <id>` or run `contextdesk config init`",
+                ),
+            );
+        }
+        let Some(active_corpus) = corpus_id.as_deref() else {
+            return fail_before_turn(
+                format,
+                CliError::user(
+                    "no active corpus is selected; import evidence with `contextdesk import <path>` or choose one with `contextdesk corpus use <id>`",
+                ),
+            );
+        };
+        let available = match LogCorpus::list_ids(cache_root) {
+            Ok(available) => available,
+            Err(error) => return fail_before_turn(format, map_workflow_error(error)),
+        };
+        if !available.iter().any(|id| id == active_corpus) {
+            return fail_before_turn(
+                format,
+                CliError::user(format!(
+                    "active corpus '{active_corpus}' is unavailable; run `contextdesk corpus list` and select one with `contextdesk corpus use <id>`"
+                )),
+            );
+        }
+    }
     let session_id = if args.new {
         None
     } else {
@@ -163,6 +224,7 @@ pub async fn run(
     let observed_session_id = Arc::new(Mutex::new(session_id.clone()));
     let live_session_id = observed_session_id.clone();
     let mut answer_started = false;
+    let mut buffered_answer = String::new();
     let mut terminal_text = TerminalTextSanitizer::for_current_console();
     let mut live_sink = |event: StreamEvent| {
         if let StreamEvent::TurnStarted { session_id, .. } = &event {
@@ -175,14 +237,21 @@ pub async fn run(
         if jsonl {
             emit_jsonl(&event);
         } else if text {
-            chat_renderer.on_event(&event);
             if let StreamEvent::TextDelta { text } = &event {
-                if stdout_is_tty && !answer_started {
-                    println!("+--------+\n| Answer |\n+--------+");
-                    answer_started = true;
+                let clean = terminal_text.push(text);
+                if implicit_chat {
+                    buffered_answer.push_str(&clean);
+                } else {
+                    chat_renderer.on_event(&event);
+                    if stdout_is_tty && !answer_started {
+                        println!("+--------+\n| Answer |\n+--------+");
+                        answer_started = true;
+                    }
+                    print!("{clean}");
+                    let _ = io::stdout().flush();
                 }
-                print!("{}", terminal_text.push(text));
-                let _ = io::stdout().flush();
+            } else {
+                chat_renderer.on_event(&event);
             }
         }
     };
@@ -232,10 +301,10 @@ pub async fn run(
             sessions,
             cache_root,
             session_id.as_deref(),
-            &args.question,
+            &question,
             ChatWorkflowRequest {
                 corpus_id: corpus_id.as_deref(),
-                explicit_profile_id: profile_override,
+                explicit_profile_id: effective_profile_override,
                 chat_model_override: model_override,
                 dry_run: args.dry_run,
                 trace_sink,
@@ -395,7 +464,7 @@ pub async fn run(
 
     match format {
         OutputFormat::Text => {
-            if !outcome.final_text.is_empty() {
+            if !outcome.final_text.is_empty() && !implicit_chat {
                 println!();
             }
             let grounding = grounding_status(corpus_id.as_deref(), &outcome.events);
@@ -404,6 +473,14 @@ pub async fn run(
                 session_id: &outcome.session_id,
                 grounding,
             });
+            if implicit_chat {
+                let answer = if buffered_answer.trim().is_empty() {
+                    &outcome.final_text
+                } else {
+                    &buffered_answer
+                };
+                print!("{}", crate::answer_render::render(answer, color));
+            }
             if let Some(lines) = &trace_lines {
                 let level = effective_trace.unwrap_or(TraceLevel::Summary);
                 let style = HierarchyStyle::detect_stdout(color);
@@ -510,6 +587,45 @@ pub async fn run(
     Ok(())
 }
 
+fn fail_before_turn(format: OutputFormat, error: CliError) -> CliResult<()> {
+    match format {
+        OutputFormat::Jsonl => print_jsonl_failure(&error, "", None),
+        OutputFormat::Json => print_json_failure(&error, None),
+        OutputFormat::Text => eprintln!("error: {}", error.message),
+    }
+    Err(error)
+}
+
+fn resolve_implicit_profile_override(
+    cfg: &AppConfig,
+    explicit: Option<&str>,
+) -> CliResult<Option<String>> {
+    if explicit.is_some() {
+        return Ok(None);
+    }
+    match cfg.providers.active_id.as_deref() {
+        Some(active)
+            if cfg
+                .providers
+                .profiles
+                .iter()
+                .any(|profile| profile.id == active) =>
+        {
+            Ok(Some(active.to_string()))
+        }
+        Some(active) => Err(CliError::user(format!(
+            "active provider profile '{active}' no longer exists; run `contextdesk config show`, then select or configure a valid profile"
+        ))),
+        None if cfg.providers.profiles.len() == 1 => {
+            Ok(Some(cfg.providers.profiles[0].id.clone()))
+        }
+        None if cfg.providers.profiles.len() > 1 => Err(CliError::user(
+            "multiple provider profiles are configured but none is active; use `--profile <id>` or run `contextdesk config init` to choose a default",
+        )),
+        None => Ok(None),
+    }
+}
+
 fn map_workflow_error(e: cd_core::error::CoreError) -> CliError {
     let message = e.to_string();
     let lower = message.to_ascii_lowercase();
@@ -522,6 +638,47 @@ fn map_workflow_error(e: cd_core::error::CoreError) -> CliError {
         CliError::provider(message)
     } else {
         CliError::internal(message)
+    }
+}
+
+#[cfg(test)]
+mod implicit_resolution_tests {
+    use super::*;
+    use cd_core::providers::ProviderProfile;
+
+    fn profile(id: &str) -> ProviderProfile {
+        let mut profile = ProviderProfile::ollama_local();
+        profile.id = id.to_string();
+        profile
+    }
+
+    #[test]
+    fn one_profile_is_a_safe_default_but_multiple_without_active_is_ambiguous() {
+        let mut cfg = AppConfig::default();
+        cfg.providers.active_id = None;
+        cfg.providers.profiles = vec![profile("only")];
+        assert_eq!(
+            resolve_implicit_profile_override(&cfg, None).unwrap(),
+            Some("only".into())
+        );
+
+        cfg.providers.profiles.push(profile("second"));
+        let error = resolve_implicit_profile_override(&cfg, None).unwrap_err();
+        assert!(error.message.contains("multiple provider profiles"));
+        assert!(error.message.contains("--profile <id>"));
+    }
+
+    #[test]
+    fn stale_active_profile_fails_and_explicit_profile_defers_to_shared_workflow() {
+        let mut cfg = AppConfig::default();
+        cfg.providers.active_id = Some("deleted".into());
+        cfg.providers.profiles = vec![profile("available")];
+        let error = resolve_implicit_profile_override(&cfg, None).unwrap_err();
+        assert!(error.message.contains("no longer exists"));
+        assert_eq!(
+            resolve_implicit_profile_override(&cfg, Some("available")).unwrap(),
+            None
+        );
     }
 }
 
