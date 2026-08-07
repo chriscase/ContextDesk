@@ -27,6 +27,35 @@ export type EventDto = {
   payload: Record<string, unknown>;
 };
 
+/**
+ * Authoritative OpenAI-compatible provider-turn telemetry (same DTO as CLI
+ * `trace_summary.provider_telemetry` / EventDto kind `provider_telemetry`).
+ * Hosts must project this value; they must not invent tokens, cost, or route.
+ */
+export type ProviderTurnTelemetryDto = {
+  configuredProfileId: string;
+  configuredModel: string;
+  responseModel?: string | null;
+  providerRequestId?: string | null;
+  observedRoute: { status: "unknown" } | { status: "reported"; value: string };
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+  reasoningTokens?: number | null;
+  cachedTokens?: number | null;
+  totalTokens?: number | null;
+  cost?: number | null;
+  contextBudget?: Record<string, unknown> | null;
+  providerRoundCount: number;
+  applicationRetryReasons?: { round: number; reason: string }[];
+  finalTurnOutcome?: string | null;
+  finishReason?: string | null;
+  emptyVisibleAnswer: boolean;
+  truncatedByLength: boolean;
+  toolCallCount: number;
+  latencyMs?: number | null;
+  rounds?: Record<string, unknown>[];
+};
+
 export type PreflightItemDto = {
   id: string;
   title: string;

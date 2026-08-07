@@ -78,6 +78,28 @@ pub struct ChatCompletion {
     pub tool_calls: Vec<ToolCallMsg>,
     /// Finish reason.
     pub finish_reason: String,
+    /// Authoritative transport telemetry captured from the wire (OpenAI-
+    /// compatible body + allowlisted safe headers). Absent fields stay
+    /// unknown — never inferred from the configured model.
+    pub telemetry: crate::provider_telemetry::ProviderTransportTelemetry,
+}
+
+impl ChatCompletion {
+    /// Build a completion without transport capture (non-OpenAI backends,
+    /// scripted tests). Prefer letting [`OpenAiCompatibleClient`] fill
+    /// [`Self::telemetry`] from the wire.
+    pub fn from_parts(
+        content: impl Into<String>,
+        tool_calls: Vec<ToolCallMsg>,
+        finish_reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            content: content.into(),
+            tool_calls,
+            finish_reason: finish_reason.into(),
+            telemetry: crate::provider_telemetry::ProviderTransportTelemetry::default(),
+        }
+    }
 }
 
 /// One logical delta from an OpenAI-compatible SSE stream (after `data: ` parse).
@@ -111,6 +133,7 @@ pub struct StreamAccumulator {
     /// index -> (id, name, arguments buffer)
     tool_parts: std::collections::BTreeMap<usize, (String, String, String)>,
     finish_reason: Option<String>,
+    telemetry: crate::provider_telemetry::ProviderTransportTelemetry,
 }
 
 impl StreamAccumulator {
@@ -157,6 +180,14 @@ impl StreamAccumulator {
         }
     }
 
+    /// Merge transport telemetry from one SSE payload or header capture.
+    pub fn merge_telemetry(
+        &mut self,
+        patch: &crate::provider_telemetry::ProviderTransportTelemetry,
+    ) {
+        self.telemetry.merge_from(patch);
+    }
+
     /// Finish into a completion (same shape as non-stream parse).
     pub fn into_completion(self) -> ChatCompletion {
         let mut tool_calls = Vec::new();
@@ -192,6 +223,7 @@ impl StreamAccumulator {
             content: self.content,
             tool_calls,
             finish_reason,
+            telemetry: self.telemetry,
         }
     }
 }
@@ -340,6 +372,26 @@ fn apply_sse_deltas<F: FnMut(StreamDelta)>(
     }
 }
 
+/// Parse one SSE `data:` payload into deltas **and** merge any transport
+/// telemetry the chunk carries (usage on the final OpenAI chunk, Vercel
+/// `providerMetadata`, response `model` / `id`, …).
+fn apply_sse_data_line<F: FnMut(StreamDelta)>(
+    acc: &mut StreamAccumulator,
+    on_delta: &mut F,
+    data: &str,
+) -> CoreResult<()> {
+    let trimmed = data.trim();
+    if !trimmed.is_empty() && trimmed != "[DONE]" {
+        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+            acc.merge_telemetry(
+                &crate::provider_telemetry::extract_transport_telemetry_from_value(&value),
+            );
+        }
+    }
+    apply_sse_deltas(acc, on_delta, parse_openai_sse_data(trimmed)?);
+    Ok(())
+}
+
 /// Replay one ordinary JSON completion through the same callback contract as
 /// an equivalent SSE response. Gateways that ignore `stream=true` must not
 /// make live consumers lose tool calls, finish state, or the terminal marker.
@@ -362,8 +414,28 @@ fn emit_full_completion<F: FnMut(StreamDelta)>(completion: &ChatCompletion, on_d
 /// Accumulate a full SSE body into [`ChatCompletion`] (offline fixture path).
 pub fn accumulate_openai_sse(body: &str) -> CoreResult<ChatCompletion> {
     let mut acc = StreamAccumulator::new();
-    for d in parse_openai_sse_stream(body)? {
-        acc.push(d);
+    for raw_line in body.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        if line.is_empty() || line.starts_with(':') {
+            continue;
+        }
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim_start();
+        if data.is_empty() {
+            continue;
+        }
+        if data != "[DONE]" {
+            if let Ok(value) = serde_json::from_str::<Value>(data) {
+                acc.merge_telemetry(
+                    &crate::provider_telemetry::extract_transport_telemetry_from_value(&value),
+                );
+            }
+        }
+        for d in parse_openai_sse_data(data)? {
+            acc.push(d);
+        }
     }
     Ok(acc.into_completion())
 }
@@ -483,6 +555,13 @@ impl OpenAiCompatibleClient {
             .await
             .map_err(|e| CoreError::Message(format!("chat request: {e}")))?;
         let status = resp.status();
+        let header_tel = crate::provider_telemetry::capture_safe_response_headers(
+            resp.headers().iter().filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|value| (k.as_str().to_string(), value.to_string()))
+            }),
+        );
         let text = resp
             .text()
             .await
@@ -493,7 +572,12 @@ impl OpenAiCompatibleClient {
                 text.chars().take(300).collect::<String>()
             )));
         }
-        parse_openai_completion(&text)
+        let mut completion = parse_openai_completion(&text)?;
+        // Headers first, body second so JSON `id` / usage win over header ids.
+        let mut tel = header_tel;
+        tel.merge_from(&completion.telemetry);
+        completion.telemetry = tel;
+        Ok(completion)
     }
 
     /// Streaming chat completion (SSE). Accumulates to [`ChatCompletion`].
@@ -522,6 +606,13 @@ impl OpenAiCompatibleClient {
             .await
             .map_err(|e| CoreError::Message(format!("stream request: {e}")))?;
         let status = resp.status();
+        let header_tel = crate::provider_telemetry::capture_safe_response_headers(
+            resp.headers().iter().filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|value| (k.as_str().to_string(), value.to_string()))
+            }),
+        );
         let text = resp
             .text()
             .await
@@ -533,10 +624,15 @@ impl OpenAiCompatibleClient {
             )));
         }
         // Some gateways ignore stream=true and return a full JSON object.
-        if text.trim_start().starts_with('{') && !text.contains("data:") {
-            return parse_openai_completion(&text);
-        }
-        accumulate_openai_sse(&text)
+        let mut completion = if text.trim_start().starts_with('{') && !text.contains("data:") {
+            parse_openai_completion(&text)?
+        } else {
+            accumulate_openai_sse(&text)?
+        };
+        let mut tel = header_tel;
+        tel.merge_from(&completion.telemetry);
+        completion.telemetry = tel;
+        Ok(completion)
     }
 
     /// Streaming chat: invoke `on_delta` for each delta as SSE arrives.
@@ -586,6 +682,14 @@ impl OpenAiCompatibleClient {
             )));
         }
 
+        let header_tel = crate::provider_telemetry::capture_safe_response_headers(
+            resp.headers().iter().filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|value| (k.as_str().to_string(), value.to_string()))
+            }),
+        );
+
         // Some OpenAI-compatible gateways ignore `stream=true` and return a
         // normal completion with an honest JSON content type. Parse that
         // shape before the SSE line parser: a full completion's
@@ -607,12 +711,16 @@ impl OpenAiCompatibleClient {
                 let bytes = chunk.map_err(|e| CoreError::Message(format!("stream body: {e}")))?;
                 full_body.push(&bytes)?;
             }
-            let completion = parse_openai_completion(&full_body.finish()?)?;
+            let mut completion = parse_openai_completion(&full_body.finish()?)?;
+            let mut tel = header_tel.clone();
+            tel.merge_from(&completion.telemetry);
+            completion.telemetry = tel;
             emit_full_completion(&completion, &mut on_delta);
             return Ok(completion);
         }
 
         let mut acc = StreamAccumulator::new();
+        acc.merge_telemetry(&header_tel);
         // Only needed for the non-SSE-gateway fallback below; stop growing
         // it once real SSE framing is confirmed. Raw bytes, decoded exactly
         // once in that fallback — never per chunk, which would corrupt a
@@ -638,7 +746,7 @@ impl OpenAiCompatibleClient {
                 if data.is_empty() {
                     continue;
                 }
-                apply_sse_deltas(&mut acc, &mut on_delta, parse_openai_sse_data(data)?);
+                apply_sse_data_line(&mut acc, &mut on_delta, data)?;
             }
         }
         // Some OpenAI-compatible gateways accept `stream=true` but return a
@@ -647,7 +755,10 @@ impl OpenAiCompatibleClient {
         // assistant message/tool calls. Detect the absence of any SSE data
         // lines and route the complete body through the non-stream parser.
         if !saw_sse_data {
-            let completion = parse_openai_completion(full_body.finish()?.trim())?;
+            let mut completion = parse_openai_completion(full_body.finish()?.trim())?;
+            let mut tel = header_tel;
+            tel.merge_from(&completion.telemetry);
+            completion.telemetry = tel;
             emit_full_completion(&completion, &mut on_delta);
             return Ok(completion);
         }
@@ -661,7 +772,7 @@ impl OpenAiCompatibleClient {
                     .map(str::trim)
                     .unwrap_or("");
                 if !data.is_empty() {
-                    apply_sse_deltas(&mut acc, &mut on_delta, parse_openai_sse_data(data)?);
+                    apply_sse_data_line(&mut acc, &mut on_delta, data)?;
                 }
             }
         }
@@ -802,6 +913,7 @@ pub fn parse_openai_completion(text: &str) -> CoreResult<ChatCompletion> {
         content,
         tool_calls,
         finish_reason: finish,
+        telemetry: crate::provider_telemetry::extract_transport_telemetry_from_value(&v),
     })
 }
 
@@ -1063,6 +1175,8 @@ pub fn parse_ollama_chat_response(text: &str) -> CoreResult<ChatCompletion> {
         content,
         tool_calls,
         finish_reason,
+
+        telemetry: Default::default(),
     })
 }
 
@@ -1271,6 +1385,8 @@ pub fn parse_anthropic_completion(text: &str) -> CoreResult<ChatCompletion> {
         content,
         tool_calls,
         finish_reason,
+
+        telemetry: Default::default(),
     })
 }
 
@@ -1401,6 +1517,8 @@ pub fn accumulate_anthropic_sse(body: &str) -> CoreResult<ChatCompletion> {
         content,
         tool_calls,
         finish_reason,
+
+        telemetry: Default::default(),
     })
 }
 

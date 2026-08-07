@@ -613,10 +613,9 @@ fn extract_field_value(line: &str, key: &str) -> Option<String> {
     // Prefer key= form (log lines); fall back to JSON "key": form.
     let (pos, prefix_len) = if let Some(p) = lower.find(&format!("{key_l}=")) {
         (p, key_l.len() + 1)
-    } else if let Some(p) = lower.find(&format!("\"{key_l}\":")) {
-        (p, key_l.len() + 3)
     } else {
-        return None;
+        let p = lower.find(&format!("\"{key_l}\":"))?;
+        (p, key_l.len() + 3)
     };
     let after = line.get(pos + prefix_len..)?.trim_start();
     let value = if let Some(rest) = after.strip_prefix('"') {

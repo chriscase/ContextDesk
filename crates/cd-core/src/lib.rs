@@ -60,6 +60,7 @@ pub mod permissions;
 pub mod preflight;
 pub mod probe;
 pub mod process_progress;
+pub mod provider_telemetry;
 pub mod providers;
 pub mod redact;
 pub mod research;

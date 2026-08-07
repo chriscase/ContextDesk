@@ -687,12 +687,21 @@ than inventing them.
   history retained/omitted counts, capacity source, useful-headroom verdict,
   and model-round identity. Text mode nests these facts under **Context**;
   JSON/JSONL expose the same additive object without parsing display text.
+  When a provider-backed turn runs, an additive `provider_telemetry` object
+  carries the same host-neutral `ProviderTurnTelemetry` DTO Tauri receives as
+  EventDto kind `provider_telemetry` (configured profile/model, response
+  model, safe request id, observed route or explicit `unknown`, token/cost
+  fields only when supplied, context budget fold-in, application round count
+  and retry reasons, finish/empty/length/latency/tool/outcome facts). Missing
+  usage or cost stays omitted (unknown), never zero-filled or inferred from
+  the configured model.
 - **`context`** (adds `trace_context`, one line per provider call — one for a
   dry run, one per round for a real multi-round turn): the exact bounded,
   redacted messages and tool names that call sent. Reading consecutive
   `trace_context` lines shows context added between rounds — round *N+1*'s
   messages include round *N*'s tool results, already folded into history the
-  same way a real turn folds them.
+  same way a real turn folds them. Each line may also carry additive
+  `provider_round_telemetry` for that round.
 - **`full`** (adds `trace_tool`, one line per tool call the turn actually
   made): id/name/ok/summary/detail — the same bounded data a UI's tool
   lifecycle display already has, correlated by round rather than dropped.

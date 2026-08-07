@@ -28,6 +28,8 @@ Produced by `cd_core::research::event_to_dto` — **snake_case** names:
 | `tool` | single event with `phase` (`started`/`finished`), `id`, `name`, `summary`, `detail`, `ok` |
 | `citation` | `source_id`, `label`, `locator` |
 | `search_trail` | `steps` |
+| `context_budget` | typed packing/headroom snapshot (`ContextBudgetTelemetry`, camelCase) |
+| `provider_telemetry` | authoritative OpenAI-compatible turn telemetry (`ProviderTurnTelemetry`, camelCase); hosts must not invent tokens/cost/route |
 | `permission_required` | `request_id`, `tool_name`, `target`, `reason`, `preview`, `risk`, `arguments` |
 | `turn_completed` | `reason` |
 | `error` | `code`, `message` (safe) |

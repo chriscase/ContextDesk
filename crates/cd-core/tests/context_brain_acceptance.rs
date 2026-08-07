@@ -29,6 +29,7 @@ fn final_answer(text: &str) -> ChatCompletion {
         content: text.into(),
         tool_calls: vec![],
         finish_reason: "stop".into(),
+        telemetry: Default::default(),
     }
 }
 
@@ -44,6 +45,7 @@ fn tool_call(id: &str, name: &str, args: &str) -> ChatCompletion {
             },
         }],
         finish_reason: "tool_calls".into(),
+        telemetry: Default::default(),
     }
 }
 

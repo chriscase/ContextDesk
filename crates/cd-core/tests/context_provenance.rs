@@ -53,6 +53,7 @@ impl ChatBackend for FinalAnswerBackend {
             content: "synthetic final answer".into(),
             tool_calls: Vec::new(),
             finish_reason: "stop".into(),
+            telemetry: Default::default(),
         })
     }
 }
@@ -84,12 +85,14 @@ impl ChatBackend for MultiRoundCaptureBackend {
                     },
                 }],
                 finish_reason: "tool_calls".into(),
+                telemetry: Default::default(),
             });
         }
         Ok(ChatCompletion {
             content: "answer after tool".into(),
             tool_calls: Vec::new(),
             finish_reason: "stop".into(),
+            telemetry: Default::default(),
         })
     }
 }

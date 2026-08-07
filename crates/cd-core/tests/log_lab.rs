@@ -211,6 +211,7 @@ impl ChatBackend for Literal250kLinkedBackend {
                         },
                     }],
                     finish_reason: "tool_calls".into(),
+                    telemetry: Default::default(),
                 })
             }
             1 => {
@@ -236,6 +237,7 @@ impl ChatBackend for Literal250kLinkedBackend {
                     ),
                     tool_calls: Vec::new(),
                     finish_reason: "stop".into(),
+                    telemetry: Default::default(),
                 })
             }
             _ => panic!("unexpected provider call {call}"),

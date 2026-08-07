@@ -850,6 +850,7 @@ fn scripted_broad_triage_turn_exposes_brief_and_accepts_structured_answer() {
         content: markdown.clone(),
         tool_calls: vec![],
         finish_reason: "stop".into(),
+        telemetry: Default::default(),
     }]);
 
     let mut history = Vec::new();
@@ -1012,6 +1013,7 @@ fn budget_exhaustion_final_synthesis_reserves_real_path_headroom() {
         content: markdown,
         tool_calls: vec![],
         finish_reason: "stop".into(),
+        telemetry: Default::default(),
     }]);
     let mut history = Vec::new();
     let opts = AgentOptions {
@@ -1087,6 +1089,7 @@ fn minimum_custom_budget_reserves_proportional_headroom_on_real_agent_path() {
         content: markdown,
         tool_calls: vec![],
         finish_reason: "stop".into(),
+        telemetry: Default::default(),
     }]);
     let mut history = Vec::new();
     let minimum_budget = cd_core::model_context::MIN_CONTEXT_CHAR_BUDGET;

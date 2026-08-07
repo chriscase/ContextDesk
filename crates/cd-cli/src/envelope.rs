@@ -283,6 +283,10 @@ pub struct TraceSummaryLine {
     /// Host deterministic context-plan "Context used" summary when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_used: Option<String>,
+    /// Authoritative provider-turn telemetry (additive; same DTO as Tauri).
+    /// Boxed so the CLI `StreamLine` enum stays clippy-friendly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_telemetry: Option<Box<cd_core::provider_telemetry::ProviderTurnTelemetry>>,
 }
 
 /// `--trace context` / `--trace full`: one line per provider call this turn
@@ -304,6 +308,9 @@ pub struct TraceContextLine {
     pub tool_call_count: Option<usize>,
     /// Redacted error text, only when `outcome == "failed"`.
     pub error: Option<String>,
+    /// Per-round transport + application telemetry (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_round_telemetry: Option<cd_core::provider_telemetry::ProviderRoundTelemetry>,
 }
 
 /// `--trace full` only (requires `--trace-ack`): one line per tool call this

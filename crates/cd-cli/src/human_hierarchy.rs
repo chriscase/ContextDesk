@@ -1108,6 +1108,7 @@ mod tests {
             grounding_scope: "not_applicable".into(),
             interpretation_validated: false,
             context_used: None,
+            provider_telemetry: None,
         }
     }
 
@@ -1217,6 +1218,8 @@ Trace (summary)
             finish_reason: Some("tool_calls".into()),
             tool_call_count: Some(1),
             error: None,
+
+            provider_round_telemetry: None,
         };
         let ctx1 = TraceContextLine {
             round: 1,
@@ -1240,6 +1243,8 @@ Trace (summary)
             finish_reason: Some("stop".into()),
             tool_call_count: Some(0),
             error: None,
+
+            provider_round_telemetry: None,
         };
         let tool = TraceToolLine {
             id: "call_1".into(),
@@ -1286,6 +1291,8 @@ Trace (summary)
             finish_reason: None,
             tool_call_count: None,
             error: Some("provider timeout".into()),
+
+            provider_round_telemetry: None,
         };
         let tool = TraceToolLine {
             id: "t1".into(),
