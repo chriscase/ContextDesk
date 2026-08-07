@@ -205,6 +205,10 @@ pub fn tool_host_with_app_config(
     secrets: &dyn cd_core::keychain_store::SecretStore,
 ) -> CliResult<ToolHost> {
     let mut host = tool_host(cache_root)?;
+    // Keep the CLI on the same whole-turn budget as the shared AppConfig and
+    // desktop host. Otherwise cd-core sees ToolHost's 120s default and can
+    // silently discard an explicit user deadline resolved by cd-workflow.
+    host.set_router_budget(app_cfg.router.clone());
     apply_app_connectors(&mut host, app_cfg, secrets);
     Ok(host)
 }
@@ -212,6 +216,22 @@ pub fn tool_host_with_app_config(
 #[cfg(test)]
 mod credential_tests {
     use super::*;
+
+    struct NoSecrets;
+
+    impl cd_core::keychain_store::SecretStore for NoSecrets {
+        fn get(&self, _reference: &str) -> CoreResult<Option<String>> {
+            Ok(None)
+        }
+
+        fn set(&self, _reference: &str, _value: &str) -> CoreResult<()> {
+            Ok(())
+        }
+
+        fn delete(&self, _reference: &str) -> CoreResult<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn process_override_is_provider_only() {
@@ -228,5 +248,17 @@ mod credential_tests {
         );
         assert_eq!(store.provider_override("connector/confluence/pat"), None);
         assert_eq!(store.provider_override("connector/postgres/password"), None);
+    }
+
+    #[test]
+    fn cli_host_preserves_explicit_app_router_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.router.deadline_ms = 600_000;
+        cfg.router.deadline_is_explicit = true;
+
+        let host = tool_host_with_app_config(dir.path(), &cfg, &NoSecrets).unwrap();
+        assert_eq!(host.router_budget().deadline_ms, 600_000);
+        assert!(host.router_budget().deadline_is_explicit);
     }
 }
