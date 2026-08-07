@@ -874,7 +874,9 @@ fn multi_stage_candidate_messages(
                  and hypotheses. Never propose credentials, certificates, network, deployment, malformed input, or any \\
                  other cause unless a supplied pattern supports it; otherwise say the cause is unknown. \\
                  Include the exact supplied `group_id`. Classify the candidate as an operational incident, symptom, \\
-                 or likely noise/decoy and explain why. DO NOT emit `seq=`, `source=`, `template_id=`, bracketed \\
+                 or likely noise/decoy and explain why. A single health-check/client-closed observation with no \\
+                 repetition or downstream impact is not enough to call an operational incident. DO NOT emit \\
+                 `seq=`, `source=`, `template_id=`, bracketed \\
                  citations, or an evidence list. The trusted host attaches this group's canonical identities. \\
                  {correction_text}"
             ),
@@ -902,7 +904,7 @@ fn multi_stage_comparison_messages(
     correction: bool,
 ) -> Vec<ChatMessage> {
     let correction_text = if correction {
-        "Your previous comparison was withheld. Keep every group separate, include every exact group id, and rank them. DO NOT emit `seq=`, `source=`, `template_id=`, bracketed citations, or an evidence list. The trusted host will attach canonical identities after validation."
+        "Your previous comparison was withheld. Keep every group separate and include every exact group id. Rank only supported incidents; place likely noise/decoys in their own section. DO NOT emit `seq=`, `source=`, `template_id=`, bracketed citations, tables, or an evidence list. The trusted host will attach canonical identities after validation."
     } else {
         ""
     };
@@ -919,9 +921,11 @@ fn multi_stage_comparison_messages(
             content: format!(
                 "You are completing a bounded comparison of independent incident candidates. \\
                  Do not fuse candidate groups or transfer evidence between them. Include a distinct section for \\
-                 every `group_id` below and rank the groups strongest-to-weakest with uncertainty. Preserve exact \\
-                 error codes and mechanisms; do not replace them with generic speculation. Cite only \\
-                 the supplied candidate citations. {correction_text}"
+                 every `group_id` below. Rank supported operational incidents strongest-to-weakest, then put weak, \\
+                 isolated, or likely noise/decoy groups in a separate `Likely noise or isolated observations` \\
+                 section instead of ranking them as incidents. Preserve exact error codes and mechanisms; do not \\
+                 replace them with generic speculation. Use short Markdown headings and bullets; do not use tables, \\
+                 box art, or multi-column layouts. Cite only the supplied candidate citations. {correction_text}"
             ),
             tool_call_id: None,
             tool_calls: None,
@@ -11684,6 +11688,27 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             finish_reason: "stop".into(),
             telemetry: Default::default(),
         }
+    }
+
+    #[test]
+    fn multi_stage_prompts_keep_noise_out_of_incident_ranking_and_avoid_tables() {
+        let candidate = multi_stage_candidate("trace:health", 7);
+        let candidate_prompt = multi_stage_candidate_messages("triage", &candidate, false)[0]
+            .content
+            .clone();
+        assert!(candidate_prompt.contains("single health-check/client-closed observation"));
+        assert!(candidate_prompt.contains("not enough to call an operational incident"));
+
+        let draft = CandidateSynthesisDraft {
+            group_id: candidate.group_id.clone(),
+            text: "likely noise".into(),
+            evidence: candidate.evidence.into_iter().collect(),
+        };
+        let comparison_prompt = multi_stage_comparison_messages("triage", &[draft], false)[0]
+            .content
+            .clone();
+        assert!(comparison_prompt.contains("Likely noise or isolated observations"));
+        assert!(comparison_prompt.contains("do not use tables"));
     }
 
     #[tokio::test]
