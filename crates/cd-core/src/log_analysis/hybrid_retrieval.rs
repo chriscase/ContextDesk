@@ -2,8 +2,9 @@
 //! optionally widened by a semantic embedding lane and optionally reordered
 //! by a rerank stage.
 //!
-//! Contract (host-neutral; CLI, desktop, and the retrieval-ablation benchmark
-//! all consume this seam):
+//! Host-neutral contract. The current product integration exposes role
+//! diagnostics through the CLI; desktop and benchmark execution adapters are
+//! intentionally not claimed until they are wired and measured.
 //!
 //! 1. The structured/keyword lane always runs and is always usable — absence
 //!    or failure of any optional role degrades gracefully and is recorded in

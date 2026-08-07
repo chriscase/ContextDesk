@@ -1,8 +1,9 @@
 //! Host-neutral optional retrieval roles: config resolution, status
 //! diagnostics, and the shared hybrid search entry.
 //!
-//! Consumed identically by the CLI and the desktop host. Distinguishes, per
-//! optional role (semantic embedding, reranking):
+//! Currently consumed by CLI diagnostics and reusable by future hosts.
+//! Desktop retrieval activation is not wired by this module. Distinguishes,
+//! per optional role (semantic embedding, reranking):
 //!
 //! * capability — an adapter for the role exists in this build;
 //! * configuration — the user enabled it and named a model (names are
