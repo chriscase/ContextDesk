@@ -15,9 +15,9 @@ use cd_core::error::CoreResult;
 use cd_core::events::StreamEvent;
 use cd_core::log_analysis::store::LogCorpus;
 use cd_core::tool_host::ToolHost;
-use cd_core::turn_trace::TurnTraceSink;
+use cd_core::turn_trace::{RecordingTurnTrace, TurnTraceSink};
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Arc;
 use tokio::time::Instant;
 
@@ -40,6 +40,17 @@ pub struct TurnExecutionOptions<'a> {
     pub cancel: Option<Arc<AtomicBool>>,
     pub dry_run: bool,
     pub trace_sink: Option<Arc<dyn TurnTraceSink>>,
+    /// Optional workflow-owned recorder. Supplying the same recorder across
+    /// multiple `run_turn` calls makes their provider telemetry one coherent
+    /// capture rather than unrelated per-segment snapshots.
+    pub telemetry_recorder: Option<Arc<RecordingTurnTrace>>,
+    /// Optional workflow-owned provider sequence. This stays monotonic even
+    /// when permission continuation creates a fresh backend wrapper.
+    pub telemetry_sequence: Option<Arc<AtomicUsize>>,
+    /// Let a higher-level workflow append one aggregate telemetry event after
+    /// several internal `run_turn` segments. Ordinary hosts leave this false
+    /// and receive the existing one-event-per-turn behavior.
+    pub suppress_provider_telemetry_event: bool,
     pub linked_synthesis_retry: Option<LinkedSynthesisCheckpoint>,
     pub turn_started_at: Option<Instant>,
     pub turn_prelude_emitted: bool,
@@ -68,16 +79,26 @@ pub async fn run_turn(
     mut live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
     checkpoint_out: Option<&mut Option<LinkedSynthesisCheckpoint>>,
 ) -> CoreResult<Vec<StreamEvent>> {
-    use cd_core::turn_trace::{FanoutTurnTrace, RecordingTurnTrace, TurnTraceSink};
+    use cd_core::turn_trace::{FanoutTurnTrace, TurnTraceSink};
     use std::sync::Arc;
 
-    let telemetry_recorder = Arc::new(RecordingTurnTrace::new());
+    let telemetry_recorder = options
+        .telemetry_recorder
+        .clone()
+        .unwrap_or_else(|| Arc::new(RecordingTurnTrace::new()));
+    let telemetry_sequence = options
+        .telemetry_sequence
+        .clone()
+        .unwrap_or_else(|| Arc::new(AtomicUsize::new(0)));
     let mut sinks: Vec<Arc<dyn TurnTraceSink>> =
         vec![telemetry_recorder.clone() as Arc<dyn TurnTraceSink>];
     if let Some(host_sink) = options.trace_sink.clone() {
         sinks.push(host_sink);
     }
-    let fanout: Arc<dyn TurnTraceSink> = Arc::new(FanoutTurnTrace::new(sinks));
+    let fanout: Arc<dyn TurnTraceSink> = Arc::new(FanoutTurnTrace::with_provider_call_sequence(
+        sinks,
+        telemetry_sequence,
+    ));
 
     let mut events = if let Some(sink) = live.as_mut() {
         cd_core::research::research_turn_with_cancel_and_context_and_checkpoint_and_trace(
@@ -126,6 +147,10 @@ pub async fn run_turn(
         )
         .await?
     };
+
+    if options.suppress_provider_telemetry_event {
+        return Ok(events);
+    }
 
     let calls = telemetry_recorder.calls();
     let telemetry_event = crate::provider_telemetry::aggregate_provider_telemetry_event(
@@ -244,6 +269,9 @@ pub async fn run_linked_turn(
             cancel,
             dry_run,
             trace_sink,
+            telemetry_recorder: None,
+            telemetry_sequence: None,
+            suppress_provider_telemetry_event: false,
             linked_synthesis_retry,
             turn_started_at,
             turn_prelude_emitted,

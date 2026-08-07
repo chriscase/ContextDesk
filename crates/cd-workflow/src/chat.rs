@@ -67,10 +67,10 @@ use cd_core::keychain_store::SecretStore;
 use cd_core::permissions::PermissionDecision;
 use cd_core::sessions::{Session, SessionStore, StoredMessage};
 use cd_core::tool_host::ToolHost;
-use cd_core::turn_trace::TurnTraceSink;
+use cd_core::turn_trace::{RecordingTurnTrace, TurnTraceSink};
 use serde_json::Value;
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Arc;
 
 /// Bound on synchronous grant-and-continue rounds within one workflow call —
@@ -240,6 +240,12 @@ pub async fn run_chat_workflow(
     let turn_id = format!("{}::{}", session_id, uuid::Uuid::new_v4());
     let mut all_events = Vec::new();
     let mut rounds = 0usize;
+    // The CLI's synchronous permission grants resume one user turn through
+    // several `run_turn` segments. Keep one recorder and sequence across them
+    // so the final DTO is workflow-scoped, has unique round ids, and never
+    // drops the provider call that preceded the permission prompt.
+    let workflow_telemetry_recorder = Arc::new(RecordingTurnTrace::new());
+    let workflow_telemetry_sequence = Arc::new(AtomicUsize::new(0));
     // A concrete, always-present sink lets each loop iteration reborrow the
     // SAME `&mut dyn FnMut`, which the borrow checker tracks precisely across
     // iterations; matching `live` fresh inside the loop does not, because
@@ -265,6 +271,9 @@ pub async fn run_chat_workflow(
                 cancel: cancel.clone(),
                 dry_run: request.dry_run,
                 trace_sink: request.trace_sink.clone(),
+                telemetry_recorder: Some(workflow_telemetry_recorder.clone()),
+                telemetry_sequence: Some(workflow_telemetry_sequence.clone()),
+                suppress_provider_telemetry_event: true,
                 user_selection: request.user_selection,
                 ..TurnExecutionOptions::default()
             },
@@ -321,6 +330,20 @@ pub async fn run_chat_workflow(
         .await?;
         all_events.extend(grant_events);
     }
+
+    // Emit precisely one shared DTO for the whole CLI chat workflow. This is
+    // deliberately after permission continuation and grant events so every
+    // provider call in the user-visible turn contributes to the aggregate.
+    let telemetry_event = crate::provider_telemetry::aggregate_provider_telemetry_event(
+        crate::provider_telemetry::ProviderTelemetryAggregateInput {
+            configured_profile_id: &resolved.profile.id,
+            configured_model: &resolved.profile.chat_model,
+            calls: &workflow_telemetry_recorder.calls(),
+            events: &all_events,
+        },
+    );
+    live_sink(telemetry_event.clone());
+    all_events.push(telemetry_event);
 
     let corpus_revision = binding.as_ref().map(|b| b.revision);
     if let Some(binding) = binding {
@@ -479,6 +502,146 @@ mod tests {
         assert_eq!(saved.messages[1].content, "hi there");
         assert_eq!(saved.messages[2].role, "assistant");
         assert_eq!(saved.messages[2].content, "hello from the mock model");
+    }
+
+    /// A CLI permission grant resumes the same user-visible chat turn through
+    /// a second `run_turn` segment. Telemetry must remain one workflow-scoped
+    /// DTO: both provider responses stay present, their metrics aggregate, and
+    /// the new backend wrapper cannot reset round ids and cross-associate the
+    /// final response with the call that requested permission.
+    #[tokio::test]
+    async fn permission_continuation_keeps_provider_telemetry_workflow_scoped() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::{Request, Respond};
+
+        struct PermissionThenAnswer {
+            calls: AtomicUsize,
+        }
+
+        impl Respond for PermissionThenAnswer {
+            fn respond(&self, _request: &Request) -> ResponseTemplate {
+                let body = match self.calls.fetch_add(1, Ordering::SeqCst) {
+                    0 => concat!(
+                        "data: {\"id\":\"request-before-permission\",\"model\":\"response-model-a\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"save-1\",\"function\":{\"name\":\"save_memory\",\"arguments\":\"{\\\"title\\\":\\\"telemetry fixture\\\",\\\"body_markdown\\\":\\\"fixture\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"cost\":0.1}}\n\n",
+                        "data: [DONE]\n\n"
+                    ),
+                    1 => concat!(
+                        "data: {\"id\":\"request-after-permission\",\"model\":\"response-model-b\",\"choices\":[{\"delta\":{\"content\":\"permission continuation complete\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4,\"total_tokens\":7,\"cost\":0.2}}\n\n",
+                        "data: [DONE]\n\n"
+                    ),
+                    _ => panic!("workflow must make exactly two provider calls"),
+                };
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_raw(body, "text/event-stream")
+            }
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(PermissionThenAnswer {
+                calls: AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new("permission-telemetry", vec![workspace_dir.path().into()]);
+        let index = KeywordIndex::build(&workspace).unwrap();
+        let mut host = ToolHost::new(workspace, index, None);
+        let secrets = MemorySecretStore::new();
+        let mut profile = ProviderProfile::ollama_local();
+        profile.kind = ProviderKind::OpenAiCompatible;
+        profile.base_url = server.uri();
+        profile.local_only = true;
+        profile.chat_model = "configured-model".into();
+        profile.capabilities.tools = true;
+        let cfg = AppConfig {
+            providers: ProviderConfig {
+                active_id: Some(profile.id.clone()),
+                profiles: vec![profile],
+            },
+            ..AppConfig::default()
+        };
+        let sessions_dir = tempfile::tempdir().unwrap();
+        let sessions = SessionStore::new(sessions_dir.path());
+        let trace = Arc::new(RecordingTurnTrace::new());
+        let trace_sink: Arc<dyn TurnTraceSink> = trace.clone();
+
+        let outcome = run_chat_workflow(
+            &mut host,
+            &secrets,
+            &cfg,
+            &sessions,
+            workspace_dir.path(),
+            None,
+            "save the telemetry fixture",
+            ChatWorkflowRequest {
+                corpus_id: None,
+                explicit_profile_id: None,
+                chat_model_override: None,
+                dry_run: false,
+                trace_sink: Some(trace_sink),
+                user_selection: None,
+            },
+            None,
+            None,
+            |_tool, _target, _reason, _preview, _risk| PermissionDecision::AllowOnce,
+        )
+        .await
+        .expect("permission continuation workflow should complete");
+
+        let telemetry_events: Vec<_> = outcome
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::ProviderTelemetry { telemetry } => Some(telemetry.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(telemetry_events.len(), 1, "one DTO for the CLI workflow");
+        let telemetry = telemetry_events[0];
+        assert_eq!(telemetry.provider_round_count, 2);
+        assert_eq!(telemetry.prompt_tokens, Some(13));
+        assert_eq!(telemetry.completion_tokens, Some(6));
+        assert_eq!(telemetry.total_tokens, Some(19));
+        assert!((telemetry.cost.expect("both rounds report cost") - 0.3).abs() < 1e-9);
+        assert_eq!(
+            telemetry.response_model.as_deref(),
+            Some("response-model-b")
+        );
+        assert_eq!(
+            telemetry.provider_request_id.as_deref(),
+            Some("request-after-permission")
+        );
+        assert_eq!(telemetry.rounds.len(), 2);
+        assert_eq!(telemetry.rounds[0].round, 0);
+        assert_eq!(telemetry.rounds[1].round, 1);
+        assert_eq!(
+            telemetry.rounds[0].transport.provider_request_id.as_deref(),
+            Some("request-before-permission")
+        );
+        assert_eq!(
+            telemetry.rounds[1].transport.provider_request_id.as_deref(),
+            Some("request-after-permission")
+        );
+
+        let calls = trace.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].seq, 0);
+        assert_eq!(calls[1].seq, 1);
+        for call in &calls {
+            let round = telemetry
+                .rounds
+                .iter()
+                .find(|round| round.round == call.seq as u32)
+                .expect("unique trace sequence must resolve to one telemetry round");
+            assert_eq!(round.transport, call.transport);
+        }
+        assert!(outcome.events.iter().any(
+            |event| matches!(event, StreamEvent::PermissionRequired { tool_name, .. } if tool_name == "save_memory")
+        ));
     }
 
     #[tokio::test]

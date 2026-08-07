@@ -945,6 +945,13 @@ pub trait TurnTraceSink: Send + Sync {
     /// Record one completed (or failed) backend call.
     fn record(&self, call: TracedCall);
 
+    /// Allocate the next monotonically increasing provider-call sequence for
+    /// this trace. Sinks that do not retain calls may return `None`; the
+    /// tracing wrapper then uses its local fallback counter.
+    fn next_provider_call_seq(&self) -> Option<usize> {
+        None
+    }
+
     /// Note that the **next** provider round is an application retry with this
     /// stable reason code. Ordinary tool continuations must not call this.
     ///
@@ -1026,14 +1033,27 @@ pub struct FanoutTurnTrace {
     /// Pending application-retry reason for the next provider round (decision
     /// point capture). Taken once by [`TracingChatBackend`] into [`TracedCall`].
     pending_application_retry: Mutex<Option<String>>,
+    /// Shared provider-call sequence. A workflow may supply the same counter
+    /// to several short-lived fan-outs (for example across CLI permission
+    /// continuation segments), so every captured provider round stays unique.
+    provider_call_seq: Arc<AtomicUsize>,
 }
 
 impl FanoutTurnTrace {
     /// Forward every record to each sink in order.
     pub fn new(sinks: Vec<Arc<dyn TurnTraceSink>>) -> Self {
+        Self::with_provider_call_sequence(sinks, Arc::new(AtomicUsize::new(0)))
+    }
+
+    /// Build a fan-out using a caller-owned provider sequence.
+    pub fn with_provider_call_sequence(
+        sinks: Vec<Arc<dyn TurnTraceSink>>,
+        provider_call_seq: Arc<AtomicUsize>,
+    ) -> Self {
         Self {
             sinks,
             pending_application_retry: Mutex::new(None),
+            provider_call_seq,
         }
     }
 }
@@ -1043,6 +1063,10 @@ impl TurnTraceSink for FanoutTurnTrace {
         for sink in &self.sinks {
             sink.record(call.clone());
         }
+    }
+
+    fn next_provider_call_seq(&self) -> Option<usize> {
+        Some(self.provider_call_seq.fetch_add(1, Ordering::SeqCst))
     }
 
     fn note_application_retry(&self, reason: &str) {
@@ -1160,6 +1184,9 @@ pub struct RecordingTurnTrace {
     developer_dropped: AtomicUsize,
     /// Pending application-retry reason for the next [`TracedCall`].
     pending_application_retry: Mutex<Option<String>>,
+    /// Provider-call sequence is distinct from timeline event ordering: host
+    /// observations also consume timeline sequence numbers.
+    provider_call_seq: AtomicUsize,
 }
 
 impl fmt::Debug for RecordingTurnTrace {
@@ -1195,6 +1222,7 @@ impl RecordingTurnTrace {
             developer_observer: None,
             developer_dropped: AtomicUsize::new(0),
             pending_application_retry: Mutex::new(None),
+            provider_call_seq: AtomicUsize::new(0),
         }
     }
 
@@ -1222,6 +1250,7 @@ impl RecordingTurnTrace {
             developer_observer: Some(observer),
             developer_dropped: AtomicUsize::new(0),
             pending_application_retry: Mutex::new(None),
+            provider_call_seq: AtomicUsize::new(0),
         }
     }
 
@@ -1599,6 +1628,10 @@ fn bound_developer_event(
 impl TurnTraceSink for RecordingTurnTrace {
     fn record(&self, call: TracedCall) {
         self.push(TracedTimelineItem::ProviderCall(call));
+    }
+
+    fn next_provider_call_seq(&self) -> Option<usize> {
+        Some(self.provider_call_seq.fetch_add(1, Ordering::SeqCst))
     }
 
     fn note_application_retry(&self, reason: &str) {
@@ -2019,7 +2052,10 @@ impl TracingChatBackend {
         tools: &[ToolSpec],
         result: &CoreResult<ChatCompletion>,
     ) {
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst);
+        let seq = self
+            .sink
+            .next_provider_call_seq()
+            .unwrap_or_else(|| self.seq.fetch_add(1, Ordering::SeqCst));
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let tool_names = tools
             .iter()

@@ -111,7 +111,9 @@ where
     let mut sum = 0u64;
     for round in rounds {
         any = true;
-        sum = sum.saturating_add(get(&round)?);
+        // An unrepresentable aggregate is not an exact provider fact. Keep it
+        // unknown rather than saturating to a fabricated token count.
+        sum = sum.checked_add(get(&round)?)?;
     }
     any.then_some(sum)
 }
@@ -656,5 +658,24 @@ mod tests {
         assert!((summed_cost - 0.3).abs() < 1e-9);
         assert_eq!(sum_reported_f64_all([&a, &missing], |t| t.cost), None);
         assert_eq!(sum_reported_u64_all([&a], |t| t.prompt_tokens), Some(10));
+    }
+
+    #[test]
+    fn reported_aggregation_rejects_numeric_overflow() {
+        assert_eq!(
+            sum_reported_u64_all([u64::MAX, 1], |value| Some(*value)),
+            None,
+            "an overflowing token sum must remain unknown"
+        );
+        assert_eq!(
+            sum_reported_f64_all([f64::MAX, f64::MAX], |value| Some(*value)),
+            None,
+            "an infinite cost sum must remain unknown"
+        );
+        assert_eq!(
+            sum_reported_f64_all([f64::NAN], |value| Some(*value)),
+            None,
+            "a non-finite reported cost must remain unknown"
+        );
     }
 }
