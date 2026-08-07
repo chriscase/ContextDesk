@@ -91,6 +91,13 @@ type LogSearchToolRunResult = (
 pub const BROAD_LOG_TRIAGE_BRIEF_MAX_BYTES: usize = 32 * 1024;
 /// Maximum trusted event identities carried beside one broad-log brief.
 pub const BROAD_LOG_TRIAGE_IDENTITY_CAP: usize = 128;
+/// Maximum independent incident groups admitted to the experimental staged
+/// broad-log synthesis path. This is intentionally lower than the brief's
+/// display caps: every group may require two provider attempts plus one final
+/// comparison, all under the ordinary whole-turn deadline.
+pub const BROAD_LOG_TRIAGE_CANDIDATE_CAP: usize = 4;
+/// Maximum representative citations passed to one candidate-only synthesis.
+pub const BROAD_LOG_TRIAGE_CANDIDATE_IDENTITY_CAP: usize = 12;
 
 const BROAD_LOG_TRIAGE_DISTRIBUTION_CAP: usize = 12;
 const BROAD_LOG_TRIAGE_ERROR_DISPLAY_CAP: usize = 16;
@@ -169,6 +176,30 @@ pub struct BroadLogTriageBrief {
     pub deterministic_complete: bool,
     /// Host-neutral exception episode correlation (derived; raw events unchanged).
     pub exception_episodes: Option<crate::log_analysis::ExceptionEpisodeReport>,
+    /// Host-selected, disjoint incident candidates for the experimental
+    /// multi-stage path. Their evidence is the only citation channel allowed
+    /// during per-candidate synthesis; an empty list retains single-stage
+    /// behavior.
+    pub candidate_groups: Vec<BroadLogTriageCandidate>,
+}
+
+/// One deterministic broad-triage incident candidate.
+///
+/// Candidates are structural groups: parser-true cross-source trace groups
+/// first, then ungrouped ERROR/FATAL template groups. They never include
+/// warning/noise-only templates, which prevents high-volume decoys from being
+/// promoted merely because they are frequent.
+#[derive(Debug, Clone)]
+pub struct BroadLogTriageCandidate {
+    /// Stable host-owned group label (for example `trace:<id>` or
+    /// `template:<id>`). It is not supplied by the model.
+    pub group_id: String,
+    /// `trace` or `template`, retained for event/trail disclosure.
+    pub structural_kind: &'static str,
+    /// Compact untrusted-data brief containing only this group's structure.
+    pub model_text: String,
+    /// Trusted identities belonging only to this group.
+    pub evidence: Vec<crate::log_analysis::SearchEvidenceIdentity>,
 }
 
 /// Cooperative abort handle for one deterministic broad-log triage worker.
@@ -2272,6 +2303,11 @@ impl ToolHost {
         let mut evidence = Vec::new();
         let mut seen_evidence = std::collections::HashSet::new();
         let mut identity_partial = false;
+        // Candidate construction is host-only and deliberately independent of
+        // the global brief identity cap. A group must retain its own complete
+        // bounded citation set or it is not admitted to multi-stage synthesis.
+        let mut candidate_groups = Vec::new();
+        let mut trace_candidate_template_ids = std::collections::HashSet::new();
         let trace_chains_available = crate::log_analysis::query_cross_source_trace_summaries(
             &corpus,
             &suppression.excluded_template_ids,
@@ -2339,7 +2375,8 @@ impl ToolHost {
                 representatives.len(),
                 templates_partial
             ));
-            for event in representatives {
+            let mut candidate_evidence = Vec::new();
+            for event in &representatives {
                 let source = broad_triage_source_identity(&event.source);
                 let service =
                     broad_triage_bounded_line(event.service.as_deref().unwrap_or("<unset>"));
@@ -2361,6 +2398,18 @@ impl ToolHost {
                     event.template_id,
                     pattern
                 ));
+                if candidate_evidence.len() < BROAD_LOG_TRIAGE_CANDIDATE_IDENTITY_CAP {
+                    let identity = crate::log_analysis::SearchEvidenceIdentity {
+                        seq: event.seq,
+                        source: event.source.clone(),
+                        citation_source: broad_triage_citation_source(&event.source),
+                        template_id: event.template_id,
+                    };
+                    if !candidate_evidence.contains(&identity) {
+                        candidate_evidence.push(identity);
+                    }
+                }
+                trace_candidate_template_ids.insert(event.template_id);
                 if evidence.len() >= BROAD_LOG_TRIAGE_IDENTITY_CAP {
                     identity_partial = true;
                     continue;
@@ -2374,6 +2423,36 @@ impl ToolHost {
                 if seen_evidence.insert(identity.clone()) {
                     evidence.push(identity);
                 }
+            }
+            if !candidate_evidence.is_empty()
+                && candidate_groups.len() < BROAD_LOG_TRIAGE_CANDIDATE_CAP
+            {
+                let mut candidate_text = format!(
+                    "source_kind: deterministic_broad_log_candidate\nstructural_kind: trace\ngroup_id: trace:{}\ntrace_event_count: {}\ntrace_source_count: {}\ntrace_error_or_fatal_count: {}\ntrusted_citations_only:\n",
+                    broad_triage_bounded_line(&chain.trace_id),
+                    chain.event_count,
+                    chain.source_count,
+                    chain.error_or_fatal_count,
+                );
+                for identity in &candidate_evidence {
+                    candidate_text.push_str(&format!(
+                        "- seq={} source={} template_id={}\n",
+                        identity.seq,
+                        broad_triage_source_identity(
+                            identity
+                                .citation_source
+                                .as_deref()
+                                .unwrap_or(&identity.source)
+                        ),
+                        identity.template_id
+                    ));
+                }
+                candidate_groups.push(BroadLogTriageCandidate {
+                    group_id: format!("trace:{}", chain.trace_id),
+                    structural_kind: "trace",
+                    model_text: candidate_text,
+                    evidence: candidate_evidence,
+                });
             }
         }
 
@@ -2528,6 +2607,64 @@ impl ToolHost {
                         "  identity seq={} source={source} template_id={} axis_value={}\n",
                         identity.seq, identity.template_id, event.ts
                     ));
+                }
+            }
+            // A template already represented by a parser-true cross-source
+            // trace remains in that trace group. Do not make the final model
+            // collapse the same incident into a duplicate template candidate.
+            if !trace_candidate_template_ids.contains(&hit.template_id)
+                && candidate_groups.len() < BROAD_LOG_TRIAGE_CANDIDATE_CAP
+            {
+                let mut candidate_evidence = Vec::new();
+                for event in [&first_span, &last_span] {
+                    let identity = crate::log_analysis::SearchEvidenceIdentity {
+                        seq: event.seq,
+                        source: event.source.clone(),
+                        citation_source: broad_triage_citation_source(&event.source),
+                        template_id: event.template_id,
+                    };
+                    if !candidate_evidence.contains(&identity) {
+                        candidate_evidence.push(identity);
+                    }
+                }
+                for event in &exemplars {
+                    if candidate_evidence.len() >= BROAD_LOG_TRIAGE_CANDIDATE_IDENTITY_CAP {
+                        break;
+                    }
+                    let identity = crate::log_analysis::SearchEvidenceIdentity {
+                        seq: event.seq,
+                        source: event.source.clone(),
+                        citation_source: broad_triage_citation_source(&event.source),
+                        template_id: event.template_id,
+                    };
+                    if !candidate_evidence.contains(&identity) {
+                        candidate_evidence.push(identity);
+                    }
+                }
+                if !candidate_evidence.is_empty() {
+                    let mut candidate_text = format!(
+                        "source_kind: deterministic_broad_log_candidate\nstructural_kind: template\ngroup_id: template:{}\ntemplate_id: {}\nseverity: {}\nerror_event_count: {}\ntrusted_citations_only:\n",
+                        hit.template_id, hit.template_id, hit.severity, hit.error_event_count
+                    );
+                    for identity in &candidate_evidence {
+                        candidate_text.push_str(&format!(
+                            "- seq={} source={} template_id={}\n",
+                            identity.seq,
+                            broad_triage_source_identity(
+                                identity
+                                    .citation_source
+                                    .as_deref()
+                                    .unwrap_or(&identity.source)
+                            ),
+                            identity.template_id
+                        ));
+                    }
+                    candidate_groups.push(BroadLogTriageCandidate {
+                        group_id: format!("template:{}", hit.template_id),
+                        structural_kind: "template",
+                        model_text: candidate_text,
+                        evidence: candidate_evidence,
+                    });
                 }
             }
         }
@@ -2986,6 +3123,7 @@ impl ToolHost {
             suppression_lens_suspended: suppression.suppression_lens_suspended,
             deterministic_complete: true,
             exception_episodes: exception_report,
+            candidate_groups,
         })
     }
 
@@ -9096,6 +9234,33 @@ mod tests {
             .unwrap();
         host.pin_log_suppression_lens(&corpus_id).unwrap();
         (dir, corpus, host)
+    }
+
+    #[test]
+    fn broad_triage_candidates_use_ungrouped_error_templates_when_no_trace_exists() {
+        let (_dir, corpus, host) = broad_triage_fixture(crate::log_analysis::TimeQuality::Wall);
+        corpus
+            .with_connection(|connection| {
+                connection
+                    .execute("UPDATE events SET trace_id = NULL", [])
+                    .map_err(|error| {
+                        CoreError::Message(format!("clear test trace ids: {error}"))
+                    })?;
+                Ok(())
+            })
+            .unwrap();
+
+        let brief = host.build_broad_log_triage_brief().unwrap();
+        assert!(brief.candidate_groups.len() >= 2);
+        assert!(brief
+            .candidate_groups
+            .iter()
+            .all(|candidate| candidate.structural_kind == "template"));
+        assert!(brief
+            .candidate_groups
+            .windows(2)
+            .all(|pair| pair[0].group_id != pair[1].group_id));
+        assert!(brief.candidate_groups.len() <= BROAD_LOG_TRIAGE_CANDIDATE_CAP);
     }
 
     #[test]
