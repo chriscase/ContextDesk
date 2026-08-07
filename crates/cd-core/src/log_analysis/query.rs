@@ -716,6 +716,30 @@ pub struct EventRowsPage {
     pub time_quality: TimeQuality,
 }
 
+/// Bounded host-computed summary of one parser-true trace spanning sources.
+///
+/// This deliberately uses only the durable `events.trace_id` column. Request,
+/// span, thread, and message tokens are never promoted into trace identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CrossSourceTraceSummary {
+    /// Exact parser-populated trace id.
+    pub trace_id: String,
+    /// Matching unsuppressed events.
+    pub event_count: u64,
+    /// Distinct matching sources.
+    pub source_count: u64,
+    /// Matching ERROR/FATAL events.
+    pub error_or_fatal_count: u64,
+    /// Earliest stored axis value.
+    pub first_ts: i64,
+    /// Latest stored axis value.
+    pub last_ts: i64,
+}
+
+/// Hard result bound for cross-source trace discovery.
+pub const MAX_CROSS_SOURCE_TRACE_SUMMARIES: usize = 32;
+
 /// Exact count under one cursor-independent event filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1377,6 +1401,52 @@ pub fn query_event_rows(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<EventR
 /// and limit. Exact results are boundedly cached by filter on the open corpus.
 pub fn query_event_count(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<EventCount> {
     query_event_count_with_additional_keyword(corpus, q, None)
+}
+
+/// Find bounded parser-true traces that cross source boundaries and contain an
+/// ERROR/FATAL event. Ranking is deterministic and favors broader source
+/// coverage before raw volume.
+pub fn query_cross_source_trace_summaries(
+    corpus: &LogCorpus,
+    excluded_template_ids: &[u64],
+    limit: usize,
+) -> CoreResult<Vec<CrossSourceTraceSummary>> {
+    let filter = EventQuery {
+        excluded_template_ids: excluded_template_ids.to_vec(),
+        ..Default::default()
+    };
+    let (where_sql, binds) = build_where(&filter)?;
+    let limit = limit.clamp(1, MAX_CROSS_SOURCE_TRACE_SUMMARIES);
+    let sql = format!(
+        "SELECT trace_id, COUNT(*), COUNT(DISTINCT source), \
+                SUM(CASE WHEN lower(level) IN ('error', 'fatal') THEN 1 ELSE 0 END), \
+                MIN(ts), MAX(ts) \
+         FROM events \
+         WHERE {where_sql} AND trace_id IS NOT NULL AND length(trim(trace_id)) > 0 \
+         GROUP BY trace_id \
+         HAVING COUNT(DISTINCT source) > 1 \
+            AND SUM(CASE WHEN lower(level) IN ('error', 'fatal') THEN 1 ELSE 0 END) > 0 \
+         ORDER BY COUNT(DISTINCT source) DESC, \
+                  SUM(CASE WHEN lower(level) IN ('error', 'fatal') THEN 1 ELSE 0 END) DESC, \
+                  COUNT(*) DESC, trace_id ASC \
+         LIMIT {limit}"
+    );
+    corpus.with_connection(|conn| {
+        let mut stmt = conn.prepare(&sql).map_err(duck_err)?;
+        let rows = stmt
+            .query_map(params_ref(&binds).as_slice(), |row| {
+                Ok(CrossSourceTraceSummary {
+                    trace_id: row.get(0)?,
+                    event_count: row.get::<_, i64>(1)?.max(0) as u64,
+                    source_count: row.get::<_, i64>(2)?.max(0) as u64,
+                    error_or_fatal_count: row.get::<_, i64>(3)?.max(0) as u64,
+                    first_ts: row.get(4)?,
+                    last_ts: row.get(5)?,
+                })
+            })
+            .map_err(duck_err)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(duck_err)
+    })
 }
 
 /// Query events while requiring an additional case-insensitive message

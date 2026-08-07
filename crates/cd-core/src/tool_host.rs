@@ -104,6 +104,8 @@ const BROAD_LOG_TRIAGE_TIMELINE_BUCKET_CAP: usize = 12;
 const BROAD_LOG_TRIAGE_TIMELINE_ERROR_RESERVE: usize = 4;
 const BROAD_LOG_TRIAGE_CORRELATION_SEED_CAP: usize = 3;
 const BROAD_LOG_TRIAGE_CORRELATION_RESULT_CAP: usize = 5;
+const BROAD_LOG_TRIAGE_TRACE_CHAIN_CAP: usize = 4;
+const BROAD_LOG_TRIAGE_TRACE_CHAIN_TEMPLATE_CAP: usize = 12;
 const BROAD_LOG_TRIAGE_NOISE_SUGGESTION_CAP: usize = 6;
 const BROAD_LOG_TRIAGE_LINE_MAX_BYTES: usize = 192;
 
@@ -2267,6 +2269,113 @@ impl ToolHost {
         let error_partial =
             error_templates_available > u64::try_from(selected_errors.len()).unwrap_or(u64::MAX);
 
+        let mut evidence = Vec::new();
+        let mut seen_evidence = std::collections::HashSet::new();
+        let mut identity_partial = false;
+        let trace_chains_available = crate::log_analysis::query_cross_source_trace_summaries(
+            &corpus,
+            &suppression.excluded_template_ids,
+            BROAD_LOG_TRIAGE_TRACE_CHAIN_CAP.saturating_add(1),
+        )?;
+        let trace_chains = trace_chains_available
+            .iter()
+            .take(BROAD_LOG_TRIAGE_TRACE_CHAIN_CAP)
+            .collect::<Vec<_>>();
+        checkpoint("cross_source_trace_summaries")?;
+        body.push_str("\n## Cross-source execution chains\n");
+        body.push_str(&broad_triage_section_disclosure(
+            &suppression,
+            BROAD_LOG_TRIAGE_TRACE_CHAIN_CAP,
+            trace_chains_available.len() > trace_chains.len(),
+            false,
+        ));
+        body.push_str(
+            "identity_basis: parser_true_trace_id_only\n\
+             interpretation: ordered correlation evidence; sequence does not by itself prove root cause\n\
+             ranking: distinct sources DESC, ERROR/FATAL count DESC, event count DESC, trace id ASC\n",
+        );
+        if trace_chains.is_empty() {
+            body.push_str("selection_state: no_parser_true_cross_source_error_trace\n");
+        }
+        for chain in trace_chains {
+            let page = crate::log_analysis::query_event_rows(
+                &corpus,
+                &crate::log_analysis::EventQuery {
+                    trace_id: Some(chain.trace_id.clone()),
+                    excluded_template_ids: suppression.excluded_template_ids.clone(),
+                    limit: crate::log_analysis::MAX_EVENT_PAGE,
+                    ..Default::default()
+                },
+            )?;
+            checkpoint("cross_source_trace_events")?;
+            let row_partial = page.next_cursor.is_some();
+            identity_partial |= row_partial;
+            let available_templates = page
+                .events
+                .iter()
+                .map(|event| event.template_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len();
+            let mut seen_templates = std::collections::HashSet::new();
+            let representatives = page
+                .events
+                .iter()
+                .filter(|event| seen_templates.insert(event.template_id))
+                .take(BROAD_LOG_TRIAGE_TRACE_CHAIN_TEMPLATE_CAP)
+                .collect::<Vec<_>>();
+            let templates_partial = available_templates > representatives.len() || row_partial;
+            let trace_id = broad_triage_bounded_line(&chain.trace_id);
+            let trace_id =
+                serde_json::to_string(&trace_id).unwrap_or_else(|_| "\"<invalid>\"".into());
+            body.push_str(&format!(
+                "- trace_id={trace_id} event_count={} source_count={} error_or_fatal_count={} \
+                 first_axis_value={} last_axis_value={} representative_templates={} partial={}\n",
+                chain.event_count,
+                chain.source_count,
+                chain.error_or_fatal_count,
+                chain.first_ts,
+                chain.last_ts,
+                representatives.len(),
+                templates_partial
+            ));
+            for event in representatives {
+                let source = broad_triage_source_identity(&event.source);
+                let service =
+                    broad_triage_bounded_line(event.service.as_deref().unwrap_or("<unset>"));
+                let service =
+                    serde_json::to_string(&service).unwrap_or_else(|_| "\"<invalid>\"".into());
+                let pattern = corpus
+                    .template_pattern(event.template_id)
+                    .unwrap_or_else(|| event.message.clone());
+                let pattern = broad_triage_bounded_line(&pattern);
+                let pattern =
+                    serde_json::to_string(&pattern).unwrap_or_else(|_| "\"<invalid>\"".into());
+                body.push_str(&format!(
+                    "  - axis_value={} seq={} source={} service={} level={} template_id={} pattern={}\n",
+                    event.ts,
+                    event.seq,
+                    source,
+                    service,
+                    event.level,
+                    event.template_id,
+                    pattern
+                ));
+                if evidence.len() >= BROAD_LOG_TRIAGE_IDENTITY_CAP {
+                    identity_partial = true;
+                    continue;
+                }
+                let identity = crate::log_analysis::SearchEvidenceIdentity {
+                    seq: event.seq,
+                    source: event.source.clone(),
+                    citation_source: broad_triage_citation_source(&event.source),
+                    template_id: event.template_id,
+                };
+                if seen_evidence.insert(identity.clone()) {
+                    evidence.push(identity);
+                }
+            }
+        }
+
         body.push_str("\n## Structured ERROR templates\n");
         body.push_str(&broad_triage_section_disclosure(
             &suppression,
@@ -2284,10 +2393,7 @@ impl ToolHost {
             selected_errors.len(),
             BROAD_LOG_TRIAGE_ERROR_DISPLAY_CAP.saturating_sub(BROAD_LOG_TRIAGE_RARE_ERROR_RESERVE)
         ));
-        let mut evidence = Vec::new();
-        let mut seen_evidence = std::collections::HashSet::new();
         let mut correlation_seeds = Vec::new();
-        let mut identity_partial = false;
         // Prefer occurrence citations (actual children) as trusted identities.
         if let Some(report) = exception_report.as_ref() {
             for family in report.families.iter().take(4) {
@@ -8960,7 +9066,11 @@ mod tests {
                     host: Some(if template_id == 22 { "db-01" } else { "app-01" }.into()),
                     template_id,
                     params: vec![],
-                    trace_id: Some(format!("trace-{template_id}")),
+                    trace_id: Some(if matches!(template_id, 21 | 22) {
+                        "trace-incident".into()
+                    } else {
+                        format!("trace-{template_id}")
+                    }),
                     message: format!("{pattern} event {index}"),
                     source: source.into(),
                 });
@@ -9283,6 +9393,7 @@ mod tests {
         for section in [
             "## Ranking formulas",
             "## Top distributions",
+            "## Cross-source execution chains",
             "## Structured ERROR templates",
             "## Structured WARN templates",
             "## Problem clusters",
@@ -9291,6 +9402,25 @@ mod tests {
             "## Suggested noise candidates",
         ] {
             assert!(first.model_text.contains(section), "{section}");
+        }
+        assert!(
+            first.model_text.contains("trace_id=\"trace-incident\"")
+                && first.model_text.contains("source_count=2")
+                && first.model_text.contains("checkout connection refused")
+                && first
+                    .model_text
+                    .contains("database page corruption sentinel"),
+            "cross-source chain must preserve ordered host evidence: {}",
+            first.model_text
+        );
+        for identity in [(21_u64, "api/app.log"), (22_u64, "db/database.log")] {
+            assert!(
+                first
+                    .evidence
+                    .iter()
+                    .any(|event| { event.template_id == identity.0 && event.source == identity.1 }),
+                "chain identity missing: {identity:?}"
+            );
         }
         assert!(
             first
