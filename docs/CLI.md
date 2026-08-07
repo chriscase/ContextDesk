@@ -689,12 +689,13 @@ than inventing them.
   JSON/JSONL expose the same additive object without parsing display text.
   When a provider-backed turn runs, an additive `provider_telemetry` object
   carries the same host-neutral `ProviderTurnTelemetry` DTO Tauri receives as
-  EventDto kind `provider_telemetry` (configured profile/model, response
-  model, safe request id, observed route or explicit `unknown`, token/cost
-  fields only when supplied, context budget fold-in, application round count
-  and retry reasons, finish/empty/length/latency/tool/outcome facts). Missing
-  usage or cost stays omitted (unknown), never zero-filled or inferred from
-  the configured model.
+  EventDto kind `provider_telemetry` (configured profile/model scrubbed and
+  length-bounded, response model, safe request id, observed route or explicit
+  `unknown`, per-round transport preserved, turn-level token/cost sums only
+  when every round reports that metric, context budget fold-in, application
+  round count, and retry reasons only for causal application retries — never
+  ordinary tool continuations). Missing usage or cost stays omitted (unknown),
+  never zero-filled or inferred from the configured model.
 - **`context`** (adds `trace_context`, one line per provider call — one for a
   dry run, one per round for a real multi-round turn): the exact bounded,
   redacted messages and tool names that call sent. Reading consecutive

@@ -98,6 +98,50 @@ pub struct ProviderTransportTelemetry {
     pub cost: Option<f64>,
 }
 
+/// Sum a per-round numeric metric only when **every** round reports it.
+///
+/// If `rounds` is empty, or any round omits the metric, returns [`None`]
+/// (unknown) — never a partial sum and never an invented zero.
+pub fn sum_reported_u64_all<I, F>(rounds: I, mut get: F) -> Option<u64>
+where
+    I: IntoIterator,
+    F: FnMut(&I::Item) -> Option<u64>,
+{
+    let mut any = false;
+    let mut sum = 0u64;
+    for round in rounds {
+        any = true;
+        sum = sum.saturating_add(get(&round)?);
+    }
+    any.then_some(sum)
+}
+
+/// Sum a per-round cost only when **every** round reports cost.
+///
+/// Genuine `0.0` values are retained and summed; missing cost on any round
+/// yields [`None`].
+pub fn sum_reported_f64_all<I, F>(rounds: I, mut get: F) -> Option<f64>
+where
+    I: IntoIterator,
+    F: FnMut(&I::Item) -> Option<f64>,
+{
+    let mut any = false;
+    let mut sum = 0.0_f64;
+    for round in rounds {
+        any = true;
+        let v = get(&round)?;
+        if !v.is_finite() {
+            return None;
+        }
+        sum += v;
+    }
+    if !any || !sum.is_finite() {
+        None
+    } else {
+        Some(sum)
+    }
+}
+
 impl ProviderTransportTelemetry {
     /// True when no transport facts were captured.
     pub fn is_empty(&self) -> bool {
@@ -169,6 +213,20 @@ pub fn bound_telemetry_string(raw: &str) -> Option<String> {
         out = out.chars().take(MAX_TELEMETRY_STRING_CHARS).collect();
     }
     Some(out)
+}
+
+/// Scrub and length-bound a configured profile id or model override before it
+/// enters workflow DTOs / events.
+///
+/// Legitimate provider/model identifiers pass through unchanged (aside from
+/// trimming). Credential-shaped or overlong values are scrubbed and capped;
+/// a value that is empty after scrubbing becomes `"[redacted]"` so hosts never
+/// receive the raw secret and the field remains a non-empty string.
+pub fn sanitize_configured_identity(raw: &str) -> String {
+    match bound_telemetry_string(raw) {
+        Some(s) => s,
+        None => "[redacted]".to_string(),
+    }
 }
 
 fn json_u64(value: &Value) -> Option<u64> {
@@ -363,20 +421,31 @@ pub struct ProviderRoundTelemetry {
 }
 
 /// Turn-level authoritative provider telemetry shared by CLI and Tauri.
+///
+/// Aggregation policy (enforced in `cd-workflow`):
+/// - **Per-round transport** is preserved independently on [`Self::rounds`].
+/// - **Numeric turn totals** (prompt/completion/reasoning/cached/total tokens
+///   and cost) are the sum across every provider round **only when every round
+///   reports that metric**. Any omission → turn-level field is absent/unknown
+///   (never a partial sum, never invented as zero).
+/// - **Identity fields** (`response_model`, `provider_request_id`,
+///   `observed_route`, `finish_reason`) are **not** summed: they come from the
+///   last round that authoritatively reported them (finish reason from the last
+///   completed round).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderTurnTelemetry {
-    /// Configured provider profile id.
+    /// Configured provider profile id (scrubbed / length-bounded).
     pub configured_profile_id: String,
-    /// Model id requested / configured for the turn.
+    /// Model id requested / configured for the turn (scrubbed / length-bounded).
     pub configured_model: String,
-    /// Model actually reported on the last successful response, when any.
+    /// Model actually reported on the last response that included `model`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_model: Option<String>,
     /// Safe request id from the last round that reported one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_request_id: Option<String>,
-    /// Authoritative observed route for the turn (last reported, else unknown).
+    /// Authoritative observed route from the last reported round, else unknown.
     #[serde(default)]
     pub observed_route: ObservedRoute,
     /// Aggregated prompt tokens when reported on the wire.
@@ -542,5 +611,50 @@ mod tests {
         assert!(visible_answer_empty("   "));
         assert!(finish_reason_is_length("length"));
         assert!(!finish_reason_is_length("stop"));
+    }
+
+    #[test]
+    fn sanitize_configured_identity_scrubs_secrets_and_bounds_length() {
+        let legit = sanitize_configured_identity("anthropic/claude-sonnet-4");
+        assert_eq!(legit, "anthropic/claude-sonnet-4");
+
+        let with_key = sanitize_configured_identity("model-sk-abcdefghijklmnop-override");
+        assert!(with_key.contains("sk-***"), "{with_key}");
+        assert!(!with_key.contains("abcdefghijklmnop"), "{with_key}");
+
+        let bearer = sanitize_configured_identity("Bearer tokentokentoken12345");
+        assert!(bearer.contains("Bearer ***"), "{bearer}");
+        assert!(!bearer.contains("tokentokentoken12345"), "{bearer}");
+
+        let long = "m".repeat(MAX_TELEMETRY_STRING_CHARS + 50);
+        let bounded = sanitize_configured_identity(&long);
+        assert_eq!(bounded.chars().count(), MAX_TELEMETRY_STRING_CHARS);
+    }
+
+    #[test]
+    fn sum_reported_requires_every_round() {
+        let a = ProviderTransportTelemetry {
+            prompt_tokens: Some(10),
+            cost: Some(0.1),
+            ..Default::default()
+        };
+        let b = ProviderTransportTelemetry {
+            prompt_tokens: Some(5),
+            cost: Some(0.2),
+            ..Default::default()
+        };
+        let missing = ProviderTransportTelemetry {
+            prompt_tokens: Some(1),
+            cost: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            sum_reported_u64_all([&a, &b], |t| t.prompt_tokens),
+            Some(15)
+        );
+        let summed_cost = sum_reported_f64_all([&a, &b], |t| t.cost).unwrap();
+        assert!((summed_cost - 0.3).abs() < 1e-9);
+        assert_eq!(sum_reported_f64_all([&a, &missing], |t| t.cost), None);
+        assert_eq!(sum_reported_u64_all([&a], |t| t.prompt_tokens), Some(10));
     }
 }

@@ -175,6 +175,7 @@ mod tests {
             },
             transport: Default::default(),
             empty_visible_answer: false,
+            application_retry_reason: None,
         };
         TurnTraceSink::record(sink.as_ref(), call);
 
@@ -337,6 +338,7 @@ mod tests {
             },
             transport: Default::default(),
             empty_visible_answer: false,
+            application_retry_reason: None,
         };
         TurnTraceSink::record(sink.as_ref(), call);
 

@@ -3628,6 +3628,10 @@ Retrying without tools — answers still work; built-in tools (KB search, etc.) 
 tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-parser."
                             .into(),
                     });
+                    // Capture the retry decision for provider telemetry (next round).
+                    if let Some(obs) = opts.developer_trace.as_ref() {
+                        obs.note_application_retry("tools_unsupported");
+                    }
                     // Soft-ground the model with a local KB prefetch when tools are off.
                     // Prefetch is unbounded from search — re-enforce hard budget before retry.
                     enter_phase(
@@ -3750,6 +3754,9 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                         code: "context_compacted".into(),
                         message: "Provider hit context limit — compacted and retrying once.".into(),
                     });
+                    if let Some(obs) = opts.developer_trace.as_ref() {
+                        obs.note_application_retry("context_compacted");
+                    }
                     continue;
                 }
                 Err(e) if attempt >= 1 && classify_context_error(&e) => {

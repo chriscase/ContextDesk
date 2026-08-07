@@ -1047,6 +1047,7 @@ mod grounding_tests {
 
             transport: Default::default(),
             empty_visible_answer: false,
+            application_retry_reason: None,
         }];
 
         let lines = build_trace_lines(
