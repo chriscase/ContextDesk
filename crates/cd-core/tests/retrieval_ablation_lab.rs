@@ -1452,3 +1452,361 @@ fn generate_large_tier_corpus_on_demand() {
         "large tier must reach one million events"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Hybrid adapters: hermetic contract execution (default CI) and env-gated
+// LIVE measurement (never CI, never a mock-as-capability)
+// ---------------------------------------------------------------------------
+
+/// The hybrid adapters execute through the identical contract, validator and
+/// scorer with deterministic offline backends. Contract validation ONLY:
+/// synthetic identities scream synthetic, nothing here is a capability
+/// measurement, and nothing touches the committed baseline.
+#[test]
+fn hybrid_adapters_execute_hermetically_through_the_same_contract() {
+    let root = require_suite_root();
+    let case_id = "rb02-semantic-gap";
+    let truth = load_ra_truth(&root, case_id).expect("truth");
+    let queries = load_ra_queries(&root, case_id).expect("queries");
+    let import_root = ra_case_import_root(&root, case_id);
+    let backend: Arc<dyn cd_core::embed::EmbedBackend> =
+        Arc::new(cd_core::embed::ConceptEmbedBackend::default());
+    let imported = lab::ra_import_case_with_embedding(
+        case_id,
+        &import_root,
+        Some(backend.clone()),
+        "concept-embed-contract-test",
+    )
+    .expect("embedded import");
+    assert_eq!(
+        imported.events_imported, truth.expected.events,
+        "embedding at import must not change event identity"
+    );
+
+    for reranked in [false, true] {
+        let adapter = if reranked {
+            lab::RaHybridAdapter::reranked(
+                backend.clone(),
+                "concept-embed-contract-test (deterministic synthetic; NOT a capability)",
+                Arc::new(cd_core::rerank::ScriptedRerankBackend),
+                &contextdesk_sha(),
+            )
+        } else {
+            lab::RaHybridAdapter::embedding(
+                backend.clone(),
+                "concept-embed-contract-test (deterministic synthetic; NOT a capability)",
+                &contextdesk_sha(),
+            )
+        };
+        let record_a = run_mode_for_case(
+            &adapter,
+            &imported,
+            &queries,
+            &truth.tier,
+            truth.seed,
+            truth.expected.events,
+            &truth.import_tree_sha256,
+            None,
+        )
+        .expect("hybrid run");
+        let record_b = run_mode_for_case(
+            &adapter,
+            &imported,
+            &queries,
+            &truth.tier,
+            truth.seed,
+            truth.expected.events,
+            &truth.import_tree_sha256,
+            None,
+        )
+        .expect("hybrid rerun");
+        let digest = |record: &RaRunRecord| {
+            let mut normalized = record.clone();
+            for run in &mut normalized.queries {
+                run.runtime_ms = None;
+            }
+            normalized.calls.embedding_calls = None;
+            normalized.calls.rerank_calls = None;
+            serde_json::to_string(&normalized).expect("serialize")
+        };
+        assert_eq!(
+            digest(&record_a),
+            digest(&record_b),
+            "adapter is deterministic"
+        );
+        assert_eq!(record_a.mode_status.state, "executed");
+        let violations = validate_run_record(&truth, &queries, &record_a);
+        assert!(violations.is_empty(), "contract violations: {violations:?}");
+        assert!(
+            record_a.calls.embedding_calls.unwrap() > 0,
+            "measured embedding calls"
+        );
+        if reranked {
+            assert!(
+                record_a.calls.rerank_calls.unwrap() > 0,
+                "measured rerank calls"
+            );
+            assert!(record_a
+                .engine
+                .reranker_identity
+                .as_deref()
+                .unwrap()
+                .contains("synthetic"));
+        }
+        let score = score_case_mode(&truth, &queries, &record_a, &[]);
+        assert!(score.violations.is_empty(), "{:?}", score.violations);
+        assert!(matches!(
+            score.partition,
+            RaPartition::PassOnBase | RaPartition::BaselineLimitation
+        ));
+    }
+}
+
+fn live_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+/// LIVE small-tier measurement against real configured endpoints.
+///
+/// Env contract (never CI):
+///   CD_RA_LIVE_EMBED_BASE_URL   e.g. http://127.0.0.1:11434
+///   CD_RA_LIVE_EMBED_MODEL      e.g. bge-m3 (any embedding model the
+///                               endpoint actually serves; identity recorded)
+///   CD_RA_LIVE_RERANK_BASE_URL  optional /rerank-compatible endpoint
+///   CD_RA_LIVE_RERANK_MODEL     optional reranker model id
+///
+/// Unset env => the test FAILS with instructions (never a silent green).
+/// Reports are written under fixtures/log-lab/generated/retrieval-ablation/
+/// live-reports/ (git-ignored) and compared against the COMMITTED baseline,
+/// which is never modified.
+#[test]
+#[ignore = "live measurement against configured endpoints; run explicitly with --ignored after setting CD_RA_LIVE_EMBED_BASE_URL/MODEL"]
+fn live_hybrid_small_tier_measurement() {
+    let base_url = live_env("CD_RA_LIVE_EMBED_BASE_URL")
+        .expect("set CD_RA_LIVE_EMBED_BASE_URL (e.g. http://127.0.0.1:11434)");
+    let embed_model = live_env("CD_RA_LIVE_EMBED_MODEL")
+        .expect("set CD_RA_LIVE_EMBED_MODEL to a model the endpoint serves");
+    let rerank_base = live_env("CD_RA_LIVE_RERANK_BASE_URL");
+    let rerank_model = live_env("CD_RA_LIVE_RERANK_MODEL");
+
+    // Health first: a dead endpoint is an UNAVAILABLE result, not a hang.
+    let client = cd_core::chat::OllamaClient::new(&base_url, &embed_model).expect("client");
+    let embed_backend: Arc<dyn cd_core::embed::EmbedBackend> =
+        Arc::new(cd_core::embed::OllamaEmbedBackend::new(client));
+    let probe = cd_core::memory::embed_blocking(
+        embed_backend.as_ref(),
+        "contextdesk retrieval health probe",
+        10_000,
+    );
+    let dims = probe.map(|vector| vector.len()).unwrap_or(0);
+    assert!(
+        dims > 0,
+        "embedding endpoint failed the health probe; record UNAVAILABLE, do not fabricate"
+    );
+    let rerank_backend: Option<Arc<dyn cd_core::rerank::RerankBackend>> =
+        match (&rerank_base, &rerank_model) {
+            (Some(base), Some(model)) => Some(Arc::new(
+                cd_core::rerank::HttpRerankBackend::new(base, model.clone(), None)
+                    .expect("rerank backend"),
+            )),
+            _ => None,
+        };
+
+    let root = require_suite_root();
+    let suite = load_ra_suite(&root).expect("suite");
+    let committed: RaReport = serde_json::from_slice(
+        &std::fs::read(
+            root.join(RA_SUITE_REL_ROOT)
+                .join("reports/baseline/small-structured_keyword.report.json"),
+        )
+        .expect("committed baseline"),
+    )
+    .expect("baseline parses");
+    let baseline_by_case: BTreeMap<String, (f64, Option<f64>, f64)> = committed
+        .cases
+        .iter()
+        .map(|case| {
+            let score = case
+                .modes
+                .iter()
+                .find(|mode| mode.mode == RaMode::StructuredKeyword)
+                .expect("baseline mode");
+            (
+                case.case_id.clone(),
+                (
+                    score.mean_recall_at_25_answerable,
+                    score.rare_trigger_recall_at_25,
+                    score.max_decoy_share_at_25,
+                ),
+            )
+        })
+        .collect();
+
+    let started = std::time::Instant::now();
+    let mut rows = Vec::new();
+    let mut inputs = Vec::new();
+    for case_id in all_case_ids() {
+        let truth = load_ra_truth(&root, case_id).expect("truth");
+        let queries = load_ra_queries(&root, case_id).expect("queries");
+        let import_root = ra_case_import_root(&root, case_id);
+        let imported = lab::ra_import_case_with_embedding(
+            case_id,
+            &import_root,
+            Some(embed_backend.clone()),
+            &embed_model,
+        )
+        .expect("embedded import");
+        let observed = ra_observe_corpus(&truth, &imported).expect("observe");
+        // Baseline over the SAME embedded corpus: proves embedding at import
+        // leaves structured/keyword results byte-identical to the committed
+        // pinned baseline.
+        let baseline_adapter = lab::RaStructuredKeywordAdapter {
+            contextdesk_sha: contextdesk_sha(),
+        };
+        let baseline_record = run_mode_for_case(
+            &baseline_adapter,
+            &imported,
+            &queries,
+            &truth.tier,
+            truth.seed,
+            truth.expected.events,
+            &truth.import_tree_sha256,
+            None,
+        )
+        .expect("baseline over embedded corpus");
+        let baseline_score = score_case_mode(&truth, &queries, &baseline_record, &[]);
+        let adapter = lab::RaHybridAdapter::embedding(
+            embed_backend.clone(),
+            &format!("{embed_model} @ ollama ({dims} dims)"),
+            &contextdesk_sha(),
+        );
+        let record = run_mode_for_case(
+            &adapter,
+            &imported,
+            &queries,
+            &truth.tier,
+            truth.seed,
+            truth.expected.events,
+            &truth.import_tree_sha256,
+            None,
+        )
+        .expect("live hybrid run");
+        let mut records = vec![baseline_record, record];
+        match &rerank_backend {
+            Some(rerank) => {
+                let adapter = lab::RaHybridAdapter::reranked(
+                    embed_backend.clone(),
+                    &format!("{embed_model} @ ollama ({dims} dims)"),
+                    rerank.clone(),
+                    &contextdesk_sha(),
+                );
+                records.push(
+                    run_mode_for_case(
+                        &adapter,
+                        &imported,
+                        &queries,
+                        &truth.tier,
+                        truth.seed,
+                        truth.expected.events,
+                        &truth.import_tree_sha256,
+                        None,
+                    )
+                    .expect("live reranked run"),
+                );
+            }
+            None => records.push(unavailable_run_record(
+                RaMode::HybridEmbeddingReranked,
+                "unavailable: no /rerank-compatible endpoint configured or discovered (qwen3-reranker-0.6b remains a configuration example)",
+                "cd-core.log_analysis.hybrid_search_events + HttpRerankBackend",
+                &imported,
+                &queries,
+                &truth.tier,
+                truth.seed,
+                truth.expected.events,
+                &truth.import_tree_sha256,
+            )),
+        }
+        let conservation = validate_conservation(&truth, &observed);
+        assert!(
+            conservation.is_empty(),
+            "{case_id}: embedded import broke conservation: {conservation:?}"
+        );
+        for record in &records {
+            if record.mode_status.state == "executed" {
+                let violations = validate_run_record(&truth, &queries, record);
+                assert!(violations.is_empty(), "{case_id}: {violations:?}");
+            }
+        }
+        let hybrid_score = score_case_mode(&truth, &queries, &records[1], &conservation);
+        let (baseline_recall, baseline_rare, baseline_decoy) = baseline_by_case
+            .get(case_id)
+            .copied()
+            .expect("baseline row");
+        assert_eq!(
+            (
+                baseline_score.mean_recall_at_25_answerable,
+                baseline_score.rare_trigger_recall_at_25,
+                baseline_score.max_decoy_share_at_25,
+            ),
+            (baseline_recall, baseline_rare, baseline_decoy),
+            "{case_id}: structured/keyword baseline drifted on the embedded corpus"
+        );
+        rows.push(serde_json::json!({
+            "case_id": case_id,
+            "intended_probe": truth.intended_probe,
+            "baseline": {
+                "recall_at_25": baseline_recall,
+                "rare_trigger": baseline_rare,
+                "decoy_share": baseline_decoy,
+            },
+            "hybrid_embedding": {
+                "recall_at_25": hybrid_score.mean_recall_at_25_answerable,
+                "rare_trigger": hybrid_score.rare_trigger_recall_at_25,
+                "decoy_share": hybrid_score.max_decoy_share_at_25,
+                "partition": hybrid_score.partition.as_str(),
+                "violations": hybrid_score.violations,
+            },
+            "delta_recall_at_25":
+                hybrid_score.mean_recall_at_25_answerable - baseline_recall,
+        }));
+        inputs.push(RaCaseInputs {
+            truth,
+            queries,
+            observed,
+            records,
+        });
+    }
+    let report = assemble_report(&contextdesk_sha(), &suite, &inputs, None);
+    let runtime_ms = started.elapsed().as_millis() as u64;
+
+    let out_dir = fixture_root().join("generated/retrieval-ablation/live-reports");
+    std::fs::create_dir_all(&out_dir).expect("live report dir");
+    std::fs::write(
+        out_dir.join("live-hybrid-small.report.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_id": "contextdesk.log_lab.retrieval_live_comparison.v1",
+            "schema_version": 1,
+            "contextdesk_sha": contextdesk_sha(),
+            "suite_seed": suite.seed,
+            "corpus_identity_sha256": suite.corpus_identity_sha256,
+            "embedding_model": format!("{embed_model} @ {base_url} ({dims} dims)"),
+            "reranker": rerank_model.clone().map(|m| format!("{m} @ {}", rerank_base.clone().unwrap_or_default())),
+            "total_runtime_ms": runtime_ms,
+            "modes": report.modes,
+            "per_case": rows,
+        }))
+        .expect("json"),
+    )
+    .expect("write live json");
+    std::fs::write(
+        out_dir.join("live-hybrid-small.report.md"),
+        report.to_projection_markdown(),
+    )
+    .expect("write live md");
+    println!(
+        "LIVE_HYBRID_SMALL_OK model={embed_model} dims={dims} runtime_ms={runtime_ms} out={}",
+        out_dir.display()
+    );
+}

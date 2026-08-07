@@ -51,8 +51,30 @@ impl RaImportedCase {
 /// desktop LogPane and CLI default import use) into an isolated cache root.
 /// Keyword-only policy: no embeddings, no network.
 pub fn ra_import_case(case_id: &str, import_root: &Path) -> LabResult<RaImportedCase> {
+    ra_import_case_with_embedding(case_id, import_root, None, "none")
+}
+
+/// Import with an optional embedding backend so the semantic lane can run
+/// over the identical import tree (corpus identity is the source tree, not
+/// the vectors).
+pub fn ra_import_case_with_embedding(
+    case_id: &str,
+    import_root: &Path,
+    embed: Option<std::sync::Arc<dyn cd_core::embed::EmbedBackend>>,
+    embed_model_id: &str,
+) -> LabResult<RaImportedCase> {
     let cache = tempfile::tempdir()?;
-    let policy = LogEmbedPolicy::default();
+    let policy = if embed.is_some() {
+        LogEmbedPolicy {
+            mode: cd_core::log_analysis::LogEmbedMode::Local,
+            cloud_content_leaves_machine: false,
+            cloud_base_url: None,
+            model_id: embed_model_id.into(),
+            defer_above_source_bytes: None,
+        }
+    } else {
+        LogEmbedPolicy::default()
+    };
     let started = std::time::Instant::now();
     let plan = preview_import_plan(import_root, None)?;
     let selected = plan
@@ -73,7 +95,7 @@ pub fn ra_import_case(case_id: &str, import_root: &Path) -> LabResult<RaImported
         import_root,
         case_id,
         &policy,
-        None,
+        embed,
         &NoopProcessProgress,
         None,
         &selection,
@@ -213,6 +235,174 @@ impl RaRetrievalAdapter for RaStructuredKeywordAdapter {
 
     fn call_counts(&self) -> RaCallCounts {
         RaCallCounts::measured_zero()
+    }
+}
+
+/// Executable hybrid adapters over the shared production hybrid retrieval
+/// seam (`cd_core::log_analysis::hybrid_search_events`). The SAME run-record
+/// contract, truth, queries, evidence identities and scoring apply; only the
+/// engine differs. A run whose optional lanes degraded below the intended
+/// mode FAILS instead of silently reporting narrower results under a wider
+/// label (that would be the M12 false green).
+pub struct RaHybridAdapter {
+    pub mode: RaMode,
+    pub embed: std::sync::Arc<dyn cd_core::embed::EmbedBackend>,
+    pub embed_identity: String,
+    pub rerank: Option<std::sync::Arc<dyn cd_core::rerank::RerankBackend>>,
+    pub reranker_identity: Option<String>,
+    pub contextdesk_sha: String,
+    embedding_calls: std::sync::atomic::AtomicU64,
+    rerank_calls: std::sync::atomic::AtomicU64,
+}
+
+impl RaHybridAdapter {
+    pub fn embedding(
+        embed: std::sync::Arc<dyn cd_core::embed::EmbedBackend>,
+        embed_identity: &str,
+        contextdesk_sha: &str,
+    ) -> Self {
+        Self {
+            mode: RaMode::HybridEmbedding,
+            embed,
+            embed_identity: embed_identity.into(),
+            rerank: None,
+            reranker_identity: None,
+            contextdesk_sha: contextdesk_sha.into(),
+            embedding_calls: std::sync::atomic::AtomicU64::new(0),
+            rerank_calls: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    pub fn reranked(
+        embed: std::sync::Arc<dyn cd_core::embed::EmbedBackend>,
+        embed_identity: &str,
+        rerank: std::sync::Arc<dyn cd_core::rerank::RerankBackend>,
+        contextdesk_sha: &str,
+    ) -> Self {
+        let reranker_identity = rerank.identity();
+        Self {
+            mode: RaMode::HybridEmbeddingReranked,
+            embed,
+            embed_identity: embed_identity.into(),
+            rerank: Some(rerank),
+            reranker_identity: Some(reranker_identity),
+            contextdesk_sha: contextdesk_sha.into(),
+            embedding_calls: std::sync::atomic::AtomicU64::new(0),
+            rerank_calls: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+impl RaRetrievalAdapter for RaHybridAdapter {
+    fn mode(&self) -> RaMode {
+        self.mode
+    }
+
+    fn availability(&self) -> Result<RaEngineManifest, String> {
+        Ok(RaEngineManifest {
+            kind: "cd-core.log_analysis.hybrid_search_events".into(),
+            contextdesk_sha: self.contextdesk_sha.clone(),
+            ranking: "merge: semantic score DESC then (ts, seq); optional rerank reorders top-n with pre-rerank tiebreak".into(),
+            model_identity: Some(self.embed_identity.clone()),
+            reranker_identity: self.reranker_identity.clone(),
+            deterministic: true,
+        })
+    }
+
+    fn run_query(&self, corpus: &LogCorpus, query: &RaQuery, k: u64) -> LabResult<RaQueryRun> {
+        use cd_core::log_analysis::{HybridModeUsed, HybridOptions};
+        let plan = &query.keyword_plan;
+        let options = HybridOptions {
+            keyword_terms: plan.terms.clone(),
+            semantic_query: Some(query.question.clone()),
+            filter: EventQuery {
+                levels: plan.level.iter().cloned().collect(),
+                sources: plan.sources.clone(),
+                services: plan.services.clone(),
+                time_from: plan.time_from,
+                time_to: plan.time_to,
+                ..Default::default()
+            },
+            k: k as usize,
+            ..HybridOptions::default()
+        };
+        let started = std::time::Instant::now();
+        let outcome = cd_core::log_analysis::hybrid_search_events(
+            corpus,
+            &options,
+            Some(self.embed.as_ref()),
+            self.rerank.as_deref(),
+            None,
+        )?;
+        let runtime_ms = started.elapsed().as_millis() as u64;
+        let intended = match self.mode {
+            RaMode::HybridEmbedding => HybridModeUsed::HybridEmbedding,
+            RaMode::HybridEmbeddingReranked => HybridModeUsed::HybridEmbeddingReranked,
+            other => return Err(format!("RaHybridAdapter cannot execute {other}").into()),
+        };
+        if outcome.mode_used != intended {
+            return Err(format!(
+                "{} degraded to {} ({}); refusing to mislabel narrower results",
+                self.mode,
+                outcome.mode_used.as_str(),
+                outcome
+                    .degradations
+                    .iter()
+                    .map(|d| d.code.clone())
+                    .collect::<Vec<_>>()
+                    .join("+")
+            )
+            .into());
+        }
+        self.embedding_calls.fetch_add(
+            outcome.telemetry.embedding_calls.unwrap_or(0),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        self.rerank_calls.fetch_add(
+            outcome.telemetry.rerank_calls.unwrap_or(0),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        let candidates = outcome
+            .candidates
+            .iter()
+            .map(|candidate| RaCandidate {
+                rank: candidate.final_rank,
+                seq: candidate.seq,
+                source: candidate.source.clone(),
+                ts: candidate.ts,
+                timestamp_provenance: candidate.timestamp_provenance.clone(),
+                level: Some(candidate.level.clone()),
+                template_id: Some(candidate.template_id),
+                score: Some(match candidate.rerank_score {
+                    Some(score) => f64::from(score),
+                    None => f64::from(candidate.pre_rerank_score),
+                }),
+                content: candidate.message.clone(),
+            })
+            .collect();
+        Ok(RaQueryRun {
+            query_id: query.query_id.clone(),
+            k_requested: k,
+            matched_total: outcome.keyword_matched_total,
+            scanned: outcome.scanned,
+            partial: outcome.partial,
+            runtime_ms: Some(runtime_ms),
+            candidates,
+        })
+    }
+
+    fn call_counts(&self) -> RaCallCounts {
+        RaCallCounts {
+            embedding_calls: Some(
+                self.embedding_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            ),
+            rerank_calls: Some(self.rerank_calls.load(std::sync::atomic::Ordering::SeqCst)),
+            provider_calls: Some(0),
+            tokens_in: None,
+            tokens_out: None,
+            cost_usd: None,
+        }
     }
 }
 
