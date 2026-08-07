@@ -240,9 +240,12 @@ async fn comparison_stage_transport_retry_stays_within_the_first_comparison_atte
 }
 
 /// Scenario 2 at the candidate stage, green half: exhausted 429s are NOT a
-/// rejected candidate and NOT an invalid analysis. On base the run surfaces
-/// a raw error that still names the rate limit; it must never surface
-/// `FailedClosed` (which the caller maps to `linked_invalid_grounded_answer`).
+/// rejected candidate and NOT an invalid analysis. It must never surface
+/// `FailedClosed` (which the caller maps to `linked_invalid_grounded_answer`),
+/// and whichever way the failure reaches the caller — the raw error base
+/// produced, or the typed `ProviderFailed` its RED sibling demands — the
+/// surfaced message still names the rate limit and still borrows no
+/// analysis vocabulary.
 #[tokio::test]
 async fn candidate_stage_429_exhaustion_never_rejects_the_candidate() {
     let server = MockServer::start().await;
@@ -277,22 +280,29 @@ async fn candidate_stage_429_exhaustion_never_rejects_the_candidate() {
         Ok(MultiStageTriageOutcome::Completed { .. }) => {
             panic!("an exhausted rate limit cannot complete a triage")
         }
-        Ok(other) => panic!("unexpected typed outcome on base: {other:?}"),
-        Err(error) => {
-            let message = error.to_string();
-            assert!(
-                message.contains("HTTP 429"),
-                "the surfaced error must keep naming the rate limit, got {message:?}"
-            );
-            let lowered = message.to_ascii_lowercase();
-            for forbidden in ["candidate", "rejected", "evidence", "invalid", "analysis"] {
-                assert!(
-                    !lowered.contains(forbidden),
-                    "rate-limit exhaustion must not borrow analysis vocabulary \
-                     ({forbidden:?} in {message:?})"
-                );
-            }
+        Ok(MultiStageTriageOutcome::ProviderFailed(error)) => {
+            assert_provider_rate_limit_language(&error);
         }
+        Ok(other) => panic!("unexpected typed outcome: {other:?}"),
+        Err(error) => assert_provider_rate_limit_language(&error),
+    }
+}
+
+/// Both the typed and the raw form must name the rate limit and must not
+/// borrow the vocabulary of a failed analysis.
+fn assert_provider_rate_limit_language(error: &CoreError) {
+    let message = error.to_string();
+    assert!(
+        message.contains("HTTP 429"),
+        "the surfaced error must keep naming the rate limit, got {message:?}"
+    );
+    let lowered = message.to_ascii_lowercase();
+    for forbidden in ["candidate", "rejected", "evidence", "invalid", "analysis"] {
+        assert!(
+            !lowered.contains(forbidden),
+            "rate-limit exhaustion must not borrow analysis vocabulary \
+             ({forbidden:?} in {message:?})"
+        );
     }
 }
 

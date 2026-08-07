@@ -504,6 +504,37 @@ impl ChatBackend for AnthropicBackend {
     }
 }
 
+/// Whether lowercased provider text talks about *streaming* as a whole word.
+///
+/// A naked `contains("stream")` matches inside `upstream`, `downstream`, and
+/// `livestream` — and "upstream …" is how gateways describe a failure of the
+/// service behind them, which is the opposite of a streaming-capability
+/// problem. Only a standalone token counts.
+fn mentions_streaming(lowercased: &str) -> bool {
+    const TOKENS: [&str; 3] = ["stream", "streaming", "sse"];
+    lowercased
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| TOKENS.contains(&word))
+}
+
+/// Whether a failure could plausibly mean "this gateway refuses streaming".
+///
+/// A provider HTTP status with a standard meaning unrelated to request *shape*
+/// — rate limit, authorization, timeout, server fault — never does, whatever
+/// words happen to appear in its body. Non-HTTP failures (connect/read errors,
+/// SSE framing faults) carry no status and stay eligible, which is how
+/// genuinely stream-specific transport faults keep their existing
+/// classification.
+fn provider_status_can_mean_stream_rejection(error: &CoreError) -> bool {
+    match error.provider_http_status() {
+        Some(401 | 402 | 403 | 407 | 408 | 429) => false,
+        // 501 Not Implemented is the one server-side status that genuinely
+        // reports an unsupported request feature.
+        Some(status) if (500..=599).contains(&status) && status != 501 => false,
+        _ => true,
+    }
+}
+
 /// Honor profile capability flags: strip tools when disabled; skip stream when
 /// `stream` is false (#125). Does not swallow rejections — non-stream path is explicit.
 pub struct CapabilityAwareBackend {
@@ -557,11 +588,24 @@ impl ChatBackend for CapabilityAwareBackend {
                     return Err(e);
                 }
                 // Surface stream rejection rather than silent success-with-empty.
-                let msg = e.to_string().to_lowercase();
-                if msg.contains("stream")
-                    || msg.contains("sse")
-                    || (msg.contains("not support") && !msg.contains("tool"))
-                    || (msg.contains("unsupported") && !msg.contains("tool"))
+                //
+                // The keyword probe must read what the PROVIDER said, never
+                // ContextDesk's own `stream HTTP …` operation prefix: that
+                // prefix contains "stream" for *every* status failure on the
+                // streaming endpoint, so probing the whole message relabelled
+                // rate limits, auth failures, and 5xx as "this gateway does
+                // not support streaming" and pointed the operator at the one
+                // setting that was not the problem.
+                if !provider_status_can_mean_stream_rejection(&e) {
+                    return Err(e);
+                }
+                let probe = e
+                    .provider_http_body()
+                    .map(str::to_ascii_lowercase)
+                    .unwrap_or_else(|| e.to_string().to_ascii_lowercase());
+                if mentions_streaming(&probe)
+                    || (probe.contains("not support") && !probe.contains("tool"))
+                    || (probe.contains("unsupported") && !probe.contains("tool"))
                 {
                     return Err(CoreError::Message(format!(
                         "Streaming rejected by provider (capabilities.stream=true but request failed): {e}"
@@ -2195,6 +2239,147 @@ mod tests {
         );
         // Exhaustive: every StreamEvent variant appears (count match).
         assert_eq!(kinds.len(), DOCUMENTED.len());
+    }
+
+    /// A backend whose streaming call always fails with a fixed error.
+    struct StreamFailsBackend(Box<dyn Fn() -> CoreError + Send + Sync>);
+
+    #[async_trait]
+    impl ChatBackend for StreamFailsBackend {
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> CoreResult<ChatCompletion> {
+            Err((self.0)())
+        }
+
+        async fn complete_streaming(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+            _on_text: &mut (dyn FnMut(String) + Send),
+            _cancel: Option<&std::sync::atomic::AtomicBool>,
+        ) -> CoreResult<ChatCompletion> {
+            Err((self.0)())
+        }
+    }
+
+    async fn capability_stream_failure(
+        error: impl Fn() -> CoreError + Send + Sync + 'static,
+    ) -> String {
+        let backend = CapabilityAwareBackend::new(
+            Box::new(StreamFailsBackend(Box::new(error))),
+            ProviderCapabilities {
+                stream: true,
+                ..Default::default()
+            },
+        );
+        let mut on_text = |_: String| {};
+        backend
+            .complete_streaming(&[], &[], &mut on_text, None)
+            .await
+            .expect_err("the scripted backend always fails")
+            .to_string()
+    }
+
+    /// Regression: ContextDesk's own `stream HTTP …` operation prefix contains
+    /// the word "stream" for *every* status failure on the streaming endpoint.
+    /// Probing the whole message relabelled rate limits, auth failures, and
+    /// 5xx as "this gateway does not support streaming" and pointed the
+    /// operator at the one setting that was not the problem.
+    #[tokio::test]
+    async fn provider_status_failures_are_never_relabelled_as_streaming_rejections() {
+        for (status, status_line) in [
+            (429u16, "429 Too Many Requests"),
+            (401, "401 Unauthorized"),
+            (403, "403 Forbidden"),
+            (500, "500 Internal Server Error"),
+            (503, "503 Service Unavailable"),
+        ] {
+            let status_line = status_line.to_string();
+            let message = capability_stream_failure(move || CoreError::ProviderHttp {
+                operation: "stream".into(),
+                status,
+                status_line: status_line.clone(),
+                body: r#"{"error":{"message":"provider rate limited"}}"#.into(),
+            })
+            .await;
+            assert!(
+                !message.contains("capabilities.stream"),
+                "HTTP {status} is not a streaming-capability rejection, got {message:?}"
+            );
+            assert!(
+                message.contains(&format!("HTTP {status}")),
+                "the provider's status must survive verbatim, got {message:?}"
+            );
+        }
+    }
+
+    /// A status that *can* mean "this request shape is unsupported" still
+    /// classifies as a streaming rejection when the provider's own body says
+    /// so — the fix narrows the probe, it does not remove the classification.
+    #[tokio::test]
+    async fn a_provider_that_says_it_cannot_stream_is_still_a_streaming_rejection() {
+        let message = capability_stream_failure(|| CoreError::ProviderHttp {
+            operation: "stream".into(),
+            status: 400,
+            status_line: "400 Bad Request".into(),
+            body: r#"{"error":{"message":"stream is not supported by this deployment"}}"#.into(),
+        })
+        .await;
+        assert!(message.contains("capabilities.stream"), "{message:?}");
+
+        // …and a 400 whose body is about something else is not relabelled.
+        let unrelated = capability_stream_failure(|| CoreError::ProviderHttp {
+            operation: "stream".into(),
+            status: 400,
+            status_line: "400 Bad Request".into(),
+            body: r#"{"error":{"message":"model 'x' does not exist"}}"#.into(),
+        })
+        .await;
+        assert!(!unrelated.contains("capabilities.stream"), "{unrelated:?}");
+    }
+
+    /// "upstream"/"downstream" is how a gateway names a failure of the service
+    /// behind it — the opposite of a streaming-capability problem. A naked
+    /// substring probe matched them and blamed the wrong setting.
+    #[tokio::test]
+    async fn an_upstream_failure_is_not_a_streaming_rejection() {
+        for body in [
+            r#"{"error":{"message":"upstream failed reading /srv/private/customer.log"}}"#,
+            r#"{"error":{"message":"downstream connect error or disconnect/reset before headers"}}"#,
+            r#"{"error":{"message":"livestream quota exceeded for this project"}}"#,
+        ] {
+            let message = capability_stream_failure(move || CoreError::ProviderHttp {
+                operation: "stream".into(),
+                status: 400,
+                status_line: "400 Bad Request".into(),
+                body: body.into(),
+            })
+            .await;
+            assert!(
+                !message.contains("capabilities.stream"),
+                "{body} is not a streaming-capability rejection, got {message:?}"
+            );
+        }
+        assert!(mentions_streaming("stream is not supported"));
+        assert!(mentions_streaming("sse framing rejected"));
+        assert!(mentions_streaming("streaming disabled for this deployment"));
+        assert!(!mentions_streaming("upstream connect error"));
+        assert!(!mentions_streaming("downstream reset"));
+    }
+
+    /// Non-HTTP transport faults carry no status and keep the existing
+    /// classification, so genuinely stream-specific framing errors are still
+    /// reported as stream failures.
+    #[tokio::test]
+    async fn stream_framing_faults_without_a_status_keep_their_classification() {
+        let message = capability_stream_failure(|| {
+            CoreError::Message("stream chunk: connection reset".into())
+        })
+        .await;
+        assert!(message.contains("capabilities.stream"), "{message:?}");
     }
 
     #[tokio::test]

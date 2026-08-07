@@ -784,6 +784,24 @@ enum MultiStageTriageOutcome {
     },
     Cancelled,
     Deadline,
+    /// The provider failed a candidate or comparison round. Classified here
+    /// rather than `?`-propagated so the caller emits the same explicit
+    /// provider terminal every other provider failure receives — an escaped
+    /// `Err` would abort the whole turn and discard its typed telemetry.
+    ProviderFailed(Box<CoreError>),
+}
+
+/// Classify a provider error raised inside the multi-stage loops.
+///
+/// A transport that observes cancellation first reports it as an ordinary
+/// error; the single-stage loop already treats that string as a clean cancel,
+/// and this keeps the two seams from disagreeing about the same user action
+/// based on which poll loop won the race.
+fn multi_stage_provider_outcome(error: CoreError) -> MultiStageTriageOutcome {
+    if error.to_string().contains("cancelled") {
+        return MultiStageTriageOutcome::Cancelled;
+    }
+    MultiStageTriageOutcome::ProviderFailed(Box::new(error))
 }
 
 fn multi_stage_candidate_ledger_digest(
@@ -1105,7 +1123,8 @@ async fn run_multi_stage_broad_triage(
             )
             .await
             {
-                Ok(result) => result?,
+                Ok(Ok(completion)) => completion,
+                Ok(Err(error)) => return Ok(multi_stage_provider_outcome(error)),
                 Err(TurnAwaitError::Cancelled) => return Ok(MultiStageTriageOutcome::Cancelled),
                 Err(TurnAwaitError::Deadline) => return Ok(MultiStageTriageOutcome::Deadline),
             };
@@ -1198,7 +1217,8 @@ async fn run_multi_stage_broad_triage(
         )
         .await
         {
-            Ok(result) => result?,
+            Ok(Ok(completion)) => completion,
+            Ok(Err(error)) => return Ok(multi_stage_provider_outcome(error)),
             Err(TurnAwaitError::Cancelled) => return Ok(MultiStageTriageOutcome::Cancelled),
             Err(TurnAwaitError::Deadline) => return Ok(MultiStageTriageOutcome::Deadline),
         };
@@ -2814,6 +2834,91 @@ fn terminal_linked_provider_failure(
     Ok(out.into_events())
 }
 
+/// Classify a provider-originated turn failure into a stable terminal code
+/// and an operator-facing message.
+///
+/// Provider-neutral by construction: the decision is the HTTP status the
+/// provider returned (carried structurally on [`CoreError::ProviderHttp`]),
+/// never any one provider's prose. Every branch describes a *transport*
+/// outcome — none of them borrows analysis vocabulary, because a provider
+/// that never answered produced neither a bad analysis nor bad evidence.
+/// The status the provider returned is the *only* thing quoted here. A
+/// provider body is untrusted third-party text that routinely echoes the
+/// request — endpoints, filesystem paths from the operator's own logs, and
+/// credentials a gateway decided to quote back — and this message lands in
+/// the transcript and the activity journal, which are deliberately free of
+/// all three. The full (secret-scrubbed) transport message stays on the
+/// turn trace, behind the explicit developer-trace opt-in.
+fn classify_provider_turn_failure(error: &CoreError) -> (&'static str, String) {
+    match error.provider_http_status() {
+        Some(429) => (
+            crate::events::PROVIDER_RATE_LIMITED_REASON,
+            "The provider rate limited this request (HTTP 429) and the bounded transport retries \
+             were exhausted. No model round completed, so this turn produced no answer. Wait for \
+             the provider's limit to reset, then send the message again."
+                .to_string(),
+        ),
+        Some(status @ (401 | 402 | 403 | 407)) => (
+            crate::events::PROVIDER_UNAUTHORIZED_REASON,
+            format!(
+                "The provider refused this request's credentials (HTTP {status}). No model round \
+                 completed. Check this profile's API key and base URL in Settings."
+            ),
+        ),
+        Some(status @ 408) | Some(status @ 500..=599) => (
+            crate::events::PROVIDER_UNAVAILABLE_REASON,
+            format!(
+                "The provider could not serve this request (HTTP {status}). No model round \
+                 completed, so this turn produced no answer."
+            ),
+        ),
+        Some(status) => (
+            crate::events::PROVIDER_FAILED_REASON,
+            format!(
+                "The provider failed this request (HTTP {status}). No model round completed, so \
+                 this turn produced no answer."
+            ),
+        ),
+        None => (
+            crate::events::PROVIDER_FAILED_REASON,
+            "The provider request failed before any model round completed, so this turn produced \
+             no answer. Run the turn with developer tracing for the transport detail."
+                .to_string(),
+        ),
+    }
+}
+
+/// Terminal projection for a provider failure on an ordinary (non-linked)
+/// turn.
+///
+/// The linked path has always produced a typed terminal
+/// ([`terminal_linked_provider_failure`]); the ordinary path returned an
+/// opaque `Err`, which discarded the turn's typed telemetry for *both* hosts
+/// — the provider round that actually failed never reached
+/// `ProviderTelemetry`, and the host saw a bare string instead of a
+/// classified terminal. Every error reaching this point came from the
+/// provider call itself, so classifying it here cannot mask an unrelated
+/// internal fault.
+fn terminal_provider_failure(
+    mut out: EventCollector<'_>,
+    trail: &mut Vec<String>,
+    error: &CoreError,
+) -> CoreResult<Vec<StreamEvent>> {
+    let (code, message) = classify_provider_turn_failure(error);
+    trail.push(format!("provider_failure:{code}"));
+    out.push(StreamEvent::Error {
+        code: code.into(),
+        message,
+    });
+    out.push(StreamEvent::SearchTrail {
+        steps: trail.clone(),
+    });
+    out.push(StreamEvent::TurnCompleted {
+        reason: code.into(),
+    });
+    Ok(out.into_events())
+}
+
 fn enter_phase(
     out: &mut EventCollector<'_>,
     trail: &mut Vec<String>,
@@ -3611,6 +3716,23 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                 deadline_plan.total_ms,
                                 true,
                             );
+                        }
+                        MultiStageTriageOutcome::ProviderFailed(error) => {
+                            // Same classification the ordinary terminal uses,
+                            // so a rate limit is distinguishable from a 500 at
+                            // this seam too — without quoting the provider's
+                            // body into the trail.
+                            let (class, _) = classify_provider_turn_failure(&error);
+                            trail.push(format!(
+                                "linked_broad_triage_multi_stage_provider_failure:{class}"
+                            ));
+                            // The deterministic brief is complete and already
+                            // checkpointed by the time this stage runs (the
+                            // Deadline arm above relies on the same fact), so
+                            // this is the synthesis-side provider failure: the
+                            // governed evidence survives for a synthesis-only
+                            // retry, and no source is missing.
+                            return terminal_linked_provider_failure(out, &mut trail, true, &[]);
                         }
                         MultiStageTriageOutcome::FailedClosed(reason) => {
                             trail.push(format!(
@@ -4572,7 +4694,7 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                             &missing,
                         );
                     }
-                    return Err(e);
+                    return terminal_provider_failure(out, &mut trail, &e);
                 }
             }
         };
@@ -9791,10 +9913,27 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             None,
             None,
         )
-        .await;
+        .await
+        .expect(
+            "an ordinary-chat provider failure is a typed terminal turn too — an opaque Err \
+             would discard the failed provider round's telemetry for both hosts",
+        );
         assert!(
-            ordinary.is_err(),
-            "ordinary-chat provider failure behavior must remain unchanged"
+            ordinary.iter().any(|event| matches!(
+                event,
+                StreamEvent::TurnCompleted { reason }
+                    if reason == crate::events::PROVIDER_FAILED_REASON
+            )),
+            "a non-HTTP provider failure classifies as the generic provider terminal: {ordinary:?}"
+        );
+        assert_eq!(
+            crate::activity::status_for_turn_events(&ordinary),
+            crate::activity::ActivityStatus::Failed,
+            "a turn the provider never answered must never read as a clean success"
+        );
+        assert!(
+            crate::events::withheld_turn_reason(&ordinary).is_none(),
+            "…and it is a provider failure, not ContextDesk withholding an answer it had"
         );
     }
 

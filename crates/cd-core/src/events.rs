@@ -179,6 +179,28 @@ pub const WITHHELD_TURN_REASONS: &[&str] = &[
     "linked_synthesis_provider_error",
 ];
 
+/// The `provider_*` terminals below are deliberately **not** withheld reasons.
+/// Withholding means ContextDesk had an answer and chose not to deliver it;
+/// these mean the provider never answered at all. Both produce no usable
+/// result, but only one is ContextDesk's decision, and
+/// [`crate::activity::status_for_turn_reason`] classifies them `Failed`
+/// precisely so an operator can tell the two apart.
+///
+/// Terminal reason: the provider rate limited the turn and ContextDesk's
+/// bounded transport retries were exhausted before any model round completed.
+pub const PROVIDER_RATE_LIMITED_REASON: &str = "provider_rate_limited";
+
+/// Terminal reason: the provider rejected the turn's credentials.
+pub const PROVIDER_UNAUTHORIZED_REASON: &str = "provider_unauthorized";
+
+/// Terminal reason: the provider could not serve the turn (server fault or
+/// upstream timeout).
+pub const PROVIDER_UNAVAILABLE_REASON: &str = "provider_unavailable";
+
+/// Terminal reason: the provider failed before a model round completed, for a
+/// reason with no more specific classification.
+pub const PROVIDER_FAILED_REASON: &str = "provider_failed";
+
 /// Stable [`StreamEvent::Error`] codes that mean the answer this turn
 /// produced is not log-grounded, even though the turn itself completed with
 /// an ordinary reason such as `"stop"`.

@@ -734,7 +734,16 @@ async fn hard_provider_failure_returns_bounded_failed_activity_in_json_and_jsonl
             let retained = serde_json::to_string(activity).unwrap();
             assert!(!retained.contains("/private/demo"), "{retained}");
             assert!(!retained.contains("sk-private-marker"), "{retained}");
-            assert!(retained.contains("Error: provider_error"), "{retained}");
+            // The label used to be the CLI's own synthetic `provider_error`,
+            // recovered from an opaque `Err`. The turn now terminates typed,
+            // so the journal keeps the classification the provider's status
+            // actually supports — and still nothing from its response body.
+            assert!(
+                retained.contains("Error: provider_unavailable"),
+                "{retained}"
+            );
+            assert!(retained.contains("HTTP 500"), "{retained}");
+            assert!(!retained.contains("failure at"), "{retained}");
         } else {
             let lines = parse_jsonl(&output.stdout);
             assert_eq!(lines.last().unwrap()["type"], "done");

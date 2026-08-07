@@ -462,7 +462,8 @@ pub async fn run(
                 .map(StreamLine::Activity)
                 .collect()
         });
-    let withheld_error = withheld_cli_error(&outcome.events);
+    let withheld_error =
+        withheld_cli_error(&outcome.events).or_else(|| failed_turn_cli_error(&outcome.events));
 
     match format {
         OutputFormat::Text => {
@@ -628,6 +629,39 @@ fn withheld_cli_error(events: &[StreamEvent]) -> Option<CliError> {
     } else {
         CliError::new(ExitCategory::NotReady, message)
     })
+}
+
+/// A turn the shared classifier calls `Failed` produced no answer, so the CLI
+/// must not exit 0 for it.
+///
+/// Withholding (handled above) is ContextDesk declining to deliver; this is
+/// the provider never answering — `provider_rate_limited`,
+/// `provider_unauthorized`, `provider_unavailable`, `provider_failed`,
+/// `provider_not_wired`, `ollama_unreachable`. Those terminals used to reach
+/// the CLI as an opaque `Err`; now that they are typed events, a script that
+/// only checks the exit code would otherwise read a dead provider as a
+/// successful run. Classification is delegated to
+/// [`cd_core::activity::status_for_turn_reason`] so the CLI and the activity
+/// journal can never disagree about which terminals are failures.
+fn failed_turn_cli_error(events: &[StreamEvent]) -> Option<CliError> {
+    let reason = events.iter().rev().find_map(|event| match event {
+        StreamEvent::TurnCompleted { reason } => Some(reason.clone()),
+        _ => None,
+    })?;
+    if cd_core::activity::status_for_turn_reason(&reason)
+        != cd_core::activity::ActivityStatus::Failed
+    {
+        return None;
+    }
+    let message = events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            StreamEvent::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| format!("The turn failed ({reason})."));
+    Some(CliError::provider(message))
 }
 
 /// Return only the typed host event. In particular, no `TextDelta` is parsed

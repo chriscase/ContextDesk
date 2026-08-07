@@ -17,6 +17,28 @@ const OPENAI_COMPATIBLE_RETRY_BASE_DELAY: Duration = Duration::from_secs(30);
 const OPENAI_COMPATIBLE_RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
 const OPENAI_COMPATIBLE_MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 
+/// One provider-neutral constructor for "the provider answered a chat or
+/// stream request with a non-success HTTP status".
+///
+/// Every provider client routes its status failure through this so the status
+/// travels structurally (see [`CoreError::ProviderHttp`]) instead of only
+/// inside prose that each consumer would have to re-parse. The rendered text
+/// is identical to the per-client `format!` calls this replaces, so existing
+/// message contracts (and the transport oracle that pins them) still hold.
+fn provider_http_error(
+    operation: &str,
+    status: reqwest::StatusCode,
+    body: &str,
+    body_chars: usize,
+) -> CoreError {
+    CoreError::ProviderHttp {
+        operation: operation.to_string(),
+        status: status.as_u16(),
+        status_line: status.to_string(),
+        body: body.chars().take(body_chars).collect(),
+    }
+}
+
 fn bounded_openai_retry_after(
     headers: &reqwest::header::HeaderMap,
     retry: u32,
@@ -707,10 +729,7 @@ impl OpenAiCompatibleClient {
             .await
             .map_err(|e| CoreError::Message(format!("chat body: {e}")))?;
         if !status.is_success() {
-            return Err(CoreError::Message(format!(
-                "chat HTTP {status}: {}",
-                text.chars().take(300).collect::<String>()
-            )));
+            return Err(provider_http_error("chat", status, &text, 300));
         }
         let mut completion = parse_openai_completion(&text)?;
         // Headers first, body second so JSON `id` / usage win over header ids.
@@ -756,10 +775,7 @@ impl OpenAiCompatibleClient {
             .await
             .map_err(|e| CoreError::Message(format!("stream body: {e}")))?;
         if !status.is_success() {
-            return Err(CoreError::Message(format!(
-                "stream HTTP {status}: {}",
-                text.chars().take(300).collect::<String>()
-            )));
+            return Err(provider_http_error("stream", status, &text, 300));
         }
         // Some gateways ignore stream=true and return a full JSON object.
         let mut completion = if text.trim_start().starts_with('{') && !text.contains("data:") {
@@ -811,10 +827,7 @@ impl OpenAiCompatibleClient {
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(CoreError::Message(format!(
-                "stream HTTP {status}: {}",
-                text.chars().take(300).collect::<String>()
-            )));
+            return Err(provider_http_error("stream", status, &text, 300));
         }
 
         let header_tel = crate::provider_telemetry::capture_safe_response_headers(
@@ -1129,10 +1142,7 @@ impl OllamaClient {
             .await
             .map_err(|e| CoreError::Message(format!("ollama body: {e}")))?;
         if !status.is_success() {
-            return Err(CoreError::Message(format!(
-                "ollama HTTP {status}: {}",
-                text.chars().take(200).collect::<String>()
-            )));
+            return Err(provider_http_error("ollama", status, &text, 200));
         }
         parse_ollama_chat_response(&text)
     }
@@ -1732,10 +1742,7 @@ impl AnthropicClient {
             .await
             .map_err(|e| CoreError::Message(format!("anthropic body: {e}")))?;
         if !status.is_success() {
-            return Err(CoreError::Message(format!(
-                "anthropic HTTP {status}: {}",
-                text.chars().take(300).collect::<String>()
-            )));
+            return Err(provider_http_error("anthropic", status, &text, 300));
         }
         parse_anthropic_completion(&text)
     }
@@ -1758,10 +1765,7 @@ impl AnthropicClient {
             .await
             .map_err(|e| CoreError::Message(format!("anthropic stream body: {e}")))?;
         if !status.is_success() {
-            return Err(CoreError::Message(format!(
-                "anthropic stream HTTP {status}: {}",
-                text.chars().take(300).collect::<String>()
-            )));
+            return Err(provider_http_error("anthropic stream", status, &text, 300));
         }
         if text.trim_start().starts_with('{') && !text.contains("event:") && !text.contains("data:")
         {
@@ -1822,10 +1826,7 @@ impl AnthropicClient {
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(CoreError::Message(format!(
-                "anthropic stream HTTP {status}: {}",
-                text.chars().take(300).collect::<String>()
-            )));
+            return Err(provider_http_error("anthropic stream", status, &text, 300));
         }
 
         // Anthropic's final tool-call reconstruction re-parses the whole
