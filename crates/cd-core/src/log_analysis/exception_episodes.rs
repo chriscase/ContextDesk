@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Schema id for host-neutral reports (v2 semantics; field-compatible transition).
+/// Schema id for host-neutral reports (v2 semantics; additive fields only).
 pub const EXCEPTION_EPISODE_SCHEMA_ID: &str = "contextdesk.exception_episode_report.v2";
 /// Schema version (2 = typed completeness + certified strong derived episodes).
 pub const EXCEPTION_EPISODE_SCHEMA_VERSION: u32 = 2;
@@ -455,6 +455,12 @@ pub struct ExceptionEpisodeAnalysis {
     pub counts_complete: bool,
     /// True when any occurrence is uncertain.
     pub uncertain: bool,
+    /// Occurrences carrying one or more concrete refused-correlation conflicts.
+    #[serde(default)]
+    pub conflicting_occurrence_count: u64,
+    /// Occurrences carrying a non-zero local candidate-component ambiguity count.
+    #[serde(default)]
+    pub ambiguous_occurrence_count: u64,
     /// Matching policy name (honest about greedy vs global optimality).
     pub matching_policy: String,
     /// True when the matcher detected non-unique maximum matchings for a component.
@@ -1337,6 +1343,14 @@ fn analyze_bounded_events_cancellable(
             || (occurrence.duplicate_rendering
                 && occurrence.correlation_confidence != ExceptionCorrelationConfidence::Strong)
     });
+    let conflicting_occurrence_count = occurrences
+        .iter()
+        .filter(|(_, occurrence)| !occurrence.conflict_codes.is_empty())
+        .count() as u64;
+    let ambiguous_occurrence_count = occurrences
+        .iter()
+        .filter(|(_, occurrence)| occurrence.ambiguity_count > 0)
+        .count() as u64;
 
     let mut grouped: BTreeMap<String, Vec<ExceptionOccurrenceSummary>> = BTreeMap::new();
     for (signature, occurrence) in occurrences {
@@ -1458,8 +1472,10 @@ fn analyze_bounded_events_cancellable(
         partial,
         counts_complete,
         uncertain,
+        conflicting_occurrence_count,
+        ambiguous_occurrence_count,
         matching_policy:
-            "v2_app_propagation_chains_plus_unique_chain_stderr_match; forced_or_reciprocal_unique_only".into(),
+            "v3_global_exact_anchor_component_preflight_plus_unique_chain_stderr_match; reused_anchor_components_unresolved".into(),
         matching_ambiguous: match_meta.ambiguous,
         pinned_event_revision: None,
         pinned_template_analysis_revision: None,
@@ -1517,6 +1533,8 @@ fn build_ranking_disclosure(report: &ExceptionEpisodeAnalysis) -> String {
          layer_standalone_renderings: {}\n\
          layer_unresolved_renderings: {}\n\
          layer_ambiguous_components: {}\n\
+         layer_conflicting_occurrences: {}\n\
+         layer_ambiguous_occurrences: {}\n\
          amplification_raw_records_per_occurrence: {}/{} = {} rem {} integral={}\n\
          amplification_stderr_records_per_occurrence: {}/{} = {} rem {} integral={}\n\
          amplification_application_records_per_occurrence: {}/{} = {} rem {} integral={}\n\
@@ -1562,6 +1580,8 @@ fn build_ranking_disclosure(report: &ExceptionEpisodeAnalysis) -> String {
         report.standalone_rendering_count,
         report.unresolved_rendering_count,
         report.ambiguous_component_count,
+        report.conflicting_occurrence_count,
+        report.ambiguous_occurrence_count,
         amp.raw_records_per_occurrence.numerator,
         amp.raw_records_per_occurrence.denominator,
         amp.raw_records_per_occurrence.quotient,
@@ -1715,6 +1735,8 @@ use raw/rendering and unresolved/ambiguous counts only\n",
          standalone_rendering_count: {}\n\
          unresolved_rendering_count: {}\n\
          ambiguous_component_count: {}\n\
+         conflicting_occurrence_count: {}\n\
+         ambiguous_occurrence_count: {}\n\
          duplicate_rendering_occurrence_count: {}\n\
          amplification_raw_records_per_occurrence: {}/{} = {} rem {}\n\
          amplification_stderr_records_per_occurrence: {}/{} = {} rem {}\n\
@@ -1740,6 +1762,8 @@ use raw/rendering and unresolved/ambiguous counts only\n",
         report.standalone_rendering_count,
         report.unresolved_rendering_count,
         report.ambiguous_component_count,
+        report.conflicting_occurrence_count,
+        report.ambiguous_occurrence_count,
         report.duplicate_rendering_occurrence_count,
         amp.raw_records_per_occurrence.numerator,
         amp.raw_records_per_occurrence.denominator,
@@ -2349,6 +2373,32 @@ fn matching_global_anchor(a: &TypedExecutionSignals, b: &TypedExecutionSignals) 
         || matches!((&a.request_id, &b.request_id), (Some(x), Some(y)) if x == y)
 }
 
+fn execution_conflict_codes(a: &TypedExecutionSignals, b: &TypedExecutionSignals) -> Vec<String> {
+    let mut codes = Vec::new();
+    if a.execution_key_conflict || b.execution_key_conflict {
+        codes.push("conflicting_envelope_execution_key".into());
+    }
+    if a.envelope_malformed || b.envelope_malformed {
+        codes.push("malformed_execution_envelope".into());
+    }
+    if matches!((&a.trace_id, &b.trace_id), (Some(x), Some(y)) if x != y) {
+        codes.push("conflicting_trace_anchor".into());
+    }
+    if matches!((&a.request_id, &b.request_id), (Some(x), Some(y)) if x != y) {
+        codes.push("conflicting_request_anchor".into());
+    }
+    if a.source == b.source && matches!((&a.thread, &b.thread), (Some(x), Some(y)) if x != y) {
+        codes.push("conflicting_source_scoped_thread".into());
+    }
+    if matches!((&a.host, &b.host), (Some(x), Some(y)) if x != y) {
+        codes.push("conflicting_host".into());
+    }
+    if matches!((&a.service, &b.service), (Some(x), Some(y)) if x != y) {
+        codes.push("conflicting_service".into());
+    }
+    codes
+}
+
 fn same_scoped_thread_host(a: &TypedExecutionSignals, b: &TypedExecutionSignals) -> bool {
     match (&a.thread, &b.thread) {
         (Some(x), Some(y)) if x == y => {}
@@ -2410,6 +2460,50 @@ fn chain_wall_span_ok(members: &[&RenderEpisode], candidate: &RenderEpisode) -> 
         hi = hi.max(m.first_ts.max(m.last_ts));
     }
     hi.abs_diff(lo) <= MAX_CHAIN_WALL_SECONDS as u64
+}
+
+/// Bounded global preflight for an exact request/trace component.
+///
+/// The old local loop accepted every exact-anchor neighbour and selected the
+/// earliest one.  That is deterministic but not a proof that there is only one
+/// execution partition.  A real propagation chain may visit a site once; a
+/// reused identifier creates two candidates for at least one site.  Inspect the
+/// whole component before any local growth and withhold the merge in that case.
+///
+/// This deliberately remains conservative: an unparseable site is made unique
+/// per rendering by `derive_exception_graph`, so it cannot manufacture a
+/// repeated-site proof.  Such input may remain a one-member chain, but cannot
+/// gain a semantic count without a unique stderr match and full conservation.
+fn exact_anchor_component_is_unique(
+    seed: usize,
+    app_idxs: &[usize],
+    renderings: &[RenderEpisode],
+    graphs: &[ExceptionGraphSummary],
+    signals: &[TypedExecutionSignals],
+) -> bool {
+    let mut members = Vec::new();
+    for &candidate in app_idxs {
+        if execution_signals_conflict(&signals[seed], &signals[candidate])
+            || !matching_global_anchor(&signals[seed], &signals[candidate])
+            || !graphs_structurally_related(&graphs[seed], &graphs[candidate])
+        {
+            continue;
+        }
+        // Wall-clock exact-anchor chains still have a bounded execution window.
+        // Order-only inputs are allowed here only because their exact anchor is
+        // subsequently required again for chain↔stderr matching.
+        if renderings[seed].wall_time
+            && renderings[candidate].wall_time
+            && !wall_span_ok(&signals[seed], &signals[candidate], MAX_CHAIN_WALL_SECONDS)
+        {
+            continue;
+        }
+        members.push(candidate);
+    }
+    let mut sites = HashSet::new();
+    members
+        .into_iter()
+        .all(|idx| sites.insert(graphs[idx].propagation_site.clone()))
 }
 
 /// One-to-one / multi-app propagation correlation (v2).
@@ -2490,6 +2584,17 @@ fn correlate_renderings_cancellable(
         assigned_app[seed] = true;
         let mut chain_sites = vec![graphs[seed].propagation_site.clone()];
         let mut chain_trace = signals[seed].trace_id.clone();
+        // A named request/trace is evidence, not a licence to choose an
+        // arbitrary partition.  Before an exact-anchor component may grow,
+        // prove that every member has a distinct propagation site.  Repeated
+        // sites under one anchor are the observable shape of a reused id (two
+        // executions on the same worker path); leave that whole component
+        // unresolved instead of letting input order select one chain.
+        let exact_component_unique =
+            exact_anchor_component_is_unique(seed, &app_idxs, &renderings, &graphs, &signals);
+        if !exact_component_unique {
+            ambiguous_components = ambiguous_components.saturating_add(1);
+        }
         loop {
             let mut candidates: Vec<(usize, LinkConfidence)> = Vec::new();
             for &other in &app_idxs {
@@ -2548,6 +2653,12 @@ fn correlate_renderings_cancellable(
                 let exact_anchor = chain
                     .iter()
                     .any(|&m| matching_global_anchor(&signals[m], &signals[other]));
+                if exact_anchor && !exact_component_unique {
+                    // Global component inspection found an alternative
+                    // execution partition for this identifier.  Do not let a
+                    // local earliest-record choice collapse it.
+                    continue;
+                }
                 if any_order_only && !exact_anchor {
                     // OrderOnly: thread / wall multi-signal fallback forbidden.
                     continue;
@@ -2586,10 +2697,10 @@ fn correlate_renderings_cancellable(
             // chain is the unique eligible partner in the local window.
             let mut forced: Vec<(usize, LinkConfidence)> = Vec::new();
             for &(cand, conf) in &candidates {
-                // Exact anchors (shared trace/request/correlation) do not require
-                // rival-free uniqueness among same-anchor siblings — the anchor
-                // itself is the fail-closed boundary. Thread-only / multi-signal
-                // wall fallback still requires a unique reciprocal candidate.
+                // Exact anchors are eligible only after the bounded global
+                // component check above proved a unique site partition.
+                // Thread-only / multi-signal wall fallback still requires a
+                // reciprocal candidate.
                 if matches!(conf, LinkConfidence::ExactExecutionAnchor) {
                     forced.push((cand, conf));
                     continue;
@@ -2861,6 +2972,8 @@ fn correlate_renderings_cancellable(
             ),
         ));
     }
+
+    annotate_unresolved_occurrences(&mut occurrences, &renderings, &graphs, &signals);
 
     occurrences.sort_by(|a, b| {
         a.1.first_seq
@@ -3283,6 +3396,44 @@ fn occurrence_from_renderings(
     if renderings.len() > 1 {
         reason_codes.push("multi_rendering".into());
     }
+    // Record the actual evidence path, rather than leaving consumers to infer
+    // it from a blanket confidence label.  These are bounded enum-like strings
+    // and do not expose request/trace values.
+    let mut has_request = false;
+    let mut has_trace = false;
+    let mut has_thread_wall = false;
+    for (left_i, left) in renderings.iter().enumerate() {
+        let left_signals = signals_from_rendering(left);
+        for right in renderings.iter().skip(left_i + 1) {
+            let right_signals = signals_from_rendering(right);
+            has_request |= matches!(
+                (&left_signals.request_id, &right_signals.request_id),
+                (Some(a), Some(b)) if a == b
+            );
+            has_trace |= matches!(
+                (&left_signals.trace_id, &right_signals.trace_id),
+                (Some(a), Some(b)) if a == b
+            );
+            has_thread_wall |= left.wall_time
+                && right.wall_time
+                && matches!(
+                    (&left_signals.thread, &right_signals.thread),
+                    (Some(a), Some(b)) if a == b
+                );
+        }
+    }
+    if has_request {
+        reason_codes.push("shared_request_anchor".into());
+    }
+    if has_trace {
+        reason_codes.push("shared_trace_anchor".into());
+    }
+    if has_thread_wall {
+        reason_codes.push("shared_thread_wall_window".into());
+    }
+    if confidence == ExceptionCorrelationConfidence::Moderate {
+        reason_codes.push("unkeyed_wall_window".into());
+    }
     ExceptionOccurrenceSummary {
         episode_id,
         first_seq,
@@ -3305,6 +3456,66 @@ fn occurrence_from_renderings(
         citations_complete: complete,
         omitted_citation_count: omitted,
         ambiguity_count: 0,
+    }
+}
+
+/// Attach observable refusal/ambiguity details to standalone occurrences.
+///
+/// A conflict must not disappear merely because the fail-closed matcher kept
+/// the rendering standalone.  Likewise, a rendering left out of a component
+/// with more than one viable neighbour needs an occurrence-local ambiguity
+/// count, not only a report-wide boolean.
+fn annotate_unresolved_occurrences(
+    occurrences: &mut [(String, ExceptionOccurrenceSummary)],
+    renderings: &[RenderEpisode],
+    graphs: &[ExceptionGraphSummary],
+    signals: &[TypedExecutionSignals],
+) {
+    for (_, occurrence) in occurrences {
+        if occurrence.rendering_count != 1 {
+            continue;
+        }
+        let Some(first) = occurrence.citations.first() else {
+            continue;
+        };
+        let Some(index) = renderings.iter().position(|rendering| {
+            rendering.citations.first().is_some_and(|citation| {
+                citation.seq == first.seq && citation.source == first.source
+            })
+        }) else {
+            continue;
+        };
+        let mut conflicts = HashSet::new();
+        let mut viable_neighbours = 0u64;
+        for (other_index, other) in renderings.iter().enumerate() {
+            if other_index == index || other.signature != renderings[index].signature {
+                continue;
+            }
+            for code in execution_conflict_codes(&signals[index], &signals[other_index]) {
+                conflicts.insert(code);
+            }
+            if !execution_signals_conflict(&signals[index], &signals[other_index])
+                && graphs_structurally_related(&graphs[index], &graphs[other_index])
+                && (matching_global_anchor(&signals[index], &signals[other_index])
+                    || duplicate_evidence(&renderings[index], other).is_some())
+            {
+                viable_neighbours = viable_neighbours.saturating_add(1);
+            }
+        }
+        let mut ordered_conflicts: Vec<String> = conflicts.into_iter().collect();
+        ordered_conflicts.sort();
+        if !ordered_conflicts.is_empty() {
+            occurrence
+                .reason_codes
+                .push("correlation_refused_on_conflict".into());
+            occurrence.conflict_codes = ordered_conflicts;
+        }
+        if viable_neighbours > 1 {
+            occurrence
+                .reason_codes
+                .push("ambiguous_candidate_component".into());
+            occurrence.ambiguity_count = viable_neighbours;
+        }
     }
 }
 
@@ -6051,6 +6262,123 @@ mod tests {
             analysis.occurrence_count, 2,
             "conflicting traces on same thread must stay separate"
         );
+        assert!(
+            analysis.conflicting_occurrence_count > 0
+                && analysis
+                    .families
+                    .iter()
+                    .flat_map(|family| &family.occurrences)
+                    .any(|occurrence| occurrence
+                        .conflict_codes
+                        .iter()
+                        .any(|code| code == "conflicting_trace_anchor")),
+            "refused trace conflict must reach the public occurrence DTO"
+        );
+    }
+
+    #[test]
+    fn p0_reused_exact_anchor_duplicate_site_is_unresolved_and_annotated() {
+        // Two otherwise-identical executions reused the same named id.  The
+        // global component has duplicate propagation sites, so a local earliest
+        // choice would be arbitrary and must not create a multi-app episode.
+        let mut events = Vec::new();
+        for execution in 0..2u64 {
+            for (site, seq) in [("A", 1 + execution * 2), ("B", 2 + execution * 2)] {
+                events.push(event(
+                    seq,
+                    100 + seq as i64,
+                    "app.log",
+                    &format!(
+                        "request_id=reused-7 java.lang.RuntimeException: XYZ_REUSED\n at com.xyz.{site}.Handler.handle(H.java:1)"
+                    ),
+                ));
+            }
+        }
+        let analysis = analyze_bounded_events(events.len() as u64, &events);
+        assert!(analysis.matching_ambiguous);
+        assert_eq!(analysis.duplicate_rendering_occurrence_count, 0);
+        assert_eq!(analysis.occurrence_count, 4);
+        assert!(
+            analysis.ambiguous_occurrence_count > 0
+                && analysis
+                    .families
+                    .iter()
+                    .flat_map(|family| &family.occurrences)
+                    .any(|occurrence| occurrence.ambiguity_count > 0
+                        && occurrence
+                            .reason_codes
+                            .iter()
+                            .any(|code| code == "ambiguous_candidate_component")),
+            "reused-anchor ambiguity must be visible on affected DTO occurrences"
+        );
+    }
+
+    #[test]
+    fn p0_stray_app_only_named_id_never_certifies_a_semantic_episode() {
+        // An id present only on application records cannot be mistaken for a
+        // cross-rendering execution proof.  This covers request-id text copied
+        // into an application error template.
+        let events = [
+            event(
+                1,
+                100,
+                "app.log",
+                "request_id=template-default java.lang.RuntimeException: XYZ_STRAY\n at com.xyz.A.m(A.java:1)",
+            ),
+            event(
+                2,
+                101,
+                "app.log",
+                "request_id=template-default java.lang.RuntimeException: XYZ_STRAY\n at com.xyz.B.m(B.java:1)",
+            ),
+        ];
+        let analysis = analyze_bounded_events(2, &events);
+        assert!(!analysis.semantic_counts_certified);
+        assert_eq!(analysis.strong_derived_episode_count, 0);
+    }
+
+    #[test]
+    fn p0_stray_stderr_only_named_id_never_certifies_a_semantic_episode() {
+        // Conversely, an identifier that occurs only in separately wrapped
+        // stderr records must not create an application execution chain.
+        let events = [
+            event(
+                1,
+                100,
+                "stderr-a.log",
+                "[stderr] request_id=template-default java.lang.RuntimeException: XYZ_STRAY\n at com.xyz.A.m(A.java:1)",
+            ),
+            event(
+                2,
+                101,
+                "stderr-b.log",
+                "[stderr] request_id=template-default java.lang.RuntimeException: XYZ_STRAY\n at com.xyz.B.m(B.java:1)",
+            ),
+        ];
+        let analysis = analyze_bounded_events(2, &events);
+        assert!(!analysis.semantic_counts_certified);
+        assert_eq!(analysis.strong_derived_episode_count, 0);
+        assert_eq!(analysis.application_propagation_chain_count, 0);
+    }
+
+    #[test]
+    fn exception_episode_report_additive_fields_deserialize_when_absent() {
+        let analysis = analyze_bounded_events(
+            1,
+            &[event(
+                1,
+                1,
+                "app.log",
+                "java.lang.RuntimeException: XYZ_COMPAT\n at com.xyz.A.m(A.java:1)",
+            )],
+        );
+        let mut value = serde_json::to_value(&analysis).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("conflictingOccurrenceCount");
+        object.remove("ambiguousOccurrenceCount");
+        let decoded: ExceptionEpisodeAnalysis = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.conflicting_occurrence_count, 0);
+        assert_eq!(decoded.ambiguous_occurrence_count, 0);
     }
 
     #[test]

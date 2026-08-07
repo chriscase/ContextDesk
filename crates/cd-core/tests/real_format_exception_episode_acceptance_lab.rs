@@ -352,13 +352,13 @@ fn stderr_payloads_unanchored(exec: usize) -> Vec<String> {
         ));
     }
     lines.push(format!(
-        "Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT request_id=req-{exec} {MARKER_HDR}"
+        "Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT exec={exec} {MARKER_HDR}"
     ));
     lines.push(format!(
-        "Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT request_id=req-{exec} {MARKER_HDR}"
+        "Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT exec={exec} {MARKER_HDR}"
     ));
     lines.push(format!(
-        "Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT request_id=req-{exec} {MARKER_HDR}"
+        "Caused by: java.io.IOException: XYZ_UPSTREAM_TIMEOUT exec={exec} {MARKER_HDR}"
     ));
     assert_eq!(lines.len(), STDERR_RECORDS_PER_EXEC);
     lines
@@ -1656,6 +1656,23 @@ fn company_shaped_unanchored_remains_uncertified() {
     write_company_shaped_unanchored_cascade(import.path());
     write_unrelated_controls(import.path());
     let (_cache, _id, corpus) = ingest_dir(import.path());
+    assert!(
+        all_events(&corpus).iter().all(|event| {
+            ![
+                "request_id=",
+                "requestId=",
+                "correlation_id=",
+                "correlationId=",
+                "transaction_id=",
+                "transactionId=",
+                "trace_id=",
+                "traceId=",
+            ]
+            .iter()
+            .any(|needle| event.message.contains(needle))
+        }),
+        "the unanchored fixture must contain no named execution anchors"
+    );
     let analysis = analyze_exception_episodes(&corpus, &[]).expect("analyze must run");
     eprintln!(
         "UNANCHORED: raw={} renderings={} strong={} unpaired={} cert={} corr={}",
