@@ -926,9 +926,10 @@ fn dedup_tool_names(events: &[StreamEvent]) -> Vec<String> {
     names
 }
 
-/// `"not_applicable"` for an ordinary turn; otherwise `"grounded"` unless the
-/// turn ended with one of the linked-evidence-validation error codes, which
-/// are always prefixed `linked_` (see `cd_core::research`).
+/// `"not_applicable"` for an ordinary turn. A linked turn is grounded only
+/// when it carries at least one host-emitted log citation for the attached
+/// corpus and no linked-evidence-validation error. Successful tool lifecycle
+/// alone is not evidence: an empty search must remain ungrounded.
 ///
 /// `pub(crate)` so `commands::doctor`'s live-turn grounding check reuses
 /// this exact classification instead of re-deriving it.
@@ -936,10 +937,24 @@ pub(crate) fn grounding_status(corpus_id: Option<&str>, events: &[StreamEvent]) 
     if corpus_id.is_none() {
         return "not_applicable";
     }
+    let corpus_id = corpus_id.expect("checked above");
     let ungrounded = events.iter().any(
         |event| matches!(event, StreamEvent::Error { code, .. } if code.starts_with("linked_")),
     );
-    if ungrounded {
+    let has_trusted_log_evidence = events.iter().any(|event| match event {
+        StreamEvent::Citation {
+            source_id,
+            corpus_id: citation_corpus_id,
+            ..
+        } => {
+            (source_id.starts_with("log_event:") || source_id.starts_with("log_template:"))
+                && citation_corpus_id
+                    .as_deref()
+                    .is_none_or(|cited| cited == corpus_id)
+        }
+        _ => false,
+    });
+    if ungrounded || !has_trusted_log_evidence {
         "ungrounded"
     } else {
         "grounded"
@@ -1165,6 +1180,15 @@ mod grounding_tests {
     fn linked_turn_with_no_evidence_error_is_grounded() {
         let events = vec![citation("log_event:1"), citation("log_event:2")];
         assert_eq!(grounding_status(Some("corpus-a"), &events), "grounded");
+    }
+
+    #[test]
+    fn linked_turn_without_trusted_log_evidence_is_ungrounded() {
+        assert_eq!(grounding_status(Some("corpus-a"), &[]), "ungrounded");
+        assert_eq!(
+            grounding_status(Some("corpus-a"), &[citation("file:README.md")]),
+            "ungrounded"
+        );
     }
 
     #[test]

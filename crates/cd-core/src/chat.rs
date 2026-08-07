@@ -1032,11 +1032,7 @@ pub fn parse_openai_completion(text: &str) -> CoreResult<ChatCompletion> {
                 .and_then(|x| x.as_str())
                 .unwrap_or("")
                 .to_string();
-            let arguments = func
-                .get("arguments")
-                .and_then(|x| x.as_str())
-                .unwrap_or("{}")
-                .to_string();
+            let arguments = function_arguments_as_string(func.get("arguments"), "{}");
             tool_calls.push(ToolCallMsg {
                 id,
                 kind: "function".into(),
@@ -1933,6 +1929,33 @@ mod tests {
         let c = parse_openai_completion(fixture).unwrap();
         assert_eq!(c.tool_calls.len(), 1);
         assert_eq!(c.tool_calls[0].function.name, "search_kb");
+    }
+
+    #[test]
+    fn parse_openai_completion_preserves_object_valued_tool_arguments() {
+        let fixture = r#"{
+          "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [{
+                "id": "call_object_args",
+                "type": "function",
+                "function": {
+                  "name": "search_logs",
+                  "arguments": {"query":"NO_SUCH_TOKEN","semantic":false,"k":5}
+                }
+              }]
+            }
+          }]
+        }"#;
+        let completion = parse_openai_completion(fixture).unwrap();
+        let arguments: Value =
+            serde_json::from_str(&completion.tool_calls[0].function.arguments).unwrap();
+        assert_eq!(arguments["query"], "NO_SUCH_TOKEN");
+        assert_eq!(arguments["semantic"], false);
+        assert_eq!(arguments["k"], 5);
     }
 
     #[test]

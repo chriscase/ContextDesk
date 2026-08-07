@@ -384,7 +384,12 @@ impl Respond for UngroundedProvider {
                             "type": "function",
                             "function": {
                                 "name": "search_logs",
-                                "arguments": {"query": "NO_SUCH_TOKEN_IN_THIS_CORPUS", "semantic": false, "k": 5}
+                                "arguments": {
+                                    "query": "NO_SUCH_TOKEN_IN_THIS_CORPUS",
+                                    "service": "definitely-missing-doctor-service",
+                                    "semantic": false,
+                                    "k": 5
+                                }
                             }
                         }]
                     }
