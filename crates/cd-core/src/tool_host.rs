@@ -2282,7 +2282,7 @@ impl ToolHost {
             .take(BROAD_LOG_TRIAGE_TRACE_CHAIN_CAP)
             .collect::<Vec<_>>();
         checkpoint("cross_source_trace_summaries")?;
-        body.push_str("\n## Cross-source execution chains\n");
+        body.push_str("\n## Cross-source trace-key groups\n");
         body.push_str(&broad_triage_section_disclosure(
             &suppression,
             BROAD_LOG_TRIAGE_TRACE_CHAIN_CAP,
@@ -2291,13 +2291,16 @@ impl ToolHost {
         ));
         body.push_str(
             "identity_basis: parser_true_trace_id_only\n\
-             interpretation: ordered correlation evidence; sequence does not by itself prove root cause\n\
+             trace_key_semantics: parser-populated key; uniqueness and execution boundaries are not independently verified\n\
+             interpretation: ordered correlation evidence only; one key may be reused across unrelated executions\n\
+             independence_rule: never merge different groups; never assume one group is one incident without corroboration\n\
+             privacy: raw trace-key values withheld; stable ordinals are model-facing\n\
              ranking: distinct sources DESC, ERROR/FATAL count DESC, event count DESC, trace id ASC\n",
         );
         if trace_chains.is_empty() {
             body.push_str("selection_state: no_parser_true_cross_source_error_trace\n");
         }
-        for chain in trace_chains {
+        for (chain_index, chain) in trace_chains.into_iter().enumerate() {
             let page = crate::log_analysis::query_event_rows(
                 &corpus,
                 &crate::log_analysis::EventQuery {
@@ -2324,12 +2327,10 @@ impl ToolHost {
                 .take(BROAD_LOG_TRIAGE_TRACE_CHAIN_TEMPLATE_CAP)
                 .collect::<Vec<_>>();
             let templates_partial = available_templates > representatives.len() || row_partial;
-            let trace_id = broad_triage_bounded_line(&chain.trace_id);
-            let trace_id =
-                serde_json::to_string(&trace_id).unwrap_or_else(|_| "\"<invalid>\"".into());
             body.push_str(&format!(
-                "- trace_id={trace_id} event_count={} source_count={} error_or_fatal_count={} \
+                "- trace_group={} event_count={} source_count={} error_or_fatal_count={} \
                  first_axis_value={} last_axis_value={} representative_templates={} partial={}\n",
+                chain_index.saturating_add(1),
                 chain.event_count,
                 chain.source_count,
                 chain.error_or_fatal_count,
@@ -9393,7 +9394,7 @@ mod tests {
         for section in [
             "## Ranking formulas",
             "## Top distributions",
-            "## Cross-source execution chains",
+            "## Cross-source trace-key groups",
             "## Structured ERROR templates",
             "## Structured WARN templates",
             "## Problem clusters",
@@ -9404,14 +9405,21 @@ mod tests {
             assert!(first.model_text.contains(section), "{section}");
         }
         assert!(
-            first.model_text.contains("trace_id=\"trace-incident\"")
+            first.model_text.contains("trace_group=1")
                 && first.model_text.contains("source_count=2")
+                && first.model_text.contains("raw trace-key values withheld")
+                && first.model_text.contains("one key may be reused")
                 && first.model_text.contains("checkout connection refused")
                 && first
                     .model_text
                     .contains("database page corruption sentinel"),
             "cross-source chain must preserve ordered host evidence: {}",
             first.model_text
+        );
+        assert!(
+            !first.model_text.contains("trace-incident")
+                && !first.model_text.contains("execution chains"),
+            "raw/reused trace keys must not be presented as certified executions"
         );
         for identity in [(21_u64, "api/app.log"), (22_u64, "db/database.log")] {
             assert!(

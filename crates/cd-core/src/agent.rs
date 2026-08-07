@@ -472,6 +472,8 @@ pub struct LogExplorerTurnContext {
     pub noise_lens_suspended: bool,
 }
 
+const BROAD_TRIAGE_MULTI_INCIDENT_SYSTEM_TEXT: &str = "MULTI-INCIDENT HONESTY: A broad corpus may contain several unrelated failures. For several independently supported incidents, lead with `Likely causes:` rather than forcing one root cause for the corpus. Distinct host trace-key groups must remain separate unless host evidence explicitly links them. A shared trace key is correlation evidence, not proof of one execution. Never claim one group caused another without shared governed evidence.";
+
 impl LogExplorerTurnContext {
     const MAX_ID_CHARS: usize = 128;
     const MAX_BRIEF_CHARS: usize = 2_000;
@@ -687,17 +689,19 @@ impl LogExplorerTurnContext {
              time without a timezone-aware conversion. Distinguish observation from inference, \
              label confidence, disclose caps and time-quality limits, identify the next evidence \
              needed to resolve uncertainty, and never fabricate a result, citation, count, or \
-             causal claim.\n\n{}",
+             causal claim.\n\n{}\n\n{}",
             self.corpus_id,
-            crate::triage_quality::triage_answer_contract_system_text()
+            crate::triage_quality::triage_answer_contract_system_text(),
+            BROAD_TRIAGE_MULTI_INCIDENT_SYSTEM_TEXT
         )
     }
 
     fn broad_triage_synthesis_system_hint(&self) -> String {
         format!(
-            "{}\n\n{}",
+            "{}\n\n{}\n\n{}",
             self.staged_synthesis_system_hint(),
-            crate::triage_quality::triage_answer_contract_system_text()
+            crate::triage_quality::triage_answer_contract_system_text(),
+            BROAD_TRIAGE_MULTI_INCIDENT_SYSTEM_TEXT
         )
     }
 
@@ -1382,6 +1386,7 @@ fn answer_overclaims_cause(text: &str) -> bool {
         })
         .to_ascii_lowercase();
     lead.starts_with("likely cause:")
+        || lead.starts_with("likely causes:")
         || lead.starts_with("root cause:")
         || lead.starts_with("the cause")
 }
