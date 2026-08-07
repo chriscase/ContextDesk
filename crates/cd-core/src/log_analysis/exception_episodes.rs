@@ -2098,14 +2098,14 @@ fn correlate_renderings_cancellable(
                         (Some(a), Some(b)) if a == b
                     )
                 });
-                // Exact anchors: matching trace/request, or matching explicit thread
-                // identity (thread is a first-class execution anchor when present).
+                // Exact unique execution anchors for app-app: trace / request /
+                // correlation only. Thread alone is never ExactExecutionAnchor
+                // and never authorizes OrderOnly app-app grouping.
                 let exact_anchor = chain
                     .iter()
-                    .any(|&m| matching_global_anchor(&signals[m], &signals[other]))
-                    || matching_thread;
+                    .any(|&m| matching_global_anchor(&signals[m], &signals[other]));
                 if any_order_only && !exact_anchor {
-                    // OrderOnly: multi-signal wall fallback forbidden; need exact anchor.
+                    // OrderOnly: thread / wall multi-signal fallback forbidden.
                     continue;
                 }
                 if all_wall && !chain_wall_span_ok(&member_refs, &renderings[other]) {
@@ -2119,7 +2119,11 @@ fn correlate_renderings_cancellable(
                         .iter()
                         .any(|&m| same_scoped_thread_host(&signals[m], &signals[other]))
                 {
-                    // Wall multi-signal fallback (forbidden for OrderOnly — already gated).
+                    // Wall multi-signal fallback (host+thread+structural); never OrderOnly.
+                    LinkConfidence::StrongMultiSignal
+                } else if all_wall && matching_thread {
+                    // Same thread without host still needs structural (already gated)
+                    // and unique reciprocal — not ExactExecutionAnchor.
                     LinkConfidence::StrongMultiSignal
                 } else {
                     continue;
@@ -2138,10 +2142,10 @@ fn correlate_renderings_cancellable(
             // chain is the unique eligible partner in the local window.
             let mut forced: Vec<(usize, LinkConfidence)> = Vec::new();
             for &(cand, conf) in &candidates {
-                // Exact anchors (shared thread/request/trace) do not require
+                // Exact anchors (shared trace/request/correlation) do not require
                 // rival-free uniqueness among same-anchor siblings — the anchor
-                // itself is the fail-closed boundary. Multi-signal wall fallback
-                // still requires a unique reciprocal candidate.
+                // itself is the fail-closed boundary. Thread-only / multi-signal
+                // wall fallback still requires a unique reciprocal candidate.
                 if matches!(conf, LinkConfidence::ExactExecutionAnchor) {
                     forced.push((cand, conf));
                     continue;
@@ -5669,6 +5673,58 @@ mod tests {
             "OrderOnly app-app without exact unique execution anchor must not group"
         );
         assert_eq!(analysis.duplicate_rendering_occurrence_count, 0);
+    }
+
+    /// P0-10 product path: OrderOnly + matching thread + distinct sites + no
+    /// trace/request/correlation must NOT form one episode (thread alone is not
+    /// an ExactExecutionAnchor; OrderOnly multi-signal fallback is forbidden).
+    #[test]
+    fn p0_order_only_same_thread_without_request_or_trace_stays_separate() {
+        let a = order_event(
+            1,
+            "app.log",
+            "thread=worker-1 java.lang.RuntimeException: XYZ_TH\n at com.xyz.siteA.Handler.handle(A.java:1)",
+        );
+        let b = order_event(
+            2,
+            "app.log",
+            "thread=worker-1 java.lang.RuntimeException: XYZ_TH\n at com.xyz.siteB.Handler.handle(B.java:1)",
+        );
+        let analysis = analyze_bounded_events(2, &[a, b]);
+        assert_eq!(
+            analysis.occurrence_count, 2,
+            "OrderOnly same-thread app-app without request/trace must stay separate (got occ={})",
+            analysis.occurrence_count
+        );
+        assert_eq!(analysis.duplicate_rendering_occurrence_count, 0);
+        let max_r = analysis
+            .families
+            .iter()
+            .flat_map(|f| f.occurrences.iter())
+            .map(|o| o.rendering_count)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            max_r, 1,
+            "thread-alone OrderOnly must not collapse into multi-rendering episode"
+        );
+
+        // Parenthesized WildFly task thread form (not thread= key).
+        let c = order_event(
+            3,
+            "app.log",
+            "ERROR [XYZ_app] (default task-1) java.lang.RuntimeException: XYZ_TASK\n at com.xyz.layer0.Handler.handle(H.java:1)",
+        );
+        let d = order_event(
+            4,
+            "app.log",
+            "ERROR [XYZ_app] (default task-1) java.lang.RuntimeException: XYZ_TASK\n at com.xyz.layer1.Handler.handle(H.java:1)",
+        );
+        let paren = analyze_bounded_events(2, &[c, d]);
+        assert_eq!(
+            paren.occurrence_count, 2,
+            "OrderOnly parenthesized task-thread alone must not form one episode"
+        );
     }
 
     #[test]
