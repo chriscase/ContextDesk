@@ -11924,3 +11924,9 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         }
     }
 }
+
+// Wire-level transport-vs-semantic-attempt oracle for the private
+// candidate/comparison pipeline above (audit/transport-semantic-attempt-oracle).
+#[cfg(test)]
+#[path = "agent_transport_semantic_oracle_tests.rs"]
+mod transport_semantic_oracle_tests;
