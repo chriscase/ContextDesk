@@ -1157,6 +1157,7 @@ mod tests {
             sources_omitted: vec!["config/flags.jsonl".into()],
             decoy_earliest_error_message_token: Some("decoy".into()),
             true_trigger_message_token: Some("causal trigger".into()),
+            competing_trigger_message_tokens: Vec::new(),
             symptom_message_tokens: vec!["downstream symptom".into()],
             root_cause_establishable: true,
             forbidden_claims: vec![

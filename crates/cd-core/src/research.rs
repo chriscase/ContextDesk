@@ -62,6 +62,10 @@ pub fn event_to_dto(e: &StreamEvent) -> EventDto {
             }),
         ),
         StreamEvent::TextDelta { text } => ("text_delta", serde_json::json!({ "text": text })),
+        StreamEvent::InvestigationAnswer { envelope } => (
+            "investigation_answer",
+            serde_json::json!({ "envelope": envelope }),
+        ),
         StreamEvent::ThoughtDelta { text } => {
             ("thought_delta", serde_json::json!({ "text": text }))
         }

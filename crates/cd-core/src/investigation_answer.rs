@@ -98,6 +98,8 @@ pub struct CanonicalCitationV1 {
     pub locator: String,
     pub corpus_id: String,
     pub revision: String,
+    /// Host-owned bounded excerpt used by future renderers.
+    pub content: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvestigationAnswerV1 {
@@ -117,6 +119,8 @@ pub struct HostEvidenceEntry {
     pub corpus_id: String,
     pub revision: String,
     pub role: EvidenceRole,
+    /// Host-owned bounded excerpt; never supplied by the model.
+    pub content: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnswerBindingV1 {
@@ -145,6 +149,9 @@ pub enum ValidationError {
     WrongRevision,
     EmptyEvidence,
     RootRole,
+    EmptyLedger,
+    InvalidBinding,
+    DigestMismatch,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +164,17 @@ impl HostEvidenceLedger {
         binding: AnswerBindingV1,
         evidence: Vec<HostEvidenceEntry>,
     ) -> Result<Self, ValidationError> {
+        if binding.session_id.trim().is_empty()
+            || binding.turn_id.trim().is_empty()
+            || binding.corpus_id.trim().is_empty()
+            || binding.revision.trim().is_empty()
+            || binding.ledger_digest.trim().is_empty()
+        {
+            return Err(ValidationError::InvalidBinding);
+        }
+        if evidence.is_empty() {
+            return Err(ValidationError::EmptyLedger);
+        }
         let mut entries = BTreeMap::new();
         for entry in evidence {
             if entry.evidence_id.is_empty()
@@ -164,6 +182,10 @@ impl HostEvidenceLedger {
             {
                 return Err(ValidationError::DuplicateId);
             }
+        }
+        let canonical = entries.values().cloned().collect::<Vec<_>>();
+        if binding.ledger_digest != Self::digest(&canonical) {
+            return Err(ValidationError::DigestMismatch);
         }
         Ok(Self { binding, entries })
     }
@@ -175,7 +197,21 @@ impl HostEvidenceLedger {
         rows.sort_by(|a, b| a.evidence_id.cmp(&b.evidence_id));
         let mut h = Sha256::new();
         for e in rows {
-            for part in [&e.evidence_id, &e.candidate_id, &e.corpus_id, &e.revision] {
+            h.update([match e.role {
+                EvidenceRole::Cause => 1,
+                EvidenceRole::Supporting => 2,
+                EvidenceRole::Symptom => 3,
+                EvidenceRole::Neutral => 4,
+            }]);
+            for part in [
+                &e.evidence_id,
+                &e.candidate_id,
+                &e.source_label,
+                &e.locator,
+                &e.corpus_id,
+                &e.revision,
+                &e.content,
+            ] {
                 h.update(part.as_bytes());
                 h.update([0]);
             }
@@ -202,6 +238,9 @@ pub fn validate_model_answer(
     raw: &str,
     ledger: &HostEvidenceLedger,
 ) -> Result<AnswerEnvelopeV1, ValidationError> {
+    if ledger.entries.is_empty() {
+        return Err(ValidationError::EmptyLedger);
+    }
     let proposal = parse_model_json(raw)?;
     let mut candidate_ids = BTreeSet::new();
     let mut claim_ids = BTreeSet::new();
@@ -261,6 +300,7 @@ pub fn validate_model_answer(
                             locator: entry.locator.clone(),
                             corpus_id: entry.corpus_id.clone(),
                             revision: entry.revision.clone(),
+                            content: entry.content.clone(),
                         });
                 }
                 let supporting_root = kind == ClaimKind::InitiatingCause
@@ -328,6 +368,7 @@ mod tests {
                 corpus_id: "c".into(),
                 revision: "r".into(),
                 role: EvidenceRole::Cause,
+                content: "host excerpt one".into(),
             },
             HostEvidenceEntry {
                 evidence_id: "e-b".into(),
@@ -337,6 +378,7 @@ mod tests {
                 corpus_id: "c".into(),
                 revision: "r".into(),
                 role: EvidenceRole::Symptom,
+                content: "host excerpt two".into(),
             },
         ];
         let binding = AnswerBindingV1 {
@@ -371,7 +413,9 @@ mod tests {
         }
         let mut stale = l.entries();
         stale[0].revision = "old".into();
-        let stale = HostEvidenceLedger::new(l.binding().clone(), stale).unwrap();
+        let mut stale_binding = l.binding().clone();
+        stale_binding.ledger_digest = HostEvidenceLedger::digest(&stale);
+        let stale = HostEvidenceLedger::new(stale_binding, stale).unwrap();
         let both = format!(
             r#"{{"schema":"{SCHEMA_V1}","candidates":[{{"candidate_id":"a","observations":[{{"claim_id":"a","text":"x","evidence_ids":["e-a"]}}]}},{{"candidate_id":"b","observations":[{{"claim_id":"b","text":"x","evidence_ids":["e-b"]}}]}}]}}"#
         );
@@ -397,6 +441,59 @@ mod tests {
             validate_model_answer(&duplicate_claim, &l),
             Err(ValidationError::DuplicateId)
         );
+    }
+    #[test]
+    fn empty_or_unbound_ledger_is_never_authoritative() {
+        let empty = HostEvidenceLedger::new(
+            AnswerBindingV1 {
+                session_id: "s".into(),
+                turn_id: "t".into(),
+                corpus_id: "c".into(),
+                revision: "r".into(),
+                ledger_digest: "x".into(),
+            },
+            Vec::new(),
+        );
+        assert!(matches!(empty, Err(ValidationError::EmptyLedger)));
+        let mut binding = ledger().binding().clone();
+        binding.turn_id.clear();
+        assert!(matches!(
+            HostEvidenceLedger::new(binding, ledger().entries()),
+            Err(ValidationError::InvalidBinding)
+        ));
+    }
+    #[test]
+    fn digest_binds_every_rendered_host_fact_and_round_trips_envelope() {
+        let l = ledger();
+        for change in 0..4 {
+            let mut rows = l.entries();
+            match change {
+                0 => rows[0].source_label.push('x'),
+                1 => rows[0].locator.push('x'),
+                2 => rows[0].role = EvidenceRole::Supporting,
+                _ => rows[0].content.push('x'),
+            }
+            assert!(matches!(
+                HostEvidenceLedger::new(l.binding().clone(), rows),
+                Err(ValidationError::DigestMismatch)
+            ));
+        }
+        let raw = format!(
+            r#"{{"schema":"{SCHEMA_V1}","candidates":[{{"candidate_id":"a","observations":[{{"claim_id":"a","text":"x","evidence_ids":["e-a"]}}]}},{{"candidate_id":"b","observations":[{{"claim_id":"b","text":"x","evidence_ids":["e-b"]}}]}}]}}"#
+        );
+        let envelope = validate_model_answer(&raw, &l).unwrap();
+        let round_trip: AnswerEnvelopeV1 =
+            serde_json::from_str(&serde_json::to_string(&envelope).unwrap()).unwrap();
+        assert_eq!(round_trip, envelope);
+        let event = crate::events::StreamEvent::InvestigationAnswer { envelope };
+        let event_round_trip: crate::events::StreamEvent =
+            serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
+        match event_round_trip {
+            crate::events::StreamEvent::InvestigationAnswer { envelope: got } => {
+                assert_eq!(got, round_trip);
+            }
+            other => panic!("expected typed envelope event, got {other:?}"),
+        }
     }
     #[test]
     fn root_is_withheld_for_symptom_only() {

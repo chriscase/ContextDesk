@@ -993,6 +993,7 @@ fn multi_stage_ledger(
                 revision: binding.revision.clone(),
                 // No generic classifier establishes causes from these rows.
                 role: EvidenceRole::Neutral,
+                content: format!("source={} seq={}", identity.source, identity.seq),
             });
         }
     }
@@ -3570,7 +3571,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                         &brief.candidate_groups,
                         crate::investigation_answer::AnswerBindingV1 {
                             session_id: opts.session_id.clone(),
-                            turn_id: opts.turn_id.clone(),
+                            turn_id: effective_turn_id.clone(),
                             corpus_id: brief.corpus_id.clone(),
                             revision: format!(
                                 "{}:{}:{}",
@@ -3592,7 +3593,14 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                 name: "broad_log_triage_multi_stage".into(),
                                 phase: crate::events::ToolPhase::Finished,
                                 summary: "Using established single-stage synthesis".into(),
-                                detail: Some(format!("multi-stage not entered: {reason}")),
+                                detail: Some(
+                                    serde_json::json!({
+                                        "multi_stage": "not_entered",
+                                        "reason": reason,
+                                        "answer_authority": "untyped"
+                                    })
+                                    .to_string(),
+                                ),
                                 ok: Some(true),
                             });
                         }
@@ -3655,6 +3663,8 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                         "rejected_groups": rejected_groups,
                                         "retry_class": "candidate_or_final_bounded",
                                         "final_citation_confinement": "valid",
+                                        "answer_authority": "host_validated_typed",
+                                        "root_establishment": "withheld_pending_host_structural_roles",
                                         "answer_binding": envelope.binding,
                                         "semantic_attempts": envelope.semantic_attempts,
                                     })
@@ -3664,6 +3674,9 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                             });
                             out.push(StreamEvent::TextDelta {
                                 text: content.clone(),
+                            });
+                            out.push(StreamEvent::InvestigationAnswer {
+                                envelope: (*envelope).clone(),
                             });
                             out.push(StreamEvent::SearchTrail { steps: trail });
                             out.push(StreamEvent::TurnCompleted {
@@ -11759,7 +11772,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
     }
 
     #[test]
-    fn multi_stage_prompts_keep_noise_out_of_incident_ranking_and_avoid_tables() {
+    fn multi_stage_prompts_require_strict_typed_evidence_scoping() {
         assert!(code_like_identifiers_are_confined(
             "CDLAB4206 was observed",
             ["pattern=CDLAB4206 gateway returned status=503"],
@@ -11783,8 +11796,10 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         let comparison_prompt = multi_stage_comparison_messages("triage", &[draft], false)[0]
             .content
             .clone();
-        assert!(comparison_prompt.contains("Likely noise or isolated observations"));
-        assert!(comparison_prompt.contains("do not use tables"));
+        assert!(comparison_prompt.contains("exactly one JSON object"));
+        assert!(comparison_prompt.contains("contextdesk.investigation_answer.v1"));
+        assert!(comparison_prompt.contains("only supplied host ids"));
+        assert!(!comparison_prompt.contains("Markdown headings"));
     }
 
     #[tokio::test]

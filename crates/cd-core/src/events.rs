@@ -51,6 +51,12 @@ pub enum StreamEvent {
         /// UTF-8 chunk (may be partial markdown).
         text: String,
     },
+    /// A complete host-validated typed answer envelope. Hosts may persist this
+    /// exact value, but must never reconstruct authority from displayed text.
+    InvestigationAnswer {
+        /// Host-owned answer, evidence ledger, and turn binding.
+        envelope: crate::investigation_answer::AnswerEnvelopeV1,
+    },
     /// Optional model "thought" channel.
     ThoughtDelta {
         /// Thought chunk.
