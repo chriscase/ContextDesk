@@ -167,6 +167,10 @@ pub const WITHHELD_TURN_REASONS: &[&str] = &[
     "budget_time",
     // The round budget ran out AND the final answer failed.
     "budget_rounds",
+    // The provider failed before required linked-log retrieval completed.
+    "linked_retrieval_provider_error",
+    // The provider failed after retrieval but before grounded synthesis completed.
+    "linked_synthesis_provider_error",
 ];
 
 /// Stable [`StreamEvent::Error`] codes that mean the answer this turn

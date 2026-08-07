@@ -4,7 +4,7 @@
 
 use crate::cli::ExploreArgs;
 use crate::envelope::{CliError, CliResult, Render};
-use cd_core::log_analysis::search::{search_logs, SearchLogsQuery};
+use cd_core::log_analysis::search::{search_logs, SearchEvidenceIdentity, SearchLogsQuery};
 use cd_core::log_analysis::store::LogCorpus;
 use serde::Serialize;
 use std::path::Path;
@@ -16,6 +16,8 @@ pub struct ExploreHit {
     pub score: f32,
     pub count: u64,
     pub severity: u8,
+    pub exemplars: Vec<String>,
+    pub evidence: Vec<SearchEvidenceIdentity>,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,6 +48,12 @@ impl Render for ExploreOutput {
                 hit.count,
                 hit.severity
             ));
+            for (exemplar, evidence) in hit.exemplars.iter().zip(&hit.evidence) {
+                out.push_str(&format!(
+                    "   - seq={} source={:?}: {}\n",
+                    evidence.seq, evidence.source, exemplar
+                ));
+            }
         }
         out.trim_end().to_string()
     }
@@ -91,6 +99,8 @@ pub fn run(
                 score: h.score,
                 count: h.count,
                 severity: h.severity,
+                exemplars: h.exemplars,
+                evidence: h.evidence,
             })
             .collect(),
     })

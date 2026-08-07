@@ -6,8 +6,9 @@
 use crate::envelope::{CliError, CliResult};
 use cd_core::branding::Branding;
 use cd_core::config::{config_path, ensure_config_dir, load_config, save_config, AppConfig};
+use cd_core::error::CoreResult;
 use cd_core::index::KeywordIndex;
-use cd_core::keychain_store::KeychainSecretStore;
+use cd_core::keychain_store::{KeychainSecretStore, SecretStore};
 use cd_core::sessions::SessionStore;
 use cd_core::tool_host::ToolHost;
 use cd_core::workspace::Workspace;
@@ -111,8 +112,80 @@ pub fn session_store(paths: &Paths) -> SessionStore {
 /// uses — a provider configured in the GUI works immediately from the CLI
 /// with no separate credential setup, and nothing this crate does ever
 /// touches secrets except through this trait object.
-pub fn secret_store() -> KeychainSecretStore {
-    KeychainSecretStore::new()
+pub const PROVIDER_API_KEY_ENV: &str = "CONTEXTDESK_PROVIDER_API_KEY";
+
+/// CLI credential adapter.
+///
+/// Normal interactive use shares the desktop application's OS keychain. For
+/// ephemeral automation and CI, `CONTEXTDESK_PROVIDER_API_KEY` supplies only
+/// provider credentials for the lifetime of this process. It is never
+/// persisted and never substitutes for connector secrets.
+pub struct CliSecretStore {
+    keychain: KeychainSecretStore,
+    provider_override: Option<String>,
+}
+
+impl CliSecretStore {
+    fn new() -> Self {
+        let provider_override = std::env::var(PROVIDER_API_KEY_ENV)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        Self {
+            keychain: KeychainSecretStore::new(),
+            provider_override,
+        }
+    }
+
+    fn provider_override(&self, reference: &str) -> Option<String> {
+        reference
+            .starts_with("provider/")
+            .then(|| self.provider_override.clone())
+            .flatten()
+    }
+}
+
+impl SecretStore for CliSecretStore {
+    fn get(&self, reference: &str) -> CoreResult<Option<String>> {
+        if let Some(value) = self.provider_override(reference) {
+            return Ok(Some(value));
+        }
+        self.keychain.get(reference)
+    }
+
+    fn set(&self, reference: &str, value: &str) -> CoreResult<()> {
+        self.keychain.set(reference, value)
+    }
+
+    fn delete(&self, reference: &str) -> CoreResult<()> {
+        self.keychain.delete(reference)
+    }
+}
+
+pub fn secret_store() -> CliSecretStore {
+    CliSecretStore::new()
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    #[test]
+    fn process_override_is_provider_only() {
+        let store = CliSecretStore {
+            keychain: KeychainSecretStore::new(),
+            provider_override: Some("ephemeral-value".to_string()),
+        };
+
+        assert_eq!(
+            store
+                .provider_override("provider/vercel/api_key")
+                .as_deref(),
+            Some("ephemeral-value")
+        );
+        assert_eq!(store.provider_override("connector/confluence/pat"), None);
+        assert_eq!(store.provider_override("connector/postgres/password"), None);
+    }
 }
 
 /// Build a `ToolHost` for a headless process: an empty workspace (the CLI's

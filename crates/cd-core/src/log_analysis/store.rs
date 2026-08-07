@@ -1257,7 +1257,7 @@ impl LogCorpus {
         f(&events)
     }
 
-    fn load_all_events(&self) -> CoreResult<Vec<LogEvent>> {
+    pub(crate) fn load_all_events(&self) -> CoreResult<Vec<LogEvent>> {
         let conn = self.db.lock().map_err(|_| lock_err())?;
         let mut stmt = conn
             .prepare(

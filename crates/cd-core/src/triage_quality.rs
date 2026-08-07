@@ -47,10 +47,13 @@ pub const TRIAGE_ANSWER_SECTIONS: [&str; 5] = [
 /// deepening broad-triage synthesis hints).
 pub fn triage_answer_contract_system_text() -> &'static str {
     "STRUCTURED TRIAGE ANSWER CONTRACT (required):\n\
+     LEAD WITH THE ANSWER: begin with `Likely cause:` (or `Cause not established:`) and a concise 1-3 sentence conclusion. \
+     For causal questions, explicitly distinguish the best-supported trigger, downstream symptoms, and irrelevant/noise events. \
+     Do not begin with `Based on the provided logs`, restate the entire tool inventory, or narrate the analysis process.\n\
      Answer with these explicit sections in order (markdown headings or JSON keys):\n\
-     1) observations — only host-returned facts (counts, levels, sources, cited seq/source pairs).\n\
-     2) causal_candidates — plausible triggers supported by evidence; do not equate earliest error with root cause.\n\
-     3) competing_explanations — alternate readings and why they remain open.\n\
+     1) observations — only the few facts needed to support the conclusion.\n\
+     2) causal_candidates — the strongest trigger first; distinguish it from symptoms.\n\
+     3) competing_explanations — include decoys/noise and why they are less likely.\n\
      4) confidence — high|medium|low with a one-line reason; order-only/mixed time cannot support high cross-source chronology confidence.\n\
      5) missing_or_next_evidence — sources, configs, or reads still needed; if root cause is not establishable, say so explicitly.\n\
      HARD RULES: never invent event counts; never claim every event is an error unless host level facets prove it; \

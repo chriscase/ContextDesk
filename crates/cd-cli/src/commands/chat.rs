@@ -13,8 +13,8 @@ use crate::activity_render::{activity_lines, context_used_from_events, project_t
 use crate::cli::{ActivityLevel, ChatArgs, TraceLevel};
 use crate::config::{ColorMode, OutputFormat};
 use crate::envelope::{
-    CliError, CliResult, Envelope, JsonlMetaLine, StreamLine, TraceContextLine, TraceSummaryLine,
-    TraceToolLine, TracedMessageLine,
+    CliError, CliResult, Envelope, ExitCategory, JsonlMetaLine, StreamLine, TraceContextLine,
+    TraceSummaryLine, TraceToolLine, TracedMessageLine,
 };
 use crate::human_hierarchy::{
     render_activity_hierarchy, render_activity_hierarchy_with_context, render_trace_hierarchy,
@@ -462,19 +462,26 @@ pub async fn run(
                 .map(StreamLine::Activity)
                 .collect()
         });
+    let withheld_error = withheld_cli_error(&outcome.events);
 
     match format {
         OutputFormat::Text => {
-            if !outcome.final_text.is_empty() && !implicit_chat {
+            if withheld_error.is_none() && !outcome.final_text.is_empty() && !implicit_chat {
                 println!();
             }
-            let grounding = grounding_status(corpus_id.as_deref(), &outcome.events);
             // Status line first — never interleave with trace/activity sections.
-            chat_renderer.finish(ChatOutcomeSummary::Ok {
-                session_id: &outcome.session_id,
-                grounding,
-            });
-            if implicit_chat {
+            if let Some(error) = withheld_error.as_ref() {
+                chat_renderer.finish(ChatOutcomeSummary::Failed {
+                    message: &error.message,
+                });
+            } else {
+                let grounding = grounding_status(corpus_id.as_deref(), &outcome.events);
+                chat_renderer.finish(ChatOutcomeSummary::Ok {
+                    session_id: &outcome.session_id,
+                    grounding,
+                });
+            }
+            if implicit_chat && withheld_error.is_none() {
                 let answer = if buffered_answer.trim().is_empty() {
                     &outcome.final_text
                 } else {
@@ -548,44 +555,72 @@ pub async fn run(
                 seq = seq.saturating_add(1);
             }
             let done = crate::envelope::StreamLine::Done {
-                ok: true,
+                ok: withheld_error.is_none(),
                 session_id: &outcome.session_id,
-                final_text: &outcome.final_text,
+                final_text: if withheld_error.is_none() {
+                    &outcome.final_text
+                } else {
+                    ""
+                },
             };
             emit_meta(&outcome.session_id, &turn_id, "done", seq, &done);
         }
         OutputFormat::Json => {
-            #[derive(Serialize)]
-            struct ChatSummaryWithActivity<'a> {
-                session_id: &'a str,
-                final_text: &'a str,
-                /// Host deterministic context-plan summary when the turn emitted one.
-                #[serde(skip_serializing_if = "Option::is_none")]
-                context_used: Option<String>,
-                #[serde(skip_serializing_if = "Option::is_none")]
-                trace: Option<Vec<StreamLine<'static>>>,
-                #[serde(skip_serializing_if = "Option::is_none")]
-                activity: Option<&'a cd_core::activity::TurnActivityRecord>,
+            if let Some(error) = withheld_error.as_ref() {
+                print_json_failure(error, activity_record.as_ref());
+            } else {
+                #[derive(Serialize)]
+                struct ChatSummaryWithActivity<'a> {
+                    session_id: &'a str,
+                    final_text: &'a str,
+                    /// Host deterministic context-plan summary when the turn emitted one.
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    context_used: Option<String>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    trace: Option<Vec<StreamLine<'static>>>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    activity: Option<&'a cd_core::activity::TurnActivityRecord>,
+                }
+                let context_used = context_used_from_events(&outcome.events);
+                let envelope = Envelope::ok(
+                    "chat",
+                    ChatSummaryWithActivity {
+                        session_id: &outcome.session_id,
+                        final_text: &outcome.final_text,
+                        context_used,
+                        trace: trace_lines,
+                        activity: activity_record.as_ref(),
+                    },
+                );
+                println!(
+                    "{}",
+                    serde_json::to_string(&envelope).expect("Envelope is always serializable")
+                );
             }
-            let context_used = context_used_from_events(&outcome.events);
-            let envelope = Envelope::ok(
-                "chat",
-                ChatSummaryWithActivity {
-                    session_id: &outcome.session_id,
-                    final_text: &outcome.final_text,
-                    context_used,
-                    trace: trace_lines,
-                    activity: activity_record.as_ref(),
-                },
-            );
-            println!(
-                "{}",
-                serde_json::to_string(&envelope).expect("Envelope is always serializable")
-            );
         }
     }
 
-    Ok(())
+    match withheld_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+fn withheld_cli_error(events: &[StreamEvent]) -> Option<CliError> {
+    let reason = cd_core::events::withheld_turn_reason(events)?;
+    let message = events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            StreamEvent::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| format!("The answer was withheld ({reason})."));
+    Some(if reason.ends_with("provider_error") {
+        CliError::provider(message)
+    } else {
+        CliError::new(ExitCategory::NotReady, message)
+    })
 }
 
 pub fn validate_question(args: &ChatArgs, format: OutputFormat) -> CliResult<()> {

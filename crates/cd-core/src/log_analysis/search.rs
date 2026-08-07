@@ -259,8 +259,9 @@ pub fn search_logs_with_excluded_templates(
         .filter(|t| t.len() > 2)
         .collect();
 
-    corpus.with_events(|events| {
-        for e in events {
+    let persisted_events = corpus.load_all_events()?;
+    {
+        for e in &persisted_events {
             if excluded.contains(&e.template_id) {
                 continue;
             }
@@ -338,7 +339,7 @@ pub fn search_logs_with_excluded_templates(
                 }
             }
         }
-    });
+    }
 
     // Also score templates by pattern FTS
     for row in corpus.list_templates() {

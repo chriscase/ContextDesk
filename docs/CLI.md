@@ -1,5 +1,10 @@
 # ContextDesk CLI
 
+For ephemeral automation or CI, set `CONTEXTDESK_PROVIDER_API_KEY` for the
+current process. It overrides provider keychain lookup only; ContextDesk does
+not persist or print the value, and connector credentials remain isolated.
+Interactive desktop/CLI use continues to share the OS keychain by default.
+
 `cd-cli` (binary: `contextdesk`) is a thin adapter over `cd_workflow`, which
 packages host-neutral operations around the production `cd_core` engine. The
 CLI and desktop share that lower-level engine for source selection, ingest,

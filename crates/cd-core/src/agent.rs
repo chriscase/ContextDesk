@@ -779,7 +779,6 @@ fn linked_broad_log_triage_requested(user_text: &str) -> bool {
         " request_id ",
         " sequence ",
         " seq ",
-        " job ",
         " error code ",
         " error_code ",
     ]
@@ -795,9 +794,10 @@ fn linked_broad_log_triage_requested(user_text: &str) -> bool {
         return false;
     }
 
-    // Causal intent aimed at a singular locally-owned incident is focused,
-    // regardless of surface wording. Explicit corpus-wide/cross-source scope
-    // wins and keeps genuinely comprehensive RCA in broad triage.
+    // A causal question without a concrete identifier/source/time anchor must
+    // not depend on the model guessing a lucky search query. Give it the
+    // deterministic bounded triage brief. Questions with an anchor returned
+    // above and keep the cheaper focused path.
     let tokens = normalized.split_whitespace().collect::<Vec<_>>();
     let broad_scope_noun = |token: &&str| {
         matches!(
@@ -832,20 +832,8 @@ fn linked_broad_log_triage_requested(user_text: &str) -> bool {
                 | "root"
         )
     });
-    let local_owner = ["this", "that", "the", "our", "my", "current"];
-    let singular_target = [
-        "failure", "error", "incident", "outage", "problem", "issue", "request", "job",
-    ];
-    let locally_scoped_singular = tokens.iter().enumerate().any(|(index, token)| {
-        local_owner.contains(token)
-            && tokens
-                .iter()
-                .skip(index + 1)
-                .take(3)
-                .any(|candidate| singular_target.contains(candidate))
-    });
-    if causal_intent && locally_scoped_singular && !explicit_broad_scope {
-        return false;
+    if causal_intent {
+        return true;
     }
 
     let has_broad_action = [
@@ -1305,12 +1293,68 @@ fn linked_grounded_answer_is_valid(
     available_evidence: &HashSet<crate::log_analysis::SearchEvidenceIdentity>,
     allow_empty_evidence: bool,
 ) -> bool {
-    !linked_answer_mistakes_wrapper_for_evidence(text)
-        && if allow_empty_evidence {
-            linked_answer_truthfully_reports_no_events(text)
+    linked_answer_citation_status(text, available_evidence, allow_empty_evidence)
+        == LinkedAnswerCitationStatus::Valid
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkedAnswerCitationStatus {
+    Valid,
+    Missing,
+    Invalid,
+}
+
+fn linked_answer_citation_status(
+    text: &str,
+    available_evidence: &HashSet<crate::log_analysis::SearchEvidenceIdentity>,
+    allow_empty_evidence: bool,
+) -> LinkedAnswerCitationStatus {
+    if linked_answer_mistakes_wrapper_for_evidence(text) {
+        return LinkedAnswerCitationStatus::Invalid;
+    }
+    if allow_empty_evidence {
+        return if linked_answer_truthfully_reports_no_events(text) {
+            LinkedAnswerCitationStatus::Valid
         } else {
-            linked_answer_references_available_event_identities(text, available_evidence)
-        }
+            LinkedAnswerCitationStatus::Invalid
+        };
+    }
+    if linked_answer_references_available_event_identities(text, available_evidence) {
+        return LinkedAnswerCitationStatus::Valid;
+    }
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("seq=") || lower.contains("source=") || lower.contains("template_id=") {
+        LinkedAnswerCitationStatus::Invalid
+    } else {
+        LinkedAnswerCitationStatus::Missing
+    }
+}
+
+fn attach_host_evidence_appendix(
+    text: &str,
+    available_evidence: &HashSet<crate::log_analysis::SearchEvidenceIdentity>,
+) -> String {
+    let mut evidence = available_evidence.iter().collect::<Vec<_>>();
+    evidence.sort_by(|left, right| {
+        left.seq
+            .cmp(&right.seq)
+            .then_with(|| left.source.cmp(&right.source))
+            .then_with(|| left.template_id.cmp(&right.template_id))
+    });
+    let mut answer = text.trim_end().to_string();
+    answer.push_str(
+        "\n\n### Evidence supplied by ContextDesk\n\n\
+_Host-attached event identities; the model's interpretation above is not independently verified._\n",
+    );
+    for item in evidence {
+        let source = serde_json::to_string(&item.source).unwrap_or_else(|_| "\"unknown\"".into());
+        answer.push_str(&format!(
+            "\n- `seq={} source={} template_id={}`",
+            item.seq, source, item.template_id
+        ));
+    }
+    answer.push('\n');
+    answer
 }
 
 fn model_context_contains_evidence(messages: &[ChatMessage], evidence: &str) -> bool {
@@ -3861,7 +3905,7 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
         }
 
         if tool_calls.is_empty() {
-            let final_content = if linked_turn
+            let mut final_content = if linked_turn
                 && completion.content.trim().is_empty()
                 && !withheld_text.trim().is_empty()
             {
@@ -3923,11 +3967,12 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                 continue;
             }
             if linked_turn && linked_required_evidence_satisfied {
-                let invalid_grounding = !linked_grounded_answer_is_valid(
+                let citation_status = linked_answer_citation_status(
                     &final_content,
                     &linked_log_evidence_identities,
                     linked_allow_empty_evidence,
                 );
+                let invalid_grounding = citation_status != LinkedAnswerCitationStatus::Valid;
                 if invalid_grounding
                     && !linked_invalid_synthesis_retry
                     && round + 1 < opts.max_rounds
@@ -3944,21 +3989,31 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                     continue;
                 }
                 if invalid_grounding {
-                    trail.push("linked_invalid_grounded_answer_withheld".into());
-                    out.push(StreamEvent::Error {
-                        code: "linked_invalid_grounded_answer".into(),
-                        message: "The model answer did not truthfully reference the bounded \
-                                  evidence as required. ContextDesk withheld it; inspect the \
-                                  successful host result or retry with a narrower question."
-                            .into(),
-                    });
-                    out.push(StreamEvent::SearchTrail {
-                        steps: trail.clone(),
-                    });
-                    out.push(StreamEvent::TurnCompleted {
-                        reason: "linked_invalid_grounded_answer".into(),
-                    });
-                    return Ok(out.into_events());
+                    if citation_status == LinkedAnswerCitationStatus::Missing
+                        && !linked_log_evidence_identities.is_empty()
+                    {
+                        final_content = attach_host_evidence_appendix(
+                            &final_content,
+                            &linked_log_evidence_identities,
+                        );
+                        trail.push("linked_host_attached_evidence_identities".into());
+                    } else {
+                        trail.push("linked_invalid_grounded_answer_withheld".into());
+                        out.push(StreamEvent::Error {
+                            code: "linked_invalid_grounded_answer".into(),
+                            message: "The model answer used invalid or mismatched evidence \
+                                      identities. ContextDesk withheld it; inspect the successful \
+                                      host result or retry with a narrower question."
+                                .into(),
+                        });
+                        out.push(StreamEvent::SearchTrail {
+                            steps: trail.clone(),
+                        });
+                        out.push(StreamEvent::TurnCompleted {
+                            reason: "linked_invalid_grounded_answer".into(),
+                        });
+                        return Ok(out.into_events());
+                    }
                 }
             }
             // Default backends may not stream; emit remaining content once.
@@ -4715,7 +4770,7 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
     match synthesis {
         Ok(completion) => {
             // Ignore further tool_calls — budget is closed.
-            let content = if completion.content.trim().is_empty()
+            let mut content = if completion.content.trim().is_empty()
                 && withheld_linked_synthesis.trim().is_empty()
             {
                 "I gathered sources but hit the tool-round limit before finishing. \
@@ -4727,15 +4782,25 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                 completion.content
             };
             if linked_turn {
+                let citation_status = linked_answer_citation_status(
+                    &content,
+                    &linked_log_evidence_identities,
+                    linked_allow_empty_evidence,
+                );
                 let invalid_grounding = successful_log_tools > 0
-                    && !linked_grounded_answer_is_valid(
-                        &content,
-                        &linked_log_evidence_identities,
-                        linked_allow_empty_evidence,
-                    );
+                    && citation_status != LinkedAnswerCitationStatus::Valid;
                 let no_log_evidence = successful_log_tools == 0;
                 let incomplete_broad_triage = !broad_triage_complete;
-                if invalid_grounding || no_log_evidence || incomplete_broad_triage {
+                if invalid_grounding
+                    && citation_status == LinkedAnswerCitationStatus::Missing
+                    && !linked_log_evidence_identities.is_empty()
+                    && !no_log_evidence
+                    && !incomplete_broad_triage
+                {
+                    content =
+                        attach_host_evidence_appendix(&content, &linked_log_evidence_identities);
+                    trail.push("linked_host_attached_evidence_identities".into());
+                } else if invalid_grounding || no_log_evidence || incomplete_broad_triage {
                     trail.push("linked_budget_synthesis_withheld".into());
                     out.push(StreamEvent::Error {
                         code: "linked_invalid_grounded_answer".into(),
@@ -5109,35 +5174,38 @@ mod tests {
             "Give me an overview of errors and anomalies across everything."
         ));
 
-        assert!(!linked_broad_log_triage_requested(
+        assert!(linked_broad_log_triage_requested(
             "What caused the checkout incident?"
         ));
-        assert!(!linked_broad_log_triage_requested(
+        assert!(linked_broad_log_triage_requested(
             "What caused this failure in these logs?"
         ));
-        assert!(!linked_broad_log_triage_requested(
+        assert!(linked_broad_log_triage_requested(
             "Can you find the root cause of this failure in the logs?"
         ));
-        assert!(!linked_broad_log_triage_requested(
+        assert!(linked_broad_log_triage_requested(
             "Why did this request fail in these logs?"
         ));
-        assert!(!linked_broad_log_triage_requested(
+        assert!(linked_broad_log_triage_requested(
             "What explains this failure in these logs?"
         ));
-        assert!(!linked_broad_log_triage_requested(
+        assert!(linked_broad_log_triage_requested(
             "What led to this failure in the logs?"
         ));
-        assert!(!linked_broad_log_triage_requested(
+        assert!(linked_broad_log_triage_requested(
             "Please explain this failure using these logs."
         ));
-        assert!(!linked_broad_log_triage_requested(
+        assert!(linked_broad_log_triage_requested(
             "What explains our checkout outage in these logs?"
         ));
-        assert!(!linked_broad_log_triage_requested(
+        assert!(linked_broad_log_triage_requested(
             "What led to the current error?"
         ));
-        assert!(!linked_broad_log_triage_requested(
+        assert!(linked_broad_log_triage_requested(
             "What caused the database incident in the logs?"
+        ));
+        assert!(linked_broad_log_triage_requested(
+            "What caused the job to fail? Identify the causal trigger and downstream symptoms."
         ));
         assert!(!linked_broad_log_triage_requested(
             "What problems do you see around trace_id=trace-7f3a?"
@@ -5289,6 +5357,21 @@ mod tests {
             "The logs show a serious timeout.",
             &evidence,
         ));
+        assert_eq!(
+            linked_answer_citation_status("The logs show a serious timeout.", &evidence, false),
+            LinkedAnswerCitationStatus::Missing
+        );
+        let repaired = attach_host_evidence_appendix("The logs show a serious timeout.", &evidence);
+        assert!(repaired.contains("Host-attached event identities"));
+        assert!(linked_grounded_answer_is_valid(&repaired, &evidence, false));
+        assert_eq!(
+            linked_answer_citation_status(
+                "The logs prove it at seq=999 source=fake.log.",
+                &evidence,
+                false
+            ),
+            LinkedAnswerCitationStatus::Invalid
+        );
     }
 
     #[test]
