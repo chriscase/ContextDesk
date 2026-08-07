@@ -65,6 +65,7 @@ pub mod process_progress;
 pub mod provider_telemetry;
 pub mod providers;
 pub mod redact;
+pub mod rerank;
 pub mod research;
 pub mod router;
 #[cfg(feature = "s3-object-store")]

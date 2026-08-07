@@ -235,6 +235,49 @@ pub struct AppConfig {
     /// bodies retained.
     #[serde(default)]
     pub activity: ActivitySettings,
+    /// Optional retrieval roles (semantic embedding, reranking).
+    ///
+    /// Absent in files written before this existed, so it takes
+    /// [`RetrievalSettings::default`] — both roles unconfigured, meaning the
+    /// structured/keyword baseline runs alone.
+    #[serde(default)]
+    pub retrieval: RetrievalSettings,
+}
+
+/// Optional retrieval-role configuration.
+///
+/// Model names here are CONFIGURATION, never behavior: `bge-m3` and
+/// `qwen3-reranker-0.6b` are documentation examples, not defaults. An absent,
+/// disabled, or failing role always leaves the structured/keyword baseline
+/// usable. Whether a configured role is *verified* (capability), *healthy*
+/// (answered a probe just now), or *measurably better* (benchmark) are three
+/// separate facts reported by the retrieval status surface — configuration
+/// alone never claims any of them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetrievalSettings {
+    /// Optional semantic-embedding role (e.g. model `bge-m3`).
+    #[serde(default)]
+    pub embedding: Option<RetrievalRoleModel>,
+    /// Optional reranking role (e.g. model `qwen3-reranker-0.6b`).
+    #[serde(default)]
+    pub reranker: Option<RetrievalRoleModel>,
+}
+
+/// One configured optional retrieval role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetrievalRoleModel {
+    /// Explicit opt-in; a configured-but-disabled role is reported as
+    /// `disabled`, distinct from unconfigured or unverified.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Endpoint base URL (scheme+host+port). Never carries credentials.
+    pub base_url: String,
+    /// Model identity requested from the endpoint.
+    pub model: String,
+    /// Optional keychain REFERENCE for a bearer credential — never the
+    /// secret itself (`refuse_raw_secret_refs` enforces this on load/save).
+    #[serde(default)]
+    pub api_key_ref: Option<String>,
 }
 
 /// What the Activity Inspector captures.
@@ -344,6 +387,18 @@ pub fn ensure_config_dir(branding: &Branding) -> CoreResult<PathBuf> {
 
 fn refuse_raw_secret_refs(cfg: &AppConfig) -> CoreResult<()> {
     use crate::keychain_store::looks_like_raw_secret;
+    for role in [&cfg.retrieval.embedding, &cfg.retrieval.reranker]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(reference) = &role.api_key_ref {
+            if looks_like_raw_secret(reference) {
+                return Err(CoreError::Config(
+                    "refusing config that embeds raw secrets in retrieval api_key_ref".into(),
+                ));
+            }
+        }
+    }
     for p in &cfg.providers.profiles {
         if let Some(r) = &p.api_key_ref {
             if looks_like_raw_secret(r) {
@@ -695,5 +750,63 @@ mod tests {
         // Path-shaped refs are OK
         cfg.providers.profiles[0].api_key_ref = Some("provider/openai-compatible/api_key".into());
         assert!(save_config(&path, &cfg).is_ok());
+    }
+
+    #[test]
+    fn a_config_without_the_retrieval_section_still_loads() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut cfg = AppConfig {
+            providers: ProviderConfig::with_local_ollama(),
+            ..AppConfig::default()
+        };
+        save_config(&path, &cfg).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("retrieval");
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded.retrieval, RetrievalSettings::default());
+        assert!(loaded.retrieval.embedding.is_none());
+        assert!(loaded.retrieval.reranker.is_none());
+
+        // Round-trips once configured (model names are configuration only).
+        cfg.retrieval.reranker = Some(RetrievalRoleModel {
+            enabled: false,
+            base_url: "http://127.0.0.1:8080".into(),
+            model: "qwen3-reranker-0.6b".into(),
+            api_key_ref: None,
+        });
+        save_config(&path, &cfg).unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(
+            loaded.retrieval.reranker.as_ref().map(|r| r.model.as_str()),
+            Some("qwen3-reranker-0.6b")
+        );
+    }
+
+    #[test]
+    fn refuses_raw_secret_in_retrieval_api_key_ref() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut cfg = AppConfig {
+            providers: ProviderConfig::with_local_ollama(),
+            ..AppConfig::default()
+        };
+        cfg.retrieval.embedding = Some(RetrievalRoleModel {
+            enabled: true,
+            base_url: "http://127.0.0.1:11434".into(),
+            model: "bge-m3".into(),
+            api_key_ref: Some("sk-proj-not-a-reference".into()),
+        });
+        assert!(save_config(&path, &cfg).is_err());
+        cfg.retrieval.embedding.as_mut().unwrap().api_key_ref =
+            Some("provider/embedding/api_key".into());
+        assert!(save_config(&path, &cfg).is_ok());
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !written.contains("sk-proj"),
+            "raw secret never reaches disk"
+        );
     }
 }

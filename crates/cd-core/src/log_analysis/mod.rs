@@ -17,6 +17,7 @@ pub mod exception_episodes;
 pub mod format_profile;
 pub mod frame;
 pub mod governed_citation;
+pub mod hybrid_retrieval;
 pub mod import_diagnose;
 pub mod import_preview;
 pub mod import_profile;
@@ -99,6 +100,10 @@ pub use format_profile::{
 pub use governed_citation::{
     format_governed_log_citation_id, is_governed_log_citation_id, parse_governed_log_citation_id,
     GovernedLogCitationId, GovernedLogCitationKind,
+};
+pub use hybrid_retrieval::{
+    hybrid_search_events, HybridCandidate, HybridDegradation, HybridModeUsed, HybridOptions,
+    HybridOrigin, HybridOutcome, HybridTelemetry,
 };
 pub use import_diagnose::{
     diagnose_log_import, public_report_denylist_patterns, strip_variable_fields,
