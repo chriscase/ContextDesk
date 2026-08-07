@@ -26,7 +26,7 @@ use crate::log_analysis::{
 };
 use crate::process_progress::CancelFlag;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Schema id for host-neutral reports (v2 semantics; field-compatible transition).
@@ -56,6 +56,10 @@ const MAX_CHAIN_WALL_SECONDS: i64 = 5;
 const MAX_CHAIN_STDERR_WALL_SECONDS: i64 = 5;
 /// Max store rows walked when collecting exception candidates (independent of severity).
 pub const EXCEPTION_EPISODE_ROW_WALK_CAP: usize = 250_000;
+/// Max templates inspected for the independent structural-template inventory.
+pub const EXCEPTION_EPISODE_STRUCTURAL_TEMPLATE_CAP: usize = 50_000;
+/// Max independently expected structural identities retained for conservation.
+pub const EXCEPTION_EPISODE_STRUCTURAL_IDENTITY_CAP: usize = 250_000;
 
 /// Effective candidate retention cap (test override when non-zero).
 fn effective_candidate_cap() -> usize {
@@ -487,15 +491,33 @@ pub struct ExceptionEpisodeAnalysis {
     /// Application propagation chain count retained before stderr matching.
     pub application_propagation_chain_count: u64,
     /// Independent inventory: structurally eligible event identities before rendering.
+    ///
+    /// On the product corpus path this is the **template-derived** expected set
+    /// (not `filter(is_exception_candidate)`). Bounded in-memory analysis without
+    /// a template catalog leaves this at 0 and withholds structural certification.
     pub eligible_structural_identity_count: u64,
+    /// Alias: independently expected structural identities (template inventory).
+    pub independently_expected_structural_identity_count: u64,
+    /// Message-level candidates recognized by `is_exception_candidate`.
+    pub message_candidate_identity_count: u64,
+    /// Unique identities present in physical-rendering citations (pre-correlation).
+    pub rendering_identity_count: u64,
     /// Unique identities present in the final occurrence citation union.
     pub covered_structural_identity_count: u64,
-    /// Eligible but missing from citation union.
+    /// Independent expected but missing from final citation union.
     pub missing_structural_identity_count: u64,
+    /// Independent expected recognized by templates but rejected by message candidate predicate.
+    pub candidate_predicate_miss_count: u64,
+    /// Independent expected missing from physical-rendering citations.
+    pub rendering_miss_count: u64,
     /// Duplicate identity citations across or within episodes.
     pub duplicate_structural_identity_count: u64,
     /// Cited identities not in the independent eligible set.
     pub unexpected_structural_identity_count: u64,
+    /// Identities on templates classified as unknown/suspicious structural.
+    pub unknown_suspicious_structural_identity_count: u64,
+    /// True when template or identity inventory hit a retention cap.
+    pub structural_inventory_capped: bool,
     /// Pre-correlation expected application full-stack record count.
     pub expected_application_stack_count: u64,
     /// Final-citation covered application full-stack record count.
@@ -660,12 +682,35 @@ pub fn analyze_exception_episodes_with_cancel(
         return Err(CoreError::Cancelled);
     }
 
-    // Pin revisions before multi-page scan; fail closed on concurrent mutation.
+    // Pin revisions before multi-page scan + independent template inventory.
     let pinned_event_revision = corpus.event_revision();
     let pinned_template_revision = corpus.template_analysis_revision();
 
-    // Candidate scan is severity-independent: walk store rows and keep only
-    // structure-based exception candidates (heads/causes/frames/wrappers).
+    // Independent structural-template catalog (not message-candidate predicate).
+    let excluded: HashSet<u64> = excluded_template_ids.iter().copied().collect();
+    let mut structural_by_tid: HashMap<u64, StructuralTemplateRole> = HashMap::new();
+    let mut template_inventory_capped = false;
+    let mut templates_inspected = 0usize;
+    for row in corpus.list_templates() {
+        if is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
+        if templates_inspected >= EXCEPTION_EPISODE_STRUCTURAL_TEMPLATE_CAP {
+            template_inventory_capped = true;
+            break;
+        }
+        templates_inspected = templates_inspected.saturating_add(1);
+        let tid = row.info.template_id;
+        if excluded.contains(&tid) {
+            continue;
+        }
+        if let Some(role) = classify_structural_template_pattern(&row.info.pattern) {
+            structural_by_tid.insert(tid, role);
+        }
+    }
+    check_revisions(corpus, pinned_event_revision, pinned_template_revision)?;
+
+    // Candidate scan is severity-independent: walk store rows under suppression.
     let filter = EventQuery {
         excluded_template_ids: excluded_template_ids.to_vec(),
         sort_by_time: false,
@@ -677,6 +722,10 @@ pub fn analyze_exception_episodes_with_cancel(
     let candidate_cap = effective_candidate_cap();
     let row_walk_cap = effective_row_walk_cap();
     let mut candidates = Vec::new();
+    let mut independent_expected: HashSet<(u64, String)> = HashSet::new();
+    let mut message_candidate_ids: HashSet<(u64, String)> = HashSet::new();
+    let mut unknown_suspicious_identity_count = 0u64;
+    let mut identity_inventory_capped = false;
     let mut rows_walked: u64 = 0;
     let mut after_seq = None;
     let mut walk_truncated = false;
@@ -716,7 +765,21 @@ pub fn analyze_exception_episodes_with_cancel(
             if is_cancelled() {
                 return Err(CoreError::Cancelled);
             }
+            let id = (event.seq, event.source.clone());
+            // Independent inventory: template-role membership, not message predicate.
+            if let Some(role) = structural_by_tid.get(&event.template_id) {
+                if independent_expected.len() < EXCEPTION_EPISODE_STRUCTURAL_IDENTITY_CAP {
+                    independent_expected.insert(id.clone());
+                    if *role == StructuralTemplateRole::UnknownSuspicious {
+                        unknown_suspicious_identity_count =
+                            unknown_suspicious_identity_count.saturating_add(1);
+                    }
+                } else if !independent_expected.contains(&id) {
+                    identity_inventory_capped = true;
+                }
+            }
             if is_exception_candidate(&event) {
+                message_candidate_ids.insert(id);
                 if candidates.len() < candidate_cap {
                     candidates.push(event);
                 } else {
@@ -753,14 +816,25 @@ pub fn analyze_exception_episodes_with_cancel(
     }
     // Exact CAP + proven store_eof with no overflow → complete totals allowed.
     let incomplete = walk_truncated || candidate_truncated;
+    let inventory_capped = template_inventory_capped || identity_inventory_capped;
 
     let candidate_scope = format!(
         "structure_based_exception_candidates_independent_of_severity; \
+         independent_structural_template_inventory=true; \
+         structural_templates={}/{}; \
+         independently_expected={}/{}; \
+         message_candidates={}; \
+         inventory_capped={inventory_capped}; \
          rows_walked={rows_walked}/{row_walk_cap}; \
          candidates_retained={}/{candidate_cap}; \
          store_rows_under_suppression={store_total}; \
          store_eof={store_eof}; \
          candidate_cap_prevents_complete_totals={}",
+        structural_by_tid.len(),
+        EXCEPTION_EPISODE_STRUCTURAL_TEMPLATE_CAP,
+        independent_expected.len(),
+        EXCEPTION_EPISODE_STRUCTURAL_IDENTITY_CAP,
+        message_candidate_ids.len(),
         candidates.len(),
         incomplete
     );
@@ -771,12 +845,18 @@ pub fn analyze_exception_episodes_with_cancel(
         candidates.len() as u64
     };
 
-    let mut analysis = analyze_bounded_events_cancellable(
-        events_available,
-        &candidates,
-        &is_cancelled,
-        MatchingMeta::default(),
-    )?;
+    let seed = MatchingMeta {
+        inventory_mode: StructuralInventoryMode::TemplateIndependent,
+        independent_expected,
+        message_candidate_ids,
+        unknown_suspicious_identity_count,
+        inventory_capped,
+        ..MatchingMeta::default()
+    };
+    let mut analysis =
+        analyze_bounded_events_cancellable(events_available, &candidates, &is_cancelled, seed)?;
+    // Recheck pinned template revision after inventory + correlation.
+    check_revisions(corpus, pinned_event_revision, pinned_template_revision)?;
     analysis.rows_walked = rows_walked;
     analysis.row_walk_cap = row_walk_cap;
     analysis.event_scan_cap = candidate_cap;
@@ -793,9 +873,174 @@ pub fn analyze_exception_episodes_with_cancel(
             );
         }
     }
+    // Caps / unknown suspicious / inventory incompleteness withhold certification.
+    if inventory_capped
+        || analysis.unknown_suspicious_structural_identity_count > 0
+        || analysis.candidate_predicate_miss_count > 0
+        || analysis.rendering_miss_count > 0
+    {
+        analysis.structural_coverage_complete = false;
+        analysis.semantic_counts_certified = false;
+    }
+    if incomplete {
+        analysis.structural_coverage_complete = false;
+        analysis.semantic_counts_certified = false;
+    }
     // Recompute disclosure after partial flags settle.
     analysis.ranking_disclosure = build_ranking_disclosure(&analysis);
     Ok(analysis)
+}
+
+/// Role assigned by the independent structural-template classifier.
+///
+/// Deliberately separate from [`is_exception_candidate`]: may over-identify and
+/// withhold certification, but must not share the message-parser blind spot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum StructuralTemplateRole {
+    StackFrame,
+    CauseSuppressed,
+    WrapperScaffold,
+    ExceptionHeaderOrFullStack,
+    UnknownSuspicious,
+}
+
+/// Classify a persisted Drain template pattern as structural (template-only).
+///
+/// Uses pattern text with `<*>` wildcards — never calls [`is_exception_candidate`].
+fn classify_structural_template_pattern(pattern: &str) -> Option<StructuralTemplateRole> {
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return None;
+    }
+    // Collapse wildcards to a stable token so line-prefix checks remain useful.
+    let normalized = pattern.replace("<*>", "X");
+    let mut saw_frame = false;
+    let mut saw_cause = false;
+    let mut saw_scaffold = false;
+    let mut saw_header = false;
+    for line in normalized.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with("at ")
+            || line.starts_with("... ")
+            || line.contains(" at X")
+            || (line.contains(" at ") && line.contains(".java:"))
+        {
+            saw_frame = true;
+            continue;
+        }
+        if line.starts_with("Caused by:")
+            || line.starts_with("Suppressed:")
+            || line.starts_with("--- End of inner exception")
+            || line.starts_with("File \"")
+        {
+            saw_cause = true;
+            continue;
+        }
+        if line.starts_with("Exception in thread")
+            || line.contains("Exception wrapper")
+            || line.starts_with("Wrapped by:")
+            || line.starts_with("Nested exception")
+            || (line.starts_with("... ") && line.ends_with(" more"))
+        {
+            saw_scaffold = true;
+            continue;
+        }
+        // Header / full-stack: dotted type token ending in Exception/Error/Throwable.
+        if template_pattern_looks_like_exception_type_line(line) {
+            saw_header = true;
+        }
+    }
+    // Prefer specific roles over unknown.
+    if saw_cause {
+        return Some(StructuralTemplateRole::CauseSuppressed);
+    }
+    if saw_scaffold {
+        return Some(StructuralTemplateRole::WrapperScaffold);
+    }
+    if saw_frame && !saw_header {
+        return Some(StructuralTemplateRole::StackFrame);
+    }
+    if saw_header {
+        return Some(StructuralTemplateRole::ExceptionHeaderOrFullStack);
+    }
+    if saw_frame {
+        return Some(StructuralTemplateRole::StackFrame);
+    }
+    // Conservative over-identify: exception-ish keywords without clear role.
+    // Prefer specific roles above; only fall through when structure is ambiguous.
+    let lower = normalized.to_ascii_lowercase();
+    if lower.contains("exception")
+        || lower.contains("stacktrace")
+        || lower.contains("stack_trace")
+        || lower.contains("throwable")
+        || (lower.contains("[stderr]")
+            && (lower.contains(" at ")
+                || lower.contains("caused by")
+                || lower.contains("error")
+                || lower.contains("fail")))
+    {
+        return Some(StructuralTemplateRole::UnknownSuspicious);
+    }
+    None
+}
+
+fn template_pattern_looks_like_exception_type_line(line: &str) -> bool {
+    let line = line
+        .strip_prefix("ERROR ")
+        .or_else(|| line.strip_prefix("WARN "))
+        .or_else(|| line.strip_prefix("INFO "))
+        .or_else(|| line.strip_prefix("error "))
+        .unwrap_or(line)
+        .trim();
+    let line = line
+        .strip_prefix("[stderr]")
+        .map(str::trim_start)
+        .unwrap_or(line);
+    let line = if line.starts_with('(') {
+        line.find(')')
+            .and_then(|i| line.get(i + 1..))
+            .map(str::trim_start)
+            .unwrap_or(line)
+    } else {
+        line
+    };
+    let line = line
+        .strip_prefix("Caused by:")
+        .map(str::trim_start)
+        .unwrap_or(line);
+    if line.starts_with("at ") {
+        return false;
+    }
+    // Scan tokens for package.Type ending in Exception|Error|Throwable (ASCII case-insensitive).
+    for raw in line.split_whitespace().take(8) {
+        let token = raw.trim_matches(|c: char| matches!(c, ':' | ',' | '"' | '\'' | ';'));
+        if token.is_empty() || token.len() > 256 {
+            continue;
+        }
+        let base = token.rsplit('.').next().unwrap_or(token);
+        let b = base.as_bytes();
+        if ends_with_ascii_ignore_case(b, b"Exception")
+            || ends_with_ascii_ignore_case(b, b"Error")
+            || ends_with_ascii_ignore_case(b, b"Throwable")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn ends_with_ascii_ignore_case(hay: &[u8], needle: &[u8]) -> bool {
+    if hay.len() < needle.len() {
+        return false;
+    }
+    let start = hay.len() - needle.len();
+    hay[start..]
+        .iter()
+        .zip(needle.iter())
+        .all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
 fn check_revisions(corpus: &LogCorpus, pinned_event: u64, pinned_template: u64) -> CoreResult<()> {
@@ -867,6 +1112,16 @@ pub fn analyze_bounded_events(
         .expect("non-cancellable bounded analysis")
 }
 
+/// How structural inventory was obtained for conservation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum StructuralInventoryMode {
+    /// No template catalog — structural certification must be withheld.
+    #[default]
+    Unavailable,
+    /// Template-pattern inventory collected on the product corpus path.
+    TemplateIndependent,
+}
+
 #[derive(Debug, Clone, Default)]
 struct MatchingMeta {
     unpaired_renderings: u64,
@@ -876,9 +1131,19 @@ struct MatchingMeta {
     strong_derived_episodes: u64,
     standalone_renderings: u64,
     correlation_complete: bool,
+    inventory_mode: StructuralInventoryMode,
+    independent_expected: HashSet<(u64, String)>,
+    message_candidate_ids: HashSet<(u64, String)>,
+    unknown_suspicious_identity_count: u64,
+    inventory_capped: bool,
     eligible_structural_identity_count: u64,
+    independently_expected_structural_identity_count: u64,
+    message_candidate_identity_count: u64,
+    rendering_identity_count: u64,
     covered_structural_identity_count: u64,
     missing_structural_identity_count: u64,
+    candidate_predicate_miss_count: u64,
+    rendering_miss_count: u64,
     duplicate_structural_identity_count: u64,
     unexpected_structural_identity_count: u64,
     structural_coverage_complete: bool,
@@ -894,7 +1159,7 @@ fn analyze_bounded_events_cancellable(
     events_available: u64,
     events: &[ExplorerEvent],
     is_cancelled: &dyn Fn() -> bool,
-    _seed_meta: MatchingMeta,
+    seed_meta: MatchingMeta,
 ) -> CoreResult<ExceptionEpisodeAnalysis> {
     if is_cancelled() {
         return Err(CoreError::Cancelled);
@@ -908,25 +1173,51 @@ fn analyze_bounded_events_cancellable(
             .then_with(|| a.source.cmp(&b.source))
             .then_with(|| a.ts.cmp(&b.ts))
     });
-    // P0-2: independent inventory of structurally eligible identities BEFORE rendering.
-    let eligible_identities: HashSet<(u64, String)> = ordered
+
+    // Message candidates among retained analysis events (always computed).
+    let message_from_events: HashSet<(u64, String)> = ordered
         .iter()
         .filter(|e| is_exception_candidate(e))
         .map(|e| (e.seq, e.source.clone()))
         .collect();
-    let eligible_structural_identity_count = eligible_identities.len() as u64;
+    // Independent expected set: ONLY from template inventory when available.
+    // Never derive "independent" from filter(is_exception_candidate) alone —
+    // that shares the message-parser blind spot the company corpus exposes.
+    let (eligible_identities, message_candidate_ids, inventory_available) =
+        match seed_meta.inventory_mode {
+            StructuralInventoryMode::TemplateIndependent => (
+                seed_meta.independent_expected.clone(),
+                if seed_meta.message_candidate_ids.is_empty() {
+                    message_from_events
+                } else {
+                    seed_meta.message_candidate_ids.clone()
+                },
+                true,
+            ),
+            StructuralInventoryMode::Unavailable => {
+                // Bounded path without template catalog: withhold structural cert.
+                (HashSet::new(), message_from_events, false)
+            }
+        };
+    let independently_expected = eligible_identities.len() as u64;
+    let message_candidate_identity_count = message_candidate_ids.len() as u64;
+    let candidate_predicate_miss_count = eligible_identities
+        .iter()
+        .filter(|k| !message_candidate_ids.contains(*k))
+        .count() as u64;
 
     let (renderings, render_partial) = derive_render_episodes_cancellable(&ordered, is_cancelled)?;
     if is_cancelled() {
         return Err(CoreError::Cancelled);
     }
-    // Independent of occurrence correlation: inventory expected role/kind counts
-    // from physical renderings before any matching merges candidates away.
+    // Physical-rendering citation union (stage 2) — independent of final episodes.
+    let mut rendering_union: HashSet<(u64, String)> = HashSet::new();
     let mut expected_app_stack = 0u64;
     let mut expected_header_cause = 0u64;
     let mut expected_frame_scaffold = 0u64;
     for r in &renderings {
         for c in &r.citations {
+            rendering_union.insert((c.seq, c.source.clone()));
             if c.rendering_kind == ExceptionRenderingKind::ApplicationFullStack {
                 expected_app_stack = expected_app_stack.saturating_add(1);
             }
@@ -940,6 +1231,11 @@ fn analyze_bounded_events_cancellable(
             }
         }
     }
+    let rendering_identity_count = rendering_union.len() as u64;
+    let rendering_miss_count = eligible_identities
+        .iter()
+        .filter(|k| !rendering_union.contains(*k))
+        .count() as u64;
     let application_exception_record_count = renderings
         .iter()
         .filter(|r| r.kind == ExceptionRenderingKind::ApplicationFullStack)
@@ -954,7 +1250,7 @@ fn analyze_bounded_events_cancellable(
         application_exception_record_count + stderr_exception_record_count;
     let rendering_episode_count = renderings.len() as u64;
     let (occurrences, mut match_meta) = correlate_renderings_cancellable(renderings, is_cancelled)?;
-    // P0-2: compare independent eligible set vs final citation union (not same vectors).
+    // Stage 3: final occurrence citation union vs independent expected.
     let mut cite_union: HashSet<(u64, String)> = HashSet::new();
     let mut dup_cites = 0u64;
     let mut covered_app_stack = 0u64;
@@ -988,9 +1284,17 @@ fn analyze_bounded_events_cancellable(
         .iter()
         .filter(|k| !eligible_identities.contains(*k))
         .count() as u64;
-    match_meta.eligible_structural_identity_count = eligible_structural_identity_count;
+    match_meta.inventory_mode = seed_meta.inventory_mode;
+    match_meta.unknown_suspicious_identity_count = seed_meta.unknown_suspicious_identity_count;
+    match_meta.inventory_capped = seed_meta.inventory_capped;
+    match_meta.eligible_structural_identity_count = independently_expected;
+    match_meta.independently_expected_structural_identity_count = independently_expected;
+    match_meta.message_candidate_identity_count = message_candidate_identity_count;
+    match_meta.rendering_identity_count = rendering_identity_count;
     match_meta.covered_structural_identity_count = covered;
     match_meta.missing_structural_identity_count = missing;
+    match_meta.candidate_predicate_miss_count = candidate_predicate_miss_count;
+    match_meta.rendering_miss_count = rendering_miss_count;
     match_meta.duplicate_structural_identity_count = dup_cites;
     match_meta.unexpected_structural_identity_count = unexpected;
     match_meta.expected_application_stack_count = expected_app_stack;
@@ -1002,11 +1306,17 @@ fn analyze_bounded_events_cancellable(
     let role_conserved = expected_app_stack == covered_app_stack
         && expected_header_cause == covered_header_cause
         && expected_frame_scaffold == covered_frame_scaffold;
-    match_meta.structural_coverage_complete = missing == 0
+    // Structural coverage is complete only with a real independent template inventory.
+    match_meta.structural_coverage_complete = inventory_available
+        && !seed_meta.inventory_capped
+        && seed_meta.unknown_suspicious_identity_count == 0
+        && candidate_predicate_miss_count == 0
+        && rendering_miss_count == 0
+        && missing == 0
         && unexpected == 0
         && dup_cites == 0
-        && covered == eligible_structural_identity_count
-        && eligible_structural_identity_count > 0
+        && covered == independently_expected
+        && independently_expected > 0
         && role_conserved;
     let occurrence_count = occurrences.len() as u64;
     let duplicate_rendering_occurrence_count = occurrences
@@ -1119,7 +1429,12 @@ fn analyze_bounded_events_cancellable(
         && match_meta.strong_derived_episodes == strong_occurrence_count
         && match_meta.missing_structural_identity_count == 0
         && match_meta.unexpected_structural_identity_count == 0
-        && match_meta.duplicate_structural_identity_count == 0;
+        && match_meta.duplicate_structural_identity_count == 0
+        && match_meta.candidate_predicate_miss_count == 0
+        && match_meta.rendering_miss_count == 0
+        && match_meta.unknown_suspicious_identity_count == 0
+        && !match_meta.inventory_capped
+        && match_meta.inventory_mode == StructuralInventoryMode::TemplateIndependent;
 
     let mut analysis = ExceptionEpisodeAnalysis {
         schema_id: EXCEPTION_EPISODE_SCHEMA_ID.into(),
@@ -1162,10 +1477,18 @@ fn analyze_bounded_events_cancellable(
         ambiguous_component_count: match_meta.ambiguous_components,
         application_propagation_chain_count: match_meta.application_propagation_chains,
         eligible_structural_identity_count: match_meta.eligible_structural_identity_count,
+        independently_expected_structural_identity_count: match_meta
+            .independently_expected_structural_identity_count,
+        message_candidate_identity_count: match_meta.message_candidate_identity_count,
+        rendering_identity_count: match_meta.rendering_identity_count,
         covered_structural_identity_count: match_meta.covered_structural_identity_count,
         missing_structural_identity_count: match_meta.missing_structural_identity_count,
+        candidate_predicate_miss_count: match_meta.candidate_predicate_miss_count,
+        rendering_miss_count: match_meta.rendering_miss_count,
         duplicate_structural_identity_count: match_meta.duplicate_structural_identity_count,
         unexpected_structural_identity_count: match_meta.unexpected_structural_identity_count,
+        unknown_suspicious_structural_identity_count: match_meta.unknown_suspicious_identity_count,
+        structural_inventory_capped: match_meta.inventory_capped,
         expected_application_stack_count: match_meta.expected_application_stack_count,
         covered_application_stack_count: match_meta.covered_application_stack_count,
         expected_header_cause_count: match_meta.expected_header_cause_count,
@@ -1205,6 +1528,17 @@ fn build_ranking_disclosure(report: &ExceptionEpisodeAnalysis) -> String {
          structural_coverage_complete: {}\n\
          semantic_counts_certified: {}\n\
          counts_complete: {} (deprecated v1 alias: scan+render complete, not semantic certification)\n\
+         conservation_stage1_independently_expected: {}\n\
+         conservation_stage1_message_candidates: {}\n\
+         conservation_stage1_candidate_predicate_misses: {}\n\
+         conservation_stage2_rendering_identities: {}\n\
+         conservation_stage2_rendering_misses: {}\n\
+         conservation_stage3_final_unique_citations: {}\n\
+         conservation_stage3_missing: {}\n\
+         conservation_stage3_unexpected: {}\n\
+         conservation_stage3_duplicates: {}\n\
+         unknown_suspicious_structural_identities: {}\n\
+         structural_inventory_capped: {}\n\
          matching_policy: {}\n\
          matching_ambiguous: {}\n\
          independent_incident_claim_forbidden: true\n\
@@ -1212,6 +1546,7 @@ fn build_ranking_disclosure(report: &ExceptionEpisodeAnalysis) -> String {
          application multi-renderings form propagation chains under typed execution evidence; \
          chain↔stderr matching is forced/reciprocal-unique only. \
          Order-only app-app grouping requires an exact unique execution anchor. \
+         Structural inventory is template-derived (not is_exception_candidate). \
          Exact semantic totals may be exposed only when semantic_counts_certified=true. \
          When partial or uncertified, do not present derived episode totals as corpus-wide incidents.\n",
         report.candidate_scope,
@@ -1254,6 +1589,17 @@ fn build_ranking_disclosure(report: &ExceptionEpisodeAnalysis) -> String {
         report.structural_coverage_complete,
         report.semantic_counts_certified,
         report.counts_complete,
+        report.independently_expected_structural_identity_count,
+        report.message_candidate_identity_count,
+        report.candidate_predicate_miss_count,
+        report.rendering_identity_count,
+        report.rendering_miss_count,
+        report.covered_structural_identity_count,
+        report.missing_structural_identity_count,
+        report.unexpected_structural_identity_count,
+        report.duplicate_structural_identity_count,
+        report.unknown_suspicious_structural_identity_count,
+        report.structural_inventory_capped,
         report.matching_policy,
         report.matching_ambiguous,
     )
@@ -2539,9 +2885,19 @@ fn correlate_renderings_cancellable(
             strong_derived_episodes: strong_derived,
             standalone_renderings: standalone,
             correlation_complete,
+            inventory_mode: StructuralInventoryMode::Unavailable,
+            independent_expected: HashSet::new(),
+            message_candidate_ids: HashSet::new(),
+            unknown_suspicious_identity_count: 0,
+            inventory_capped: false,
             eligible_structural_identity_count: 0,
+            independently_expected_structural_identity_count: 0,
+            message_candidate_identity_count: 0,
+            rendering_identity_count: 0,
             covered_structural_identity_count: 0,
             missing_structural_identity_count: 0,
+            candidate_predicate_miss_count: 0,
+            rendering_miss_count: 0,
             duplicate_structural_identity_count: 0,
             unexpected_structural_identity_count: 0,
             structural_coverage_complete: false,
@@ -3515,7 +3871,8 @@ mod tests {
     use crate::log_analysis::embed_policy::{LogEmbedMode, LogEmbedPolicy};
     use crate::log_analysis::ingest::ingest_path_with_policy;
     use crate::log_analysis::{
-        query_events, ActiveTimestampBasis, TimeQuality, TimestampProvenance, MAX_EVENT_PAGE,
+        query_events, ActiveTimestampBasis, LogEvent, TemplateInfo, TemplateRow, TimeQuality,
+        TimestampProvenance, MAX_EVENT_PAGE,
     };
     use std::collections::BTreeSet;
     use std::fs;
@@ -6055,6 +6412,254 @@ mod tests {
         ];
         let b = analyze_bounded_events(3, &events2);
         assert_eq!(b.strong_derived_episode_count, 1);
+        // Bounded path has no template catalog → structural cert withheld; correlation may complete.
         assert!(b.semantic_counts_certified || b.correlation_complete);
+        assert!(!b.semantic_counts_certified || b.structural_coverage_complete);
+    }
+
+    #[test]
+    fn independent_structural_template_classifier_is_not_message_candidate() {
+        // Pattern is structural; message that would be assigned this template is not a candidate.
+        assert_eq!(
+            classify_structural_template_pattern("at com.xyz.payment.<*>.invoke(<*>.java:<*>)"),
+            Some(StructuralTemplateRole::StackFrame)
+        );
+        assert_eq!(
+            classify_structural_template_pattern(
+                "java.lang.RuntimeException: XYZ_PAYMENT_FAILED request_id=<*>"
+            ),
+            Some(StructuralTemplateRole::ExceptionHeaderOrFullStack)
+        );
+        assert_eq!(
+            classify_structural_template_pattern(
+                "XYZ_EXCEPTION: java.lang.RuntimeException: XYZ_PAYMENT_FAILED request_id=<*>"
+            ),
+            Some(StructuralTemplateRole::ExceptionHeaderOrFullStack)
+        );
+        assert_eq!(
+            classify_structural_template_pattern("Caused by: java.io.IOException: <*>"),
+            Some(StructuralTemplateRole::CauseSuppressed)
+        );
+        assert_eq!(
+            classify_structural_template_pattern(
+                "Exception wrapper XYZ_WRAP#<*> for payment failure"
+            ),
+            Some(StructuralTemplateRole::WrapperScaffold)
+        );
+        // Non-structural ops line.
+        assert_eq!(
+            classify_structural_template_pattern("heartbeat ok unrelated_id=<*>"),
+            None
+        );
+        let ghost = event(
+            99,
+            100,
+            "ghost.log",
+            "INFO status: worker idle heartbeat ok unrelated",
+        );
+        assert!(
+            !is_exception_candidate(&ghost),
+            "ghost message must bypass is_exception_candidate"
+        );
+    }
+
+    #[test]
+    fn product_path_structural_template_bypassing_message_candidate_withholds_cert() {
+        // Required mutation: persisted structural template + message that fails
+        // is_exception_candidate → independent_expected > message_candidates,
+        // candidate_predicate_misses > 0, structural + semantic cert false.
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("in");
+        fs::create_dir_all(&src).unwrap();
+        write_dual_rendering_corpus(&src, 2);
+        let (_cache, _id, corpus) = ingest_dir(&src);
+
+        let structural_tid = 9_001_001u64;
+        corpus
+            .upsert_templates([TemplateRow {
+                info: TemplateInfo {
+                    template_id: structural_tid,
+                    pattern: "at com.xyz.payment.<*>.invoke(<*>.java:<*>)".into(),
+                    token_count: 6,
+                    count: 1,
+                    first_seen: 1_700_000_000,
+                    last_seen: 1_700_000_100,
+                    severity: 3,
+                    example: "at com.xyz.payment.StackFrame0.invoke(StackFrame0.java:1)".into(),
+                },
+                content_hash: format!("sha256:struct-{structural_tid}"),
+                vector: None,
+            }])
+            .unwrap();
+        corpus
+            .push_events(&[LogEvent {
+                seq: 50_000_001,
+                ts: 1_700_000_500,
+                timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+                active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+                unresolved_local_timestamp: None,
+                level: "INFO".into(),
+                service: Some("ghost".into()),
+                host: Some("ghost-host".into()),
+                template_id: structural_tid,
+                params: vec![],
+                trace_id: None,
+                message: "INFO status: worker idle heartbeat ok unrelated".into(),
+                source: "ghost.stderr".into(),
+            }])
+            .unwrap();
+        corpus.flush().unwrap();
+
+        let analysis = analyze_exception_episodes(&corpus, &[]).unwrap();
+        assert!(
+            analysis.independently_expected_structural_identity_count
+                > analysis.message_candidate_identity_count,
+            "independently_expected ({}) must exceed message_candidates ({})",
+            analysis.independently_expected_structural_identity_count,
+            analysis.message_candidate_identity_count
+        );
+        assert!(
+            analysis.candidate_predicate_miss_count > 0,
+            "candidate_predicate_misses must be > 0"
+        );
+        assert!(
+            !analysis.structural_coverage_complete,
+            "structural_coverage_complete must be false"
+        );
+        assert!(
+            !analysis.semantic_counts_certified,
+            "semantic_counts_certified must be false"
+        );
+        // Anti-regression: filter(is_exception_candidate) as "eligible" would hide this miss.
+        assert!(
+            analysis
+                .ranking_disclosure
+                .contains("candidate_predicate_misses")
+                || analysis.candidate_predicate_miss_count > 0
+        );
+    }
+
+    #[test]
+    fn product_path_suppression_removes_identity_from_independent_and_citations() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("in");
+        fs::create_dir_all(&src).unwrap();
+        write_dual_rendering_corpus(&src, 1);
+        let (_cache, _id, corpus) = ingest_dir(&src);
+        let full = analyze_exception_episodes(&corpus, &[]).unwrap();
+        assert!(full.independently_expected_structural_identity_count > 0);
+
+        // Suppress every template → independent inventory and citations empty.
+        let all_tids: Vec<u64> = corpus
+            .list_templates()
+            .into_iter()
+            .map(|t| t.info.template_id)
+            .collect();
+        let suppressed = analyze_exception_episodes(&corpus, &all_tids).unwrap();
+        assert_eq!(
+            suppressed.independently_expected_structural_identity_count,
+            0
+        );
+        assert_eq!(suppressed.message_candidate_identity_count, 0);
+        assert_eq!(suppressed.covered_structural_identity_count, 0);
+        assert_eq!(suppressed.events_scanned, 0);
+    }
+
+    #[test]
+    fn product_path_template_revision_drift_during_inventory_fails_closed() {
+        // Product scan pins template revision before inventory and rechecks after
+        // inventory + correlation. Concurrent template upsert mid-walk fails closed.
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("in");
+        fs::create_dir_all(&src).unwrap();
+        write_dual_rendering_corpus(&src, 4);
+        let (_cache, _id, corpus) = ingest_dir(&src);
+        let pinned_event = corpus.event_revision();
+        let pinned_template = corpus.template_analysis_revision();
+        corpus
+            .upsert_templates([TemplateRow {
+                info: TemplateInfo {
+                    template_id: 9_999_888,
+                    pattern: "pre-scan drift <*>".into(),
+                    token_count: 2,
+                    count: 1,
+                    first_seen: 1,
+                    last_seen: 2,
+                    severity: 0,
+                    example: "drift".into(),
+                },
+                content_hash: "sha256:prescan-drift".into(),
+                vector: None,
+            }])
+            .unwrap();
+        assert_ne!(corpus.template_analysis_revision(), pinned_template);
+        let err = check_revisions(&corpus, pinned_event, pinned_template).unwrap_err();
+        assert!(
+            err.to_string().contains("template analysis revision"),
+            "expected template revision fail-closed, got {err}"
+        );
+
+        // Mid-scan: page hook mutates templates while product walk holds a pin.
+        let _guard = TestScanOverrideGuard::acquire();
+        let corpus_ptr: *const LogCorpus = &corpus;
+        set_episode_scan_page_hook_for_test(Some(Box::new(move |page| {
+            if page == 0 {
+                // SAFETY: corpus lives for the duration of this test; hook runs
+                // only while analyze_exception_episodes borrows it.
+                let corpus = unsafe { &*corpus_ptr };
+                let _ = corpus.upsert_templates([TemplateRow {
+                    info: TemplateInfo {
+                        template_id: 9_999_889,
+                        pattern: "mid-scan drift <*>".into(),
+                        token_count: 2,
+                        count: 1,
+                        first_seen: 1,
+                        last_seen: 2,
+                        severity: 0,
+                        example: "mid".into(),
+                    },
+                    content_hash: "sha256:mid-drift".into(),
+                    vector: None,
+                }]);
+            }
+        })));
+        let err = analyze_exception_episodes(&corpus, &[]).unwrap_err();
+        assert!(
+            err.to_string().contains("template analysis revision")
+                || err.to_string().contains("revision changed"),
+            "mid-scan template drift must fail closed, got {err}"
+        );
+    }
+
+    #[test]
+    fn product_path_dual_rendering_independent_inventory_matches_final_citations() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("in");
+        fs::create_dir_all(&src).unwrap();
+        write_dual_rendering_corpus(&src, 4);
+        let (_cache, _id, corpus) = ingest_dir(&src);
+        let analysis = analyze_exception_episodes(&corpus, &[]).unwrap();
+        assert_eq!(
+            analysis.independently_expected_structural_identity_count,
+            analysis.covered_structural_identity_count
+        );
+        assert_eq!(analysis.candidate_predicate_miss_count, 0);
+        assert_eq!(analysis.rendering_miss_count, 0);
+        assert_eq!(analysis.missing_structural_identity_count, 0);
+        assert_eq!(analysis.duplicate_structural_identity_count, 0);
+        assert_eq!(analysis.unexpected_structural_identity_count, 0);
+        assert_eq!(analysis.unknown_suspicious_structural_identity_count, 0);
+        assert!(analysis.structural_coverage_complete);
+        assert!(analysis.semantic_counts_certified);
+        // Three conservation stages are disclosed.
+        assert!(analysis
+            .ranking_disclosure
+            .contains("conservation_stage1_independently_expected"));
+        assert!(analysis
+            .ranking_disclosure
+            .contains("conservation_stage2_rendering_identities"));
+        assert!(analysis
+            .ranking_disclosure
+            .contains("conservation_stage3_final_unique_citations"));
     }
 }

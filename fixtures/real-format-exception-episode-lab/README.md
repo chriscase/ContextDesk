@@ -4,6 +4,11 @@ Product-path acceptance oracle for exception-episode reconstruction against
 genuine WildFly/JBoss-shaped streams. Distinguishes **anchored** certification
 from **company-shaped unanchored** honesty.
 
+**History:** began as a red oracle on main-equivalent analyzers. The **anchored**
+path is now expected **green** (15 232 raw / 448 renderings / 56 strong derived
+episodes, `semantic_counts_certified=true`). The unanchored company-shaped twin
+remains uncertified by design.
+
 ## Why this exists
 
 The simplified ISO dual-render 56×265 oracle is insufficient:
@@ -42,20 +47,22 @@ Neutral `XYZ_*` markers only. Bare `id=` is **not** an exact execution anchor.
 ## Anchored vs unanchored
 
 - **Anchored** (`write_real_format_cascade`): shared `request_id=req-{N}` across
-  the seven application renderings and one stderr rendering → product may certify
+  the seven application renderings and one stderr rendering → product certifies
   `strong_derived_episode_count=56` with `semantic_counts_certified=true`.
 - **Company-shaped unanchored** (`write_company_shaped_unanchored_cascade`): app
   thread `(default task-N)` vs stderr `(pool-40-thread-M)`, no
   request/trace/correlation/transaction field, no synthetic bare `id=` →
   physical reconstruction and application propagation may succeed where proven;
   chain-to-stderr remains Moderate/unresolved; `semantic_counts_certified=false`;
-  no exact 56-episode fact reaches broad triage. Raw/rendering/unresolved counts
-  remain available. Model-facing text explains repeated propagation groups without
-  proving an independent incident count.
+  no exact 56-episode fact reaches broad triage.
 
-Do **not** claim the company corpus is solved until a real run establishes which
-shared signals actually exist. Do not use the anchored synthetic fixture to
-claim the unanchored company shape is solved.
+## Conservation stages (anchored)
+
+1. **Independent structural inventory** — template-pattern classifier (not
+   `is_exception_candidate`) → 15 232 expected identities
+2. **Physical renderings** — citation union covers every independent identity
+3. **Final episode citations** — unique union equals independent expected;
+   missing = duplicate = unexpected = 0
 
 ## How to run
 
@@ -67,10 +74,8 @@ Truth: `truth/truth_manifest.json`.
 
 ## Integration
 
-Product work that intends to pass this gate should:
-
 1. Ingest generated logs via `ingest_path_with_policy`
 2. Call `analyze_exception_episodes`
 3. Optionally project through broad triage + triage-quality
-4. Meet every exact total and conservation equation in the truth manifest for the
-   **anchored** path; keep unanchored uncertified
+4. Meet every exact total and conservation equation for the **anchored** path;
+   keep unanchored uncertified

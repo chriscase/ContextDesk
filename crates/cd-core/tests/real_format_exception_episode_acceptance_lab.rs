@@ -1,11 +1,12 @@
-//! Red acceptance checkpoint: real-format 56-execution WildFly/JBoss exception
-//! episode oracle.
+//! Real-format 56-execution WildFly/JBoss exception-episode acceptance lab.
 //!
-//! **Not SHIP.** This suite drives the shipped product path
-//! (`ingest_path_with_policy` → `analyze_exception_episodes` → broad triage →
-//! triage-quality) against a fail-closed truth table. On current main-equivalent
-//! behavior the primary oracle **must fail** for documented semantic reasons
-//! (multi-app chain under-merge, WildFly envelope/timestamp/thread gaps).
+//! Drives the shipped product path (`ingest_path_with_policy` →
+//! `analyze_exception_episodes` → broad triage → triage-quality) against a
+//! fail-closed truth table.
+//!
+//! **History:** began as a red oracle on main-equivalent analyzers. The
+//! **anchored** path is now expected **green** (15 232 / 448 / 56 certified).
+//! The **company-shaped unanchored** twin remains uncertified by design.
 //! Do not weaken exact equality to green the suite.
 
 use std::collections::{BTreeSet, HashSet};
@@ -60,8 +61,13 @@ const MARKER_HDR: &str = "XYZ_HDR_CAUSE";
 
 #[derive(Debug, Deserialize)]
 struct TruthManifest {
-    red_acceptance_checkpoint: bool,
+    /// Current acceptance status (true = green anchored contract).
+    acceptance_checkpoint: bool,
+    /// Product path is expected green for the anchored fixture.
     ship: bool,
+    /// Historical note: suite began as a red oracle.
+    #[serde(default)]
+    historical_red_oracle: bool,
     exact_totals: ExactTotals,
     conservation_partitions: Partitions,
     geometry: Geometry,
@@ -442,8 +448,12 @@ fn classify_message(message: &str) -> &'static str {
 #[test]
 fn truth_manifest_matches_hardcoded_oracle_constants() {
     let t = load_truth();
-    assert!(t.red_acceptance_checkpoint);
-    assert!(!t.ship);
+    assert!(t.acceptance_checkpoint);
+    assert!(t.ship, "anchored fixture contract is green");
+    assert!(
+        t.historical_red_oracle,
+        "preserve history that this began as a red oracle"
+    );
     assert_eq!(t.geometry.executions, EXECUTIONS);
     assert_eq!(
         t.geometry.application_renderings_per_execution,
@@ -582,11 +592,13 @@ fn product_ingest_preserves_exact_raw_identity_inventory() {
     assert_eq!(hdr, HDR_PARTITION, "stored header/cause identities");
 }
 
-// ─── Primary red oracle: analyze_exception_episodes ────────────────────────
+// ─── Primary anchored acceptance: analyze_exception_episodes ───────────────
 
-/// Primary red acceptance checkpoint. Expected to **fail on current main**.
+/// Anchored real-format acceptance (green): 15 232 / 448 / 56 certified.
+///
+/// History: formerly `red_checkpoint_real_format_56_execution_episode_oracle`.
 #[test]
-fn red_checkpoint_real_format_56_execution_episode_oracle() {
+fn anchored_real_format_56_execution_episode_oracle() {
     let import = tempfile::tempdir().unwrap();
     write_real_format_cascade(import.path());
     write_unrelated_controls(import.path());
@@ -596,7 +608,7 @@ fn red_checkpoint_real_format_56_execution_episode_oracle() {
         analyze_exception_episodes(&corpus, &[]).expect("analyze_exception_episodes must run");
 
     eprintln!(
-        "OBSERVED analysis: raw={} app={} stderr={} renderings={} unpaired={} occ={} dup={} strong={} partial={} counts_complete={} cert={} structural={} amp_raw={}/{}={} rem{} eligible={} covered={} missing={} dup_id={} unexpected={}",
+        "OBSERVED analysis: raw={} app={} stderr={} renderings={} unpaired={} occ={} dup={} strong={} partial={} counts_complete={} cert={} structural={} amp_raw={}/{}={} rem{} independent={} msg_cand={} render_ids={} covered={} miss={} cand_miss={} render_miss={} dup_id={} unexpected={}",
         analysis.raw_exception_record_count,
         analysis.application_exception_record_count,
         analysis.stderr_exception_record_count,
@@ -613,15 +625,17 @@ fn red_checkpoint_real_format_56_execution_episode_oracle() {
         analysis.amplification.raw_records_per_occurrence.denominator,
         analysis.amplification.raw_records_per_occurrence.quotient,
         analysis.amplification.raw_records_per_occurrence.remainder,
-        analysis.eligible_structural_identity_count,
+        analysis.independently_expected_structural_identity_count,
+        analysis.message_candidate_identity_count,
+        analysis.rendering_identity_count,
         analysis.covered_structural_identity_count,
         analysis.missing_structural_identity_count,
+        analysis.candidate_predicate_miss_count,
+        analysis.rendering_miss_count,
         analysis.duplicate_structural_identity_count,
         analysis.unexpected_structural_identity_count,
     );
-    eprintln!(
-        "red_acceptance_checkpoint: anchored cert path | ship=false on fixture until promote"
-    );
+    eprintln!("acceptance_checkpoint: anchored green path | independent template inventory");
 
     // Completeness of scan (15232 < 50k cap).
     assert!(
@@ -653,6 +667,30 @@ fn red_checkpoint_real_format_56_execution_episode_oracle() {
         analysis.rendering_episode_count as usize, TOTAL_RENDERINGS,
         "semantic: total physical renderings 448 (392 app + 56 stderr)"
     );
+
+    // Three-stage conservation: independent template → rendering → final citations.
+    assert_eq!(
+        analysis.independently_expected_structural_identity_count as usize, TOTAL_RAW,
+        "stage1: independently expected structural identities"
+    );
+    assert_eq!(
+        analysis.message_candidate_identity_count as usize, TOTAL_RAW,
+        "stage1: message candidates (no predicate misses on anchored path)"
+    );
+    assert_eq!(analysis.candidate_predicate_miss_count, 0);
+    assert_eq!(
+        analysis.rendering_identity_count as usize, TOTAL_RAW,
+        "stage2: physical-rendering citation identities"
+    );
+    assert_eq!(analysis.rendering_miss_count, 0);
+    assert_eq!(
+        analysis.covered_structural_identity_count as usize, TOTAL_RAW,
+        "stage3: final unique citations"
+    );
+    assert_eq!(analysis.missing_structural_identity_count, 0);
+    assert_eq!(analysis.duplicate_structural_identity_count, 0);
+    assert_eq!(analysis.unexpected_structural_identity_count, 0);
+    assert!(analysis.structural_coverage_complete);
 
     // Strongly supported episodes: 56 chains (7 app + 1 stderr each).
     assert!(

@@ -1,10 +1,12 @@
 {
   "schema_version": 1,
   "case_id": "xyz-real-format-56-execution-wildfly-chain",
-  "red_acceptance_checkpoint": true,
-  "ship": false,
+  "acceptance_checkpoint": true,
+  "ship": true,
+  "historical_red_oracle": true,
+  "historical_note": "Began as a red acceptance oracle on main-equivalent analyzers; anchored path is now green. Company-shaped unanchored twin remains uncertified by design.",
   "base_commit": "50cd50409dd30bd23f39b578ea9d7481c6506a4c",
-  "description": "Anchored real-format acceptance: 56 executions \u00d7 (7 application full-stack renderings + 265 WildFly/JBoss [stderr] (thread) records) with shared request_id= anchors. Company-shaped unanchored twin (no request/trace/id) must not certify.",
+  "description": "Anchored real-format acceptance: 56 executions × (7 application full-stack renderings + 265 WildFly/JBoss [stderr] (thread) records) with shared request_id= anchors. Company-shaped unanchored twin (no request/trace/id) must not certify.",
   "format": {
     "timestamp_shape": "YYYY-MM-DD HH:mm:ss,SSS",
     "stderr_envelope": "LEVEL [stderr] (pool-N-thread-M) payload",
@@ -42,6 +44,7 @@
     "raw = application_raw + stderr_raw",
     "raw = unique_citation_union",
     "physical_renderings = sum(episode.rendering_count)",
+    "independently_expected = message_candidates = rendering_identities = final_citations (anchored)",
     "at_stored = at_cited = 10584",
     "aux_stored = aux_cited = 4032",
     "header_cause_stored = header_cause_cited = 224"
@@ -74,7 +77,8 @@
     ],
     "expected_when_anchored": {
       "strongly_supported_derived_episodes": 56,
-      "semantic_counts_certified": true
+      "semantic_counts_certified": true,
+      "independently_expected_structural_identities": 15232
     }
   },
   "unanchored_company_shaped": {
