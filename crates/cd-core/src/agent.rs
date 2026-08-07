@@ -860,7 +860,7 @@ fn multi_stage_candidate_messages(
     correction: bool,
 ) -> Vec<ChatMessage> {
     let correction_text = if correction {
-        "Your previous draft was withheld. Correct the analysis, but DO NOT emit `seq=`, `source=`, `template_id=`, bracketed citations, or an evidence list. The trusted host will attach this group's canonical identities after validation."
+        "Your previous draft was withheld. Correct the analysis and include the exact supplied `group_id`."
     } else {
         ""
     };
@@ -873,8 +873,10 @@ fn multi_stage_candidate_messages(
                  Lead with exact host-supplied error codes and mechanisms. Separate observations, downstream symptoms, \\
                  and hypotheses. Never propose credentials, certificates, network, deployment, malformed input, or any \\
                  other cause unless a supplied pattern supports it; otherwise say the cause is unknown. \\
-                 Cite at least one identity exactly as `seq=N source=... template_id=M`, and cite only identities \\
-                 supplied in this group. {correction_text}"
+                 Include the exact supplied `group_id`. Classify the candidate as an operational incident, symptom, \\
+                 or likely noise/decoy and explain why. DO NOT emit `seq=`, `source=`, `template_id=`, bracketed \\
+                 citations, or an evidence list. The trusted host attaches this group's canonical identities. \\
+                 {correction_text}"
             ),
             tool_call_id: None,
             tool_calls: None,
@@ -1059,17 +1061,13 @@ async fn run_multi_stage_broad_triage(
                 completion.content
             };
             let evidence = candidate.evidence.iter().cloned().collect::<HashSet<_>>();
-            let accepted_content = if content.trim().is_empty() {
-                None
-            } else if attempt == 0 && linked_grounded_answer_is_valid(&content, &evidence, false) {
-                Some(content)
-            } else if attempt > 0 && !linked_answer_mistakes_wrapper_for_evidence(&content) {
-                let sanitized = strip_model_authored_log_citations(&content);
-                (!sanitized.is_empty() && sanitized.contains(&candidate.group_id))
-                    .then(|| attach_host_evidence_appendix(&sanitized, &evidence))
-            } else {
-                None
-            };
+            let sanitized = strip_model_authored_log_citations(&content);
+            let accepted_content = (!sanitized.is_empty()
+                && !linked_answer_mistakes_wrapper_for_evidence(&content))
+            .then(|| {
+                let host_scoped = format!("group_id: {}\n{}", candidate.group_id, sanitized);
+                attach_host_evidence_appendix(&host_scoped, &evidence)
+            });
             if let Some(content) = accepted_content {
                 accepted = Some(CandidateSynthesisDraft {
                     group_id: candidate.group_id.clone(),
@@ -1090,6 +1088,11 @@ async fn run_multi_stage_broad_triage(
         } else {
             rejected_groups.push(candidate.group_id.clone());
         }
+    }
+    if !rejected_groups.is_empty() {
+        return Ok(MultiStageTriageOutcome::FailedClosed(
+            "one or more selected candidate syntheses failed validation".into(),
+        ));
     }
     if drafts.len() < 2 {
         return Ok(MultiStageTriageOutcome::FailedClosed(
@@ -11692,18 +11695,19 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             multi_stage_candidate("trace:charlie", 33),
             multi_stage_candidate("template:decoy", 99),
         ];
-        // The decoy twice tries to cite alpha. Candidate-scoped validation must
-        // reject it rather than allowing a global set to bless that citation.
+        // Every selected group reaches comparison with host-owned citations.
+        // A possible decoy remains isolated so comparison can label it noise
+        // rather than silently dropping it.
         let backend = ScriptedBackend::new(vec![
-            multi_stage_completion("alpha: seq=11 source=trace:alpha.log template_id=11"),
-            multi_stage_completion("bravo: seq=22 source=trace:bravo.log template_id=22"),
-            multi_stage_completion("charlie: seq=33 source=trace:charlie.log template_id=33"),
-            multi_stage_completion("decoy: seq=11 source=trace:alpha.log template_id=11"),
-            multi_stage_completion("still decoy: seq=11 source=trace:alpha.log template_id=11"),
+            multi_stage_completion("trace:alpha is an operational incident"),
+            multi_stage_completion("trace:bravo is an operational incident"),
+            multi_stage_completion("trace:charlie is an operational incident"),
+            multi_stage_completion("template:decoy is likely repetitive noise"),
             multi_stage_completion(
                 "Ranked: trace:alpha (seq=11 source=trace:alpha.log template_id=11); \\
                  trace:bravo (seq=22 source=trace:bravo.log template_id=22); \\
-                 trace:charlie (seq=33 source=trace:charlie.log template_id=33).",
+                 trace:charlie (seq=33 source=trace:charlie.log template_id=33); \\
+                 template:decoy is noise (seq=99 source=template:decoy.log template_id=99).",
             ),
         ]);
         let opts = AgentOptions {
@@ -11731,16 +11735,20 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             } => {
                 assert_eq!(
                     accepted_groups,
-                    vec!["trace:alpha", "trace:bravo", "trace:charlie"]
+                    vec![
+                        "trace:alpha",
+                        "trace:bravo",
+                        "trace:charlie",
+                        "template:decoy"
+                    ]
                 );
-                assert!(!accepted_groups.iter().any(|id| id == "template:decoy"));
-                assert_eq!(rejected_groups, vec!["template:decoy"]);
+                assert!(rejected_groups.is_empty());
                 assert!(content.contains("trace:alpha"));
                 assert!(content.contains("trace:bravo"));
                 assert!(content.contains("trace:charlie"));
                 assert_eq!(
-                    provider_rounds, 6,
-                    "one bounded decoy retry plus final comparison"
+                    provider_rounds, 5,
+                    "one scoped draft per candidate plus final comparison"
                 );
                 assert!(provider_rounds <= opts.max_rounds);
                 assert_eq!(contexts.len(), provider_rounds);
@@ -11756,8 +11764,8 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             multi_stage_candidate("trace:bravo", 22),
         ];
         let backend = ScriptedBackend::new(vec![
-            multi_stage_completion("wrong seq=22 source=trace:bravo.log template_id=22"),
-            multi_stage_completion("wrong again seq=22 source=trace:bravo.log template_id=22"),
+            multi_stage_completion(""),
+            multi_stage_completion(""),
             multi_stage_completion("bravo seq=22 source=trace:bravo.log template_id=22"),
         ]);
         let opts = AgentOptions {
@@ -11787,7 +11795,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             multi_stage_candidate("trace:bravo", 22),
         ];
         let backend = ScriptedBackend::new(vec![
-            multi_stage_completion("wrong seq=999 source=fabricated.log template_id=999"),
+            multi_stage_completion("- seq=999 source=fabricated.log template_id=999"),
             multi_stage_completion(
                 "trace:alpha is a plausible independent failure group. \
                  seq=999 source=fabricated-again.log template_id=999",
