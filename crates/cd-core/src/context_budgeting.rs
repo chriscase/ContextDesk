@@ -566,10 +566,11 @@ pub fn compact_correction_package(
 ) -> (String, String, PackedLinkedEvidence) {
     let correction_system = format!(
         "{base_system}\n\
-PRIOR DRAFT REJECTED: it lacked concrete event identity or treated host wrapper \
-metadata as evidence. Return a concise corrected answer citing each event with an \
-exact seq=… plus source=\"…\" pair from the data rows only. Use only the compact \
-evidence package below — do not assume omitted rows."
+PRIOR DRAFT REJECTED: its citation syntax was missing, malformed, or did not match \
+the bounded evidence. Return only a concise corrected analysis. DO NOT emit seq=, \
+source=, template_id=, bracketed citations, or an evidence list; ContextDesk will \
+attach the exact host-verified event identities. Use only the compact evidence \
+package below — do not assume omitted rows."
     );
     // Leave room for system + user in the packing budget.
     let sys_chars = correction_system.chars().count();
@@ -1182,8 +1183,10 @@ mod tests {
             blocks.push(format!("seq={i} source=\"s.log\" msg={}", "y".repeat(800)));
         }
         let full = pack_linked_evidence_blocks(&blocks, 50_000);
-        let (_sys, _user, compact) =
+        let (sys, _user, compact) =
             compact_correction_package("SYS", "what broke?", &blocks, 120_000);
+        assert!(sys.contains("ContextDesk will attach"));
+        assert!(sys.contains("DO NOT emit seq="));
         assert!(compact.included_chars < full.included_chars);
         assert!(compact.included_chars < 50_000);
         assert!(compact.text.contains("seq="));

@@ -50,6 +50,10 @@ pub fn triage_answer_contract_system_text() -> &'static str {
      LEAD WITH THE ANSWER: begin with `Likely cause:` (or `Cause not established:`) and a concise 1-3 sentence conclusion. \
      For causal questions, explicitly distinguish the best-supported trigger, downstream symptoms, and irrelevant/noise events. \
      Do not begin with `Based on the provided logs`, restate the entire tool inventory, or narrate the analysis process.\n\
+     CAUSAL THRESHOLD: an error/failure preceding an abort is not by itself a cause. Use `Likely cause:` only when host evidence names a concrete mechanism, reason, or trigger that explains the symptoms. \
+     If records are explicitly symptom-only, or the evidence says an authoritative source/component is absent, lead with `Cause not established:` and describe the observed failure chain without promoting a symptom to root cause.\n\
+     MISSING EVIDENCE IS NOT A CAUSE: `not present in this import`, `source unavailable in the corpus`, and similar coverage statements mean ContextDesk lacks that evidence. They do NOT prove the source, service, component, or configuration was absent during the incident. \
+     Never turn an evidence-coverage gap into an operational cause. When the available failure records are explicitly symptom-only and the authoritative causal source is outside the import, you MUST lead with `Cause not established:`.\n\
      Answer with these explicit sections in order (markdown headings or JSON keys):\n\
      1) observations — only the few facts needed to support the conclusion.\n\
      2) causal_candidates — the strongest trigger first; distinguish it from symptoms.\n\
@@ -1455,6 +1459,9 @@ mod tests {
         for section in TRIAGE_ANSWER_SECTIONS {
             assert!(text.contains(section), "missing {section}");
         }
+        assert!(text.contains("MISSING EVIDENCE IS NOT A CAUSE"));
+        assert!(text.contains("not present in this import"));
+        assert!(text.contains("Cause not established:"));
         assert!(text.contains("does not verify") || text.contains("citation identities only"));
     }
 }

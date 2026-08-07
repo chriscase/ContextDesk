@@ -1357,6 +1357,48 @@ _Host-attached event identities; the model's interpretation above is not indepen
     answer
 }
 
+fn evidence_requires_cause_not_established(evidence_text: &str) -> bool {
+    let lower = evidence_text.to_ascii_lowercase();
+    let explicitly_symptom_only = lower.contains("symptom only:")
+        || lower.contains("symptom-only")
+        || lower.contains("root cause not established")
+        || lower.contains("cause unknown");
+    let explicit_coverage_gap = [
+        "not present in this import",
+        "not included in this import",
+        "source unavailable in the corpus",
+        "source is unavailable in the corpus",
+        "causal source is outside the import",
+    ]
+    .iter()
+    .any(|signal| lower.contains(signal));
+    explicitly_symptom_only && explicit_coverage_gap
+}
+
+fn answer_overclaims_cause(text: &str) -> bool {
+    let lead = text
+        .trim_start_matches(|character: char| {
+            character.is_whitespace() || matches!(character, '*' | '#' | '_' | '`')
+        })
+        .to_ascii_lowercase();
+    lead.starts_with("likely cause:")
+        || lead.starts_with("root cause:")
+        || lead.starts_with("the cause")
+}
+
+fn host_cause_not_established_answer(
+    available_evidence: &HashSet<crate::log_analysis::SearchEvidenceIdentity>,
+) -> String {
+    attach_host_evidence_appendix(
+        "**Cause not established:** ContextDesk found failure-chain records, but the bounded \
+         evidence explicitly characterizes them as symptoms and does not provide a concrete \
+         causal mechanism. It will not promote an observed failure or a missing evidence source \
+         into a root cause.\n\n### What to collect next\n\nImport the authoritative component, \
+         configuration, or upstream service logs that can explain why the observed failure occurred.",
+        available_evidence,
+    )
+}
+
 fn model_context_contains_evidence(messages: &[ChatMessage], evidence: &str) -> bool {
     evidence.is_empty()
         || messages
@@ -3967,19 +4009,25 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                 continue;
             }
             if linked_turn && linked_required_evidence_satisfied {
+                let causal_overclaim =
+                    evidence_requires_cause_not_established(&current_turn_evidence.render())
+                        && answer_overclaims_cause(&final_content);
                 let citation_status = linked_answer_citation_status(
                     &final_content,
                     &linked_log_evidence_identities,
                     linked_allow_empty_evidence,
                 );
-                let invalid_grounding = citation_status != LinkedAnswerCitationStatus::Valid;
+                let invalid_grounding =
+                    citation_status != LinkedAnswerCitationStatus::Valid || causal_overclaim;
                 if invalid_grounding
                     && !linked_invalid_synthesis_retry
                     && round + 1 < opts.max_rounds
                 {
                     linked_invalid_synthesis_retry = true;
                     trail.push(
-                        if linked_answer_mistakes_wrapper_for_evidence(&final_content) {
+                        if causal_overclaim {
+                            "linked_causal_overclaim_rejected"
+                        } else if linked_answer_mistakes_wrapper_for_evidence(&final_content) {
                             "linked_wrapper_metadata_answer_rejected"
                         } else {
                             "linked_uncited_answer_rejected"
@@ -3989,7 +4037,11 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                     continue;
                 }
                 if invalid_grounding {
-                    if citation_status == LinkedAnswerCitationStatus::Missing
+                    if causal_overclaim {
+                        final_content =
+                            host_cause_not_established_answer(&linked_log_evidence_identities);
+                        trail.push("linked_host_cause_not_established".into());
+                    } else if citation_status == LinkedAnswerCitationStatus::Missing
                         && !linked_log_evidence_identities.is_empty()
                     {
                         final_content = attach_host_evidence_appendix(
@@ -5372,6 +5424,22 @@ mod tests {
             ),
             LinkedAnswerCitationStatus::Invalid
         );
+
+        let symptom_only = "message=symptom only: entitlement check failed\n\
+                            message=operator note: authority source not present in this import";
+        assert!(evidence_requires_cause_not_established(symptom_only));
+        assert!(answer_overclaims_cause(
+            "**Likely cause:** the authority was unavailable."
+        ));
+        assert!(!answer_overclaims_cause(
+            "**Cause not established:** the check failure is a symptom."
+        ));
+        assert!(!evidence_requires_cause_not_established(
+            "message=task aborted because reason=quota_exhausted"
+        ));
+        let safe = host_cause_not_established_answer(&evidence);
+        assert!(safe.contains("Cause not established:"));
+        assert!(linked_grounded_answer_is_valid(&safe, &evidence, false));
     }
 
     #[test]
