@@ -303,18 +303,19 @@ pub fn validate_model_answer(
                             content: entry.content.clone(),
                         });
                 }
-                let supporting_root = kind == ClaimKind::InitiatingCause
+                let cause_root = kind == ClaimKind::InitiatingCause
                     && model_claim.evidence_ids.iter().any(|id| {
-                        ledger.entries.get(id).is_some_and(|e| {
-                            matches!(e.role, EvidenceRole::Cause | EvidenceRole::Supporting)
-                        })
+                        ledger
+                            .entries
+                            .get(id)
+                            .is_some_and(|e| e.role == EvidenceRole::Cause)
                     });
-                let status = if kind == ClaimKind::InitiatingCause && !supporting_root {
+                let status = if kind == ClaimKind::InitiatingCause && !cause_root {
                     ClaimStatus::Withheld
                 } else {
                     ClaimStatus::Supported
                 };
-                root |= supporting_root;
+                root |= cause_root;
                 claims.push(InvestigationClaimV1 {
                     claim_id: model_claim.claim_id,
                     claim_kind: kind,
@@ -359,6 +360,9 @@ pub fn authoritative_json(envelope: &AnswerEnvelopeV1) -> String {
 mod tests {
     use super::*;
     fn ledger() -> HostEvidenceLedger {
+        ledger_with_roles(EvidenceRole::Cause, EvidenceRole::Symptom)
+    }
+    fn ledger_with_roles(role_a: EvidenceRole, role_b: EvidenceRole) -> HostEvidenceLedger {
         let evidence = vec![
             HostEvidenceEntry {
                 evidence_id: "e-a".into(),
@@ -367,7 +371,7 @@ mod tests {
                 locator: "line 1".into(),
                 corpus_id: "c".into(),
                 revision: "r".into(),
-                role: EvidenceRole::Cause,
+                role: role_a,
                 content: "host excerpt one".into(),
             },
             HostEvidenceEntry {
@@ -377,7 +381,7 @@ mod tests {
                 locator: "line 2".into(),
                 corpus_id: "c".into(),
                 revision: "r".into(),
-                role: EvidenceRole::Symptom,
+                role: role_b,
                 content: "host excerpt two".into(),
             },
         ];
@@ -506,5 +510,57 @@ mod tests {
             e.answer.candidates[1].claims[0].status,
             ClaimStatus::Withheld
         );
+    }
+    #[test]
+    fn supporting_only_discloses_but_never_establishes_root() {
+        let raw = format!(
+            r#"{{"schema":"{SCHEMA_V1}","candidates":[{{"candidate_id":"a","initiating_causes":[{{"claim_id":"root-a","text":"candidate root","evidence_ids":["e-a"]}}]}},{{"candidate_id":"b","observations":[{{"claim_id":"obs-b","text":"observation","evidence_ids":["e-b"]}}]}}]}}"#
+        );
+        let envelope = validate_model_answer(
+            &raw,
+            &ledger_with_roles(EvidenceRole::Supporting, EvidenceRole::Neutral),
+        )
+        .unwrap();
+        assert!(!envelope.answer.root_cause_established);
+        assert_eq!(
+            envelope.answer.candidates[0].claims[0].status,
+            ClaimStatus::Withheld
+        );
+    }
+    #[test]
+    fn cause_establishes_only_its_candidate_scoped_claim() {
+        let valid = format!(
+            r#"{{"schema":"{SCHEMA_V1}","candidates":[{{"candidate_id":"a","initiating_causes":[{{"claim_id":"root-a","text":"candidate root","evidence_ids":["e-a"]}}]}},{{"candidate_id":"b","observations":[{{"claim_id":"obs-b","text":"observation","evidence_ids":["e-b"]}}]}}]}}"#
+        );
+        let envelope = validate_model_answer(&valid, &ledger()).unwrap();
+        assert!(envelope.answer.root_cause_established);
+        assert_eq!(
+            envelope.answer.candidates[0].claims[0].status,
+            ClaimStatus::Supported
+        );
+
+        let transplanted = format!(
+            r#"{{"schema":"{SCHEMA_V1}","candidates":[{{"candidate_id":"a","observations":[{{"claim_id":"obs-a","text":"observation","evidence_ids":["e-a"]}}]}},{{"candidate_id":"b","initiating_causes":[{{"claim_id":"root-b","text":"candidate root","evidence_ids":["e-a"]}}]}}]}}"#
+        );
+        assert_eq!(
+            validate_model_answer(&transplanted, &ledger()),
+            Err(ValidationError::WrongScope)
+        );
+    }
+    #[test]
+    fn neutral_and_symptom_roles_never_establish_root() {
+        let raw = format!(
+            r#"{{"schema":"{SCHEMA_V1}","candidates":[{{"candidate_id":"a","initiating_causes":[{{"claim_id":"root-a","text":"candidate root","evidence_ids":["e-a"]}}]}},{{"candidate_id":"b","observations":[{{"claim_id":"obs-b","text":"observation","evidence_ids":["e-b"]}}]}}]}}"#
+        );
+        for role in [EvidenceRole::Neutral, EvidenceRole::Symptom] {
+            let envelope =
+                validate_model_answer(&raw, &ledger_with_roles(role, EvidenceRole::Neutral))
+                    .unwrap();
+            assert!(!envelope.answer.root_cause_established);
+            assert_eq!(
+                envelope.answer.candidates[0].claims[0].status,
+                ClaimStatus::Withheld
+            );
+        }
     }
 }
