@@ -55,6 +55,13 @@ fn interactive_pty_chat_redraws_in_place_and_ends_clean() {
     let bin = assert_cmd::cargo::cargo_bin("contextdesk");
     let mut cmd = CommandBuilder::new(bin);
     cmd.env("HOME", home.path());
+    // HOME is intentionally not ContextDesk's isolation contract: on
+    // Windows, the shared profile is resolved through FOLDERID_Profile and
+    // ignores a child-only HOME override. Give every concurrently running
+    // PTY test its own explicit state root so it cannot auto-link a corpus,
+    // open DuckDB, or reuse a session belonging to another test/process.
+    cmd.arg("--data-dir");
+    cmd.arg(home.path());
     // `CommandBuilder::new` starts from the PARENT process's full
     // environment (`portable_pty::cmdbuilder::get_base_env`), not a clean
     // slate — this test asserts the capable-terminal path specifically, so
@@ -142,12 +149,38 @@ fn interactive_pty_chat_redraws_in_place_and_ends_clean() {
         text.contains("Connecting to provider"),
         "expected the renderer's initial status line under a real pty: {text:?}"
     );
+    #[cfg(not(windows))]
     assert!(
         text.contains("\r\u{1b}[2K"),
         "expected at least one in-place redraw (\\r + ANSI clear-line) — \
          this is the one behavior only a real controlling terminal can \
          prove: {text:?}"
     );
+    #[cfg(windows)]
+    {
+        // Windows' ConPTY is a terminal *emulator* boundary, not a
+        // transparent byte pipe: it consumes the child's CR + clear-line
+        // write and synthesizes an equivalent cursor/erase VT stream for
+        // the master. Assert that screen-semantic result rather than a Unix
+        // byte sequence ConPTY deliberately does not preserve.
+        let capture = decode_conpty_capture(&text);
+        assert!(
+            capture.complete,
+            "ConPTY must leave a complete control stream: {text:?}"
+        );
+        assert!(
+            capture.saw_line_erase,
+            "the capable-terminal lifecycle must include a translated \
+             in-place line erase under ConPTY: {text:?}"
+        );
+        assert!(
+            capture.semantic.contains("Connecting to provider")
+                && capture.semantic.contains("done"),
+            "the translated screen-event transcript must retain the \
+             lifecycle endpoints: {:?}",
+            capture.semantic
+        );
+    }
     assert!(
         text.contains("done"),
         "expected the concise completion line: {text:?}"
@@ -205,6 +238,10 @@ fn interactive_pty_chat_with_term_dumb_degrades_to_bounded_plain_output() {
     let bin = assert_cmd::cargo::cargo_bin("contextdesk");
     let mut cmd = CommandBuilder::new(bin);
     cmd.env("HOME", home.path());
+    // See the capable-terminal sibling: HOME does not isolate the shared
+    // ContextDesk profile on Windows, whereas --data-dir does on every OS.
+    cmd.arg("--data-dir");
+    cmd.arg(home.path());
     // The one variable this test is actually about — pinned explicitly
     // rather than relying on inheriting it, so the test means the same
     // thing regardless of what shell/CI environment runs it.
@@ -272,21 +309,53 @@ fn interactive_pty_chat_with_term_dumb_degrades_to_bounded_plain_output() {
     );
 
     let text = String::from_utf8_lossy(&output).to_string();
+    #[cfg(not(windows))]
     assert!(
         !text.contains('\u{1b}'),
         "TERM=dumb must never emit an ANSI escape sequence, even under a \
          real controlling terminal: {text:?}"
     );
+    #[cfg(not(windows))]
     assert!(
         !text.contains("\r\u{1b}[2K"),
         "TERM=dumb must never redraw in place: {text:?}"
     );
+    #[cfg(windows)]
+    let conpty_capture = {
+        // ConPTY always synthesizes its own startup, cursor, and window-title
+        // escapes on the master stream, even when the child writes only
+        // plain text. Those transport bytes cannot prove what the child
+        // emitted. Decode the bounded terminal protocol and assert the two
+        // product-visible effects TERM=dumb forbids: no colored SGR and no
+        // in-place line erase. `render::tests` and the redirected binary
+        // test independently retain byte-exact proof of the capability
+        // decision and plain child output.
+        let capture = decode_conpty_capture(&text);
+        assert!(
+            capture.complete,
+            "ConPTY must leave a complete control stream: {text:?}"
+        );
+        assert!(
+            capture.non_reset_sgr.is_empty(),
+            "TERM=dumb must not produce colored/styled screen semantics; \
+             non-reset SGR parameters: {:?}; raw={text:?}",
+            capture.non_reset_sgr
+        );
+        assert!(
+            !capture.saw_line_erase,
+            "TERM=dumb must not produce an in-place line erase under \
+             ConPTY: {text:?}"
+        );
+        capture
+    };
     // A real pty still translates this program's own `\n` writes into
     // `\r\n` (standard line-ending translation, not this program's doing —
     // see the sibling SSE test's identical note) — a bare `\r` with no ANSI
     // escape anywhere near it is exactly that, not an in-place redraw
     // artifact, so it is excluded here rather than asserted against.
+    #[cfg(not(windows))]
     let bare_cr_outside_crlf = text.replace("\r\n", "").contains('\r');
+    #[cfg(not(windows))]
     assert!(
         !bare_cr_outside_crlf,
         "TERM=dumb must never emit a bare carriage return used for \
@@ -309,7 +378,11 @@ fn interactive_pty_chat_with_term_dumb_degrades_to_bounded_plain_output() {
     // Bounded: a handful of short lines, never one line per internal event
     // (mirrors `chat_interactive_renderer.rs`'s identical redirected-output
     // assertion — TERM=dumb must degrade the same way redirection does).
-    let status_lines: Vec<&str> = text
+    #[cfg(not(windows))]
+    let lifecycle_text = text.as_str();
+    #[cfg(windows)]
+    let lifecycle_text = conpty_capture.semantic.as_str();
+    let status_lines: Vec<&str> = lifecycle_text
         .lines()
         .filter(|l| !l.trim().is_empty())
         .filter(|l| {
@@ -390,6 +463,11 @@ async fn a_streamed_reply_is_never_concatenated_with_the_completion_line() {
     let bin = assert_cmd::cargo::cargo_bin("contextdesk");
     let mut cmd = CommandBuilder::new(bin);
     cmd.env("HOME", home.path());
+    // Keep the mocked-provider turn independent from the two dry-run PTY
+    // turns executing beside it. In particular, Windows must not consult
+    // the runner's shared FOLDERID_Profile and auto-link its active corpus.
+    cmd.arg("--data-dir");
+    cmd.arg(home.path());
     // See the sibling capable-terminal test's comment on the same lines —
     // this test also exercises the interactive redraw/downgrade path and
     // must not depend on the parent process's inherited `TERM`/`NO_COLOR`.
@@ -476,12 +554,27 @@ async fn a_streamed_reply_is_never_concatenated_with_the_completion_line() {
     // `\r\n` (standard line-ending translation) — normalize that back to a
     // bare `\n` FIRST, or the `\r` collapse below would misread that
     // trailing `\r` as one more overwrite and erase the whole line.
+    #[cfg(not(windows))]
     let visible = text
         .replace("\r\n", "\n")
         .split('\n')
         .map(|segment| segment.rsplit('\r').next().unwrap_or(segment).to_string())
         .collect::<Vec<_>>()
         .join("\n");
+    #[cfg(windows)]
+    let visible = {
+        // ConPTY consumes the application's cursor operations and emits a
+        // synthesized VT screen-delta protocol. Linearize cursor moves as
+        // logical line boundaries while discarding styling/title metadata;
+        // ordinary adjacent text remains adjacent, so this cannot hide the
+        // reply/status concatenation regression this test guards against.
+        let capture = decode_conpty_capture(&text);
+        assert!(
+            capture.complete,
+            "ConPTY must leave a complete control stream: {text:?}"
+        );
+        capture.semantic
+    };
     let lines: Vec<&str> = visible.lines().collect();
     let reply_line_idx = lines
         .iter()
@@ -547,6 +640,184 @@ async fn a_streamed_reply_is_never_concatenated_with_the_completion_line() {
         "the terminal must never be left mid-escape-sequence at process \
          exit: {last_nonempty:?}"
     );
+}
+
+/// Bounded decoding of the VT stream Windows ConPTY exposes at its master
+/// endpoint.
+///
+/// Unlike a Unix pty, ConPTY is not a transparent byte transport: it consumes
+/// console writes and synthesizes cursor, erase, SGR, and title sequences that
+/// reproduce the resulting screen mutations. Consequently, raw `ESC` presence
+/// cannot identify an application-emitted escape on Windows. This decoder
+/// preserves every printable character, CR/LF, and logical cursor boundary in
+/// a semantic transcript while recording the two effects these tests need to
+/// distinguish (line erase and non-reset SGR). It consumes each input scalar at
+/// most once and emits at most one scalar/boundary per input scalar, so malformed
+/// output cannot cause an unbounded loop or expansion.
+#[derive(Debug, PartialEq, Eq)]
+struct ConptyCapture {
+    semantic: String,
+    saw_line_erase: bool,
+    non_reset_sgr: Vec<String>,
+    complete: bool,
+}
+
+fn decode_conpty_capture(input: &str) -> ConptyCapture {
+    let mut chars = input.chars().peekable();
+    let mut semantic = String::with_capacity(input.len());
+    let mut saw_line_erase = false;
+    let mut non_reset_sgr = Vec::new();
+    let mut complete = true;
+
+    while let Some(character) = chars.next() {
+        match character {
+            '\u{1b}' => match chars.next() {
+                Some('[') => {
+                    let mut parameters = String::new();
+                    let final_byte = loop {
+                        match chars.next() {
+                            Some(candidate) if ('\u{40}'..='\u{7e}').contains(&candidate) => {
+                                break Some(candidate);
+                            }
+                            Some(candidate) => parameters.push(candidate),
+                            None => break None,
+                        }
+                    };
+                    let Some(final_byte) = final_byte else {
+                        complete = false;
+                        break;
+                    };
+
+                    match final_byte {
+                        'K' => {
+                            saw_line_erase = true;
+                            push_semantic_boundary(&mut semantic);
+                        }
+                        // Cursor position/movement changes which visible line
+                        // receives subsequent text. A boundary preserves that
+                        // separation without pretending the transport's row /
+                        // column bookkeeping was application output.
+                        'H' | 'f' | 'G' | 'd' | 'A' | 'B' | 'E' | 'F' => {
+                            push_semantic_boundary(&mut semantic);
+                        }
+                        'm' if sgr_has_non_reset_effect(&parameters) => {
+                            non_reset_sgr.push(parameters);
+                        }
+                        _ => {}
+                    }
+                }
+                Some(']') => {
+                    // OSC (usually ConPTY's synthesized window-title update)
+                    // ends with BEL or ST (`ESC \\`). Do not leak the title
+                    // payload into the visible application transcript.
+                    let mut terminated = false;
+                    while let Some(candidate) = chars.next() {
+                        if candidate == '\u{7}' {
+                            terminated = true;
+                            break;
+                        }
+                        if candidate == '\u{1b}' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            terminated = true;
+                            break;
+                        }
+                    }
+                    if !terminated {
+                        complete = false;
+                        break;
+                    }
+                }
+                // Complete two-byte escape (save/restore cursor, keypad mode,
+                // etc.). None carries printable application content.
+                Some(_) => {}
+                None => {
+                    complete = false;
+                    break;
+                }
+            },
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                    semantic.push('\n');
+                } else {
+                    push_semantic_boundary(&mut semantic);
+                }
+            }
+            '\n' => semantic.push('\n'),
+            '\u{8}' => {
+                // A backspace changes the cursor rather than adding a glyph.
+                // Treat its next write as a separate semantic fragment; do not
+                // delete previously captured evidence from the transcript.
+                push_semantic_boundary(&mut semantic);
+            }
+            c if c.is_control() => {}
+            c => semantic.push(c),
+        }
+    }
+
+    ConptyCapture {
+        semantic,
+        saw_line_erase,
+        non_reset_sgr,
+        complete,
+    }
+}
+
+fn push_semantic_boundary(output: &mut String) {
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+}
+
+fn sgr_has_non_reset_effect(parameters: &str) -> bool {
+    // ConPTY commonly synthesizes `CSI m` / `CSI 0m` resets. Any other SGR
+    // parameter is a visible style/color effect and would contradict the
+    // product's TERM=dumb contract.
+    !parameters.is_empty()
+        && parameters
+            .split(';')
+            .any(|component| component.parse::<u16>() != Ok(0))
+}
+
+#[test]
+fn conpty_decoder_separates_transport_metadata_from_visible_lifecycle() {
+    let raw = "\u{1b}[?9001h\u{1b}[?1004h\u{1b}[?25l\u{1b}[2J\u{1b}[m\u{1b}[H\
+               Connecting to provider | 0.0s\r\n\u{1b}]0;C:\\contextdesk.exe\u{7}\
+               \u{1b}[?25h\u{1b}[?25l\u{1b}[5;1Hdone | 0.1s\u{1b}[?25h\r\n";
+    let decoded = decode_conpty_capture(raw);
+
+    assert!(decoded.complete);
+    assert!(!decoded.saw_line_erase);
+    assert!(decoded.non_reset_sgr.is_empty());
+    assert!(decoded.semantic.contains("Connecting to provider | 0.0s"));
+    assert!(decoded.semantic.contains("done | 0.1s"));
+    assert!(!decoded.semantic.contains("contextdesk.exe"));
+    assert!(!decoded.semantic.contains('\u{1b}'));
+}
+
+#[test]
+fn conpty_decoder_retains_redraw_and_color_semantics() {
+    let decoded = decode_conpty_capture("\u{1b}[36mConnecting\u{1b}[m\r\u{1b}[2KAssembling\r\n");
+
+    assert!(decoded.complete);
+    assert!(decoded.saw_line_erase);
+    assert_eq!(decoded.non_reset_sgr, vec!["36"]);
+    assert_eq!(decoded.semantic, "Connecting\nAssembling\n");
+}
+
+#[test]
+fn conpty_decoder_cannot_hide_plain_text_concatenation_or_truncation() {
+    let concatenated = decode_conpty_capture("hello from modeldone\r\n");
+    assert_eq!(concatenated.semantic, "hello from modeldone\n");
+    assert!(concatenated.complete);
+
+    let truncated_csi = decode_conpty_capture("safe\u{1b}[36");
+    assert_eq!(truncated_csi.semantic, "safe");
+    assert!(!truncated_csi.complete);
+
+    let truncated_osc = decode_conpty_capture("safe\u{1b}]0;unfinished title");
+    assert_eq!(truncated_osc.semantic, "safe");
+    assert!(!truncated_osc.complete);
 }
 
 /// Bounded reap for a `portable_pty` child: poll `try_wait` for up to
