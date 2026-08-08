@@ -37,7 +37,7 @@ pub struct Paths {
     /// True when `config_dir` came from an explicit `--data-dir` /
     /// `--profile-dir` override rather than the default, desktop-shared
     /// `~/.contextdesk`. Isolated state never touches `$HOME` — a broken or
-    /// absent `$HOME` cannot affect an isolated profile.
+    /// absent OS home/profile directory cannot affect an isolated profile.
     pub isolated: bool,
 }
 
@@ -59,6 +59,36 @@ impl Paths {
         app_config_override: Option<&std::path::Path>,
     ) -> CliResult<Self> {
         let branding = Branding::embedded();
+        Self::resolve_with_shared_paths(
+            data_dir_override,
+            app_config_override,
+            || {
+                ensure_config_dir(&branding)
+                    .map_err(|e| CliError::internal(format!("resolve config dir: {e}")))
+            },
+            || config_path(&branding).ok(),
+        )
+    }
+
+    /// Resolve paths while deferring both OS-profile lookups until the
+    /// desktop-shared branch actually needs them.
+    ///
+    /// Keeping the resolvers lazy is part of the isolation boundary: an
+    /// explicit data directory must not even evaluate code that discovers a
+    /// user's shared home/profile path. The indirection also gives tests a
+    /// platform-independent way to prove that negative property; on Windows,
+    /// `dirs::home_dir()` uses `FOLDERID_Profile` and intentionally ignores
+    /// the Unix-specific `HOME` environment variable.
+    fn resolve_with_shared_paths<SharedDir, SharedAppConfig>(
+        data_dir_override: Option<&Path>,
+        app_config_override: Option<&Path>,
+        resolve_shared_dir: SharedDir,
+        resolve_shared_app_config: SharedAppConfig,
+    ) -> CliResult<Self>
+    where
+        SharedDir: FnOnce() -> CliResult<PathBuf>,
+        SharedAppConfig: FnOnce() -> Option<PathBuf>,
+    {
         let (config_dir, isolated) = match data_dir_override {
             Some(dir) => {
                 std::fs::create_dir_all(dir).map_err(|e| {
@@ -66,17 +96,13 @@ impl Paths {
                 })?;
                 (dir.to_path_buf(), true)
             }
-            None => {
-                let dir = ensure_config_dir(&branding)
-                    .map_err(|e| CliError::internal(format!("resolve config dir: {e}")))?;
-                (dir, false)
-            }
+            None => (resolve_shared_dir()?, false),
         };
         let app_config_path = app_config_override.map(PathBuf::from).unwrap_or_else(|| {
             if isolated {
                 config_dir.join("config.json")
             } else {
-                config_path(&branding).unwrap_or_else(|_| config_dir.join("config.json"))
+                resolve_shared_app_config().unwrap_or_else(|| config_dir.join("config.json"))
             }
         });
         Ok(Self {
@@ -87,6 +113,65 @@ impl Paths {
             config_dir,
             isolated,
         })
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn isolated_paths_never_evaluate_shared_profile_resolvers() {
+        let isolated_dir = tempfile::tempdir().unwrap();
+        let paths = Paths::resolve_with_shared_paths(
+            Some(isolated_dir.path()),
+            None,
+            || panic!("isolated resolution consulted the shared config directory"),
+            || panic!("isolated resolution consulted the shared app config path"),
+        )
+        .unwrap();
+
+        assert!(paths.isolated);
+        assert_eq!(paths.config_dir, isolated_dir.path());
+        assert_eq!(
+            paths.app_config_path,
+            isolated_dir.path().join("config.json")
+        );
+        assert_eq!(paths.cache_root, isolated_dir.path().join("cache"));
+        assert_eq!(paths.sessions_dir, isolated_dir.path().join("sessions"));
+        assert_eq!(paths.cli_state_dir, isolated_dir.path().join("cli"));
+    }
+
+    #[test]
+    fn shared_paths_evaluate_both_platform_resolvers() {
+        let shared_dir = tempfile::tempdir().unwrap();
+        let shared_app_config = shared_dir.path().join("shared-config.json");
+        let dir_called = Cell::new(false);
+        let app_config_called = Cell::new(false);
+
+        let paths = Paths::resolve_with_shared_paths(
+            None,
+            None,
+            || {
+                dir_called.set(true);
+                Ok(shared_dir.path().to_path_buf())
+            },
+            || {
+                app_config_called.set(true);
+                Some(shared_app_config.clone())
+            },
+        )
+        .unwrap();
+
+        assert!(dir_called.get(), "shared config resolver was not exercised");
+        assert!(
+            app_config_called.get(),
+            "shared app-config resolver was not exercised"
+        );
+        assert!(!paths.isolated);
+        assert_eq!(paths.config_dir, shared_dir.path());
+        assert_eq!(paths.app_config_path, shared_app_config);
     }
 }
 
