@@ -513,7 +513,14 @@ fn write_turn_meta(w: &mut TreeWriter, prefix: &str, summary: &TraceSummaryLine)
             summary.interpretation_validated
         ),
     );
-    w.branch(prefix, true, &format!("elapsed_ms={}", summary.elapsed_ms));
+    w.branch(
+        prefix,
+        true,
+        &format!(
+            "turn_elapsed_ms={}  provider_call_elapsed_ms_sum={}",
+            summary.turn_elapsed_ms, summary.provider_call_elapsed_ms_sum
+        ),
+    );
 }
 
 fn write_context_meta(w: &mut TreeWriter, prefix: &str, summary: &TraceSummaryLine) {
@@ -1104,6 +1111,8 @@ mod tests {
             tools_executed: vec![],
             tools_offered: vec!["search_kb".into()],
             elapsed_ms: 2,
+            turn_elapsed_ms: 7,
+            provider_call_elapsed_ms_sum: 2,
             grounding: "not_applicable".into(),
             grounding_scope: "not_applicable".into(),
             interpretation_validated: false,
@@ -1186,7 +1195,7 @@ Trace (summary)
 |   +-- corpus=(none)
 |   +-- grounding=not_applicable  scope=not_applicable
 |   +-- interpretation_validated=false
-|   `-- elapsed_ms=2
+|   `-- turn_elapsed_ms=7  provider_call_elapsed_ms_sum=2
 +-- Context
 |   +-- budget_chars=120000  used_chars=828
 |   +-- history_messages=3

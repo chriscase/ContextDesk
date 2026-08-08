@@ -752,6 +752,15 @@ than inventing them.
   messages include round *N*'s tool results, already folded into history the
   same way a real turn folds them. Each line may also carry additive
   `provider_round_telemetry` for that round.
+
+Trace summary timing keeps two scopes explicit: `turn_elapsed_ms` is the
+whole CLI turn wall time, while `provider_call_elapsed_ms_sum` adds the
+durations of all recorded provider calls. The latter is accumulated call
+time, not a turn-relative timestamp, and may exceed turn wall time if provider
+calls execute concurrently. The older `elapsed_ms` field remains as a v1
+compatibility alias for its historical provider-call-total behavior; new
+consumers should use the explicitly named fields.
+
 - **`full`** (adds `trace_tool`, one line per tool call the turn actually
   made): id/name/ok/summary/detail — the same bounded data a UI's tool
   lifecycle display already has, correlated by round rather than dropped.
@@ -771,7 +780,7 @@ capture point in the first place: the traced boundary
 credential.
 
 ```json
-{"type":"trace_summary","provider_profile_id":"ollama-local","chat_model":"mistral","corpus_id":null,"corpus_revision":null,"dry_run":true,"history_messages":3,"retrieved_evidence":0,"evidence_ids":[],"context_budget_chars":120000,"context_used_chars":828,"tool_names":["search_kb"],"tools_executed":[],"tools_offered":["search_kb"],"elapsed_ms":2,"grounding":"not_applicable","grounding_scope":"not_applicable","interpretation_validated":false}
+{"type":"trace_summary","provider_profile_id":"ollama-local","chat_model":"mistral","corpus_id":null,"corpus_revision":null,"dry_run":true,"history_messages":3,"retrieved_evidence":0,"evidence_ids":[],"context_budget_chars":120000,"context_used_chars":828,"tool_names":["search_kb"],"tools_executed":[],"tools_offered":["search_kb"],"elapsed_ms":2,"turn_elapsed_ms":7,"provider_call_elapsed_ms_sum":2,"grounding":"not_applicable","grounding_scope":"not_applicable","interpretation_validated":false}
 ```
 
 ## `chat --activity` / `--context-selection`

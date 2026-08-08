@@ -267,8 +267,18 @@ pub struct TraceSummaryLine {
     pub tools_executed: Vec<String>,
     /// Distinct tools offered to the provider across all recorded rounds.
     pub tools_offered: Vec<String>,
-    /// Total wall-clock time across every backend call this turn made.
+    /// Legacy total of backend-call wall time. Retained for the v1 wire
+    /// contract; new consumers should use `provider_call_elapsed_ms_sum`,
+    /// whose name makes the scope explicit.
     pub elapsed_ms: u64,
+    /// Whole CLI turn wall time, including deterministic host work, provider
+    /// setup, every provider call, validation, and session persistence.
+    pub turn_elapsed_ms: u64,
+    /// Sum of the wall-clock duration of every recorded provider call.
+    /// This is accumulated provider-call time, not turn-relative elapsed
+    /// time; if a future pipeline runs calls concurrently, the sum may exceed
+    /// `turn_elapsed_ms`.
+    pub provider_call_elapsed_ms_sum: u64,
     /// `"not_applicable"` (ordinary turn) | `"grounded"` | `"ungrounded"` —
     /// derived from whether the turn completed cleanly or ended with one of
     /// the `linked_*` evidence-validation error codes.

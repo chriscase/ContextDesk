@@ -1164,12 +1164,18 @@ fn build_trace_lines(
         tools_offered,
         // Prefer the sum of actual backend-call time when a trace sink was
         // active (it is, whenever this function runs); fall back to the
-        // whole-command wall clock so the field is never simply absent.
+        // whole-command wall clock so the legacy field is never simply
+        // absent. The two explicitly scoped fields below must never perform
+        // this substitution: a zero-duration provider call and no provider
+        // call are both valid observations, while turn wall time remains a
+        // separate measurement.
         elapsed_ms: if call_elapsed_ms > 0 {
             call_elapsed_ms
         } else {
             elapsed_ms
         },
+        turn_elapsed_ms: elapsed_ms,
+        provider_call_elapsed_ms_sum: call_elapsed_ms,
         grounding: grounding_status(corpus_id, &outcome.events).to_string(),
         grounding_scope: if corpus_id.is_some() {
             "citation_identity_only".to_string()
@@ -1421,6 +1427,76 @@ mod grounding_tests {
             summary.tool_names,
             vec!["broad_log_triage", "search_logs"],
             "legacy union remains backward compatible"
+        );
+    }
+
+    #[test]
+    fn trace_keeps_whole_turn_elapsed_separate_from_provider_latency() {
+        let outcome = ChatWorkflowOutcome {
+            session_id: "session-a".into(),
+            turn_id: "turn-a".into(),
+            events: vec![StreamEvent::TurnCompleted {
+                reason: "budget_time".into(),
+            }],
+            final_text: String::new(),
+            provider_profile_id: "profile-a".into(),
+            chat_model: "model-a".into(),
+            corpus_revision: None,
+            corpus_snapshot_revision: None,
+            history_messages: 1,
+            multi_model_configured: cd_core::multi_model::MultiModelMode::Single,
+            multi_model_executed: cd_core::multi_model::ExecutedMode::Single,
+            multi_model_entry_degradation: None,
+        };
+        let calls = vec![TracedCall {
+            seq: 0,
+            elapsed_ms: 41_300,
+            tool_names: vec![],
+            messages: vec![],
+            context_used_chars: 100,
+            messages_capped: false,
+            outcome: TracedOutcome::Failed {
+                message: "turn deadline reached".into(),
+            },
+            transport: Default::default(),
+            empty_visible_answer: false,
+            application_retry_reason: None,
+        }];
+
+        let lines = build_trace_lines(
+            TraceLevel::Summary,
+            false,
+            Some("corpus-a"),
+            &outcome,
+            &calls,
+            76_800,
+            1_000,
+        );
+        let StreamLine::TraceSummary(summary) = &lines[0] else {
+            panic!("expected trace summary")
+        };
+
+        assert_eq!(summary.turn_elapsed_ms, 76_800);
+        assert_eq!(summary.provider_call_elapsed_ms_sum, 41_300);
+        assert_eq!(summary.elapsed_ms, 41_300, "legacy alias is preserved");
+        let wire = serde_json::to_value(&lines[0]).expect("trace summary serializes");
+        assert_eq!(wire["elapsed_ms"], 41_300);
+        assert_eq!(wire["turn_elapsed_ms"], 76_800);
+        assert_eq!(wire["provider_call_elapsed_ms_sum"], 41_300);
+        let rendered = render_trace_hierarchy(&lines, TraceLevel::Summary, HierarchyStyle::plain());
+        assert!(rendered.contains("turn_elapsed_ms=76800  provider_call_elapsed_ms_sum=41300"));
+        assert!(!rendered.contains("`-- elapsed_ms=41300"));
+
+        let no_call_lines =
+            build_trace_lines(TraceLevel::Summary, true, None, &outcome, &[], 8, 1_000);
+        let StreamLine::TraceSummary(no_call_summary) = &no_call_lines[0] else {
+            panic!("expected trace summary")
+        };
+        assert_eq!(no_call_summary.turn_elapsed_ms, 8);
+        assert_eq!(no_call_summary.provider_call_elapsed_ms_sum, 0);
+        assert_eq!(
+            no_call_summary.elapsed_ms, 8,
+            "legacy no-call fallback is preserved"
         );
     }
 
