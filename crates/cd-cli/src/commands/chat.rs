@@ -295,7 +295,10 @@ pub async fn run(
     // is dropped as soon as `result` is settled — `build_trace_lines` below
     // needs `host.model_context_budgets()`, which a live borrow would block.
     let result = {
-        let turn = run_chat_workflow(
+        // Keep the composite workflow future off the CLI main thread's stack.
+        // Windows reserves only 1 MiB there, and stack-pinning this future can
+        // overflow while polling the agent pipeline even for a single-model turn.
+        let mut turn = Box::pin(run_chat_workflow(
             &mut host,
             secrets,
             cfg,
@@ -319,8 +322,7 @@ pub async fn run(
             Some(cancel.clone()),
             Some(&mut live_sink),
             decide_permission,
-        );
-        tokio::pin!(turn);
+        ));
 
         // Mirrors `commands::doctor::execute_live_turns`'s own race exactly:
         // on Ctrl-C, set the cooperative cancel flag, give the turn a
@@ -332,14 +334,14 @@ pub async fn run(
         // report the wrong exit code and render a `done` line for a turn
         // the operator explicitly interrupted.
         tokio::select! {
-            result = &mut turn => result.map_err(map_workflow_error),
+            result = turn.as_mut() => result.map_err(map_workflow_error),
             _ = tokio::signal::ctrl_c() => {
                 cancel.store(true, Ordering::SeqCst);
                 if text {
                     chat_renderer.clear_for_interrupt();
                 }
                 eprintln!("cancelling - waiting for the turn to wind down...");
-                let _ = tokio::time::timeout(INTERRUPT_GRACE, &mut turn).await;
+                let _ = tokio::time::timeout(INTERRUPT_GRACE, turn.as_mut()).await;
                 Err(CliError::cancelled("chat turn cancelled"))
             }
         }

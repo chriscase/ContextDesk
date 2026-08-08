@@ -919,7 +919,9 @@ async fn execute_live_turns(
         Err(e) => return LiveTurnOutcome::SetupFailed(format!("could not build tool host: {e}")),
     };
 
-    let turn_one = run_chat_workflow(
+    // Match chat's heap-pinning discipline: Windows' 1 MiB CLI main-thread
+    // stack cannot safely poll this composite workflow future in place.
+    let mut turn_one = Box::pin(run_chat_workflow(
         &mut host,
         secrets,
         cfg,
@@ -942,11 +944,10 @@ async fn execute_live_turns(
         // against a corpus it just created and will delete before
         // returning — there is nothing here for an operator to confirm.
         |_tool_name, _target, _reason, _preview, _risk| PermissionDecision::AllowOnce,
-    );
-    tokio::pin!(turn_one);
+    ));
 
     let raced = tokio::select! {
-        result = tokio::time::timeout(timeout, &mut turn_one) => result,
+        result = tokio::time::timeout(timeout, turn_one.as_mut()) => result,
         _ = tokio::signal::ctrl_c() => {
             cancel.store(true, Ordering::SeqCst);
             eprintln!("doctor: interrupted — waiting for the in-flight check to stop...");
@@ -962,7 +963,7 @@ async fn execute_live_turns(
             // observe an `Ok`, its session was already saved to disk and
             // must still be captured here for cleanup, or it leaks
             // permanently into the real session store.
-            let leaked_session_id = match tokio::time::timeout(INTERRUPT_GRACE, &mut turn_one).await {
+            let leaked_session_id = match tokio::time::timeout(INTERRUPT_GRACE, turn_one.as_mut()).await {
                 Ok(Ok(outcome)) => Some(outcome.session_id),
                 _ => None,
             };
@@ -1052,7 +1053,7 @@ async fn execute_live_turns(
     // one's trace.
     let recorder_two = Arc::new(RecordingTurnTrace::new());
     let trace_sink_two: Arc<dyn TurnTraceSink> = recorder_two.clone();
-    let turn_two = run_chat_workflow(
+    let mut turn_two = Box::pin(run_chat_workflow(
         &mut host_two,
         secrets,
         cfg,
@@ -1072,14 +1073,13 @@ async fn execute_live_turns(
         Some(cancel.clone()),
         None,
         |_tool_name, _target, _reason, _preview, _risk| PermissionDecision::AllowOnce,
-    );
-    tokio::pin!(turn_two);
+    ));
     let raced_two = tokio::select! {
-        result = tokio::time::timeout(timeout, &mut turn_two) => result,
+        result = tokio::time::timeout(timeout, turn_two.as_mut()) => result,
         _ = tokio::signal::ctrl_c() => {
             cancel.store(true, Ordering::SeqCst);
             eprintln!("doctor: interrupted — waiting for the in-flight check to stop...");
-            let _ = tokio::time::timeout(INTERRUPT_GRACE, &mut turn_two).await;
+            let _ = tokio::time::timeout(INTERRUPT_GRACE, turn_two.as_mut()).await;
             // Unlike turn one, `session_id` here is already known and was
             // already durably saved by `run_chat_workflow` before turn two
             // even started — capture it unconditionally so cleanup can
