@@ -206,7 +206,7 @@ pub struct LoggingQualityMetrics {
     pub wall_event_count: u64,
     /// Events that are order-only under active basis.
     pub order_only_event_count: u64,
-    /// Events with unresolved local timestamp evidence.
+    /// Local-timestamp events whose active basis is still unresolved/order-only.
     pub unresolved_local_event_count: u64,
     /// Distinct selection / omission buckets (never folded into each other).
     pub selection: LoggingQualitySelectionCoverage,
@@ -326,7 +326,7 @@ pub struct LoggingQualitySourceMetrics {
     pub wall_event_count: u64,
     /// Order-only events.
     pub order_only_event_count: u64,
-    /// Unresolved local timestamp events.
+    /// Local-timestamp events whose active basis is still unresolved/order-only.
     pub unresolved_local_event_count: u64,
     /// Parser-true `trace_id` events.
     pub with_trace_id: u64,
@@ -810,6 +810,7 @@ struct CorpusAggregates {
     event_count: u64,
     wall_event_count: u64,
     unresolved_local_event_count: u64,
+    active_timestamp_basis_counts: BTreeMap<String, u64>,
     with_trace_id: u64,
     unknown_level_count: u64,
     template_counts: Vec<(u64, u64)>,
@@ -834,7 +835,9 @@ fn query_corpus_aggregates(corpus: &LogCorpus) -> CoreResult<CorpusAggregates> {
             "SELECT
                 COUNT(*),
                 SUM(CASE WHEN active_timestamp_basis IN ('explicit_wall','resolved_local') THEN 1 ELSE 0 END),
-                SUM(CASE WHEN unresolved_local_timestamp IS NOT NULL THEN 1 ELSE 0 END),
+                SUM(CASE WHEN timestamp_provenance = 'unresolved_local'
+                              AND active_timestamp_basis = 'order_only'
+                         THEN 1 ELSE 0 END),
                 SUM(CASE WHEN trace_id IS NOT NULL AND length(trace_id) > 0 THEN 1 ELSE 0 END),
                 SUM(CASE WHEN level IS NULL OR level = '' OR lower(level) = 'unknown' THEN 1 ELSE 0 END)
              FROM events",
@@ -850,6 +853,41 @@ fn query_corpus_aggregates(corpus: &LogCorpus) -> CoreResult<CorpusAggregates> {
             },
         )
         .map_err(|e| CoreError::Message(format!("logging quality corpus aggregates: {e}")))?;
+
+        let mut basis_stmt = conn
+            .prepare(
+                "SELECT active_timestamp_basis, COUNT(*)
+                 FROM events
+                 GROUP BY active_timestamp_basis
+                 ORDER BY active_timestamp_basis",
+            )
+            .map_err(|e| {
+                CoreError::Message(format!("logging quality active basis prepare: {e}"))
+            })?;
+        let basis_rows = basis_stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, i64>(1)?,
+                ))
+            })
+            .map_err(|e| {
+                CoreError::Message(format!("logging quality active basis query: {e}"))
+            })?;
+        for row in basis_rows {
+            let (stored, count) = row.map_err(|e| {
+                CoreError::Message(format!("logging quality active basis row: {e}"))
+            })?;
+            let basis = ActiveTimestampBasis::from_storage_str(stored.as_deref()).ok_or_else(|| {
+                CoreError::Message("logging quality active timestamp basis is invalid".into())
+            })?;
+            let count = count.max(0) as u64;
+            let total = agg
+                .active_timestamp_basis_counts
+                .entry(basis.as_storage_str().into())
+                .or_insert(0);
+            *total = total.saturating_add(count);
+        }
 
         let mut stmt = conn
             .prepare(
@@ -894,7 +932,9 @@ fn query_source_aggregates(corpus: &LogCorpus) -> CoreResult<Vec<SourceAggregate
                     source,
                     COUNT(*),
                     SUM(CASE WHEN active_timestamp_basis IN ('explicit_wall','resolved_local') THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN unresolved_local_timestamp IS NOT NULL THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN timestamp_provenance = 'unresolved_local'
+                                  AND active_timestamp_basis = 'order_only'
+                             THEN 1 ELSE 0 END),
                     SUM(CASE WHEN trace_id IS NOT NULL AND length(trace_id) > 0 THEN 1 ELSE 0 END),
                     SUM(CASE WHEN level IS NULL OR level = '' OR lower(level) = 'unknown' THEN 1 ELSE 0 END)
                  FROM events
@@ -1021,7 +1061,7 @@ fn build_metrics(
     LoggingQualityMetrics {
         time_quality,
         timestamp_provenance_counts: stats.timestamp_provenance_counts.clone(),
-        active_timestamp_basis_counts: stats.active_timestamp_basis_counts.clone(),
+        active_timestamp_basis_counts: aggregates.active_timestamp_basis_counts.clone(),
         wall_event_count: aggregates.wall_event_count,
         order_only_event_count: order_only,
         unresolved_local_event_count: aggregates.unresolved_local_event_count,
