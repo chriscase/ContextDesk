@@ -242,6 +242,88 @@ pub struct AppConfig {
     /// structured/keyword baseline runs alone.
     #[serde(default)]
     pub retrieval: RetrievalSettings,
+    /// Optional multi-model investigation settings (reviewer-first V1).
+    ///
+    /// Absent in files written before this existed, so it takes
+    /// [`MultiModelSettings::default`] — mode `single`, no reviewer, meaning
+    /// the established single-model path runs unchanged.
+    #[serde(default)]
+    pub multi_model: MultiModelSettings,
+}
+
+/// Multi-model investigation configuration. Additive; the default is the
+/// single-model floor. A reviewer references an existing provider **profile
+/// id** — never a provider kind and never a raw secret — so credentials stay
+/// keychain-only through the profile's own `api_key_ref`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultiModelSettings {
+    /// Default mode for new investigation turns. `single` unless the user
+    /// opts in. A per-turn override may still request review.
+    #[serde(default)]
+    pub mode: crate::multi_model::MultiModelMode,
+    /// Reviewer role assignment. `None` means no reviewer is configured, so
+    /// review mode degrades to single with `reviewer_unconfigured`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer: Option<ReviewerRoleConfig>,
+    /// Per-turn ceilings for the multi-model path.
+    #[serde(default)]
+    pub budget: MultiModelBudgetConfig,
+}
+
+/// Reviewer role assignment. Provider-neutral: it names a profile id, not a
+/// provider kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewerRoleConfig {
+    /// Existing provider profile id to fill the reviewer role. May equal the
+    /// investigator's profile (same model, reviewer prompt) or differ.
+    pub profile_id: String,
+    /// Model id override; `None` uses the profile's chat model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Require a measured capability qualification before using this model as
+    /// a reviewer. Default true: an unverified reviewer degrades honestly
+    /// rather than being trusted on a name.
+    #[serde(default = "default_true")]
+    pub require_qualified: bool,
+    /// Explicit acknowledgment that this reviewer may send stage data to a
+    /// remote provider. Default false: a remote reviewer without this degrades
+    /// with `reviewer_egress_not_acknowledged`. Ignored for local providers.
+    #[serde(default)]
+    pub allow_remote: bool,
+}
+
+/// Persisted per-turn budget for the multi-model path. Deterministic units the
+/// host always has (model rounds and model-facing characters). No currency.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultiModelBudgetConfig {
+    /// Hard ceiling on model calls across all stages.
+    #[serde(default = "default_multi_model_rounds")]
+    pub max_total_provider_rounds: u32,
+    /// Per-stage semantic-correction cap (independent of transport retries).
+    #[serde(default = "default_multi_model_corrections")]
+    pub max_semantic_corrections_per_stage: u8,
+    /// Optional deterministic usage ceiling: total model-facing characters sent
+    /// across all stages. `None` = no usage gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context_chars_total: Option<u64>,
+}
+
+impl Default for MultiModelBudgetConfig {
+    fn default() -> Self {
+        Self {
+            max_total_provider_rounds: default_multi_model_rounds(),
+            max_semantic_corrections_per_stage: default_multi_model_corrections(),
+            max_context_chars_total: None,
+        }
+    }
+}
+
+const fn default_multi_model_rounds() -> u32 {
+    12
+}
+
+const fn default_multi_model_corrections() -> u8 {
+    1
 }
 
 /// Optional retrieval-role configuration.
@@ -783,6 +865,46 @@ mod tests {
             loaded.retrieval.reranker.as_ref().map(|r| r.model.as_str()),
             Some("qwen3-reranker-0.6b")
         );
+    }
+
+    #[test]
+    fn a_config_without_the_multi_model_section_still_loads_as_single() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut cfg = AppConfig {
+            providers: ProviderConfig::with_local_ollama(),
+            ..AppConfig::default()
+        };
+        save_config(&path, &cfg).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("multi_model");
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded.multi_model, MultiModelSettings::default());
+        assert_eq!(
+            loaded.multi_model.mode,
+            crate::multi_model::MultiModelMode::Single
+        );
+        assert!(loaded.multi_model.reviewer.is_none());
+        assert_eq!(loaded.multi_model.budget.max_semantic_corrections_per_stage, 1);
+
+        // A reviewer references a profile id and never carries a raw secret.
+        cfg.multi_model.mode = crate::multi_model::MultiModelMode::Review;
+        cfg.multi_model.reviewer = Some(ReviewerRoleConfig {
+            profile_id: "ollama-local".into(),
+            model: None,
+            require_qualified: true,
+            allow_remote: false,
+        });
+        save_config(&path, &cfg).unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded.multi_model.mode, crate::multi_model::MultiModelMode::Review);
+        assert_eq!(
+            loaded.multi_model.reviewer.as_ref().map(|r| r.profile_id.as_str()),
+            Some("ollama-local")
+        );
+        assert!(loaded.multi_model.reviewer.as_ref().unwrap().require_qualified);
     }
 
     #[test]
