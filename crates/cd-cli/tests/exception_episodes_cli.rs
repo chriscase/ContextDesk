@@ -82,6 +82,22 @@ fn exception_episodes_json_discloses_occurrence_vs_raw() {
         .as_str()
         .unwrap_or("")
         .contains("independent_incident_claim_forbidden"));
+
+    let text = bin()
+        .args(["--data-dir", data.to_str().unwrap(), "exception-episodes"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text).unwrap();
+    assert!(text.contains("Retained correlation groups"), "{text}");
+    assert!(text.contains("Certified semantic episodes"), "{text}");
+    assert!(text.contains("withheld (uncertified)"), "{text}");
+    assert!(text.contains("retained_groups="), "{text}");
+    assert!(!text.contains("Semantic occurrences"), "{text}");
+    assert!(!text.contains(" occurrences="), "{text}");
+    assert!(!text.contains("raw_per_occ="), "{text}");
     // Alias
     bin()
         .args(["--data-dir", data.to_str().unwrap(), "--json", "episodes"])

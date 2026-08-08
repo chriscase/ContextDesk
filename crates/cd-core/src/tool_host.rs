@@ -2524,7 +2524,7 @@ impl ToolHost {
              impact_slots: {}\n\
              rare_candidate_reserve: {BROAD_LOG_TRIAGE_RARE_ERROR_RESERVE}\n\
              exemplars_per_template_cap: {BROAD_LOG_TRIAGE_ERROR_EXEMPLAR_CAP}\n\
-             ranking_note: prefer semantic_occurrence_count and amplification over raw error_event_count\n",
+             ranking_note: prefer certified semantic episode counts when exposed; otherwise use strongly supported derived episodes plus raw/rendering and unresolved counts\n",
             selected_errors.len(),
             BROAD_LOG_TRIAGE_ERROR_DISPLAY_CAP.saturating_sub(BROAD_LOG_TRIAGE_RARE_ERROR_RESERVE)
         ));
@@ -2584,11 +2584,17 @@ impl ToolHost {
                         let count = p.occurrence_count.unwrap_or(0);
                         (count.to_string(), supporting.to_string(), true)
                     }
-                    Some(_) => (
-                        "unknown_partial".to_string(),
-                        "unknown_partial".to_string(),
-                        false,
-                    ),
+                    Some(_) => {
+                        let unavailable = if exception_report
+                            .as_ref()
+                            .is_some_and(|report| !report.semantic_counts_certified)
+                        {
+                            "unknown_uncertified"
+                        } else {
+                            "unknown_partial"
+                        };
+                        (unavailable.to_string(), unavailable.to_string(), false)
+                    }
                     None => (
                         hit.error_event_count.to_string(),
                         "false".to_string(),
@@ -9353,6 +9359,13 @@ mod tests {
             .windows(2)
             .all(|pair| pair[0].group_id != pair[1].group_id));
         assert!(brief.candidate_groups.len() <= BROAD_LOG_TRIAGE_CANDIDATE_CAP);
+        assert!(
+            brief
+                .model_text
+                .contains("episode_adjusted_count=unknown_uncertified"),
+            "uncertified correlation groups must not become semantic template counts: {}",
+            brief.model_text
+        );
         for candidate in &brief.candidate_groups {
             assert!(candidate.model_text.contains("bounded_observations:"));
             assert!(candidate.model_text.contains("level=ERROR"));

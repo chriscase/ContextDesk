@@ -7,7 +7,7 @@
 //!    typed execution evidence and fail-closed boundaries.
 //! 4. **Strongly supported derived episodes** — chain↔stderr unique matches
 //!    (or single dual-render) under reciprocal/forced evidence only.
-//! 5. **Families** — bounded groups of episodes sharing a root signature.
+//! 5. **Families** — bounded signature buckets of retained correlation groups.
 //!
 //! Merge guards (fail closed):
 //! - message equality, divisibility, adjacency, or rotation-family alone never
@@ -163,7 +163,7 @@ pub enum ExceptionRenderingKind {
     SeparatelyWrappedRecords,
 }
 
-/// Role of one child event inside a physical rendering / semantic occurrence.
+/// Role of one child event inside a physical rendering / retained correlation group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExceptionCitationRole {
@@ -201,13 +201,13 @@ impl ExceptionEventCitation {
     }
 }
 
-/// Per-template projection onto semantic occurrences (never borrows global counts).
+/// Per-template projection onto certified semantic episodes (never borrows global counts).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TemplateEpisodeProjection {
     /// Template id projected.
     pub template_id: u64,
-    /// Occurrences that contain this template (once each). `None` when incomplete.
+    /// Certified episodes that contain this template (once each). `None` when uncertified.
     pub occurrence_count: Option<u64>,
     /// Occurrences where this template appears as a rendering lead.
     pub lead_occurrence_count: Option<u64>,
@@ -231,7 +231,12 @@ pub enum ExceptionCorrelationConfidence {
     Moderate,
 }
 
-/// One likely logical occurrence (semantic episode).
+/// One retained correlation group.
+///
+/// A group may be a strongly supported derived episode, a weaker multi-render
+/// candidate, or one uncorrelated physical rendering. Consumers must not treat
+/// a group as a semantic episode unless the enclosing report certifies semantic
+/// counts and the group carries Strong correlation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExceptionOccurrenceSummary {
@@ -335,15 +340,15 @@ pub struct ExceptionAmplificationMetrics {
     pub stderr_exception_records: u64,
     /// Physical rendering count.
     pub physical_renderings: u64,
-    /// Semantic occurrence count (denominator for per-occurrence ratios).
+    /// Retained correlation-group count (legacy field name for compatibility).
     pub semantic_occurrences: u64,
-    /// `raw_exception_records / semantic_occurrences` with remainder.
+    /// `raw_exception_records / retained correlation groups` with remainder.
     pub raw_records_per_occurrence: ExceptionCountRatio,
-    /// `stderr_exception_records / semantic_occurrences` with remainder.
+    /// `stderr_exception_records / retained correlation groups` with remainder.
     pub stderr_records_per_occurrence: ExceptionCountRatio,
-    /// `application_exception_records / semantic_occurrences` with remainder.
+    /// `application_exception_records / retained correlation groups` with remainder.
     pub application_records_per_occurrence: ExceptionCountRatio,
-    /// `physical_renderings / semantic_occurrences` with remainder.
+    /// `physical_renderings / retained correlation groups` with remainder.
     pub renderings_per_occurrence: ExceptionCountRatio,
 }
 
@@ -395,7 +400,8 @@ pub struct ExceptionFamilySummary {
     pub stderr_record_count: u64,
     /// Sum of physical renderings across occurrences.
     pub rendering_episode_count: u64,
-    /// Semantic occurrence count (never invented).
+    /// Retained correlation-group count (legacy field name for compatibility).
+    /// This is not an independent-incident count when semantic totals are uncertified.
     pub occurrence_count: u64,
     /// Occurrences that include duplicate renderings.
     pub duplicate_rendering_occurrence_count: u64,
@@ -437,7 +443,8 @@ pub struct ExceptionEpisodeAnalysis {
     pub rendering_episode_count: u64,
     /// Unpaired physical renderings after matching.
     pub unpaired_rendering_count: u64,
-    /// Semantic occurrence count.
+    /// Retained correlation-group count (legacy field name for compatibility).
+    /// This is not an independent-incident count when semantic totals are uncertified.
     pub occurrence_count: u64,
     /// Occurrences with duplicate renderings.
     pub duplicate_rendering_occurrence_count: u64,
@@ -1402,9 +1409,20 @@ fn analyze_bounded_events_cancellable(
         })
         .collect::<Vec<_>>();
     families.sort_by(|left, right| {
-        right
-            .occurrence_count
-            .cmp(&left.occurrence_count)
+        let strong_count = |family: &ExceptionFamilySummary| {
+            family
+                .occurrences
+                .iter()
+                .filter(|occurrence| {
+                    occurrence.duplicate_rendering
+                        && occurrence.correlation_confidence
+                            == ExceptionCorrelationConfidence::Strong
+                })
+                .count()
+        };
+        strong_count(right)
+            .cmp(&strong_count(left))
+            .then_with(|| right.occurrence_count.cmp(&left.occurrence_count))
             .then_with(|| right.raw_record_count.cmp(&left.raw_record_count))
             .then_with(|| left.signature.cmp(&right.signature))
     });
@@ -1518,15 +1536,21 @@ fn analyze_bounded_events_cancellable(
 
 fn build_ranking_disclosure(report: &ExceptionEpisodeAnalysis) -> String {
     let amp = &report.amplification;
+    let certified_semantic_count = if report.semantic_counts_certified && !report.partial {
+        report.strong_derived_episode_count.to_string()
+    } else {
+        "withheld".into()
+    };
     format!(
-        "ranking_basis: strong_derived_episodes_not_raw_stack_volume\n\
+        "ranking_basis: strong_derived_episodes DESC, retained_correlation_groups DESC, raw_records DESC, signature ASC\n\
          candidate_scope: {}\n\
          layer_raw_exception_records: {}\n\
          layer_application_exception_records: {}\n\
          layer_stderr_exception_records: {}\n\
          layer_physical_renderings: {}\n\
          layer_unpaired_renderings: {}\n\
-         layer_semantic_occurrences: {}\n\
+         layer_retained_correlation_groups: {}\n\
+         layer_certified_semantic_episodes: {}\n\
          layer_duplicate_rendering_occurrences: {}\n\
          layer_application_propagation_chains: {}\n\
          layer_strong_derived_episodes: {}\n\
@@ -1574,6 +1598,7 @@ fn build_ranking_disclosure(report: &ExceptionEpisodeAnalysis) -> String {
         report.rendering_episode_count,
         report.unpaired_rendering_count,
         report.occurrence_count,
+        certified_semantic_count,
         report.duplicate_rendering_occurrence_count,
         report.application_propagation_chain_count,
         report.strong_derived_episode_count,
@@ -1625,12 +1650,12 @@ fn build_ranking_disclosure(report: &ExceptionEpisodeAnalysis) -> String {
     )
 }
 
-/// Project one template onto semantic occurrences (at most once per occurrence).
+/// Project one template onto certified semantic episodes (at most once per episode).
 pub fn project_template_onto_episodes(
     report: &ExceptionEpisodeAnalysis,
     template_id: u64,
 ) -> TemplateEpisodeProjection {
-    if report.partial || !report.counts_complete {
+    if report.partial || !report.counts_complete || !report.semantic_counts_certified {
         return TemplateEpisodeProjection {
             template_id,
             occurrence_count: None,
@@ -1638,7 +1663,8 @@ pub fn project_template_onto_episodes(
             supporting_only_occurrence_count: None,
             complete: false,
             incomplete_reason: Some(
-                "analysis partial or incomplete; template occurrence projection withheld".into(),
+                "semantic episode totals are partial, incomplete, or uncertified; template projection withheld"
+                    .into(),
             ),
         };
     }
@@ -1782,6 +1808,15 @@ use raw/rendering and unresolved/ambiguous counts only\n",
     ));
     for family in report.families.iter().take(4) {
         let famp = &family.amplification;
+        let strong_derived = family
+            .occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.duplicate_rendering
+                    && occurrence.correlation_confidence == ExceptionCorrelationConfidence::Strong
+            })
+            .count() as u64;
+        let non_strong_groups = family.occurrence_count.saturating_sub(strong_derived);
         let sig = {
             let mut s: String = family.signature.chars().take(96).collect();
             if family.signature.chars().count() > 96 {
@@ -1790,9 +1825,12 @@ use raw/rendering and unresolved/ambiguous counts only\n",
             s
         };
         out.push_str(&format!(
-            "- signature={sig} occurrences={} raw={} app={} stderr={} \
-             raw_per_occ={}/{}={} rem{} duplicates={}\n",
+            "- signature={sig} retained_correlation_groups={} strong_derived_episodes={} \
+             non_strong_groups={} raw={} app={} stderr={} \
+             raw_per_group={}/{}={} rem{} duplicate_render_groups={}\n",
             family.occurrence_count,
+            strong_derived,
+            non_strong_groups,
             family.raw_record_count,
             family.application_record_count,
             family.stderr_record_count,
@@ -1804,17 +1842,19 @@ use raw/rendering and unresolved/ambiguous counts only\n",
         ));
         for occ in family.occurrences.iter().take(1) {
             out.push_str(&format!(
-                "  occurrence raw={} app={} stderr={} renderings={} duplicate={}\n",
+                "  retained_group raw={} app={} stderr={} renderings={} duplicate={} confidence={:?}\n",
                 occ.raw_record_count,
                 occ.application_record_count,
                 occ.stderr_record_count,
                 occ.rendering_count,
-                occ.duplicate_rendering
+                occ.duplicate_rendering,
+                occ.correlation_confidence
             ));
         }
     }
     out.push_str(
-        "note: raw records ≠ renderings ≠ strongly supported derived episodes ≠ independent incidents; \
+        "note: occurrenceCount and semanticOccurrences are legacy JSON names for retained correlation groups; \
+         raw records ≠ renderings ≠ retained groups ≠ strongly supported derived episodes ≠ independent incidents; \
          amplification ratios include remainders; \
          counts_complete is independent of ratio_integral; \
          semantic totals require semantic_counts_certified.\n",
@@ -4888,7 +4928,12 @@ mod tests {
         }
         let analysis = analyze_bounded_events(events.len() as u64, &events);
         assert_eq!(analysis.occurrence_count, 5);
-        let proj = project_template_onto_episodes(&analysis, 7777);
+        let withheld = project_template_onto_episodes(&analysis, 7777);
+        assert!(!withheld.complete, "{withheld:?}");
+        assert_eq!(withheld.occurrence_count, None);
+        let mut certified = analysis.clone();
+        certified.semantic_counts_certified = true;
+        let proj = project_template_onto_episodes(&certified, 7777);
         assert!(proj.complete, "{proj:?}");
         assert_eq!(proj.occurrence_count, Some(2));
         assert_eq!(proj.supporting_only_occurrence_count, Some(2));
@@ -5727,7 +5772,12 @@ mod tests {
             .find(|f| f.occurrence_count == 3)
             .expect("family B 3");
         assert_ne!(fam_a.signature, fam_b.signature);
-        let proj = project_template_onto_episodes(&analysis, 7777);
+        let withheld = project_template_onto_episodes(&analysis, 7777);
+        assert!(!withheld.complete, "{withheld:?}");
+        assert_eq!(withheld.occurrence_count, None);
+        let mut certified = analysis.clone();
+        certified.semantic_counts_certified = true;
+        let proj = project_template_onto_episodes(&certified, 7777);
         assert!(proj.complete, "{proj:?}");
         assert_eq!(proj.occurrence_count, Some(3));
         assert_eq!(proj.supporting_only_occurrence_count, Some(3));
@@ -6423,6 +6473,96 @@ mod tests {
         assert!(analysis
             .ranking_disclosure
             .contains("semantic_counts_certified: false"));
+        let projection = project_template_onto_episodes(&analysis, 101);
+        assert!(!projection.complete);
+        assert_eq!(projection.occurrence_count, None);
+        assert!(projection
+            .incomplete_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("uncertified")));
+    }
+
+    #[test]
+    fn strong_episode_ranking_beats_more_uncertified_standalone_groups() {
+        fn app(seq: u64, ts: i64, family: &str, request: &str) -> ExplorerEvent {
+            event(
+                seq,
+                ts,
+                "application.log",
+                &format!(
+                    "request_id={request} java.lang.IllegalArgumentException: {family}\n at sample.module.Entry.run(Entry.java:1)"
+                ),
+            )
+        }
+        fn wrapped(seq: u64, ts: i64, family: &str, request: &str) -> Vec<ExplorerEvent> {
+            vec![
+                event(
+                    seq,
+                    ts,
+                    "wrapped.log",
+                    &format!(
+                        "[stderr] (worker-{request}) request_id={request} java.lang.IllegalArgumentException: {family}"
+                    ),
+                ),
+                event(
+                    seq + 1,
+                    ts,
+                    "wrapped.log",
+                    &format!(
+                        "[stderr] (worker-{request}) request_id={request} at sample.module.Entry.run(Entry.java:1)"
+                    ),
+                ),
+            ]
+        }
+
+        let mut events = vec![app(1, 10, "family_one", "one-strong")];
+        events.extend(wrapped(2, 10, "family_one", "one-strong"));
+        for (offset, request) in ["one-a", "one-b", "one-c"].into_iter().enumerate() {
+            events.push(app(
+                10 + offset as u64,
+                100 + offset as i64 * 100,
+                "family_one",
+                request,
+            ));
+        }
+        for (index, request) in ["two-a", "two-b"].into_iter().enumerate() {
+            let seq = 100 + index as u64 * 10;
+            let ts = 1_000 + index as i64 * 100;
+            events.push(app(seq, ts, "family_two", request));
+            events.extend(wrapped(seq + 1, ts, "family_two", request));
+        }
+
+        let analysis = analyze_bounded_events(events.len() as u64, &events);
+        assert!(!analysis.semantic_counts_certified);
+        let ranked_signatures: Vec<&str> = analysis
+            .families
+            .iter()
+            .map(|family| family.signature.as_str())
+            .collect();
+        assert_eq!(ranked_signatures.len(), 2, "{ranked_signatures:?}");
+        assert!(ranked_signatures[0].contains("family_two"));
+        let first = &analysis.families[0];
+        let second = &analysis.families[1];
+        let strong = |family: &ExceptionFamilySummary| {
+            family
+                .occurrences
+                .iter()
+                .filter(|group| {
+                    group.duplicate_rendering
+                        && group.correlation_confidence == ExceptionCorrelationConfidence::Strong
+                })
+                .count()
+        };
+        assert_eq!(strong(first), 2);
+        assert_eq!(strong(second), 1);
+        assert!(second.occurrence_count > first.occurrence_count);
+
+        let brief = format_exception_episode_brief_section(&analysis);
+        assert!(brief.contains("semantic_occurrence_count: withheld"));
+        assert!(brief.contains("retained_correlation_groups="));
+        assert!(brief.contains("strong_derived_episodes="));
+        assert!(!brief.contains(" occurrences="));
+        assert!(!brief.contains("raw_per_occ="));
     }
 
     #[test]

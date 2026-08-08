@@ -588,7 +588,14 @@ It reports v2 layers with typed completeness:
    execution evidence (trace/request/thread) with fail-closed boundaries.
 4. **Strongly supported derived episodes** — chain↔stderr unique matches
    (forced/reciprocal only); never bare “N incidents”.
-5. **Families** — bounded groups of episodes sharing a root signature.
+5. **Families** — bounded signature buckets of retained correlation groups.
+
+For schema compatibility, JSON fields named `occurrenceCount` and
+`semanticOccurrences` count **retained correlation groups**. Those groups
+include uncorrelated standalone renderings when matching fails closed; they are
+not semantic-episode or independent-incident totals unless
+`semantic_counts_certified=true`. Human and model-facing text labels them as
+retained groups and withholds the certified semantic total otherwise.
 
 Completeness fields separate `scan_complete`, `renderings_complete`,
 `correlation_complete`, `citations_complete`, `structural_coverage_complete`,
@@ -609,9 +616,9 @@ unverified.
 
 This distinction matters for application servers that emit one exception as
 both a normal multiline log entry and hundreds of individually wrapped stderr
-frames. ContextDesk preserves all those records while reporting the supported
-incident count separately, so record amplification is not presented as
-hundreds of independent outages.
+frames. ContextDesk preserves all those records while reporting strongly
+supported derived episodes separately. It never presents retained groups or
+record amplification as independent outages.
 
 ## Ingest-pipeline provenance (stale corpora)
 

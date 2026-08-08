@@ -886,11 +886,10 @@ fn product_path_family_a_56_family_b_3_supporting_template_projects_to_three() {
         .expect("family B 3");
     assert_ne!(fam_a.signature, fam_b.signature);
     let proj = project_template_onto_episodes(&analysis, 7777);
-    assert!(proj.complete, "{proj:?}");
-    assert_eq!(proj.occurrence_count, Some(3));
-    assert_eq!(proj.supporting_only_occurrence_count, Some(3));
-    assert_ne!(proj.occurrence_count, Some(56));
-    assert_ne!(proj.occurrence_count, Some(59));
+    assert!(!analysis.semantic_counts_certified);
+    assert!(!proj.complete, "{proj:?}");
+    assert_eq!(proj.occurrence_count, None);
+    assert_eq!(proj.supporting_only_occurrence_count, None);
 }
 
 // ─── Cap / EOF / INFO-after-50k (product scan path) ─────────────────────────

@@ -1,5 +1,5 @@
-//! `contextdesk exception-episodes` — four-layer exception rendering analysis
-//! (raw records / physical renderings / semantic occurrences / families).
+//! `contextdesk exception-episodes` — layered exception rendering analysis
+//! (raw records / physical renderings / correlation groups / certified episodes / families).
 
 use crate::cli::ExceptionEpisodesArgs;
 use crate::envelope::{CliError, CliResult, Render};
@@ -18,6 +18,11 @@ impl Render for ExceptionEpisodesOutput {
         let mut out = String::new();
         out.push_str("Exception episode correlation\n\n");
         let amp = &r.amplification;
+        let certified_semantic = if r.semantic_counts_certified && !r.partial {
+            r.strong_derived_episode_count.to_string()
+        } else {
+            "withheld (uncertified)".into()
+        };
         out.push_str(&format!(
             "  Schema           {} v{}\n\
              \nLayers\n\n\
@@ -30,12 +35,13 @@ impl Render for ExceptionEpisodesOutput {
                Stderr records              {}\n\
                Physical renderings         {}\n\
                Unpaired renderings         {}\n\
-               Semantic occurrences        {}\n\
+               Retained correlation groups {}\n\
+               Certified semantic episodes {}\n\
                Duplicate-render occurrences {}\n\
                Families                    {}\n\
-               Raw records / occurrence    {}/{} = {} rem {}\n\
-               Stderr records / occurrence {}/{} = {} rem {}\n\
-               Renderings / occurrence     {}/{} = {} rem {}\n\
+               Raw records / retained group {}/{} = {} rem {}\n\
+               Stderr records / retained group {}/{} = {} rem {}\n\
+               Renderings / retained group {}/{} = {} rem {}\n\
                Counts complete             {}\n\
                Partial                     {}\n\
                Uncertain                   {}\n\
@@ -52,6 +58,7 @@ impl Render for ExceptionEpisodesOutput {
             r.rendering_episode_count,
             r.unpaired_rendering_count,
             r.occurrence_count,
+            certified_semantic,
             r.duplicate_rendering_occurrence_count,
             r.families.len(),
             amp.raw_records_per_occurrence.numerator,
@@ -75,10 +82,22 @@ impl Render for ExceptionEpisodesOutput {
             out.push_str("\nFamilies\n");
             for f in r.families.iter().take(12) {
                 let famp = &f.amplification;
+                let strong_derived = f
+                    .occurrences
+                    .iter()
+                    .filter(|occurrence| {
+                        occurrence.duplicate_rendering
+                            && occurrence.correlation_confidence
+                                == cd_core::log_analysis::ExceptionCorrelationConfidence::Strong
+                    })
+                    .count() as u64;
+                let non_strong_groups = f.occurrence_count.saturating_sub(strong_derived);
                 out.push_str(&format!(
-                    "\n  {} occurrences={} raw={} app={} stderr={} renderings={} raw_per_occ={}/{}={} rem{} app_per_occ={}/{}={} rem{} duplicates={}\n",
+                    "\n  {} retained_groups={} strong_derived={} non_strong_groups={} raw={} app={} stderr={} renderings={} raw_per_group={}/{}={} rem{} app_per_group={}/{}={} rem{} duplicate_render_groups={}\n",
                     f.signature,
                     f.occurrence_count,
+                    strong_derived,
+                    non_strong_groups,
                     f.raw_record_count,
                     f.application_record_count,
                     f.stderr_record_count,
@@ -95,7 +114,7 @@ impl Render for ExceptionEpisodesOutput {
                 ));
                 for occ in f.occurrences.iter().take(2) {
                     out.push_str(&format!(
-                        "    occurrence raw={} renderings={} duplicate={} confidence={:?}\n",
+                        "    retained_group raw={} renderings={} duplicate={} confidence={:?}\n",
                         occ.raw_record_count,
                         occ.rendering_count,
                         occ.duplicate_rendering,
@@ -142,7 +161,7 @@ impl Render for ExceptionEpisodesOutput {
             );
         }
         out.push_str(
-            "\n\nNote\n\n  Layers: raw records, physical renderings, application propagation chains,              strongly supported derived episodes, families. Never claim independent incident counts.              Order-only app-app grouping requires an exact unique execution anchor.              counts_complete is a deprecated v1 alias and does not alone certify semantic totals.              Raw events are unchanged.\n",
+            "\n\nNote\n\n  Layers: raw records, physical renderings, retained correlation groups, application propagation chains, strongly supported derived episodes, families. occurrenceCount and semanticOccurrences are legacy JSON names for retained groups, not incident totals. Never claim independent incident counts. Order-only app-app grouping requires an exact unique execution anchor. counts_complete is a deprecated v1 alias and does not alone certify semantic totals. Raw events are unchanged.\n",
         );
         out.trim_end().to_string()
     }

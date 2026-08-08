@@ -33,7 +33,7 @@ Help [demo datasets](help/log-analysis/demo-datasets.md).
 | Timezone status / apply / apply-all | **Host (deterministic)** | Explicit operator declaration; no silent guessing |
 | `explore`, `context`, Log Explorer search/filter/lanes | **Host (deterministic)** | Retrieval and evidence assembly on the host |
 | `normalize` → JSONL + manifest + report | **Host (deterministic)** | Offline; zero provider / keychain |
-| `exception-episodes` | **Host (deterministic)** | Separates raw exception records, physical renderings, semantic occurrences, and families; preserves raw citations |
+| `exception-episodes` | **Host (deterministic)** | Separates raw exception records, physical renderings, retained correlation groups, certified derived episodes, and families; preserves raw citations |
 | Activity Inspector / `chat --activity` | **Host capture** of a turn | Process-lifetime; not durable after quit |
 | Grounded answer text in `chat` / desktop chat | **LLM** (when not `--dry-run`) | Model synthesizes; citations must still resolve to **host** evidence ids |
 | `chat --dry-run` | **Host only** | Builds bounded context; guarantees no provider request |
@@ -237,10 +237,14 @@ $BIN --data-dir "$DATA" --json episodes "$CORPUS"
 ```
 
 **Expect:** the text report clearly separates raw exception records, physical
-renderings, semantic occurrences, and families. The JSON report uses schema
-`contextdesk.exception_episode_report.v1`, retains `seq` + `source` citations,
-and exposes `counts_complete`, `partial`, `uncertain`, and
-`matching_ambiguous`. The public CLI fixture may contain no dual-rendered
+renderings, retained correlation groups, certified derived episodes, and
+families. The JSON report uses schema
+`contextdesk.exception_episode_report.v2`, retains `seq` + `source` citations,
+and exposes `counts_complete`, `partial`, `uncertain`,
+`matching_ambiguous`, and `semantic_counts_certified`. Compatibility fields
+`occurrenceCount` and `semanticOccurrences` count retained groups, including
+standalone unresolved renderings; they are not incident totals when semantic
+counts are uncertified. The public CLI fixture may contain no dual-rendered
 exception; zero/low amplification is honest. Use the dedicated synthetic
 exception lab for the exact 56×265 oracle—never substitute private logs.
 
@@ -273,10 +277,12 @@ quality** for interactive evidence/lane review.
 ## 5. Exception-episode scope
 
 `exception-episodes` is also deterministic and offline. Correlation requires
-multiple host signals and never changes stored events. Its occurrence count is
-an evidence-supported estimate of independent failures, not proof of business
-root cause. Any incomplete cap, ambiguous matching geometry, cancellation, or
-revision change is disclosed or fails closed; see
+multiple host signals and never changes stored events. Retained correlation
+groups are structural accounting, not estimates of independent failures. Only
+a `semantic_counts_certified=true` result authorizes the separately labeled
+strongly supported derived-episode total; even that is not proof of business
+root cause or an independent-incident count. Any incomplete cap, ambiguous
+matching geometry, cancellation, or revision change is disclosed or fails closed; see
 [CLI.md](CLI.md#exception-episodes-and-duplicate-renderings).
 
 ---
