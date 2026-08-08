@@ -55,6 +55,44 @@ confidence — V1 validates none, so the output says so. It is ordered by
 host-owned identifiers, so a permuted envelope renders byte-identically.
 Nothing parses that Markdown back: a later turn builds a fresh ledger.
 
+### Presentation is a trust boundary too
+
+A validated envelope is safe as *data* and still unsafe as *markup*: the
+projection interpolates dynamic strings into a document a renderer reparses.
+Claim text is model-controlled, and the corpus-derived fields — identifiers,
+source labels, locators, excerpts — are only ever whatever an imported log
+called itself, so host-owned does not mean safe to reparse. Without a boundary
+a claim can open a new line and write a second "root cause established" line, a
+heading, an evidence section, or a clickable link that looks host-issued.
+
+Every dynamic value therefore passes through
+`cd_core::investigation_answer::literal_display_text` and is emitted inside a
+code span. Three normalizations, all deliberate and all documented here:
+
+1. **Line, paragraph, and column boundaries become a single space.** This is
+   the load-bearing rule. Every block construct — heading, list item, table
+   row, fence, block quote — and every host status line is line-anchored, so a
+   value that cannot contain a line break cannot author any of them. One rule
+   covers the whole class without naming a single construct.
+2. **C0, C1, and DEL are removed**, which takes ESC with them, so no ANSI or
+   OSC sequence (including OSC 8 hyperlinks) can reach a terminal.
+3. **Bidi formatting controls are removed**, so displayed order matches byte
+   order. `TerminalTextSanitizer` applies the same set to all CLI output.
+
+A backtick becomes a straight apostrophe — the one character that could close
+the surrounding span early. Everything else is preserved, including non-ASCII
+letters, emoji, and combining marks: this is a control-character and
+line-structure boundary, not a character allowlist. A value that normalizes to
+nothing renders as the host's `(empty)` placeholder rather than an empty span.
+
+The code span is what survives into the renderer: its content is literal by
+definition, so no emphasis, link, autolink, citation chip, or HTML can form
+from a dynamic value. `MarkdownBody` was extracting code spans *after* running
+its emphasis, link, chip, and `<br>` passes over the whole string, which meant
+a code span protected nothing; it now extracts them first. The visible
+backticks are part of the point: a reader can see exactly where host-owned
+structure stops and quoted, untrusted content starts.
+
 The legacy structured-triage answer contract (`observations`,
 `causal_candidates`, `competing_explanations`, `confidence`,
 `missing_or_next_evidence`) and its hermetic rubric still govern the

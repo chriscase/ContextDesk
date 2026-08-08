@@ -164,7 +164,11 @@ revision. Hosts may persist the exact envelope in assistant-message metadata and
 to human text, JSON, JSONL, or IPC. The human projection is produced centrally by
 `cd_core::investigation_answer::render_answer_markdown`, so CLI and desktop display the same
 deterministic Markdown; the accompanying `TextDelta` carries that Markdown, never the
-authoritative JSON. Those projections are display/read APIs only: hosts must not parse displayed
+authoritative JSON. In that projection every dynamic value — model-authored claim text and
+corpus-derived identifiers, labels, locators, and excerpts alike — is reduced to a single line
+free of control, ANSI/OSC, and bidi material and emitted inside a code span, so only the host
+can author a heading, status line, candidate, evidence section, withheld marker, citation, or
+link. Hosts rendering that Markdown must treat code spans as literal. Those projections are display/read APIs only: hosts must not parse displayed
 transcript text or JSON, or accept client-supplied envelope JSON, to create or revalidate
 authority. Authoritative turn ids and message-row ownership are host-created; renderer message ids
 are correlation labels and cannot select a prior transcript row for new authority. A subsequent

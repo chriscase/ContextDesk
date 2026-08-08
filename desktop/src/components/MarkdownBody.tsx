@@ -106,13 +106,57 @@ function restoreSafeBrTags(escaped: string): string {
     .replace(/&lt;br\s*&gt;\s*&lt;\/br\s*&gt;/gi, "<br />");
 }
 
+/**
+ * Sentinel standing in for one extracted code span while the other inline
+ * passes run. U+0000 cannot appear in source text here (it is stripped below
+ * and never survives the host's own literal-text boundary), so no author —
+ * model, log line, or otherwise — can forge a slot.
+ */
+const CODE_SLOT_SENTINEL = String.fromCharCode(0);
+const CODE_SLOT_RE = new RegExp(
+  `${CODE_SLOT_SENTINEL}c(\\d+)${CODE_SLOT_SENTINEL}`,
+  "g",
+);
+const CODE_SLOT_STRIP_RE = new RegExp(CODE_SLOT_SENTINEL, "g");
+
+/**
+ * Pull code spans out before any other inline pass runs.
+ *
+ * A code span's content is literal by definition, so emphasis, links,
+ * autolinks, citation chips, and `<br>` restoration must never see it. This
+ * renderer used to run every pass over the whole string, which meant a code
+ * span protected nothing: `` `[a](https://x)` `` still became a link. That is
+ * also what makes a code span a usable boundary for untrusted values.
+ */
+function extractCodeSpans(escaped: string): {
+  text: string;
+  spans: string[];
+} {
+  const spans: string[] = [];
+  const text = escaped.replace(/`([^`]*)`/g, (_m, body: string) => {
+    spans.push(body);
+    return `${CODE_SLOT_SENTINEL}c${spans.length - 1}${CODE_SLOT_SENTINEL}`;
+  });
+  return { text, spans };
+}
+
+function restoreCodeSpans(text: string, spans: string[]): string {
+  return text.replace(
+    CODE_SLOT_RE,
+    (_m, index: string) => `<code>${spans[Number(index)] ?? ""}</code>`,
+  );
+}
+
 /** Core inline formatting (bold/links/code) after optional list restructuring. */
 function renderInlinePlain(src: string): string {
-  let s = escapeHtml(src);
+  // Strip the slot sentinel from author-controlled text first: everything
+  // after this point may rely on slots being host-generated.
+  let s = escapeHtml(src.replace(CODE_SLOT_STRIP_RE, ""));
+  const { text, spans } = extractCodeSpans(s);
+  s = text;
   s = restoreSafeBrTags(s);
   // Soft breaks: only when the model used an explicit HTML br (already restored).
   // Real \n stay as \n for pre-wrap containers (paragraphs, table cells).
-  s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   s = s.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
   s = s.replace(
@@ -127,7 +171,7 @@ function renderInlinePlain(src: string): string {
     const host = shortHostFromUrl(String(href));
     return `${pre}<a class="md-ext-link" href="${href}" target="_blank" rel="noreferrer noopener" title="${href}">${host}</a>`;
   });
-  return s;
+  return restoreCodeSpans(s, spans);
 }
 
 type InlineCtx = "default" | "list-item" | "table-cell";

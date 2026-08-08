@@ -378,6 +378,105 @@ pub fn authoritative_json(envelope: &AnswerEnvelopeV1) -> String {
     serde_json::to_string(&envelope.answer).unwrap_or_else(|_| "{}".into())
 }
 
+/// Unicode formatting controls that can reorder or re-anchor a rendered line
+/// without being visible: the bidi overrides, embeddings, isolates, and the
+/// directional marks. Their only effect on a log excerpt or an identifier is
+/// to make what a reader sees differ from what the bytes say, which is exactly
+/// the property a presentation boundary must remove.
+const BIDI_FORMATTING_CONTROLS: [char; 12] = [
+    '\u{061c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}',
+    '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+];
+
+/// Whether `c` is one of [`BIDI_FORMATTING_CONTROLS`].
+///
+/// Exposed so a host's own terminal or webview boundary applies the same set
+/// as this projection instead of keeping a second, drifting copy.
+pub fn is_bidi_formatting_control(c: char) -> bool {
+    BIDI_FORMATTING_CONTROLS.contains(&c)
+}
+
+/// Whether `c` starts or ends a line, paragraph, or column in some renderer.
+fn is_line_boundary(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\r' | '\t' | '\u{000b}' | '\u{000c}' | '\u{0085}' | '\u{2028}' | '\u{2029}'
+    )
+}
+
+/// Reduce one untrusted value to a single line of literal display text.
+///
+/// Applies to *every* dynamic string the projection shows — model-authored
+/// claim text and host-owned-but-corpus-derived strings alike (identifiers,
+/// source labels, locators, excerpts). Host-owned does not mean trustworthy as
+/// presentation: a source label is whatever the imported log called itself.
+///
+/// Three deliberate normalizations, in order:
+///
+/// 1. **Every line, paragraph, and column boundary becomes one space.** This
+///    is the load-bearing one. A value that cannot contain a line break cannot
+///    begin a line, and every block construct in Markdown — heading, list
+///    item, table row, fence, block quote — as well as every host status line
+///    this projection emits, is line-anchored. One rule removes the whole
+///    class, with no knowledge of any construct.
+/// 2. **C0, C1, and DEL are removed.** That covers ESC, so ANSI/OSC sequences
+///    (including OSC 8 hyperlinks) can never survive into a terminal, and the
+///    single-byte C1 CSI introducer with them.
+/// 3. **Bidi formatting controls are removed** ([`BIDI_FORMATTING_CONTROLS`]),
+///    so displayed order matches byte order.
+///
+/// A backtick becomes a straight apostrophe, because the caller renders the
+/// result inside a code span and a backtick is the one character that could
+/// close it early. Replacing rather than deleting keeps quoted prose readable.
+///
+/// Everything else is preserved, including non-ASCII letters, emoji, and
+/// combining marks: this is a control-character and line-structure boundary,
+/// not a character allowlist.
+pub fn literal_display_text(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut pending_space = false;
+    for c in raw.chars() {
+        if is_line_boundary(c) || c == ' ' {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if c.is_control() || c == '\u{007f}' || BIDI_FORMATTING_CONTROLS.contains(&c) {
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        out.push(if c == '`' { '\'' } else { c });
+    }
+    out
+}
+
+/// Placeholder shown when a value carried nothing displayable.
+///
+/// Host-owned static text, so an emptied value can never render as an empty
+/// code span (which is not a code span at all) or vanish silently.
+const EMPTY_VALUE_PLACEHOLDER: &str = "(empty)";
+
+/// Render one untrusted value as literal display text inside a code span.
+///
+/// The code span is the boundary that survives a Markdown renderer: its
+/// content is by definition literal, so no emphasis, link, autolink, citation
+/// chip, or HTML can be formed from a dynamic value. [`literal_display_text`]
+/// has already removed the one character able to close the span early, so the
+/// value cannot escape it.
+///
+/// Every dynamic value in the projection goes through here. The visible
+/// backticks are the point as much as the safety is: a reader can see exactly
+/// where host-owned structure stops and quoted, untrusted content starts.
+fn literal_span(raw: &str) -> String {
+    let normalized = literal_display_text(raw);
+    if normalized.is_empty() {
+        return EMPTY_VALUE_PLACEHOLDER.to_string();
+    }
+    format!("`{normalized}`")
+}
+
 /// Human-readable label for a claim kind.
 ///
 /// Host-owned presentation of a fixed enum — not a domain word list, and not
@@ -477,8 +576,8 @@ pub fn render_answer_markdown(envelope: &AnswerEnvelopeV1) -> String {
     // omitting the line silently would invite the reader to supply one.
     out.push_str("- Confidence: not rated by this contract\n");
     out.push_str(&format!(
-        "- Evidence snapshot: corpus `{}` · events {} · template analysis {} · suppression {}\n",
-        envelope.binding.corpus_id,
+        "- Evidence snapshot: corpus {} · events {} · template analysis {} · suppression {}\n",
+        literal_span(&envelope.binding.corpus_id),
         envelope.binding.revision.event_revision,
         envelope.binding.revision.template_analysis_revision,
         envelope.binding.revision.suppression_revision,
@@ -491,7 +590,10 @@ pub fn render_answer_markdown(envelope: &AnswerEnvelopeV1) -> String {
     }
     let mut displayed_evidence: BTreeSet<&str> = BTreeSet::new();
     for candidate in candidates {
-        out.push_str(&format!("\n## Candidate `{}`\n", candidate.candidate_id));
+        out.push_str(&format!(
+            "\n## Candidate {}\n",
+            literal_span(&candidate.candidate_id)
+        ));
         let mut rendered_any = false;
         for kind in CLAIM_KIND_RENDER_ORDER {
             let mut claims = candidate
@@ -514,7 +616,7 @@ pub fn render_answer_markdown(envelope: &AnswerEnvelopeV1) -> String {
                     out.push_str(marker);
                     out.push(' ');
                 }
-                out.push_str(claim.text.trim());
+                out.push_str(&literal_span(&claim.text));
                 let mut cited = claim
                     .evidence_ids
                     .iter()
@@ -526,7 +628,7 @@ pub fn render_answer_markdown(envelope: &AnswerEnvelopeV1) -> String {
                 if !cited.is_empty() {
                     let rendered = cited
                         .iter()
-                        .map(|id| format!("`{id}`"))
+                        .map(|id| literal_span(id))
                         .collect::<Vec<_>>()
                         .join(", ");
                     out.push_str(&format!(" — cites {rendered}"));
@@ -551,8 +653,10 @@ pub fn render_answer_markdown(envelope: &AnswerEnvelopeV1) -> String {
                 continue;
             };
             let line = format!(
-                "- `{}` — {} · {}",
-                citation.evidence_id, citation.source_label, citation.locator
+                "- {} — {} · {}",
+                literal_span(&citation.evidence_id),
+                literal_span(&citation.source_label),
+                literal_span(&citation.locator)
             );
             out.push_str(&line);
             if citation.corpus_id != envelope.binding.corpus_id
@@ -560,9 +664,9 @@ pub fn render_answer_markdown(envelope: &AnswerEnvelopeV1) -> String {
             {
                 out.push_str(" · outside this turn's evidence snapshot");
             }
-            let excerpt = citation.content.trim();
-            if !excerpt.is_empty() && excerpt_adds_information(excerpt, &line) {
-                out.push_str(&format!("\n  - {excerpt}"));
+            let excerpt = literal_display_text(&citation.content);
+            if !excerpt.is_empty() && excerpt_adds_information(&excerpt, &line) {
+                out.push_str(&format!("\n  - {}", literal_span(&excerpt)));
             }
             out.push('\n');
         }
@@ -772,19 +876,33 @@ mod tests {
     // is deliberately meaningless.
     // -----------------------------------------------------------------
 
-    /// Evidence ids the rendered text actually shows the reader — from the
-    /// `cites` segments and the Evidence section, never from the envelope.
+    /// Evidence ids the rendered text actually shows the reader.
+    ///
+    /// Span-aware: the host's `— cites` grammar and the Evidence section are
+    /// read from the text *outside* code spans, so a dynamic value that
+    /// spells out the same grammar contributes nothing. Cited ids are the
+    /// span values positioned after the host marker on that line.
     fn displayed_evidence_ids(markdown: &str) -> BTreeSet<String> {
         let mut ids = BTreeSet::new();
+        let mut in_evidence = false;
         for line in markdown.lines() {
-            let trimmed = line.trim();
-            if let Some((_, cited)) = trimmed.split_once("— cites ") {
-                for token in cited.split(", ") {
-                    ids.insert(token.trim().trim_matches('`').to_string());
-                }
-            } else if let Some(rest) = trimmed.strip_prefix("- `") {
-                if let Some((id, _)) = rest.split_once("` — ") {
-                    ids.insert(id.to_string());
+            let (outside, values) = split_spans(line);
+            let trimmed = outside.trim();
+            if trimmed == "## Evidence" {
+                in_evidence = true;
+                continue;
+            }
+            if trimmed.starts_with("## ") || trimmed.starts_with("# ") {
+                in_evidence = false;
+            }
+            if let Some((before, _)) = outside.split_once("— cites ") {
+                let already = before.matches(VALUE_SLOT).count();
+                ids.extend(values.iter().skip(already).cloned());
+            } else if in_evidence && outside.starts_with("- ") {
+                // Column 0 is the citation bullet; an indented `- ` under it is
+                // that citation's host excerpt, not another evidence id.
+                if let Some(first) = values.first() {
+                    ids.insert(first.clone());
                 }
             }
         }
@@ -806,6 +924,313 @@ mod tests {
         );
         validate_model_answer(&raw, &ledger_with_roles(role_a, EvidenceRole::Neutral))
             .expect("fixture proposal validates")
+    }
+
+    // -----------------------------------------------------------------
+    // Presentation integrity.
+    //
+    // Payloads below are structural, not semantic: each one is a Markdown,
+    // HTML, terminal, or Unicode *mechanism*, chosen so the gates never
+    // depend on the wording of any particular exploit. They are applied to
+    // model-authored claim text and to corpus-derived host fields alike,
+    // because a source label is only ever whatever an imported log called
+    // itself.
+    // -----------------------------------------------------------------
+
+    /// One payload per presentation mechanism a dynamic value might reach for.
+    fn structural_payloads() -> Vec<String> {
+        vec![
+            // Line boundaries in every form a renderer recognises.
+            "x\nsecond line".into(),
+            "x\r\nsecond line".into(),
+            "x\u{2028}second line".into(),
+            "x\u{2029}second line".into(),
+            "x\u{0085}second line".into(),
+            "x\u{000b}second\u{000c}line".into(),
+            "x\tcolumn".into(),
+            // Block constructs, each anchored to a fresh line.
+            "x\n# forged heading".into(),
+            "x\n## Evidence".into(),
+            "x\n- Root cause established: yes".into(),
+            "x\n- Confidence: high".into(),
+            "x\n1. forged ordered item".into(),
+            "x\n> forged quote".into(),
+            "x\n| a | b |\n| --- | --- |\n| c | d |".into(),
+            "x\n```\nforged fence\n```".into(),
+            "x\n---".into(),
+            "x\n\u{2022} forged bullet".into(),
+            // Inline constructs.
+            "`code span`".into(),
+            "``double`` backticks".into(),
+            "**bold** and *emphasis*".into(),
+            "_underscore_ and ~~strike~~".into(),
+            "[label](https://evil.example)".into(),
+            "[chip](#cite:e-forged)".into(),
+            "[ref][1] and ![img](https://evil.example/i.png)".into(),
+            "bare https://evil.example/path?q=1".into(),
+            "protocol-relative //evil.example".into(),
+            "<a href=\"https://evil.example\">html</a>".into(),
+            "<br>line<br/>break".into(),
+            "<script>alert(1)</script>".into(),
+            "delimiter run ***___```".into(),
+            // Terminal control material.
+            "\u{1b}[31mred\u{1b}[0m".into(),
+            "\u{1b}]8;;https://evil.example\u{7}osc link\u{1b}]8;;\u{7}".into(),
+            "\u{9b}31m c1 csi".into(),
+            "bell\u{7}del\u{7f}nul\u{0}".into(),
+            // Bidi / directional spoofing.
+            "\u{202e}reversed\u{202c}".into(),
+            "\u{2066}isolated\u{2069}".into(),
+            "\u{061c}arabic letter mark".into(),
+            "\u{200e}\u{200f}marks".into(),
+            // Host-structure mimicry with no line break of its own.
+            "— cites `e-forged`".into(),
+            "**[withheld]**".into(),
+            "## Candidate `forged`".into(),
+        ]
+    }
+
+    /// Build a validated envelope whose model-authored *and* corpus-derived
+    /// strings are all set to `payload`.
+    fn envelope_with_payload_everywhere(payload: &str) -> AnswerEnvelopeV1 {
+        let escaped = serde_json::to_string(payload).expect("payload is a JSON string");
+        let raw = format!(
+            r#"{{"schema":"{SCHEMA_V1}","candidates":[
+                {{"candidate_id":"a","observations":[{{"claim_id":"a-obs","text":{escaped},"evidence_ids":["e-a"]}}]}},
+                {{"candidate_id":"b","initiating_causes":[{{"claim_id":"b-root","text":{escaped},"evidence_ids":["e-b"]}}]}}
+            ]}}"#
+        );
+        let mut envelope =
+            validate_model_answer(&raw, &ledger()).expect("payload proposal is valid");
+        // Corpus-derived host fields carry the same payload: "host-owned" is
+        // not the same as "safe to reparse".
+        envelope.binding.corpus_id = payload.to_string();
+        for citation in &mut envelope.answer.canonical_citations {
+            citation.source_label = payload.to_string();
+            citation.locator = payload.to_string();
+            citation.content = payload.to_string();
+        }
+        envelope
+    }
+
+    /// Stands in for one dynamic value inside a host skeleton. Contains a NUL,
+    /// which [`literal_display_text`] removes, so no value can forge it.
+    const VALUE_SLOT: &str = "\u{0}VALUE\u{0}";
+
+    /// Split a rendered line into the text outside code spans and the values
+    /// inside them.
+    ///
+    /// Every dynamic value is emitted inside a code span and can never contain
+    /// a backtick, so backticks in the projection are host-authored and pair
+    /// exactly. That makes this split total and unambiguous: what remains
+    /// outside the spans is host-authored text and nothing else.
+    fn split_spans(line: &str) -> (String, Vec<String>) {
+        let mut outside = String::new();
+        let mut values = Vec::new();
+        let mut in_span = false;
+        let mut current = String::new();
+        for c in line.chars() {
+            if c == '`' {
+                if in_span {
+                    values.push(std::mem::take(&mut current));
+                } else {
+                    outside.push_str(VALUE_SLOT);
+                }
+                in_span = !in_span;
+                continue;
+            }
+            if in_span {
+                current.push(c);
+            } else {
+                outside.push(c);
+            }
+        }
+        assert!(!in_span, "unbalanced code span: {line}");
+        (outside, values)
+    }
+
+    /// The host-authored skeleton of a whole projection: every dynamic value
+    /// replaced by one fixed token.
+    ///
+    /// This is the load-bearing gate. If the skeleton is identical for every
+    /// payload, then no dynamic value contributed a heading, a list item, a
+    /// status line, a candidate, an evidence section, a withheld marker, a
+    /// citation, or any other host construct — whatever it contained.
+    fn host_skeleton(markdown: &str) -> String {
+        markdown
+            .lines()
+            .map(|line| {
+                split_spans(line)
+                    .0
+                    .replace(EMPTY_VALUE_PLACEHOLDER, VALUE_SLOT)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn no_dynamic_value_can_author_host_structure() {
+        let baseline = host_skeleton(&render_answer_markdown(&envelope_with_payload_everywhere(
+            "plain",
+        )));
+        // The skeleton the fixture is expected to have, spelled out so a
+        // change in host structure cannot silently pass as "still invariant".
+        assert_eq!(baseline.matches("- Root cause established: no").count(), 1);
+        assert_eq!(
+            baseline
+                .matches("- Confidence: not rated by this contract")
+                .count(),
+            1
+        );
+        assert_eq!(baseline.matches("## Candidate ").count(), 2);
+        assert_eq!(baseline.matches("## Evidence").count(), 1);
+        assert_eq!(baseline.matches("**[withheld]**").count(), 1);
+        assert_eq!(baseline.matches("— cites ").count(), 2);
+
+        for payload in structural_payloads() {
+            let markdown = render_answer_markdown(&envelope_with_payload_everywhere(&payload));
+            assert_eq!(
+                host_skeleton(&markdown),
+                baseline,
+                "payload {payload:?} changed the host skeleton:\n{markdown}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_dynamic_value_renders_on_exactly_one_line_without_controls() {
+        for payload in structural_payloads() {
+            let normalized = literal_display_text(&payload);
+            assert!(
+                !normalized.chars().any(is_line_boundary),
+                "payload {payload:?} kept a line boundary"
+            );
+            assert!(
+                !normalized.chars().any(|c| c.is_control() || c == '\u{7f}'),
+                "payload {payload:?} kept a control character"
+            );
+            assert!(
+                !normalized
+                    .chars()
+                    .any(|c| BIDI_FORMATTING_CONTROLS.contains(&c)),
+                "payload {payload:?} kept a backtick or bidi control"
+            );
+            assert!(
+                !normalized.contains('`'),
+                "payload {payload:?} kept a backtick"
+            );
+
+            // The projection keeps its exact line count whatever the payload.
+            let markdown = render_answer_markdown(&envelope_with_payload_everywhere(&payload));
+            let plain = render_answer_markdown(&envelope_with_payload_everywhere("plain"));
+            assert_eq!(
+                markdown.lines().count(),
+                plain.lines().count(),
+                "payload {payload:?} changed the line count:\n{markdown}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_canonical_host_structure_yields_displayed_citations() {
+        for payload in structural_payloads() {
+            let envelope = envelope_with_payload_everywhere(&payload);
+            let canonical = envelope
+                .answer
+                .canonical_citations
+                .iter()
+                .map(|citation| citation.evidence_id.clone())
+                .collect::<BTreeSet<_>>();
+            let displayed = displayed_evidence_ids(&render_answer_markdown(&envelope));
+            assert_eq!(
+                displayed, canonical,
+                "payload {payload:?} changed the displayed citation set"
+            );
+        }
+    }
+
+    /// Companion to the skeleton gate: the values are still *shown*, and they
+    /// are shown only inside code spans. Skeleton invariance alone would be
+    /// satisfied by a renderer that dropped every dynamic value.
+    #[test]
+    fn dynamic_values_are_shown_only_inside_code_spans() {
+        for payload in structural_payloads() {
+            let normalized = literal_display_text(&payload);
+            let markdown = render_answer_markdown(&envelope_with_payload_everywhere(&payload));
+            let mut outside = String::new();
+            let mut values = Vec::new();
+            for line in markdown.lines() {
+                let (line_outside, line_values) = split_spans(line);
+                outside.push_str(&line_outside);
+                outside.push('\n');
+                values.extend(line_values);
+            }
+            if normalized.is_empty() {
+                assert!(
+                    markdown.contains(EMPTY_VALUE_PLACEHOLDER),
+                    "an emptied value must still be accounted for: {payload:?}"
+                );
+                continue;
+            }
+            assert!(
+                values.iter().any(|value| value == &normalized),
+                "payload {payload:?} was not displayed at all"
+            );
+            // Everything the host wrote is invariant, so the payload can only
+            // appear outside a span by coinciding with host-static text.
+            let host_only = render_answer_markdown(&envelope_with_payload_everywhere("plain"));
+            let host_outside = host_only
+                .lines()
+                .map(|line| split_spans(line).0)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(
+                outside.trim_end(),
+                host_outside.trim_end(),
+                "payload {payload:?} reached the host-authored text"
+            );
+        }
+    }
+
+    #[test]
+    fn safe_values_stay_readable() {
+        let readable = [
+            "connection refused after 3 retries",
+            "app/worker_pool-1.jsonl",
+            "seq=1428",
+            "GET /v2/orders?id=99 -> 503",
+            "utilisateur non trouvé — 사용자 없음 — ユーザー未検出",
+            "café ☕ ok",
+        ];
+        for value in readable {
+            assert_eq!(
+                literal_display_text(value),
+                value,
+                "a safe value must survive the boundary unchanged"
+            );
+            let markdown = render_answer_markdown(&envelope_with_payload_everywhere(value));
+            assert!(markdown.contains(value), "{markdown}");
+        }
+        // Runs of whitespace collapse; that is the documented normalization.
+        assert_eq!(literal_display_text("a \t\n  b"), "a b");
+        assert_eq!(literal_display_text("  padded  "), "padded");
+        assert_eq!(literal_display_text("\u{1b}[0m"), "[0m");
+        assert_eq!(literal_display_text("a`b"), "a'b");
+        assert_eq!(literal_display_text("\u{202e}"), "");
+    }
+
+    #[test]
+    fn an_emptied_value_renders_a_host_placeholder_not_an_empty_span() {
+        let envelope = envelope_with_payload_everywhere("\u{202e}\u{1b}\u{0}");
+        let markdown = render_answer_markdown(&envelope);
+        assert!(markdown.contains(EMPTY_VALUE_PLACEHOLDER), "{markdown}");
+        assert!(
+            !markdown.contains("``"),
+            "no empty span may appear:\n{markdown}"
+        );
+        for line in markdown.lines() {
+            assert!(line.matches('`').count() % 2 == 0, "{line}");
+        }
     }
 
     #[test]

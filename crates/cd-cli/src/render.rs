@@ -177,6 +177,16 @@ impl TerminalTextSanitizer {
                     }
                     '\r' => EscapeState::Text,
                     c if c.is_control() => EscapeState::Text,
+                    // Bidi overrides, embeddings, isolates, and directional
+                    // marks are invisible but reorder what a terminal shows,
+                    // so displayed order can disagree with the bytes. Dropping
+                    // them costs nothing legible — the bidi algorithm still
+                    // lays out RTL text on its own — and removes a whole class
+                    // of line spoofing from every provider's output, not just
+                    // from host-rendered answers.
+                    c if cd_core::investigation_answer::is_bidi_formatting_control(c) => {
+                        EscapeState::Text
+                    }
                     c => {
                         if self.ascii {
                             push_ascii_typography(&mut out, c);
@@ -654,6 +664,62 @@ mod tests {
         let mut filter = TerminalTextSanitizer::default();
         assert_eq!(filter.push("before\u{1b}]0;secret"), "before");
         assert_eq!(filter.push(" title\u{1b}\\after"), "after");
+    }
+
+    /// Bidi controls are invisible and reorder a rendered line, so a value
+    /// carrying them can make a terminal show something the bytes do not say.
+    #[test]
+    fn terminal_text_filter_strips_bidi_formatting_controls() {
+        let mut filter = TerminalTextSanitizer::default();
+        assert_eq!(
+            filter.push("\u{202e}reversed\u{202c} \u{2066}iso\u{2069} \u{061c}\u{200e}\u{200f}m"),
+            "reversed iso m"
+        );
+        // Legible RTL content itself is untouched; only the controls go.
+        let mut filter = TerminalTextSanitizer::default();
+        assert_eq!(filter.push("خطأ في الاتصال"), "خطأ في الاتصال");
+    }
+
+    /// The whole host projection, carrying an adversarial value, reaches a
+    /// terminal with no control sequence and no forged line boundary.
+    #[test]
+    fn a_host_projection_carrying_hostile_values_stays_flat_in_a_terminal() {
+        use cd_core::investigation_answer::literal_display_text;
+
+        let hostile = [
+            "x\nsecond line",
+            "x\u{2028}second line",
+            "\u{1b}[31mred\u{1b}[0m",
+            "\u{1b}]8;;https://evil.example\u{7}osc\u{1b}]8;;\u{7}",
+            "\u{202e}reversed\u{202c}",
+            "bell\u{7}del\u{7f}nul\u{0}",
+            "x\u{0085}\u{000b}\u{000c}y",
+        ];
+        for raw in hostile {
+            let value = literal_display_text(raw);
+            let line = format!("- `{value}` — cites `e-a`");
+            let mut filter = TerminalTextSanitizer::default();
+            let rendered = filter.push(&line);
+            assert_eq!(
+                rendered, line,
+                "the host boundary already removed everything the terminal filter would"
+            );
+            assert_eq!(
+                rendered.lines().count(),
+                1,
+                "a dynamic value must not create a terminal line: {rendered:?}"
+            );
+            assert!(
+                !rendered.chars().any(|c| c.is_control() && c != '\n'),
+                "control character reached the terminal: {rendered:?}"
+            );
+            assert!(
+                !rendered
+                    .chars()
+                    .any(cd_core::investigation_answer::is_bidi_formatting_control),
+                "bidi control reached the terminal: {rendered:?}"
+            );
+        }
     }
 
     #[test]
