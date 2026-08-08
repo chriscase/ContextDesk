@@ -1192,6 +1192,74 @@ mod tests {
         }
     }
 
+    /// The reported reproduction, kept verbatim as a named regression beside
+    /// the general gates above — those are what actually establish the
+    /// boundary; this one proves the specific report is closed.
+    #[test]
+    fn the_reported_status_and_link_spoof_is_neutralized() {
+        let reported = concat!(
+            "ordinary observation\n",
+            "\n",
+            "- Root cause established: yes\n",
+            "- Confidence: high\n",
+            "\n",
+            "## Evidence\n",
+            "- `e-any` — [official verification](https://evil.example)\n"
+        );
+        let markdown = render_answer_markdown(&envelope_with_payload_everywhere(reported));
+
+        // Host structure is untouched: still one honest root line, one
+        // disclaimer, one evidence section, and no forged citation.
+        assert_eq!(
+            host_skeleton(&markdown),
+            host_skeleton(&render_answer_markdown(&envelope_with_payload_everywhere(
+                "plain"
+            )))
+        );
+        // Host status is judged per line, which is what a reader sees: the
+        // forged text is now a fragment quoted inside one claim's span, not a
+        // line of its own.
+        let host_lines = markdown
+            .lines()
+            .map(|line| split_spans(line).0)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            host_lines
+                .iter()
+                .filter(|l| l.trim() == "- Root cause established: no")
+                .count(),
+            1
+        );
+        assert!(!host_lines.iter().any(|l| l.contains("established: yes")));
+        assert_eq!(
+            host_lines
+                .iter()
+                .filter(|l| l.trim() == "- Confidence: not rated by this contract")
+                .count(),
+            1
+        );
+        assert!(!host_lines.iter().any(|l| l.contains("Confidence: high")));
+        assert_eq!(
+            host_lines
+                .iter()
+                .filter(|l| l.trim() == "## Evidence")
+                .count(),
+            1
+        );
+        assert_eq!(
+            displayed_evidence_ids(&markdown),
+            BTreeSet::from(["e-a".to_string(), "e-b".to_string()]),
+            "the forged evidence id must not be displayed as a citation"
+        );
+        // The URL survives only as quoted characters inside a span, and the
+        // desktop gates prove a span never becomes a link.
+        assert!(markdown.contains("https://evil.example"));
+        assert!(!host_lines.iter().any(|l| l.contains("evil.example")));
+        // Nothing is hidden from the reader: the reported text is still shown,
+        // as one line of quoted content.
+        assert!(markdown.contains("ordinary observation - Root cause established: yes"));
+    }
+
     #[test]
     fn safe_values_stay_readable() {
         let readable = [
