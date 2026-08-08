@@ -5,9 +5,7 @@
 //! acknowledgment / local-only-forbidden reviewer, and the property that a
 //! refused reviewer builds no backend (no network). Opaque identifiers only.
 
-use cd_core::config::{
-    AppConfig, MultiModelBudgetConfig, MultiModelSettings, ReviewerRoleConfig,
-};
+use cd_core::config::{AppConfig, MultiModelBudgetConfig, MultiModelSettings, ReviewerRoleConfig};
 use cd_core::keychain_store::MemorySecretStore;
 use cd_core::multi_model::{DegradationReason, MultiModelMode};
 use cd_core::providers::{ProviderCapabilities, ProviderConfig, ProviderKind, ProviderProfile};
@@ -46,7 +44,11 @@ fn config(investigator: ProviderProfile, reviewer: Option<ReviewerRoleConfig>) -
     AppConfig {
         providers: ProviderConfig {
             active_id: Some(investigator.id.clone()),
-            profiles: vec![investigator, remote_profile("rev-remote"), local_profile("rev-local")],
+            profiles: vec![
+                investigator,
+                remote_profile("rev-remote"),
+                local_profile("rev-local"),
+            ],
         },
         multi_model: MultiModelSettings {
             mode: MultiModelMode::Review,
@@ -84,7 +86,10 @@ async fn resolve(
 #[tokio::test]
 async fn single_mode_never_builds_a_reviewer_and_is_not_a_degradation() {
     let secrets = MemorySecretStore::new();
-    let cfg = config(local_profile("inv"), Some(reviewer("rev-local", false, false)));
+    let cfg = config(
+        local_profile("inv"),
+        Some(reviewer("rev-local", false, false)),
+    );
     let (has_runtime, degradation) = resolve(&cfg, &secrets, MultiModelMode::Single, None).await;
     assert!(!has_runtime);
     assert!(degradation.is_none());
@@ -112,7 +117,10 @@ async fn a_reviewer_profile_that_does_not_exist_degrades() {
 async fn a_local_only_investigator_forbids_a_remote_reviewer() {
     let secrets = MemorySecretStore::new();
     // Even with allow_remote, a local-only investigator pins the turn local.
-    let cfg = config(local_profile("inv"), Some(reviewer("rev-remote", true, false)));
+    let cfg = config(
+        local_profile("inv"),
+        Some(reviewer("rev-remote", true, false)),
+    );
     let (has_runtime, degradation) = resolve(&cfg, &secrets, MultiModelMode::Review, None).await;
     assert!(!has_runtime);
     assert_eq!(
@@ -125,7 +133,10 @@ async fn a_local_only_investigator_forbids_a_remote_reviewer() {
 async fn a_remote_reviewer_without_acknowledgment_degrades() {
     let secrets = MemorySecretStore::new();
     // Remote investigator (not local-only) + remote reviewer without allow_remote.
-    let cfg = config(remote_profile("inv"), Some(reviewer("rev-remote", false, false)));
+    let cfg = config(
+        remote_profile("inv"),
+        Some(reviewer("rev-remote", false, false)),
+    );
     let (has_runtime, degradation) = resolve(&cfg, &secrets, MultiModelMode::Review, None).await;
     assert!(!has_runtime);
     assert_eq!(
@@ -137,7 +148,10 @@ async fn a_remote_reviewer_without_acknowledgment_degrades() {
 #[tokio::test]
 async fn a_required_qualified_but_unverified_reviewer_degrades() {
     let secrets = MemorySecretStore::new();
-    let cfg = config(local_profile("inv"), Some(reviewer("rev-local", false, true)));
+    let cfg = config(
+        local_profile("inv"),
+        Some(reviewer("rev-local", false, true)),
+    );
     // Unverified (None) with require_qualified → degrade.
     let (has_runtime, degradation) = resolve(&cfg, &secrets, MultiModelMode::Review, None).await;
     assert!(!has_runtime);
@@ -153,13 +167,19 @@ async fn a_required_qualified_but_unverified_reviewer_degrades() {
 async fn a_local_reviewer_builds_a_runtime_when_permitted() {
     let secrets = MemorySecretStore::new();
     // Local reviewer, require_qualified=false → runs without a measurement.
-    let cfg = config(local_profile("inv"), Some(reviewer("rev-local", false, false)));
+    let cfg = config(
+        local_profile("inv"),
+        Some(reviewer("rev-local", false, false)),
+    );
     let (has_runtime, degradation) = resolve(&cfg, &secrets, MultiModelMode::Review, None).await;
     assert!(has_runtime, "a permitted local reviewer builds a runtime");
     assert!(degradation.is_none());
 
     // A measured-qualified reviewer with require_qualified also runs.
-    let cfg = config(local_profile("inv"), Some(reviewer("rev-local", false, true)));
+    let cfg = config(
+        local_profile("inv"),
+        Some(reviewer("rev-local", false, true)),
+    );
     let (has_runtime, degradation) =
         resolve(&cfg, &secrets, MultiModelMode::Review, Some(true)).await;
     assert!(has_runtime);
@@ -175,7 +195,10 @@ async fn a_local_reviewer_builds_a_runtime_when_permitted() {
 #[tokio::test]
 async fn a_refused_remote_reviewer_is_refused_by_policy_not_by_a_build_or_connect() {
     let secrets = MemorySecretStore::new();
-    let cfg = config(remote_profile("inv"), Some(reviewer("rev-remote", false, false)));
+    let cfg = config(
+        remote_profile("inv"),
+        Some(reviewer("rev-remote", false, false)),
+    );
     let (_has, degradation) = resolve(&cfg, &secrets, MultiModelMode::Review, None).await;
     // Policy reason, never a provider/connect error — proves the gate ran first.
     assert_eq!(

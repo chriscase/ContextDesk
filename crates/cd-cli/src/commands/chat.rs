@@ -622,8 +622,7 @@ pub async fn run(
                 let investigation_answer = investigation_answer_from_events(&outcome.events);
                 let multi_model = (outcome.multi_model_configured
                     != cd_core::multi_model::MultiModelMode::Single
-                    || outcome.multi_model_executed
-                        != cd_core::multi_model::ExecutedMode::Single)
+                    || outcome.multi_model_executed != cd_core::multi_model::ExecutedMode::Single)
                     .then(|| MultiModelSummary {
                         configured_mode: outcome.multi_model_configured.as_str(),
                         executed_mode: outcome.multi_model_executed.as_str(),

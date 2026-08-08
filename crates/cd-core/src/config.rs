@@ -887,7 +887,10 @@ mod tests {
             crate::multi_model::MultiModelMode::Single
         );
         assert!(loaded.multi_model.reviewer.is_none());
-        assert_eq!(loaded.multi_model.budget.max_semantic_corrections_per_stage, 1);
+        assert_eq!(
+            loaded.multi_model.budget.max_semantic_corrections_per_stage,
+            1
+        );
 
         // A reviewer references a profile id and never carries a raw secret.
         cfg.multi_model.mode = crate::multi_model::MultiModelMode::Review;
@@ -899,12 +902,26 @@ mod tests {
         });
         save_config(&path, &cfg).unwrap();
         let loaded = load_config(&path).unwrap();
-        assert_eq!(loaded.multi_model.mode, crate::multi_model::MultiModelMode::Review);
         assert_eq!(
-            loaded.multi_model.reviewer.as_ref().map(|r| r.profile_id.as_str()),
+            loaded.multi_model.mode,
+            crate::multi_model::MultiModelMode::Review
+        );
+        assert_eq!(
+            loaded
+                .multi_model
+                .reviewer
+                .as_ref()
+                .map(|r| r.profile_id.as_str()),
             Some("ollama-local")
         );
-        assert!(loaded.multi_model.reviewer.as_ref().unwrap().require_qualified);
+        assert!(
+            loaded
+                .multi_model
+                .reviewer
+                .as_ref()
+                .unwrap()
+                .require_qualified
+        );
     }
 
     #[test]

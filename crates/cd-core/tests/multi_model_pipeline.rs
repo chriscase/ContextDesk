@@ -19,8 +19,8 @@ use cd_core::error::CoreError;
 use cd_core::investigation_answer::{AnswerBindingV1, LogSnapshotRevisionV1};
 use cd_core::log_analysis::SearchEvidenceIdentity;
 use cd_core::multi_model::{
-    render_review_markdown, run_review_pipeline, DegradationReason, ExecutedMode, InvestigationRole,
-    MultiModelBackends, MultiModelBudget, MultiModelOutcome, MultiModelRoleIds,
+    render_review_markdown, run_review_pipeline, DegradationReason, ExecutedMode,
+    InvestigationRole, MultiModelBackends, MultiModelBudget, MultiModelOutcome, MultiModelRoleIds,
     ReviewPipelineInputs, StageOutcomeKind, StageProgressEvent,
 };
 use cd_core::tool_host::BroadLogTriageCandidate;
@@ -185,7 +185,9 @@ fn run_with_backends(
         .build()
         .unwrap();
     let outcome = rt
-        .block_on(run_review_pipeline(&backends, inputs, &mut |e| stages.push(e)))
+        .block_on(run_review_pipeline(&backends, inputs, &mut |e| {
+            stages.push(e)
+        }))
         .expect("pipeline never returns a raw Err");
     RunResult { outcome, stages }
 }
@@ -208,7 +210,13 @@ fn two_candidates() -> Vec<BroadLogTriageCandidate> {
     vec![candidate("k1", &[1]), candidate("k2", &[2])]
 }
 
-fn expect_completed(outcome: &MultiModelOutcome) -> (&cd_core::investigation_answer::AnswerEnvelopeV1, &str, ExecutedMode) {
+fn expect_completed(
+    outcome: &MultiModelOutcome,
+) -> (
+    &cd_core::investigation_answer::AnswerEnvelopeV1,
+    &str,
+    ExecutedMode,
+) {
     match outcome {
         MultiModelOutcome::Completed {
             envelope,
@@ -238,7 +246,8 @@ fn outcome_label(outcome: &MultiModelOutcome) -> &'static str {
 #[test]
 fn happy_path_reviews_and_synthesizes_a_host_validated_answer() {
     let (inv, rev) = happy_backends();
-    let RunResult { outcome, stages } = run_with(inv, rev, &two_candidates(), MultiModelBudget::default());
+    let RunResult { outcome, stages } =
+        run_with(inv, rev, &two_candidates(), MultiModelBudget::default());
     let (envelope, content, executed) = expect_completed(&outcome);
     assert_eq!(executed, ExecutedMode::Review);
     // The final answer is host-validated and Cause-free (no establishment).
@@ -250,17 +259,23 @@ fn happy_path_reviews_and_synthesizes_a_host_validated_answer() {
     assert!(content.starts_with("# Investigation answer"));
     assert!(serde_json::from_str::<serde_json::Value>(content.trim()).is_err());
     // The reviewer stage ran and completed.
-    assert!(stages.iter().any(|s| s.role == InvestigationRole::Reviewer
-        && s.outcome == Some(StageOutcomeKind::Completed)));
+    assert!(stages
+        .iter()
+        .any(|s| s.role == InvestigationRole::Reviewer
+            && s.outcome == Some(StageOutcomeKind::Completed)));
     // Telemetry: three roles executed, review contributed.
-    if let MultiModelOutcome::Completed { telemetry, review, .. } = &outcome {
+    if let MultiModelOutcome::Completed {
+        telemetry, review, ..
+    } = &outcome
+    {
         assert_eq!(telemetry.executed_mode, ExecutedMode::Review);
         assert!(telemetry.degradation.is_none());
         assert!(review.is_some());
         assert!(telemetry
             .stages
             .iter()
-            .any(|s| s.role == InvestigationRole::Reviewer && s.outcome == StageOutcomeKind::Completed));
+            .any(|s| s.role == InvestigationRole::Reviewer
+                && s.outcome == StageOutcomeKind::Completed));
     }
 }
 
@@ -279,17 +294,28 @@ fn a_forged_reviewer_citation_degrades_and_never_becomes_authority() {
             "",
         )),
     ];
-    let RunResult { outcome, stages } = run_with(inv, reviewer, &two_candidates(), MultiModelBudget::default());
+    let RunResult { outcome, stages } = run_with(
+        inv,
+        reviewer,
+        &two_candidates(),
+        MultiModelBudget::default(),
+    );
     let (envelope, _, executed) = expect_completed(&outcome);
     // Answer still produced (synthesis without review), degraded honestly.
     assert_eq!(executed, ExecutedMode::ReviewDegraded);
     assert!(!envelope.answer.root_cause_established);
-    if let MultiModelOutcome::Completed { telemetry, review, .. } = &outcome {
+    if let MultiModelOutcome::Completed {
+        telemetry, review, ..
+    } = &outcome
+    {
         assert_eq!(
             telemetry.degradation,
             Some(DegradationReason::ReviewerSemanticInvalid)
         );
-        assert!(review.is_none(), "an invalid review never reaches the outcome");
+        assert!(
+            review.is_none(),
+            "an invalid review never reaches the outcome"
+        );
     }
     assert!(stages.iter().any(|s| s.role == InvestigationRole::Reviewer
         && s.outcome == Some(StageOutcomeKind::SemanticInvalid)));
@@ -302,7 +328,10 @@ fn candidate_permutation_yields_a_byte_identical_answer() {
         let inv = groups
             .iter()
             .map(|(g, s)| completion(finding_json(g, s)))
-            .chain(std::iter::once(completion(answer_json(&[("k1", &[1]), ("k2", &[2])]))))
+            .chain(std::iter::once(completion(answer_json(&[
+                ("k1", &[1]),
+                ("k2", &[2]),
+            ]))))
             .collect::<Vec<_>>();
         let rev = vec![completion(review_json("", ""))];
         (inv, rev)
@@ -310,12 +339,25 @@ fn candidate_permutation_yields_a_byte_identical_answer() {
     // Note: the synthesizer answer names candidates in a fixed order; the host
     // renderer sorts candidates by id, so display is order-independent.
     let (inv_a, rev_a) = base(&[("k1", &[1]), ("k2", &[2])]);
-    let a = run_with(inv_a, rev_a, &[candidate("k1", &[1]), candidate("k2", &[2])], MultiModelBudget::default());
+    let a = run_with(
+        inv_a,
+        rev_a,
+        &[candidate("k1", &[1]), candidate("k2", &[2])],
+        MultiModelBudget::default(),
+    );
     let (inv_b, rev_b) = base(&[("k2", &[2]), ("k1", &[1])]);
-    let b = run_with(inv_b, rev_b, &[candidate("k2", &[2]), candidate("k1", &[1])], MultiModelBudget::default());
+    let b = run_with(
+        inv_b,
+        rev_b,
+        &[candidate("k2", &[2]), candidate("k1", &[1])],
+        MultiModelBudget::default(),
+    );
     let (_, content_a, _) = expect_completed(&a.outcome);
     let (_, content_b, _) = expect_completed(&b.outcome);
-    assert_eq!(content_a, content_b, "candidate order must not change the rendered answer");
+    assert_eq!(
+        content_a, content_b,
+        "candidate order must not change the rendered answer"
+    );
 }
 
 #[test]
@@ -324,7 +366,8 @@ fn conflicting_and_colluding_reviewers_never_establish_a_cause() {
     // has causal_candidates but no host Cause role, so nothing is established.
     let (inv, rev) = happy_backends();
     let (envelope, content, _) = {
-        let RunResult { outcome, .. } = run_with(inv, rev, &two_candidates(), MultiModelBudget::default());
+        let RunResult { outcome, .. } =
+            run_with(inv, rev, &two_candidates(), MultiModelBudget::default());
         let (e, c, ex) = expect_completed(&outcome);
         (e.clone(), c.to_string(), ex)
     };
@@ -341,10 +384,17 @@ fn conflicting_and_colluding_reviewers_never_establish_a_cause() {
         ),
     ];
     let rev2 = vec![completion(review_json("", ""))];
-    let RunResult { outcome, .. } = run_with(inv2, rev2, &two_candidates(), MultiModelBudget::default());
+    let RunResult { outcome, .. } =
+        run_with(inv2, rev2, &two_candidates(), MultiModelBudget::default());
     let (envelope, content, _) = expect_completed(&outcome);
-    assert!(!envelope.answer.root_cause_established, "no Cause role → never established");
-    assert!(content.contains("**[withheld]**"), "a claimed root renders withheld: {content}");
+    assert!(
+        !envelope.answer.root_cause_established,
+        "no Cause role → never established"
+    );
+    assert!(
+        content.contains("**[withheld]**"),
+        "a claimed root renders withheld: {content}"
+    );
 }
 
 #[test]
@@ -367,11 +417,19 @@ fn a_provider_failure_in_the_reviewer_stage_degrades_not_fails() {
     }
     let (inv, _) = happy_backends();
     let inv = ScriptedBackend::new(inv);
-    let RunResult { outcome, .. } = run_with_backends(&inv, &FailBackend, &two_candidates(), MultiModelBudget::default());
+    let RunResult { outcome, .. } = run_with_backends(
+        &inv,
+        &FailBackend,
+        &two_candidates(),
+        MultiModelBudget::default(),
+    );
     let (_, _, executed) = expect_completed(&outcome);
     assert_eq!(executed, ExecutedMode::ReviewDegraded);
     if let MultiModelOutcome::Completed { telemetry, .. } = &outcome {
-        assert_eq!(telemetry.degradation, Some(DegradationReason::ReviewerProviderFailed));
+        assert_eq!(
+            telemetry.degradation,
+            Some(DegradationReason::ReviewerProviderFailed)
+        );
     }
 }
 
@@ -396,9 +454,12 @@ fn a_provider_failure_in_a_required_stage_is_a_typed_provider_outcome() {
             })
         }
     }
-    let inv = FailFirst { calls: AtomicBool::new(false) };
+    let inv = FailFirst {
+        calls: AtomicBool::new(false),
+    };
     let rev = ScriptedBackend::new(vec![completion(review_json("", ""))]);
-    let RunResult { outcome, .. } = run_with_backends(&inv, &rev, &two_candidates(), MultiModelBudget::default());
+    let RunResult { outcome, .. } =
+        run_with_backends(&inv, &rev, &two_candidates(), MultiModelBudget::default());
     assert!(matches!(outcome, MultiModelOutcome::ProviderFailed(_)));
 }
 
@@ -414,11 +475,15 @@ fn budget_that_cannot_fit_a_reviewer_call_degrades_deterministically() {
     let (_, _, executed) = expect_completed(&outcome);
     assert_eq!(executed, ExecutedMode::ReviewDegraded);
     if let MultiModelOutcome::Completed { telemetry, .. } = &outcome {
-        assert_eq!(telemetry.degradation, Some(DegradationReason::BudgetRoundsInsufficient));
+        assert_eq!(
+            telemetry.degradation,
+            Some(DegradationReason::BudgetRoundsInsufficient)
+        );
     }
     assert!(stages
         .iter()
-        .any(|s| s.role == InvestigationRole::Reviewer && s.outcome == Some(StageOutcomeKind::Skipped)));
+        .any(|s| s.role == InvestigationRole::Reviewer
+            && s.outcome == Some(StageOutcomeKind::Skipped)));
 }
 
 #[test]
@@ -430,7 +495,10 @@ fn a_usage_char_ceiling_that_cannot_fit_a_reviewer_call_degrades() {
     };
     let RunResult { outcome, .. } = run_with(inv, rev, &two_candidates(), budget);
     if let MultiModelOutcome::Completed { telemetry, .. } = &outcome {
-        assert_eq!(telemetry.degradation, Some(DegradationReason::BudgetUsageInsufficient));
+        assert_eq!(
+            telemetry.degradation,
+            Some(DegradationReason::BudgetUsageInsufficient)
+        );
     } else {
         panic!("expected a degraded completion");
     }
@@ -473,7 +541,12 @@ fn one_semantic_correction_recovers_an_investigator_then_stays_bounded() {
         completion(answer_json(&[("k1", &[1]), ("k2", &[2])])),
     ];
     let rev = vec![completion(review_json("", ""))];
-    let RunResult { outcome, .. } = run_with(investigator, rev, &two_candidates(), MultiModelBudget::default());
+    let RunResult { outcome, .. } = run_with(
+        investigator,
+        rev,
+        &two_candidates(),
+        MultiModelBudget::default(),
+    );
     let (_, _, executed) = expect_completed(&outcome);
     assert_eq!(executed, ExecutedMode::Review);
     if let MultiModelOutcome::Completed { telemetry, .. } = &outcome {
@@ -528,11 +601,15 @@ fn malicious_markdown_control_and_bidi_in_review_fields_render_inert() {
         let md = render_review_markdown(&report);
         // No dynamic value can author a new line, and every line's backticks pair.
         for line in md.lines() {
-            assert!(line.matches('`').count() % 2 == 0, "unbalanced span for {payload:?}: {line}");
+            assert!(
+                line.matches('`').count() % 2 == 0,
+                "unbalanced span for {payload:?}: {line}"
+            );
         }
         // No control or bidi character survives into the rendered text.
         assert!(
-            !md.chars().any(|c| (c.is_control() && c != '\n') || cd_core::investigation_answer::is_bidi_formatting_control(c)),
+            !md.chars().any(|c| (c.is_control() && c != '\n')
+                || cd_core::investigation_answer::is_bidi_formatting_control(c)),
             "control/bidi survived for {payload:?}"
         );
         // The host's own headings appear exactly once each, unforgeable.
@@ -561,7 +638,8 @@ fn renaming_every_model_string_changes_only_the_displayed_text() {
             completion(answer),
         ];
         let rev = vec![completion(review_json("", ""))];
-        let RunResult { outcome, .. } = run_with(inv, rev, &two_candidates(), MultiModelBudget::default());
+        let RunResult { outcome, .. } =
+            run_with(inv, rev, &two_candidates(), MultiModelBudget::default());
         match outcome {
             MultiModelOutcome::Completed { envelope, .. } => *envelope,
             other => panic!("expected Completed, got {}", outcome_label(&other)),
@@ -579,7 +657,14 @@ fn renaming_every_model_string_changes_only_the_displayed_text() {
                 let claims = c
                     .claims
                     .iter()
-                    .map(|cl| (cl.claim_id.clone(), cl.claim_kind, cl.evidence_ids.clone(), cl.status))
+                    .map(|cl| {
+                        (
+                            cl.claim_id.clone(),
+                            cl.claim_kind,
+                            cl.evidence_ids.clone(),
+                            cl.status,
+                        )
+                    })
                     .collect::<Vec<_>>();
                 (c.candidate_id.clone(), claims)
             })
@@ -594,7 +679,10 @@ fn renaming_every_model_string_changes_only_the_displayed_text() {
     };
     assert_eq!(skeleton(&a), skeleton(&b));
     // But the text did differ.
-    assert_ne!(a.answer.candidates[0].claims[0].text, b.answer.candidates[0].claims[0].text);
+    assert_ne!(
+        a.answer.candidates[0].claims[0].text,
+        b.answer.candidates[0].claims[0].text
+    );
 }
 
 /// The typed envelope and the typed event round-trip byte-exact through JSON,
@@ -602,16 +690,22 @@ fn renaming_every_model_string_changes_only_the_displayed_text() {
 #[test]
 fn typed_answer_persists_byte_exact_and_visible_text_is_markdown() {
     let (inv, rev) = happy_backends();
-    let RunResult { outcome, .. } = run_with(inv, rev, &two_candidates(), MultiModelBudget::default());
+    let RunResult { outcome, .. } =
+        run_with(inv, rev, &two_candidates(), MultiModelBudget::default());
     let (envelope, content, _) = expect_completed(&outcome);
     let json = serde_json::to_string(envelope).unwrap();
-    let back: cd_core::investigation_answer::AnswerEnvelopeV1 = serde_json::from_str(&json).unwrap();
+    let back: cd_core::investigation_answer::AnswerEnvelopeV1 =
+        serde_json::from_str(&json).unwrap();
     assert_eq!(&back, envelope);
-    let event = cd_core::events::StreamEvent::InvestigationAnswer { envelope: envelope.clone() };
+    let event = cd_core::events::StreamEvent::InvestigationAnswer {
+        envelope: envelope.clone(),
+    };
     let ev_json = serde_json::to_string(&event).unwrap();
     let ev_back: cd_core::events::StreamEvent = serde_json::from_str(&ev_json).unwrap();
     match ev_back {
-        cd_core::events::StreamEvent::InvestigationAnswer { envelope: got } => assert_eq!(&got, envelope),
+        cd_core::events::StreamEvent::InvestigationAnswer { envelope: got } => {
+            assert_eq!(&got, envelope)
+        }
         other => panic!("typed event changed shape: {other:?}"),
     }
     assert!(serde_json::from_str::<serde_json::Value>(content.trim()).is_err());

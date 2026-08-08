@@ -125,7 +125,10 @@ fn flat_plan(total_ms: u64) -> TurnDeadlinePlan {
 
 /// One host evidence row for one candidate identity. Mirrors the existing
 /// multi-stage ledger construction exactly (role `Neutral`, empty excerpt).
-fn candidate_entries(candidate: &BroadLogTriageCandidate, binding: &AnswerBindingV1) -> Vec<HostEvidenceEntry> {
+fn candidate_entries(
+    candidate: &BroadLogTriageCandidate,
+    binding: &AnswerBindingV1,
+) -> Vec<HostEvidenceEntry> {
     let mut entries = Vec::new();
     for identity in &candidate.evidence {
         entries.push(HostEvidenceEntry {
@@ -244,7 +247,11 @@ fn investigator_messages(
 
 /// Reviewer prompt. Consumes only typed, host-validated findings (candidate id,
 /// claim id, claim text) — never raw investigator prose.
-fn reviewer_messages(findings_summary: &str, evidence_lines: &str, correction: bool) -> Vec<ChatMessage> {
+fn reviewer_messages(
+    findings_summary: &str,
+    evidence_lines: &str,
+    correction: bool,
+) -> Vec<ChatMessage> {
     let correction_note = if correction {
         " Your previous JSON was rejected by host validation. Return exactly one corrected JSON \
          object using only the supplied ids."
@@ -365,8 +372,17 @@ fn known_claims(findings: &[CandidateFindingV1]) -> KnownClaims {
 
 /// Result of driving one model call with a bounded correction budget.
 enum CallResult<T> {
-    Ok { value: T, rounds: u32, corrections: u8, chars: u64 },
-    SemanticInvalid { rounds: u32, corrections: u8, chars: u64 },
+    Ok {
+        value: T,
+        rounds: u32,
+        corrections: u8,
+        chars: u64,
+    },
+    SemanticInvalid {
+        rounds: u32,
+        corrections: u8,
+        chars: u64,
+    },
     Provider(CoreError),
     Deadline,
     Cancelled,
@@ -391,12 +407,14 @@ async fn drive_stage<T>(
     let mut chars = 0u64;
     loop {
         if rounds >= max_rounds_here {
-            return CallResult::SemanticInvalid { rounds, corrections, chars };
+            return CallResult::SemanticInvalid {
+                rounds,
+                corrections,
+                chars,
+            };
         }
         let messages = build_messages(corrections > 0);
-        chars = chars.saturating_add(
-            messages.iter().map(|m| m.content.len() as u64).sum::<u64>(),
-        );
+        chars = chars.saturating_add(messages.iter().map(|m| m.content.len() as u64).sum::<u64>());
         let mut buffered = String::new();
         let mut on_text = |t: String| buffered.push_str(&t);
         let completion = match within_turn_deadline(
@@ -423,16 +441,30 @@ async fn drive_stage<T>(
             completion.content
         };
         if let Some(value) = validate(&content) {
-            return CallResult::Ok { value, rounds, corrections, chars };
+            return CallResult::Ok {
+                value,
+                rounds,
+                corrections,
+                chars,
+            };
         }
         if corrections >= max_corrections {
-            return CallResult::SemanticInvalid { rounds, corrections, chars };
+            return CallResult::SemanticInvalid {
+                rounds,
+                corrections,
+                chars,
+            };
         }
         corrections = corrections.saturating_add(1);
     }
 }
 
-fn role_binding(role: InvestigationRole, profile: &str, model: &str, corrections: u8) -> RoleBinding {
+fn role_binding(
+    role: InvestigationRole,
+    profile: &str,
+    model: &str,
+    corrections: u8,
+) -> RoleBinding {
     RoleBinding {
         role,
         profile_id: profile.to_string(),
@@ -528,7 +560,12 @@ pub async fn run_review_pipeline(
         )
         .await;
         match result {
-            CallResult::Ok { mut value, rounds, corrections, chars } => {
+            CallResult::Ok {
+                mut value,
+                rounds,
+                corrections,
+                chars,
+            } => {
                 used_rounds = used_rounds.saturating_add(rounds);
                 used_chars = used_chars.saturating_add(chars);
                 value.role_binding.semantic_attempts = corrections;
@@ -551,7 +588,11 @@ pub async fn run_review_pipeline(
                 accepted.push(candidate);
                 findings.push(value);
             }
-            CallResult::SemanticInvalid { rounds, corrections, chars } => {
+            CallResult::SemanticInvalid {
+                rounds,
+                corrections,
+                chars,
+            } => {
                 used_rounds = used_rounds.saturating_add(rounds);
                 used_chars = used_chars.saturating_add(chars);
                 stages.push(StageTelemetry {
@@ -572,7 +613,9 @@ pub async fn run_review_pipeline(
                 });
                 // Rejected candidate: excluded from the answer, fail-closed.
             }
-            CallResult::Provider(error) => return Ok(MultiModelOutcome::ProviderFailed(Box::new(error))),
+            CallResult::Provider(error) => {
+                return Ok(MultiModelOutcome::ProviderFailed(Box::new(error)))
+            }
             CallResult::Deadline => return Ok(MultiModelOutcome::Deadline),
             CallResult::Cancelled => return Ok(MultiModelOutcome::Cancelled),
         }
@@ -614,7 +657,9 @@ pub async fn run_review_pipeline(
     let mut review: Option<ReviewReportV1> = None;
 
     // Reserve exactly one synthesis round after the reviewer.
-    let fits_rounds = used_rounds.saturating_add(u32::from(max_corr) + 1).saturating_add(1)
+    let fits_rounds = used_rounds
+        .saturating_add(u32::from(max_corr) + 1)
+        .saturating_add(1)
         <= budget.max_total_provider_rounds;
     let reviewer_msgs = reviewer_messages(&findings_summary(&findings), &all_evidence_lines, false);
     let reviewer_chars: u64 = reviewer_msgs.iter().map(|m| m.content.len() as u64).sum();
@@ -626,11 +671,21 @@ pub async fn run_review_pipeline(
     if !fits_rounds {
         executed = ExecutedMode::ReviewDegraded;
         degradation = Some(DegradationReason::BudgetRoundsInsufficient);
-        emit_skip(on_stage, DegradationReason::BudgetRoundsInsufficient, &mut stages, &inputs);
+        emit_skip(
+            on_stage,
+            DegradationReason::BudgetRoundsInsufficient,
+            &mut stages,
+            &inputs,
+        );
     } else if !fits_usage {
         executed = ExecutedMode::ReviewDegraded;
         degradation = Some(DegradationReason::BudgetUsageInsufficient);
-        emit_skip(on_stage, DegradationReason::BudgetUsageInsufficient, &mut stages, &inputs);
+        emit_skip(
+            on_stage,
+            DegradationReason::BudgetUsageInsufficient,
+            &mut stages,
+            &inputs,
+        );
     } else {
         on_stage(StageProgressEvent {
             role: InvestigationRole::Reviewer,
@@ -665,7 +720,12 @@ pub async fn run_review_pipeline(
         )
         .await;
         match result {
-            CallResult::Ok { mut value, rounds, corrections, chars } => {
+            CallResult::Ok {
+                mut value,
+                rounds,
+                corrections,
+                chars,
+            } => {
                 used_rounds = used_rounds.saturating_add(rounds);
                 used_chars = used_chars.saturating_add(chars);
                 value.role_binding.semantic_attempts = corrections;
@@ -713,7 +773,11 @@ pub async fn run_review_pipeline(
                         0,
                         reviewer_chars,
                     ),
-                    CallResult::SemanticInvalid { rounds, corrections, chars } => (
+                    CallResult::SemanticInvalid {
+                        rounds,
+                        corrections,
+                        chars,
+                    } => (
                         StageOutcomeKind::SemanticInvalid,
                         DegradationReason::ReviewerSemanticInvalid,
                         rounds,
@@ -760,14 +824,27 @@ pub async fn run_review_pipeline(
         backends.synthesizer,
         &clock,
         cancel,
-        |correction| synthesizer_messages(inputs.user_text, &summary, &review_text, &candidate_ids, correction),
+        |correction| {
+            synthesizer_messages(
+                inputs.user_text,
+                &summary,
+                &review_text,
+                &candidate_ids,
+                correction,
+            )
+        },
         |content| validate_model_answer(content, &ledger).ok(),
         max_corr,
         u32::from(max_corr) + 1,
     )
     .await;
     match synth {
-        CallResult::Ok { value, rounds, corrections, chars } => {
+        CallResult::Ok {
+            value,
+            rounds,
+            corrections,
+            chars,
+        } => {
             used_rounds = used_rounds.saturating_add(rounds);
             used_chars = used_chars.saturating_add(chars);
             stages.push(StageTelemetry {
@@ -800,11 +877,19 @@ pub async fn run_review_pipeline(
             Ok(MultiModelOutcome::Completed {
                 envelope: Box::new(envelope),
                 content,
-                review: if executed == ExecutedMode::Review { review } else { None },
+                review: if executed == ExecutedMode::Review {
+                    review
+                } else {
+                    None
+                },
                 telemetry: Box::new(telemetry),
             })
         }
-        CallResult::SemanticInvalid { rounds, corrections, chars } => {
+        CallResult::SemanticInvalid {
+            rounds,
+            corrections,
+            chars,
+        } => {
             used_rounds = used_rounds.saturating_add(rounds);
             used_chars = used_chars.saturating_add(chars);
             stages.push(StageTelemetry {

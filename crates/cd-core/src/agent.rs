@@ -3743,11 +3743,9 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                 reviewer: runtime.reviewer_backend.as_ref(),
                                 synthesizer: backend,
                             };
-                            crate::multi_model::run_review_pipeline(
-                                &backends,
-                                inputs,
-                                &mut |ev| stage_events.push(ev),
-                            )
+                            crate::multi_model::run_review_pipeline(&backends, inputs, &mut |ev| {
+                                stage_events.push(ev)
+                            })
                             .await?
                         };
                         for ev in stage_events {
@@ -3833,7 +3831,12 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                             MmO::ProviderFailed(error) => {
                                 let (class, _) = classify_provider_turn_failure(&error);
                                 trail.push(format!("multi_model_provider_failure:{class}"));
-                                return terminal_linked_provider_failure(out, &mut trail, true, &[]);
+                                return terminal_linked_provider_failure(
+                                    out,
+                                    &mut trail,
+                                    true,
+                                    &[],
+                                );
                             }
                             MmO::Cancelled => return terminal_cancel(out),
                             MmO::Deadline => {

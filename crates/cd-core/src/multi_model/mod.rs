@@ -208,9 +208,7 @@ impl DegradationReason {
             Self::BudgetUsageInsufficient => {
                 "the turn's usage budget could not fit a reviewer call; answered without review"
             }
-            Self::ReviewerProviderFailed => {
-                "the reviewer provider failed; answered without review"
-            }
+            Self::ReviewerProviderFailed => "the reviewer provider failed; answered without review",
             Self::ReviewerDeadline => "the reviewer call ran out of time; answered without review",
             Self::ReviewerSemanticInvalid => {
                 "the reviewer output failed host validation; answered without review"

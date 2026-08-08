@@ -22,7 +22,9 @@ use cd_core::multi_model::{
 };
 use cd_core::providers::ProviderProfile;
 
-use crate::provider::{resolve_provider_profile, resolve_turn_inputs_from_profile, ResolvedTurnInputs};
+use crate::provider::{
+    resolve_provider_profile, resolve_turn_inputs_from_profile, ResolvedTurnInputs,
+};
 
 /// End-of-resolution outcome. Exactly one of `runtime` / `entry` is set for a
 /// review request; `Single` requests set neither.

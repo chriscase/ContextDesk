@@ -349,11 +349,19 @@ pub fn render_review_markdown(report: &ReviewReportV1) -> String {
                 literal_span(&gap.candidate_id),
                 literal_span(&gap.text),
             ));
-            let mut ev = gap.evidence_ids.iter().map(String::as_str).collect::<Vec<_>>();
+            let mut ev = gap
+                .evidence_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
             ev.sort_unstable();
             ev.dedup();
             if !ev.is_empty() {
-                let rendered = ev.iter().map(|id| literal_span(id)).collect::<Vec<_>>().join(", ");
+                let rendered = ev
+                    .iter()
+                    .map(|id| literal_span(id))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 out.push_str(&format!(" — relates {rendered}"));
             }
             out.push('\n');
@@ -376,11 +384,19 @@ pub fn render_review_markdown(report: &ReviewReportV1) -> String {
                 literal_span(&c.claim_b_id),
                 literal_span(&c.text),
             ));
-            let mut ev = c.evidence_ids.iter().map(String::as_str).collect::<Vec<_>>();
+            let mut ev = c
+                .evidence_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
             ev.sort_unstable();
             ev.dedup();
             if !ev.is_empty() {
-                let rendered = ev.iter().map(|id| literal_span(id)).collect::<Vec<_>>().join(", ");
+                let rendered = ev
+                    .iter()
+                    .map(|id| literal_span(id))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 out.push_str(&format!(" — cites {rendered}"));
             }
             out.push('\n');
@@ -462,7 +478,12 @@ mod tests {
             r#"{{"schema":"{CANDIDATE_FINDING_SCHEMA_V1}","candidate_id":"k1","observations":[{{"claim_id":"o1","text":"x","evidence_ids":["e:k2:2"]}}]}}"#
         );
         assert_eq!(
-            validate_candidate_finding(&cross, &ledger, "k1", rb(super::super::InvestigationRole::Investigator)),
+            validate_candidate_finding(
+                &cross,
+                &ledger,
+                "k1",
+                rb(super::super::InvestigationRole::Investigator)
+            ),
             Err(ValidationError::WrongScope)
         );
 
@@ -471,7 +492,12 @@ mod tests {
             r#"{{"schema":"{CANDIDATE_FINDING_SCHEMA_V1}","candidate_id":"k1","observations":[{{"claim_id":"o1","text":"x","evidence_ids":["e:ghost:9"]}}]}}"#
         );
         assert_eq!(
-            validate_candidate_finding(&unknown, &ledger, "k1", rb(super::super::InvestigationRole::Investigator)),
+            validate_candidate_finding(
+                &unknown,
+                &ledger,
+                "k1",
+                rb(super::super::InvestigationRole::Investigator)
+            ),
             Err(ValidationError::UnknownEvidence)
         );
 
@@ -480,7 +506,12 @@ mod tests {
             r#"{{"schema":"{CANDIDATE_FINDING_SCHEMA_V1}","candidate_id":"k2","observations":[{{"claim_id":"o1","text":"x","evidence_ids":["e:k2:2"]}}]}}"#
         );
         assert_eq!(
-            validate_candidate_finding(&mismatch, &ledger, "k1", rb(super::super::InvestigationRole::Investigator)),
+            validate_candidate_finding(
+                &mismatch,
+                &ledger,
+                "k1",
+                rb(super::super::InvestigationRole::Investigator)
+            ),
             Err(ValidationError::WrongScope)
         );
 
@@ -489,7 +520,12 @@ mod tests {
             r#"{{"schema":"{CANDIDATE_FINDING_SCHEMA_V1}","candidate_id":"k1","status":"supported","observations":[]}}"#
         );
         assert_eq!(
-            validate_candidate_finding(&forged, &ledger, "k1", rb(super::super::InvestigationRole::Investigator)),
+            validate_candidate_finding(
+                &forged,
+                &ledger,
+                "k1",
+                rb(super::super::InvestigationRole::Investigator)
+            ),
             Err(ValidationError::Parse)
         );
     }
@@ -497,14 +533,22 @@ mod tests {
     #[test]
     fn review_validates_gaps_and_contradictions_by_id_only() {
         let ledger = union_ledger();
-        let known: KnownClaims = [("a1".to_string(), "k1".to_string()), ("b1".to_string(), "k2".to_string())]
-            .into_iter()
-            .collect();
+        let known: KnownClaims = [
+            ("a1".to_string(), "k1".to_string()),
+            ("b1".to_string(), "k2".to_string()),
+        ]
+        .into_iter()
+        .collect();
         let ok = format!(
             r#"{{"schema":"{REVIEW_SCHEMA_V1}","evidence_gaps":[{{"gap_id":"g1","candidate_id":"k1","text":"x","related_evidence_ids":["e:k1:1"]}}],"contradictions":[{{"contradiction_id":"x1","candidate_a":"k1","claim_a_id":"a1","candidate_b":"k2","claim_b_id":"b1","text":"conflict","evidence_ids":["e:k1:1","e:k2:2"]}}]}}"#
         );
-        let report = validate_review_report(&ok, &ledger, &known, rb(super::super::InvestigationRole::Reviewer))
-            .expect("valid review");
+        let report = validate_review_report(
+            &ok,
+            &ledger,
+            &known,
+            rb(super::super::InvestigationRole::Reviewer),
+        )
+        .expect("valid review");
         assert_eq!(report.gaps.len(), 1);
         assert_eq!(report.contradictions.len(), 1);
 
@@ -513,7 +557,12 @@ mod tests {
             r#"{{"schema":"{REVIEW_SCHEMA_V1}","contradictions":[{{"contradiction_id":"x1","candidate_a":"k1","claim_a_id":"a1","candidate_b":"k1","claim_b_id":"a1","text":"x","evidence_ids":[]}}]}}"#
         );
         assert_eq!(
-            validate_review_report(&same, &ledger, &known, rb(super::super::InvestigationRole::Reviewer)),
+            validate_review_report(
+                &same,
+                &ledger,
+                &known,
+                rb(super::super::InvestigationRole::Reviewer)
+            ),
             Err(ValidationError::WrongScope)
         );
 
@@ -522,7 +571,12 @@ mod tests {
             r#"{{"schema":"{REVIEW_SCHEMA_V1}","contradictions":[{{"contradiction_id":"x1","candidate_a":"k1","claim_a_id":"b1","candidate_b":"k2","claim_b_id":"a1","text":"x","evidence_ids":[]}}]}}"#
         );
         assert_eq!(
-            validate_review_report(&wrong_claim, &ledger, &known, rb(super::super::InvestigationRole::Reviewer)),
+            validate_review_report(
+                &wrong_claim,
+                &ledger,
+                &known,
+                rb(super::super::InvestigationRole::Reviewer)
+            ),
             Err(ValidationError::WrongScope)
         );
 
@@ -531,7 +585,12 @@ mod tests {
             r#"{{"schema":"{REVIEW_SCHEMA_V1}","evidence_gaps":[{{"gap_id":"g1","candidate_id":"k1","text":"x","related_evidence_ids":["e:k2:2"]}}]}}"#
         );
         assert_eq!(
-            validate_review_report(&cross_gap, &ledger, &known, rb(super::super::InvestigationRole::Reviewer)),
+            validate_review_report(
+                &cross_gap,
+                &ledger,
+                &known,
+                rb(super::super::InvestigationRole::Reviewer)
+            ),
             Err(ValidationError::WrongScope)
         );
     }
