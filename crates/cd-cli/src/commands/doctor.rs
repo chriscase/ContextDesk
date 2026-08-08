@@ -1295,6 +1295,9 @@ mod tests {
             corpus_revision: None,
             corpus_snapshot_revision: None,
             history_messages: 4,
+            multi_model_configured: cd_core::multi_model::MultiModelMode::Single,
+            multi_model_executed: cd_core::multi_model::ExecutedMode::Single,
+            multi_model_entry_degradation: None,
         };
         let calls = vec![call_with_messages(&[&format!(
             "Search the logs for {SYNTHETIC_MARKER} and tell me..."
@@ -1325,6 +1328,9 @@ mod tests {
             corpus_revision: None,
             corpus_snapshot_revision: None,
             history_messages: 2,
+            multi_model_configured: cd_core::multi_model::MultiModelMode::Single,
+            multi_model_executed: cd_core::multi_model::ExecutedMode::Single,
+            multi_model_entry_degradation: None,
         };
         let calls = vec![call_with_messages(&[
             "a follow-up question with no prior context",

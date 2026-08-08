@@ -1376,6 +1376,9 @@ mod grounding_tests {
             corpus_revision: Some(3),
             corpus_snapshot_revision: None,
             history_messages: 3,
+            multi_model_configured: cd_core::multi_model::MultiModelMode::Single,
+            multi_model_executed: cd_core::multi_model::ExecutedMode::Single,
+            multi_model_entry_degradation: None,
         };
         let calls = vec![TracedCall {
             seq: 0,
@@ -1464,6 +1467,9 @@ mod grounding_tests {
             corpus_revision: None,
             corpus_snapshot_revision: None,
             history_messages: 1,
+            multi_model_configured: cd_core::multi_model::MultiModelMode::Single,
+            multi_model_executed: cd_core::multi_model::ExecutedMode::Single,
+            multi_model_entry_degradation: None,
         };
         let lines = build_trace_lines(
             TraceLevel::Summary,
