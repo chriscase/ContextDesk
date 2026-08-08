@@ -378,6 +378,198 @@ pub fn authoritative_json(envelope: &AnswerEnvelopeV1) -> String {
     serde_json::to_string(&envelope.answer).unwrap_or_else(|_| "{}".into())
 }
 
+/// Human-readable label for a claim kind.
+///
+/// Host-owned presentation of a fixed enum — not a domain word list, and not
+/// derived from any corpus text. Renaming every claim, evidence row, and log
+/// term in a corpus leaves these labels unchanged.
+fn claim_kind_label(kind: ClaimKind) -> &'static str {
+    match kind {
+        ClaimKind::Observation => "Observations",
+        ClaimKind::Symptom => "Symptoms",
+        ClaimKind::CausalCandidate => "Causal candidates",
+        ClaimKind::InitiatingCause => "Initiating causes",
+        ClaimKind::CompetingExplanation => "Competing explanations",
+        ClaimKind::MissingEvidence => "Missing evidence",
+    }
+}
+
+/// Fixed render order for claim kinds — the same order
+/// [`validate_model_answer`] consumes the proposal's sections in.
+const CLAIM_KIND_RENDER_ORDER: [ClaimKind; 6] = [
+    ClaimKind::Observation,
+    ClaimKind::Symptom,
+    ClaimKind::CausalCandidate,
+    ClaimKind::InitiatingCause,
+    ClaimKind::CompetingExplanation,
+    ClaimKind::MissingEvidence,
+];
+
+/// Explicit status marker for a claim the host did not accept as supported.
+///
+/// `Supported` renders unmarked; every other status is named in the visible
+/// text, so a withheld initiating cause can never read as an established one.
+fn claim_status_marker(status: ClaimStatus) -> Option<&'static str> {
+    match status {
+        ClaimStatus::Supported => None,
+        ClaimStatus::Unsupported => Some("**[unsupported]**"),
+        ClaimStatus::Withheld => Some("**[withheld]**"),
+    }
+}
+
+/// Whether the citation line already states everything `content` would add.
+///
+/// The host excerpt is optional and some ledgers populate it with the same
+/// identity the citation line already prints. Repeating it would be noise, so
+/// it is shown only when it carries tokens the line does not.
+fn excerpt_adds_information(content: &str, already_shown: &str) -> bool {
+    let shown = already_shown.to_ascii_lowercase();
+    let shown_tokens = shown
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect::<BTreeSet<_>>();
+    content
+        .to_ascii_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .any(|token| !shown_tokens.contains(token))
+}
+
+/// Deterministic, host-owned Markdown projection of a validated envelope.
+///
+/// This is the *display* contract for [`InvestigationAnswerV1`]; the typed
+/// event and [`authoritative_json`] remain the machine and persistence
+/// contract. Nothing ever parses this text back into authority — a later turn
+/// builds a fresh ledger — so the projection is free to be readable.
+///
+/// Guarantees, all of which are gated:
+///
+/// * every displayed citation is an entry of `canonical_citations`; claim
+///   `evidence_ids` are only ever *looked up* there, never printed raw;
+/// * candidate and claim-kind separation is preserved — no claim is shown
+///   outside its candidate, and no kind is merged into another;
+/// * a claim whose host status is not `Supported` carries a visible marker;
+/// * root-cause establishment is printed from `root_cause_established` alone;
+/// * no confidence value is invented — V1 validates none, and the output says
+///   so rather than leaving a reader to assume one;
+/// * output is stable under input ordering: candidates, claims, evidence ids,
+///   and citations are ordered by their host-owned identifiers, so a permuted
+///   envelope renders byte-identically. V1 carries no rank, so imposing an
+///   identifier order is the only ordering the host can honestly display.
+pub fn render_answer_markdown(envelope: &AnswerEnvelopeV1) -> String {
+    let citations: BTreeMap<&str, &CanonicalCitationV1> = envelope
+        .answer
+        .canonical_citations
+        .iter()
+        .map(|citation| (citation.evidence_id.as_str(), citation))
+        .collect();
+
+    let mut out = String::from("# Investigation answer\n\n");
+    out.push_str(&format!(
+        "- Root cause established: {}\n",
+        if envelope.answer.root_cause_established {
+            "yes"
+        } else {
+            "no"
+        }
+    ));
+    // V1 has no validated confidence field. Saying so is the honest option;
+    // omitting the line silently would invite the reader to supply one.
+    out.push_str("- Confidence: not rated by this contract\n");
+    out.push_str(&format!(
+        "- Evidence snapshot: corpus `{}` · events {} · template analysis {} · suppression {}\n",
+        envelope.binding.corpus_id,
+        envelope.binding.revision.event_revision,
+        envelope.binding.revision.template_analysis_revision,
+        envelope.binding.revision.suppression_revision,
+    ));
+
+    let mut candidates = envelope.answer.candidates.iter().collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.candidate_id.cmp(&right.candidate_id));
+    if candidates.is_empty() {
+        out.push_str("\nNo candidate was reported for this turn.\n");
+    }
+    let mut displayed_evidence: BTreeSet<&str> = BTreeSet::new();
+    for candidate in candidates {
+        out.push_str(&format!("\n## Candidate `{}`\n", candidate.candidate_id));
+        let mut rendered_any = false;
+        for kind in CLAIM_KIND_RENDER_ORDER {
+            let mut claims = candidate
+                .claims
+                .iter()
+                .filter(|claim| claim.claim_kind == kind)
+                .collect::<Vec<_>>();
+            if claims.is_empty() {
+                continue;
+            }
+            claims.sort_by(|left, right| left.claim_id.cmp(&right.claim_id));
+            rendered_any = true;
+            // Bold labels, not headings: the legacy structured-triage parser
+            // keys on normalized headings, and these two answer contracts must
+            // stay visibly and mechanically separate.
+            out.push_str(&format!("\n**{}**\n\n", claim_kind_label(kind)));
+            for claim in claims {
+                out.push_str("- ");
+                if let Some(marker) = claim_status_marker(claim.status) {
+                    out.push_str(marker);
+                    out.push(' ');
+                }
+                out.push_str(claim.text.trim());
+                let mut cited = claim
+                    .evidence_ids
+                    .iter()
+                    .filter(|id| citations.contains_key(id.as_str()))
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                cited.sort_unstable();
+                cited.dedup();
+                if !cited.is_empty() {
+                    let rendered = cited
+                        .iter()
+                        .map(|id| format!("`{id}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    out.push_str(&format!(" — cites {rendered}"));
+                    displayed_evidence.extend(cited);
+                } else if !claim.evidence_ids.is_empty() {
+                    // Only reachable for an envelope that did not come from
+                    // `validate_model_answer`; never silently drop the gap.
+                    out.push_str(" — no host citation available");
+                }
+                out.push('\n');
+            }
+        }
+        if !rendered_any {
+            out.push_str("\nNo claims were reported for this candidate.\n");
+        }
+    }
+
+    if !displayed_evidence.is_empty() {
+        out.push_str("\n## Evidence\n\n");
+        for evidence_id in &displayed_evidence {
+            let Some(citation) = citations.get(evidence_id) else {
+                continue;
+            };
+            let line = format!(
+                "- `{}` — {} · {}",
+                citation.evidence_id, citation.source_label, citation.locator
+            );
+            out.push_str(&line);
+            if citation.corpus_id != envelope.binding.corpus_id
+                || citation.revision != envelope.binding.revision
+            {
+                out.push_str(" · outside this turn's evidence snapshot");
+            }
+            let excerpt = citation.content.trim();
+            if !excerpt.is_empty() && excerpt_adds_information(excerpt, &line) {
+                out.push_str(&format!("\n  - {excerpt}"));
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,6 +764,304 @@ mod tests {
             Err(ValidationError::WrongScope)
         );
     }
+    // -----------------------------------------------------------------
+    // Host Markdown projection (`render_answer_markdown`).
+    //
+    // These gates are V1-native and vocabulary-neutral: no gate depends on
+    // any incident word, log term, or corpus content. Every identifier below
+    // is deliberately meaningless.
+    // -----------------------------------------------------------------
+
+    /// Evidence ids the rendered text actually shows the reader — from the
+    /// `cites` segments and the Evidence section, never from the envelope.
+    fn displayed_evidence_ids(markdown: &str) -> BTreeSet<String> {
+        let mut ids = BTreeSet::new();
+        for line in markdown.lines() {
+            let trimmed = line.trim();
+            if let Some((_, cited)) = trimmed.split_once("— cites ") {
+                for token in cited.split(", ") {
+                    ids.insert(token.trim().trim_matches('`').to_string());
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("- `") {
+                if let Some((id, _)) = rest.split_once("` — ") {
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+        ids
+    }
+
+    /// Two candidates, one supported observation each, plus one initiating
+    /// cause whose evidence role cannot establish a root (so the host
+    /// withholds it). `role_a` selects whether the root is established.
+    fn mixed_status_envelope(role_a: EvidenceRole) -> AnswerEnvelopeV1 {
+        let raw = format!(
+            r#"{{"schema":"{SCHEMA_V1}","candidates":[
+                {{"candidate_id":"a",
+                  "observations":[{{"claim_id":"a-obs","text":"first opaque statement","evidence_ids":["e-a"]}}],
+                  "initiating_causes":[{{"claim_id":"a-root","text":"proposed initiating item","evidence_ids":["e-a"]}}]}},
+                {{"candidate_id":"b",
+                  "observations":[{{"claim_id":"b-obs","text":"second opaque statement","evidence_ids":["e-b"]}}]}}
+            ]}}"#
+        );
+        validate_model_answer(&raw, &ledger_with_roles(role_a, EvidenceRole::Neutral))
+            .expect("fixture proposal validates")
+    }
+
+    #[test]
+    fn every_displayed_citation_maps_to_a_host_canonical_citation() {
+        let envelope = mixed_status_envelope(EvidenceRole::Neutral);
+        let markdown = render_answer_markdown(&envelope);
+        let canonical = envelope
+            .answer
+            .canonical_citations
+            .iter()
+            .map(|citation| citation.evidence_id.clone())
+            .collect::<BTreeSet<_>>();
+        let displayed = displayed_evidence_ids(&markdown);
+        assert!(!displayed.is_empty(), "{markdown}");
+        assert!(
+            displayed.is_subset(&canonical),
+            "displayed {displayed:?} escaped canonical {canonical:?}\n{markdown}"
+        );
+
+        // A claim citing an id the host never canonicalized shows no citation
+        // for it, and says so rather than dropping the gap silently.
+        let mut tampered = envelope.clone();
+        tampered.answer.canonical_citations.clear();
+        let tampered_markdown = render_answer_markdown(&tampered);
+        assert!(displayed_evidence_ids(&tampered_markdown).is_empty());
+        assert!(tampered_markdown.contains("no host citation available"));
+    }
+
+    #[test]
+    fn candidate_and_claim_kind_separation_survives_rendering() {
+        let markdown = render_answer_markdown(&mixed_status_envelope(EvidenceRole::Neutral));
+        // Split on the host's own candidate heading rather than byte offsets:
+        // the blocks are what a reader sees under each candidate.
+        let mut blocks = markdown.split("## Candidate ");
+        let header = blocks.next().expect("document header");
+        assert!(header.contains("# Investigation answer"), "{markdown}");
+        let a_block = blocks.next().expect("candidate a block");
+        let b_block = blocks.next().expect("candidate b block");
+        assert!(
+            blocks.next().is_none(),
+            "exactly two candidates: {markdown}"
+        );
+        assert!(a_block.starts_with("`a`"), "{a_block}");
+        assert!(b_block.starts_with("`b`"), "{b_block}");
+        // The evidence section trails the last candidate, not the first.
+        assert!(!a_block.contains("## Evidence"), "{a_block}");
+        assert!(b_block.contains("## Evidence"), "{b_block}");
+        let b_block = b_block
+            .split("## Evidence")
+            .next()
+            .expect("candidate b claims");
+
+        // Each claim stays under its own candidate…
+        assert!(a_block.contains("first opaque statement"));
+        assert!(!a_block.contains("second opaque statement"));
+        assert!(b_block.contains("second opaque statement"));
+        assert!(!b_block.contains("first opaque statement"));
+        // …and each candidate cites only its own evidence.
+        assert!(a_block.contains("`e-a`") && !a_block.contains("`e-b`"));
+        assert!(b_block.contains("`e-b`") && !b_block.contains("`e-a`"));
+        // Kinds are separate labelled groups, not one merged list.
+        assert!(a_block.contains("**Observations**"));
+        assert!(a_block.contains("**Initiating causes**"));
+        assert!(!b_block.contains("**Initiating causes**"));
+    }
+
+    #[test]
+    fn a_withheld_initiating_cause_never_renders_as_established() {
+        let envelope = mixed_status_envelope(EvidenceRole::Neutral);
+        assert!(!envelope.answer.root_cause_established);
+        let claim = envelope.answer.candidates[0]
+            .claims
+            .iter()
+            .find(|claim| claim.claim_kind == ClaimKind::InitiatingCause)
+            .expect("fixture proposes an initiating cause");
+        assert_eq!(claim.status, ClaimStatus::Withheld);
+
+        let markdown = render_answer_markdown(&envelope);
+        let line = markdown
+            .lines()
+            .find(|line| line.contains("proposed initiating item"))
+            .expect("the withheld claim is still shown");
+        assert!(
+            line.contains("**[withheld]**"),
+            "a withheld claim must carry a visible marker: {line}"
+        );
+        assert!(
+            markdown.contains("- Root cause established: no"),
+            "{markdown}"
+        );
+        assert!(
+            !markdown.contains("Root cause established: yes"),
+            "{markdown}"
+        );
+    }
+
+    #[test]
+    fn displayed_root_status_equals_the_host_boolean_exactly() {
+        for (role, established, expected) in [
+            (EvidenceRole::Neutral, false, "- Root cause established: no"),
+            (EvidenceRole::Cause, true, "- Root cause established: yes"),
+        ] {
+            let envelope = mixed_status_envelope(role);
+            assert_eq!(envelope.answer.root_cause_established, established);
+            let markdown = render_answer_markdown(&envelope);
+            assert!(markdown.contains(expected), "{markdown}");
+            assert_eq!(
+                markdown
+                    .lines()
+                    .filter(|line| line.starts_with("- Root cause established:"))
+                    .count(),
+                1,
+                "exactly one root statement: {markdown}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_confidence_value_is_invented() {
+        let markdown = render_answer_markdown(&mixed_status_envelope(EvidenceRole::Cause));
+        let confidence = markdown
+            .lines()
+            .filter(|line| line.starts_with("- Confidence:"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            confidence,
+            vec!["- Confidence: not rated by this contract"],
+            "{markdown}"
+        );
+        let lowered = markdown.to_ascii_lowercase();
+        for invented in ["confidence: high", "confidence: medium", "confidence: low"] {
+            assert!(!lowered.contains(invented), "{markdown}");
+        }
+    }
+
+    #[test]
+    fn renaming_every_human_string_changes_only_that_text() {
+        let envelope = mixed_status_envelope(EvidenceRole::Neutral);
+        let mut renamed = envelope.clone();
+        // Rename every model- and corpus-derived string the renderer can see.
+        // Ids stay fixed: this is the vocabulary-independence property, not an
+        // identity-renaming one.
+        let rename = |text: &str| text.replace("opaque", "renamed").replace("one", "qux");
+        for candidate in &mut renamed.answer.candidates {
+            for claim in &mut candidate.claims {
+                claim.text = rename(&claim.text);
+            }
+        }
+        for citation in &mut renamed.answer.canonical_citations {
+            citation.source_label = rename(&citation.source_label);
+            citation.locator = rename(&citation.locator);
+            citation.content = rename(&citation.content);
+        }
+        for entry in &mut renamed.evidence {
+            entry.source_label = rename(&entry.source_label);
+            entry.locator = rename(&entry.locator);
+            entry.content = rename(&entry.content);
+        }
+        assert_eq!(
+            rename(&render_answer_markdown(&envelope)),
+            render_answer_markdown(&renamed),
+            "the renderer must treat every human string as opaque"
+        );
+    }
+
+    #[test]
+    fn rendering_is_stable_under_input_ordering() {
+        let envelope = mixed_status_envelope(EvidenceRole::Neutral);
+        let expected = render_answer_markdown(&envelope);
+
+        let mut permuted = envelope.clone();
+        permuted.answer.candidates.reverse();
+        for candidate in &mut permuted.answer.candidates {
+            candidate.claims.reverse();
+            for claim in &mut candidate.claims {
+                claim.evidence_ids.reverse();
+            }
+        }
+        permuted.answer.canonical_citations.reverse();
+        permuted.evidence.reverse();
+        assert_eq!(
+            render_answer_markdown(&permuted),
+            expected,
+            "a permuted envelope must render byte-identically"
+        );
+        // …and rendering the same value twice is itself stable.
+        assert_eq!(render_answer_markdown(&envelope), expected);
+    }
+
+    #[test]
+    fn a_host_excerpt_is_shown_only_when_it_adds_something_the_citation_line_lacks() {
+        // The fixture ledger's excerpts carry words the citation line does not.
+        let envelope = mixed_status_envelope(EvidenceRole::Neutral);
+        let markdown = render_answer_markdown(&envelope);
+        assert!(markdown.contains("host excerpt one"), "{markdown}");
+
+        // An excerpt that only restates the identity already printed is noise.
+        let mut restating = envelope.clone();
+        for citation in &mut restating.answer.canonical_citations {
+            citation.content = format!("{} {}", citation.source_label, citation.locator);
+        }
+        let restated = render_answer_markdown(&restating);
+        assert!(!restated.contains("host excerpt"), "{restated}");
+        for citation in &restating.answer.canonical_citations {
+            assert_eq!(
+                restated.matches(citation.locator.as_str()).count(),
+                1,
+                "the identity must be printed once, not echoed: {restated}"
+            );
+        }
+
+        // An empty excerpt renders nothing at all.
+        let mut empty = envelope.clone();
+        for citation in &mut empty.answer.canonical_citations {
+            citation.content.clear();
+        }
+        let rendered = render_answer_markdown(&empty);
+        assert!(!rendered.contains("\n  - "), "{rendered}");
+    }
+
+    #[test]
+    fn the_human_projection_is_markdown_while_the_machine_projection_stays_exact() {
+        let envelope = mixed_status_envelope(EvidenceRole::Neutral);
+        let markdown = render_answer_markdown(&envelope);
+        assert!(markdown.starts_with("# Investigation answer"), "{markdown}");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(markdown.trim()).is_err(),
+            "the visible answer must not be raw JSON: {markdown}"
+        );
+        assert!(!markdown.contains(SCHEMA_V1), "{markdown}");
+
+        // The machine contract is untouched by the display contract.
+        let json = authoritative_json(&envelope);
+        let parsed: InvestigationAnswerV1 =
+            serde_json::from_str(&json).expect("authoritative JSON stays exact");
+        assert_eq!(parsed, envelope.answer);
+    }
+
+    /// The V1 projection must not be mistakable for the legacy
+    /// structured-triage contract: that parser keys on normalized headings,
+    /// so this renderer uses bold labels and its own heading vocabulary.
+    #[test]
+    fn the_v1_projection_is_not_a_legacy_structured_triage_answer() {
+        let markdown = render_answer_markdown(&mixed_status_envelope(EvidenceRole::Cause));
+        let legacy = crate::triage_quality::parse_structured_triage_answer(&markdown)
+            .expect("the legacy parser is total over text");
+        assert!(legacy.observations.is_empty(), "{legacy:?}");
+        assert!(legacy.causal_candidates.is_empty(), "{legacy:?}");
+        assert!(legacy.competing_explanations.is_empty(), "{legacy:?}");
+        assert!(legacy.confidence.is_empty(), "{legacy:?}");
+        assert!(
+            !legacy.asserts_root_cause_established,
+            "an established V1 root must not become a legacy assertion: {legacy:?}"
+        );
+    }
+
     #[test]
     fn neutral_and_symptom_roles_never_establish_root() {
         let raw = format!(

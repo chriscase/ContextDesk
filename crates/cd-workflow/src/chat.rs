@@ -495,6 +495,92 @@ mod tests {
         }
     }
 
+    /// The machine contract and the human contract are different projections
+    /// of the same validated envelope, and only the typed one is authority.
+    #[test]
+    fn persistence_keeps_the_typed_envelope_exact_while_visible_text_is_markdown() {
+        use cd_core::investigation_answer::{
+            render_answer_markdown, CanonicalCitationV1, ClaimKind, ClaimStatus,
+            InvestigationCandidateV1, InvestigationClaimV1, LogSnapshotRevisionV1,
+        };
+
+        let revision = LogSnapshotRevisionV1 {
+            event_revision: 3,
+            template_analysis_revision: 2,
+            suppression_revision: 1,
+        };
+        let StreamEvent::InvestigationAnswer { mut envelope } =
+            typed_answer_event("session", "turn", "corpus-a", revision)
+        else {
+            unreachable!("fixture builds a typed answer event")
+        };
+        envelope.answer.candidates.push(InvestigationCandidateV1 {
+            candidate_id: "k1".into(),
+            claims: vec![InvestigationClaimV1 {
+                claim_id: "c1".into(),
+                claim_kind: ClaimKind::Observation,
+                text: "opaque host-validated statement".into(),
+                candidate_id: "k1".into(),
+                evidence_ids: vec!["ev1".into()],
+                status: ClaimStatus::Supported,
+            }],
+        });
+        envelope
+            .answer
+            .canonical_citations
+            .push(CanonicalCitationV1 {
+                evidence_id: "ev1".into(),
+                candidate_id: "k1".into(),
+                source_label: "one/two.jsonl".into(),
+                locator: "seq=9".into(),
+                corpus_id: "corpus-a".into(),
+                revision,
+                content: String::new(),
+            });
+
+        let markdown = render_answer_markdown(&envelope);
+        let stored = stored_from_chat(
+            &ChatMessage {
+                role: Role::Assistant,
+                content: markdown.clone(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            Some(&envelope),
+        );
+
+        // Human projection: readable Markdown, never the authoritative JSON.
+        assert!(stored.content.starts_with("# Investigation answer"));
+        assert!(serde_json::from_str::<serde_json::Value>(stored.content.trim()).is_err());
+        assert!(stored.content.contains("`ev1`"), "{}", stored.content);
+
+        // Machine projection: byte-exact typed envelope under the reserved key.
+        let meta = stored.meta.expect("assistant metadata");
+        let persisted = meta
+            .get(INVESTIGATION_ANSWER_META_KEY)
+            .expect("typed envelope persisted");
+        assert_eq!(
+            persisted,
+            &serde_json::to_value(&envelope).expect("typed value")
+        );
+        let round_trip: cd_core::investigation_answer::AnswerEnvelopeV1 =
+            serde_json::from_value(persisted.clone()).expect("exact round trip");
+        assert_eq!(round_trip, envelope);
+
+        // Re-entry: the rendered text is never a path back to authority. A
+        // stream carrying only the Markdown yields no investigation answer.
+        let display_only = vec![StreamEvent::TextDelta { text: markdown }];
+        assert!(investigation_answer_for_turn(
+            &display_only,
+            "session",
+            "turn",
+            Some("corpus-a"),
+            Some("corpus-a"),
+            Some(revision),
+        )
+        .is_none());
+    }
+
     #[test]
     fn investigation_answer_persistence_requires_exact_linked_scope_and_revision() {
         let revision = cd_core::investigation_answer::LogSnapshotRevisionV1 {

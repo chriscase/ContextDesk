@@ -161,8 +161,11 @@ open under #287.
 `StreamEvent::InvestigationAnswer` carries an `AnswerEnvelopeV1` only after core validates a
 model proposal against the host-built evidence ledger for that exact session, turn, corpus, and
 revision. Hosts may persist the exact envelope in assistant-message metadata and may project it
-to human text, JSON, JSONL, or IPC. Those projections are display/read APIs only: hosts must not
-parse displayed transcript JSON, or accept client-supplied envelope JSON, to create or revalidate
+to human text, JSON, JSONL, or IPC. The human projection is produced centrally by
+`cd_core::investigation_answer::render_answer_markdown`, so CLI and desktop display the same
+deterministic Markdown; the accompanying `TextDelta` carries that Markdown, never the
+authoritative JSON. Those projections are display/read APIs only: hosts must not parse displayed
+transcript text or JSON, or accept client-supplied envelope JSON, to create or revalidate
 authority. Authoritative turn ids and message-row ownership are host-created; renderer message ids
 are correlation labels and cannot select a prior transcript row for new authority. A subsequent
 turn builds a fresh ledger. If an envelope's session/corpus/revision no longer matches host state,

@@ -462,8 +462,10 @@ On failure, `ok` is `false`, `data` is `null`, and `error` is
 
 When a linked investigation completes, JSON output includes `investigation_answer` and JSONL
 emits an `investigation_answer` line containing the same host-validated `AnswerEnvelopeV1`.
-`final_text` is a display projection only; scripts must not feed it, or a displayed envelope,
-back into a later chat turn as evidence authority. Every new turn creates a fresh ledger.
+`final_text` is the host's deterministic Markdown projection of that envelope — readable
+output, not authority. Scripts must read `investigation_answer`; they must not parse
+`final_text`, or feed it (or a displayed envelope) back into a later chat turn as evidence
+authority. Every new turn creates a fresh ledger.
 
 Every streaming command's own `type`-tagged vocabulary is closed and
 command-specific — a reader must not assume one shared line grammar across

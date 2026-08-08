@@ -12,10 +12,12 @@ flowchart TD
     B --> C["Host: <=4 structural candidates"]
     C --> S["LLM: candidate-only synthesis\n(max 2 attempts each)"]
     S --> V["Host: validate citations against that candidate only"]
-    V -->|"valid groups >=2"| F["LLM: final ranked comparison"]
+    V -->|"valid groups >=2"| F["LLM: strict investigation_answer.v1 proposal"]
     V -->|"no groups / insufficient starting budget"| L["Existing single-stage path"]
-    F --> G["Host: validate citations + every group remains named"]
-    G --> O["Shared CLI / GUI stream events + telemetry"]
+    F --> G["Host: validate proposal against the immutable evidence ledger"]
+    G --> E["Host: typed AnswerEnvelopeV1 (authority)"]
+    E --> M["Host: deterministic Markdown projection (display)"]
+    M --> O["Shared CLI / GUI stream events + telemetry"]
 ```
 
 ## Responsibility boundary
@@ -30,10 +32,35 @@ create groups, or move citations between groups.
 Each candidate has a stable `group_id`, a small structural brief, and its own
 trusted identity ledger (`seq`, `source`, `template_id`). A candidate response
 must cite an identity from its own ledger. Invalid responses receive at most
-one correction attempt and are then withheld. The final response sees only
-accepted candidate drafts, must name each accepted `group_id`, keep sections
-separate, rank them, and cite only their union. This avoids a global evidence
+one correction attempt and are then withheld. This avoids a global evidence
 set incorrectly validating a decoy's citation from another incident.
+
+## Two contracts: authority and display
+
+The final comparison is a **strict `contextdesk.investigation_answer.v1`
+proposal**, not prose. The model supplies only `candidate_id`, `claim_id`,
+`text`, and `evidence_ids`; every host-owned field — citations, claim status,
+corpus, revision, session, turn — is refused on input and derived by
+`validate_model_answer` against the immutable ledger for that exact turn. The
+result is an `AnswerEnvelopeV1`, emitted as `StreamEvent::InvestigationAnswer`.
+That envelope is the sole authority and the only persistence path.
+
+What a person reads is a **separate, deterministic host projection**:
+`render_answer_markdown` renders the validated envelope as Markdown and that
+text is what the visible `TextDelta` and transcript history carry. The
+projection derives citations only from `canonical_citations`, keeps candidates
+and claim kinds separate, marks any claim the host did not accept, states
+root-cause establishment from `root_cause_established` alone, and invents no
+confidence — V1 validates none, so the output says so. It is ordered by
+host-owned identifiers, so a permuted envelope renders byte-identically.
+Nothing parses that Markdown back: a later turn builds a fresh ledger.
+
+The legacy structured-triage answer contract (`observations`,
+`causal_candidates`, `competing_explanations`, `confidence`,
+`missing_or_next_evidence`) and its hermetic rubric still govern the
+**single-stage** synthesis path, and only that path. The two contracts are kept
+mechanically separate — the projection deliberately avoids the headings the
+legacy parser keys on — so neither can be mistaken for the other.
 
 ## Bounds and failures
 

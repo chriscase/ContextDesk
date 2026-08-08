@@ -1011,7 +1011,12 @@ fn multi_stage_ledger(
                 revision: binding.revision,
                 // No generic classifier establishes causes from these rows.
                 role: EvidenceRole::Neutral,
-                content: format!("source={} seq={}", identity.source, identity.seq),
+                // `content` is the host's *excerpt* slot. A search evidence
+                // identity carries no message text, so this ledger has no
+                // excerpt to give; restating the source and seq the citation
+                // already prints would be noise in the rendered answer, not
+                // evidence. A future ledger that carries real text fills this.
+                content: String::new(),
             });
         }
     }
@@ -1233,7 +1238,13 @@ async fn run_multi_stage_broad_triage(
         {
             envelope.semantic_attempts = u8::try_from(semantic_attempts).unwrap_or(u8::MAX);
             return Ok(MultiStageTriageOutcome::Completed {
-                content: crate::investigation_answer::authoritative_json(&envelope),
+                // Visible text is the host's readable projection of the
+                // validated envelope, not the authoritative JSON: the typed
+                // event beside it stays the machine/persistence contract, and
+                // a transcript that shows raw authority invites a caller to
+                // read it back as authority. Both hosts consume this one
+                // projection, so CLI and GUI cannot drift apart.
+                content: crate::investigation_answer::render_answer_markdown(&envelope),
                 envelope: Box::new(envelope),
                 accepted_groups: drafts.into_iter().map(|draft| draft.group_id).collect(),
                 rejected_groups,
@@ -3785,7 +3796,10 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                         "retry_class": "candidate_or_final_bounded",
                                         "final_citation_confinement": "valid",
                                         "answer_authority": "host_validated_typed",
-                                        "root_establishment": "withheld_pending_host_structural_roles",
+                                        // Read from the validated boolean, never
+                                        // asserted alongside it.
+                                        "root_cause_established": envelope.answer.root_cause_established,
+                                        "visible_projection": "host_rendered_markdown",
                                         "answer_binding": envelope.binding,
                                         "semantic_attempts": envelope.semantic_attempts,
                                     })
@@ -12122,7 +12136,16 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 assert!(rejected_groups.is_empty());
                 assert_eq!(provider_rounds, 4);
                 assert_eq!(envelope.semantic_attempts, 1);
-                assert!(content.contains("contextdesk.investigation_answer.v1"));
+                // Visible text is the host's readable projection of the
+                // validated envelope; the schema id belongs to the typed
+                // event beside it, never to the transcript.
+                assert_eq!(
+                    content,
+                    crate::investigation_answer::render_answer_markdown(&envelope)
+                );
+                assert!(content.starts_with("# Investigation answer"));
+                assert!(!content.contains("contextdesk.investigation_answer.v1"));
+                assert!(content.contains("## Candidate `trace:alpha`"));
                 assert!(!content.contains("forged"));
                 assert_eq!(contexts.len(), provider_rounds);
             }
