@@ -53,6 +53,33 @@ pub fn wrap_untrusted(source: &str, body: &str) -> String {
     )
 }
 
+/// Whether `text` contains one complete, nonce-matched untrusted-data envelope.
+///
+/// Context fitting uses this structural check to keep an already-wrapped system
+/// block atomic. A fitter may omit the complete block and retry, but it must
+/// never tail-truncate through its nonce-matched terminator.
+pub fn has_complete_untrusted_data_envelope(text: &str) -> bool {
+    let open_prefix = "<<<UNTRUSTED_DATA:";
+    let Some(open) = text.find(open_prefix) else {
+        return false;
+    };
+    let Some(after_open) = text.get(open + open_prefix.len()..) else {
+        return false;
+    };
+    let nonce_len = after_open
+        .chars()
+        .take_while(|c| c.is_ascii_hexdigit())
+        .count();
+    if nonce_len < 16 {
+        return false;
+    }
+    let Some(nonce) = after_open.get(..nonce_len) else {
+        return false;
+    };
+    let close = format!("<<<END_UNTRUSTED_DATA:{nonce}>>>");
+    text.ends_with(&close)
+}
+
 /// Wrap a skill body (trusted method text but still cannot raise privileges).
 pub fn wrap_skill(skill_id: &str, body: &str) -> String {
     let skill_id = sanitize_label(skill_id);
