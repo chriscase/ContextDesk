@@ -106,6 +106,9 @@ pub struct ReviewPipelineInputs<'a> {
     /// Whole-turn wall-clock ceiling. `0` = none.
     pub deadline_ms: u64,
     pub started_at: Option<Instant>,
+    /// Cooperative cancel flag shared with the driving turn. When set, every
+    /// stage stops promptly.
+    pub cancel: Option<std::sync::Arc<AtomicBool>>,
 }
 
 /// Build a flat deadline plan (no phase sub-budgets); every phase caps at the
@@ -451,7 +454,7 @@ pub async fn run_review_pipeline(
     on_stage: &mut (dyn FnMut(StageProgressEvent) + Send),
 ) -> CoreResult<MultiModelOutcome> {
     let clock = TurnClock::new(flat_plan(inputs.deadline_ms), inputs.started_at);
-    let cancel: Option<&AtomicBool> = None; // cancellation flows via the shared clock in callers
+    let cancel: Option<&AtomicBool> = inputs.cancel.as_deref();
     let budget = inputs.budget;
     let max_corr = budget.max_semantic_corrections_per_stage;
     let packing = synthesis_packing_budget(budget.context_char_budget);

@@ -80,6 +80,7 @@ use std::sync::Arc;
 pub const MAX_PERMISSION_ROUNDS: usize = 3;
 
 /// One chat request, host-neutral.
+#[derive(Default)]
 pub struct ChatWorkflowRequest<'a> {
     /// Corpus to ground this turn in, if any. `None` runs an ordinary,
     /// unlinked turn.
@@ -104,6 +105,15 @@ pub struct ChatWorkflowRequest<'a> {
     /// Text explicitly selected by the user for this turn only. This is not
     /// inferred from linked corpus, viewport, ambient memory, or attachments.
     pub user_selection: Option<&'a str>,
+    /// Multi-model mode for this turn. `Single` (the default) runs the
+    /// established path unchanged; `Review` opts in to the reviewer pipeline
+    /// with deterministic degradation.
+    pub multi_model_mode: cd_core::multi_model::MultiModelMode,
+    /// Host-resolved reviewer qualification verdict: `Some(true)` measured
+    /// pass, `Some(false)` measured fail, `None` unverified. A caller with no
+    /// qualification store leaves this `None`; a `require_qualified` reviewer
+    /// then degrades honestly.
+    pub reviewer_qualified: Option<bool>,
 }
 
 /// Outcome of one workflow call.
@@ -131,6 +141,15 @@ pub struct ChatWorkflowOutcome {
     /// (system preamble + every prior + new turn) — a trace summary's
     /// "history count."
     pub history_messages: usize,
+    /// Configured multi-model mode for this turn (what was requested).
+    pub multi_model_configured: cd_core::multi_model::MultiModelMode,
+    /// Executed multi-model mode, honest about degradation. `single` when
+    /// review was not requested or degraded at entry; the seam reports
+    /// `review` / `review_degraded` via the event stream.
+    pub multi_model_executed: cd_core::multi_model::ExecutedMode,
+    /// Exact entry-time degradation reason, if review was requested but could
+    /// not run. Mid-pipeline degradations are reported on the event stream.
+    pub multi_model_entry_degradation: Option<cd_core::multi_model::DegradationReason>,
 }
 
 fn role_str(role: &Role) -> &'static str {
@@ -256,6 +275,32 @@ pub async fn run_chat_workflow(
     let mut history = session.to_chat_history();
     let before_len = history.len();
 
+    // Resolve the multi-model reviewer runtime. Review is only meaningful for a
+    // corpus-linked investigation turn (the reviewer pipeline runs at the
+    // broad-triage seam), so an unlinked turn stays single-model regardless of
+    // the requested mode. The reviewer's per-call context budget matches the
+    // turn's resolved budget.
+    let review_context_budget = host
+        .model_context_budgets()
+        .resolve(Some(resolved.profile.chat_model.as_str()));
+    let review_mode = if request.corpus_id.is_some() {
+        request.multi_model_mode
+    } else {
+        cd_core::multi_model::MultiModelMode::Single
+    };
+    let review = crate::multi_model::resolve_reviewer_runtime(
+        cfg,
+        secrets,
+        review_mode,
+        &resolved,
+        request.reviewer_qualified,
+        review_context_budget,
+    )
+    .await;
+    let multi_model_runtime = review.runtime.clone();
+    let multi_model_configured = review.configured_mode;
+    let multi_model_entry_degradation = review.entry_degradation;
+
     let binding = match request.corpus_id {
         Some(corpus_id) => Some(bind_linked_corpus(host, cache_root, corpus_id)?),
         None => None,
@@ -300,6 +345,14 @@ pub async fn run_chat_workflow(
         Some(sink) => sink,
         None => &mut noop_sink,
     };
+    // An entry-time reviewer degradation is reported once, before the turn, so
+    // the caller knows review was requested but is running single-model and
+    // why. Mid-pipeline degradations are reported by the seam itself.
+    if let Some(reason) = multi_model_entry_degradation {
+        let event = crate::multi_model::entry_degradation_event(reason);
+        live_sink(event.clone());
+        all_events.push(event);
+    }
     loop {
         let events = run_turn(
             host,
@@ -317,6 +370,7 @@ pub async fn run_chat_workflow(
                 telemetry_sequence: Some(workflow_telemetry_sequence.clone()),
                 suppress_provider_telemetry_event: true,
                 user_selection: request.user_selection,
+                multi_model: multi_model_runtime.clone(),
                 ..TurnExecutionOptions::default()
             },
             Some(&mut *live_sink),
@@ -434,6 +488,7 @@ pub async fn run_chat_workflow(
         .collect::<Vec<_>>()
         .join("");
 
+    let multi_model_executed = executed_mode_from_events(&all_events);
     Ok(ChatWorkflowOutcome {
         session_id,
         turn_id,
@@ -444,7 +499,32 @@ pub async fn run_chat_workflow(
         corpus_snapshot_revision,
         history_messages: history.len(),
         final_text,
+        multi_model_configured,
+        multi_model_executed,
+        multi_model_entry_degradation,
     })
+}
+
+/// Derive the executed multi-model mode from the event stream's summary line.
+/// The seam and the entry-degradation both emit a `multi_model_stage` summary
+/// with a status of `single` / `review` / `review_degraded`; absent one, the
+/// turn was single-model.
+fn executed_mode_from_events(events: &[StreamEvent]) -> cd_core::multi_model::ExecutedMode {
+    use cd_core::multi_model::ExecutedMode;
+    events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            StreamEvent::MultiModelStage { stage, status, .. } if stage == "summary" => {
+                match status.as_deref() {
+                    Some("review") => Some(ExecutedMode::Review),
+                    Some("review_degraded") => Some(ExecutedMode::ReviewDegraded),
+                    _ => Some(ExecutedMode::Single),
+                }
+            }
+            _ => None,
+        })
+        .unwrap_or(ExecutedMode::Single)
 }
 
 #[cfg(test)]
@@ -718,6 +798,7 @@ mod tests {
                 dry_run: false,
                 trace_sink: None,
                 user_selection: None,
+                ..ChatWorkflowRequest::default()
             },
             None,
             None,
@@ -836,6 +917,7 @@ mod tests {
                 dry_run: false,
                 trace_sink: Some(trace_sink),
                 user_selection: None,
+                ..ChatWorkflowRequest::default()
             },
             None,
             None,
@@ -947,6 +1029,7 @@ mod tests {
                     dry_run: false,
                     trace_sink: None,
                     user_selection: selection,
+                    ..ChatWorkflowRequest::default()
                 },
                 None,
                 None,
@@ -1100,6 +1183,7 @@ mod tests {
                 dry_run: false,
                 trace_sink: None,
                 user_selection: None,
+                ..ChatWorkflowRequest::default()
             },
             None,
             None,
@@ -1193,6 +1277,7 @@ mod tests {
                 dry_run: true,
                 trace_sink: None,
                 user_selection: None,
+                ..ChatWorkflowRequest::default()
             },
             None,
             None,

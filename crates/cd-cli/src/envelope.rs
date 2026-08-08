@@ -393,6 +393,16 @@ pub enum StreamLine<'a> {
     InvestigationAnswer {
         envelope: &'a cd_core::investigation_answer::AnswerEnvelopeV1,
     },
+    /// Multi-model stage progress / summary. Host-authored counts and ids only.
+    MultiModelStage {
+        stage: String,
+        phase: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        detail: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        candidate_id: Option<String>,
+    },
     /// `--trace summary` (and above). See [`TraceSummaryLine`].
     TraceSummary(TraceSummaryLine),
     /// `--trace context` (and `full`). See [`TraceContextLine`].

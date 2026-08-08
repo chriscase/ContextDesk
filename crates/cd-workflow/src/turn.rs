@@ -58,6 +58,11 @@ pub struct TurnExecutionOptions<'a> {
     /// Text the user explicitly selected for this turn. Never derive from a
     /// viewport, ambient recall, or attachment inventory.
     pub user_selection: Option<&'a str>,
+    /// Optional resolved multi-model reviewer runtime. `None` (the default)
+    /// keeps the single-model path. The workflow layer builds this only after
+    /// resolving qualification and egress; the presence of a runtime means
+    /// "review may run at the broad-triage seam".
+    pub multi_model: Option<cd_core::agent::MultiModelRuntime>,
 }
 
 /// Drive the shared provider/tool kernel for either an ordinary or a linked
@@ -121,6 +126,7 @@ pub async fn run_turn(
             options.applied_skill_ids,
             options.turn_id.clone(),
             options.user_selection,
+            options.multi_model.clone(),
         )
         .await?
     } else {
@@ -144,6 +150,7 @@ pub async fn run_turn(
             options.applied_skill_ids,
             options.turn_id,
             options.user_selection,
+            options.multi_model,
         )
         .await?
     };
@@ -281,6 +288,7 @@ pub async fn run_linked_turn(
             turn_prelude_emitted,
             applied_skill_ids: &[],
             user_selection: None,
+            multi_model: None,
         },
         live,
         checkpoint_out,

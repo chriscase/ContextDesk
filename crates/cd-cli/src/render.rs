@@ -435,6 +435,7 @@ impl ChatStatusRenderer {
             | StreamEvent::InvestigationAnswer { .. }
             | StreamEvent::SearchTrail { .. }
             | StreamEvent::ContextBudget { .. }
+            | StreamEvent::MultiModelStage { .. }
             | StreamEvent::ProviderTelemetry { .. } => return,
         };
         self.redraw(&mut state, phase_changed);

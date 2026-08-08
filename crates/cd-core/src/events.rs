@@ -144,6 +144,25 @@ pub enum StreamEvent {
         /// User-visible message (no secrets).
         message: String,
     },
+    /// Multi-model stage progress and end-of-turn summary. Host-authored: every
+    /// field is a host label, count, id, or degradation reason — never model
+    /// text. Hosts that do not understand it ignore it (forward-compat).
+    MultiModelStage {
+        /// Functional role (`investigator` | `reviewer` | `synthesizer`) or
+        /// `summary` for the end-of-turn line.
+        stage: String,
+        /// `started` | `finished` | `summary`.
+        phase: String,
+        /// Stage outcome, or the executed mode on the summary line.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        /// Host-authored detail (counts, ids, or a degradation reason). Never
+        /// model text.
+        detail: String,
+        /// Owning candidate id for a per-candidate investigator stage.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        candidate_id: Option<String>,
+    },
 }
 
 /// Terminal [`StreamEvent::TurnCompleted`] reasons that mean the turn did

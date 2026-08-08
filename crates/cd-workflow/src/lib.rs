@@ -16,6 +16,7 @@
 pub mod chat;
 pub mod import;
 pub mod logging_quality;
+pub mod multi_model;
 pub mod normalize;
 pub mod normalized;
 pub mod provider;

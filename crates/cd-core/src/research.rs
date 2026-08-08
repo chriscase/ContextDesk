@@ -145,6 +145,22 @@ pub fn event_to_dto(e: &StreamEvent) -> EventDto {
             "error",
             serde_json::json!({ "code": code, "message": message }),
         ),
+        StreamEvent::MultiModelStage {
+            stage,
+            phase,
+            status,
+            detail,
+            candidate_id,
+        } => (
+            "multi_model_stage",
+            serde_json::json!({
+                "stage": stage,
+                "phase": phase,
+                "status": status,
+                "detail": detail,
+                "candidate_id": candidate_id,
+            }),
+        ),
     };
     EventDto {
         kind: kind.into(),
@@ -913,6 +929,7 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint(
         &[],
         None,
         None,
+        None,
     )
     .await
 }
@@ -952,6 +969,7 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
     applied_skill_ids: &[String],
     turn_id: Option<String>,
     user_selection: Option<&str>,
+    multi_model: Option<crate::agent::MultiModelRuntime>,
 ) -> CoreResult<Vec<StreamEvent>> {
     let user_selection = match user_selection.map(str::trim) {
         Some("") | None => None,
@@ -1168,6 +1186,7 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
     opts.developer_trace = developer_trace_sink.map(crate::turn_trace::TurnTraceObserver::new);
     opts.applied_skill_ids = applied_skill_ids.to_vec();
     opts.user_selection = user_selection;
+    opts.multi_model = multi_model;
     // Ambient recall follows host config (set by attach_durable_memory / rebuild_host).
     opts.ambient_recall_enabled =
         !dry_run && host.ambient_recall_enabled() && host.durable_memory_active();
@@ -2149,6 +2168,7 @@ mod tests {
             "permission_required",
             "turn_completed",
             "error",
+            "multi_model_stage",
         ];
         let samples = [
             StreamEvent::TurnStarted {
@@ -2227,6 +2247,13 @@ mod tests {
             StreamEvent::Error {
                 code: "e".into(),
                 message: "m".into(),
+            },
+            StreamEvent::MultiModelStage {
+                stage: "reviewer".into(),
+                phase: "finished".into(),
+                status: Some("completed".into()),
+                detail: "1 gap(s), 0 contradiction(s)".into(),
+                candidate_id: None,
             },
         ];
         let mut kinds: Vec<String> = samples.iter().map(|e| event_to_dto(e).kind).collect();

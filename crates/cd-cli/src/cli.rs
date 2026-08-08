@@ -354,6 +354,29 @@ pub enum SessionAction {
     Show { id: String },
 }
 
+/// Multi-model investigation mode for one `chat` turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum ChatMode {
+    /// The established single-model path (default).
+    #[default]
+    Single,
+    /// Opt in to the reviewer pipeline. Degrades to single-model when the
+    /// reviewer is unconfigured, unqualified, remote-without-ack, over budget,
+    /// or the turn is not eligible; the exact reason is reported.
+    Review,
+}
+
+impl ChatMode {
+    /// Convert to the core mode.
+    pub fn to_core(self) -> cd_core::multi_model::MultiModelMode {
+        match self {
+            Self::Single => cd_core::multi_model::MultiModelMode::Single,
+            Self::Review => cd_core::multi_model::MultiModelMode::Review,
+        }
+    }
+}
+
 /// How much of a turn's actual provider traffic `chat --trace` reveals.
 /// Each level includes everything the level below it shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -400,6 +423,12 @@ pub struct ChatArgs {
     /// `corpus use`, if any; otherwise an ordinary, unlinked turn).
     #[arg(long)]
     pub corpus: Option<String>,
+    /// Multi-model mode. `single` (default) or `review` to opt in to the
+    /// reviewer pipeline. Review needs a configured, qualified (or
+    /// `require_qualified=false`) reviewer and a corpus-linked turn; otherwise
+    /// it degrades to single-model and reports the reason.
+    #[arg(long, value_enum, default_value_t = ChatMode::Single)]
+    pub mode: ChatMode,
     /// Continue a specific durable session instead of the CLI's current one.
     #[arg(long)]
     pub session: Option<String>,
@@ -487,6 +516,7 @@ where
         "--profile-dir",
         "--profile",
         "--model",
+        "--mode",
     ];
     let mut index = 1usize;
     while index < args.len() {

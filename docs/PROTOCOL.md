@@ -33,6 +33,7 @@ Produced by `cd_core::research::event_to_dto` — **snake_case** names:
 | `permission_required` | `request_id`, `tool_name`, `target`, `reason`, `preview`, `risk`, `arguments` |
 | `turn_completed` | `reason` |
 | `error` | `code`, `message` (safe) |
+| `multi_model_stage` | Host-authored `stage` (`investigator`/`reviewer`/`synthesizer`/`summary`), `phase` (`started`/`finished`/`summary`), `status`, `detail`, optional `candidate_id`. Counts/ids/degradation reasons only — never model text |
 
 Server SSE (when used) reuses the same DTO shape; full team protocol design is tracked under remediation epic **#98**.
 

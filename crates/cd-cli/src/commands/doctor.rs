@@ -934,6 +934,7 @@ async fn execute_live_turns(
             dry_run: false,
             trace_sink: Some(trace_sink),
             user_selection: None,
+            ..ChatWorkflowRequest::default()
         },
         Some(cancel.clone()),
         None,
@@ -1066,6 +1067,7 @@ async fn execute_live_turns(
             dry_run: false,
             trace_sink: Some(trace_sink_two),
             user_selection: None,
+            ..ChatWorkflowRequest::default()
         },
         Some(cancel.clone()),
         None,

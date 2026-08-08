@@ -178,6 +178,7 @@ fn run_with_backends(
         role_ids: role_ids(),
         deadline_ms: 0,
         started_at: None,
+        cancel: None,
     };
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

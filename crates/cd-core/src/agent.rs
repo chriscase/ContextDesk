@@ -118,10 +118,42 @@ pub struct AgentOptions {
     /// Explicit user selection text from shared turn inputs (Explorer selection
     /// summary, client highlight, etc.). Empty/None means none was provided.
     pub user_selection: Option<String>,
+    /// Optional multi-model reviewer runtime. `None` (the default) keeps the
+    /// established single-model path. When present and the turn reaches the
+    /// broad-triage seam with two or more candidates, the reviewer pipeline
+    /// runs; any unavailability degrades to the same seam's single-model path.
+    pub multi_model: Option<MultiModelRuntime>,
     /// Test-only oversize evidence blocks appended **after** real governed tool
     /// results. Never compiled into release; does not change search_logs semantics.
     #[cfg(test)]
     pub test_fixture_evidence_blocks: Vec<String>,
+}
+
+/// Resolved reviewer runtime handed to the agent turn. The host resolves the
+/// reviewer profile/model, builds its backend, and enforces qualification and
+/// egress *before* constructing this; the presence of a runtime means "review
+/// may run". Its backend may be the same reference as the investigator's (same
+/// model, reviewer prompt) or a distinct provider.
+#[derive(Clone)]
+pub struct MultiModelRuntime {
+    /// What config asked for (always `Review` when a runtime exists).
+    pub configured_mode: crate::multi_model::MultiModelMode,
+    /// Host-owned role identities for telemetry/provenance.
+    pub role_ids: crate::multi_model::MultiModelRoleIds,
+    /// Per-turn ceilings.
+    pub budget: crate::multi_model::MultiModelBudget,
+    /// The reviewer backend (same or distinct provider).
+    pub reviewer_backend: std::sync::Arc<dyn ChatBackend>,
+}
+
+impl std::fmt::Debug for MultiModelRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MultiModelRuntime")
+            .field("configured_mode", &self.configured_mode)
+            .field("role_ids", &self.role_ids)
+            .field("budget", &self.budget)
+            .finish_non_exhaustive()
+    }
 }
 
 fn explicit_user_selection_message(selection: Option<&str>) -> Option<ChatMessage> {
@@ -1997,6 +2029,7 @@ impl Default for AgentOptions {
             developer_trace: None,
             applied_skill_ids: Vec::new(),
             user_selection: None,
+            multi_model: None,
             #[cfg(test)]
             test_fixture_evidence_blocks: Vec::new(),
         }
@@ -2031,6 +2064,7 @@ impl AgentOptions {
             developer_trace: None,
             applied_skill_ids: Vec::new(),
             user_selection: None,
+            multi_model: None,
             #[cfg(test)]
             test_fixture_evidence_blocks: Vec::new(),
         }
@@ -3674,6 +3708,166 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                         )),
                         ok: None,
                     });
+                    let multi_stage_binding = crate::investigation_answer::AnswerBindingV1 {
+                        session_id: opts.session_id.clone(),
+                        turn_id: effective_turn_id.clone(),
+                        corpus_id: brief.corpus_id.clone(),
+                        revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                            event_revision: brief.event_revision,
+                            template_analysis_revision: brief.template_analysis_revision,
+                            suppression_revision: brief.suppression_revision,
+                        },
+                        ledger_digest: String::new(),
+                    };
+                    // Multi-model reviewer path (opt-in). It runs the same seam
+                    // with a reviewer stage; any unavailability falls through to
+                    // the established single-model multi-stage path below. Stage
+                    // events are buffered (the pipeline's callback must be Send)
+                    // and flushed to the collector after the pipeline returns.
+                    if let Some(runtime) = opts.multi_model.clone() {
+                        let mut stage_events: Vec<crate::multi_model::StageProgressEvent> =
+                            Vec::new();
+                        let outcome = {
+                            let inputs = crate::multi_model::ReviewPipelineInputs {
+                                user_text,
+                                candidates: &brief.candidate_groups,
+                                binding: multi_stage_binding.clone(),
+                                budget: runtime.budget,
+                                role_ids: runtime.role_ids.clone(),
+                                deadline_ms: deadline_plan.total_ms,
+                                started_at: opts.turn_started_at,
+                                cancel: opts.cancel.clone(),
+                            };
+                            let backends = crate::multi_model::MultiModelBackends {
+                                investigator: backend,
+                                reviewer: runtime.reviewer_backend.as_ref(),
+                                synthesizer: backend,
+                            };
+                            crate::multi_model::run_review_pipeline(
+                                &backends,
+                                inputs,
+                                &mut |ev| stage_events.push(ev),
+                            )
+                            .await?
+                        };
+                        for ev in stage_events {
+                            out.push(StreamEvent::MultiModelStage {
+                                stage: ev.role.as_str().to_string(),
+                                phase: if ev.started { "started" } else { "finished" }.into(),
+                                status: ev.outcome.map(|o| o.as_str().to_string()),
+                                detail: ev.detail,
+                                candidate_id: ev.candidate_id,
+                            });
+                        }
+                        use crate::multi_model::MultiModelOutcome as MmO;
+                        match outcome {
+                            MmO::Completed {
+                                envelope,
+                                content,
+                                telemetry,
+                                ..
+                            } => {
+                                out.push(StreamEvent::MultiModelStage {
+                                    stage: "summary".into(),
+                                    phase: "summary".into(),
+                                    status: Some(telemetry.executed_mode.as_str().to_string()),
+                                    detail: telemetry
+                                        .degradation
+                                        .map(|d| d.detail().to_string())
+                                        .unwrap_or_else(|| {
+                                            "review contributed to the answer".into()
+                                        }),
+                                    candidate_id: None,
+                                });
+                                trail.push(format!(
+                                    "multi_model:configured={},executed={},rounds={},chars={}",
+                                    telemetry.configured_mode.as_str(),
+                                    telemetry.executed_mode.as_str(),
+                                    telemetry.total_provider_rounds,
+                                    telemetry.total_context_chars_sent
+                                ));
+                                out.push(StreamEvent::Tool {
+                                    id: stage_id,
+                                    name: "broad_log_triage_multi_stage".into(),
+                                    phase: crate::events::ToolPhase::Finished,
+                                    summary: "Multi-model reviewed synthesis".into(),
+                                    detail: Some(
+                                        serde_json::json!({
+                                            "schema": "contextdesk.multi_model.telemetry.v1",
+                                            "configured_mode": telemetry.configured_mode.as_str(),
+                                            "executed_mode": telemetry.executed_mode.as_str(),
+                                            "degradation": telemetry.degradation.map(|d| d.as_str()),
+                                            "total_provider_rounds": telemetry.total_provider_rounds,
+                                            "answer_authority": "host_validated_typed",
+                                            "visible_projection": "host_rendered_markdown",
+                                            "root_cause_established": envelope.answer.root_cause_established,
+                                            "answer_binding": envelope.binding,
+                                        })
+                                        .to_string(),
+                                    ),
+                                    ok: Some(true),
+                                });
+                                out.push(StreamEvent::TextDelta {
+                                    text: content.clone(),
+                                });
+                                out.push(StreamEvent::InvestigationAnswer {
+                                    envelope: (*envelope).clone(),
+                                });
+                                out.push(StreamEvent::SearchTrail {
+                                    steps: trail.clone(),
+                                });
+                                out.push(StreamEvent::TurnCompleted {
+                                    reason: "stop".into(),
+                                });
+                                history.push(ChatMessage {
+                                    role: Role::Assistant,
+                                    content,
+                                    tool_call_id: None,
+                                    tool_calls: None,
+                                });
+                                if let Some(slot) = checkpoint_out.as_deref_mut() {
+                                    *slot = None;
+                                }
+                                return Ok(out.into_events());
+                            }
+                            MmO::ProviderFailed(error) => {
+                                let (class, _) = classify_provider_turn_failure(&error);
+                                trail.push(format!("multi_model_provider_failure:{class}"));
+                                return terminal_linked_provider_failure(out, &mut trail, true, &[]);
+                            }
+                            MmO::Cancelled => return terminal_cancel(out),
+                            MmO::Deadline => {
+                                return terminal_synthesis_time(
+                                    out,
+                                    &trail,
+                                    deadline_plan.total_ms,
+                                    true,
+                                );
+                            }
+                            MmO::NotEligible => {
+                                out.push(StreamEvent::MultiModelStage {
+                                    stage: "summary".into(),
+                                    phase: "summary".into(),
+                                    status: Some("single".into()),
+                                    detail: crate::multi_model::DegradationReason::NotEligible
+                                        .detail()
+                                        .into(),
+                                    candidate_id: None,
+                                });
+                                // Fall through to the established single-model path.
+                            }
+                            MmO::FailedClosed { .. } => {
+                                out.push(StreamEvent::MultiModelStage {
+                                    stage: "summary".into(),
+                                    phase: "summary".into(),
+                                    status: Some("single".into()),
+                                    detail: "typed multi-model synthesis unavailable; used the single-model path".into(),
+                                    candidate_id: None,
+                                });
+                                // Fall through to the established single-model path.
+                            }
+                        }
+                    }
                     let mut publish_multi_stage_context =
                         |telemetry: crate::context_budgeting::ContextBudgetTelemetry| {
                             trail.push(telemetry.trail_step());
@@ -3685,17 +3879,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                         opts,
                         &clock,
                         &brief.candidate_groups,
-                        crate::investigation_answer::AnswerBindingV1 {
-                            session_id: opts.session_id.clone(),
-                            turn_id: effective_turn_id.clone(),
-                            corpus_id: brief.corpus_id.clone(),
-                            revision: crate::investigation_answer::LogSnapshotRevisionV1 {
-                                event_revision: brief.event_revision,
-                                template_analysis_revision: brief.template_analysis_revision,
-                                suppression_revision: brief.suppression_revision,
-                            },
-                            ledger_digest: String::new(),
-                        },
+                        multi_stage_binding,
                         &mut publish_multi_stage_context,
                     )
                     .await?

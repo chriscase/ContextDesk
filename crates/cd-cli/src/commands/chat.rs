@@ -310,6 +310,11 @@ pub async fn run(
                 dry_run: args.dry_run,
                 trace_sink,
                 user_selection: args.user_selection.as_deref(),
+                multi_model_mode: args.mode.to_core(),
+                // The CLI keeps no qualification store, so a required-qualified
+                // reviewer degrades honestly unless the user sets
+                // require_qualified=false in config.
+                reviewer_qualified: None,
             },
             Some(cancel.clone()),
             Some(&mut live_sink),
@@ -490,6 +495,22 @@ pub async fn run(
                 };
                 print!("{}", crate::answer_render::render(answer, color));
             }
+            // Honest one-line multi-model status to stderr when review was
+            // requested this turn (configured or executed differs from single).
+            if outcome.multi_model_configured != cd_core::multi_model::MultiModelMode::Single
+                || outcome.multi_model_executed != cd_core::multi_model::ExecutedMode::Single
+            {
+                let reason = outcome
+                    .multi_model_entry_degradation
+                    .map(|d| format!(" ({})", d.detail()))
+                    .unwrap_or_default();
+                eprintln!(
+                    "multi-model: configured={}, executed={}{}",
+                    outcome.multi_model_configured.as_str(),
+                    outcome.multi_model_executed.as_str(),
+                    reason
+                );
+            }
             if let Some(lines) = &trace_lines {
                 let level = effective_trace.unwrap_or(TraceLevel::Summary);
                 let style = HierarchyStyle::detect_stdout(color);
@@ -571,6 +592,13 @@ pub async fn run(
                 print_json_failure(error, activity_record.as_ref());
             } else {
                 #[derive(Serialize)]
+                struct MultiModelSummary<'a> {
+                    configured_mode: &'a str,
+                    executed_mode: &'a str,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    entry_degradation: Option<&'a str>,
+                }
+                #[derive(Serialize)]
                 struct ChatSummaryWithActivity<'a> {
                     session_id: &'a str,
                     final_text: &'a str,
@@ -586,9 +614,23 @@ pub async fn run(
                     #[serde(skip_serializing_if = "Option::is_none")]
                     investigation_answer:
                         Option<&'a cd_core::investigation_answer::AnswerEnvelopeV1>,
+                    /// Honest configured-vs-executed multi-model mode.
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    multi_model: Option<MultiModelSummary<'a>>,
                 }
                 let context_used = context_used_from_events(&outcome.events);
                 let investigation_answer = investigation_answer_from_events(&outcome.events);
+                let multi_model = (outcome.multi_model_configured
+                    != cd_core::multi_model::MultiModelMode::Single
+                    || outcome.multi_model_executed
+                        != cd_core::multi_model::ExecutedMode::Single)
+                    .then(|| MultiModelSummary {
+                        configured_mode: outcome.multi_model_configured.as_str(),
+                        executed_mode: outcome.multi_model_executed.as_str(),
+                        entry_degradation: outcome
+                            .multi_model_entry_degradation
+                            .map(|d| d.as_str()),
+                    });
                 let envelope = Envelope::ok(
                     "chat",
                     ChatSummaryWithActivity {
@@ -598,6 +640,7 @@ pub async fn run(
                         trace: trace_lines,
                         activity: activity_record.as_ref(),
                         investigation_answer,
+                        multi_model,
                     },
                 );
                 println!(
@@ -925,6 +968,22 @@ fn emit_jsonl(event: &StreamEvent) {
         StreamEvent::InvestigationAnswer { envelope } => Some((
             "investigation_answer",
             crate::envelope::StreamLine::InvestigationAnswer { envelope },
+        )),
+        StreamEvent::MultiModelStage {
+            stage,
+            phase,
+            status,
+            detail,
+            candidate_id,
+        } => Some((
+            "multi_model_stage",
+            crate::envelope::StreamLine::MultiModelStage {
+                stage: stage.clone(),
+                phase: phase.clone(),
+                status: status.clone(),
+                detail: detail.clone(),
+                candidate_id: candidate_id.clone(),
+            },
         )),
         _ => None,
     };
