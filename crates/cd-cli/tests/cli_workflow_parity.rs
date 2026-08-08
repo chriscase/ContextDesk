@@ -6,9 +6,10 @@
 //! one invocation is visible, unmodified, to the next — the same
 //! `cd_core::log_analysis` corpus cache every host reads.
 //!
-//! Every test runs in its own temp `HOME` (via `--app-config` and process
-//! `HOME` override), so nothing here ever touches the developer's real
-//! `~/.contextdesk`.
+//! Every test passes its own temporary directory through `--data-dir`, so
+//! isolation is explicit and cross-platform. In particular, Windows resolves
+//! the shared profile via `FOLDERID_Profile` and intentionally ignores the
+//! Unix-specific `HOME` environment variable.
 
 use assert_cmd::Command;
 use cd_core::config::{save_config, AppConfig};
@@ -18,10 +19,10 @@ use std::path::Path;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-fn cli(home: &Path) -> Command {
+fn cli(data_dir: &Path) -> Command {
     let mut cmd =
         Command::cargo_bin("contextdesk").expect("contextdesk binary built by this workspace");
-    cmd.env("HOME", home);
+    cmd.arg("--data-dir").arg(data_dir);
     cmd
 }
 
@@ -85,7 +86,9 @@ async fn chat_command_reaches_the_shared_chat_workflow_against_a_mock_provider()
         .expect("run contextdesk chat");
     assert!(
         output.status.success(),
-        "stderr: {}",
+        "status: {:?}\nstdout: {}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 
