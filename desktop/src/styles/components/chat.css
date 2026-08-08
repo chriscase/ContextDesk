@@ -12,6 +12,25 @@
   margin-bottom: var(--space-1);
 }
 
+.msg__multimodel {
+  margin: 4px 0 0;
+  padding: 0 2px 0 16px;
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  color: var(--text-faint);
+}
+
+.msg__multimodel-line {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.msg__multimodel-role {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
 .msg__meta {
   margin-top: 4px;
   padding: 0 2px;

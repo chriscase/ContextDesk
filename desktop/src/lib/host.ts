@@ -601,6 +601,27 @@ export async function hostGetConfig(): Promise<HostConfigDto | null> {
   return invoke<HostConfigDto>("get_config");
 }
 
+/** Non-secret multi-model settings for the Settings surface. */
+export type MultiModelSettingsDto = {
+  mode: "single" | "review" | string;
+  reviewer_profile_id: string | null;
+  reviewer_model: string | null;
+  reviewer_allow_remote: boolean;
+  reviewer_require_qualified: boolean;
+};
+
+export async function hostGetMultiModelSettings(): Promise<MultiModelSettingsDto | null> {
+  if (!isTauri()) return null;
+  return invoke<MultiModelSettingsDto>("get_multi_model_settings");
+}
+
+export async function hostSetMultiModelMode(
+  mode: "single" | "review",
+): Promise<void> {
+  if (!isTauri()) return;
+  await invoke<void>("set_multi_model_mode", { mode });
+}
+
 /** Non-secret S3-compatible backup settings. Credential values never cross IPC. */
 export type S3BackupSettingsDto = {
   enabled: boolean;

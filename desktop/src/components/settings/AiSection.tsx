@@ -28,6 +28,7 @@ import {
 import { CapabilityQualificationPanel } from "./CapabilityQualificationPanel";
 import { ModelRoleHintLine } from "./ModelRoleHintLine";
 import { ModelVisibilityPanel } from "./ModelVisibilityPanel";
+import { MultiModelReviewToggle } from "./MultiModelReviewToggle";
 
 export type AiSectionProps = {
   baseId: string;
@@ -192,6 +193,7 @@ export function AiSection({
 
   return (
 <div>
+  <MultiModelReviewToggle />
   <div className="ai-wizard__mode-row">
     <p className="section-lead" style={{ margin: 0, flex: 1 }}>
       Advanced AI settings. Paste a base URL (or pick Ollama / Grok Build)

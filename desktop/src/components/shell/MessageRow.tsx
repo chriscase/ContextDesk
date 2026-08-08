@@ -511,6 +511,34 @@ function MessageRowImpl({
         </details>
       ) : null}
       {m.role === "assistant" &&
+      !showLiveStreaming &&
+      m.multiModelStages &&
+      m.multiModelStages.length > 0 ? (
+        <details className="msg__meta-details">
+          <summary>
+            Multi-model review
+            {(() => {
+              const summary = m.multiModelStages.find(
+                (s) => s.stage === "summary",
+              );
+              return summary?.status ? ` — ${summary.status}` : "";
+            })()}
+          </summary>
+          <ul className="msg__multimodel">
+            {m.multiModelStages.map((s, i) => (
+              <li key={`${s.stage}-${s.phase}-${i}`} className="msg__multimodel-line">
+                <span className="msg__multimodel-role">
+                  {s.stage}
+                  {s.candidateId ? ` (${s.candidateId})` : ""}
+                  {s.status ? ` · ${s.status}` : ""}
+                </span>
+                {s.detail ? <span className="msg__multimodel-detail">{s.detail}</span> : null}
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+      {m.role === "assistant" &&
       activityMode !== "off" &&
       activityTurn &&
       (!showLiveStreaming ||

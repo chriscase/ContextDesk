@@ -1797,6 +1797,57 @@ fn get_config(state: State<'_, AppState>) -> AppConfig {
     state.config.lock().expect("config lock").clone()
 }
 
+/// Non-secret multi-model settings for the Settings surface. The reviewer
+/// references a provider profile id; no credential ever crosses IPC.
+#[derive(Clone, Serialize)]
+struct MultiModelSettingsDto {
+    /// `"single"` | `"review"`.
+    mode: String,
+    /// Reviewer provider profile id, if configured.
+    reviewer_profile_id: Option<String>,
+    /// Reviewer model override, if any.
+    reviewer_model: Option<String>,
+    /// Whether a remote reviewer has been acknowledged.
+    reviewer_allow_remote: bool,
+    /// Whether the reviewer must be measured-qualified.
+    reviewer_require_qualified: bool,
+}
+
+#[tauri::command]
+fn get_multi_model_settings(state: State<'_, AppState>) -> MultiModelSettingsDto {
+    let cfg = state.config.lock().expect("config lock");
+    let mm = &cfg.multi_model;
+    MultiModelSettingsDto {
+        mode: mm.mode.as_str().to_string(),
+        reviewer_profile_id: mm.reviewer.as_ref().map(|r| r.profile_id.clone()),
+        reviewer_model: mm.reviewer.as_ref().and_then(|r| r.model.clone()),
+        reviewer_allow_remote: mm.reviewer.as_ref().is_some_and(|r| r.allow_remote),
+        reviewer_require_qualified: mm
+            .reviewer
+            .as_ref()
+            .map_or(true, |r| r.require_qualified),
+    }
+}
+
+/// Set the default multi-model mode (`single`/`review`). Persists and rebuilds
+/// the host. Reviewer assignment is edited via the provider config; this is
+/// the on/off toggle the composer honors by default.
+#[tauri::command]
+fn set_multi_model_mode(state: State<'_, AppState>, mode: String) -> Result<(), String> {
+    let new_mode = match mode.as_str() {
+        "review" => cd_core::multi_model::MultiModelMode::Review,
+        "single" => cd_core::multi_model::MultiModelMode::Single,
+        other => return Err(format!("unknown multi-model mode: {other}")),
+    };
+    let mut cfg = state.config.lock().expect("config lock").clone();
+    cfg.multi_model.mode = new_mode;
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    *state.config.lock().expect("config lock") = cfg;
+    let _ = ensure_host(&state);
+    Ok(())
+}
+
 #[tauri::command]
 fn save_app_config(state: State<'_, AppState>, cfg: AppConfig) -> Result<(), String> {
     for p in &cfg.providers.profiles {
@@ -3344,6 +3395,11 @@ struct AgentTurnReq {
     /// Explorer viewport, ambient memory, or other host observations.
     #[serde(default)]
     user_selection: Option<String>,
+    /// Multi-model mode for this turn: `"single"` (default) or `"review"`.
+    /// Review opts in to the reviewer pipeline; it degrades to single-model
+    /// and reports the reason when unavailable.
+    #[serde(default)]
+    multi_model_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -4698,6 +4754,53 @@ async fn agent_turn(
     let turn_started_at = tokio::time::Instant::now();
     let deadline_plan = resolved.deadline_plan;
 
+    // Resolve the multi-model reviewer runtime for this turn (opt-in via
+    // req.multi_model_mode). The desktop host resolves the reviewer's measured
+    // qualification from its own store; a name is never a qualification.
+    let requested_review_mode = match req.multi_model_mode.as_deref() {
+        Some("review") => cd_core::multi_model::MultiModelMode::Review,
+        Some("single") => cd_core::multi_model::MultiModelMode::Single,
+        // No per-turn override → the configured default (a Settings toggle).
+        _ => cfg.multi_model.mode,
+    };
+    let reviewer_qualified = cfg.multi_model.reviewer.as_ref().and_then(|rev| {
+        let prof = cfg
+            .providers
+            .profiles
+            .iter()
+            .find(|p| p.id == rev.profile_id)?;
+        let model = rev.model.as_deref().unwrap_or(&prof.chat_model);
+        let key = cd_core::capability_qualification::QualificationKey::new(
+            &prof.id,
+            &prof.base_url,
+            model,
+        );
+        let store = state.qualification_store.lock().ok()?;
+        let report = store.get(&key)?;
+        use cd_core::capability_qualification::{CapabilityKind, CapabilityStatus};
+        Some(
+            report.status_of(CapabilityKind::BasicGeneration) == CapabilityStatus::Pass
+                && report.status_of(CapabilityKind::StructuredOutput) == CapabilityStatus::Pass,
+        )
+    });
+    let review_context_budget = cfg
+        .model_context_budgets
+        .resolve(Some(resolved.profile.chat_model.as_str()));
+    let multi_model_review = cd_workflow::multi_model::resolve_reviewer_runtime(
+        &cfg,
+        &state.secrets,
+        // Review is only meaningful for a corpus-linked investigation turn.
+        if req.log_explorer_context.is_some() {
+            requested_review_mode
+        } else {
+            cd_core::multi_model::MultiModelMode::Single
+        },
+        &resolved,
+        reviewer_qualified,
+        review_context_budget,
+    )
+    .await;
+
     // Resolve the linked corpus only from the durable session. Explorer may
     // contribute a bounded viewport brief, but neither the model nor an
     // ordinary main-chat turn request chooses or broadens corpus scope.
@@ -5162,6 +5265,12 @@ async fn agent_turn(
         }
         ev
     } else {
+        // An entry-time reviewer degradation is reported once, before the turn,
+        // so the desktop knows review was requested but ran single-model and
+        // why. Mid-pipeline degradations are reported by the seam.
+        if let Some(reason) = multi_model_review.entry_degradation {
+            sink(cd_workflow::multi_model::entry_degradation_event(reason));
+        }
         cd_workflow::turn::run_turn(
             &mut host,
             &resolved,
@@ -5182,6 +5291,7 @@ async fn agent_turn(
                 turn_prelude_emitted,
                 applied_skill_ids: &applied_skill_ids,
                 user_selection: req.user_selection.as_deref(),
+                multi_model: multi_model_review.runtime.clone(),
             },
             Some(&mut sink),
             Some(&mut next_synthesis_checkpoint),
@@ -13335,6 +13445,8 @@ pub fn run() {
             session_context_purge,
             get_config,
             save_app_config,
+            get_multi_model_settings,
+            set_multi_model_mode,
             get_s3_backup_settings,
             save_s3_backup_settings,
             run_s3_workspace_backup,
