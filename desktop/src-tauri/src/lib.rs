@@ -1822,10 +1822,7 @@ fn get_multi_model_settings(state: State<'_, AppState>) -> MultiModelSettingsDto
         reviewer_profile_id: mm.reviewer.as_ref().map(|r| r.profile_id.clone()),
         reviewer_model: mm.reviewer.as_ref().and_then(|r| r.model.clone()),
         reviewer_allow_remote: mm.reviewer.as_ref().is_some_and(|r| r.allow_remote),
-        reviewer_require_qualified: mm
-            .reviewer
-            .as_ref()
-            .map_or(true, |r| r.require_qualified),
+        reviewer_require_qualified: mm.reviewer.as_ref().is_none_or(|r| r.require_qualified),
     }
 }
 
