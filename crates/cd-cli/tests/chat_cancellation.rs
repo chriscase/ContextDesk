@@ -13,6 +13,10 @@
 //! `contextdesk` must show up as a failing assertion, never as this suite
 //! hanging.
 
+// Real POSIX SIGINT delivery (via kill(1)) and sh(1) fixtures have no
+// Windows equivalent in this harness; the whole suite is unix-only.
+#![cfg(unix)]
+
 use cd_core::config::{save_config, AppConfig};
 use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
 use std::io::{BufRead, BufReader, Read};

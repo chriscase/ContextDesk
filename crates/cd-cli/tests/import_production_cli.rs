@@ -9,6 +9,7 @@
 use assert_cmd::Command;
 use serde_json::Value;
 use std::path::Path;
+#[cfg(unix)] // piped-stderr SIGINT test only
 use std::process::Stdio;
 
 fn cli(home: &Path) -> Command {
@@ -26,6 +27,7 @@ fn parse_envelope(bytes: &[u8]) -> Value {
 /// 130, publish nothing, and leave the source in a state a second
 /// invocation can cleanly import — the CLI's own Ctrl-C → `CancelFlag`
 /// wiring, not just the underlying `cd_core` cleanup guarantee.
+#[cfg(unix)] // sends POSIX SIGINT via kill(1); no Windows equivalent here
 #[test]
 fn ctrl_c_cancels_cleanly_and_a_retry_succeeds() {
     let home = tempfile::tempdir().unwrap();

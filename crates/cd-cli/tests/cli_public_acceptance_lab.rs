@@ -1471,6 +1471,7 @@ fn corrupt_nested_zip_fails_closed_with_visible_error() {
 }
 
 /// Large public archive sized so SIGINT can land during streaming ingest.
+#[cfg(unix)] // sole user is the cfg(unix) cancel test below
 fn build_cancellable_bulk_archive(root: &Path) -> PathBuf {
     let archive = root.join("cancellable-bulk.zip");
     let file = std::fs::File::create(&archive).unwrap();
@@ -1492,6 +1493,7 @@ fn build_cancellable_bulk_archive(root: &Path) -> PathBuf {
 /// Deterministic cancel: must reach a cancellable stream phase, deliver SIGINT,
 /// observe non-success/cancel on the first command, publish no partial corpus,
 /// then retry to exactly one valid corpus.
+#[cfg(unix)] // sends POSIX SIGINT via kill(1); no Windows equivalent here
 #[test]
 fn cancel_then_retry_publishes_exactly_one_corpus() {
     use std::io::{BufRead, BufReader};
