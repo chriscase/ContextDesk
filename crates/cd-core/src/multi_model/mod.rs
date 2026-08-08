@@ -18,9 +18,12 @@
 //! * The host is the only authority. Every stage output is a strict model
 //!   *proposal* the host validates into a typed value against the immutable
 //!   evidence ledger. One model's prose is never another model's authority.
-//! * Every inter-stage reference is by host-owned id. A stage may never
-//!   introduce an evidence, claim, or candidate id the host did not create,
-//!   and may never cite across candidate scope.
+//! * Every inter-stage reference is bounded by the host. Evidence ids and
+//!   candidate ids are host-minted: a stage may never introduce one the host
+//!   did not create, and may never cite across candidate scope. Claim / gap /
+//!   contradiction ids are model-authored labels; a downstream stage may
+//!   reference only the (candidate, claim) pairs the host recorded from
+//!   already-validated findings, never a pair the host did not record.
 //! * Causal establishment is never produced here. The final synthesis reuses
 //!   [`crate::investigation_answer::validate_model_answer`], whose
 //!   `root_cause_established` requires host `Cause` provenance.
@@ -239,14 +242,18 @@ pub struct MultiModelBudget {
     pub context_char_budget: usize,
     /// Whole-turn wall-clock deadline in ms (`0` = inherit turn default).
     pub deadline_ms: u64,
-    /// Optional deterministic usage ceiling in model-facing characters. It
-    /// gates the *optional* reviewer stage: when adding the reviewer's context
-    /// would push the running total past this ceiling, the reviewer is skipped
-    /// (`budget_usage_insufficient`) and the answer is synthesized without
-    /// review. The mandatory investigator and synthesis stages always run, so
-    /// this is a reviewer gate, not a hard cap on total characters. `None` =
-    /// no usage gate. Chars are a metric the host always knows, unlike
-    /// provider-reported cost — no currency is invented.
+    /// Optional deterministic **whole-turn hard ceiling** on model-facing
+    /// characters. Every stage call — investigator, reviewer, synthesis, and
+    /// every semantic-correction re-prompt — is preflighted against the running
+    /// total before it is sent, and no call is ever allowed to cross it: the
+    /// sum of `context_chars_sent` across all stages never exceeds this value.
+    /// The stages differ only in how exhaustion is handled: an over-ceiling
+    /// *optional* reviewer degrades (`budget_usage_insufficient`) while an
+    /// over-ceiling *required* investigator or synthesis fails closed (or, for
+    /// the investigator phase, falls through to the single-model path). This is
+    /// a hard cap on total characters, not merely a reviewer gate. `None` = no
+    /// usage ceiling (rounds still bound the turn). Chars are a metric the host
+    /// always knows, unlike provider-reported cost — no currency is invented.
     pub max_context_chars_total: Option<u64>,
 }
 
@@ -278,6 +285,9 @@ pub enum StageOutcomeKind {
     Deadline,
     /// The turn was cancelled during the stage.
     Cancelled,
+    /// A message would have crossed the per-call or whole-turn character
+    /// ceiling, so it was never sent.
+    BudgetExhausted,
     /// The stage was skipped (budget, degradation) without a model call.
     Skipped,
 }
@@ -291,6 +301,7 @@ impl StageOutcomeKind {
             Self::ProviderFailed => "provider_failed",
             Self::Deadline => "deadline",
             Self::Cancelled => "cancelled",
+            Self::BudgetExhausted => "budget_exhausted",
             Self::Skipped => "skipped",
         }
     }
@@ -358,6 +369,10 @@ mod tests {
             "reviewer_remote_forbidden_local_only"
         );
         assert_eq!(StageOutcomeKind::ProviderFailed.as_str(), "provider_failed");
+        assert_eq!(
+            StageOutcomeKind::BudgetExhausted.as_str(),
+            "budget_exhausted"
+        );
     }
 
     #[test]

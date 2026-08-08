@@ -410,7 +410,12 @@ pub fn is_bidi_formatting_control(c: char) -> bool {
 }
 
 /// Whether `c` starts or ends a line, paragraph, or column in some renderer.
-fn is_line_boundary(c: char) -> bool {
+///
+/// Exposed so validators that must *reject* (not merely re-render) a value
+/// smuggling a line break — e.g. a model-authored id printed into a
+/// host-scaffolding prompt region — share the exact same notion the display
+/// boundary uses.
+pub fn is_line_boundary(c: char) -> bool {
     matches!(
         c,
         '\n' | '\r' | '\t' | '\u{000b}' | '\u{000c}' | '\u{0085}' | '\u{2028}' | '\u{2029}'
