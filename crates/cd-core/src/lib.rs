@@ -54,6 +54,7 @@ pub mod model_context;
 pub mod model_curation;
 pub mod model_role_hints;
 pub mod module_registry;
+pub mod multi_model;
 pub mod modules;
 pub mod normalized_log_events;
 pub mod object_store;

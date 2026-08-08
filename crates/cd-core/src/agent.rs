@@ -2634,12 +2634,12 @@ fn terminal_context_too_long(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TurnAwaitError {
+pub(crate) enum TurnAwaitError {
     Deadline,
     Cancelled,
 }
 
-struct TurnClock {
+pub(crate) struct TurnClock {
     started: Instant,
     phase_started: Instant,
     phase: AgentPhase,
@@ -2647,7 +2647,7 @@ struct TurnClock {
 }
 
 impl TurnClock {
-    fn new(plan: TurnDeadlinePlan, started: Option<Instant>) -> Self {
+    pub(crate) fn new(plan: TurnDeadlinePlan, started: Option<Instant>) -> Self {
         let now = Instant::now();
         Self {
             started: started.unwrap_or(now),
@@ -2693,7 +2693,7 @@ async fn wait_for_cancel(cancel: Option<&std::sync::atomic::AtomicBool>) {
     }
 }
 
-async fn within_turn_deadline<F, T>(
+pub(crate) async fn within_turn_deadline<F, T>(
     clock: &TurnClock,
     cancel: Option<&std::sync::atomic::AtomicBool>,
     future: F,

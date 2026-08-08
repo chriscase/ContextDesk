@@ -243,6 +243,19 @@ impl HostEvidenceLedger {
     pub fn entries(&self) -> Vec<HostEvidenceEntry> {
         self.entries.values().cloned().collect()
     }
+    /// Look up one host evidence row by id. Used by multi-model stage
+    /// validators to reject any id the host did not create, exactly as
+    /// [`validate_model_answer`] does for the final synthesis.
+    pub fn get(&self, evidence_id: &str) -> Option<&HostEvidenceEntry> {
+        self.entries.get(evidence_id)
+    }
+    /// The exact set of candidate ids the host bound into this ledger.
+    pub fn candidate_ids(&self) -> BTreeSet<String> {
+        self.entries
+            .values()
+            .map(|entry| entry.candidate_id.clone())
+            .collect()
+    }
 }
 
 /// Parse exactly one JSON object; no fences, prefixes, schema defaults, or embeds.
@@ -469,7 +482,11 @@ const EMPTY_VALUE_PLACEHOLDER: &str = "(empty)";
 /// Every dynamic value in the projection goes through here. The visible
 /// backticks are the point as much as the safety is: a reader can see exactly
 /// where host-owned structure stops and quoted, untrusted content starts.
-fn literal_span(raw: &str) -> String {
+///
+/// Exposed so every host renderer of untrusted values — the multi-model
+/// review projection included — uses the exact same boundary instead of
+/// keeping a second, drifting copy.
+pub fn literal_span(raw: &str) -> String {
     let normalized = literal_display_text(raw);
     if normalized.is_empty() {
         return EMPTY_VALUE_PLACEHOLDER.to_string();
