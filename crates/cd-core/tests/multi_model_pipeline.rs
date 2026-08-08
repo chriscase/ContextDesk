@@ -1489,3 +1489,162 @@ fn an_investigator_claim_id_injection_is_rejected_and_never_reviewed() {
         outcome_label(&outcome)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Provider-attempt accounting: the hard cap counts calls sent, not successes
+// ---------------------------------------------------------------------------
+
+/// The exact cap-4 regression: a failed reviewer request consumes a provider
+/// round, so a following synthesis that would want a correction is clamped to
+/// one attempt and the fifth call is never sent. Reported attempts equal calls
+/// actually issued, and the hard ceiling holds across a failed stage.
+#[test]
+fn a_failed_provider_call_consumes_a_round_so_the_hard_cap_is_never_exceeded() {
+    use std::sync::atomic::AtomicUsize;
+
+    struct CountingProviderFail {
+        calls: AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl ChatBackend for CountingProviderFail {
+        async fn complete(
+            &self,
+            _m: &[cd_core::chat::ChatMessage],
+            _t: &[cd_core::tools::ToolSpec],
+        ) -> Result<ChatCompletion, CoreError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(CoreError::ProviderHttp {
+                operation: "stream".into(),
+                status: 500,
+                status_line: "500 Internal Server Error".into(),
+                body: "{}".into(),
+            })
+        }
+    }
+
+    // Investigator + synthesizer share this backend: two valid findings, then an
+    // INVALID synthesis (which would want a correction), then a valid correction
+    // that must never be sent because the cap is already reached.
+    let inv_synth = CapturingBackend::new(vec![
+        completion(finding_json("k1", &[1])),
+        completion(finding_json("k2", &[2])),
+        completion("not a valid answer".into()),
+        completion(answer_json(&[("k1", &[1]), ("k2", &[2])])), // fifth call — must NOT be sent
+    ]);
+    let reviewer = CountingProviderFail {
+        calls: AtomicUsize::new(0),
+    };
+    let budget = MultiModelBudget {
+        max_total_provider_rounds: 4,
+        ..MultiModelBudget::default()
+    };
+    let RunResult { outcome, .. } =
+        run_with_backends(&inv_synth, &reviewer, &two_candidates(), budget);
+
+    // No valid answer and no room for a correction → fail closed.
+    assert!(
+        matches!(outcome, MultiModelOutcome::FailedClosed { .. }),
+        "expected FailedClosed, got {}",
+        outcome_label(&outcome)
+    );
+
+    let inv_synth_calls = inv_synth.seen.lock().unwrap().len();
+    let reviewer_calls = reviewer.calls.load(Ordering::SeqCst);
+    // 2 investigators + 1 synthesis attempt on the shared backend; the fifth
+    // (synthesis correction) was never sent.
+    assert_eq!(inv_synth_calls, 3, "inv1 + inv2 + one synthesis attempt");
+    assert_eq!(reviewer_calls, 1, "one failed reviewer request");
+    let actual_calls = (inv_synth_calls + reviewer_calls) as u32;
+    assert_eq!(actual_calls, 4, "exactly four provider calls issued");
+
+    if let MultiModelOutcome::FailedClosed { telemetry, .. } = &outcome {
+        // Reported attempts equal captured calls, and never exceed the cap.
+        assert_eq!(
+            telemetry.total_provider_rounds, actual_calls,
+            "reported attempts must equal calls sent"
+        );
+        assert!(telemetry.total_provider_rounds <= budget.max_total_provider_rounds);
+        // The failed reviewer call is honestly counted (previously under-reported
+        // as zero, which let the fifth synthesis call slip past the cap).
+        let rev = telemetry
+            .stages
+            .iter()
+            .find(|s| s.role == InvestigationRole::Reviewer)
+            .expect("reviewer stage");
+        assert_eq!(rev.provider_rounds, 1);
+        assert_eq!(rev.outcome, StageOutcomeKind::ProviderFailed);
+        let synth = telemetry
+            .stages
+            .iter()
+            .find(|s| s.role == InvestigationRole::Synthesizer)
+            .expect("synthesis stage");
+        assert_eq!(
+            synth.provider_rounds, 1,
+            "one synthesis attempt, no correction"
+        );
+    }
+}
+
+/// A terminal required-stage provider failure carries no telemetry payload, so
+/// the honest accounting is a progress event that reports the attempt actually
+/// sent. Proves the failed call is not silently dropped from the record.
+#[test]
+fn a_terminal_provider_failure_reports_the_attempt_via_a_progress_event() {
+    struct ScriptThenFail {
+        script: std::sync::Mutex<std::collections::VecDeque<ChatCompletion>>,
+    }
+    #[async_trait::async_trait]
+    impl ChatBackend for ScriptThenFail {
+        async fn complete(
+            &self,
+            _m: &[cd_core::chat::ChatMessage],
+            _t: &[cd_core::tools::ToolSpec],
+        ) -> Result<ChatCompletion, CoreError> {
+            match self.script.lock().unwrap().pop_front() {
+                Some(c) => Ok(c),
+                None => Err(CoreError::ProviderHttp {
+                    operation: "stream".into(),
+                    status: 500,
+                    status_line: "500 Internal Server Error".into(),
+                    body: "{}".into(),
+                }),
+            }
+        }
+    }
+    // Investigators succeed; the shared backend runs dry at synthesis and
+    // provider-fails on its only attempt.
+    let inv_synth = ScriptThenFail {
+        script: std::sync::Mutex::new(
+            vec![
+                completion(finding_json("k1", &[1])),
+                completion(finding_json("k2", &[2])),
+            ]
+            .into(),
+        ),
+    };
+    let rev = ScriptedBackend::new(vec![completion(review_json("", ""))]);
+    let RunResult { outcome, stages } = run_with_backends(
+        &inv_synth,
+        &rev,
+        &two_candidates(),
+        MultiModelBudget::default(),
+    );
+    assert!(
+        matches!(outcome, MultiModelOutcome::ProviderFailed(_)),
+        "expected a terminal provider failure, got {}",
+        outcome_label(&outcome)
+    );
+    let synth_fail = stages
+        .iter()
+        .find(|s| {
+            s.role == InvestigationRole::Synthesizer
+                && s.outcome == Some(StageOutcomeKind::ProviderFailed)
+        })
+        .expect("a synthesizer provider-failed progress event");
+    // The one attempt that was sent is recorded (honest accounting), not dropped.
+    assert!(
+        synth_fail.detail.contains("1 provider attempt"),
+        "progress detail must report the attempt count, got: {:?}",
+        synth_fail.detail
+    );
+}

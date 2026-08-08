@@ -2705,6 +2705,15 @@ impl TurnClock {
             && self.started.elapsed() >= Duration::from_millis(self.plan.total_ms)
     }
 
+    /// Whether a bounded deadline has already elapsed, mirroring exactly the
+    /// zero-`remaining` short-circuit inside [`within_turn_deadline`]. Callers
+    /// use it to decline sending a call the deadline would immediately reject,
+    /// so a provider attempt is never counted for a call that is not issued.
+    /// `false` when no deadline is configured (`total_ms == 0`).
+    pub(crate) fn deadline_reached(&self) -> bool {
+        self.remaining().is_some_and(|r| r.is_zero())
+    }
+
     fn remaining(&self) -> Option<Duration> {
         if self.plan.total_ms == 0 {
             return None;

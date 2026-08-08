@@ -509,10 +509,16 @@ fn known_claims(findings: &[CandidateFindingV1]) -> KnownClaims {
     set
 }
 
-/// Result of driving one model call with a bounded correction budget. Every
-/// non-cancel variant carries what the stage actually consumed so telemetry is
-/// accurate even when a provider error or deadline lands on a correction
-/// attempt after an earlier round already completed.
+/// Result of driving one stage's model calls with a bounded correction budget.
+///
+/// Every variant carries `rounds` = the number of **logical provider attempts
+/// actually sent** in this stage (each a `complete_streaming` invocation,
+/// initial or correction; transport-library retries beneath it are not
+/// attempts). The count is taken immediately before each send, so it includes
+/// the attempt that then failed, timed out, or was cancelled mid-flight — not
+/// only the ones that returned successfully. `BudgetExhausted` and the pre-send
+/// `Deadline`/`Cancelled` guards send nothing, so they carry the count of
+/// attempts sent by *earlier* rounds of the same stage.
 enum CallResult<T> {
     Ok {
         value: T,
@@ -538,13 +544,17 @@ enum CallResult<T> {
     },
     /// A message would have crossed the per-call packing budget or the
     /// remaining whole-turn character ceiling and was never sent. Carries the
-    /// exact rounds/chars an earlier round in the same stage already consumed.
+    /// exact rounds/chars earlier rounds of the same stage already consumed.
     BudgetExhausted {
         rounds: u32,
         corrections: u8,
         chars: u64,
     },
-    Cancelled,
+    Cancelled {
+        rounds: u32,
+        corrections: u8,
+        chars: u64,
+    },
 }
 
 /// Estimated model-facing characters for one message set — the same estimate
@@ -564,11 +574,20 @@ fn remaining_turn_chars(max_context_chars_total: Option<u64>, used_chars: u64) -
 /// Drive one stage: up to `1 + max_corrections` model calls, re-prompting only
 /// on host-validation failure.
 ///
+/// `rounds` counts **logical provider attempts actually sent** and is
+/// incremented immediately before each `complete_streaming` invocation, so the
+/// global `max_total_provider_rounds` ceiling (applied via `max_rounds_here`)
+/// bounds real calls — a failed, timed-out, or cancelled attempt counts exactly
+/// like a successful one. Transport-library retries live below
+/// `complete_streaming` and are not attempts.
+///
 /// Every message — initial and every correction — is preflighted against the
 /// per-call character budget and the remaining whole-turn character allowance
-/// *before* it is sent, so no call can cross either ceiling. Transport retries
-/// live below `complete_streaming` and never increment `rounds`. Cancellation
-/// is read from the actual cancel signal, never inferred from provider prose.
+/// *before* it is sent, so no call can cross either ceiling. A call is likewise
+/// never sent once the turn is already cancelled or past its deadline (those
+/// pre-send guards return without counting an attempt, so the reported count
+/// equals the calls actually issued). Cancellation is read from the actual
+/// cancel signal, never inferred from provider prose.
 #[allow(clippy::too_many_arguments)]
 async fn drive_stage<T>(
     backend: &dyn ChatBackend,
@@ -584,6 +603,11 @@ async fn drive_stage<T>(
     let mut rounds = 0u32;
     let mut corrections = 0u8;
     let mut chars = 0u64;
+    let cancelled = || {
+        cancel
+            .map(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+            .unwrap_or(false)
+    };
     loop {
         if rounds >= max_rounds_here {
             return CallResult::SemanticInvalid {
@@ -612,7 +636,27 @@ async fn drive_stage<T>(
                 };
             }
         }
+        // Pre-send terminal guards: if the turn is already cancelled or past its
+        // deadline, no attempt is made — return without counting a provider call
+        // so `rounds` never overstates the calls issued.
+        if cancelled() {
+            return CallResult::Cancelled {
+                rounds,
+                corrections,
+                chars,
+            };
+        }
+        if clock.deadline_reached() {
+            return CallResult::Deadline {
+                rounds,
+                corrections,
+                chars,
+            };
+        }
         chars = chars.saturating_add(est);
+        // Count the logical provider attempt about to be sent, before the call,
+        // so a failure/deadline/cancel mid-flight still consumes a round.
+        rounds = rounds.saturating_add(1);
         let mut buffered = String::new();
         let mut on_text = |t: String| buffered.push_str(&t);
         let completion = match within_turn_deadline(
@@ -627,11 +671,12 @@ async fn drive_stage<T>(
                 // Classify from the actual cancel signal, not provider prose: a
                 // transport that observed the cancel flag first returns an
                 // ordinary error, but the user's cancellation is the truth.
-                if cancel
-                    .map(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
-                    .unwrap_or(false)
-                {
-                    return CallResult::Cancelled;
+                if cancelled() {
+                    return CallResult::Cancelled {
+                        rounds,
+                        corrections,
+                        chars,
+                    };
                 }
                 return CallResult::Provider {
                     error,
@@ -640,7 +685,13 @@ async fn drive_stage<T>(
                     chars,
                 };
             }
-            Err(TurnAwaitError::Cancelled) => return CallResult::Cancelled,
+            Err(TurnAwaitError::Cancelled) => {
+                return CallResult::Cancelled {
+                    rounds,
+                    corrections,
+                    chars,
+                }
+            }
             Err(TurnAwaitError::Deadline) => {
                 return CallResult::Deadline {
                     rounds,
@@ -649,7 +700,6 @@ async fn drive_stage<T>(
                 }
             }
         };
-        rounds = rounds.saturating_add(1);
         let content = if completion.content.trim().is_empty() {
             buffered
         } else {
@@ -908,8 +958,21 @@ pub async fn run_review_pipeline(
                 });
                 continue;
             }
-            CallResult::Provider { error, .. } => {
-                return Ok(MultiModelOutcome::ProviderFailed(Box::new(error)))
+            CallResult::Provider {
+                error,
+                rounds,
+                corrections,
+                chars,
+            } => {
+                return Ok(provider_failed_outcome(
+                    InvestigationRole::Investigator,
+                    Some(candidate.group_id.clone()),
+                    error,
+                    rounds,
+                    corrections,
+                    chars,
+                    on_stage,
+                ))
             }
             CallResult::Deadline {
                 rounds,
@@ -925,7 +988,20 @@ pub async fn run_review_pipeline(
                     on_stage,
                 ))
             }
-            CallResult::Cancelled => return Ok(MultiModelOutcome::Cancelled),
+            CallResult::Cancelled {
+                rounds,
+                corrections,
+                chars,
+            } => {
+                return Ok(cancelled_outcome(
+                    InvestigationRole::Investigator,
+                    Some(candidate.group_id.clone()),
+                    rounds,
+                    corrections,
+                    chars,
+                    on_stage,
+                ))
+            }
         }
     }
 
@@ -1051,7 +1127,20 @@ pub async fn run_review_pipeline(
             }
             // Cancellation is a user action, not a reviewer defect: stop the
             // whole turn rather than degrade.
-            CallResult::Cancelled => return Ok(MultiModelOutcome::Cancelled),
+            CallResult::Cancelled {
+                rounds,
+                corrections,
+                chars,
+            } => {
+                return Ok(cancelled_outcome(
+                    InvestigationRole::Reviewer,
+                    None,
+                    rounds,
+                    corrections,
+                    chars,
+                    on_stage,
+                ))
+            }
             // A reviewer deadline under the whole-turn flat clock is terminal:
             // synthesis shares that same expired deadline, so degrading here
             // would only lead synthesis to fail the deadline while telemetry
@@ -1112,7 +1201,9 @@ pub async fn run_review_pipeline(
                         corrections,
                         chars,
                     ),
-                    CallResult::Ok { .. } | CallResult::Cancelled | CallResult::Deadline { .. } => {
+                    CallResult::Ok { .. }
+                    | CallResult::Cancelled { .. }
+                    | CallResult::Deadline { .. } => {
                         unreachable!()
                     }
                 };
@@ -1307,9 +1398,20 @@ pub async fn run_review_pipeline(
                 )),
             })
         }
-        CallResult::Provider { error, .. } => {
-            Ok(MultiModelOutcome::ProviderFailed(Box::new(error)))
-        }
+        CallResult::Provider {
+            error,
+            rounds,
+            corrections,
+            chars,
+        } => Ok(provider_failed_outcome(
+            InvestigationRole::Synthesizer,
+            None,
+            error,
+            rounds,
+            corrections,
+            chars,
+            on_stage,
+        )),
         CallResult::Deadline {
             rounds,
             corrections,
@@ -1322,16 +1424,51 @@ pub async fn run_review_pipeline(
             chars,
             on_stage,
         )),
-        CallResult::Cancelled => Ok(MultiModelOutcome::Cancelled),
+        CallResult::Cancelled {
+            rounds,
+            corrections,
+            chars,
+        } => Ok(cancelled_outcome(
+            InvestigationRole::Synthesizer,
+            None,
+            rounds,
+            corrections,
+            chars,
+            on_stage,
+        )),
     }
 }
 
-/// Emit a terminal-deadline progress event recording exactly what the stage
-/// consumed before the whole-turn deadline fired, then yield the terminal
-/// `Deadline` outcome. The terminal outcome carries no telemetry payload, so
-/// surfacing the consumed rounds/corrections/chars here keeps `drive_stage`'s
-/// "every variant returns exact attempted rounds/chars" contract observable to
-/// the host even on a deadline abort — for every stage, not just the reviewer.
+/// Emit a terminal-stage progress event recording exactly the logical provider
+/// attempts, corrections, and chars the stage sent before it ended the turn.
+///
+/// A terminal outcome (`Deadline`, `Cancelled`, `ProviderFailed`) carries no
+/// telemetry payload, so this progress event is the host's honest accounting for
+/// a required stage that aborts the turn — the reported attempt count is the one
+/// `drive_stage` actually issued.
+#[allow(clippy::too_many_arguments)]
+fn emit_terminal_stage(
+    on_stage: &mut (dyn FnMut(StageProgressEvent) + Send),
+    role: InvestigationRole,
+    candidate_id: Option<String>,
+    kind: StageOutcomeKind,
+    verb: &str,
+    rounds: u32,
+    corrections: u8,
+    chars: u64,
+) {
+    on_stage(StageProgressEvent {
+        role,
+        started: false,
+        outcome: Some(kind),
+        candidate_id,
+        detail: format!(
+            "{verb} after {rounds} provider attempt(s), {corrections} correction(s), \
+             {chars} char(s)"
+        ),
+    });
+}
+
 fn deadline_outcome(
     role: InvestigationRole,
     candidate_id: Option<String>,
@@ -1340,17 +1477,61 @@ fn deadline_outcome(
     chars: u64,
     on_stage: &mut (dyn FnMut(StageProgressEvent) + Send),
 ) -> MultiModelOutcome {
-    on_stage(StageProgressEvent {
+    emit_terminal_stage(
+        on_stage,
         role,
-        started: false,
-        outcome: Some(StageOutcomeKind::Deadline),
         candidate_id,
-        detail: format!(
-            "turn deadline reached after {rounds} round(s), {corrections} correction(s), \
-             {chars} char(s)"
-        ),
-    });
+        StageOutcomeKind::Deadline,
+        "turn deadline reached",
+        rounds,
+        corrections,
+        chars,
+    );
     MultiModelOutcome::Deadline
+}
+
+fn cancelled_outcome(
+    role: InvestigationRole,
+    candidate_id: Option<String>,
+    rounds: u32,
+    corrections: u8,
+    chars: u64,
+    on_stage: &mut (dyn FnMut(StageProgressEvent) + Send),
+) -> MultiModelOutcome {
+    emit_terminal_stage(
+        on_stage,
+        role,
+        candidate_id,
+        StageOutcomeKind::Cancelled,
+        "turn cancelled",
+        rounds,
+        corrections,
+        chars,
+    );
+    MultiModelOutcome::Cancelled
+}
+
+#[allow(clippy::too_many_arguments)]
+fn provider_failed_outcome(
+    role: InvestigationRole,
+    candidate_id: Option<String>,
+    error: CoreError,
+    rounds: u32,
+    corrections: u8,
+    chars: u64,
+    on_stage: &mut (dyn FnMut(StageProgressEvent) + Send),
+) -> MultiModelOutcome {
+    emit_terminal_stage(
+        on_stage,
+        role,
+        candidate_id,
+        StageOutcomeKind::ProviderFailed,
+        "provider failed",
+        rounds,
+        corrections,
+        chars,
+    );
+    MultiModelOutcome::ProviderFailed(Box::new(error))
 }
 
 fn emit_skip(

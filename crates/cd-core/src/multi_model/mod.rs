@@ -228,12 +228,18 @@ impl DegradationReason {
 /// invented — an honest deterministic usage budget, not dollars.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MultiModelBudget {
-    /// Hard ceiling on model calls across every stage. Every stage is clamped
-    /// to what this ceiling still allows, so the total number of provider
-    /// rounds never exceeds it; a stage with no room is not started (the
-    /// investigator stops taking candidates, the reviewer degrades, and — only
-    /// if even the mandatory synthesis has no room — the turn falls through to
-    /// the single-model path).
+    /// Hard ceiling on **logical provider attempts** across every stage. One
+    /// attempt is one `complete_streaming` invocation actually sent — initial or
+    /// a semantic-correction re-prompt — whether it then succeeds, fails, times
+    /// out, or is cancelled; transport-library retries beneath it are not
+    /// attempts. Each stage is clamped to what this ceiling still allows and each
+    /// attempt is counted the moment before it is sent, so the total attempts
+    /// issued never exceed this value even across failed stages. A stage with no
+    /// room is not started (the investigator stops taking candidates, the
+    /// reviewer degrades, and — only if even the mandatory synthesis has no room
+    /// — the turn falls through to the single-model path). This bounds calls
+    /// sent, not calls that returned successfully; per-stage `provider_rounds`
+    /// telemetry likewise counts attempts sent.
     pub max_total_provider_rounds: u32,
     /// Per-stage semantic-correction cap (re-prompts on validation failure).
     /// Independent of transport retries.
@@ -309,9 +315,9 @@ impl StageOutcomeKind {
 
 /// Typed per-stage telemetry. Transport retries are intentionally not counted
 /// here: a 429 that recovers below the pipeline is invisible to
-/// `provider_rounds` (one usable round), and a 429 that exhausts surfaces as
-/// `ProviderFailed` — exactly the transport-vs-semantic separation the
-/// existing oracle pins.
+/// `provider_rounds` (the recovered call is one attempt), and a 429 that
+/// exhausts surfaces as one counted attempt plus a `ProviderFailed` outcome —
+/// exactly the transport-vs-semantic separation the existing oracle pins.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StageTelemetry {
     /// Which functional role this stage filled.
@@ -320,7 +326,11 @@ pub struct StageTelemetry {
     pub profile_id: String,
     /// Exact model id used.
     pub model: String,
-    /// Usable model rounds (completions the pipeline could evaluate).
+    /// Logical provider attempts sent in this stage — each a `complete_streaming`
+    /// invocation (initial or a semantic-correction re-prompt), counted whether
+    /// it returned, failed, timed out, or was cancelled. Transport-library
+    /// retries beneath it are not attempts. This is calls sent, not calls that
+    /// returned an evaluable completion.
     pub provider_rounds: u32,
     /// Semantic corrections consumed (re-prompts on validation failure).
     pub semantic_corrections: u8,
@@ -345,7 +355,8 @@ pub struct MultiModelTurnTelemetry {
     pub degradation: Option<DegradationReason>,
     /// Per-stage typed telemetry, in execution order.
     pub stages: Vec<StageTelemetry>,
-    /// Total usable model rounds across the turn.
+    /// Total logical provider attempts sent across the turn — the sum of every
+    /// stage's `provider_rounds`. Never exceeds `max_total_provider_rounds`.
     pub total_provider_rounds: u32,
     /// Total model-facing characters sent across the turn (usage metric).
     pub total_context_chars_sent: u64,
