@@ -1,0 +1,967 @@
+{
+  "dependencies": {
+    "cargo_internal_edges": [
+      {
+        "from": "cd-cli",
+        "kind": "dependencies",
+        "to": "cd-core"
+      },
+      {
+        "from": "cd-cli",
+        "kind": "dependencies",
+        "to": "cd-workflow"
+      },
+      {
+        "from": "cd-server",
+        "kind": "dependencies",
+        "to": "cd-core"
+      },
+      {
+        "from": "cd-workflow",
+        "kind": "dependencies",
+        "to": "cd-core"
+      },
+      {
+        "from": "contextdesk",
+        "kind": "dependencies",
+        "to": "cd-core"
+      },
+      {
+        "from": "contextdesk",
+        "kind": "dependencies",
+        "to": "cd-workflow"
+      }
+    ],
+    "cargo_packages": [
+      {
+        "manifest": "crates/cd-cli/Cargo.toml",
+        "name": "cd-cli"
+      },
+      {
+        "manifest": "crates/cd-core/Cargo.toml",
+        "name": "cd-core"
+      },
+      {
+        "manifest": "crates/cd-server/Cargo.toml",
+        "name": "cd-server"
+      },
+      {
+        "manifest": "crates/cd-workflow/Cargo.toml",
+        "name": "cd-workflow"
+      },
+      {
+        "manifest": "desktop/src-tauri/Cargo.toml",
+        "name": "contextdesk"
+      },
+      {
+        "manifest": "packages/cli-clients/rust/Cargo.toml",
+        "name": "contextdesk-cli-client-example"
+      }
+    ],
+    "typescript_relative_imports": {
+      "highest_fan_in": [
+        {
+          "edges": 109,
+          "path": "desktop/src/lib/host.ts"
+        },
+        {
+          "edges": 51,
+          "path": "desktop/src/lib/activity/types.ts"
+        },
+        {
+          "edges": 31,
+          "path": "desktop/src/lib/session/index.ts"
+        },
+        {
+          "edges": 28,
+          "path": "desktop/src/lib/preflight.ts"
+        },
+        {
+          "edges": 16,
+          "path": "desktop/src/components/icons.tsx"
+        },
+        {
+          "edges": 15,
+          "path": "desktop/src/lib/skins.ts"
+        },
+        {
+          "edges": 14,
+          "path": "desktop/src/components/wizards/types.ts"
+        },
+        {
+          "edges": 13,
+          "path": "desktop/src/lib/logExplorer/types.ts"
+        },
+        {
+          "edges": 13,
+          "path": "desktop/src/lib/turn.ts"
+        },
+        {
+          "edges": 12,
+          "path": "desktop/src/hooks/useDismissibleLayer.tsx"
+        }
+      ],
+      "highest_fan_out": [
+        {
+          "edges": 42,
+          "path": "desktop/src/components/logExplorer/LogExplorer.tsx"
+        },
+        {
+          "edges": 36,
+          "path": "desktop/src/App.tsx"
+        },
+        {
+          "edges": 25,
+          "path": "desktop/src/components/panes/LogPane.tsx"
+        },
+        {
+          "edges": 24,
+          "path": "desktop/src/components/logExplorer/LinkedChatRail.tsx"
+        },
+        {
+          "edges": 19,
+          "path": "desktop/src/components/shell/ChatPane.tsx"
+        },
+        {
+          "edges": 14,
+          "path": "desktop/src/components/SettingsModal.tsx"
+        },
+        {
+          "edges": 13,
+          "path": "desktop/src/components/shell/MessageRow.tsx"
+        },
+        {
+          "edges": 13,
+          "path": "desktop/src/components/shell/Workspace.tsx"
+        },
+        {
+          "edges": 12,
+          "path": "desktop/src/lib/activity/lifecycleRaces.test.tsx"
+        },
+        {
+          "edges": 10,
+          "path": "desktop/src/components/settings/AiSection.tsx"
+        }
+      ],
+      "resolved_relative_import_edges": 967,
+      "same_area_edges": 382,
+      "same_area_ratio": 0.395,
+      "unresolved_relative_imports": 6
+    }
+  },
+  "exact": {
+    "analyzed_bytes": 16667525,
+    "code_file_nonblank_line_distribution": {
+      "at_least_1000": 89,
+      "at_least_500": 193,
+      "maximum": 18039,
+      "median_p50": 208,
+      "p90": 1074,
+      "p95": 1713
+    },
+    "maintained_code_files": 786,
+    "maintained_code_nonblank_lines": 405932,
+    "maintained_code_physical_lines": 431916,
+    "nonblank_lines": 426844,
+    "physical_lines": 457204
+  },
+  "heuristic": {
+    "decision_tokens": 25289,
+    "decision_tokens_per_1000_nonblank_code_lines": 62.3,
+    "functions": 9536,
+    "tests": 4478,
+    "types": 2430
+  },
+  "hotspots": [
+    {
+      "bytes": 715829,
+      "decision_tokens": 1032,
+      "functions": 620,
+      "language": "Rust",
+      "nonblank_lines": 18039,
+      "path": "desktop/src-tauri/src/lib.rs",
+      "physical_lines": 19112,
+      "system": "Desktop host (Tauri)",
+      "tests": 140,
+      "types": 112
+    },
+    {
+      "bytes": 507467,
+      "decision_tokens": 884,
+      "functions": 285,
+      "language": "Rust",
+      "nonblank_lines": 12118,
+      "path": "crates/cd-core/src/tool_host.rs",
+      "physical_lines": 12575,
+      "system": "Rust crate: cd-core",
+      "tests": 85,
+      "types": 16
+    },
+    {
+      "bytes": 484053,
+      "decision_tokens": 863,
+      "functions": 201,
+      "language": "Rust",
+      "nonblank_lines": 11504,
+      "path": "crates/cd-core/src/agent.rs",
+      "physical_lines": 11926,
+      "system": "Rust crate: cd-core",
+      "tests": 75,
+      "types": 39
+    },
+    {
+      "bytes": 340967,
+      "decision_tokens": 144,
+      "functions": 36,
+      "language": "TypeScript/TSX",
+      "nonblank_lines": 9532,
+      "path": "desktop/src/components/logExplorer/LogExplorer.test.tsx",
+      "physical_lines": 10113,
+      "system": "Desktop UI",
+      "tests": 126,
+      "types": 1
+    },
+    {
+      "bytes": 310005,
+      "decision_tokens": 680,
+      "functions": 84,
+      "language": "TypeScript/TSX",
+      "nonblank_lines": 8419,
+      "path": "desktop/src/components/logExplorer/LogExplorer.tsx",
+      "physical_lines": 8618,
+      "system": "Desktop UI",
+      "tests": 2,
+      "types": 58
+    },
+    {
+      "bytes": 295965,
+      "decision_tokens": 466,
+      "functions": 193,
+      "language": "Rust",
+      "nonblank_lines": 7557,
+      "path": "crates/cd-core/src/log_analysis/ingest.rs",
+      "physical_lines": 7965,
+      "system": "Rust crate: cd-core",
+      "tests": 81,
+      "types": 29
+    },
+    {
+      "bytes": 274584,
+      "decision_tokens": 736,
+      "functions": 159,
+      "language": "Rust",
+      "nonblank_lines": 6707,
+      "path": "crates/cd-core/src/log_analysis/exception_episodes.rs",
+      "physical_lines": 6993,
+      "system": "Rust crate: cd-core",
+      "tests": 66,
+      "types": 23
+    },
+    {
+      "bytes": 205059,
+      "decision_tokens": 322,
+      "functions": 109,
+      "language": "Rust",
+      "nonblank_lines": 5282,
+      "path": "crates/cd-core/src/log_analysis/query.rs",
+      "physical_lines": 5588,
+      "system": "Rust crate: cd-core",
+      "tests": 44,
+      "types": 30
+    },
+    {
+      "bytes": 191879,
+      "decision_tokens": 266,
+      "functions": 143,
+      "language": "Rust",
+      "nonblank_lines": 5129,
+      "path": "crates/cd-server/src/main.rs",
+      "physical_lines": 5447,
+      "system": "Rust crate: cd-server",
+      "tests": 39,
+      "types": 37
+    },
+    {
+      "bytes": 191172,
+      "decision_tokens": 297,
+      "functions": 104,
+      "language": "Rust",
+      "nonblank_lines": 4641,
+      "path": "crates/cd-core/src/investigations/mod.rs",
+      "physical_lines": 4895,
+      "system": "Rust crate: cd-core",
+      "tests": 28,
+      "types": 35
+    },
+    {
+      "bytes": 132239,
+      "decision_tokens": 302,
+      "functions": 208,
+      "language": "TypeScript",
+      "nonblank_lines": 4244,
+      "path": "desktop/src/lib/host.ts",
+      "physical_lines": 4638,
+      "system": "Desktop UI",
+      "tests": 0,
+      "types": 183
+    },
+    {
+      "bytes": 146283,
+      "decision_tokens": 358,
+      "functions": 137,
+      "language": "Rust",
+      "nonblank_lines": 3680,
+      "path": "crates/cd-core/src/log_analysis/parse.rs",
+      "physical_lines": 3912,
+      "system": "Rust crate: cd-core",
+      "tests": 64,
+      "types": 13
+    },
+    {
+      "bytes": 126592,
+      "decision_tokens": 55,
+      "functions": 7,
+      "language": "TypeScript/TSX",
+      "nonblank_lines": 3633,
+      "path": "desktop/src/components/logExplorer/LinkedChatRail.test.tsx",
+      "physical_lines": 3851,
+      "system": "Desktop UI",
+      "tests": 50,
+      "types": 1
+    },
+    {
+      "bytes": 148267,
+      "decision_tokens": 141,
+      "functions": 65,
+      "language": "Rust",
+      "nonblank_lines": 3488,
+      "path": "crates/cd-core/src/investigations/report.rs",
+      "physical_lines": 3676,
+      "system": "Rust crate: cd-core",
+      "tests": 22,
+      "types": 19
+    },
+    {
+      "bytes": 122439,
+      "decision_tokens": 39,
+      "functions": 11,
+      "language": "TypeScript/TSX",
+      "nonblank_lines": 3317,
+      "path": "desktop/src/components/panes/LogPane.test.tsx",
+      "physical_lines": 3549,
+      "system": "Desktop UI",
+      "tests": 57,
+      "types": 1
+    },
+    {
+      "bytes": 82559,
+      "decision_tokens": 0,
+      "functions": 0,
+      "language": "CSS",
+      "nonblank_lines": 3237,
+      "path": "desktop/src/styles/components/log-explorer.css",
+      "physical_lines": 3743,
+      "system": "Desktop UI",
+      "tests": 0,
+      "types": 0
+    },
+    {
+      "bytes": 121457,
+      "decision_tokens": 202,
+      "functions": 68,
+      "language": "Rust",
+      "nonblank_lines": 3168,
+      "path": "crates/cd-core/src/log_analysis/noise_candidates.rs",
+      "physical_lines": 3302,
+      "system": "Rust crate: cd-core",
+      "tests": 30,
+      "types": 12
+    },
+    {
+      "bytes": 129076,
+      "decision_tokens": 163,
+      "functions": 131,
+      "language": "Rust",
+      "nonblank_lines": 3072,
+      "path": "crates/cd-core/src/turn_trace.rs",
+      "physical_lines": 3287,
+      "system": "Rust crate: cd-core",
+      "tests": 34,
+      "types": 23
+    },
+    {
+      "bytes": 107264,
+      "decision_tokens": 248,
+      "functions": 95,
+      "language": "Rust",
+      "nonblank_lines": 2886,
+      "path": "crates/cd-core/src/incident_evidence.rs",
+      "physical_lines": 3041,
+      "system": "Rust crate: cd-core",
+      "tests": 41,
+      "types": 12
+    },
+    {
+      "bytes": 115536,
+      "decision_tokens": 214,
+      "functions": 96,
+      "language": "Rust",
+      "nonblank_lines": 2864,
+      "path": "crates/cd-core/src/log_analysis/import_preview.rs",
+      "physical_lines": 3053,
+      "system": "Rust crate: cd-core",
+      "tests": 38,
+      "types": 15
+    }
+  ],
+  "languages": [
+    {
+      "bytes": 9706192,
+      "decision_tokens_heuristic": 15766,
+      "files": 251,
+      "functions_heuristic": 7429,
+      "name": "Rust",
+      "nonblank_lines": 244823,
+      "physical_lines": 259103,
+      "tests_heuristic": 2580,
+      "types_heuristic": 1348
+    },
+    {
+      "bytes": 3237852,
+      "decision_tokens_heuristic": 4314,
+      "files": 192,
+      "functions_heuristic": 882,
+      "name": "TypeScript/TSX",
+      "nonblank_lines": 90297,
+      "physical_lines": 95184,
+      "tests_heuristic": 971,
+      "types_heuristic": 420
+    },
+    {
+      "bytes": 1288862,
+      "decision_tokens_heuristic": 2915,
+      "files": 214,
+      "functions_heuristic": 865,
+      "name": "TypeScript",
+      "nonblank_lines": 37178,
+      "physical_lines": 39987,
+      "tests_heuristic": 669,
+      "types_heuristic": 646
+    },
+    {
+      "bytes": 1132016,
+      "decision_tokens_heuristic": 0,
+      "files": 117,
+      "functions_heuristic": 0,
+      "name": "Markdown",
+      "nonblank_lines": 16609,
+      "physical_lines": 20762,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 384294,
+      "decision_tokens_heuristic": 0,
+      "files": 35,
+      "functions_heuristic": 0,
+      "name": "CSS",
+      "nonblank_lines": 15564,
+      "physical_lines": 17921,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 307316,
+      "decision_tokens_heuristic": 1334,
+      "files": 48,
+      "functions_heuristic": 201,
+      "name": "JavaScript",
+      "nonblank_lines": 8893,
+      "physical_lines": 9533,
+      "tests_heuristic": 223,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 223075,
+      "decision_tokens_heuristic": 960,
+      "files": 19,
+      "functions_heuristic": 159,
+      "name": "Python",
+      "nonblank_lines": 5143,
+      "physical_lines": 5794,
+      "tests_heuristic": 35,
+      "types_heuristic": 16
+    },
+    {
+      "bytes": 119747,
+      "decision_tokens_heuristic": 0,
+      "files": 18,
+      "functions_heuristic": 0,
+      "name": "Shell",
+      "nonblank_lines": 2990,
+      "physical_lines": 3266,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 61581,
+      "decision_tokens_heuristic": 0,
+      "files": 22,
+      "functions_heuristic": 0,
+      "name": "JSON",
+      "nonblank_lines": 1721,
+      "physical_lines": 1721,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 48739,
+      "decision_tokens_heuristic": 0,
+      "files": 33,
+      "functions_heuristic": 0,
+      "name": "Other text",
+      "nonblank_lines": 727,
+      "physical_lines": 812,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 27493,
+      "decision_tokens_heuristic": 0,
+      "files": 7,
+      "functions_heuristic": 0,
+      "name": "YAML",
+      "nonblank_lines": 749,
+      "physical_lines": 807,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 75127,
+      "decision_tokens_heuristic": 0,
+      "files": 19,
+      "functions_heuristic": 0,
+      "name": "SVG",
+      "nonblank_lines": 748,
+      "physical_lines": 787,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 13032,
+      "decision_tokens_heuristic": 0,
+      "files": 11,
+      "functions_heuristic": 0,
+      "name": "TOML",
+      "nonblank_lines": 358,
+      "physical_lines": 399,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 12696,
+      "decision_tokens_heuristic": 0,
+      "files": 2,
+      "functions_heuristic": 0,
+      "name": "Java",
+      "nonblank_lines": 290,
+      "physical_lines": 312,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 4953,
+      "decision_tokens_heuristic": 0,
+      "files": 1,
+      "functions_heuristic": 0,
+      "name": "C",
+      "nonblank_lines": 143,
+      "physical_lines": 151,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 5141,
+      "decision_tokens_heuristic": 0,
+      "files": 1,
+      "functions_heuristic": 0,
+      "name": "C/C++ header",
+      "nonblank_lines": 133,
+      "physical_lines": 147,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 5013,
+      "decision_tokens_heuristic": 0,
+      "files": 1,
+      "functions_heuristic": 0,
+      "name": "C#",
+      "nonblank_lines": 123,
+      "physical_lines": 132,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 4136,
+      "decision_tokens_heuristic": 0,
+      "files": 1,
+      "functions_heuristic": 0,
+      "name": "C++",
+      "nonblank_lines": 115,
+      "physical_lines": 127,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 6714,
+      "decision_tokens_heuristic": 0,
+      "files": 1,
+      "functions_heuristic": 0,
+      "name": "PowerShell",
+      "nonblank_lines": 116,
+      "physical_lines": 127,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 2982,
+      "decision_tokens_heuristic": 0,
+      "files": 1,
+      "functions_heuristic": 0,
+      "name": "Go",
+      "nonblank_lines": 108,
+      "physical_lines": 116,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 564,
+      "decision_tokens_heuristic": 0,
+      "files": 1,
+      "functions_heuristic": 0,
+      "name": "HTML",
+      "nonblank_lines": 16,
+      "physical_lines": 16,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    }
+  ],
+  "methodology": {
+    "exact": [
+      "tracked-file inventory, bytes, physical/nonblank lines, and file-size distribution",
+      "path-derived language/system grouping",
+      "Cargo path dependency declarations between workspace packages"
+    ],
+    "heuristic": [
+      "functions, types, and tests are conservative Rust/TypeScript/JavaScript/Python line-oriented lexical matches",
+      "decision tokens count control-flow/boolean tokens; they are not cyclomatic complexity",
+      "TypeScript relative-import edges use static syntax and filesystem resolution",
+      "same-area import ratio uses path-derived feature areas as a cohesion/coupling proxy"
+    ]
+  },
+  "schema_version": 1,
+  "scope": {
+    "analyzed_text_files": 995,
+    "excluded_by_reason": {
+      "binary/media asset": 58,
+      "dependency lockfile": 5,
+      "fixture/snapshot asset": 72,
+      "fixture/vendor/build tree": 295,
+      "generated health report": 2,
+      "non-UTF-8/binary file": 1
+    },
+    "excluded_files": 433,
+    "inventory": "git tracked files",
+    "tracked_content_fingerprint_sha256": "6346a1bbdf29dea1b43db9b528cbb3d697ece536996f0586cc7abc8e7bf89d27",
+    "tracked_files": 1428
+  },
+  "systems": [
+    {
+      "bytes": 7566207,
+      "decision_tokens_heuristic": 12707,
+      "files": 177,
+      "functions_heuristic": 5723,
+      "name": "Rust crate: cd-core",
+      "nonblank_lines": 190487,
+      "physical_lines": 201379,
+      "tests_heuristic": 2080,
+      "types_heuristic": 990
+    },
+    {
+      "bytes": 4529258,
+      "decision_tokens_heuristic": 6991,
+      "files": 402,
+      "functions_heuristic": 1648,
+      "name": "Desktop UI",
+      "nonblank_lines": 132819,
+      "physical_lines": 142258,
+      "tests_heuristic": 1545,
+      "types_heuristic": 912
+    },
+    {
+      "bytes": 904047,
+      "decision_tokens_heuristic": 1380,
+      "files": 16,
+      "functions_heuristic": 794,
+      "name": "Desktop host (Tauri)",
+      "nonblank_lines": 22957,
+      "physical_lines": 24334,
+      "tests_heuristic": 195,
+      "types_heuristic": 152
+    },
+    {
+      "bytes": 1216685,
+      "decision_tokens_heuristic": 0,
+      "files": 152,
+      "functions_heuristic": 0,
+      "name": "Documentation",
+      "nonblank_lines": 18096,
+      "physical_lines": 21999,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 774090,
+      "decision_tokens_heuristic": 1179,
+      "files": 46,
+      "functions_heuristic": 557,
+      "name": "Rust crate: cd-cli",
+      "nonblank_lines": 19753,
+      "physical_lines": 20998,
+      "tests_heuristic": 189,
+      "types_heuristic": 117
+    },
+    {
+      "bytes": 417098,
+      "decision_tokens_heuristic": 1179,
+      "files": 42,
+      "functions_heuristic": 210,
+      "name": "Repository tooling",
+      "nonblank_lines": 10422,
+      "physical_lines": 11474,
+      "tests_heuristic": 130,
+      "types_heuristic": 13
+    },
+    {
+      "bytes": 277968,
+      "decision_tokens_heuristic": 141,
+      "files": 34,
+      "functions_heuristic": 77,
+      "name": "Desktop tooling/config",
+      "nonblank_lines": 7204,
+      "physical_lines": 7672,
+      "tests_heuristic": 72,
+      "types_heuristic": 9
+    },
+    {
+      "bytes": 240826,
+      "decision_tokens_heuristic": 326,
+      "files": 5,
+      "functions_heuristic": 200,
+      "name": "Rust crate: cd-server",
+      "nonblank_lines": 6455,
+      "physical_lines": 6877,
+      "tests_heuristic": 50,
+      "types_heuristic": 62
+    },
+    {
+      "bytes": 227297,
+      "decision_tokens_heuristic": 159,
+      "files": 15,
+      "functions_heuristic": 149,
+      "name": "Rust crate: cd-workflow",
+      "nonblank_lines": 5349,
+      "physical_lines": 5703,
+      "tests_heuristic": 66,
+      "types_heuristic": 26
+    },
+    {
+      "bytes": 158497,
+      "decision_tokens_heuristic": 597,
+      "files": 32,
+      "functions_heuristic": 100,
+      "name": "Desktop acceptance harness",
+      "nonblank_lines": 4571,
+      "physical_lines": 4921,
+      "tests_heuristic": 118,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 148638,
+      "decision_tokens_heuristic": 415,
+      "files": 27,
+      "functions_heuristic": 40,
+      "name": "Repository root/config",
+      "nonblank_lines": 2993,
+      "physical_lines": 3433,
+      "tests_heuristic": 6,
+      "types_heuristic": 1
+    },
+    {
+      "bytes": 90230,
+      "decision_tokens_heuristic": 95,
+      "files": 11,
+      "functions_heuristic": 16,
+      "name": "SDK package: contracts",
+      "nonblank_lines": 2561,
+      "physical_lines": 2743,
+      "tests_heuristic": 15,
+      "types_heuristic": 97
+    },
+    {
+      "bytes": 42856,
+      "decision_tokens_heuristic": 55,
+      "files": 9,
+      "functions_heuristic": 10,
+      "name": "SDK package: client",
+      "nonblank_lines": 1203,
+      "physical_lines": 1259,
+      "tests_heuristic": 10,
+      "types_heuristic": 48
+    },
+    {
+      "bytes": 29242,
+      "decision_tokens_heuristic": 0,
+      "files": 8,
+      "functions_heuristic": 0,
+      "name": "GitHub automation",
+      "nonblank_lines": 780,
+      "physical_lines": 848,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 8876,
+      "decision_tokens_heuristic": 0,
+      "files": 1,
+      "functions_heuristic": 0,
+      "name": "CLI client example: java",
+      "nonblank_lines": 182,
+      "physical_lines": 199,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 4953,
+      "decision_tokens_heuristic": 0,
+      "files": 1,
+      "functions_heuristic": 0,
+      "name": "CLI client example: c",
+      "nonblank_lines": 143,
+      "physical_lines": 151,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 5141,
+      "decision_tokens_heuristic": 0,
+      "files": 1,
+      "functions_heuristic": 0,
+      "name": "CLI client example: shared",
+      "nonblank_lines": 133,
+      "physical_lines": 147,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 5013,
+      "decision_tokens_heuristic": 0,
+      "files": 1,
+      "functions_heuristic": 0,
+      "name": "CLI client example: csharp",
+      "nonblank_lines": 123,
+      "physical_lines": 132,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 4232,
+      "decision_tokens_heuristic": 26,
+      "files": 1,
+      "functions_heuristic": 5,
+      "name": "CLI client example: python",
+      "nonblank_lines": 107,
+      "physical_lines": 129,
+      "tests_heuristic": 0,
+      "types_heuristic": 2
+    },
+    {
+      "bytes": 4136,
+      "decision_tokens_heuristic": 0,
+      "files": 1,
+      "functions_heuristic": 0,
+      "name": "CLI client example: cpp",
+      "nonblank_lines": 115,
+      "physical_lines": 127,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 2982,
+      "decision_tokens_heuristic": 0,
+      "files": 1,
+      "functions_heuristic": 0,
+      "name": "CLI client example: go",
+      "nonblank_lines": 108,
+      "physical_lines": 116,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 3286,
+      "decision_tokens_heuristic": 13,
+      "files": 2,
+      "functions_heuristic": 4,
+      "name": "CLI client example: rust",
+      "nonblank_lines": 104,
+      "physical_lines": 114,
+      "tests_heuristic": 0,
+      "types_heuristic": 1
+    },
+    {
+      "bytes": 3256,
+      "decision_tokens_heuristic": 26,
+      "files": 1,
+      "functions_heuristic": 3,
+      "name": "CLI client example: node",
+      "nonblank_lines": 93,
+      "physical_lines": 99,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 1002,
+      "decision_tokens_heuristic": 0,
+      "files": 4,
+      "functions_heuristic": 0,
+      "name": "SDK package: react",
+      "nonblank_lines": 35,
+      "physical_lines": 36,
+      "tests_heuristic": 1,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 978,
+      "decision_tokens_heuristic": 0,
+      "files": 4,
+      "functions_heuristic": 0,
+      "name": "SDK package: ui",
+      "nonblank_lines": 35,
+      "physical_lines": 36,
+      "tests_heuristic": 1,
+      "types_heuristic": 0
+    },
+    {
+      "bytes": 731,
+      "decision_tokens_heuristic": 0,
+      "files": 1,
+      "functions_heuristic": 0,
+      "name": "CLI client examples/config",
+      "nonblank_lines": 16,
+      "physical_lines": 20,
+      "tests_heuristic": 0,
+      "types_heuristic": 0
+    }
+  ]
+}

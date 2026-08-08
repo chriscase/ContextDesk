@@ -75,6 +75,10 @@ sh scripts/check_claims.sh
 sh scripts/check_close_proof.sh --offline
 sh scripts/check_close_proof.sh --fixture scripts/fixtures/close_proof_sample.json
 
+# Periodic repository magnitude/design-health snapshot (not a per-commit gate)
+python3 scripts/repository_health.py
+python3 scripts/repository_health.py --check
+
 # Full gate — see AGENTS.md "Build / test / lint"
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings

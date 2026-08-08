@@ -45,6 +45,7 @@ the product remains rename-friendly through [`branding.toml`](branding.toml).
 | **Normalization** | [NORMALIZATION.md](docs/NORMALIZATION.md) · [spec](docs/specs/NORMALIZED_LOG_EVENTS_V1.md) |
 | **Logging quality assessment (LQA)** | [LQA guide](docs/help/log-analysis/logging-quality-assessment.md) · [Demo runbook](docs/DEMO_RUNBOOK.md#f-logging-quality-assessment-jsonmarkdown-export) |
 | **Architecture** | [ARCHITECTURE.md](docs/ARCHITECTURE.md) · [PRODUCT.md](docs/PRODUCT.md) · [AGENTS.md](AGENTS.md) |
+| **Repository magnitude / health signals** | [Repository health snapshot](docs/development/REPOSITORY_HEALTH.md) · [machine-readable JSON](docs/development/repository-health.json) |
 | **Repeatable demo (GUI + CLI)** | **[Demo runbook](docs/DEMO_RUNBOOK.md)** · [Demo acceptance](docs/DEMO_ACCEPTANCE.md) |
 
 ## CLI and log normalization
