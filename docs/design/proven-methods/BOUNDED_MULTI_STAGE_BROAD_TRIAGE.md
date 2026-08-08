@@ -100,6 +100,22 @@ The legacy structured-triage answer contract (`observations`,
 mechanically separate — the projection deliberately avoids the headings the
 legacy parser keys on — so neither can be mistaken for the other.
 
+## Causal vocabulary is never host authority
+
+The host verifies identities, scopes, and typed roles — it never infers causal
+semantics from corpus wording. An earlier single-model guard that recognized
+literal coverage-gap/symptom phrases in bounded evidence (and rewrote
+overclaiming answers into a host-authored `Cause not established:`) was
+removed as fixture-vocabulary coupling: it only fired on the frozen lab's
+phrasing, and untrusted log text could steer it. Whether evidence establishes
+a mechanism is model judgment under the synthesis contract; typed
+establishment remains host-only via `EvidenceRole::Cause` provenance and
+role-withhold, which no production path assigns from text. The
+vocabulary-generalization gates (`vocab_generalization_gates.rs`) hold this
+boundary: shipped outcomes must be invariant under unseen corpus renames, and
+production prompt/ranking sources must not contain fixture lexicon or alias
+tables. See [`docs/design/VOCAB_AGNOSTIC_KNOWN_ROOT.md`](../VOCAB_AGNOSTIC_KNOWN_ROOT.md).
+
 ## Bounds and failures
 
 `AgentOptions.max_rounds` is the hard provider-call cap for this path. It
