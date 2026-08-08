@@ -711,6 +711,70 @@ fn typed_answer_persists_byte_exact_and_visible_text_is_markdown() {
     assert!(serde_json::from_str::<serde_json::Value>(content.trim()).is_err());
 }
 
+/// The documented hard ceiling holds: total provider rounds never exceed
+/// max_total_provider_rounds, even with more candidates than the budget can
+/// investigate. The reviewer degrades and one candidate is left uninvestigated.
+#[test]
+fn the_round_ceiling_is_never_exceeded_across_stages() {
+    let candidates = vec![
+        candidate("k1", &[1]),
+        candidate("k2", &[2]),
+        candidate("k3", &[3]),
+        candidate("k4", &[4]),
+    ];
+    // Only room for three investigator rounds (reserving one for synthesis)
+    // and one synthesis round — no reviewer.
+    let investigator = vec![
+        completion(finding_json("k1", &[1])),
+        completion(finding_json("k2", &[2])),
+        completion(finding_json("k3", &[3])),
+        completion(answer_json(&[("k1", &[1]), ("k2", &[2]), ("k3", &[3])])),
+    ];
+    let budget = MultiModelBudget {
+        max_total_provider_rounds: 4,
+        ..MultiModelBudget::default()
+    };
+    let RunResult { outcome, .. } = run_with(investigator, vec![], &candidates, budget);
+    match &outcome {
+        MultiModelOutcome::Completed { telemetry, .. } => {
+            assert!(
+                telemetry.total_provider_rounds <= 4,
+                "ceiling exceeded: {} rounds",
+                telemetry.total_provider_rounds
+            );
+            assert_eq!(telemetry.executed_mode, ExecutedMode::ReviewDegraded);
+            assert_eq!(
+                telemetry.degradation,
+                Some(DegradationReason::BudgetRoundsInsufficient)
+            );
+        }
+        other => panic!(
+            "expected a degraded completion, got {}",
+            outcome_label(other)
+        ),
+    }
+}
+
+/// A ceiling below the minimum viable typed path (two investigators + one
+/// synthesis) is not eligible — the caller runs the single-model path, no work
+/// is spent.
+#[test]
+fn a_budget_below_the_minimum_viable_path_is_not_eligible() {
+    let budget = MultiModelBudget {
+        max_total_provider_rounds: 2,
+        ..MultiModelBudget::default()
+    };
+    let RunResult { outcome, stages } = run_with(
+        vec![completion(finding_json("k1", &[1]))],
+        vec![],
+        &two_candidates(),
+        budget,
+    );
+    assert!(matches!(outcome, MultiModelOutcome::NotEligible));
+    // No stage ran — nothing was spent before falling through.
+    assert!(stages.is_empty());
+}
+
 #[test]
 fn rendered_review_is_stable_under_gap_and_contradiction_ordering() {
     use cd_core::multi_model::{ReviewContradiction, ReviewGap, ReviewReportV1, RoleBinding};

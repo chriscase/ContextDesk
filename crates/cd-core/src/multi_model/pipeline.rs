@@ -370,7 +370,10 @@ fn known_claims(findings: &[CandidateFindingV1]) -> KnownClaims {
     map
 }
 
-/// Result of driving one model call with a bounded correction budget.
+/// Result of driving one model call with a bounded correction budget. Every
+/// non-cancel variant carries what the stage actually consumed so telemetry is
+/// accurate even when a provider error or deadline lands on a correction
+/// attempt after an earlier round already completed.
 enum CallResult<T> {
     Ok {
         value: T,
@@ -383,8 +386,17 @@ enum CallResult<T> {
         corrections: u8,
         chars: u64,
     },
-    Provider(CoreError),
-    Deadline,
+    Provider {
+        error: CoreError,
+        rounds: u32,
+        corrections: u8,
+        chars: u64,
+    },
+    Deadline {
+        rounds: u32,
+        corrections: u8,
+        chars: u64,
+    },
     Cancelled,
 }
 
@@ -429,10 +441,21 @@ async fn drive_stage<T>(
                 if error.to_string().contains("cancelled") {
                     return CallResult::Cancelled;
                 }
-                return CallResult::Provider(error);
+                return CallResult::Provider {
+                    error,
+                    rounds,
+                    corrections,
+                    chars,
+                };
             }
             Err(TurnAwaitError::Cancelled) => return CallResult::Cancelled,
-            Err(TurnAwaitError::Deadline) => return CallResult::Deadline,
+            Err(TurnAwaitError::Deadline) => {
+                return CallResult::Deadline {
+                    rounds,
+                    corrections,
+                    chars,
+                }
+            }
         };
         rounds = rounds.saturating_add(1);
         let content = if completion.content.trim().is_empty() {
@@ -499,6 +522,24 @@ pub async fn run_review_pipeline(
     if candidates.len() < 2 {
         return Ok(MultiModelOutcome::NotEligible);
     }
+    // The minimum viable typed path is two investigator rounds plus one
+    // synthesis round. A ceiling below that cannot host the pipeline, so fall
+    // through to the single-model path rather than start work we cannot finish.
+    if budget.max_total_provider_rounds < 3 {
+        return Ok(MultiModelOutcome::NotEligible);
+    }
+    // Worst-case rounds one stage may consume (one attempt plus corrections).
+    let stage_cap = u32::from(max_corr) + 1;
+    // Clamp a stage to what the global ceiling still allows, so `used_rounds`
+    // can never exceed `max_total_provider_rounds` — the documented hard
+    // ceiling holds for every stage, not just the reviewer.
+    let stage_budget = |used: u32, reserve_for_synth: u32| -> u32 {
+        let remaining = budget
+            .max_total_provider_rounds
+            .saturating_sub(used)
+            .saturating_sub(reserve_for_synth);
+        stage_cap.min(remaining)
+    };
 
     let mut stages: Vec<StageTelemetry> = Vec::new();
     let mut used_rounds = 0u32;
@@ -523,7 +564,10 @@ pub async fn run_review_pipeline(
         {
             continue;
         }
-        if used_rounds >= budget.max_total_provider_rounds {
+        // Reserve one round for the mandatory synthesis stage so investigators
+        // can never consume the whole ceiling.
+        let investigator_rounds_here = stage_budget(used_rounds, 1);
+        if investigator_rounds_here == 0 {
             break;
         }
         on_stage(StageProgressEvent {
@@ -556,7 +600,7 @@ pub async fn run_review_pipeline(
                 .ok()
             },
             max_corr,
-            u32::from(max_corr) + 1,
+            investigator_rounds_here,
         )
         .await;
         match result {
@@ -613,21 +657,24 @@ pub async fn run_review_pipeline(
                 });
                 // Rejected candidate: excluded from the answer, fail-closed.
             }
-            CallResult::Provider(error) => {
+            CallResult::Provider { error, .. } => {
                 return Ok(MultiModelOutcome::ProviderFailed(Box::new(error)))
             }
-            CallResult::Deadline => return Ok(MultiModelOutcome::Deadline),
+            CallResult::Deadline { .. } => return Ok(MultiModelOutcome::Deadline),
             CallResult::Cancelled => return Ok(MultiModelOutcome::Cancelled),
         }
     }
 
+    // A typed path that could not produce two valid findings falls through to
+    // the single-model path. No review ran and no answer was produced, so the
+    // executed mode is single and no reviewer degradation is claimed.
     if findings.len() < 2 {
         return Ok(MultiModelOutcome::FailedClosed {
             reason: "fewer than two candidate findings passed host validation",
             telemetry: Box::new(finalize_telemetry(
                 MultiModelMode::Review,
-                ExecutedMode::ReviewDegraded,
-                Some(DegradationReason::NotEligible),
+                ExecutedMode::Single,
+                None,
                 stages,
                 used_rounds,
                 used_chars,
@@ -640,8 +687,8 @@ pub async fn run_review_pipeline(
             reason: "host evidence ledger was invalid",
             telemetry: Box::new(finalize_telemetry(
                 MultiModelMode::Review,
-                ExecutedMode::ReviewDegraded,
-                Some(DegradationReason::NotEligible),
+                ExecutedMode::Single,
+                None,
                 stages,
                 used_rounds,
                 used_chars,
@@ -656,11 +703,10 @@ pub async fn run_review_pipeline(
     let mut degradation: Option<DegradationReason> = None;
     let mut review: Option<ReviewReportV1> = None;
 
-    // Reserve exactly one synthesis round after the reviewer.
-    let fits_rounds = used_rounds
-        .saturating_add(u32::from(max_corr) + 1)
-        .saturating_add(1)
-        <= budget.max_total_provider_rounds;
+    // Reserve one synthesis round after the reviewer; the reviewer may use
+    // whatever the ceiling still allows beyond that reserve.
+    let reviewer_rounds_here = stage_budget(used_rounds, 1);
+    let fits_rounds = reviewer_rounds_here > 0;
     let reviewer_msgs = reviewer_messages(&findings_summary(&findings), &all_evidence_lines, false);
     let reviewer_chars: u64 = reviewer_msgs.iter().map(|m| m.content.len() as u64).sum();
     let fits_usage = match budget.max_context_chars_total {
@@ -716,7 +762,7 @@ pub async fn run_review_pipeline(
                 .ok()
             },
             max_corr,
-            u32::from(max_corr) + 1,
+            reviewer_rounds_here,
         )
         .await;
         match result {
@@ -759,19 +805,28 @@ pub async fn run_review_pipeline(
             // telemetry records what the stage consumed.
             reviewer_failure => {
                 let (outcome_kind, reason, rounds, corrections, chars) = match reviewer_failure {
-                    CallResult::Provider(_) => (
+                    CallResult::Provider {
+                        rounds,
+                        corrections,
+                        chars,
+                        ..
+                    } => (
                         StageOutcomeKind::ProviderFailed,
                         DegradationReason::ReviewerProviderFailed,
-                        0,
-                        0,
-                        reviewer_chars,
+                        rounds,
+                        corrections,
+                        chars.max(reviewer_chars),
                     ),
-                    CallResult::Deadline => (
+                    CallResult::Deadline {
+                        rounds,
+                        corrections,
+                        chars,
+                    } => (
                         StageOutcomeKind::Deadline,
                         DegradationReason::ReviewerDeadline,
-                        0,
-                        0,
-                        reviewer_chars,
+                        rounds,
+                        corrections,
+                        chars.max(reviewer_chars),
                     ),
                     CallResult::SemanticInvalid {
                         rounds,
@@ -811,6 +866,24 @@ pub async fn run_review_pipeline(
     }
 
     // ---- Stage 5: synthesis (reuses the existing host validation) ----
+    // The mandatory synthesis stage is clamped to the remaining ceiling; the
+    // investigator/reviewer phases each reserved a round for it, so this is
+    // non-zero on any budget that passed the entry guard, but a defensive
+    // fall-through keeps the ceiling honest even if it is not.
+    let synth_rounds_here = stage_budget(used_rounds, 0);
+    if synth_rounds_here == 0 {
+        return Ok(MultiModelOutcome::FailedClosed {
+            reason: "round budget exhausted before synthesis",
+            telemetry: Box::new(finalize_telemetry(
+                MultiModelMode::Review,
+                executed,
+                degradation.or(Some(DegradationReason::BudgetRoundsInsufficient)),
+                stages,
+                used_rounds,
+                used_chars,
+            )),
+        });
+    }
     on_stage(StageProgressEvent {
         role: InvestigationRole::Synthesizer,
         started: true,
@@ -835,7 +908,7 @@ pub async fn run_review_pipeline(
         },
         |content| validate_model_answer(content, &ledger).ok(),
         max_corr,
-        u32::from(max_corr) + 1,
+        synth_rounds_here,
     )
     .await;
     match synth {
@@ -920,8 +993,10 @@ pub async fn run_review_pipeline(
                 )),
             })
         }
-        CallResult::Provider(error) => Ok(MultiModelOutcome::ProviderFailed(Box::new(error))),
-        CallResult::Deadline => Ok(MultiModelOutcome::Deadline),
+        CallResult::Provider { error, .. } => {
+            Ok(MultiModelOutcome::ProviderFailed(Box::new(error)))
+        }
+        CallResult::Deadline { .. } => Ok(MultiModelOutcome::Deadline),
         CallResult::Cancelled => Ok(MultiModelOutcome::Cancelled),
     }
 }

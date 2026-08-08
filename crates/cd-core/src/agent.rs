@@ -3859,12 +3859,22 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                 });
                                 // Fall through to the established single-model path.
                             }
-                            MmO::FailedClosed { .. } => {
+                            MmO::FailedClosed { telemetry, .. } => {
+                                // Surface the exact reason when the pipeline
+                                // degraded before failing closed, else a
+                                // generic host line. Either way the executed
+                                // path is single-model below.
+                                let detail = telemetry
+                                    .degradation
+                                    .map(|d| d.detail().to_string())
+                                    .unwrap_or_else(|| {
+                                        "typed multi-model synthesis unavailable; used the single-model path".into()
+                                    });
                                 out.push(StreamEvent::MultiModelStage {
                                     stage: "summary".into(),
                                     phase: "summary".into(),
                                     status: Some("single".into()),
-                                    detail: "typed multi-model synthesis unavailable; used the single-model path".into(),
+                                    detail,
                                     candidate_id: None,
                                 });
                                 // Fall through to the established single-model path.

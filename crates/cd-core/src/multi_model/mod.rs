@@ -225,8 +225,12 @@ impl DegradationReason {
 /// invented — an honest deterministic usage budget, not dollars.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MultiModelBudget {
-    /// Hard ceiling on model calls across every stage. A stage that cannot fit
-    /// within this ceiling is not started.
+    /// Hard ceiling on model calls across every stage. Every stage is clamped
+    /// to what this ceiling still allows, so the total number of provider
+    /// rounds never exceeds it; a stage with no room is not started (the
+    /// investigator stops taking candidates, the reviewer degrades, and — only
+    /// if even the mandatory synthesis has no room — the turn falls through to
+    /// the single-model path).
     pub max_total_provider_rounds: u32,
     /// Per-stage semantic-correction cap (re-prompts on validation failure).
     /// Independent of transport retries.
@@ -235,9 +239,14 @@ pub struct MultiModelBudget {
     pub context_char_budget: usize,
     /// Whole-turn wall-clock deadline in ms (`0` = inherit turn default).
     pub deadline_ms: u64,
-    /// Optional deterministic usage ceiling: total model-facing characters sent
-    /// across all stages. `None` = no usage gate. Chars are a metric the host
-    /// always knows, unlike provider-reported cost.
+    /// Optional deterministic usage ceiling in model-facing characters. It
+    /// gates the *optional* reviewer stage: when adding the reviewer's context
+    /// would push the running total past this ceiling, the reviewer is skipped
+    /// (`budget_usage_insufficient`) and the answer is synthesized without
+    /// review. The mandatory investigator and synthesis stages always run, so
+    /// this is a reviewer gate, not a hard cap on total characters. `None` =
+    /// no usage gate. Chars are a metric the host always knows, unlike
+    /// provider-reported cost — no currency is invented.
     pub max_context_chars_total: Option<u64>,
 }
 
