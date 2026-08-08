@@ -25,8 +25,11 @@ use cd_core::config::{save_config, AppConfig};
 use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
 use serde_json::{json, Value};
 use std::path::Path;
+#[cfg(unix)] // piped-stdout interrupt tests only
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(unix)] // provider gating flags belong to cfg(unix) tests only
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use wiremock::matchers::{method, path};
@@ -93,6 +96,7 @@ fn synthetic_corpora_left_behind(data_dir: &Path) -> usize {
 /// Session files doctor's own synthetic-check step leaves under
 /// `<data-dir>/sessions` — used to prove session cleanup ran even when the
 /// run was interrupted after a session had already been durably saved.
+#[cfg(unix)] // sole users are cfg(unix) interrupt/cleanup tests; dead code on Windows otherwise
 fn synthetic_sessions_left_behind(data_dir: &Path) -> usize {
     let dir = data_dir.join("sessions");
     if !dir.exists() {
@@ -121,6 +125,7 @@ fn synthetic_sessions_left_behind(data_dir: &Path) -> usize {
 /// safe in one context silently wasn't in the other. Synchronizing on
 /// actual observed output removes that entire source of variance instead of
 /// padding the guess.
+#[cfg(unix)] // sole users are cfg(unix) interrupt/cleanup tests; dead code on Windows otherwise
 fn wait_for_n_lines(
     stdout: std::process::ChildStdout,
     n: usize,
@@ -491,6 +496,7 @@ fn unwritable_state_fails_that_check_without_blocking_the_others() {
 // 8. Interrupted run
 // ---------------------------------------------------------------------
 
+#[cfg(unix)] // interrupt tests send POSIX SIGINT via kill(1); no Windows equivalent here
 #[tokio::test]
 async fn an_interrupted_run_still_cleans_up_the_synthetic_corpus() {
     let server = MockServer::start().await;
@@ -568,11 +574,13 @@ async fn an_interrupted_run_still_cleans_up_the_synthetic_corpus() {
 /// Ctrl-C handling discarded the known session id on this exact path,
 /// leaking a permanent "doctor readiness check" session into the real,
 /// non-isolated session store.
+#[cfg(unix)] // sole users are cfg(unix) interrupt/cleanup tests; dead code on Windows otherwise
 #[derive(Clone)]
 struct HangsOnSecondTurnProvider {
     call: Arc<AtomicUsize>,
 }
 
+#[cfg(unix)]
 impl Respond for HangsOnSecondTurnProvider {
     fn respond(&self, _request: &Request) -> ResponseTemplate {
         match self.call.fetch_add(1, Ordering::SeqCst) {
@@ -616,6 +624,7 @@ impl Respond for HangsOnSecondTurnProvider {
     }
 }
 
+#[cfg(unix)] // interrupt tests send POSIX SIGINT via kill(1); no Windows equivalent here
 #[tokio::test]
 async fn an_interrupt_during_the_second_turn_still_removes_the_already_saved_session() {
     let server = MockServer::start().await;
@@ -845,6 +854,7 @@ impl Respond for GroundedTwoTurnProvider {
 /// permissions) between "the synthetic corpus/session exists" and "doctor
 /// itself reaches cleanup," without depending on a hair-trigger race
 /// against near-instant local mock responses.
+#[cfg(unix)] // sole user is a cfg(unix) cleanup test; dead code on Windows otherwise
 #[derive(Clone)]
 struct DelayedGroundedTwoTurnProvider {
     call: Arc<AtomicUsize>,
@@ -855,6 +865,7 @@ struct DelayedGroundedTwoTurnProvider {
 /// filesystem permission needed to make final corpus removal fail. Entering
 /// the provider proves corpus creation and seeding completed, avoiding a race
 /// with DuckDB initialization under parallel test load.
+#[cfg(unix)] // sole users are cfg(unix) interrupt/cleanup tests; dead code on Windows otherwise
 #[derive(Clone)]
 struct GatedGroundedTwoTurnProvider {
     call: Arc<AtomicUsize>,
@@ -862,6 +873,7 @@ struct GatedGroundedTwoTurnProvider {
     release_first_response: Arc<AtomicBool>,
 }
 
+#[cfg(unix)]
 impl Respond for GatedGroundedTwoTurnProvider {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         let call = self.call.fetch_add(1, Ordering::SeqCst);
@@ -878,6 +890,7 @@ impl Respond for GatedGroundedTwoTurnProvider {
     }
 }
 
+#[cfg(unix)]
 impl Respond for DelayedGroundedTwoTurnProvider {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         grounded_two_turn_response(self.call.fetch_add(1, Ordering::SeqCst), request)
@@ -893,6 +906,7 @@ impl Respond for DelayedGroundedTwoTurnProvider {
 /// one; callers that only need "has doctor gotten this far yet" (the
 /// sessions directory, which can also gain a sibling meta-cache
 /// subdirectory) use the returned path only as a synchronization signal.
+#[cfg(unix)] // sole users are the cfg(unix) cleanup tests; dead code on Windows otherwise
 fn wait_for_first_entry(dir: &Path) -> std::path::PathBuf {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -908,6 +922,7 @@ fn wait_for_first_entry(dir: &Path) -> std::path::PathBuf {
     }
 }
 
+#[cfg(unix)] // sole users are cfg(unix) interrupt/cleanup tests; dead code on Windows otherwise
 fn wait_for_flag(flag: &AtomicBool, description: &str) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -1336,6 +1351,7 @@ async fn cleanup_check_fails_and_gates_readiness_when_the_synthetic_session_cann
 // stderr, while still preserving exit 130.
 // ---------------------------------------------------------------------
 
+#[cfg(unix)] // interrupt tests send POSIX SIGINT via kill(1); no Windows equivalent here
 #[tokio::test]
 async fn an_interrupted_run_reports_cleanup_in_the_jsonl_interrupted_line_itself() {
     let server = MockServer::start().await;
