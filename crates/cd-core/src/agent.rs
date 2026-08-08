@@ -2368,7 +2368,10 @@ fn emit_context_provenance_before_provider(
                     "rejected_count": amb.rejected_count,
                     "selected": amb.selected,
                     "rejected": amb.rejected,
+                    // Exact length of the model-facing block, including the
+                    // host framing and nonce-bound untrusted-fence overhead.
                     "context_block_chars_estimate": amb.context_block_chars,
+                    "content_fence": format!("wrap_untrusted:{}", crate::memory::AMBIENT_UNTRUSTED_SOURCE),
                     "scoring": "host_hybrid_recall",
                 }),
                 ContextProvenanceAuthority::RepeatableHeuristic,
@@ -4387,6 +4390,11 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                 Some(AmbientProvenanceSnapshot::from_injection(&inj));
                             ambient_source_ids
                                 .extend(inj.selected.iter().map(|item| item.source_id.clone()));
+                            // context_block arrives pre-fenced: host-authored
+                            // framing outside, memory content inside a
+                            // nonce-bound wrap_untrusted("ambient_memory")
+                            // block — durable memory is host-selected, never
+                            // host-authored, and must not gain system authority.
                             if !inj.context_block.is_empty() {
                                 model_ctx.insert(
                                     0,

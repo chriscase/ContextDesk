@@ -159,6 +159,62 @@ pub fn system_policy_with_tools(tool_names: &[&str]) -> String {
     s
 }
 
+/// Test-only decomposition of a [`wrap_untrusted`] fence found inside a block.
+///
+/// The fenced body is delimited by the wrapper's `---` lines because the
+/// trusted header self-describes its terminator (a raw nonce-matched END
+/// marker) above them. Owned segments let callers assert containment without
+/// re-slicing the block.
+#[cfg(test)]
+pub(crate) struct TestFenceView {
+    /// Extracted per-call nonce (≥64-bit hex).
+    pub nonce: String,
+    /// Everything before the open marker (host-authored framing).
+    pub before_open: String,
+    /// Open marker line plus the wrapper's trusted header, up to the body.
+    pub header: String,
+    /// Fenced body between the `---` delimiters.
+    pub body: String,
+    /// Everything after the close marker.
+    pub after_close: String,
+}
+
+/// Structurally parse the single untrusted fence inside `block`.
+#[cfg(test)]
+pub(crate) fn test_fence_view(block: &str) -> TestFenceView {
+    let open_prefix = "<<<UNTRUSTED_DATA:";
+    let open = block.find(open_prefix).expect("open marker present");
+    let after_open = block
+        .get(open + open_prefix.len()..)
+        .expect("text after open marker");
+    let nonce_end = after_open.find(' ').expect("nonce delimiter");
+    let nonce = after_open.get(..nonce_end).expect("nonce");
+    assert!(nonce.len() >= 16, "nonce must be ≥64-bit hex, got {nonce}");
+    let close_marker = format!("<<<END_UNTRUSTED_DATA:{nonce}>>>");
+    let close = block
+        .rfind(&close_marker)
+        .expect("nonce-matched close marker present");
+    let open_tail = block.get(open..).expect("open tail");
+    let body_start = open_tail
+        .find("\n---\n")
+        .map(|p| open + p + 5)
+        .expect("body open delimiter");
+    let before_close = block.get(..close).expect("text before close marker");
+    let body_end = before_close.rfind("\n---\n").expect("body close delimiter");
+    assert!(body_start <= body_end, "body delimiters must be ordered");
+    assert!(close > body_end, "close must follow the fenced body");
+    TestFenceView {
+        nonce: nonce.to_string(),
+        before_open: block.get(..open).expect("before open").to_string(),
+        header: block.get(open..body_start).expect("header").to_string(),
+        body: block.get(body_start..body_end).expect("body").to_string(),
+        after_close: block
+            .get(close + close_marker.len()..)
+            .expect("after close")
+            .to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

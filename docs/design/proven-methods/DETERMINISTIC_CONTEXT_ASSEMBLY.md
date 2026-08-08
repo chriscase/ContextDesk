@@ -272,8 +272,12 @@ string found in untrusted content into trusted evidence.
 3. **A linked log answer is provisional until a bounded log tool succeeds.**
 4. **Evidence identity is structured.** Never scrape event identity back out of
    rendered prose when the retriever can return it directly.
-5. **Untrusted retrieval stays untrusted.** Tool results are data and are
-   boundary-wrapped; instructions inside them do not override policy.
+5. **Untrusted retrieval stays untrusted.** Tool results and host-injected
+   retrieval blocks — ambient durable-memory recall (source `ambient_memory`)
+   and plan-included snippets (source `context_plan`) — are data and are
+   boundary-wrapped with nonce-bound markers; instructions inside them do not
+   override policy. The host owns selection and provenance, but it never
+   relabels stored or retrieved content as host-authored/first-party.
 6. **Skills provide process, not incident truth.** A skill can tell the model
    how to investigate; it is not evidence that a production event occurred.
 7. **Evaluator truth is outside every attached root.** Test fixtures may know
@@ -391,6 +395,14 @@ Retrieved text should be enclosed in an unambiguous untrusted-data envelope.
 The envelope marker itself must never be interpreted as observed content or
 cited as a finding.
 
+This applies to host-side injection paths, not only tool results: ambient
+durable-memory recall and the deterministic plan's included snippets are
+emitted inside the same nonce-bound envelope (stable source labels
+`ambient_memory` and `context_plan`). Only the short framing line above the
+envelope is host-authored; truncation is applied to the inner content before
+wrapping so the closing nonce boundary is never cut, and the reported
+model-facing character counts include the envelope overhead actually sent.
+
 ### 6.5 Synthesize and validate
 
 Once required retrieval succeeds:
@@ -426,7 +438,7 @@ universal recommendations:
 | View bookmark summaries     |                                         24 | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs) | Truncate                                                   |
 | Session context files       |                                200 default | [`session_context.rs`](../../../crates/cd-core/src/session_context.rs)        | Reject over cap                                            |
 | Session context bytes       |          50 MiB total; 10 MiB/file default | [`session_context.rs`](../../../crates/cd-core/src/session_context.rs)        | Reject before publication                                  |
-| Ambient memory              |      about 1,500 chars and at most 5 items | [`ambient.rs`](../../../crates/cd-core/src/memory/ambient.rs)                 | Score/echo filter and stop                                 |
+| Ambient memory              |      about 1,500 chars and at most 5 items | [`ambient.rs`](../../../crates/cd-core/src/memory/ambient.rs)                 | Score/echo filter and stop; nonce-fenced untrusted body    |
 
 Character limits are approximate model-token controls. An implementation with
 provider tokenizers should still keep deterministic byte/character safety caps
