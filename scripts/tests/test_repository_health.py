@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import ntpath
+import posixpath
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -82,16 +85,108 @@ test("renders", () => {})
             "desktop/src/components/Card/index.tsx",
         )
 
+    def test_ts_import_lexer_ignores_prose_and_includes_side_effect_imports(self) -> None:
+        source = r'''
+const prose = "import './synthetic'";
+const moreProse = "from './also-synthetic'";
+const template = `import './template-synthetic'`;
+// import "./comment-synthetic";
+/* export { fake } from "./block-comment-synthetic"; */
+import "./setup";
+import type { Api } from "./api";
+export { helper } from "./helper";
+const lazy = import("./lazy");
+const legacy = require("./legacy");
+object.import("./method-synthetic");
+'''
+        self.assertEqual(
+            health.extract_ts_imports(source),
+            ["./setup", "./api", "./helper", "./lazy", "./legacy"],
+        )
+
+    def test_git_path_graph_has_windows_emulation_fixture_parity(self) -> None:
+        paths = {
+            "desktop/src/App.tsx",
+            "desktop/src/setup.ts",
+            "desktop/src/lib/api.ts",
+            "desktop/src/components/Card/index.tsx",
+        }
+        blobs = {
+            "desktop/src/App.tsx": (
+                b'import "./setup";\n'
+                b'import { api } from "./lib/api";\n'
+                b'import { Card } from "./components/Card";\n'
+                b'import { absent } from "./missing";\n'
+            ),
+            "desktop/src/setup.ts": b"export {};\n",
+            "desktop/src/lib/api.ts": b"export const api = true;\n",
+            "desktop/src/components/Card/index.tsx": b"export const Card = () => null;\n",
+        }
+        facts = [
+            health.FileFacts(
+                path,
+                health.language_for(path),
+                "Desktop UI",
+                len(blobs[path]),
+                1,
+                1,
+                0,
+                0,
+                0,
+                0,
+            )
+            for path in sorted(paths)
+        ]
+        graph = health.ts_import_graph(facts, blobs)
+        self.assertEqual(graph["resolved_relative_import_edges"], 3)
+        self.assertEqual(graph["unresolved_relative_imports"], 1)
+        self.assertEqual(
+            health.resolve_ts_import(
+                "desktop/src/App.tsx", "./components/Card", paths
+            ),
+            "desktop/src/components/Card/index.tsx",
+        )
+        # This is the previous Windows-host failure mode: ntpath introduces
+        # backslashes into a Git path. The production resolver always uses POSIX.
+        self.assertIn(
+            "\\", ntpath.normpath("desktop/src/./components/Card/index.tsx")
+        )
+        self.assertEqual(
+            posixpath.normpath("desktop/src/./components/Card/index.tsx"),
+            "desktop/src/components/Card/index.tsx",
+        )
+
     def test_fingerprint_is_path_and_content_deterministic(self) -> None:
+        blobs = {"a.txt": b"alpha", "b.txt": b"beta"}
+        first = health.tree_fingerprint(blobs, ["a.txt", "b.txt"])
+        second = health.tree_fingerprint(blobs, ["b.txt", "a.txt"])
+        self.assertEqual(first, second)
+        changed = {**blobs, "b.txt": b"changed"}
+        self.assertNotEqual(
+            first, health.tree_fingerprint(changed, ["a.txt", "b.txt"])
+        )
+
+    def test_index_blob_metrics_ignore_checkout_crlf_conversion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "a.txt").write_text("alpha", encoding="utf-8")
-            (root / "b.txt").write_text("beta", encoding="utf-8")
-            first = health.tree_fingerprint(root, ["a.txt", "b.txt"])
-            second = health.tree_fingerprint(root, ["b.txt", "a.txt"])
-            self.assertEqual(first, second)
-            (root / "b.txt").write_text("changed", encoding="utf-8")
-            self.assertNotEqual(first, health.tree_fingerprint(root, ["a.txt", "b.txt"]))
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            root.joinpath(".gitattributes").write_text(
+                "*.txt text eol=lf\n", encoding="utf-8"
+            )
+            sample = root / "sample.txt"
+            sample.write_bytes(b"one\ntwo\n")
+            subprocess.run(
+                ["git", "add", ".gitattributes", "sample.txt"], cwd=root, check=True
+            )
+            before = health.collect(root)
+            sample.write_bytes(b"one\r\ntwo\r\n")
+            after = health.collect(root)
+            self.assertEqual(before["scope"], after["scope"])
+            self.assertEqual(before["exact"], after["exact"])
+            entries = health.tracked_entries(root)
+            self.assertEqual(
+                health.tracked_blob_bytes(root, entries)["sample.txt"], b"one\ntwo\n"
+            )
 
     def test_cargo_inventory_uses_only_supplied_tracked_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -108,12 +203,41 @@ test("renders", () => {})
                 '[package]\nname = "surprise"\nversion = "0.1.0"\n',
                 encoding="utf-8",
             )
-            packages, edges = health.cargo_packages(root, ["crates/tracked/Cargo.toml"])
+            blobs = {
+                "crates/tracked/Cargo.toml": tracked.joinpath("Cargo.toml").read_bytes()
+            }
+            packages, edges = health.cargo_packages(
+                ["crates/tracked/Cargo.toml"], blobs
+            )
             self.assertEqual(
                 packages,
                 [{"name": "tracked", "manifest": "crates/tracked/Cargo.toml"}],
             )
             self.assertEqual(edges, [])
+
+    def test_absolute_output_paths_write_and_check_outside_repository(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as repository,
+            tempfile.TemporaryDirectory() as output,
+        ):
+            root = Path(repository)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            root.joinpath("README.md").write_text("# Fixture\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=root, check=True)
+            json_path = Path(output) / "health.json"
+            markdown_path = Path(output) / "health.md"
+            arguments = [
+                "--root",
+                str(root),
+                "--json",
+                str(json_path),
+                "--markdown",
+                str(markdown_path),
+            ]
+            self.assertEqual(health.main(arguments), 0)
+            self.assertTrue(json_path.is_file())
+            self.assertTrue(markdown_path.is_file())
+            self.assertEqual(health.main([*arguments, "--check"]), 0)
 
 
 if __name__ == "__main__":

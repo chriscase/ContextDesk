@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
-import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -113,11 +114,6 @@ PY_FUNCTION = re.compile(r"^\s*(?:async\s+)?def\s+[A-Za-z_]\w*\s*\(")
 PY_TYPE = re.compile(r"^\s*class\s+[A-Za-z_]\w*\s*(?:\([^)]*\))?:")
 PY_TEST = re.compile(r"^\s*(?:async\s+)?def\s+test_[A-Za-z_]\w*\s*\(")
 
-TS_IMPORT = re.compile(
-    r"(?:\bfrom\s*|\bimport\s*\(|\brequire\s*\()\s*['\"](\.[^'\"]+)['\"]"
-)
-
-
 @dataclass(frozen=True)
 class FileFacts:
     path: str
@@ -143,11 +139,51 @@ def run_git(root: Path, *args: str) -> str:
     return result.stdout
 
 
-def tracked_files(root: Path) -> list[str]:
+def tracked_entries(root: Path) -> dict[str, str]:
     raw = subprocess.run(
-        ["git", "ls-files", "-z"], cwd=root, check=True, capture_output=True
+        ["git", "ls-files", "--stage", "-z"],
+        cwd=root,
+        check=True,
+        capture_output=True,
     ).stdout
-    return sorted(part.decode("utf-8") for part in raw.split(b"\0") if part)
+    entries: dict[str, str] = {}
+    for record in raw.split(b"\0"):
+        if not record:
+            continue
+        metadata, encoded_path = record.split(b"\t", 1)
+        _mode, object_id, stage = metadata.split()
+        if stage == b"0":
+            entries[encoded_path.decode("utf-8")] = object_id.decode("ascii")
+    return dict(sorted(entries.items()))
+
+
+def tracked_blob_bytes(root: Path, entries: dict[str, str]) -> dict[str, bytes]:
+    """Read canonical index blobs in one Git batch, independent of checkout EOLs."""
+    object_ids = sorted(set(entries.values()))
+    result = subprocess.run(
+        ["git", "cat-file", "--batch"],
+        cwd=root,
+        input="".join(f"{oid}\n" for oid in object_ids).encode("ascii"),
+        check=True,
+        capture_output=True,
+    )
+    output = io.BytesIO(result.stdout)
+    objects: dict[str, bytes] = {}
+    for requested_id in object_ids:
+        header = output.readline().decode("ascii").rstrip("\n")
+        fields = header.split()
+        if len(fields) != 3 or fields[1] != "blob":
+            raise RuntimeError(f"expected Git blob for {requested_id}, got: {header}")
+        resolved_id, _kind, encoded_size = fields
+        size = int(encoded_size)
+        data = output.read(size)
+        separator = output.read(1)
+        if len(data) != size or separator != b"\n":
+            raise RuntimeError(f"truncated Git cat-file response for {requested_id}")
+        objects[resolved_id] = data
+    if output.read(1):
+        raise RuntimeError("unexpected trailing Git cat-file output")
+    return {path: objects[object_id] for path, object_id in entries.items()}
 
 
 def language_for(path: str) -> str:
@@ -284,11 +320,10 @@ def lexical_facts(text: str, language: str) -> tuple[int, int, int, int]:
     return functions, types, tests, decisions
 
 
-def inspect_file(root: Path, path: str) -> tuple[FileFacts | None, str | None]:
+def inspect_file(path: str, data: bytes) -> tuple[FileFacts | None, str | None]:
     reason = exclusion_reason(path)
     if reason:
         return None, reason
-    data = (root / path).read_bytes()
     text = decode_text(data)
     if text is None:
         return None, "non-UTF-8/binary file"
@@ -342,30 +377,31 @@ def summarize_group(files: Iterable[FileFacts], key: str) -> list[dict[str, obje
 
 
 def cargo_packages(
-    root: Path, tracked_paths: Iterable[str]
+    tracked_paths: Iterable[str], blobs: dict[str, bytes]
 ) -> tuple[list[dict[str, object]], list[dict[str, str]]]:
     manifests = [
-        root / path
+        path
         for path in sorted(tracked_paths)
         if PurePosixPath(path).name == "Cargo.toml" and exclusion_reason(path) is None
     ]
     packages: list[dict[str, object]] = []
-    package_by_dir: dict[Path, str] = {}
-    manifest_data: dict[Path, dict[str, object]] = {}
+    package_by_dir: dict[str, str] = {}
+    manifest_data: dict[str, dict[str, object]] = {}
     for manifest in manifests:
-        data = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        data = tomllib.loads(blobs[manifest].decode("utf-8"))
         package = data.get("package")
         if not isinstance(package, dict) or not isinstance(package.get("name"), str):
             continue
         name = str(package["name"])
-        rel = manifest.relative_to(root).as_posix()
-        package_by_dir[manifest.parent.resolve()] = name
+        manifest_dir = PurePosixPath(manifest).parent.as_posix()
+        package_by_dir[manifest_dir] = name
         manifest_data[manifest] = data
-        packages.append({"name": name, "manifest": rel})
+        packages.append({"name": name, "manifest": manifest})
 
     edges: set[tuple[str, str, str]] = set()
     for manifest, data in manifest_data.items():
-        source = package_by_dir[manifest.parent.resolve()]
+        manifest_dir = PurePosixPath(manifest).parent.as_posix()
+        source = package_by_dir[manifest_dir]
         for section in ("dependencies", "dev-dependencies", "build-dependencies"):
             dependencies = data.get(section, {})
             if not isinstance(dependencies, dict):
@@ -373,7 +409,9 @@ def cargo_packages(
             for declared_name, value in dependencies.items():
                 if not isinstance(value, dict) or not isinstance(value.get("path"), str):
                     continue
-                target_dir = (manifest.parent / str(value["path"])).resolve()
+                target_dir = posixpath.normpath(
+                    posixpath.join(manifest_dir, str(value["path"]))
+                )
                 target = package_by_dir.get(target_dir)
                 if target:
                     edges.add((source, target, section))
@@ -383,9 +421,103 @@ def cargo_packages(
     ]
 
 
+def js_lexical_tokens(text: str) -> list[tuple[str, str]]:
+    """Tokenize enough JS/TS syntax to find imports without parsing strings/comments."""
+    tokens: list[tuple[str, str]] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        following = text[index + 1] if index + 1 < len(text) else ""
+        if char.isspace():
+            index += 1
+        elif char == "/" and following == "/":
+            newline = text.find("\n", index + 2)
+            index = len(text) if newline < 0 else newline + 1
+        elif char == "/" and following == "*":
+            end = text.find("*/", index + 2)
+            index = len(text) if end < 0 else end + 2
+        elif char in {"'", '"'}:
+            quote = char
+            index += 1
+            value: list[str] = []
+            while index < len(text):
+                current = text[index]
+                if current == "\\" and index + 1 < len(text):
+                    value.append(text[index + 1])
+                    index += 2
+                elif current == quote:
+                    index += 1
+                    break
+                else:
+                    value.append(current)
+                    index += 1
+            tokens.append(("string", "".join(value)))
+        elif char == "`":
+            # Template contents are data, not static module specifiers. Deliberately
+            # skip the complete template rather than matching import-like prose.
+            index += 1
+            while index < len(text):
+                if text[index] == "\\" and index + 1 < len(text):
+                    index += 2
+                elif text[index] == "`":
+                    index += 1
+                    break
+                else:
+                    index += 1
+        elif char.isalpha() or char in {"_", "$"}:
+            end = index + 1
+            while end < len(text) and (text[end].isalnum() or text[end] in {"_", "$"}):
+                end += 1
+            tokens.append(("identifier", text[index:end]))
+            index = end
+        else:
+            tokens.append(("punctuation", char))
+            index += 1
+    return tokens
+
+
+def extract_ts_imports(text: str) -> list[str]:
+    """Extract literal JS/TS module references with lightweight lexical context."""
+    tokens = js_lexical_tokens(text)
+    imports: list[str] = []
+    for index, (kind, value) in enumerate(tokens):
+        previous = tokens[index - 1][1] if index else None
+        if kind != "identifier" or previous == ".":
+            continue
+        if value == "require":
+            if (
+                index + 2 < len(tokens)
+                and tokens[index + 1] == ("punctuation", "(")
+                and tokens[index + 2][0] == "string"
+            ):
+                imports.append(tokens[index + 2][1])
+            continue
+        if value not in {"import", "export"}:
+            continue
+        if index + 1 < len(tokens) and tokens[index + 1][0] == "string":
+            # Static side-effect import: import "./setup".
+            imports.append(tokens[index + 1][1])
+            continue
+        if (
+            value == "import"
+            and index + 2 < len(tokens)
+            and tokens[index + 1] == ("punctuation", "(")
+            and tokens[index + 2][0] == "string"
+        ):
+            imports.append(tokens[index + 2][1])
+            continue
+        cursor = index + 1
+        while cursor + 1 < len(tokens) and tokens[cursor][1] not in {";", "import", "export"}:
+            if tokens[cursor] == ("identifier", "from") and tokens[cursor + 1][0] == "string":
+                imports.append(tokens[cursor + 1][1])
+                break
+            cursor += 1
+    return [specifier for specifier in imports if specifier.startswith(".")]
+
+
 def resolve_ts_import(source: str, specifier: str, candidates: set[str]) -> str | None:
-    base = PurePosixPath(source).parent.joinpath(specifier)
-    normalized = PurePosixPath(os.path.normpath(base.as_posix())).as_posix()
+    base = posixpath.join(PurePosixPath(source).parent.as_posix(), specifier)
+    normalized = posixpath.normpath(base)
     probes = [
         normalized,
         *(normalized + suffix for suffix in (".ts", ".tsx", ".js", ".mjs")),
@@ -394,17 +526,21 @@ def resolve_ts_import(source: str, specifier: str, candidates: set[str]) -> str 
     return next((probe for probe in probes if probe in candidates), None)
 
 
-def ts_import_graph(root: Path, facts: list[FileFacts]) -> dict[str, object]:
-    candidates = {
+def ts_import_graph(facts: list[FileFacts], blobs: dict[str, bytes]) -> dict[str, object]:
+    sources = {
         fact.path
         for fact in facts
         if fact.language in {"TypeScript", "TypeScript/TSX", "JavaScript"}
     }
+    # Relative imports can intentionally target CSS, JSON, SVG, or a fixture.
+    # Every tracked blob is therefore a resolution candidate, while only
+    # maintained JS/TS files are scanned as graph sources.
+    candidates = set(blobs)
     edges: set[tuple[str, str]] = set()
     unresolved = 0
-    for source in sorted(candidates):
-        text = (root / source).read_text(encoding="utf-8")
-        for specifier in TS_IMPORT.findall(text):
+    for source in sorted(sources):
+        text = blobs[source].decode("utf-8")
+        for specifier in extract_ts_imports(text):
             target = resolve_ts_import(source, specifier, candidates)
             if target:
                 edges.add((source, target))
@@ -430,10 +566,10 @@ def ts_import_graph(root: Path, facts: list[FileFacts]) -> dict[str, object]:
     }
 
 
-def tree_fingerprint(root: Path, paths: Iterable[str]) -> str:
+def tree_fingerprint(blobs: dict[str, bytes], paths: Iterable[str]) -> str:
     digest = hashlib.sha256()
     for path in sorted(paths):
-        data = (root / path).read_bytes()
+        data = blobs[path]
         digest.update(path.encode("utf-8"))
         digest.update(b"\0")
         digest.update(len(data).to_bytes(8, "big"))
@@ -442,11 +578,13 @@ def tree_fingerprint(root: Path, paths: Iterable[str]) -> str:
 
 
 def collect(root: Path) -> dict[str, object]:
-    paths = tracked_files(root)
+    entries = tracked_entries(root)
+    paths = list(entries)
+    blobs = tracked_blob_bytes(root, entries)
     facts: list[FileFacts] = []
     excluded = Counter()
     for path in paths:
-        fact, reason = inspect_file(root, path)
+        fact, reason = inspect_file(path, blobs[path])
         if fact:
             facts.append(fact)
         else:
@@ -454,7 +592,7 @@ def collect(root: Path) -> dict[str, object]:
 
     code_files = [fact for fact in facts if fact.language in CODE_LANGUAGES]
     sizes = [fact.nonblank_lines for fact in code_files]
-    packages, cargo_edges = cargo_packages(root, paths)
+    packages, cargo_edges = cargo_packages(paths, blobs)
     large_files = sorted(code_files, key=lambda fact: (-fact.nonblank_lines, fact.path))[:20]
     code_nonblank = sum(fact.nonblank_lines for fact in code_files)
     decisions = sum(fact.decision_tokens for fact in code_files)
@@ -463,8 +601,10 @@ def collect(root: Path) -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,
         "scope": {
-            "inventory": "git tracked files",
-            "tracked_content_fingerprint_sha256": tree_fingerprint(root, fingerprint_paths),
+            "inventory": "Git index stage-0 blobs (canonical repository bytes)",
+            "tracked_content_fingerprint_sha256": tree_fingerprint(
+                blobs, fingerprint_paths
+            ),
             "tracked_files": len(paths),
             "analyzed_text_files": len(facts),
             "excluded_files": sum(excluded.values()),
@@ -503,18 +643,18 @@ def collect(root: Path) -> dict[str, object]:
         "dependencies": {
             "cargo_packages": packages,
             "cargo_internal_edges": cargo_edges,
-            "typescript_relative_imports": ts_import_graph(root, facts),
+            "typescript_relative_imports": ts_import_graph(facts, blobs),
         },
         "methodology": {
             "exact": [
-                "tracked-file inventory, bytes, physical/nonblank lines, and file-size distribution",
+                "Git index blob inventory, canonical bytes, physical/nonblank lines, and file-size distribution",
                 "path-derived language/system grouping",
                 "Cargo path dependency declarations between workspace packages",
             ],
             "heuristic": [
                 "functions, types, and tests are conservative Rust/TypeScript/JavaScript/Python line-oriented lexical matches",
                 "decision tokens count control-flow/boolean tokens; they are not cyclomatic complexity",
-                "TypeScript relative-import edges use static syntax and filesystem resolution",
+                "TypeScript relative-import edges use lexically valid literal import/export/import()/require syntax and POSIX Git-path resolution",
                 "same-area import ratio uses path-derived feature areas as a cohesion/coupling proxy",
             ],
         },
@@ -648,8 +788,9 @@ the ratio itself.
 
 ### Exact in this snapshot
 
-- Git tracked-file inventory, byte counts, physical lines, nonblank lines, file
-  distributions, and path-derived group membership.
+- Git index stage-0 blob inventory, canonical repository byte counts, physical
+  lines, nonblank lines, file distributions, and path-derived group membership.
+  Checkout-specific CRLF/LF conversion does not change these measurements.
 - Cargo package manifests and explicit internal `path` dependency declarations.
 - Exclusions by documented path/name/media rules.
 
@@ -661,8 +802,10 @@ the ratio itself.
   declarations may be missed; callbacks may be counted differently.
 - “Decision tokens” count common control-flow and boolean tokens after basic
   single-line comment removal. They do not understand syntax trees.
-- Relative-import fan-in/fan-out scans static TypeScript/JavaScript syntax only.
-  Aliases, dynamic imports, and generated modules may be absent.
+- Relative-import fan-in/fan-out recognizes lexically valid literal
+  `import`/`export from`, side-effect imports, `import()`, and `require()`.
+  Computed specifiers, aliases, bare external packages, and generated modules
+  are outside this repository-edge graph.
 - Architecture areas come from stable repository paths, not semantic analysis.
 
 This report deliberately avoids a composite score, developer rankings, churn
@@ -677,10 +820,14 @@ python3 scripts/repository_health.py --check
 python3 -m unittest scripts.tests.test_repository_health
 ```
 
+The generator measures the Git index: stage or commit intended source changes
+before refreshing. Unstaged working-copy edits are deliberately not presented as
+repository statistics.
+
 The companion JSON file is
 [`repository-health.json`](repository-health.json). Both outputs are deterministic
-for the same tracked tree because generated outputs exclude themselves from the
-content fingerprint and measurements.
+for the same indexed content because generated outputs exclude themselves from
+the content fingerprint and measurements.
 """
 
 
@@ -690,6 +837,13 @@ def write_or_check(path: Path, content: str, check: bool) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     return True
+
+
+def display_path(path: Path, root: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -716,13 +870,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.check and not (json_ok and markdown_ok):
         stale = []
         if not json_ok:
-            stale.append(str(json_path.relative_to(root)))
+            stale.append(display_path(json_path, root))
         if not markdown_ok:
-            stale.append(str(markdown_path.relative_to(root)))
+            stale.append(display_path(markdown_path, root))
         print("repository health snapshot is stale: " + ", ".join(stale), file=sys.stderr)
         return 1
     verb = "verified" if args.check else "wrote"
-    print(f"{verb} {json_path.relative_to(root)} and {markdown_path.relative_to(root)}")
+    print(
+        f"{verb} {display_path(json_path, root)} and "
+        f"{display_path(markdown_path, root)}"
+    )
     return 0
 
 

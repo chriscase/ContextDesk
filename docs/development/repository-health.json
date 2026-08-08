@@ -61,7 +61,7 @@
     "typescript_relative_imports": {
       "highest_fan_in": [
         {
-          "edges": 109,
+          "edges": 108,
           "path": "desktop/src/lib/host.ts"
         },
         {
@@ -69,7 +69,7 @@
           "path": "desktop/src/lib/activity/types.ts"
         },
         {
-          "edges": 31,
+          "edges": 32,
           "path": "desktop/src/lib/session/index.ts"
         },
         {
@@ -103,12 +103,20 @@
       ],
       "highest_fan_out": [
         {
-          "edges": 42,
+          "edges": 43,
           "path": "desktop/src/components/logExplorer/LogExplorer.tsx"
         },
         {
           "edges": 36,
           "path": "desktop/src/App.tsx"
+        },
+        {
+          "edges": 32,
+          "path": "desktop/src/main.tsx"
+        },
+        {
+          "edges": 27,
+          "path": "desktop/visual/support/styles.ts"
         },
         {
           "edges": 25,
@@ -133,24 +141,16 @@
         {
           "edges": 13,
           "path": "desktop/src/components/shell/Workspace.tsx"
-        },
-        {
-          "edges": 12,
-          "path": "desktop/src/lib/activity/lifecycleRaces.test.tsx"
-        },
-        {
-          "edges": 10,
-          "path": "desktop/src/components/settings/AiSection.tsx"
         }
       ],
-      "resolved_relative_import_edges": 967,
-      "same_area_edges": 382,
-      "same_area_ratio": 0.395,
-      "unresolved_relative_imports": 6
+      "resolved_relative_import_edges": 1041,
+      "same_area_edges": 398,
+      "same_area_ratio": 0.3823,
+      "unresolved_relative_imports": 0
     }
   },
   "exact": {
-    "analyzed_bytes": 16667525,
+    "analyzed_bytes": 16678611,
     "code_file_nonblank_line_distribution": {
       "at_least_1000": 89,
       "at_least_500": 193,
@@ -160,16 +160,16 @@
       "p95": 1713
     },
     "maintained_code_files": 786,
-    "maintained_code_nonblank_lines": 405932,
-    "maintained_code_physical_lines": 431916,
-    "nonblank_lines": 426844,
-    "physical_lines": 457204
+    "maintained_code_nonblank_lines": 406202,
+    "maintained_code_physical_lines": 432197,
+    "nonblank_lines": 427114,
+    "physical_lines": 457485
   },
   "heuristic": {
-    "decision_tokens": 25289,
-    "decision_tokens_per_1000_nonblank_code_lines": 62.3,
-    "functions": 9536,
-    "tests": 4478,
+    "decision_tokens": 25349,
+    "decision_tokens_per_1000_nonblank_code_lines": 62.4,
+    "functions": 9544,
+    "tests": 4482,
     "types": 2430
   },
   "hotspots": [
@@ -482,14 +482,14 @@
       "types_heuristic": 0
     },
     {
-      "bytes": 223075,
-      "decision_tokens_heuristic": 960,
+      "bytes": 234161,
+      "decision_tokens_heuristic": 1020,
       "files": 19,
-      "functions_heuristic": 159,
+      "functions_heuristic": 167,
       "name": "Python",
-      "nonblank_lines": 5143,
-      "physical_lines": 5794,
-      "tests_heuristic": 35,
+      "nonblank_lines": 5413,
+      "physical_lines": 6075,
+      "tests_heuristic": 39,
       "types_heuristic": 16
     },
     {
@@ -649,14 +649,14 @@
   ],
   "methodology": {
     "exact": [
-      "tracked-file inventory, bytes, physical/nonblank lines, and file-size distribution",
+      "Git index blob inventory, canonical bytes, physical/nonblank lines, and file-size distribution",
       "path-derived language/system grouping",
       "Cargo path dependency declarations between workspace packages"
     ],
     "heuristic": [
       "functions, types, and tests are conservative Rust/TypeScript/JavaScript/Python line-oriented lexical matches",
       "decision tokens count control-flow/boolean tokens; they are not cyclomatic complexity",
-      "TypeScript relative-import edges use static syntax and filesystem resolution",
+      "TypeScript relative-import edges use lexically valid literal import/export/import()/require syntax and POSIX Git-path resolution",
       "same-area import ratio uses path-derived feature areas as a cohesion/coupling proxy"
     ]
   },
@@ -672,8 +672,8 @@
       "non-UTF-8/binary file": 1
     },
     "excluded_files": 433,
-    "inventory": "git tracked files",
-    "tracked_content_fingerprint_sha256": "6346a1bbdf29dea1b43db9b528cbb3d697ece536996f0586cc7abc8e7bf89d27",
+    "inventory": "Git index stage-0 blobs (canonical repository bytes)",
+    "tracked_content_fingerprint_sha256": "f70d8426eac62ab364848ad35b19e479c06651e5faad800102fb0b89fdaf4344",
     "tracked_files": 1428
   },
   "systems": [
@@ -733,14 +733,14 @@
       "types_heuristic": 117
     },
     {
-      "bytes": 417098,
-      "decision_tokens_heuristic": 1179,
+      "bytes": 428184,
+      "decision_tokens_heuristic": 1239,
       "files": 42,
-      "functions_heuristic": 210,
+      "functions_heuristic": 218,
       "name": "Repository tooling",
-      "nonblank_lines": 10422,
-      "physical_lines": 11474,
-      "tests_heuristic": 130,
+      "nonblank_lines": 10692,
+      "physical_lines": 11755,
+      "tests_heuristic": 134,
       "types_heuristic": 13
     },
     {

@@ -5,7 +5,7 @@ signals**, not developer productivity or product quality. Refresh it periodicall
 with `python3 scripts/repository_health.py`; it is intentionally not a required
 per-commit CI gate.
 
-Tracked-content fingerprint: `6346a1bbdf29dea1b43db9b528cbb3d697ece536996f0586cc7abc8e7bf89d27`
+Tracked-content fingerprint: `f70d8426eac62ab364848ad35b19e479c06651e5faad800102fb0b89fdaf4344`
 
 ## Headline measurements
 
@@ -14,12 +14,12 @@ Tracked-content fingerprint: `6346a1bbdf29dea1b43db9b528cbb3d697ece536996f0586cc
 | Tracked files | 1,428 | Exact |
 | Analyzed maintained text files | 995 | Exact |
 | Maintained code files | 786 | Exact |
-| Maintained code physical lines | 431,916 | Exact |
-| Maintained code nonblank lines | 405,932 | Exact |
-| Function declarations | 9,536 | Lexical heuristic |
+| Maintained code physical lines | 432,197 | Exact |
+| Maintained code nonblank lines | 406,202 | Exact |
+| Function declarations | 9,544 | Lexical heuristic |
 | Type declarations | 2,430 | Lexical heuristic |
-| Test declarations | 4,478 | Lexical heuristic |
-| Decision tokens / 1,000 nonblank code lines | 62.3 | Complexity proxy |
+| Test declarations | 4,482 | Lexical heuristic |
+| Decision tokens / 1,000 nonblank code lines | 62.4 | Complexity proxy |
 
 “Maintained code” excludes dependency lockfiles, fixture/snapshot trees,
 generated health outputs, build/vendor trees, and binary/media assets. Tests are
@@ -35,7 +35,7 @@ included when they are maintained source files.
 | Markdown | 117 | 20,762 | 16,609 |
 | CSS | 35 | 17,921 | 15,564 |
 | JavaScript | 48 | 9,533 | 8,893 |
-| Python | 19 | 5,794 | 5,143 |
+| Python | 19 | 6,075 | 5,413 |
 | Shell | 18 | 3,266 | 2,990 |
 | JSON | 22 | 1,721 | 1,721 |
 | Other text | 33 | 812 | 727 |
@@ -60,7 +60,7 @@ included when they are maintained source files.
 | Desktop host (Tauri) | 16 | 24,334 | 22,957 | 794 | 152 | 195 |
 | Documentation | 152 | 21,999 | 18,096 | 0 | 0 | 0 |
 | Rust crate: cd-cli | 46 | 20,998 | 19,753 | 557 | 117 | 189 |
-| Repository tooling | 42 | 11,474 | 10,422 | 210 | 13 | 130 |
+| Repository tooling | 42 | 11,755 | 10,692 | 218 | 13 | 134 |
 | Desktop tooling/config | 34 | 7,672 | 7,204 | 77 | 9 | 72 |
 | Rust crate: cd-server | 5 | 6,877 | 6,455 | 200 | 62 | 50 |
 | Rust crate: cd-workflow | 15 | 5,703 | 5,349 | 149 | 26 | 66 |
@@ -123,19 +123,19 @@ These thresholds are navigation/refactoring prompts, not failures.
 
 ## Dependency and design-health signals
 
-- TypeScript/JavaScript resolved relative-import edges: **967**.
-- Relative imports the lightweight resolver could not resolve: **6**.
-- Same path-derived architecture-area edges: **39.5%** (382 edges).
-- Decision tokens: **25,289**. This is a lexical
+- TypeScript/JavaScript resolved relative-import edges: **1,041**.
+- Relative imports the lightweight resolver could not resolve: **0**.
+- Same path-derived architecture-area edges: **38.2%** (398 edges).
+- Decision tokens: **25,349**. This is a lexical
   control-flow density signal, not cyclomatic complexity and not a quality grade.
 
 High fan-in files can be intentional shared boundaries or coupling hotspots:
 
 | Imported path | Incoming edges |
 | --- | --- |
-| desktop/src/lib/host.ts | 109 |
+| desktop/src/lib/host.ts | 108 |
 | desktop/src/lib/activity/types.ts | 51 |
-| desktop/src/lib/session/index.ts | 31 |
+| desktop/src/lib/session/index.ts | 32 |
 | desktop/src/lib/preflight.ts | 28 |
 | desktop/src/components/icons.tsx | 16 |
 | desktop/src/lib/skins.ts | 15 |
@@ -153,8 +153,9 @@ the ratio itself.
 
 ### Exact in this snapshot
 
-- Git tracked-file inventory, byte counts, physical lines, nonblank lines, file
-  distributions, and path-derived group membership.
+- Git index stage-0 blob inventory, canonical repository byte counts, physical
+  lines, nonblank lines, file distributions, and path-derived group membership.
+  Checkout-specific CRLF/LF conversion does not change these measurements.
 - Cargo package manifests and explicit internal `path` dependency declarations.
 - Exclusions by documented path/name/media rules.
 
@@ -166,8 +167,10 @@ the ratio itself.
   declarations may be missed; callbacks may be counted differently.
 - “Decision tokens” count common control-flow and boolean tokens after basic
   single-line comment removal. They do not understand syntax trees.
-- Relative-import fan-in/fan-out scans static TypeScript/JavaScript syntax only.
-  Aliases, dynamic imports, and generated modules may be absent.
+- Relative-import fan-in/fan-out recognizes lexically valid literal
+  `import`/`export from`, side-effect imports, `import()`, and `require()`.
+  Computed specifiers, aliases, bare external packages, and generated modules
+  are outside this repository-edge graph.
 - Architecture areas come from stable repository paths, not semantic analysis.
 
 This report deliberately avoids a composite score, developer rankings, churn
@@ -182,7 +185,11 @@ python3 scripts/repository_health.py --check
 python3 -m unittest scripts.tests.test_repository_health
 ```
 
+The generator measures the Git index: stage or commit intended source changes
+before refreshing. Unstaged working-copy edits are deliberately not presented as
+repository statistics.
+
 The companion JSON file is
 [`repository-health.json`](repository-health.json). Both outputs are deterministic
-for the same tracked tree because generated outputs exclude themselves from the
-content fingerprint and measurements.
+for the same indexed content because generated outputs exclude themselves from
+the content fingerprint and measurements.
