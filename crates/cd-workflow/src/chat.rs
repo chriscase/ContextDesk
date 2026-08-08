@@ -537,6 +537,52 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    fn summary_event(status: &str) -> StreamEvent {
+        StreamEvent::MultiModelStage {
+            stage: "summary".into(),
+            phase: "summary".into(),
+            status: Some(status.into()),
+            detail: "d".into(),
+            candidate_id: None,
+        }
+    }
+
+    #[test]
+    fn executed_mode_reads_the_last_summary_status_honestly() {
+        use cd_core::multi_model::ExecutedMode;
+        // No summary at all → single.
+        assert_eq!(executed_mode_from_events(&[]), ExecutedMode::Single);
+        // A review summary → review.
+        assert_eq!(
+            executed_mode_from_events(&[summary_event("review")]),
+            ExecutedMode::Review
+        );
+        // A degraded summary → review_degraded.
+        assert_eq!(
+            executed_mode_from_events(&[summary_event("review_degraded")]),
+            ExecutedMode::ReviewDegraded
+        );
+        // An entry-degradation single summary → single.
+        assert_eq!(
+            executed_mode_from_events(&[summary_event("single")]),
+            ExecutedMode::Single
+        );
+        // The LAST summary wins (a per-stage line then the terminal summary).
+        assert_eq!(
+            executed_mode_from_events(&[
+                StreamEvent::MultiModelStage {
+                    stage: "reviewer".into(),
+                    phase: "finished".into(),
+                    status: Some("completed".into()),
+                    detail: "d".into(),
+                    candidate_id: None,
+                },
+                summary_event("review"),
+            ]),
+            ExecutedMode::Review
+        );
+    }
+
     /// Genuine SSE frames — a plain JSON body with a top-level `finish_reason`
     /// would be misparsed as an SSE finish-only frame by `complete_stream_cb`
     /// and silently drop the content (verified by reading the real parser).
