@@ -10,6 +10,12 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
+# Keep every main-branch run, but stop spending runner time on an obsolete PR
+# revision once a newer commit for the same PR has started CI.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   secrets:
     name: gitleaks
@@ -95,6 +101,10 @@ jobs:
           sudo rm -rf /opt/hostedtoolcache/CodeQL /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc
           df -h /
       - uses: Swatinem/rust-cache@v2
+        with:
+          # The action still caches dependencies only (not workspace crates).
+          # Preserve that useful work when a later lint/test step fails.
+          cache-on-failure: true
       - name: fmt
         # rustfmt is OS-agnostic; still run on all three for early signal.
         run: cargo fmt --all -- --check
@@ -134,6 +144,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri
+          # Native dependency builds remain valid even if a later host gate fails.
+          cache-on-failure: true
       - name: fmt
         run: cargo fmt -- --check
       - name: clippy
