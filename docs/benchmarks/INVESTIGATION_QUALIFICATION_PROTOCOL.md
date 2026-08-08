@@ -520,3 +520,30 @@ built, executed, or published during the audit; no provider was called; and the 
 `contextdesk-multi-model-v1` working tree was never read. Findings about the multi-model batch
 describe committed tip `11ddcd07` only and **must be reconciled against the corrected commit**
 before being acted on.
+
+---
+
+## 2026-08-08 corrected-RC reconciliation addendum
+
+The local integration branch `integrate/evidence-investigation-final-rc2` was subsequently
+assembled and checked at product tip `634a81ff` (before this documentation-only addendum). It
+contains the corrected multi-model attempt ceiling and evidence flow (`93a75a5e`, `dc7ccff3`),
+the vocabulary-agnostic known-root correction (`9fbe139d`), and nonce-fenced ambient/context-plan
+injection with provider-call-time visibility reconciliation (`508fe952`, `634a81ff`). The latter
+reconciliation runs with Developer detail both enabled and disabled and is repeated before every
+initial or retried provider request; citations are eligible only for ambient context present in a
+successful request.
+
+On that combined tip, the following hermetic gates passed: formatting; all six vocabulary
+generalization tests; all six investigation-answer security gates; four filtered multi-stage
+unit tests; trace-on context-length retry reconciliation; trace-off context-length retry citation
+suppression; tools-unsupported prefetch retry reconciliation; the ambient/context-plan atomic
+overflow acceptance test; and strict `cd-core` library/test Clippy with warnings denied. Separate
+read-only audits also checked the hard provider-attempt ceiling, removal of runtime fixture
+vocabulary coupling, and ambient/context-plan provenance across retry paths.
+
+This updates the earlier statement that the corrected multi-model tip had not been reconciled.
+It does **not** change the live verdict: no paid GPT-OSS or cross-model qualification lane was run
+for this addendum, so live quality, reliability, and comparative multi-model value remain
+**BLOCKED / not certified** until the applicable protocol lanes execute. No branch was pushed,
+merged to `main`, or released as part of this local reconciliation.
