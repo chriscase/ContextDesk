@@ -449,6 +449,7 @@ async fn an_answer_with_no_retrieved_evidence_is_reported_ungrounded() {
 // 7. Unwritable state
 // ---------------------------------------------------------------------
 
+#[cfg(unix)] // exercises unix mode bits (0o555); Windows has no equivalent chmod semantics
 #[test]
 fn unwritable_state_fails_that_check_without_blocking_the_others() {
     use std::os::unix::fs::PermissionsExt;
@@ -1153,6 +1154,7 @@ async fn provider_connectivity_never_contradicts_a_successful_live_workflow_in_a
 // 12. Cleanup gating — corpus deletion failure
 // ---------------------------------------------------------------------
 
+#[cfg(unix)] // exercises unix mode bits (0o555); Windows has no equivalent chmod semantics
 #[tokio::test]
 async fn cleanup_check_fails_and_gates_readiness_when_the_synthetic_corpus_cannot_be_removed() {
     use std::os::unix::fs::PermissionsExt;
@@ -1242,6 +1244,7 @@ async fn cleanup_check_fails_and_gates_readiness_when_the_synthetic_corpus_canno
 // 13. Cleanup gating — session deletion failure
 // ---------------------------------------------------------------------
 
+#[cfg(unix)] // exercises unix mode bits (0o555); Windows has no equivalent chmod semantics
 #[tokio::test]
 async fn cleanup_check_fails_and_gates_readiness_when_the_synthetic_session_cannot_be_removed() {
     use std::os::unix::fs::PermissionsExt;

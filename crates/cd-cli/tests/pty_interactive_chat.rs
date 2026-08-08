@@ -643,6 +643,11 @@ impl portable_pty::Child for NeverExitsChild {
     fn process_id(&self) -> Option<u32> {
         None
     }
+    #[cfg(windows)]
+    fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+        // No OS process backs this fake; there is no handle to expose.
+        None
+    }
 }
 
 /// Mutation-style proof that `reap_or_kill`'s post-kill loop actually polls
