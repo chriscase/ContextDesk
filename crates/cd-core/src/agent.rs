@@ -799,6 +799,54 @@ const MULTI_STAGE_CANDIDATE_CAP: usize = crate::tool_host::BROAD_LOG_TRIAGE_CAND
 /// Keep private draft text compact so multiple incidents cannot consume the
 /// final comparison context. The model never gets another group's raw brief.
 const MULTI_STAGE_CANDIDATE_DRAFT_CHAR_CAP: usize = 2_000;
+/// Streaming and buffered candidate responses are bounded before validation.
+/// The extra room lets validation inspect a complete concise answer before the
+/// accepted draft is reduced to its smaller final-comparison cap.
+const MULTI_STAGE_CANDIDATE_RESPONSE_CHAR_CAP: usize = MULTI_STAGE_CANDIDATE_DRAFT_CHAR_CAP * 2;
+/// Absolute host-side bound for a final comparison proposal before strict JSON
+/// parsing. This is ample for four compact candidate sections while preventing
+/// a verbose or malformed response from growing without limit.
+const MULTI_STAGE_COMPARISON_RESPONSE_CHAR_CAP: usize = 32_000;
+
+fn append_chars_up_to_cap(
+    output: &mut String,
+    output_chars: &mut usize,
+    fragment: &str,
+    cap: usize,
+) -> bool {
+    let remaining = cap.saturating_sub(*output_chars);
+    let mut characters = fragment.chars();
+    for _ in 0..remaining {
+        let Some(character) = characters.next() else {
+            return false;
+        };
+        output.push(character);
+        *output_chars = output_chars.saturating_add(1);
+    }
+    characters.next().is_some()
+}
+
+fn chars_up_to_cap(text: &str, cap: usize) -> (String, bool) {
+    let mut characters = text.chars();
+    let bounded = characters.by_ref().take(cap).collect();
+    (bounded, characters.next().is_some())
+}
+
+fn bounded_response_content(
+    completion: &str,
+    streamed: String,
+    streamed_exceeded_cap: bool,
+    cap: usize,
+) -> Option<String> {
+    let (completion, completion_exceeded_cap) = chars_up_to_cap(completion, cap);
+    if completion_exceeded_cap {
+        return None;
+    }
+    if completion.trim().is_empty() {
+        return (!streamed_exceeded_cap).then_some(streamed);
+    }
+    Some(completion)
+}
 
 #[derive(Debug)]
 enum MultiStageTriageOutcome {
@@ -813,6 +861,13 @@ enum MultiStageTriageOutcome {
         /// labels only; the rejected proposal is never retained here.
         validation_errors: Vec<crate::investigation_answer::ValidationError>,
         semantic_attempts: usize,
+        provider_rounds: usize,
+    },
+    /// Candidate work began, but the remaining time/round/context budget could
+    /// not safely reach final comparison. This is distinct from model-output
+    /// validation failure and from a true whole-turn deadline.
+    BudgetStopped {
+        reason: String,
         provider_rounds: usize,
     },
     Completed {
@@ -847,12 +902,17 @@ enum MultiStageHostSignal {
 
 /// Classify a provider error raised inside the multi-stage loops.
 ///
-/// A transport that observes cancellation first reports it as an ordinary
-/// error; the single-stage loop already treats that string as a clean cancel,
-/// and this keeps the two seams from disagreeing about the same user action
-/// based on which poll loop won the race.
-fn multi_stage_provider_outcome(error: CoreError) -> MultiStageTriageOutcome {
-    if error.to_string().contains("cancelled") {
+/// A transport may observe cancellation first and report an ordinary error.
+/// The host flag remains authoritative so provider-controlled error wording
+/// cannot manufacture or suppress a typed cancellation outcome.
+fn multi_stage_provider_outcome(
+    error: CoreError,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> MultiStageTriageOutcome {
+    // Cancellation authority is the host signal, never provider-controlled
+    // error text. This also handles a transport that observes the flag and
+    // returns an ordinary connection error before the select loop sees it.
+    if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
         return MultiStageTriageOutcome::Cancelled;
     }
     MultiStageTriageOutcome::ProviderFailed(Box::new(error))
@@ -1395,8 +1455,9 @@ async fn run_multi_stage_broad_triage(
             candidate_id: Some(candidate.group_id.clone()),
         }));
 
-        // Preserve one comparison attempt. A correction is used only while it
-        // still fits the caller's normal provider-round cap.
+        // Preserve one comparison attempt. Candidate synthesis itself has one
+        // bounded attempt; the final comparison may use the optional semantic
+        // correction only while the whole-turn round cap still permits it.
         let mut accepted = None;
         for attempt in 0..MULTI_STAGE_CANDIDATE_ATTEMPT_CAP {
             if cancel_ref.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
@@ -1417,14 +1478,23 @@ async fn run_multi_stage_broad_triage(
                 multi_stage_context_telemetry(&messages, &candidate.model_text, opts, used_rounds),
             ));
             let mut withheld = String::new();
+            let mut withheld_chars = 0usize;
+            let mut withheld_exceeded_cap = false;
             let mut on_text = |text: String| {
                 // Bound model-visible accumulation in host memory for this stage
                 // so a verbose stream cannot starve later synthesis context.
-                if withheld.chars().count() < MULTI_STAGE_CANDIDATE_DRAFT_CHAR_CAP.saturating_mul(2)
-                {
-                    withheld.push_str(&text);
-                }
+                withheld_exceeded_cap |= append_chars_up_to_cap(
+                    &mut withheld,
+                    &mut withheld_chars,
+                    &text,
+                    MULTI_STAGE_CANDIDATE_RESPONSE_CHAR_CAP,
+                );
             };
+            // Count a logical provider attempt when it is issued. A timeout,
+            // cancellation, or provider error consumes the same round as a
+            // successful completion; transport-library retries stay below this
+            // boundary.
+            used_rounds = used_rounds.saturating_add(1);
             let completion = match within_turn_deadline_with_cap(
                 clock,
                 cancel_ref,
@@ -1434,13 +1504,13 @@ async fn run_multi_stage_broad_triage(
             .await
             {
                 Ok(Ok(completion)) => completion,
-                Ok(Err(error)) => return Ok(multi_stage_provider_outcome(error)),
+                Ok(Err(error)) => return Ok(multi_stage_provider_outcome(error, cancel_ref)),
                 Err(TurnAwaitError::Cancelled) => return Ok(MultiStageTriageOutcome::Cancelled),
                 // Candidate call hit the protected cap or whole-turn deadline.
                 // With no completed drafts yet this is a typed Deadline. With
                 // drafts already admitted, stop the loop and try comparison.
                 Err(TurnAwaitError::Deadline) => {
-                    if drafts.is_empty() {
+                    if drafts.is_empty() || clock.remaining_total_ms() == Some(0) {
                         return Ok(MultiStageTriageOutcome::Deadline);
                     }
                     skipped_for_budget =
@@ -1448,12 +1518,13 @@ async fn run_multi_stage_broad_triage(
                     break;
                 }
             };
-            used_rounds = used_rounds.saturating_add(1);
-            let content = if completion.content.trim().is_empty() {
-                withheld
-            } else {
-                completion.content
-            };
+            let content = bounded_response_content(
+                &completion.content,
+                withheld,
+                withheld_exceeded_cap,
+                MULTI_STAGE_CANDIDATE_RESPONSE_CHAR_CAP,
+            )
+            .unwrap_or_default();
             let evidence = candidate.evidence.iter().cloned().collect::<HashSet<_>>();
             let sanitized = strip_model_authored_log_citations(&content);
             let accepted_content = (!sanitized.is_empty()
@@ -1497,15 +1568,26 @@ async fn run_multi_stage_broad_triage(
             }));
             drafts.push(draft);
         } else {
+            let budget_denial = skipped_for_budget;
             on_host(MultiStageHostSignal::Event(StreamEvent::MultiModelStage {
                 stage: "candidate".into(),
-                phase: "finished".into(),
-                status: Some("failed".into()),
+                phase: if budget_denial.is_some() {
+                    "skipped".into()
+                } else {
+                    "finished".into()
+                },
+                status: Some(
+                    budget_denial
+                        .map(crate::multi_stage_budget::AdmissionDenial::as_str)
+                        .unwrap_or("failed")
+                        .into(),
+                ),
                 detail: serde_json::json!({
                     "schema": "contextdesk.multi_stage_budget.v1",
                     "candidate_index": index + 1,
                     "candidate_count": candidate_count,
                     "used_rounds": used_rounds,
+                    "reason": budget_denial.map(crate::multi_stage_budget::AdmissionDenial::as_str),
                 })
                 .to_string(),
                 candidate_id: Some(candidate.group_id.clone()),
@@ -1528,14 +1610,12 @@ async fn run_multi_stage_broad_triage(
             cancelled: cancel_ref
                 .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)),
         };
-        if !crate::multi_stage_budget::can_run_comparison(drafts.len(), snap, reserve) {
-            return Ok(MultiStageTriageOutcome::FailedClosed {
+        if !crate::multi_stage_budget::can_run_comparison(drafts.len(), snap) {
+            return Ok(MultiStageTriageOutcome::BudgetStopped {
                 reason: format!(
                     "multi-stage budget reserve prevented enough candidates for comparison ({})",
                     denial.as_str()
                 ),
-                validation_errors: Vec::new(),
-                semantic_attempts: 0,
                 provider_rounds: used_rounds,
             });
         }
@@ -1586,9 +1666,12 @@ async fn run_multi_stage_broad_triage(
         None,
     )) > crate::context_budgeting::synthesis_packing_budget(hard_budget)
     {
-        return Ok(MultiStageTriageOutcome::Fallback(
-            "comparison_context_budget_insufficient",
-        ));
+        return Ok(MultiStageTriageOutcome::BudgetStopped {
+            reason:
+                "comparison context exceeded the bounded packing budget after candidate synthesis"
+                    .into(),
+            provider_rounds: used_rounds,
+        });
     }
     let mut semantic_attempts = 0usize;
     let mut validation_errors = Vec::new();
@@ -1628,9 +1711,10 @@ async fn run_multi_stage_broad_triage(
         if estimate_context_chars(&messages)
             > crate::context_budgeting::synthesis_packing_budget(hard_budget)
         {
-            return Ok(MultiStageTriageOutcome::Fallback(
-                "comparison_context_budget_insufficient",
-            ));
+            return Ok(MultiStageTriageOutcome::BudgetStopped {
+                reason: "comparison correction exceeded the bounded packing budget".into(),
+                provider_rounds: used_rounds,
+            });
         }
         let comparison_evidence = messages
             .last()
@@ -1640,12 +1724,22 @@ async fn run_multi_stage_broad_triage(
             multi_stage_context_telemetry(&messages, comparison_evidence, opts, used_rounds),
         ));
         let mut withheld = String::new();
-        let mut on_text = |text: String| withheld.push_str(&text);
+        let mut withheld_chars = 0usize;
+        let mut withheld_exceeded_cap = false;
+        let mut on_text = |text: String| {
+            withheld_exceeded_cap |= append_chars_up_to_cap(
+                &mut withheld,
+                &mut withheld_chars,
+                &text,
+                MULTI_STAGE_COMPARISON_RESPONSE_CHAR_CAP,
+            );
+        };
         let phase_cap = clock.phase_cap_ms().unwrap_or(u64::MAX);
         let synth_cap = crate::multi_stage_budget::synthesis_operation_cap_ms(
             clock.remaining_total_ms(),
             phase_cap,
         );
+        used_rounds = used_rounds.saturating_add(1);
         let completion = match within_turn_deadline_with_cap(
             clock,
             cancel_ref,
@@ -1655,16 +1749,17 @@ async fn run_multi_stage_broad_triage(
         .await
         {
             Ok(Ok(completion)) => completion,
-            Ok(Err(error)) => return Ok(multi_stage_provider_outcome(error)),
+            Ok(Err(error)) => return Ok(multi_stage_provider_outcome(error, cancel_ref)),
             Err(TurnAwaitError::Cancelled) => return Ok(MultiStageTriageOutcome::Cancelled),
             Err(TurnAwaitError::Deadline) => return Ok(MultiStageTriageOutcome::Deadline),
         };
-        used_rounds = used_rounds.saturating_add(1);
-        let content = if completion.content.trim().is_empty() {
-            withheld
-        } else {
-            completion.content
-        };
+        let content = bounded_response_content(
+            &completion.content,
+            withheld,
+            withheld_exceeded_cap,
+            MULTI_STAGE_COMPARISON_RESPONSE_CHAR_CAP,
+        )
+        .unwrap_or_default();
         match crate::investigation_answer::validate_model_answer(&content, &ledger) {
             Ok(mut envelope) => {
                 envelope.semantic_attempts = u8::try_from(semantic_attempts).unwrap_or(u8::MAX);
@@ -4560,6 +4655,43 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                 retry_available,
                                 &[],
                             );
+                        }
+                        MultiStageTriageOutcome::BudgetStopped {
+                            reason,
+                            provider_rounds,
+                        } => {
+                            trail.push(format!(
+                                "linked_broad_triage_multi_stage_budget_stopped:{reason}"
+                            ));
+                            let retry_available = checkpoint_out
+                                .as_ref()
+                                .is_some_and(|checkpoint| checkpoint.is_some());
+                            out.push(StreamEvent::Tool {
+                                id: stage_id,
+                                name: "broad_log_triage_multi_stage".into(),
+                                phase: crate::events::ToolPhase::Finished,
+                                summary: "Multi-stage synthesis stopped by its turn budget".into(),
+                                detail: Some(
+                                    serde_json::json!({
+                                        "schema": "contextdesk.multi_stage_budget.v1",
+                                        "outcome": "budget_stopped",
+                                        "reason": reason,
+                                        "provider_rounds": provider_rounds,
+                                        "retry_available": retry_available,
+                                    })
+                                    .to_string(),
+                                ),
+                                ok: Some(false),
+                            });
+                            out.push(StreamEvent::Error {
+                                code: "linked_multi_stage_budget_exhausted".into(),
+                                message: "The bounded multi-stage run stopped before final comparison because the remaining turn budget could not safely complete it. No unvalidated answer was emitted.".into(),
+                            });
+                            out.push(StreamEvent::SearchTrail { steps: trail });
+                            out.push(StreamEvent::TurnCompleted {
+                                reason: "linked_multi_stage_budget_exhausted".into(),
+                            });
+                            return Ok(out.into_events());
                         }
                         MultiStageTriageOutcome::FailedClosed {
                             reason,
@@ -14382,8 +14514,326 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             crate::multi_stage_budget::admit_candidate(snap, reserve),
             Err(crate::multi_stage_budget::AdmissionDenial::RoundReserve)
         );
-        assert!(crate::multi_stage_budget::can_run_comparison(
-            2, snap, reserve
+        assert!(crate::multi_stage_budget::can_run_comparison(2, snap));
+    }
+
+    #[test]
+    fn multi_stage_response_bounds_handle_one_oversized_unicode_chunk() {
+        let mut output = String::new();
+        let mut output_chars = 0usize;
+        assert!(append_chars_up_to_cap(
+            &mut output,
+            &mut output_chars,
+            &"🌍".repeat(10),
+            3
+        ));
+        assert!(append_chars_up_to_cap(
+            &mut output,
+            &mut output_chars,
+            "ignored",
+            3
+        ));
+        assert_eq!(output, "🌍🌍🌍");
+        assert_eq!(output_chars, 3);
+        assert_eq!(chars_up_to_cap(&"é".repeat(10), 4), ("éééé".into(), true));
+        assert_eq!(chars_up_to_cap("exact", 5), ("exact".into(), false));
+        assert_eq!(
+            bounded_response_content("valid-tail", String::new(), false, 5),
+            None,
+            "an oversized response must not become valid by truncating its tail"
+        );
+        assert_eq!(
+            bounded_response_content("", "streamed".into(), false, 10),
+            Some("streamed".into())
+        );
+    }
+
+    #[test]
+    fn multi_stage_provider_error_uses_host_cancel_signal_not_error_text() {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let provider_worded = multi_stage_provider_outcome(
+            CoreError::Message("upstream says request cancelled".into()),
+            Some(&cancel),
+        );
+        assert!(matches!(
+            provider_worded,
+            MultiStageTriageOutcome::ProviderFailed(_)
+        ));
+
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        let host_cancelled = multi_stage_provider_outcome(
+            CoreError::Message("connection closed".into()),
+            Some(&cancel),
+        );
+        assert!(matches!(host_cancelled, MultiStageTriageOutcome::Cancelled));
+    }
+
+    /// An issued candidate that times out consumes a provider round. Two
+    /// completed drafts may still use the one genuinely reserved comparison
+    /// round, but the timeout cannot disappear from the cap or telemetry.
+    #[tokio::test(start_paused = true)]
+    async fn multi_stage_timeout_counts_issued_round_before_reserved_comparison() {
+        struct TimeoutThenCompareBackend {
+            calls: std::sync::atomic::AtomicUsize,
+        }
+
+        #[async_trait]
+        impl ChatBackend for TimeoutThenCompareBackend {
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                match call {
+                    0 => Ok(multi_stage_completion("alpha draft")),
+                    1 => Ok(multi_stage_completion("bravo draft")),
+                    2 => {
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        Ok(multi_stage_completion("late charlie draft"))
+                    }
+                    3 => Ok(multi_stage_completion(
+                        r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"trace:alpha","observations":[{"claim_id":"a","text":"x","evidence_ids":["e:trace:alpha:11"]}]},{"candidate_id":"trace:bravo","observations":[{"claim_id":"b","text":"x","evidence_ids":["e:trace:bravo:22"]}]}]}"#,
+                    )),
+                    _ => Err(CoreError::Message("unexpected extra provider call".into())),
+                }
+            }
+        }
+
+        let candidates = vec![
+            multi_stage_candidate("trace:alpha", 11),
+            multi_stage_candidate("trace:bravo", 22),
+            multi_stage_candidate("trace:charlie", 33),
+        ];
+        let backend = TimeoutThenCompareBackend {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let opts = AgentOptions {
+            max_rounds: 4,
+            deadline_plan: Some(TurnDeadlinePlan {
+                total_ms: 100,
+                choosing_ms: 100,
+                retrieving_ms: 100,
+                synthesizing_ms: 100,
+                explicit: true,
+            }),
+            ..Default::default()
+        };
+        let clock = TurnClock::new(opts.effective_deadline_plan(), None);
+        let outcome = run_multi_stage_broad_triage(
+            &backend,
+            "triage",
+            &opts,
+            &clock,
+            MultiStageTriageEvidence {
+                candidates: &candidates,
+                comparison_context: None,
+                binding: crate::investigation_answer::AnswerBindingV1 {
+                    session_id: "s".into(),
+                    turn_id: "t".into(),
+                    corpus_id: "c".into(),
+                    revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                        event_revision: 1,
+                        template_analysis_revision: 2,
+                        suppression_revision: 3,
+                    },
+                    ledger_digest: String::new(),
+                },
+            },
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            MultiStageTriageOutcome::Completed {
+                provider_rounds: 4,
+                ..
+            }
+        ));
+        assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+
+    /// A true whole-turn expiry remains a typed deadline even when one draft
+    /// was already banked; it must not become a reserve or validation failure.
+    #[tokio::test(start_paused = true)]
+    async fn multi_stage_whole_turn_expiry_mid_candidate_remains_deadline() {
+        struct DeadlineBackend {
+            calls: std::sync::atomic::AtomicUsize,
+        }
+
+        #[async_trait]
+        impl ChatBackend for DeadlineBackend {
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if call == 0 {
+                    return Ok(multi_stage_completion("alpha draft"));
+                }
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                Ok(multi_stage_completion("late bravo draft"))
+            }
+        }
+
+        let candidates = vec![
+            multi_stage_candidate("trace:alpha", 11),
+            multi_stage_candidate("trace:bravo", 22),
+        ];
+        let backend = DeadlineBackend {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let opts = AgentOptions {
+            max_rounds: 3,
+            deadline_plan: Some(TurnDeadlinePlan {
+                total_ms: 1,
+                choosing_ms: 1,
+                retrieving_ms: 1,
+                synthesizing_ms: 1,
+                explicit: true,
+            }),
+            ..Default::default()
+        };
+        let clock = TurnClock::new(opts.effective_deadline_plan(), None);
+        let outcome = run_multi_stage_broad_triage(
+            &backend,
+            "triage",
+            &opts,
+            &clock,
+            MultiStageTriageEvidence {
+                candidates: &candidates,
+                comparison_context: None,
+                binding: crate::investigation_answer::AnswerBindingV1 {
+                    session_id: "s".into(),
+                    turn_id: "t".into(),
+                    corpus_id: "c".into(),
+                    revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                        event_revision: 1,
+                        template_analysis_revision: 2,
+                        suppression_revision: 3,
+                    },
+                    ledger_digest: String::new(),
+                },
+            },
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, MultiStageTriageOutcome::Deadline));
+        assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// Once candidate provider calls have been issued, a later packing failure
+    /// cannot restart an unmetered single-stage path.
+    #[tokio::test]
+    async fn multi_stage_post_call_comparison_budget_failure_is_typed_budget_stop() {
+        let candidates = vec![
+            multi_stage_candidate("trace:alpha", 11),
+            multi_stage_candidate("trace:bravo", 22),
+        ];
+        let hard_budget = crate::model_context::MIN_CONTEXT_CHAR_BUDGET;
+        let packing_budget = crate::context_budgeting::synthesis_packing_budget(hard_budget);
+        let candidate_base = candidates
+            .iter()
+            .map(|candidate| {
+                estimate_context_chars(&multi_stage_candidate_messages("", candidate, false))
+            })
+            .max()
+            .unwrap();
+        let preview_drafts = candidates
+            .iter()
+            .map(|candidate| CandidateSynthesisDraft {
+                group_id: candidate.group_id.clone(),
+                text: "x".repeat(MULTI_STAGE_CANDIDATE_DRAFT_CHAR_CAP),
+                evidence: candidate.evidence.iter().cloned().collect(),
+            })
+            .collect::<Vec<_>>();
+        let preview_ledger = multi_stage_ledger(
+            &preview_drafts,
+            None,
+            crate::investigation_answer::AnswerBindingV1 {
+                session_id: "s".into(),
+                turn_id: "t".into(),
+                corpus_id: "c".into(),
+                revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                    event_revision: 1,
+                    template_analysis_revision: 2,
+                    suppression_revision: 3,
+                },
+                ledger_digest: String::new(),
+            },
+        )
+        .unwrap();
+        let preview_manifest = preview_ledger.final_answer_manifest();
+        let comparison_base = estimate_context_chars(&multi_stage_comparison_messages(
+            "",
+            &preview_drafts,
+            "",
+            &preview_manifest,
+            None,
+        ));
+        assert!(comparison_base > candidate_base);
+        let user_text = "u".repeat(packing_budget.saturating_sub(candidate_base));
+        assert!(candidates.iter().all(|candidate| {
+            estimate_context_chars(&multi_stage_candidate_messages(
+                &user_text, candidate, false,
+            )) <= packing_budget
+        }));
+        assert!(
+            estimate_context_chars(&multi_stage_comparison_messages(
+                &user_text,
+                &preview_drafts,
+                "",
+                &preview_manifest,
+                None,
+            )) > packing_budget
+        );
+
+        let backend = ScriptedBackend::new(vec![
+            multi_stage_completion(&"x".repeat(MULTI_STAGE_CANDIDATE_DRAFT_CHAR_CAP)),
+            multi_stage_completion(&"x".repeat(MULTI_STAGE_CANDIDATE_DRAFT_CHAR_CAP)),
+        ]);
+        let opts = AgentOptions {
+            max_rounds: 3,
+            context_char_budget: hard_budget,
+            ..Default::default()
+        };
+        let clock = TurnClock::new(opts.effective_deadline_plan(), None);
+        let outcome = run_multi_stage_broad_triage(
+            &backend,
+            &user_text,
+            &opts,
+            &clock,
+            MultiStageTriageEvidence {
+                candidates: &candidates,
+                comparison_context: None,
+                binding: crate::investigation_answer::AnswerBindingV1 {
+                    session_id: "s".into(),
+                    turn_id: "t".into(),
+                    corpus_id: "c".into(),
+                    revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                        event_revision: 1,
+                        template_analysis_revision: 2,
+                        suppression_revision: 3,
+                    },
+                    ledger_digest: String::new(),
+                },
+            },
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            MultiStageTriageOutcome::BudgetStopped {
+                provider_rounds: 2,
+                ..
+            }
         ));
     }
 

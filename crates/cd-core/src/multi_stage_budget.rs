@@ -166,11 +166,7 @@ pub fn synthesis_operation_cap_ms(
 }
 
 /// Whether comparison may still run given drafts and budget after early stop.
-pub fn can_run_comparison(
-    draft_count: usize,
-    snapshot: AdmissionSnapshot,
-    reserve: SynthesisReserve,
-) -> bool {
+pub fn can_run_comparison(draft_count: usize, snapshot: AdmissionSnapshot) -> bool {
     if draft_count < 2 {
         return false;
     }
@@ -185,7 +181,6 @@ pub fn can_run_comparison(
         return false;
     }
     // Comparison may spend the reserved time — only refuse when already zero.
-    let _ = reserve;
     true
 }
 
@@ -277,15 +272,14 @@ mod tests {
 
     #[test]
     fn comparison_allowed_with_two_drafts_and_one_round() {
-        let r = synthesis_reserve(&plan(120_000));
         let snap = AdmissionSnapshot {
             remaining_total_ms: Some(10),
             used_rounds: 2,
             max_rounds: 3,
             cancelled: false,
         };
-        assert!(can_run_comparison(2, snap, r));
-        assert!(!can_run_comparison(1, snap, r));
+        assert!(can_run_comparison(2, snap));
+        assert!(!can_run_comparison(1, snap));
     }
 
     #[test]

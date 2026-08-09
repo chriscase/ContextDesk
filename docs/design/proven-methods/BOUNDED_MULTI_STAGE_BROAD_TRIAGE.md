@@ -21,7 +21,9 @@ names). Policy identity:
   so a slow or verbose candidate cannot spend the protected budget.
 - **Early stop:** when another candidate would violate the reserve, completed
   drafts are kept; comparison runs if at least two drafts remain, else the
-  path fails closed with an honest budget reason (not a silent success).
+  path emits a typed budget stop with an honest reason (not a validation error
+  or silent success). A true whole-turn expiry remains a deadline and preserves
+  the established synthesis-retry affordance.
 - **Compatibility:** an orchestration timeout or reserve stop does **not**
   clear measured model readiness. Compatibility probes and quality/orchestration
   evidence remain separate classes.
@@ -200,16 +202,27 @@ tables. See [`docs/design/VOCAB_AGNOSTIC_KNOWN_ROOT.md`](../VOCAB_AGNOSTIC_KNOWN
 
 `AgentOptions.max_rounds` is the hard provider-call cap for this path. It
 includes candidate attempts and the final comparison; the experimental path
-never starts without room for a comparison. Candidate and final contexts use
-the same headroom-aware context budget as ordinary linked synthesis. The current
-implementation has an in-flight concurrency cap of one (conservative while
-preserving one ordered provider trace); it is designed so a future bounded
-parallel executor can raise that cap without changing the evidence contract.
+never starts without room for a comparison. A round is counted immediately
+before `complete_streaming` is issued, so failed, timed-out, and cancelled calls
+consume the same logical round as successful calls. Transport-library retries
+remain below that boundary. Candidate and final contexts use the same
+headroom-aware context budget as ordinary linked synthesis. Candidate responses
+are capped at 4,000 characters before validation and accepted drafts at 2,000;
+final comparison proposals are capped at 32,000 characters before strict JSON
+parsing. The caps apply to both individual streaming chunks and buffered
+completion content. An over-cap response is rejected rather than validated as
+a truncated prefix, so discarded trailing text cannot turn a nonconforming
+response into an accepted one. The current implementation has an in-flight
+concurrency cap of one (conservative while preserving one ordered provider
+trace); it is designed so a future bounded parallel executor can raise that cap
+without changing the evidence contract.
 
 The global chronology consumes context budget but no provider round. Its
 manifest, excerpts, untrusted-data wrapper, and output scaffold are included in
 the same preflight packing check as candidate drafts; an oversized comparison
-falls back before the final provider request.
+emits a typed budget stop before the final provider request if candidate calls
+were already issued. Preflight failures discovered before any multi-stage
+provider call may still use the established single-stage path.
 
 Cancellation and the whole-turn deadline use the existing shared agent clock.
 Every provider request still passes through the normal backend/trace observer,
@@ -252,3 +265,9 @@ a bounded context, but cannot itself grant causal authority.
 The bounded sequential executor favors predictable cancellation, cost, and
 telemetry over latency; live-provider quality and safe parallelism remain
 separate acceptance work.
+
+The response caps above bound what the multi-stage executor accumulates from
+callbacks and retains or validates from a returned completion. Some provider
+clients still assemble their own complete response before returning it; a
+transport-wide response ceiling is shared client hardening outside issue #869,
+not an end-to-end memory-bound claim made by this policy.
