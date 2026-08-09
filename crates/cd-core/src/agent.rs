@@ -2743,7 +2743,6 @@ pub(crate) enum TurnAwaitError {
 
 pub(crate) struct TurnClock {
     started: Instant,
-    phase_started: Instant,
     phase: AgentPhase,
     plan: TurnDeadlinePlan,
 }
@@ -2753,7 +2752,6 @@ impl TurnClock {
         let now = Instant::now();
         Self {
             started: started.unwrap_or(now),
-            phase_started: now,
             phase: AgentPhase::ChoosingEvidence,
             plan,
         }
@@ -2764,7 +2762,6 @@ impl TurnClock {
             return false;
         }
         self.phase = phase;
-        self.phase_started = Instant::now();
         true
     }
 
@@ -2779,18 +2776,20 @@ impl TurnClock {
     /// so a provider attempt is never counted for a call that is not issued.
     /// `false` when no deadline is configured (`total_ms == 0`).
     pub(crate) fn deadline_reached(&self) -> bool {
-        self.remaining().is_some_and(|r| r.is_zero())
+        self.remaining_for_operation().is_some_and(|r| r.is_zero())
     }
 
-    fn remaining(&self) -> Option<Duration> {
+    /// Resolve a fresh cap for one uninterrupted operation. Phase caps bound
+    /// each individual wait; only the whole-turn clock accumulates across
+    /// sequential operations.
+    fn remaining_for_operation(&self) -> Option<Duration> {
         if self.plan.total_ms == 0 {
             return None;
         }
         let total =
             Duration::from_millis(self.plan.total_ms).saturating_sub(self.started.elapsed());
-        let phase = Duration::from_millis(self.plan.for_phase(self.phase))
-            .saturating_sub(self.phase_started.elapsed());
-        Some(total.min(phase))
+        let operation = Duration::from_millis(self.plan.for_phase(self.phase));
+        Some(total.min(operation))
     }
 }
 
@@ -2816,7 +2815,7 @@ where
         return Err(TurnAwaitError::Cancelled);
     }
     let bounded = async {
-        match clock.remaining() {
+        match clock.remaining_for_operation() {
             None => Ok(future.await),
             Some(remaining) if remaining.is_zero() => Err(TurnAwaitError::Deadline),
             Some(remaining) => tokio::time::timeout(remaining, future)
@@ -11414,23 +11413,70 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
     }
 
     #[tokio::test(start_paused = true)]
-    async fn phase_caps_never_extend_the_monotonic_whole_turn_deadline() {
+    async fn phase_cap_resets_for_each_uninterrupted_operation() {
         let mut clock = TurnClock::new(
             TurnDeadlinePlan {
                 total_ms: 100,
-                choosing_ms: 90,
-                retrieving_ms: 90,
-                synthesizing_ms: 90,
+                choosing_ms: 40,
+                retrieving_ms: 40,
+                synthesizing_ms: 40,
                 explicit: true,
             },
             None,
         );
-        tokio::time::advance(Duration::from_millis(90)).await;
         clock.enter(AgentPhase::SynthesizingAnswer);
+
+        for _ in 0..2 {
+            let result =
+                within_turn_deadline(&clock, None, tokio::time::sleep(Duration::from_millis(30)))
+                    .await;
+            assert_eq!(result, Ok(()));
+        }
+        assert_eq!(clock.started.elapsed(), Duration::from_millis(60));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn operation_caps_never_extend_the_monotonic_whole_turn_deadline() {
+        let mut clock = TurnClock::new(
+            TurnDeadlinePlan {
+                total_ms: 50,
+                choosing_ms: 40,
+                retrieving_ms: 40,
+                synthesizing_ms: 40,
+                explicit: true,
+            },
+            None,
+        );
+        clock.enter(AgentPhase::SynthesizingAnswer);
+
+        let first =
+            within_turn_deadline(&clock, None, tokio::time::sleep(Duration::from_millis(30))).await;
+        assert_eq!(first, Ok(()));
+
+        let second =
+            within_turn_deadline(&clock, None, tokio::time::sleep(Duration::from_millis(30))).await;
+        assert_eq!(second, Err(TurnAwaitError::Deadline));
+        assert!(clock.started.elapsed() <= Duration::from_millis(51));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn one_operation_cannot_exceed_the_active_phase_cap() {
+        let mut clock = TurnClock::new(
+            TurnDeadlinePlan {
+                total_ms: 200,
+                choosing_ms: 40,
+                retrieving_ms: 40,
+                synthesizing_ms: 40,
+                explicit: true,
+            },
+            None,
+        );
+        clock.enter(AgentPhase::SynthesizingAnswer);
+
         let result =
-            within_turn_deadline(&clock, None, tokio::time::sleep(Duration::from_millis(20))).await;
+            within_turn_deadline(&clock, None, tokio::time::sleep(Duration::from_millis(41))).await;
         assert_eq!(result, Err(TurnAwaitError::Deadline));
-        assert!(clock.started.elapsed() <= Duration::from_millis(101));
+        assert!(clock.started.elapsed() <= Duration::from_millis(41));
     }
 
     #[tokio::test]
@@ -12990,6 +13036,86 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             }
             other => panic!("expected bounded independent comparison, got {other:?}"),
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn multi_stage_calls_each_receive_a_fresh_synthesis_operation_cap() {
+        struct DelayedScriptedBackend {
+            inner: ScriptedBackend,
+            delay: Duration,
+        }
+
+        #[async_trait]
+        impl ChatBackend for DelayedScriptedBackend {
+            async fn complete(
+                &self,
+                messages: &[ChatMessage],
+                tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                tokio::time::sleep(self.delay).await;
+                self.inner.complete(messages, tools).await
+            }
+        }
+
+        let candidates = vec![
+            multi_stage_candidate("trace:alpha", 11),
+            multi_stage_candidate("trace:bravo", 22),
+        ];
+        let backend = DelayedScriptedBackend {
+            inner: ScriptedBackend::new(vec![
+                multi_stage_completion("trace:alpha is an operational incident"),
+                multi_stage_completion("trace:bravo is an operational incident"),
+                multi_stage_completion(
+                    r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"trace:alpha","observations":[{"claim_id":"a","text":"x","evidence_ids":["e:trace:alpha:11"]}]},{"candidate_id":"trace:bravo","observations":[{"claim_id":"b","text":"x","evidence_ids":["e:trace:bravo:22"]}]}]}"#,
+                ),
+            ]),
+            delay: Duration::from_millis(20),
+        };
+        let opts = AgentOptions {
+            max_rounds: 4,
+            deadline_plan: Some(TurnDeadlinePlan {
+                total_ms: 100,
+                choosing_ms: 30,
+                retrieving_ms: 30,
+                synthesizing_ms: 30,
+                explicit: true,
+            }),
+            ..Default::default()
+        };
+        let mut clock = TurnClock::new(opts.effective_deadline_plan(), None);
+        clock.enter(AgentPhase::SynthesizingAnswer);
+        let mut contexts = Vec::new();
+        let outcome = run_multi_stage_broad_triage(
+            &backend,
+            "triage",
+            &opts,
+            &clock,
+            &candidates,
+            crate::investigation_answer::AnswerBindingV1 {
+                session_id: "s".into(),
+                turn_id: "t".into(),
+                corpus_id: "c".into(),
+                revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                    event_revision: 1,
+                    template_analysis_revision: 2,
+                    suppression_revision: 3,
+                },
+                ledger_digest: String::new(),
+            },
+            &mut |telemetry| contexts.push(telemetry),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            MultiStageTriageOutcome::Completed {
+                provider_rounds: 3,
+                ..
+            }
+        ));
+        assert_eq!(clock.started.elapsed(), Duration::from_millis(60));
+        assert_eq!(contexts.len(), 3);
     }
 
     #[tokio::test]
