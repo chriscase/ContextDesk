@@ -472,9 +472,16 @@ command-specific — a reader must not assume one shared line grammar across
 commands, only that every line always parses independently and the last
 line is always the terminal one.
 
-`chat`: `text_delta`, `tool`, `permission_required`, `turn_completed`,
-`error`, `trace_summary`, `trace_context`, `trace_tool`, `activity`,
-`context_used`, `done`. The line
+`chat`: `progress`, `text_delta`, `tool`, `permission_required`,
+`turn_completed`, `error`, `investigation_answer`, `multi_model_stage`,
+`trace_summary`, `trace_context`, `trace_tool`, `activity`, `context_used`,
+`done`. A `progress` line is the shared human-progress projection of the same
+engine event sent to normal text and desktop hosts. It carries `category`
+(`turn`, `phase`, `tool`, or `multi_model`), stable `stage` / `phase`, a concise
+host label, `elapsed_ms`, and optional bounded diagnostics. Tool `started`
+activity therefore arrives before its legacy terminal `tool` result, and
+investigator/reviewer/synthesizer activity is visible while those stages run.
+The line
 tagged `done` is always last and appears exactly once — that holds on a
 successful turn and on a failed one alike. On failure, the last two lines
 are always `error` (the failure, `code`/`message`) then `done` with

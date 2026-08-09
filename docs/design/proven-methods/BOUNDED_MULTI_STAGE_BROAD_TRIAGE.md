@@ -151,6 +151,13 @@ so CLI and Tauri project the same events and provider telemetry. No provider is
 called in tests: scripted hermetic cases cover three independent groups, a
 cross-group decoy, bounded invalid retry, and total-round caps.
 
+Stage callbacks enter the shared event collector immediately. Investigator,
+reviewer, and synthesizer `MultiModelStage` events are therefore live while a
+provider stage is pending, rather than buffered until the whole pipeline
+returns. Core's shared `TurnProgress` projection gives normal CLI text, JSONL,
+and desktop IPC the same concise labels and host-measured elapsed clock; opaque
+candidate ids and scrubbed bounded detail stay behind expandable diagnostics.
+
 If groups are absent, the initial round budget is too small, or a candidate
 context cannot fit, the workflow falls back before any multi-stage provider
 request. Once an invalid candidate/comparison request has started, it fails

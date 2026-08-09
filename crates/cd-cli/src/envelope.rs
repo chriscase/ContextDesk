@@ -378,6 +378,9 @@ fn is_zero_usize(value: &usize) -> bool {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamLine<'a> {
+    /// Shared human-progress projection derived from the same engine event
+    /// delivered to text and desktop hosts.
+    Progress(cd_core::events::TurnProgress),
     TextDelta {
         text: &'a str,
     },

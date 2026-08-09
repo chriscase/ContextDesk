@@ -156,6 +156,15 @@ Terminal lines use the shared stream envelope fields documented in
 
 Fixtures: `fixtures/cli-client-protocol/progress.line.json`, `stream.terminal.done.json`.
 
+Chat uses the `contextdesk.cli.stream.v1` envelope for its additive
+`type:"progress"` lines. These lines carry the core-authored `category`,
+`stage`, `phase`, and human `label`, plus the host-measured `elapsed_ms` and
+optional bounded `detail`, `status`, and `candidate_id`. Consumers should use
+`category` and `phase` instead of parsing the label. In particular,
+`category:"tool"` + `phase:"started"` is the live tool-start signal, and
+`category:"multi_model"` exposes investigator, reviewer, and synthesizer
+activity before the terminal result.
+
 ### Chat trace semantics
 
 For `type: "trace_summary"`, clients should prefer the precise additive

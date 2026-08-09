@@ -62,6 +62,10 @@ shared `cd-workflow` provider/turn seam and pass a `RecordingTurnTrace` when
 capture is enabled. The recorder timestamps provider completions and
 metadata-only host stream observations against one turn origin, then projects
 the ordered timeline after the turn via `ActivityRecorder::record_timeline`.
+Multi-model investigator, reviewer, synthesizer, and summary lifecycle events
+use this same capture seam: role/phase/outcome, opaque candidate id, and
+scrubbed bounded host diagnostics are retained as metadata-only Activity.
+Model stage prose is never captured.
 
 There is no second desktop or CLI tracing loop. The CLI's `chat --activity
 summary|full` projects the same `TracedCall`/`TurnActivityRecord` contract;
@@ -71,6 +75,15 @@ data, including failed turns. Text-mode Activity is a nested causal tree
 (turn / phase / model round / tool lifecycle), not a flat Debug dump. This is
 contract and execution-seam parity, not a claim that the CLI reproduces every
 desktop layout or import control.
+
+Normal chat progress is a lighter live projection of the same source events.
+Core maps turn phases, tool lifecycle, and multi-model stages to one concise
+`TurnProgress` vocabulary; CLI text, CLI JSONL, and Tauri IPC add only their
+measured turn-relative elapsed clock. Linked and ordinary desktop chat render
+it as a readable process-lifetime timeline with diagnostics collapsed by
+default after completion. This timeline is explanatory UI, never evidence,
+and is intentionally not added to durable transcript serialization while
+durable Activity hydration remains disabled.
 
 ### Why this cannot change execution
 

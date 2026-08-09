@@ -961,6 +961,20 @@ impl ActivityRecorder {
                 StreamEvent::Citation { source_id, .. } => Some(TracedHostEvent::Citation {
                     source_id: source_id.clone(),
                 }),
+                StreamEvent::MultiModelStage {
+                    stage,
+                    phase,
+                    status,
+                    candidate_id,
+                    ..
+                } => Some(TracedHostEvent::MultiModelStage {
+                    stage: stage.clone(),
+                    phase: phase.clone(),
+                    status: status.clone(),
+                    candidate_id: candidate_id.clone(),
+                    detail: crate::events::progress_for_stream_event(event, 0)
+                        .and_then(|progress| progress.detail),
+                }),
                 _ => None,
             };
             if let Some(traced) = traced {
@@ -1276,6 +1290,63 @@ impl ActivityRecorder {
                 privacy: PrivacyClass::Metadata,
                 context: None,
             }),
+            TracedHostEvent::MultiModelStage {
+                stage,
+                phase,
+                status,
+                candidate_id,
+                detail,
+            } => {
+                let activity_phase = if phase == "started" {
+                    ActivityPhase::Started
+                } else if phase == "finished" || phase == "summary" {
+                    ActivityPhase::Completed
+                } else {
+                    ActivityPhase::Progress
+                };
+                let activity_status = match status.as_deref() {
+                    Some("completed")
+                    | Some("review")
+                    | Some("review_degraded")
+                    | Some("single") => ActivityStatus::Ok,
+                    Some("cancelled") => ActivityStatus::Cancelled,
+                    Some("deadline")
+                    | Some("provider_failed")
+                    | Some("semantic_invalid")
+                    | Some("budget_exhausted") => ActivityStatus::Failed,
+                    Some("skipped") => ActivityStatus::Withheld,
+                    None => ActivityStatus::Pending,
+                    Some(_) => ActivityStatus::Pending,
+                };
+                let mut diagnostic = Vec::new();
+                if let Some(candidate_id) = candidate_id {
+                    diagnostic.push(format!("candidate_id={candidate_id}"));
+                }
+                if let Some(status) = status {
+                    diagnostic.push(format!("status={status}"));
+                }
+                if let Some(detail) = detail {
+                    diagnostic.push(detail.clone());
+                }
+                self.push(ActivityEvent {
+                    turn_id: String::new(),
+                    operation_id: format!("multi-model-{stage}-{phase}"),
+                    seq: 0,
+                    elapsed_ms,
+                    phase: activity_phase,
+                    status: activity_status,
+                    origin: ActivityOrigin::DeterministicHost,
+                    determinism: Determinism::Deterministic,
+                    label: format!("Multi-model {stage}: {phase}"),
+                    detail: (!diagnostic.is_empty())
+                        .then(|| bound_chars(&diagnostic.join("; "), MAX_ACTIVITY_DETAIL_CHARS)),
+                    trigger: ActivityTrigger::HostPolicy,
+                    scope: self.scope.clone(),
+                    evidence: Vec::new(),
+                    privacy: PrivacyClass::Metadata,
+                    context: None,
+                });
+            }
             TracedHostEvent::Error { code, message } => {
                 let is_search_bound = code.starts_with("linked_search_non_progress");
                 self.push(ActivityEvent {
@@ -1669,6 +1740,68 @@ mod tests {
         let json = serde_json::to_string(&record).expect("serialize activity");
         assert!(json.contains("linked_search_non_progress_zero_hits"));
         assert!(json.contains("host_policy="));
+    }
+
+    #[test]
+    fn activity_records_multi_model_stage_metadata_without_model_text() {
+        let mut recorder = ActivityRecorder::new(
+            "turn-review",
+            "session-review",
+            DataScope::conversation(),
+            ActivityDetailLevel::Summary,
+        );
+        recorder.record_stream_events(&[
+            StreamEvent::MultiModelStage {
+                stage: "reviewer".into(),
+                phase: "started".into(),
+                status: None,
+                detail: "reviewing 2 candidate findings".into(),
+                candidate_id: None,
+            },
+            StreamEvent::MultiModelStage {
+                stage: "reviewer".into(),
+                phase: "finished".into(),
+                status: Some("budget_exhausted".into()),
+                detail: "review budget exhausted before a provider call".into(),
+                candidate_id: None,
+            },
+            StreamEvent::MultiModelStage {
+                stage: "summary".into(),
+                phase: "summary".into(),
+                status: Some("single".into()),
+                detail: "continued through the established single-model path".into(),
+                candidate_id: None,
+            },
+        ]);
+        let record = recorder.finish(ActivityStatus::Ok, 25);
+        let reviewer = record
+            .events
+            .iter()
+            .find(|event| event.operation_id == "multi-model-reviewer-started")
+            .expect("reviewer activity row");
+        assert_eq!(reviewer.label, "Multi-model reviewer: started");
+        assert_eq!(reviewer.origin, ActivityOrigin::DeterministicHost);
+        assert_eq!(reviewer.privacy, PrivacyClass::Metadata);
+        assert_eq!(
+            reviewer.detail.as_deref(),
+            Some("reviewing 2 candidate findings")
+        );
+        assert_eq!(
+            record
+                .events
+                .iter()
+                .find(|event| event.operation_id == "multi-model-reviewer-finished")
+                .map(|event| event.status),
+            Some(ActivityStatus::Failed)
+        );
+        assert_eq!(
+            record
+                .events
+                .iter()
+                .find(|event| event.operation_id == "multi-model-summary-summary")
+                .map(|event| event.status),
+            Some(ActivityStatus::Ok)
+        );
     }
 }
 

@@ -224,6 +224,7 @@ pub async fn run(
     let host_event_sink = recorder.clone();
     let observed_session_id = Arc::new(Mutex::new(session_id.clone()));
     let live_session_id = observed_session_id.clone();
+    let started = Instant::now();
     let mut answer_started = false;
     let mut buffered_answer = String::new();
     let mut terminal_text = TerminalTextSanitizer::for_current_console();
@@ -236,7 +237,8 @@ pub async fn run(
             sink.record_host_event(&event, &kinds);
         }
         if jsonl {
-            emit_jsonl(&event);
+            let event_elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            emit_jsonl(&event, event_elapsed_ms);
         } else if text {
             if let StreamEvent::TextDelta { text } = &event {
                 let clean = terminal_text.push(text);
@@ -289,7 +291,6 @@ pub async fn run(
         }
     };
 
-    let started = Instant::now();
     let cancel = Arc::new(AtomicBool::new(false));
     // Scoped so the pinned turn future (and its mutable borrow of `host`)
     // is dropped as soon as `result` is settled — `build_trace_lines` below
@@ -918,7 +919,18 @@ fn print_json_failure(error: &CliError, activity: Option<&cd_core::activity::Tur
     );
 }
 
-fn emit_jsonl(event: &StreamEvent) {
+fn progress_stream_line(event: &StreamEvent, elapsed_ms: u64) -> Option<StreamLine<'static>> {
+    cd_core::events::progress_for_stream_event(event, elapsed_ms).map(StreamLine::Progress)
+}
+
+fn emit_jsonl(event: &StreamEvent, elapsed_ms: u64) {
+    if let Some(progress) = progress_stream_line(event, elapsed_ms) {
+        let wrapped = JsonlMetaLine::wrap("", "live", "progress", 0, progress);
+        println!(
+            "{}",
+            serde_json::to_string(&wrapped).expect("StreamLine is always serializable")
+        );
+    }
     let line = match event {
         StreamEvent::TextDelta { text } => Some((
             "text_delta",
@@ -938,10 +950,9 @@ fn emit_jsonl(event: &StreamEvent) {
                 summary,
             },
         )),
-        // A Started event has no outcome yet. Rendering its absent `ok` as
-        // false makes one successful tool call look like a failure followed
-        // by a success. JSONL exposes only the terminal tool outcome; full
-        // lifecycle detail remains available through trace_tool.
+        // A Started event has no outcome yet. Its lifecycle is exposed by the
+        // progress line above; keep the legacy terminal `tool` result shape so
+        // absent `ok` is never misreported as false.
         StreamEvent::Tool { .. } => None,
         StreamEvent::PermissionRequired {
             tool_name,
@@ -1287,6 +1298,43 @@ mod grounding_tests {
             code: code.to_string(),
             message: "message".to_string(),
         }
+    }
+
+    #[test]
+    fn jsonl_progress_exposes_tool_start_reviewer_stage_and_elapsed_time() {
+        let tool = progress_stream_line(
+            &StreamEvent::Tool {
+                id: "t1".into(),
+                name: "broad_log_triage".into(),
+                phase: ToolPhase::Started,
+                summary: "Preparing bounded triage brief".into(),
+                detail: None,
+                ok: None,
+            },
+            412,
+        )
+        .expect("tool start progress");
+        let tool = serde_json::to_value(tool).expect("progress JSON");
+        assert_eq!(tool["type"], "progress");
+        assert_eq!(tool["category"], "tool");
+        assert_eq!(tool["phase"], "started");
+        assert_eq!(tool["elapsed_ms"], 412);
+
+        let reviewer = progress_stream_line(
+            &StreamEvent::MultiModelStage {
+                stage: "reviewer".into(),
+                phase: "started".into(),
+                status: None,
+                detail: "reviewing candidate findings".into(),
+                candidate_id: None,
+            },
+            913,
+        )
+        .expect("reviewer progress");
+        let reviewer = serde_json::to_value(reviewer).expect("progress JSON");
+        assert_eq!(reviewer["category"], "multi_model");
+        assert_eq!(reviewer["stage"], "reviewer");
+        assert_eq!(reviewer["elapsed_ms"], 913);
     }
 
     #[test]

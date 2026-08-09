@@ -3939,11 +3939,10 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                     // Multi-model reviewer path (opt-in). It runs the same seam
                     // with a reviewer stage; any unavailability falls through to
                     // the established single-model multi-stage path below. Stage
-                    // events are buffered (the pipeline's callback must be Send)
-                    // and flushed to the collector after the pipeline returns.
+                    // events enter the normal collector from the pipeline callback
+                    // so CLI and Tauri see investigator/reviewer/synthesizer work
+                    // while it is happening, not only after the pipeline returns.
                     if let Some(runtime) = opts.multi_model.clone() {
-                        let mut stage_events: Vec<crate::multi_model::StageProgressEvent> =
-                            Vec::new();
                         let outcome = {
                             let inputs = crate::multi_model::ReviewPipelineInputs {
                                 user_text,
@@ -3961,19 +3960,16 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                 synthesizer: backend,
                             };
                             crate::multi_model::run_review_pipeline(&backends, inputs, &mut |ev| {
-                                stage_events.push(ev)
+                                out.push(StreamEvent::MultiModelStage {
+                                    stage: ev.role.as_str().to_string(),
+                                    phase: if ev.started { "started" } else { "finished" }.into(),
+                                    status: ev.outcome.map(|o| o.as_str().to_string()),
+                                    detail: ev.detail,
+                                    candidate_id: ev.candidate_id,
+                                });
                             })
                             .await?
                         };
-                        for ev in stage_events {
-                            out.push(StreamEvent::MultiModelStage {
-                                stage: ev.role.as_str().to_string(),
-                                phase: if ev.started { "started" } else { "finished" }.into(),
-                                status: ev.outcome.map(|o| o.as_str().to_string()),
-                                detail: ev.detail,
-                                candidate_id: ev.candidate_id,
-                            });
-                        }
                         use crate::multi_model::MultiModelOutcome as MmO;
                         match outcome {
                             MmO::Completed {
@@ -10312,6 +10308,59 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         }
     }
 
+    /// Accept every opaque candidate prompt without depending on fixture
+    /// vocabulary. Used only to advance the integrated review path to its
+    /// reviewer stage while that distinct reviewer remains pending.
+    struct DynamicCandidateFindingBackend;
+
+    #[async_trait]
+    impl ChatBackend for DynamicCandidateFindingBackend {
+        async fn complete(
+            &self,
+            messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> CoreResult<ChatCompletion> {
+            let prompt = messages
+                .last()
+                .map(|message| message.content.as_str())
+                .unwrap_or_default();
+            let candidate_id = prompt
+                .lines()
+                .find_map(|line| line.strip_prefix("candidate_id: "))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| CoreError::Message("candidate id missing from prompt".into()))?;
+            let evidence_prefix = format!("e:{candidate_id}:");
+            let evidence_start = prompt
+                .find(&evidence_prefix)
+                .ok_or_else(|| CoreError::Message("candidate evidence id missing".into()))?;
+            let evidence_id = prompt
+                .get(evidence_start..)
+                .expect("str::find always returns a UTF-8 boundary")
+                .split(|character: char| {
+                    character.is_whitespace() || character == ',' || character == ']'
+                })
+                .next()
+                .unwrap_or_default()
+                .trim_matches(|character| character == '"' || character == '`');
+            Ok(ChatCompletion {
+                content: serde_json::json!({
+                    "schema": crate::multi_model::CANDIDATE_FINDING_SCHEMA_V1,
+                    "candidate_id": candidate_id,
+                    "observations": [{
+                        "claim_id": format!("claim-{candidate_id}"),
+                        "text": "opaque observation",
+                        "evidence_ids": [evidence_id],
+                    }],
+                })
+                .to_string(),
+                tool_calls: Vec::new(),
+                finish_reason: "stop".into(),
+                telemetry: Default::default(),
+            })
+        }
+    }
+
     struct RejectLinkedToolsBackend;
 
     #[async_trait]
@@ -10682,6 +10731,60 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             }),
             "{events:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn reviewer_stage_reaches_the_live_sink_before_the_pipeline_returns() {
+        let (dir, mut host, context) = linked_multi_candidate_fixture();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            let _keep_fixture_alive = dir;
+            let mut history = Vec::new();
+            let mut sink = move |event| {
+                let _ = tx.send(event);
+            };
+            run_agent_turn_with_sink_and_checkpoint(
+                &DynamicCandidateFindingBackend,
+                &mut host,
+                "What problems do you see in these logs?",
+                &mut history,
+                &AgentOptions {
+                    session_id: "live-review-progress".into(),
+                    log_explorer_context: Some(context),
+                    multi_model: Some(review_runtime(std::sync::Arc::new(NeverCompletesBackend))),
+                    max_rounds: 2,
+                    ..Default::default()
+                },
+                Some(&mut sink),
+                None,
+            )
+            .await
+        });
+
+        let reviewer_started = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(event) = rx.recv().await {
+                if matches!(
+                    event,
+                    StreamEvent::MultiModelStage {
+                        ref stage,
+                        ref phase,
+                        ..
+                    } if stage == "reviewer" && phase == "started"
+                ) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .expect("reviewer progress must be observable while its provider call is pending");
+        assert!(reviewer_started);
+        assert!(
+            !task.is_finished(),
+            "the reviewer start event must arrive before the pending pipeline returns"
+        );
+        task.abort();
+        let _ = task.await;
     }
 
     #[test]

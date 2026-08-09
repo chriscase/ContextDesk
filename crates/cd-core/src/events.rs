@@ -4,6 +4,204 @@ use serde::{Deserialize, Serialize};
 
 use crate::router::AgentPhase;
 
+/// One human-readable projection of a turn lifecycle event.
+///
+/// This is presentation metadata, not evidence and not a second execution
+/// stream. Hosts derive it from the exact [`StreamEvent`] they are already
+/// forwarding, adding only their measured turn-relative clock. Keeping this
+/// projection in core prevents CLI and desktop labels from drifting while the
+/// underlying event remains the authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnProgress {
+    /// Broad activity family (`turn`, `phase`, `tool`, or `multi_model`).
+    pub category: String,
+    /// Stable engine stage/tool/role identifier.
+    pub stage: String,
+    /// Stable lifecycle value within the stage.
+    pub phase: String,
+    /// Concise host-authored label for normal human progress UI.
+    pub label: String,
+    /// Optional bounded diagnostics already present on the source event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Optional host-authored outcome (`succeeded`, `failed`, or a
+    /// multi-model stage status).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Owning candidate for a per-candidate investigation stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<String>,
+    /// Wall-clock milliseconds observed since the host admitted the turn.
+    pub elapsed_ms: u64,
+}
+
+fn agent_phase_id(phase: AgentPhase) -> &'static str {
+    match phase {
+        AgentPhase::ChoosingEvidence => "choosing_evidence",
+        AgentPhase::RetrievingEvidence => "retrieving_evidence",
+        AgentPhase::SynthesizingAnswer => "synthesizing_answer",
+    }
+}
+
+fn agent_phase_label(phase: AgentPhase) -> &'static str {
+    match phase {
+        AgentPhase::ChoosingEvidence => "Choosing bounded evidence",
+        AgentPhase::RetrievingEvidence => "Retrieving bounded evidence",
+        AgentPhase::SynthesizingAnswer => "Synthesizing the answer",
+    }
+}
+
+fn multi_model_label(stage: &str, phase: &str) -> String {
+    let action = match (stage, phase) {
+        ("investigator", "started") => "Investigating candidate",
+        ("investigator", "finished") => "Candidate investigation finished",
+        ("reviewer", "started") => "Reviewing candidate findings",
+        ("reviewer", "finished") => "Review finished",
+        ("synthesizer", "started") => "Synthesizing the reviewed answer",
+        ("synthesizer", "finished") => "Reviewed synthesis finished",
+        ("summary", _) => "Multi-model review summary",
+        (_, "started") => "Starting model stage",
+        (_, "finished") => "Model stage finished",
+        _ => "Multi-model activity",
+    };
+    action.to_string()
+}
+
+fn bounded_progress_label(raw: &str) -> String {
+    crate::redact::scrub_secrets(raw)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(240)
+        .collect()
+}
+
+fn bounded_progress_detail(raw: &str) -> Option<String> {
+    let scrubbed = crate::redact::scrub_secrets(raw);
+    let mut detail = scrubbed
+        .chars()
+        .filter(|character| !character.is_control() || *character == '\n' || *character == '\t')
+        .take(4_096)
+        .collect::<String>();
+    if scrubbed.chars().count() > 4_096 {
+        detail.push('…');
+    }
+    (!detail.trim().is_empty()).then_some(detail)
+}
+
+/// Project one engine event into the shared human-progress vocabulary.
+///
+/// `elapsed_ms` is deliberately supplied by the host: [`StreamEvent`] remains
+/// replayable and free of wall-clock assumptions, while CLI JSONL and desktop
+/// IPC can expose equivalent measured progress from the same event.
+pub fn progress_for_stream_event(event: &StreamEvent, elapsed_ms: u64) -> Option<TurnProgress> {
+    let progress = match event {
+        StreamEvent::TurnStarted { .. } => TurnProgress {
+            category: "turn".into(),
+            stage: "turn".into(),
+            phase: "started".into(),
+            label: "Assembling context".into(),
+            detail: None,
+            status: None,
+            candidate_id: None,
+            elapsed_ms,
+        },
+        StreamEvent::TurnPhase { phase } => TurnProgress {
+            category: "phase".into(),
+            stage: agent_phase_id(*phase).into(),
+            phase: "started".into(),
+            label: agent_phase_label(*phase).into(),
+            detail: None,
+            status: None,
+            candidate_id: None,
+            elapsed_ms,
+        },
+        StreamEvent::Tool {
+            name,
+            phase,
+            summary,
+            detail,
+            ok,
+            ..
+        } => {
+            let (phase, prefix) = match phase {
+                ToolPhase::Started => ("started", "Running"),
+                ToolPhase::Finished => ("finished", "Finished"),
+            };
+            let subject = if summary.trim().is_empty() {
+                name.as_str()
+            } else {
+                summary.as_str()
+            };
+            TurnProgress {
+                category: "tool".into(),
+                stage: name.clone(),
+                phase: phase.into(),
+                label: bounded_progress_label(&format!("{prefix}: {subject}")),
+                detail: detail.as_deref().and_then(bounded_progress_detail),
+                status: ok.map(|ok| if ok { "succeeded" } else { "failed" }.into()),
+                candidate_id: None,
+                elapsed_ms,
+            }
+        }
+        StreamEvent::LinkedSynthesisRetry {
+            available: true, ..
+        } => TurnProgress {
+            category: "turn".into(),
+            stage: "linked_synthesis_retry".into(),
+            phase: "available".into(),
+            label: "Bounded evidence is ready for synthesis retry".into(),
+            detail: None,
+            status: None,
+            candidate_id: None,
+            elapsed_ms,
+        },
+        StreamEvent::LinkedSynthesisRetry {
+            available: false, ..
+        } => TurnProgress {
+            category: "turn".into(),
+            stage: "linked_synthesis_retry".into(),
+            phase: "unavailable".into(),
+            label: "Synthesis retry is unavailable".into(),
+            detail: None,
+            status: None,
+            candidate_id: None,
+            elapsed_ms,
+        },
+        StreamEvent::MultiModelStage {
+            stage,
+            phase,
+            status,
+            detail,
+            candidate_id,
+        } => TurnProgress {
+            category: "multi_model".into(),
+            stage: stage.clone(),
+            phase: phase.clone(),
+            // Candidate ids can be opaque and noisy. Keep them in the
+            // structured expandable diagnostics, never in the default label.
+            label: bounded_progress_label(&multi_model_label(stage, phase)),
+            detail: bounded_progress_detail(detail),
+            status: status.clone(),
+            candidate_id: candidate_id.clone(),
+            elapsed_ms,
+        },
+        StreamEvent::TurnCompleted { reason } => TurnProgress {
+            category: "turn".into(),
+            stage: "turn".into(),
+            phase: "completed".into(),
+            label: "Saving session".into(),
+            detail: None,
+            status: Some(reason.clone()),
+            candidate_id: None,
+            elapsed_ms,
+        },
+        _ => return None,
+    };
+    Some(progress)
+}
+
 /// Phase of a tool invocation in the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -296,5 +494,71 @@ mod tests {
                 "phase": "synthesizing_answer"
             })
         );
+    }
+
+    #[test]
+    fn shared_progress_projects_phase_tool_and_reviewer_with_one_elapsed_clock() {
+        let phase = progress_for_stream_event(
+            &StreamEvent::TurnPhase {
+                phase: AgentPhase::RetrievingEvidence,
+            },
+            125,
+        )
+        .expect("phase progress");
+        assert_eq!(phase.category, "phase");
+        assert_eq!(phase.stage, "retrieving_evidence");
+        assert_eq!(phase.label, "Retrieving bounded evidence");
+        assert_eq!(phase.elapsed_ms, 125);
+
+        let tool = progress_for_stream_event(
+            &StreamEvent::Tool {
+                id: "tool-1".into(),
+                name: "broad_log_triage".into(),
+                phase: ToolPhase::Started,
+                summary: "Preparing bounded triage brief".into(),
+                detail: Some("17 identities".into()),
+                ok: None,
+            },
+            250,
+        )
+        .expect("tool-start progress");
+        assert_eq!(tool.phase, "started");
+        assert_eq!(tool.label, "Running: Preparing bounded triage brief");
+        assert_eq!(tool.detail.as_deref(), Some("17 identities"));
+
+        let reviewer = progress_for_stream_event(
+            &StreamEvent::MultiModelStage {
+                stage: "reviewer".into(),
+                phase: "started".into(),
+                status: None,
+                detail: "reviewing 3 candidate findings".into(),
+                candidate_id: None,
+            },
+            375,
+        )
+        .expect("reviewer progress");
+        assert_eq!(reviewer.category, "multi_model");
+        assert_eq!(reviewer.label, "Reviewing candidate findings");
+        assert_eq!(reviewer.elapsed_ms, 375);
+
+        let unsafe_detail = format!(
+            "authorization=Bearer test-token-value {}",
+            "x".repeat(5_000)
+        );
+        let bounded = progress_for_stream_event(
+            &StreamEvent::MultiModelStage {
+                stage: "reviewer".into(),
+                phase: "finished".into(),
+                status: Some("completed".into()),
+                detail: unsafe_detail,
+                candidate_id: Some("opaque-candidate".into()),
+            },
+            500,
+        )
+        .expect("bounded reviewer progress")
+        .detail
+        .expect("non-empty diagnostics");
+        assert!(!bounded.contains("test-token-value"), "{bounded}");
+        assert!(bounded.chars().count() <= 4_097);
     }
 }

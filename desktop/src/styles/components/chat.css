@@ -31,6 +31,88 @@
   color: var(--text-muted);
 }
 
+.turn-progress {
+  margin: var(--space-2) 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--overlay-faint);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.turn-progress > summary,
+.turn-progress__diagnostics > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.turn-progress__list {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.turn-progress__event {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 4px 8px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border-soft);
+}
+
+.turn-progress__event[data-active="true"] {
+  border-left-color: var(--accent);
+}
+
+.turn-progress__elapsed {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.turn-progress__label {
+  color: var(--text);
+}
+
+.turn-progress__diagnostics {
+  grid-column: 2;
+}
+
+.turn-progress__diagnostics dl {
+  display: grid;
+  gap: 2px;
+  margin: 6px 0;
+}
+
+.turn-progress__diagnostics dl > div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.turn-progress__diagnostics dt {
+  color: var(--text-faint);
+}
+
+.turn-progress__diagnostics dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.turn-progress__diagnostics pre {
+  max-height: 12rem;
+  margin: 6px 0 0;
+  padding: 6px;
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  white-space: pre-wrap;
+}
+
 .msg__meta {
   margin-top: 4px;
   padding: 0 2px;

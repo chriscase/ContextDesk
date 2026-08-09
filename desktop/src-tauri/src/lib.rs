@@ -4053,6 +4053,21 @@ fn event_to_dto_with_linked_corpus(
     dto
 }
 
+/// Add the host-measured turn clock to core's shared human-progress
+/// projection. The source `StreamEvent` is still sent separately and remains
+/// authoritative; this DTO is presentation metadata only.
+fn progress_dto_for_event(
+    event: &cd_core::events::StreamEvent,
+    turn_started_at: tokio::time::Instant,
+) -> Option<EventDto> {
+    let elapsed_ms = u64::try_from(turn_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let progress = cd_core::events::progress_for_stream_event(event, elapsed_ms)?;
+    Some(EventDto {
+        kind: "turn_progress".into(),
+        payload: serde_json::to_value(progress).ok()?,
+    })
+}
+
 struct AdmittedAgentTurn<'a> {
     owners: &'a Mutex<HashMap<String, u64>>,
     cancels: &'a Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
@@ -5044,6 +5059,9 @@ async fn agent_turn(
                 },
             ] {
                 let _ = on_event.send(cd_core::research::event_to_dto(&event));
+                if let Some(progress) = progress_dto_for_event(&event, turn_started_at) {
+                    let _ = on_event.send(progress);
+                }
             }
             turn_prelude_emitted = true;
             let app = window.app_handle().clone();
@@ -5138,6 +5156,9 @@ async fn agent_turn(
         }
         let dto = event_to_dto_with_linked_corpus(&ev, linked_citation_corpus.as_deref());
         let _ = channel.send(dto);
+        if let Some(progress) = progress_dto_for_event(&ev, turn_started_at) {
+            let _ = channel.send(progress);
+        }
     };
 
     // #114: host was taken out of the mutex before this awaitable turn.

@@ -97,6 +97,7 @@ import { ToolCallList } from "../ToolCallList";
 import { ActivityCompactLine } from "../activity/ActivityCompactLine";
 import { ActivityDrawer } from "../activity/ActivityDrawer";
 import { ActivityToggle } from "../activity/ActivityToggle";
+import { TurnProgressTimeline } from "../TurnProgressTimeline";
 
 export function hasHostLinkedSynthesisRetry(
   events: EventDto[],
@@ -355,6 +356,7 @@ export function LinkedChatBubble({
     message.streaming,
     message.tools,
     message.citations,
+    message.turnProgress,
     activityTurn,
     onHeightChange,
   ]);
@@ -389,6 +391,14 @@ export function LinkedChatBubble({
       </div>
       {message.tools && message.tools.length > 0 ? (
         <ToolCallList tools={message.tools} collapseAfter={4} />
+      ) : null}
+      {message.role === "assistant" &&
+      message.turnProgress &&
+      message.turnProgress.length > 0 ? (
+        <TurnProgressTimeline
+          events={message.turnProgress}
+          live={showStreamingBadge}
+        />
       ) : null}
       {message.citations && message.citations.length > 0 ? (
         <SourceCitations
@@ -1389,6 +1399,19 @@ export function LinkedChatRail({
               }));
             }
           }
+          if (ev.kind === "turn_progress") {
+            const label = String(ev.payload.label ?? "").trim();
+            if (label) {
+              setHostPhaseByChat((current) => ({
+                ...current,
+                [sessionId!]: `${label}…`,
+              }));
+              setStatusByChat((current) => ({
+                ...current,
+                [sessionId!]: `${label}…`,
+              }));
+            }
+          }
           if (
             ev.kind === "linked_synthesis_retry" &&
             ev.payload.session_id === sessionId &&
@@ -1442,16 +1465,21 @@ export function LinkedChatRail({
         (message) =>
           message.id === assistantId && message.role === "assistant",
       );
+      const folded = applyEventsToMessage(
+        { id: assistantId, role: "assistant", content: "", streaming: false },
+        events,
+      ).msg;
       let assistant: ChatMsg;
       let saved: ChatSessionDto;
       if (hostPersistedAssistant) {
-        assistant = { ...hostPersistedAssistant, streaming: false };
+        assistant = {
+          ...hostPersistedAssistant,
+          streaming: false,
+          multiModelStages: folded.multiModelStages,
+          turnProgress: folded.turnProgress,
+        };
         saved = full;
       } else {
-        const folded = applyEventsToMessage(
-          { id: assistantId, role: "assistant", content: "", streaming: false },
-          events,
-        ).msg;
         assistant = {
           ...folded,
           streaming: false,
@@ -1480,7 +1508,17 @@ export function LinkedChatRail({
       }
       if (activeChatIdRef.current === sessionId) {
         const persisted = sessionFromDto(saved);
-        setMessages(mapSessionMessages(persisted));
+        setMessages(
+          mapSessionMessages(persisted).map((message) =>
+            message.id === assistantId
+              ? {
+                  ...message,
+                  multiModelStages: assistant.multiModelStages,
+                  turnProgress: assistant.turnProgress,
+                }
+              : message,
+          ),
+        );
       }
 
       const extracted = extractAndCleanLogNav(assistant.content);

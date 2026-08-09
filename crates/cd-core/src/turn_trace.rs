@@ -898,6 +898,19 @@ pub enum TracedHostEvent {
         /// `AgentPhase` rename).
         phase: String,
     },
+    /// Metadata-only multi-model role lifecycle. Model prose is never kept.
+    MultiModelStage {
+        /// Functional role or `summary`.
+        stage: String,
+        /// `started`, `finished`, or `summary`.
+        phase: String,
+        /// Host-authored bounded outcome when present.
+        status: Option<String>,
+        /// Opaque owning candidate id when present.
+        candidate_id: Option<String>,
+        /// Scrubbed and bounded host diagnostics.
+        detail: Option<String>,
+    },
     /// Host or provider error already scrubbed at the stream boundary.
     Error {
         /// Stable error code.
@@ -1279,6 +1292,15 @@ impl RecordingTurnTrace {
                     format!("Host phase: {phase:?}"),
                     "running",
                 )),
+                StreamEvent::MultiModelStage {
+                    stage,
+                    phase,
+                    status,
+                    ..
+                } => Some(DeveloperDetailDraft::stage(
+                    format!("Multi-model stage: {stage}"),
+                    status.clone().unwrap_or_else(|| phase.clone()),
+                )),
                 StreamEvent::PermissionRequired {
                     tool_name,
                     risk,
@@ -1426,6 +1448,20 @@ impl RecordingTurnTrace {
             },
             StreamEvent::TurnPhase { phase } => TracedHostEvent::TurnPhase {
                 phase: format!("{phase:?}"),
+            },
+            StreamEvent::MultiModelStage {
+                stage,
+                phase,
+                status,
+                candidate_id,
+                ..
+            } => TracedHostEvent::MultiModelStage {
+                stage: stage.clone(),
+                phase: phase.clone(),
+                status: status.clone(),
+                candidate_id: candidate_id.clone(),
+                detail: crate::events::progress_for_stream_event(event, 0)
+                    .and_then(|progress| progress.detail),
             },
             StreamEvent::Error { code, message } => TracedHostEvent::Error {
                 code: code.clone(),
