@@ -838,6 +838,9 @@ pub const MAX_SEARCH_PATTERN_LEN: usize = 256;
 pub const MAX_REGEX_SCAN_EVENTS: usize = 50_000;
 /// Max characters in a returned excerpt.
 pub const MAX_SEARCH_EXCERPT_LEN: usize = 160;
+/// Bounded semantic template shortlist before event-level filters and the
+/// final event budget are applied.
+const SEMANTIC_TEMPLATE_CANDIDATE_CAP: usize = 40;
 
 /// Search query for explorer (events, not just templates).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1980,7 +1983,9 @@ pub fn search_events_advanced_with_cancel(
             service: q.filter.services.first().cloned(),
             trace_id: q.filter.trace_id.clone(),
             semantic: true,
-            k: k.min(40),
+            // Template discovery must not collapse to a tiny final event
+            // budget before active event filters are applied.
+            k: SEMANTIC_TEMPLATE_CANDIDATE_CAP,
         };
         let template_hits = search_logs_with_excluded_templates(
             corpus,
@@ -1991,29 +1996,43 @@ pub fn search_events_advanced_with_cancel(
         if search_cancelled(cancel) {
             return Ok(cancelled_search_result(hits, scanned));
         }
-        let mut template_ids: Vec<u64> = template_hits.iter().map(|h| h.template_id).collect();
-        template_ids.truncate(20);
-        if !template_ids.is_empty() {
+        // Expand templates in semantic-score order and keep the total event
+        // budget at k. A single chronological IN-query truncates before the
+        // later score sort, allowing old low-score events to evict a newer
+        // high-score template entirely. Per-template bounded expansion keeps
+        // the ranking signal intact without fetching more than k events.
+        for template_hit in template_hits.iter().take(SEMANTIC_TEMPLATE_CANDIDATE_CAP) {
+            if q.filter
+                .template_id
+                .is_some_and(|template_id| template_id != template_hit.template_id)
+                || (!q.filter.template_ids.is_empty()
+                    && !q.filter.template_ids.contains(&template_hit.template_id))
+            {
+                continue;
+            }
+            if hits.len() >= k {
+                partial = true;
+                break;
+            }
             let mut fq = q.filter.clone();
-            fq.template_ids = template_ids.clone();
-            fq.limit = k;
+            fq.template_id = Some(template_hit.template_id);
+            fq.limit = k - hits.len();
             let page = query_events(corpus, &fq)?;
             if search_cancelled(cancel) {
                 return Ok(cancelled_search_result(hits, scanned));
             }
-            let score_by_tid: std::collections::HashMap<u64, f32> = template_hits
-                .iter()
-                .map(|h| (h.template_id, h.score))
-                .collect();
+            scanned = scanned.saturating_add(page.events.len() as u64);
+            if page.next_cursor.is_some() {
+                partial = true;
+            }
             for e in page.events {
                 if search_cancelled(cancel) {
                     return Ok(cancelled_search_result(hits, scanned));
                 }
-                let score = score_by_tid.get(&e.template_id).copied().unwrap_or(0.1);
                 hits.push(EventSearchHit {
-                    template_id: Some(e.template_id),
+                    template_id: Some(template_hit.template_id),
                     event: e,
-                    score,
+                    score: template_hit.score,
                     match_kind: "template_semantic".into(),
                     excerpt: None,
                 });
@@ -2981,6 +3000,123 @@ mod tests {
     use crate::log_analysis::ingest::ingest_path;
     use std::io::Write;
     use std::sync::{Arc, Barrier};
+
+    struct RankedSemanticEmbed;
+
+    #[async_trait::async_trait]
+    impl EmbedBackend for RankedSemanticEmbed {
+        async fn embed(&self, texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
+            Ok(texts
+                .iter()
+                .map(|text| {
+                    let text = text.to_ascii_lowercase();
+                    if text.contains("semantic-query") || text.contains("decisive") {
+                        vec![1.0, 0.0]
+                    } else {
+                        vec![0.2, 0.98]
+                    }
+                })
+                .collect())
+        }
+
+        fn identity(&self) -> String {
+            "ranked-semantic-embed (deterministic synthetic; tests only, not a capability)".into()
+        }
+    }
+
+    #[test]
+    fn semantic_event_expansion_preserves_template_score_before_chronology() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("events.jsonl");
+        std::fs::write(
+            &logs,
+            concat!(
+                "{\"ts\":1700000000,\"level\":\"info\",\"message\":\"early routine noise\"}\n",
+                "{\"ts\":1700000100,\"level\":\"error\",\"message\":\"later decisive signal\"}\n",
+            ),
+        )
+        .unwrap();
+        let backend = RankedSemanticEmbed;
+        let report = ingest_path(
+            dir.path(),
+            &logs,
+            "score-order",
+            Some(&backend),
+            "legacy-label",
+        )
+        .unwrap();
+        let corpus = LogCorpus::open(dir.path(), &report.corpus_id).unwrap();
+
+        let result = search_events_advanced(
+            &corpus,
+            &EventSearchQuery {
+                query: Some("semantic-query".into()),
+                semantic: true,
+                k: 1,
+                match_mode: SearchMatchMode::Literal,
+                ..Default::default()
+            },
+            Some(&backend),
+        )
+        .unwrap();
+
+        assert_eq!(result.hits.len(), 1);
+        assert!(
+            result.hits[0]
+                .event
+                .message
+                .contains("later decisive signal"),
+            "the higher-score later template must not be evicted by chronological SQL truncation"
+        );
+        assert_eq!(result.hits[0].match_kind, "template_semantic");
+
+        let routine_template = corpus
+            .list_templates()
+            .into_iter()
+            .find(|row| row.info.pattern.contains("routine"))
+            .unwrap()
+            .info
+            .template_id;
+        let template_hits = crate::log_analysis::search_logs(
+            &corpus,
+            &SearchLogsQuery {
+                query: Some("semantic-query".into()),
+                semantic: true,
+                k: SEMANTIC_TEMPLATE_CANDIDATE_CAP,
+                ..Default::default()
+            },
+            Some(&backend),
+        )
+        .unwrap();
+        assert!(
+            template_hits
+                .iter()
+                .any(|hit| hit.template_id == routine_template),
+            "bounded semantic shortlist must retain the filtered template; hits={:?}",
+            template_hits
+                .iter()
+                .map(|hit| (hit.template_id, hit.score, hit.pattern.as_str()))
+                .collect::<Vec<_>>()
+        );
+        let filtered = search_events_advanced(
+            &corpus,
+            &EventSearchQuery {
+                query: Some("semantic-query".into()),
+                filter: EventQuery {
+                    template_id: Some(routine_template),
+                    ..Default::default()
+                },
+                semantic: true,
+                k: 1,
+                match_mode: SearchMatchMode::Literal,
+                ..Default::default()
+            },
+            Some(&backend),
+        )
+        .unwrap();
+        assert_eq!(filtered.hits.len(), 1);
+        assert!(filtered.hits[0].event.message.contains("routine noise"));
+    }
 
     fn multi_source_fixture() -> (tempfile::TempDir, String) {
         let dir = tempfile::tempdir().unwrap();

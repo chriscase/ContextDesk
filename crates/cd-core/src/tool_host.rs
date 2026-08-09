@@ -10158,6 +10158,10 @@ mod tests {
                     "broad deterministic triage called semantic backend".into(),
                 ))
             }
+
+            fn identity(&self) -> String {
+                "never-semantic (deterministic synthetic; tests only, not a capability)".into()
+            }
         }
 
         let (_dir, corpus, mut host) = broad_triage_fixture(crate::log_analysis::TimeQuality::Wall);

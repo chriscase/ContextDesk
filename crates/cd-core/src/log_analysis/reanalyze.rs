@@ -66,6 +66,11 @@ fn rollback_pair(
 }
 
 /// Rebuild local template vectors without reparsing or rewriting events.
+///
+/// The persisted embedding binding (`model_id` + `embedded_dims` in the corpus
+/// status) records the identity of `backend` and the dimensions it actually
+/// produced. The `model_id` parameter is a legacy display label retained for
+/// API compatibility; it no longer overrides the stored binding.
 pub fn reanalyze_corpus_embeddings(
     cache_root: &Path,
     corpus_id: &str,
@@ -96,7 +101,9 @@ fn reanalyze_corpus_embeddings_inner(
     cache_root: &Path,
     corpus_id: &str,
     backend: &dyn EmbedBackend,
-    model_id: &str,
+    // Legacy caller label; the persisted binding records `backend.identity()`
+    // so the query-time gate compares like against like.
+    _model_id: &str,
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
     fault: ReanalysisFaultHook<'_>,
@@ -193,7 +200,10 @@ fn reanalyze_corpus_embeddings_inner(
         } else {
             EmbeddingState::KeywordOnly
         },
-        model_id: (embedded > 0).then(|| model_id.trim().to_string()),
+        // The binding identity comes from the backend that actually produced
+        // the vectors; the caller's `model_id` label cannot overwrite it.
+        model_id: (embedded > 0).then(|| backend.identity()),
+        embedded_dims: expected_dims.map(|dims| dims as u32),
         embedded_templates: embedded as u64,
         total_templates: total as u64,
         reason: Some(
@@ -321,6 +331,10 @@ mod tests {
         async fn embed(&self, _texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
             Err(CoreError::Message("injected embed failure".into()))
         }
+
+        fn identity(&self) -> String {
+            "failing-embed (deterministic synthetic; tests only, not a capability)".into()
+        }
     }
 
     struct CancellingBackend {
@@ -334,6 +348,10 @@ mod tests {
             let vectors = self.inner.embed(texts).await?;
             self.cancel.cancel();
             Ok(vectors)
+        }
+
+        fn identity(&self) -> String {
+            self.inner.identity()
         }
     }
 
@@ -366,7 +384,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(status.state, EmbeddingState::Complete);
-        assert_eq!(status.model_id.as_deref(), Some("concept-local"));
+        // The binding records the producing backend's identity, not the
+        // caller's legacy label, plus the dimensions it actually produced.
+        assert_eq!(
+            status.model_id.as_deref(),
+            Some(ConceptEmbedBackend::new(32).identity().as_str())
+        );
+        assert_eq!(status.embedded_dims, Some(32));
 
         let reopened = LogCorpus::open(dir.path(), &id).unwrap();
         assert_eq!(reopened.event_count(), event_count);

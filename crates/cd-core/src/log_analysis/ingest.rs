@@ -3269,8 +3269,13 @@ fn ingest_path_into_cache(
     let deferred = embed_mode == LogEmbedMode::Local
         && defer_above_source_bytes.is_some_and(|limit| stats.source_bytes > limit);
     let mut embedded = 0usize;
+    // Binding facts recorded from the backend that actually produced vectors,
+    // never from a caller-supplied label.
+    let mut embed_identity: Option<String> = None;
+    let mut embedded_dims_written: Option<u32> = None;
     if let Some(backend) = embed.filter(|_| !deferred) {
         check_ingest_fault(fault, IngestCheckpoint::DuringEmbedding)?;
+        embed_identity = Some(backend.identity());
         let mut templates = corpus.list_templates();
         templates.sort_by_key(|r| std::cmp::Reverse(r.info.count));
         let cap = BULK_EMBED_TEMPLATE_CAP.min(templates.len());
@@ -3304,11 +3309,33 @@ fn ingest_path_into_cache(
             }
             time_op_result_ms(ops, IngestOp::Embed, || -> CoreResult<()> {
                 if let Some(v) = hash_cache.get(&row.content_hash) {
+                    let dims = u32::try_from(v.len()).map_err(|_| {
+                        CoreError::Message(
+                            "template embedding dimensions exceed the supported range".into(),
+                        )
+                    })?;
+                    if dims == 0 || embedded_dims_written.is_some_and(|expected| expected != dims) {
+                        return Err(CoreError::Message(
+                            "template embedding returned empty or inconsistent dimensions".into(),
+                        ));
+                    }
+                    embedded_dims_written.get_or_insert(dims);
                     corpus.set_template_vector(row.info.template_id, v.clone())?;
                     embedded += 1;
                     return Ok(());
                 }
                 if let Some(v) = embed_blocking(backend, &row.info.pattern, 5_000) {
+                    let dims = u32::try_from(v.len()).map_err(|_| {
+                        CoreError::Message(
+                            "template embedding dimensions exceed the supported range".into(),
+                        )
+                    })?;
+                    if dims == 0 || embedded_dims_written.is_some_and(|expected| expected != dims) {
+                        return Err(CoreError::Message(
+                            "template embedding returned empty or inconsistent dimensions".into(),
+                        ));
+                    }
+                    embedded_dims_written.get_or_insert(dims);
                     hash_cache.insert(row.content_hash.clone(), v.clone());
                     corpus.set_template_vector(row.info.template_id, v)?;
                     embedded += 1;
@@ -3347,7 +3374,17 @@ fn ingest_path_into_cache(
         } else {
             EmbeddingState::KeywordOnly
         },
-        model_id: (embedded > 0 || deferred).then(|| embed_model.to_string()),
+        // When vectors were actually written, the binding identity is the
+        // producing backend's own identity; the caller label survives only for
+        // the deferred (no-vector) intent record.
+        model_id: if embedded > 0 {
+            embed_identity
+        } else if deferred {
+            Some(embed_model.to_string())
+        } else {
+            None
+        },
+        embedded_dims: embedded_dims_written,
         embedded_templates: embedded as u64,
         total_templates: stats.templates as u64,
         reason: Some(
@@ -7526,8 +7563,9 @@ mod tests {
         assert_eq!(embedded.embedding.state, EmbeddingState::Complete);
         assert_eq!(
             embedded.embedding.model_id.as_deref(),
-            Some("concept-local")
+            Some(backend.identity().as_str())
         );
+        assert_eq!(embedded.embedding.embedded_dims, Some(32));
 
         let mut bulk = ordinary;
         bulk.defer_above_source_bytes = Some(1);

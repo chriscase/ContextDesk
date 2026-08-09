@@ -93,6 +93,13 @@ pub struct RetrievalCorpusStatus {
     /// Templates carrying vectors; zero keeps semantic ranking off (the
     /// production honesty gate).
     pub embedded_templates: u64,
+    /// Backend-known identity bound to the stored vectors, when valid.
+    pub embedding_model: Option<String>,
+    /// Single measured dimension count across all stored vectors, when valid.
+    pub embedding_dimensions: Option<u32>,
+    /// Whether the corpus has a complete model+dimension binding suitable for
+    /// query-time compatibility checks.
+    pub semantic_binding_usable: bool,
     /// Current event revision of the corpus.
     pub event_revision: u64,
 }
@@ -154,8 +161,11 @@ pub fn build_rerank_backend(
     )?))
 }
 
-fn embedding_role_status(role: Option<&RetrievalRoleModel>, probe: bool) -> RetrievalRoleStatus {
-    match role {
+fn embedding_role_status(
+    role: Option<&RetrievalRoleModel>,
+    probe: bool,
+) -> (RetrievalRoleStatus, Option<u32>) {
+    let status = match role {
         None => RetrievalRoleStatus {
             role: "embedding".into(),
             state: RetrievalRoleState::Unconfigured,
@@ -172,18 +182,22 @@ fn embedding_role_status(role: Option<&RetrievalRoleModel>, probe: bool) -> Retr
         },
         Some(role) => {
             if !probe {
-                return RetrievalRoleStatus {
-                    role: "embedding".into(),
-                    state: RetrievalRoleState::ConfiguredUnverified,
-                    model: Some(role.model.clone()),
-                    endpoint_fingerprint: Some(role_fingerprint(role)),
-                    detail: "enabled; not probed in this report (pass --probe)".into(),
-                };
+                return (
+                    RetrievalRoleStatus {
+                        role: "embedding".into(),
+                        state: RetrievalRoleState::ConfiguredUnverified,
+                        model: Some(role.model.clone()),
+                        endpoint_fingerprint: Some(role_fingerprint(role)),
+                        detail: "enabled; not probed in this report (pass --probe)".into(),
+                    },
+                    None,
+                );
             }
-            let (state, detail) = match build_embedding_backend(role) {
+            let (state, detail, probed_dims) = match build_embedding_backend(role) {
                 Err(_) => (
                     RetrievalRoleState::Unavailable,
                     "backend construction failed; check the configured endpoint".into(),
+                    None,
                 ),
                 Ok(backend) => {
                     match embed_blocking(
@@ -194,27 +208,34 @@ fn embedding_role_status(role: Option<&RetrievalRoleModel>, probe: bool) -> Retr
                         None => (
                             RetrievalRoleState::Unavailable,
                             "probe failed or timed out; baseline remains usable".into(),
+                            None,
                         ),
                         Some(vector) if vector.is_empty() => (
                             RetrievalRoleState::Incompatible,
                             "endpoint answered but returned an empty vector".into(),
+                            Some(0),
                         ),
                         Some(vector) => (
                             RetrievalRoleState::Healthy,
                             format!("probe ok ({} dimensions)", vector.len()),
+                            u32::try_from(vector.len()).ok(),
                         ),
                     }
                 }
             };
-            RetrievalRoleStatus {
-                role: "embedding".into(),
-                state,
-                model: Some(role.model.clone()),
-                endpoint_fingerprint: Some(role_fingerprint(role)),
-                detail,
-            }
+            return (
+                RetrievalRoleStatus {
+                    role: "embedding".into(),
+                    state,
+                    model: Some(role.model.clone()),
+                    endpoint_fingerprint: Some(role_fingerprint(role)),
+                    detail,
+                },
+                probed_dims,
+            );
         }
-    }
+    };
+    (status, None)
 }
 
 fn reranker_role_status(
@@ -295,8 +316,46 @@ pub fn retrieval_status(
     options: &RetrievalStatusOptions,
     secrets: Option<&dyn SecretStore>,
 ) -> CoreResult<RetrievalStatusReport> {
+    let corpus_embedding = match &options.corpus_id {
+        None => None,
+        Some(corpus_id) => {
+            let corpus = LogCorpus::open(cache_root, corpus_id)?;
+            Some((corpus, corpus_id.clone()))
+        }
+    };
+    let (mut embedding_role, probed_embedding_dims) =
+        embedding_role_status(config.retrieval.embedding.as_ref(), options.probe);
+    if let (Some(role), Some((corpus, _))) = (
+        config
+            .retrieval
+            .embedding
+            .as_ref()
+            .filter(|role| role.enabled),
+        corpus_embedding.as_ref(),
+    ) {
+        let binding = corpus.embedding_status();
+        if binding.embedded_templates > 0 {
+            let incompatibility = if binding.model_id.as_deref() != Some(role.model.as_str()) {
+                Some("configured embedding model does not match the corpus vector model")
+            } else if binding.embedded_dims.is_none_or(|dims| dims == 0) {
+                Some("corpus vectors have no single valid dimension binding")
+            } else if probed_embedding_dims.is_some()
+                && probed_embedding_dims != binding.embedded_dims
+            {
+                Some("the probed embedding dimensions do not match the corpus vectors")
+            } else {
+                None
+            };
+            if let Some(detail) = incompatibility {
+                embedding_role.state = RetrievalRoleState::Incompatible;
+                embedding_role.detail = format!(
+                    "{detail}; semantic retrieval will stay off until the corpus is re-analyzed"
+                );
+            }
+        }
+    }
     let roles = vec![
-        embedding_role_status(config.retrieval.embedding.as_ref(), options.probe),
+        embedding_role,
         reranker_role_status(config.retrieval.reranker.as_ref(), options.probe, secrets),
     ];
     let mode_configured = match (
@@ -309,17 +368,19 @@ pub fn retrieval_status(
         // configuration intent is still the baseline mode.
         (false, _) => "structured_keyword",
     };
-    let corpus = match &options.corpus_id {
-        None => None,
-        Some(corpus_id) => {
-            let corpus = LogCorpus::open(cache_root, corpus_id)?;
-            Some(RetrievalCorpusStatus {
-                corpus_id: corpus_id.clone(),
-                embedded_templates: corpus.embedding_status().embedded_templates,
-                event_revision: corpus.revision(),
-            })
+    let corpus = corpus_embedding.map(|(corpus, corpus_id)| {
+        let binding = corpus.embedding_status();
+        RetrievalCorpusStatus {
+            corpus_id,
+            embedded_templates: binding.embedded_templates,
+            embedding_model: binding.model_id.clone(),
+            embedding_dimensions: binding.embedded_dims,
+            semantic_binding_usable: binding.embedded_templates > 0
+                && binding.model_id.is_some()
+                && binding.embedded_dims.is_some_and(|dims| dims > 0),
+            event_revision: corpus.revision(),
         }
-    };
+    });
     Ok(RetrievalStatusReport {
         schema_id: RETRIEVAL_STATUS_SCHEMA_ID.into(),
         schema_version: RETRIEVAL_STATUS_SCHEMA_VERSION,
@@ -388,16 +449,10 @@ pub fn hybrid_search(
             detail: "reranker backend construction failed; pre-rerank order remains usable".into(),
         });
     }
-    if let (Some(role), Some(_)) = (
-        config.retrieval.embedding.as_ref().filter(|r| r.enabled),
-        embed.as_ref(),
-    ) {
-        if outcome.telemetry.embedding_model.is_none()
-            && outcome.telemetry.embedding_calls.unwrap_or(0) > 0
-        {
-            outcome.telemetry.embedding_model = Some(role.model.clone());
-        }
-    }
+    // `telemetry.embedding_model` is set by the engine from the identity of
+    // the backend that actually executed the semantic lane. Backfilling it
+    // here from configuration would claim a model for lanes that degraded
+    // before contributing, so no backfill happens.
     Ok(outcome)
 }
 
@@ -443,5 +498,57 @@ mod tests {
             .roles
             .iter()
             .all(|role| role.state == RetrievalRoleState::Unconfigured));
+    }
+
+    #[test]
+    fn status_marks_a_configured_model_incompatible_with_corpus_vectors() {
+        let cache = tempfile::tempdir().unwrap();
+        let logs = cache.path().join("events.log");
+        std::fs::write(&logs, "level=error msg=connection refused\n").unwrap();
+        let backend: Arc<dyn EmbedBackend> = Arc::new(cd_core::embed::ConceptEmbedBackend::new(32));
+        let policy = cd_core::log_analysis::LogEmbedPolicy {
+            mode: cd_core::log_analysis::LogEmbedMode::Local,
+            cloud_content_leaves_machine: false,
+            cloud_base_url: None,
+            model_id: "legacy-display-label".into(),
+            defer_above_source_bytes: None,
+        };
+        let ingest = cd_core::log_analysis::ingest_path_with_policy(
+            cache.path(),
+            &logs,
+            "binding-status",
+            &policy,
+            Some(backend),
+        )
+        .unwrap();
+
+        let mut config = AppConfig::default();
+        config.retrieval.embedding = Some(RetrievalRoleModel {
+            enabled: true,
+            base_url: "http://127.0.0.1:11434".into(),
+            model: "different-vector-space".into(),
+            api_key_ref: None,
+        });
+        let report = retrieval_status(
+            cache.path(),
+            &config,
+            &RetrievalStatusOptions {
+                probe: false,
+                corpus_id: Some(ingest.corpus_id),
+            },
+            None,
+        )
+        .unwrap();
+
+        let embedding = report
+            .roles
+            .iter()
+            .find(|role| role.role == "embedding")
+            .unwrap();
+        assert_eq!(embedding.state, RetrievalRoleState::Incompatible);
+        assert!(embedding.detail.contains("does not match"));
+        let corpus = report.corpus.unwrap();
+        assert_eq!(corpus.embedding_dimensions, Some(32));
+        assert!(corpus.semantic_binding_usable);
     }
 }

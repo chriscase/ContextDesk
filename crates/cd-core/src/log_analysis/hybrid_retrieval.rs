@@ -10,8 +10,9 @@
 //!    or failure of any optional role degrades gracefully and is recorded in
 //!    `degradations`, never inflated into an error.
 //! 2. The semantic lane runs only when an [`EmbedBackend`] is supplied AND
-//!    the corpus actually holds embedded templates (the production honesty
-//!    gate); otherwise the outcome says why.
+//!    the corpus actually holds embedded templates AND the stored embedding
+//!    binding (model identity + vector dimensions) matches the query backend
+//!    (the production honesty gates); otherwise the outcome says why.
 //! 3. The rerank stage reorders only the top [`HybridOptions::rerank_top_n`]
 //!    merged candidates in ONE bounded request; pre-rerank ranks and scores
 //!    are retained in diagnostics.
@@ -27,7 +28,7 @@
 //!    (measured) and unknown values stay `None`. Similarity scores mean
 //!    retrieval relevance — never proof of causation.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -150,7 +151,8 @@ pub struct HybridTelemetry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HybridDegradation {
     /// Stable machine code: `embedding_backend_absent`,
-    /// `corpus_not_embedded`, `embedding_lane_failed`, `rerank_backend_absent`,
+    /// `corpus_not_embedded`, `embedding_model_mismatch`,
+    /// `embedding_lane_failed`, `rerank_backend_absent`,
     /// `rerank_failed_or_timed_out`.
     pub code: String,
     /// Human-readable explanation of what degraded and what still ran.
@@ -215,10 +217,16 @@ impl Default for HybridOptions {
 }
 
 /// Embedding decorator that measures real calls without changing behavior.
+/// When the corpus binding pins an expected dimension count, it also records
+/// (without altering) any returned vector whose dimensions diverge, so the
+/// caller can withhold structurally incomparable semantic results with a
+/// typed reason instead of silently scoring them as zero.
 struct CountingEmbed<'a> {
     inner: &'a dyn EmbedBackend,
     calls: AtomicU64,
     ok_calls: AtomicU64,
+    expected_dims: Option<u32>,
+    dims_mismatch: AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -226,10 +234,53 @@ impl<'a> EmbedBackend for CountingEmbed<'a> {
     async fn embed(&self, texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let result = self.inner.embed(texts).await;
-        if result.is_ok() {
+        if let Ok(vectors) = &result {
             self.ok_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(expected) = self.expected_dims {
+                if vectors.iter().any(|vector| vector.len() as u32 != expected) {
+                    self.dims_mismatch.store(true, Ordering::SeqCst);
+                }
+            }
         }
         result
+    }
+
+    fn identity(&self) -> String {
+        self.inner.identity()
+    }
+}
+
+/// Typed reason when the stored embedding binding cannot be honestly compared
+/// against the query backend; `None` means the identities match and the
+/// semantic lane may run (dimensions are then verified against the vectors the
+/// query backend actually returns).
+fn embedding_binding_mismatch(
+    status: &super::store::CorpusEmbeddingStatus,
+    query_identity: &str,
+) -> Option<String> {
+    if status.embedded_dims.is_none_or(|dims| dims == 0) {
+        return Some(
+            "stored template vectors have no single valid dimension binding; re-run template \
+             re-analysis before semantic retrieval; structured/keyword results kept"
+                .into(),
+        );
+    }
+    match status
+        .model_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        None => Some(
+            "stored template vectors carry no model identity (legacy corpus); re-run template \
+             re-analysis to bind them before semantic retrieval; structured/keyword results kept"
+                .into(),
+        ),
+        Some(stored) if stored != query_identity => Some(format!(
+            "stored template vectors were produced by `{stored}` but the query backend is \
+             `{query_identity}`; vectors from different models are not comparable; \
+             structured/keyword results kept"
+        )),
+        Some(_) => None,
     }
 }
 
@@ -379,10 +430,18 @@ pub fn hybrid_search_events(
         }),
         (Some(_), None) | (None, None) => {}
         (Some(backend), Some(question)) => {
-            if corpus.embedding_status().embedded_templates == 0 {
+            let embedding_binding = corpus.embedding_status();
+            if embedding_binding.embedded_templates == 0 {
                 degradations.push(HybridDegradation {
                     code: "corpus_not_embedded".into(),
                     detail: "corpus has no embedded templates; the production honesty gate keeps semantic ranking off".into(),
+                });
+            } else if let Some(detail) =
+                embedding_binding_mismatch(&embedding_binding, &backend.identity())
+            {
+                degradations.push(HybridDegradation {
+                    code: "embedding_model_mismatch".into(),
+                    detail,
                 });
             } else if cancelled(cancel) {
                 return Err(CoreError::Cancelled);
@@ -391,6 +450,8 @@ pub fn hybrid_search_events(
                     inner: backend,
                     calls: AtomicU64::new(0),
                     ok_calls: AtomicU64::new(0),
+                    expected_dims: embedding_binding.embedded_dims,
+                    dims_mismatch: AtomicBool::new(false),
                 };
                 let search = EventSearchQuery {
                     query: Some(question.to_string()),
@@ -418,19 +479,43 @@ pub fn hybrid_search_events(
                         // The production search degrades embedding outages
                         // internally (keyword fallback); the semantic lane
                         // only counts as EXECUTED when at least one embedding
-                        // call actually succeeded.
-                        if counting.ok_calls.load(Ordering::SeqCst) == 0 {
+                        // call actually succeeded AND every returned vector
+                        // matched the stored dimension binding. Mismatched
+                        // dimensions cosine to zero structurally, so merging
+                        // that lane would misreport a semantic mode that never
+                        // contributed a comparable signal.
+                        if counting.dims_mismatch.load(Ordering::SeqCst) {
+                            degradations.push(HybridDegradation {
+                                code: "embedding_model_mismatch".into(),
+                                detail: format!(
+                                    "query backend `{}` returned vectors whose dimensions diverge from the {} stored dimensions; semantic results withheld; structured/keyword results kept",
+                                    counting.identity(),
+                                    embedding_binding
+                                        .embedded_dims
+                                        .map(|dims| dims.to_string())
+                                        .unwrap_or_else(|| "unknown".into()),
+                                ),
+                            });
+                        } else if counting.ok_calls.load(Ordering::SeqCst) == 0 {
                             degradations.push(HybridDegradation {
                                 code: "embedding_lane_failed".into(),
                                 detail: "embedding backend produced no successful call; structured/keyword results kept".into(),
                             });
                         } else {
                             semantic_ran = true;
+                            // Backend-known identity of the lane that actually
+                            // executed — never a configuration backfill.
+                            telemetry.embedding_model = Some(counting.identity());
                         }
                         telemetry.embedding_latency_ms = Some(started.elapsed().as_millis() as u64);
                         scanned = scanned.saturating_add(result.scanned);
                         partial |= result.partial;
-                        for (index, hit) in result.hits.into_iter().enumerate() {
+                        let mergeable_hits = if semantic_ran {
+                            result.hits
+                        } else {
+                            Vec::new()
+                        };
+                        for (index, hit) in mergeable_hits.into_iter().enumerate() {
                             let lane_rank = index as u64 + 1;
                             let origin = HybridOrigin::Semantic { score: hit.score };
                             merged
@@ -602,6 +687,29 @@ mod tests {
         async fn embed(&self, _texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
             Err(CoreError::Message("synthetic embedding outage".into()))
         }
+
+        fn identity(&self) -> String {
+            // Matches the concept-embedded fixtures' stored binding so the
+            // outage test exercises the lane-failure path, not the identity
+            // gate in front of it.
+            ConceptEmbedBackend::default().identity()
+        }
+    }
+
+    struct DifferentIdentityEmbed {
+        calls: std::sync::atomic::AtomicU64,
+    }
+
+    #[async_trait::async_trait]
+    impl EmbedBackend for DifferentIdentityEmbed {
+        async fn embed(&self, texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(texts.iter().map(|_| vec![1.0; 64]).collect())
+        }
+
+        fn identity(&self) -> String {
+            "different-vector-space (deterministic synthetic; tests only)".into()
+        }
     }
 
     struct StallingRerank;
@@ -731,6 +839,55 @@ mod tests {
             .degradations
             .iter()
             .any(|d| d.code == "embedding_lane_failed"));
+    }
+
+    #[test]
+    fn semantic_binding_mismatches_fail_closed_without_model_credit() {
+        let (cache, corpus_id) = fixture(true);
+        let corpus = LogCorpus::open(cache.path(), &corpus_id).expect("open");
+        let opts = options(&["alpha-token"], Some("storage saturation free space"));
+
+        let different = DifferentIdentityEmbed {
+            calls: std::sync::atomic::AtomicU64::new(0),
+        };
+        let identity_mismatch =
+            hybrid_search_events(&corpus, &opts, Some(&different), None, None).unwrap();
+        assert_eq!(
+            identity_mismatch.mode_used,
+            HybridModeUsed::StructuredKeyword
+        );
+        assert_eq!(
+            different.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "known identity mismatches must be rejected before model work"
+        );
+        assert!(identity_mismatch
+            .degradations
+            .iter()
+            .any(|d| d.code == "embedding_model_mismatch"));
+        assert!(identity_mismatch.telemetry.embedding_model.is_none());
+
+        // Concept identities deliberately do not encode dimensions, so this
+        // reaches the measured query-vector dimension gate.
+        let wrong_dims = ConceptEmbedBackend::new(32);
+        let dimension_mismatch =
+            hybrid_search_events(&corpus, &opts, Some(&wrong_dims), None, None).unwrap();
+        assert_eq!(
+            dimension_mismatch.mode_used,
+            HybridModeUsed::StructuredKeyword
+        );
+        assert!(dimension_mismatch
+            .degradations
+            .iter()
+            .any(|d| d.code == "embedding_model_mismatch"));
+        assert!(dimension_mismatch.telemetry.embedding_model.is_none());
+        assert!(!dimension_mismatch
+            .candidates
+            .iter()
+            .any(|candidate| candidate
+                .origins
+                .iter()
+                .any(|origin| matches!(origin, HybridOrigin::Semantic { .. }))));
     }
 
     #[test]

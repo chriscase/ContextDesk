@@ -24,6 +24,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub trait EmbedBackend: Send + Sync {
     /// Embed each input string; output vectors must all share the same length.
     async fn embed(&self, texts: &[String]) -> CoreResult<Vec<Vec<f32>>>;
+
+    /// Stable backend-known model identity for vector-space binding and
+    /// telemetry (mirrors [`crate::rerank::RerankBackend::identity`]).
+    ///
+    /// This is the identity the backend was configured/built with — not a
+    /// provider-confirmed measurement; wires that echo a served model may
+    /// verify it, wires that don't cannot upgrade it. Synthetic backends MUST
+    /// say so in the identity so a scripted run can never be mistaken for a
+    /// capability. Stored template vectors are only comparable to query
+    /// vectors produced under the same identity and dimension count.
+    fn identity(&self) -> String;
 }
 
 /// Weights for hybrid ranking.
@@ -141,6 +152,12 @@ impl EmbedBackend for OllamaEmbedBackend {
         }
         Ok(out)
     }
+
+    fn identity(&self) -> String {
+        // Configured model name; the Ollama embeddings wire does not echo a
+        // served-model identity to verify against.
+        self.client.model().to_string()
+    }
 }
 
 /// Deterministic offline mock: fixed-dimension pseudo-vectors from text hash.
@@ -202,6 +219,10 @@ impl MockHashEmbedBackend {
 impl EmbedBackend for MockHashEmbedBackend {
     async fn embed(&self, texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
         Ok(texts.iter().map(|t| self.embed_one(t)).collect())
+    }
+
+    fn identity(&self) -> String {
+        "mock-hash-embed (deterministic synthetic; tests only, not a capability)".into()
     }
 }
 
@@ -307,6 +328,12 @@ impl EmbedBackend for ConceptEmbedBackend {
         tokio::task::yield_now().await;
         Ok(texts.iter().map(|t| self.embed_one(t)).collect())
     }
+
+    fn identity(&self) -> String {
+        // Deliberately dimension-free so a dimension change surfaces as a
+        // dimension-binding mismatch, not an identity mismatch.
+        "concept-embed (deterministic synthetic; contract tests only, not a capability)".into()
+    }
 }
 
 /// Local in-process ONNX embeddings via **fastembed-rs** (#359).
@@ -353,6 +380,10 @@ impl EmbedBackend for FastembedEmbedBackend {
         tokio::task::yield_now().await;
         // ONNX work is sync under a Mutex; fine for batch template embed at write time.
         self.embed_batch(texts)
+    }
+
+    fn identity(&self) -> String {
+        LOCAL_LOG_EMBED_MODEL_ID.into()
     }
 }
 

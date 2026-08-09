@@ -437,6 +437,10 @@ mod tests {
                 let _ = texts;
                 std::future::pending().await
             }
+
+            fn identity(&self) -> String {
+                "never-embed (deterministic synthetic; tests only, not a capability)".into()
+            }
         }
         // Direct budgeted call stays fast offline (not 5s product budget).
         let v = super::super::sqlite_store::embed_blocking(&Never, "zebra", 30);
@@ -449,6 +453,10 @@ mod tests {
             async fn embed(&self, texts: &[String]) -> crate::error::CoreResult<Vec<Vec<f32>>> {
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+            }
+
+            fn identity(&self) -> String {
+                "slow-embed (deterministic synthetic; tests only, not a capability)".into()
             }
         }
         let got = super::super::sqlite_store::embed_blocking(&Slow200, "zebra", 5_000);

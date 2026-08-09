@@ -11965,6 +11965,10 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             async fn embed(&self, _texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
                 std::future::pending().await
             }
+
+            fn identity(&self) -> String {
+                "never-embed (deterministic synthetic; tests only, not a capability)".into()
+            }
         }
 
         let dir = tempdir().unwrap();

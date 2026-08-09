@@ -1089,6 +1089,11 @@ impl OllamaClient {
         })
     }
 
+    /// Configured model name (configuration identity, not a served-model echo).
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
     /// List local models via /api/tags.
     pub async fn list_tags(&self) -> CoreResult<Vec<String>> {
         let url = format!("{}/api/tags", self.base_url);

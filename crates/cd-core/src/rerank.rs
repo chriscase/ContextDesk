@@ -139,9 +139,20 @@ impl HttpRerankBackend {
             &resolver,
             std::time::Duration::from_millis(RERANK_DEFAULT_TIMEOUT_MS),
         )?;
-        let endpoint = url
-            .join("rerank")
-            .map_err(|e| CoreError::Config(format!("rerank endpoint: {e}")))?;
+        // Preserve an operator-supplied path prefix such as `/v1` regardless
+        // of whether the base URL has a trailing slash. `Url::join("rerank")`
+        // treats a slash-less final segment as a file and would silently drop
+        // it (`https://host/v1` -> `https://host/rerank`).
+        let mut endpoint = url;
+        let base_path = endpoint.path().trim_end_matches('/');
+        let rerank_path = if base_path.is_empty() {
+            "/rerank".to_string()
+        } else {
+            format!("{base_path}/rerank")
+        };
+        endpoint.set_path(&rerank_path);
+        endpoint.set_query(None);
+        endpoint.set_fragment(None);
         Ok(Self {
             client,
             endpoint,
@@ -356,6 +367,28 @@ mod tests {
         assert_eq!(backend.identity(), "qwen3-reranker-0.6b");
         let debug = format!("{backend:?}");
         assert!(!debug.contains("secret"), "debug never carries credentials");
+
+        // Preserve API prefixes both with and without a trailing slash.
+        let prefixed = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/rerank"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "results": [
+                        {"index": 0, "relevance_score": 0.7},
+                        {"index": 1, "relevance_score": 0.3}
+                    ]
+                })),
+            )
+            .mount(&prefixed)
+            .await;
+        for base in [
+            format!("{}/v1", prefixed.uri()),
+            format!("{}/v1/", prefixed.uri()),
+        ] {
+            let backend = HttpRerankBackend::new(&base, "m", None).expect("prefixed backend");
+            assert_eq!(backend.rerank("q", &docs).await.unwrap(), vec![0.7, 0.3]);
+        }
 
         // Missing scores fail closed rather than inventing zeros.
         let sparse = wiremock::MockServer::start().await;

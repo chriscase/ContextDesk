@@ -227,6 +227,14 @@ pub struct CorpusEmbeddingStatus {
     /// Local model identity when known; never a credential or endpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
+    /// Vector dimension count of the stored template vectors, when any exist.
+    ///
+    /// [`LogCorpus::embedding_status`] always recomputes this from the actual
+    /// stored vectors, so the reported value is measured, never claimed.
+    /// Query vectors with a different dimension count cannot be compared to
+    /// this corpus (cosine over mismatched dimensions is structurally zero).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedded_dims: Option<u32>,
     /// Templates with vectors.
     #[serde(default)]
     pub embedded_templates: u64,
@@ -246,6 +254,7 @@ impl Default for CorpusEmbeddingStatus {
         Self {
             state: EmbeddingState::KeywordOnly,
             model_id: None,
+            embedded_dims: None,
             embedded_templates: 0,
             total_templates: 0,
             reason: Some("legacy_or_not_embedded".into()),
@@ -751,6 +760,24 @@ impl LogCorpus {
         let rows = self.templates.lock().unwrap_or_else(|e| e.into_inner());
         let total = rows.len() as u64;
         let embedded = rows.values().filter(|row| row.vector.is_some()).count() as u64;
+        // Measured from every stored vector so a heterogeneous or empty-vector
+        // legacy corpus cannot be presented as a valid semantic index merely
+        // because its first row happened to look plausible.
+        let stored_dims = rows
+            .values()
+            .filter_map(|row| row.vector.as_ref())
+            .map(Vec::len)
+            .collect::<std::collections::BTreeSet<_>>();
+        let measured_dims = if stored_dims.len() == 1 {
+            stored_dims
+                .iter()
+                .next()
+                .copied()
+                .filter(|dims| *dims > 0)
+                .and_then(|dims| u32::try_from(dims).ok())
+        } else {
+            None
+        };
         let mut status = self
             .meta
             .lock()
@@ -758,7 +785,27 @@ impl LogCorpus {
             .unwrap_or_default();
         status.total_templates = total;
         status.embedded_templates = embedded;
-        status.state = if total > 0 && embedded == total {
+        status.embedded_dims = measured_dims;
+        let model_bound = status
+            .model_id
+            .as_deref()
+            .is_some_and(|identity| !identity.trim().is_empty());
+        let invalid_binding = embedded > 0 && (measured_dims.is_none() || !model_bound);
+        if invalid_binding {
+            status.reason = Some(
+                if measured_dims.is_none() {
+                    "stored_vector_dimensions_inconsistent"
+                } else {
+                    "stored_embedding_model_unbound"
+                }
+                .into(),
+            );
+        }
+        status.state = if invalid_binding {
+            // Vectors remain counted for repair diagnostics, but cannot be
+            // used as a semantic capability until re-analysis binds them.
+            EmbeddingState::KeywordOnly
+        } else if total > 0 && embedded == total {
             EmbeddingState::Complete
         } else if embedded > 0 {
             EmbeddingState::Partial
@@ -2453,6 +2500,57 @@ mod tests {
         assert_eq!(freq, vec![(1, 1)]);
         LogCorpus::discard(dir.path(), &id).unwrap();
         assert!(LogCorpus::list_ids(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn embedding_status_rejects_heterogeneous_stored_dimensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "mixed-vector-dimensions").unwrap();
+        let row = |template_id, pattern: &str, vector: Vec<f32>| TemplateRow {
+            info: TemplateInfo {
+                template_id,
+                pattern: pattern.into(),
+                token_count: 1,
+                count: 1,
+                first_seen: template_id as i64,
+                last_seen: template_id as i64,
+                severity: 1,
+                example: pattern.into(),
+            },
+            content_hash: format!("hash-{template_id}"),
+            vector: Some(vector),
+        };
+        corpus
+            .upsert_templates([
+                row(1, "first", vec![1.0, 0.0]),
+                row(2, "second", vec![1.0, 0.0, 0.0]),
+            ])
+            .unwrap();
+        corpus
+            .write_ingest_summary(
+                None,
+                CorpusStats::default(),
+                Vec::new(),
+                CorpusEmbeddingStatus {
+                    state: EmbeddingState::Complete,
+                    model_id: Some("bound-model".into()),
+                    embedded_dims: Some(2),
+                    embedded_templates: 2,
+                    total_templates: 2,
+                    reason: Some("claimed-complete".into()),
+                    updated_at: 1,
+                },
+            )
+            .unwrap();
+
+        let status = corpus.embedding_status();
+        assert_eq!(status.state, EmbeddingState::KeywordOnly);
+        assert_eq!(status.embedded_templates, 2);
+        assert_eq!(status.embedded_dims, None);
+        assert_eq!(
+            status.reason.as_deref(),
+            Some("stored_vector_dimensions_inconsistent")
+        );
     }
 
     #[test]

@@ -21,6 +21,7 @@ use lab::{
     V_NON_PROGRESS_DIVERGENCE, V_PROVENANCE_OMITTED, V_TIER_SUBSTITUTION, V_UNAVAILABLE_AS_PASS,
 };
 
+use cd_core::embed::EmbedBackend;
 use cd_core::log_analysis::{query_event_count, query_event_rows, EventQuery, MAX_EVENT_PAGE};
 use cd_core::triage_quality::{
     score_structured_triage_answer, StructuredTriageAnswer, TriageClaim, TriageHostFacts,
@@ -1243,6 +1244,12 @@ impl cd_core::embed::EmbedBackend for CountingConceptEmbed {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.embed(texts).await
     }
+
+    fn identity(&self) -> String {
+        // Counting must not change the binding identity of the wrapped
+        // backend, or the stored/query comparison would fail spuriously.
+        self.inner.identity()
+    }
 }
 
 /// Proves the hybrid_embedding adapter seam: the SAME contract (queries,
@@ -1340,9 +1347,7 @@ fn embedding_adapter_contract_plugs_in_without_touching_truth_or_scoring() {
             kind: "cd-core.log_analysis.search_events_advanced(semantic=true)".into(),
             contextdesk_sha: contextdesk_sha(),
             ranking: "score DESC, seq ASC".into(),
-            model_identity: Some(
-                "concept-embed-contract-test (deterministic synthetic; NOT BGE-M3)".into(),
-            ),
+            model_identity: Some(backend.identity()),
             reranker_identity: None,
             deterministic: true,
         },

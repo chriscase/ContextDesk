@@ -1034,7 +1034,7 @@ fn template_line_starts_with_structural_marker(line: &str, marker: &str) -> bool
     let Some(marker_start) = line.find(marker) else {
         return false;
     };
-    let prefix = line[..marker_start].trim_end();
+    let prefix = line.get(..marker_start).unwrap_or_default().trim_end();
     if prefix.is_empty() || prefix.len() > 96 || prefix.chars().any(char::is_whitespace) {
         return false;
     }

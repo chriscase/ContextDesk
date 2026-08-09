@@ -238,13 +238,17 @@ pub fn search_logs_with_excluded_templates(
     excluded_template_ids: &[u64],
 ) -> CoreResult<Vec<SearchHit>> {
     let excluded = normalize_excluded_template_ids(excluded_template_ids)?;
-    // A configured model does not make a keyword-only corpus semantic. Gate on
-    // persisted/derived vector availability so tools and UI cannot overclaim.
-    let embed = if corpus.embedding_status().embedded_templates > 0 {
-        embed
-    } else {
-        None
-    };
+    // A configured model does not make a keyword-only corpus semantic. Require
+    // an explicit semantic request plus an exact stored/query model binding and
+    // one measured non-zero dimension count. Query-vector dimensions are
+    // checked again below before cosine search.
+    let embedding_status = corpus.embedding_status();
+    let embed = embed.filter(|backend| {
+        q.semantic
+            && embedding_status.embedded_templates > 0
+            && embedding_status.embedded_dims.is_some_and(|dims| dims > 0)
+            && embedding_status.model_id.as_deref() == Some(backend.identity().as_str())
+    });
     let k = q.k.clamp(1, 100);
     // Structured filter → allowed template ids + exemplar messages
     let mut allowed: HashSet<u64> = HashSet::new();
@@ -382,13 +386,18 @@ pub fn search_logs_with_excluded_templates(
     }
 
     let mut sem_scores: std::collections::HashMap<u64, f32> = std::collections::HashMap::new();
-    if q.semantic || q.query.is_some() {
+    if q.semantic {
         if let (Some(backend), Some(query)) = (embed, q.query.as_deref()) {
             if let Some(qvec) = embed_blocking(backend, query, 5_000) {
-                let ranked =
-                    corpus.search_templates(&qvec, k.saturating_mul(3).max(k), Some(&allowed))?;
-                for (tid, s) in ranked {
-                    sem_scores.insert(tid, s);
+                if embedding_status.embedded_dims == u32::try_from(qvec.len()).ok() {
+                    let ranked = corpus.search_templates(
+                        &qvec,
+                        k.saturating_mul(3).max(k),
+                        Some(&allowed),
+                    )?;
+                    for (tid, s) in ranked {
+                        sem_scores.insert(tid, s);
+                    }
                 }
             }
         }
@@ -477,6 +486,77 @@ mod tests {
     use crate::log_analysis::ingest::ingest_path;
     use crate::log_analysis::store::{template_content_hash, TemplateRow};
     use std::io::Write;
+
+    struct RankedSemanticEmbed {
+        calls: std::sync::atomic::AtomicU64,
+    }
+
+    impl RankedSemanticEmbed {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicU64::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EmbedBackend for RankedSemanticEmbed {
+        async fn embed(&self, texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(texts
+                .iter()
+                .map(|text| {
+                    let text = text.to_ascii_lowercase();
+                    if text.contains("semantic-query") || text.contains("decisive") {
+                        vec![1.0, 0.0]
+                    } else {
+                        vec![0.0, 1.0]
+                    }
+                })
+                .collect())
+        }
+
+        fn identity(&self) -> String {
+            "ranked-semantic-embed (deterministic synthetic; tests only, not a capability)".into()
+        }
+    }
+
+    #[test]
+    fn semantic_false_never_calls_the_embedding_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("events.log");
+        std::fs::write(&logs, "level=info msg=early routine noise\n").unwrap();
+        let backend = RankedSemanticEmbed::new();
+        let report = ingest_path(
+            dir.path(),
+            &logs,
+            "semantic-off",
+            Some(&backend),
+            "legacy-label",
+        )
+        .unwrap();
+        backend.calls.store(0, std::sync::atomic::Ordering::SeqCst);
+        let corpus = LogCorpus::open(dir.path(), &report.corpus_id).unwrap();
+
+        let hits = search_logs(
+            &corpus,
+            &SearchLogsQuery {
+                query: Some("routine".into()),
+                semantic: false,
+                k: 5,
+                ..Default::default()
+            },
+            Some(&backend),
+        )
+        .unwrap();
+
+        assert!(!hits.is_empty());
+        assert_eq!(
+            backend.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a query string alone must not activate semantic egress/work"
+        );
+    }
 
     #[test]
     fn search_logs_respects_k_and_does_not_scale_with_unrelated_corpus_size() {
