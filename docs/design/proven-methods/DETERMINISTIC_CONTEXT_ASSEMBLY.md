@@ -141,6 +141,12 @@ compact citation alias whose mapping to the exact trusted source remains
 host-owned.
 
 The broad brief is a starting evidence package, not an exhaustive diagnosis.
+In the experimental candidate-scoped path, retained rendering roles outrank a
+lossy mined-template pattern for provider-round admission: a template observed
+as a rendering lead may define a candidate, while one observed only as
+supporting records remains in the trusted global evidence channel and is
+attached to its lead rather than consuming a second independent model round.
+This role decision does not certify an incident or a semantic episode count.
 When the request explicitly needs another eligible read source, the host may
 stage that governed source after the brief. Focused follow-ups use the ordinary
 bounded log tools. Tools are offered only when they are needed and eligible;

@@ -435,8 +435,30 @@ struct BroadTriageTemplateStageDisposition {
 
 fn broad_triage_template_stage_disposition(
     pattern: Option<&str>,
+    observed_episode_role: Option<crate::log_analysis::ExceptionCitationRole>,
 ) -> BroadTriageTemplateStageDisposition {
     use crate::log_analysis::StructuralTemplateRole as Role;
+
+    // Rendering citation roles are derived from retained event records, not
+    // semantic episode totals. Prefer that contextual evidence over a
+    // persisted template pattern, which may have generalized away the stack
+    // frame/header tokens needed by the pattern-only classifier. A lead sighting
+    // always wins if a generalized template occurs in more than one role.
+    match observed_episode_role {
+        Some(crate::log_analysis::ExceptionCitationRole::RenderingLead) => {
+            return BroadTriageTemplateStageDisposition {
+                admitted: true,
+                basis: "observed_rendering_lead",
+            };
+        }
+        Some(crate::log_analysis::ExceptionCitationRole::SupportingRecord) => {
+            return BroadTriageTemplateStageDisposition {
+                admitted: false,
+                basis: "observed_supporting_record",
+            };
+        }
+        None => {}
+    }
 
     match pattern.map(crate::log_analysis::classify_structural_template_pattern) {
         // A persisted structural lead is useful candidate-scoped evidence. It
@@ -473,6 +495,35 @@ fn broad_triage_template_stage_disposition(
             basis: "metadata_unavailable",
         },
     }
+}
+
+/// Strongest observed rendering role for a template in retained correlation
+/// evidence. This does not certify counts or semantic incidents. It only keeps
+/// records already recognized as rendering support from consuming a second,
+/// independent provider round when template mining erased their surface shape.
+fn broad_triage_observed_episode_role(
+    report: &crate::log_analysis::ExceptionEpisodeReport,
+    template_id: u64,
+) -> Option<crate::log_analysis::ExceptionCitationRole> {
+    let mut saw_support = false;
+    for family in &report.families {
+        for occurrence in &family.occurrences {
+            for citation in &occurrence.citations {
+                if citation.template_id != template_id {
+                    continue;
+                }
+                match citation.role {
+                    crate::log_analysis::ExceptionCitationRole::RenderingLead => {
+                        return Some(crate::log_analysis::ExceptionCitationRole::RenderingLead);
+                    }
+                    crate::log_analysis::ExceptionCitationRole::SupportingRecord => {
+                        saw_support = true;
+                    }
+                }
+            }
+        }
+    }
+    saw_support.then_some(crate::log_analysis::ExceptionCitationRole::SupportingRecord)
 }
 
 /// Exact retained citations from every derived correlation group in which the
@@ -2665,7 +2716,16 @@ impl ToolHost {
         }
         for hit in &selected_errors {
             let raw_pattern = corpus.template_pattern(hit.template_id);
-            let stage_disposition = broad_triage_template_stage_disposition(raw_pattern.as_deref());
+            let projection = exception_report.as_ref().map(|report| {
+                crate::log_analysis::project_template_onto_episodes(report, hit.template_id)
+            });
+            let observed_episode_role = exception_report
+                .as_ref()
+                .and_then(|report| broad_triage_observed_episode_role(report, hit.template_id));
+            let stage_disposition = broad_triage_template_stage_disposition(
+                raw_pattern.as_deref(),
+                observed_episode_role,
+            );
             let pattern = raw_pattern
                 .as_deref()
                 .unwrap_or("<template metadata unavailable>");
@@ -2695,9 +2755,6 @@ impl ToolHost {
             } else {
                 last_source.as_str()
             };
-            let projection = exception_report
-                .as_ref()
-                .map(|r| crate::log_analysis::project_template_onto_episodes(r, hit.template_id));
             let (episode_adjusted_display, supporting_display, projection_complete) =
                 match projection.as_ref() {
                     Some(p) if p.complete => {
@@ -9534,8 +9591,9 @@ mod tests {
     #[test]
     fn broad_triage_stages_lead_with_correlated_support_but_not_support_or_unknown_groups() {
         // Opaque structural adversary: raw ERROR volume ranks the unknown and
-        // frame templates ahead of the rendering lead. Admission must depend
-        // on structure, not those counts or any domain vocabulary.
+        // generalized support templates ahead of the rendering lead. Admission
+        // must use retained rendering roles when template mining has erased
+        // structural tokens, not counts or domain vocabulary.
         const UNKNOWN: u64 = 610;
         const SUPPORT: u64 = 620;
         const LEAD: u64 = 630;
@@ -9551,11 +9609,7 @@ mod tests {
                 "[stderr] opaque fail state token <*> without a structural role",
                 50_u64,
             ),
-            (
-                SUPPORT,
-                "[stderr] (lane-7) at opaque.unit.Frame.call(Frame.java:7)",
-                20_u64,
-            ),
+            (SUPPORT, "[stderr] (lane-7) <*>", 20_u64),
             (
                 LEAD,
                 "[stderr] (lane-7) opaque.runtime.Q7Exception: token <*>",
@@ -9563,21 +9617,54 @@ mod tests {
             ),
         ];
         assert_eq!(
-            broad_triage_template_stage_disposition(Some(templates[0].1)),
+            broad_triage_template_stage_disposition(Some(templates[0].1), None),
             BroadTriageTemplateStageDisposition {
                 admitted: false,
                 basis: "unknown_structure"
             }
         );
         assert_eq!(
-            broad_triage_template_stage_disposition(Some(templates[1].1)),
+            broad_triage_template_stage_disposition(Some(templates[1].1), None),
             BroadTriageTemplateStageDisposition {
-                admitted: false,
-                basis: "supporting_structure"
+                admitted: true,
+                basis: "non_exception_error"
             }
         );
         assert_eq!(
-            broad_triage_template_stage_disposition(Some(templates[2].1)),
+            broad_triage_template_stage_disposition(
+                Some(templates[1].1),
+                Some(crate::log_analysis::ExceptionCitationRole::SupportingRecord),
+            ),
+            BroadTriageTemplateStageDisposition {
+                admitted: false,
+                basis: "observed_supporting_record"
+            },
+            "contextual rendering evidence must override a lossy generic template"
+        );
+        assert_eq!(
+            broad_triage_template_stage_disposition(
+                Some(templates[1].1),
+                Some(crate::log_analysis::ExceptionCitationRole::RenderingLead),
+            ),
+            BroadTriageTemplateStageDisposition {
+                admitted: true,
+                basis: "observed_rendering_lead"
+            },
+            "lead evidence must win when one generalized template spans roles"
+        );
+        assert_eq!(
+            broad_triage_template_stage_disposition(
+                Some("[stderr] (lane-7) at opaque.unit.Frame.call(Frame.java:7)"),
+                None,
+            ),
+            BroadTriageTemplateStageDisposition {
+                admitted: false,
+                basis: "supporting_structure"
+            },
+            "explicit structural support remains withheld without correlation"
+        );
+        assert_eq!(
+            broad_triage_template_stage_disposition(Some(templates[2].1), None),
             BroadTriageTemplateStageDisposition {
                 admitted: true,
                 basis: "rendering_lead"
@@ -9678,7 +9765,7 @@ mod tests {
                 .map(|candidate| candidate.group_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["template:630"],
-            "support/unknown volume must not create provider-round groups"
+            "observed support-only records must not create provider-round groups even when their persisted template generalized away structural tokens"
         );
         let lead = &brief.candidate_groups[0];
         assert!(lead.model_text.contains("incident_status: unclassified"));
