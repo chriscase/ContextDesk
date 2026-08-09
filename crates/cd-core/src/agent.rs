@@ -2883,12 +2883,22 @@ fn terminal_synthesis_time(
     evidence_preserved: bool,
 ) -> CoreResult<Vec<StreamEvent>> {
     if !evidence_preserved {
-        return terminal_budget_time(
-            out,
-            trail,
-            deadline_ms,
-            "waiting for final provider synthesis",
-        );
+        let mut steps = trail.to_vec();
+        steps.push("linked_synthesis_timeout:checkpoint_unavailable".into());
+        out.push(StreamEvent::SearchTrail { steps });
+        out.push(StreamEvent::Error {
+            code: "linked_synthesis_timeout".into(),
+            message: format!(
+                "Answer synthesis reached its bounded deadline within the {deadline_ms} ms turn \
+                 ceiling. This host did not retain a synthesis checkpoint, so no synthesis-only \
+                 retry is available. Retrying the investigation will rerun bounded retrieval \
+                 before synthesis."
+            ),
+        });
+        out.push(StreamEvent::TurnCompleted {
+            reason: "linked_synthesis_timeout".into(),
+        });
+        return Ok(out.into_events());
     }
     let mut steps = trail.to_vec();
     steps.push("linked_evidence_preserved_for_synthesis_retry".into());
@@ -2926,6 +2936,16 @@ fn terminal_linked_provider_failure(
             "linked_synthesis_provider_error",
             "The provider failed after every requested bounded source was retrieved. \
              ContextDesk preserved that governed evidence for synthesis-only retry."
+                .to_string(),
+        )
+    } else if missing_sources.is_empty() {
+        trail.push("linked_synthesis_provider_failure:checkpoint_unavailable".into());
+        (
+            "linked_synthesis_provider_error",
+            "The provider failed after every requested bounded source was retrieved, but this \
+             host did not retain a synthesis checkpoint, so no synthesis-only retry is \
+             available. Retrying the investigation will rerun bounded retrieval before \
+             synthesis."
                 .to_string(),
         )
     } else {
@@ -3908,20 +3928,26 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                             MmO::ProviderFailed(error) => {
                                 let (class, _) = classify_provider_turn_failure(&error);
                                 trail.push(format!("multi_model_provider_failure:{class}"));
+                                let retry_available = checkpoint_out
+                                    .as_ref()
+                                    .is_some_and(|checkpoint| checkpoint.is_some());
                                 return terminal_linked_provider_failure(
                                     out,
                                     &mut trail,
-                                    true,
+                                    retry_available,
                                     &[],
                                 );
                             }
                             MmO::Cancelled => return terminal_cancel(out),
                             MmO::Deadline => {
+                                let retry_available = checkpoint_out
+                                    .as_ref()
+                                    .is_some_and(|checkpoint| checkpoint.is_some());
                                 return terminal_synthesis_time(
                                     out,
                                     &trail,
                                     deadline_plan.total_ms,
-                                    true,
+                                    retry_available,
                                 );
                             }
                             MmO::NotEligible => {
@@ -3995,11 +4021,14 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                         }
                         MultiStageTriageOutcome::Cancelled => return terminal_cancel(out),
                         MultiStageTriageOutcome::Deadline => {
+                            let retry_available = checkpoint_out
+                                .as_ref()
+                                .is_some_and(|checkpoint| checkpoint.is_some());
                             return terminal_synthesis_time(
                                 out,
                                 &trail,
                                 deadline_plan.total_ms,
-                                true,
+                                retry_available,
                             );
                         }
                         MultiStageTriageOutcome::ProviderFailed(error) => {
@@ -4011,13 +4040,20 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                             trail.push(format!(
                                 "linked_broad_triage_multi_stage_provider_failure:{class}"
                             ));
-                            // The deterministic brief is complete and already
-                            // checkpointed by the time this stage runs (the
-                            // Deadline arm above relies on the same fact), so
-                            // this is the synthesis-side provider failure: the
-                            // governed evidence survives for a synthesis-only
-                            // retry, and no source is missing.
-                            return terminal_linked_provider_failure(out, &mut trail, true, &[]);
+                            // The deterministic brief is complete, so this is
+                            // a synthesis-side failure with no source missing.
+                            // Checkpoint retention is host-owned, though: only
+                            // advertise synthesis-only retry when the caller's
+                            // output slot was actually populated.
+                            let retry_available = checkpoint_out
+                                .as_ref()
+                                .is_some_and(|checkpoint| checkpoint.is_some());
+                            return terminal_linked_provider_failure(
+                                out,
+                                &mut trail,
+                                retry_available,
+                                &[],
+                            );
                         }
                         MultiStageTriageOutcome::FailedClosed(reason) => {
                             trail.push(format!(
@@ -10008,6 +10044,53 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         (dir, host, context)
     }
 
+    fn linked_multi_candidate_fixture() -> (tempfile::TempDir, ToolHost, LogExplorerTurnContext) {
+        use std::io::Write;
+        let dir = tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let mut file = fs::File::create(logs.join("worker.log")).unwrap();
+        for line in [
+            r#"{"ts":1700000100,"level":"error","message":"alpha queue saturated code=51"}"#,
+            r#"{"ts":1700000101,"level":"error","message":"alpha queue saturated code=52"}"#,
+            r#"{"ts":1700000102,"level":"error","message":"beta lease refused shard=71"}"#,
+            r#"{"ts":1700000103,"level":"error","message":"beta lease refused shard=72"}"#,
+        ] {
+            writeln!(file, "{line}").unwrap();
+        }
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        let report =
+            crate::log_analysis::ingest_path(&cache, &logs, "multi-candidate", None, "none")
+                .unwrap();
+        let workspace = Workspace::new("multi-candidate", vec![dir.path().to_path_buf()]);
+        let mut host = ToolHost::new(workspace, KeywordIndex::new(), None);
+        host.set_log_analysis(true, Some(cache));
+        host.set_active_log_corpus(Some(report.corpus_id.clone()));
+        host.set_log_corpus_scope(Some(report.corpus_id.clone()));
+        host.pin_log_suppression_lens(&report.corpus_id).unwrap();
+        let context =
+            LogExplorerTurnContext::new("multi-candidate", report.corpus_id, "All sources")
+                .unwrap();
+        (dir, host, context)
+    }
+
+    fn review_runtime(reviewer_backend: std::sync::Arc<dyn ChatBackend>) -> MultiModelRuntime {
+        MultiModelRuntime {
+            configured_mode: crate::multi_model::MultiModelMode::Review,
+            role_ids: crate::multi_model::MultiModelRoleIds {
+                investigator_profile: "investigator-profile".into(),
+                investigator_model: "investigator-model".into(),
+                reviewer_profile: "reviewer-profile".into(),
+                reviewer_model: "reviewer-model".into(),
+                synthesizer_profile: "investigator-profile".into(),
+                synthesizer_model: "investigator-model".into(),
+            },
+            budget: crate::multi_model::MultiModelBudget::default(),
+            reviewer_backend,
+        }
+    }
+
     struct ToolThenNeverBackend {
         calls: std::sync::atomic::AtomicUsize,
     }
@@ -10080,6 +10163,19 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             Err(CoreError::Message(
                 "provider connection closed before first completion".into(),
             ))
+        }
+    }
+
+    struct NeverCompletesBackend;
+
+    #[async_trait]
+    impl ChatBackend for NeverCompletesBackend {
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> CoreResult<ChatCompletion> {
+            std::future::pending().await
         }
     }
 
@@ -10289,6 +10385,262 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             .contains("source_kind: deterministic_broad_log_triage"));
         assert!(!checkpoint.identities.is_empty());
         assert!(!checkpoint.allow_empty_evidence);
+    }
+
+    #[tokio::test]
+    async fn cli_shaped_one_shot_does_not_advertise_retry_without_checkpoint_output() {
+        let (_dir, mut host, context) = linked_timeout_fixture();
+        host.set_log_corpus_scope(Some(context.corpus_id.clone()));
+        host.pin_log_suppression_lens(&context.corpus_id)
+            .expect("pin broad triage lens");
+        let mut history = Vec::new();
+
+        // `cd_workflow::chat::run_chat_workflow`, and therefore the CLI,
+        // deliberately supplies no checkpoint output slot. Exercise that
+        // caller shape after the deterministic broad brief has completed.
+        let events = run_agent_turn_with_sink_and_checkpoint(
+            &FirstCallProviderFailureBackend,
+            &mut host,
+            "What problems do you see in these logs?",
+            &mut history,
+            &AgentOptions {
+                session_id: "cli-one-shot-provider-failure".into(),
+                provider_profile_id: Some("private-profile".into()),
+                model: Some("private-model".into()),
+                log_explorer_context: Some(context),
+                max_rounds: 2,
+                ..Default::default()
+            },
+            None,
+            None,
+        )
+        .await
+        .expect("one-shot host provider failure must remain a typed terminal turn");
+
+        let message = events.iter().find_map(|event| match event {
+            StreamEvent::Error { code, message } if code == "linked_synthesis_provider_error" => {
+                Some(message.as_str())
+            }
+            _ => None,
+        });
+        assert!(
+            message.is_some_and(|message| {
+                message.contains("no synthesis-only retry is available")
+                    && message.contains("rerun bounded retrieval")
+                    && !message.contains("preserved")
+                    && !message.contains("missing:")
+            }),
+            "complete evidence without a checkpoint must remain synthesis-classified and honest: \
+             {events:?}"
+        );
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::SearchTrail { steps }
+                    if steps.iter().any(|step| step
+                        == "linked_synthesis_provider_failure:checkpoint_unavailable")
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn review_mode_provider_failure_without_checkpoint_cannot_advertise_preservation() {
+        let (_dir, mut host, context) = linked_multi_candidate_fixture();
+        let mut history = Vec::new();
+        let events = run_agent_turn_with_sink_and_checkpoint(
+            &FirstCallProviderFailureBackend,
+            &mut host,
+            "What problems do you see in these logs?",
+            &mut history,
+            &AgentOptions {
+                session_id: "review-provider-failure-no-checkpoint".into(),
+                log_explorer_context: Some(context),
+                multi_model: Some(review_runtime(std::sync::Arc::new(
+                    FirstCallProviderFailureBackend,
+                ))),
+                max_rounds: 2,
+                ..Default::default()
+            },
+            None,
+            None,
+        )
+        .await
+        .expect("review provider failure must remain a typed terminal turn");
+
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::SearchTrail { steps }
+                    if steps.iter().any(|step| step.starts_with("multi_model_provider_failure:"))
+                        && steps.iter().any(|step| step
+                            == "linked_synthesis_provider_failure:checkpoint_unavailable")
+            )
+        }), "the review-mode ProviderFailed caller must derive retry availability from the absent output slot: {events:?}");
+        let message = events.iter().find_map(|event| match event {
+            StreamEvent::Error { code, message } if code == "linked_synthesis_provider_error" => {
+                Some(message.as_str())
+            }
+            _ => None,
+        });
+        assert!(
+            message.is_some_and(|message| {
+                message.contains("no synthesis-only retry is available")
+                    && message.contains("rerun bounded retrieval")
+                    && !message.contains("preserved")
+                    && !message.contains("without running retrieval")
+            }),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn review_mode_deadline_without_checkpoint_cannot_advertise_preservation() {
+        let (_dir, mut host, context) = linked_multi_candidate_fixture();
+        let mut history = Vec::new();
+        let events = run_agent_turn_with_sink_and_checkpoint(
+            &NeverCompletesBackend,
+            &mut host,
+            "What problems do you see in these logs?",
+            &mut history,
+            &AgentOptions {
+                session_id: "review-deadline-no-checkpoint".into(),
+                log_explorer_context: Some(context),
+                deadline_plan: Some(TurnDeadlinePlan {
+                    total_ms: 500,
+                    choosing_ms: 500,
+                    retrieving_ms: 500,
+                    synthesizing_ms: 500,
+                    explicit: true,
+                }),
+                multi_model: Some(review_runtime(std::sync::Arc::new(NeverCompletesBackend))),
+                max_rounds: 2,
+                ..Default::default()
+            },
+            None,
+            None,
+        )
+        .await
+        .expect("review deadline must remain a typed terminal turn");
+
+        assert!(
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    StreamEvent::MultiModelStage {
+                        status: Some(status),
+                        ..
+                    } if status == "deadline"
+                )
+            }),
+            "the review pipeline must be the deadline source: {events:?}"
+        );
+        let message = events.iter().find_map(|event| match event {
+            StreamEvent::Error { code, message } if code == "linked_synthesis_timeout" => {
+                Some(message.as_str())
+            }
+            _ => None,
+        });
+        assert!(
+            message.is_some_and(|message| {
+                message.contains("no synthesis-only retry is available")
+                    && message.contains("rerun bounded retrieval")
+                    && !message.contains("preserved")
+                    && !message.contains("without running retrieval")
+            }),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn multi_stage_deadline_reports_actual_checkpoint_availability() {
+        for retry_available in [false, true] {
+            let events = terminal_synthesis_time(
+                EventCollector {
+                    events: Vec::new(),
+                    live: None,
+                },
+                &["linked_broad_triage_multi_stage".into()],
+                1_234,
+                retry_available,
+            )
+            .expect("deadline terminal");
+            let message = events.iter().find_map(|event| match event {
+                StreamEvent::Error { code, message } if code == "linked_synthesis_timeout" => {
+                    Some(message.as_str())
+                }
+                _ => None,
+            });
+            assert!(message.is_some(), "{events:?}");
+            let message = message.unwrap();
+            if retry_available {
+                assert!(message.contains("evidence above is preserved"), "{message}");
+                assert!(
+                    message.contains("without running retrieval again"),
+                    "{message}"
+                );
+            } else {
+                assert!(
+                    message.contains("no synthesis-only retry is available"),
+                    "{message}"
+                );
+                assert!(message.contains("rerun bounded retrieval"), "{message}");
+                assert!(!message.contains("preserved"), "{message}");
+                assert!(!message.contains("without running retrieval"), "{message}");
+            }
+        }
+    }
+
+    #[test]
+    fn multi_stage_provider_failure_distinguishes_checkpoint_and_missing_evidence() {
+        for (retry_available, missing_sources, expected_code) in [
+            (true, Vec::<&str>::new(), "linked_synthesis_provider_error"),
+            (false, Vec::<&str>::new(), "linked_synthesis_provider_error"),
+            (
+                false,
+                vec!["linked logs"],
+                "linked_retrieval_provider_error",
+            ),
+        ] {
+            let mut trail = vec!["linked_broad_triage_multi_stage".into()];
+            let events = terminal_linked_provider_failure(
+                EventCollector {
+                    events: Vec::new(),
+                    live: None,
+                },
+                &mut trail,
+                retry_available,
+                &missing_sources,
+            )
+            .expect("provider terminal");
+            let message = events.iter().find_map(|event| match event {
+                StreamEvent::Error { code, message } if code == expected_code => {
+                    Some(message.as_str())
+                }
+                _ => None,
+            });
+            assert!(message.is_some(), "{events:?}");
+            let message = message.unwrap();
+            match (retry_available, missing_sources.is_empty()) {
+                (true, true) => {
+                    assert!(message.contains("preserved"), "{message}");
+                    assert!(message.contains("synthesis-only retry"), "{message}");
+                }
+                (false, true) => {
+                    assert!(
+                        message.contains("no synthesis-only retry is available"),
+                        "{message}"
+                    );
+                    assert!(message.contains("rerun bounded retrieval"), "{message}");
+                    assert!(!message.contains("missing:"), "{message}");
+                    assert!(!message.contains("preserved"), "{message}");
+                }
+                (false, false) => {
+                    assert!(message.contains("missing: linked logs"), "{message}");
+                    assert!(message.contains("No log-grounded answer"), "{message}");
+                }
+                (true, false) => unreachable!("fixture excludes inconsistent state"),
+            }
+        }
     }
 
     #[tokio::test]

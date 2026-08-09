@@ -948,6 +948,12 @@ closed as a `conflict` rather than partially applying.
   `cd_workflow::chat::run_chat_workflow`; it does not yet expose the desktop
   app's fuller tool surface (clustering, timeline, anomalies) as CLI
   subcommands of their own.
+- `chat` is a one-shot host and does not retain the desktop app's private,
+  memory-only synthesis checkpoint. If synthesis times out or the provider
+  fails after retrieval, the CLI terminal reports that no synthesis-only
+  retry is available and that rerunning the investigation repeats bounded
+  retrieval. A durable CLI synthesis retry remains tracked under #759;
+  `--session` persists conversation history, not this ephemeral checkpoint.
 - `chat --dry-run` forces ambient-memory recall off even when the profile
   would otherwise use it. Durable-memory injection embeds the query, and an
   `EmbedBackend` can itself be remote, which would violate the guarantee that

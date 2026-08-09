@@ -37,6 +37,13 @@
 //!   Routing Tauri through `run_chat_workflow` would make it save twice (or
 //!   prematurely, before that reconciliation) — a real regression, not a
 //!   simplification, so this was deliberately left alone.
+//! - **Why synthesis retry stays host-owned**: the desktop can retain a
+//!   bounded synthesis checkpoint in its private, memory-only store and offer
+//!   a no-retrieval retry while that checkpoint remains valid. This one-shot
+//!   CLI workflow deliberately passes no checkpoint output slot to
+//!   [`crate::turn::run_turn`]. Its terminal event must therefore say that a
+//!   retry reruns bounded retrieval; a durable CLI checkpoint is separate
+//!   follow-up work, not transcript/session persistence.
 //! - **Why permission continuation stays host-owned**: `cd_core::research`'s
 //!   turn functions surface a mid-turn `PermissionRequired` event and stop
 //!   for that tool call. A CLI process can prompt synchronously and loop
@@ -374,6 +381,9 @@ pub async fn run_chat_workflow(
                 ..TurnExecutionOptions::default()
             },
             Some(&mut *live_sink),
+            // The CLI is a one-shot host and has no private synthesis
+            // checkpoint lifecycle. `cd_core` derives retry availability
+            // from this absent slot and must not advertise GUI-only retry.
             None,
         )
         .await;
