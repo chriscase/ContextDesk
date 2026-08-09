@@ -8,7 +8,8 @@ Status: active experiment journal; not a release claim
 Last updated: 2026-08-09
 Experiment branch: `fix/vercel-basics-refinement-v1`
 Branch base: exact RC `37905a3788f02b5069767a2bf70b946e0f33f945`
-Current committed branch head before the model-readiness work: `22ec05f2`
+Committed model-readiness head entering this update:
+`b2cb84c2150e18714030612e2c426e2751044378`
 
 This file preserves live-gateway findings across task compaction. It records
 observations, not qualification claims. No API key, authorization header, raw
@@ -19,9 +20,11 @@ credential, or Keychain value belongs in this file.
 - Keep the main worktree and exact RC worktree untouched.
 - Do not merge, publish a release, or create final release artifacts without
   owner approval.
-- Use ContextDesk's Rust provider path for live gateway requests so the Vercel
-  credential remains in macOS Keychain. Do not export it to a shell, command
-  argument, log, or ad hoc HTTP client.
+- Use ContextDesk's Rust provider path for live gateway requests. The approved
+  test loop may provide the credential to one child process from a protected
+  local file through its environment, without printing it, placing it in an
+  argument, or persisting it in the evidence store. This bypasses Keychain for
+  the experiment without changing product secret architecture.
 - `keyring` 3.6.3 makes one `find_generic_password` call per macOS
   `get_password`. The cancelled single-model run performed one Rust credential
   lookup, not one lookup per investigation stage. Do not diagnose multiple
@@ -79,6 +82,59 @@ credential, or Keychain value belongs in this file.
 - Vercel catalog discovery and specialty probes must use the authenticated v4
   `/config`, `/embedding-model`, and `/reranking-model` contracts. A successful
   OpenAI-compatible chat catalog does not prove those specialty wire shapes.
+
+## Integrated readiness and product-triage results
+
+These runs used the feature lineage at `b2cb84c2` for model discovery and
+qualification. Full product-triage comparisons identify the tested agent code
+separately. All credentials were supplied through the protected local-file
+override described above; these runs made no Keychain request.
+
+### Live role-contract qualification
+
+| Exact model | Role | Result | Observed detail |
+| --- | --- | --- | --- |
+| `deepseek/deepseek-v4-flash` | chat | verified twice | generation, native tool call, tool-result continuation, structured output, streaming, and cancellation passed; approximately 17 s then 9 s |
+| `openai/gpt-oss-120b` | chat | verified | the same chat contract passed in approximately 16 s |
+| `voyage/voyage-4` | embedding | verified | v4 document request succeeded in approximately 591 ms and returned one 1,024-dimensional vector |
+| `voyage/rerank-2.5` | reranking | verified | v4 document envelope succeeded in approximately 988 ms and returned a valid complete permutation |
+
+The Voyage results prove the live v4 request and response contracts for those
+exact models. They do not prove product retrieval activation, retrieval
+quality, answer quality, or equivalence to the employer's embedding/reranking
+models.
+
+### Full product-triage comparison
+
+| Agent code | Model | Result | Usefulness finding |
+| --- | --- | --- | --- |
+| exact RC `37905a37` | `deepseek/deepseek-v4-flash` | failed twice at the 120 s whole-turn ceiling | deterministic retrieval completed in about 0.4 s, but four candidate rounds consumed about 105 s and left no final-synthesis budget; terminal result was `linked_synthesis_timeout` |
+| exact RC `37905a37` | `openai/gpt-oss-120b` | completed in about 25.1 s, about $0.00268 | grounded and partially useful: found the r17 configuration regression, propagated failures, rollback, and recovery, but withheld the initiating-cause claim, left `root_cause_established=false`, and did not cleanly isolate the telemetry decoy |
+| feature lineage `b2cb84c2` | `openai/gpt-oss-120b` | completed in about 23.6 s, about $0.00265 | improved symptom and unrelated-error classification, but still withheld the correct initiating-cause claim and left `root_cause_established=false` |
+
+The diagnostic DeepSeek run reported four provider rounds in about 105.4 s,
+10,867 completion tokens, 11,487 reported reasoning tokens, and approximately
+$0.00310 total cost. Compatibility is therefore green while operational
+readiness for the current multi-stage policy is not. This measured gap is
+tracked in [issue #869](https://github.com/chriscase/ContextDesk/issues/869).
+
+Both GPT-OSS product runs expose a separate host-contract limitation. The
+known trigger, propagation, unrelated error, and recovery span the global
+timeline and several candidate ledgers, while V1 only admits candidate-local
+claims. The safe cross-candidate causal synthesis work is tracked in
+[issue #868](https://github.com/chriscase/ContextDesk/issues/868); existing
+candidate scoping must not be weakened to make this fixture pass.
+
+### Discovery and CLI output lesson
+
+Vercel discovery returned the full account catalog successfully. An exact
+one-model verification initially repeated that entire inventory in its final
+output, producing an unnecessarily huge response even though only one model
+was selected. The pending CLI refinement keeps the complete catalog persisted
+for status and discovery, but returns only selected rows for targeted
+verification and caps the ordinary human-readable inventory at 30 rows with
+explicit narrowing guidance. JSON status/discovery continues to expose the
+complete saved inventory.
 
 ## Synthetic incident truth used so far
 
@@ -362,9 +418,9 @@ guarantees.
 
 | Model | Employer-list relationship | Evidence-discipline result | Mean observed latency | Mean observed cost | Current interpretation |
 | --- | --- | --- | ---: | ---: | --- |
-| `deepseek/deepseek-v4-flash` | Exact name match | 3/3 refined repeats correct, telemetry independent, contradiction unresolved, no invented bypass | 14.4 s | $0.000351 | Current primary synthesis leader |
+| `deepseek/deepseek-v4-flash` | Exact name match | 3/3 refined repeats correct, telemetry independent, contradiction unresolved, no invented bypass | 14.4 s | $0.000351 | Direct one-round synthesis leader; not operationally ready for the current multi-stage policy |
 | `mistral/ministral-14b` | Same Ministral 3 14B family/date; exact employer instruct variant not proven | Main chain 3/3; 2/3 evidence-disciplined; one run falsely said validation blocked activation | 5.0 s | $0.000418 | Fast first pass, not trusted final verdict without verification |
-| `openai/gpt-oss-120b` | Exact match | Main cause usually correct; refined run violated explicit telemetry-separation guardrails and contradicted itself | about 5.6 s in matched baseline | about $0.00063 | Candidate extraction/classification or baseline, not current primary synthesizer |
+| `openai/gpt-oss-120b` | Exact match | Main cause usually correct; refined run violated explicit telemetry-separation guardrails and contradicted itself | about 5.6 s in matched baseline | about $0.00063 | Fast product-triage baseline; current host contract still withholds the cross-candidate cause |
 | `alibaba/qwen3.6-27b` | Exact name match | One strong run; correct chain and independent telemetry | 27.8 s | $0.005471 | Correct but poor cost/latency fit for this text-only task; needs more evidence before quality claims |
 
 The employer's `Mistral-Small-24B-Instruct-2501-FP8-dynamic` has no exact
@@ -479,8 +535,9 @@ Official model-page evidence:
   usage parsing, the exact rerank request envelope, rerank response validation,
   and stable host-id mapping; all pass, and strict binary-target clippy remains
   clean. These checks did not launch the lab, read Keychain, contact Vercel, or
-  change the preserved stable launch executable. A stable direct-request
-  authentication path remains a prerequisite for live confirmation.
+  change the preserved stable launch executable. At that point, a stable
+  direct-request authentication path remained a prerequisite; the later
+  successful live role-contract probes are recorded above.
 - A two-document isolation probe was prepared, but repeated macOS Keychain
   dialogs made further executable launches a worse diagnostic path than the
   contract question warranted. The orphaned lab and SecurityAgent processes
@@ -498,10 +555,11 @@ Official model-page evidence:
   the same name. This explains why constant rebuild-and-run iteration is a poor
   retrieval experiment loop; it does not justify redesigning the secret
   architecture around a false per-stage reload diagnosis.
-- Direct HTTP experiments remain the preferred loop, but they still require
-  an authenticated bearer value. This machine currently has no Vercel CLI,
-  linked `.vercel/project.json`, `AI_GATEWAY_API_KEY`, or
-  `VERCEL_OIDC_TOKEN` available outside ContextDesk's Keychain boundary.
+- Direct provider experiments remain the preferred learning loop. A protected
+  local credential file is now available for the owner-approved synthetic
+  experiments and can be injected into one child process without exposing the
+  value. This avoids new-binary Keychain prompts; it must not be copied into
+  repository files, command arguments, captured output, or evidence records.
 - Vercel supports short-lived OIDC authentication for local development via a
   linked project and `vercel env pull`/`vercel dev`. That is the clean candidate
   for frequent direct experiments because it avoids repeatedly asking a newly
@@ -738,13 +796,13 @@ activation, or consent for production cloud egress.
 3. Produce anonymized evidence packets from hermetic/local runs and use direct
    Grok only as the qualitative packet and answer judge after deterministic
    host scoring.
-4. Do not launch another Keychain-reading development executable. Choose an
-   owner-approved stable direct-request authentication loop, preferably a
-   short-lived Vercel OIDC token from a linked development project.
-5. Use that stable loop to confirm the corrected Voyage v4 envelope with a
-   two-document request. Only if it still fails should document count, `topN`,
-   and reranker model vary. Compare Cohere Rerank 4 Fast only after the common
-   request shape is proven.
+4. Keep using the protected file-backed child-process override for authorized
+   synthetic live work so development rebuilds do not reopen Keychain dialogs.
+   A future short-lived Vercel OIDC path remains preferable for repeatable
+   shared development.
+5. Treat the successful live Voyage embedding and reranking probes as wire
+   contract evidence only. Do not claim retrieval quality until the hermetic
+   harness can attribute retrieval, reranking, and generation separately.
 6. Run the direct seven-query synthetic benchmark with
    `alibaba/qwen3-embedding-0.6b` plus the first proven economical reranker.
    Record model identity, vector dimensions, response indices, scores,
@@ -754,5 +812,8 @@ activation, or consent for production cloud egress.
    run the identical four-mode product ablation on the corrected engine.
 8. Add an explicit query-time content-leaves-machine gate before any remote
    embedding or reranking adapter can be activated outside the isolated lab.
-9. Run focused and full repository gates and hand off the isolated branch for
-   owner review; do not merge or release automatically.
+9. Evaluate the slow-model budget/reserve policy from issue #869 and the
+   cross-candidate causal contract from issue #868 independently; neither
+   should weaken the existing whole-turn ceiling or candidate evidence rules.
+10. Run focused and full repository gates and hand off the isolated branch for
+    owner review; do not merge or release automatically.

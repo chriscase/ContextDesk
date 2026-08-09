@@ -22,6 +22,7 @@ use cd_workflow::capability_qualification::{
     backend_for_provider, gate_for_model, LiveQualificationTransport,
 };
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -82,7 +83,8 @@ impl Render for ModelsOutput {
             out.push_str("\n  No provider models are configured or discovered.\n");
             return out;
         }
-        for model in &self.models {
+        const TEXT_MODEL_LIMIT: usize = 30;
+        for model in self.models.iter().take(TEXT_MODEL_LIMIT) {
             let default = if model.is_default { " · default" } else { "" };
             let configured = if model.configured_for_profile {
                 " · configured"
@@ -98,6 +100,12 @@ impl Render for ModelsOutput {
                 model.readiness.state.as_str(),
                 model.readiness.role.as_str(),
                 model.readiness.detail
+            ));
+        }
+        let omitted = self.models.len().saturating_sub(TEXT_MODEL_LIMIT);
+        if omitted > 0 {
+            out.push_str(&format!(
+                "\n  … {omitted} more model(s) saved. Use `--json` for the full inventory, or `models verify --match TEXT` to narrow it.\n"
             ));
         }
         out.push_str(
@@ -152,6 +160,7 @@ pub async fn run(
     let credentials = resolve_credentials(&profile, secrets)?;
     let mut catalog_change = None;
     let mut reports = Vec::new();
+    let mut output_selection = None;
 
     match action {
         ModelsAction::Discover(discover_args) => {
@@ -180,6 +189,7 @@ pub async fn run(
                 catalog_change = Some(record_catalog(&mut store, &store_path, &profile, &probe)?);
             }
             let selection = verification_selection(verify_args, &profile, &store)?;
+            output_selection = Some(selection.iter().cloned().collect::<BTreeSet<_>>());
             reports = verify_models(
                 app_cfg,
                 &profile,
@@ -192,6 +202,17 @@ pub async fn run(
         }
     }
 
+    let models = readiness_for_selection(
+        configured_model_readiness(
+            app_cfg,
+            &mut store,
+            preferred_profile_id,
+            preferred_model_id,
+        ),
+        &profile.id,
+        output_selection.as_ref(),
+    );
+
     Ok(ModelsOutput {
         schema_id: MODEL_READINESS_OUTPUT_SCHEMA_ID,
         action: match action {
@@ -202,14 +223,25 @@ pub async fn run(
         credentials_read: credentials.credentials_read,
         profile_id: Some(profile.id.clone()),
         catalog_change,
-        models: configured_model_readiness(
-            app_cfg,
-            &mut store,
-            preferred_profile_id,
-            preferred_model_id,
-        ),
+        models,
         verified: reports,
     })
+}
+
+/// A targeted verification returns only the selected models. The complete
+/// catalog remains persisted for later filtering and is still returned by
+/// discovery/status, but it must not make a one-model verification enormous.
+fn readiness_for_selection(
+    rows: Vec<ConfiguredModelReadiness>,
+    profile_id: &str,
+    selection: Option<&BTreeSet<String>>,
+) -> Vec<ConfiguredModelReadiness> {
+    let Some(selection) = selection else {
+        return rows;
+    };
+    rows.into_iter()
+        .filter(|row| row.profile_id == profile_id && selection.contains(&row.model_id))
+        .collect()
 }
 
 fn resolve_credentials(
@@ -786,5 +818,30 @@ mod tests {
             let error = confirm_all(12, false).unwrap_err();
             assert!(error.to_string().contains("pass --yes"));
         }
+    }
+
+    #[test]
+    fn targeted_verification_output_does_not_repeat_the_whole_catalog() {
+        let rows = [
+            "deepseek/deepseek-v4-flash",
+            "openai/gpt-oss-120b",
+            "voyage/voyage-4",
+        ]
+        .into_iter()
+        .map(|model_id| ConfiguredModelReadiness {
+            profile_id: "work".into(),
+            profile_label: "Work".into(),
+            model_id: model_id.into(),
+            configured_for_profile: false,
+            is_default: false,
+            readiness: cd_core::capability_qualification::ModelReadiness::unverified(model_id),
+        })
+        .collect();
+        let selection = BTreeSet::from(["deepseek/deepseek-v4-flash".to_string()]);
+
+        let filtered = readiness_for_selection(rows, "work", Some(&selection));
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].model_id, "deepseek/deepseek-v4-flash");
     }
 }
