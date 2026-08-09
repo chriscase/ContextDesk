@@ -946,8 +946,8 @@ pub(crate) fn classify_structural_template_pattern(
             saw_frame = true;
             continue;
         }
-        if line.starts_with("Caused by:")
-            || line.starts_with("Suppressed:")
+        if template_line_starts_with_structural_marker(line, "Caused by:")
+            || template_line_starts_with_structural_marker(line, "Suppressed:")
             || line.starts_with("--- End of inner exception")
             || line.starts_with("File \"")
         {
@@ -1000,6 +1000,61 @@ pub(crate) fn classify_structural_template_pattern(
         return Some(StructuralTemplateRole::UnknownSuspicious);
     }
     None
+}
+
+/// Recognize a structural marker either at the payload boundary or after one
+/// service-like template token. Some formatters retain a service identity in
+/// the Drain pattern even after timestamp/level parsing. Keep the fallback
+/// deliberately narrow: prose prefixes and arbitrary multi-word text must not
+/// turn an ordinary ERROR template into exception support.
+fn template_line_starts_with_structural_marker(line: &str, marker: &str) -> bool {
+    let mut line = line.trim_start();
+    for level in [
+        "ERROR ", "error ", "WARN ", "warn ", "INFO ", "info ", "DEBUG ", "debug ", "FATAL ",
+        "fatal ", "TRACE ", "trace ",
+    ] {
+        if let Some(rest) = line.strip_prefix(level) {
+            line = rest.trim_start();
+            break;
+        }
+    }
+    if let Some(rest) = line.strip_prefix(STDERR_TOKEN) {
+        line = rest.trim_start();
+    }
+    if line.starts_with('(') {
+        if let Some(close) = line.find(')') {
+            if close <= MAX_THREAD_TOKEN_CHARS {
+                line = line.get(close + 1..).unwrap_or(line).trim_start();
+            }
+        }
+    }
+    if line.starts_with(marker) {
+        return true;
+    }
+    let Some(marker_start) = line.find(marker) else {
+        return false;
+    };
+    let prefix = line[..marker_start].trim_end();
+    if prefix.is_empty() || prefix.len() > 96 || prefix.chars().any(char::is_whitespace) {
+        return false;
+    }
+    // A real exception header may mention a cause marker later in the same
+    // sentence. Header authority wins when the bounded prefix already carries
+    // the typed exception token; only an envelope/service token may precede a
+    // structural continuation marker.
+    if template_pattern_looks_like_exception_type_line(prefix) {
+        return false;
+    }
+    for ch in prefix.chars() {
+        if ch.is_ascii_alphanumeric() {
+            continue;
+        }
+        if matches!(ch, '-' | '_' | '.' | '/' | '=' | ':' | '[' | ']') {
+            continue;
+        }
+        return false;
+    }
+    true
 }
 
 fn template_pattern_looks_like_exception_type_line(line: &str) -> bool {
@@ -1920,7 +1975,7 @@ fn derive_render_episodes_cancellable(
                     );
                 }
             } else if let Some(signature) = signature {
-                let is_cause = payload.trim_start().starts_with("Caused by:");
+                let is_cause = template_line_starts_with_structural_marker(payload, "Caused by:");
                 let can_attach = open_wrap
                     .get(&lane)
                     .is_some_and(|open| adjacent_compatible(open, event, &env));
@@ -3977,8 +4032,8 @@ fn is_stack_continuation(line: &str) -> bool {
     // Also accept structural payload that is only a frame/cause line.
     line.starts_with("at ")
         || line.starts_with("... ")
-        || line.starts_with("Caused by:")
-        || line.starts_with("Suppressed:")
+        || template_line_starts_with_structural_marker(line, "Caused by:")
+        || template_line_starts_with_structural_marker(line, "Suppressed:")
         || line.starts_with("File \"")
         || line.starts_with("--- End of inner exception")
 }
@@ -6901,6 +6956,29 @@ mod tests {
         );
         assert_eq!(
             classify_structural_template_pattern(
+                "unit-7 Caused by: opaque.runtime.Q7Exception: <*>"
+            ),
+            Some(StructuralTemplateRole::CauseSuppressed),
+            "a retained service token must not promote structural support into its own incident candidate"
+        );
+        assert_eq!(
+            classify_structural_template_pattern("[unit] Suppressed: opaque detail <*>"),
+            Some(StructuralTemplateRole::CauseSuppressed)
+        );
+        for pattern in [
+            "<*> Caused by: opaque.runtime.Q7Token: detail <*> ",
+            "ERROR Caused by: opaque.runtime.Q7Token: detail <*> ",
+            "[stderr] (lane-9) Caused by: opaque.runtime.Q7Token: detail <*> ",
+            "logger Suppressed: opaque.runtime.Q7Token: detail <*> ",
+        ] {
+            assert_eq!(
+                classify_structural_template_pattern(pattern),
+                Some(StructuralTemplateRole::CauseSuppressed),
+                "structural role changed for {pattern:?}"
+            );
+        }
+        assert_eq!(
+            classify_structural_template_pattern(
                 "Exception wrapper XYZ_WRAP#<*> for payment failure"
             ),
             Some(StructuralTemplateRole::WrapperScaffold)
@@ -6909,6 +6987,18 @@ mod tests {
         assert_eq!(
             classify_structural_template_pattern("heartbeat ok unrelated_id=<*>"),
             None
+        );
+        assert_eq!(
+            classify_structural_template_pattern("user note: Caused by: routine explanation"),
+            None,
+            "multi-word prose before the marker must not be treated as structural support"
+        );
+        assert_eq!(
+            classify_structural_template_pattern(
+                "opaque.runtime.Q7Exception: Caused by: downstream detail <*>"
+            ),
+            Some(StructuralTemplateRole::ExceptionHeaderOrFullStack),
+            "a typed header that later mentions a cause marker must remain a lead"
         );
         let ghost = event(
             99,
