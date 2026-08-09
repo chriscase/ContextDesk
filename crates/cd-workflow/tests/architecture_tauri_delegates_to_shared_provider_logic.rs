@@ -27,12 +27,14 @@ fn tauri_lib_source() -> String {
     ]
     .iter()
     .collect();
-    fs::read_to_string(&path).unwrap_or_else(|e| {
-        panic!(
-            "read {}: {e} (has desktop/src-tauri moved?)",
-            path.display()
-        )
-    })
+    fs::read_to_string(&path)
+        .unwrap_or_else(|e| {
+            panic!(
+                "read {}: {e} (has desktop/src-tauri moved?)",
+                path.display()
+            )
+        })
+        .replace("\r\n", "\n")
 }
 
 /// Extracts the body of a single `fn name(...) { ... }` as the lines from
