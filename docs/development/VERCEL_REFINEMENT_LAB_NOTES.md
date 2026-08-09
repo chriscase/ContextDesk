@@ -145,13 +145,14 @@ model and must not be represented as the employer build.
 
 - Vercel AI Gateway now advertises embeddings and reranking.
 - Vercel exposes OpenAI-compatible embeddings through its `/v1` API.
-- The employer's `bge-m3` exact model was not yet confirmed in Vercel's catalog.
+- The authenticated live catalog (2026-08-09, 561 ms) returned 31 retrieval
+  models. The employer's exact `bge-m3` model is not present in that catalog.
 - Vercel does expose `alibaba/qwen3-embedding-0.6b`: 1024 dimensions, roughly
   32.8K context, multilingual, instruction-prefix support, and very low input
   cost. It is an experimental substitute, not an employer-model equivalence.
-- The employer's exact `qwen3-reranker-0.6b` was not yet confirmed in Vercel's
-  catalog. Vercel exposes other rerankers such as Cohere and Voyage. Do not use
-  them as employer-equivalence claims.
+- The employer's exact `qwen3-reranker-0.6b` is also absent from the live
+  catalog. Vercel exposes Cohere and Voyage rerankers instead. Do not use them
+  as employer-equivalence claims.
 - The current official `@ai-sdk/gateway` package (`4.0.46`, inspected
   2026-08-09) uses a gateway-native v4 retrieval contract rooted at
   `https://ai-gateway.vercel.sh/v4/ai`. This is distinct from both the
@@ -177,11 +178,12 @@ model and must not be represented as the employer build.
   `{"documents":[...],"query":"...","topN":...}` and the response contains
   `{"ranking":[{"index":...,"relevanceScore":...}]}` plus optional warnings
   and provider metadata.
-- The current SDK model types list Qwen3 embedding models (including
-  `alibaba/qwen3-embedding-0.6b`) but not BGE-M3. Its reranker type lists Cohere
-  and Voyage families but not the employer's Qwen3 reranker. Static types do
-  not prove live availability; the authenticated catalog and real calls are
-  the next gates.
+- Live embedding choices include Qwen3 0.6B/4B/8B, Amazon Titan, Cohere Embed,
+  Gemini/Google text embeddings, Mistral, OpenAI, Perplexity, and Voyage.
+  Live reranking choices are Cohere Rerank 3.5, Rerank 4 Fast, Rerank 4 Pro,
+  Voyage Rerank 2.5, and Voyage Rerank 2.5 Lite. This confirms the static SDK
+  families for this gateway account while also confirming that the employer's
+  exact BGE-M3/Qwen pair cannot be evaluated through Vercel.
 - Current official model pages independently confirm the economical first
   retrieval matrix: `alibaba/qwen3-embedding-0.6b` is 1,024-dimensional,
   multilingual (100-plus languages), roughly 33K context, and listed at
@@ -205,9 +207,51 @@ Official model-page evidence:
   for the selected Vercel contract. Do not route the Keychain secret through
   shell utilities to discover or test it.
 
+### First live retrieval contract result
+
+- A live synthetic benchmark using `alibaba/qwen3-embedding-0.6b` and
+  `voyage/rerank-2.5-lite` passed catalog discovery and the complete embedding
+  response validator, then reached the reranking call. This is evidence that
+  the selected v4 embedding transport and response shape work; the process
+  aborted before emitting quality aggregates, so it is not yet an embedding
+  quality result.
+- The first Voyage Lite reranking request returned HTTP 400. The lab correctly
+  withheld the provider body. The source request matches the inspected SDK
+  envelope (`documents`, `query`, camel-case `topN`, v4 specification header,
+  and model-id header), so the remaining candidates are provider-specific
+  validation, a request-size/limit issue, or an undocumented gateway rule.
+  This is a request-contract finding, not a reranker-quality failure.
+- A two-document isolation probe was prepared, but repeated macOS Keychain
+  dialogs made further executable launches a worse diagnostic path than the
+  contract question warranted. The orphaned lab and SecurityAgent processes
+  were stopped, and no further Keychain-driven probe is authorized in this
+  refinement loop.
+
+### Authentication and macOS execution lesson
+
+- Keyring 3.6.3 makes one `find_generic_password` call, and the ContextDesk
+  backend makes one credential lookup per single-model run. Multiple visible
+  dialogs must not be attributed to the investigation's six stages.
+- The repeated prompts correlate with separately built/changed unsigned
+  development executables and overlapping external attempts. macOS can treat
+  those as different requesting identities even when the source command has
+  the same name. This explains why constant rebuild-and-run iteration is a poor
+  retrieval experiment loop; it does not justify redesigning the secret
+  architecture around a false per-stage reload diagnosis.
+- Direct HTTP experiments remain the preferred loop, but they still require
+  an authenticated bearer value. This machine currently has no Vercel CLI,
+  linked `.vercel/project.json`, `AI_GATEWAY_API_KEY`, or
+  `VERCEL_OIDC_TOKEN` available outside ContextDesk's Keychain boundary.
+- Vercel supports short-lived OIDC authentication for local development via a
+  linked project and `vercel env pull`/`vercel dev`. That is the clean candidate
+  for frequent direct experiments because it avoids repeatedly asking a newly
+  built binary to access a long-lived Keychain item. Linking a project or
+  installing/configuring the CLI is an explicit owner setup decision, not an
+  automatic side effect of this branch.
+
 ## Independent heavy audit
 
-A read-only Claude Code audit is in flight at Fable 5 / Extra effort. It was
+A read-only Claude Code audit completed at Fable 5 / Extra effort. It was
 asked to inspect the journal, production retrieval path, configuration,
 benchmarks, and fixtures; challenge the adapter assumptions, privacy and
 Keychain boundary, data/query shapes, must-include merge, ablation design, and
@@ -364,17 +408,20 @@ terms. Reports include per-shape mean relevant recall, must-include recall,
 non-relevant share, bounded top rankings, dimensions, usage, warnings, and
 latency.
 
-The probe's unit tests (4/4) and strict binary-target clippy pass. The first
-catalog request reached the expected one-time macOS Keychain access boundary
-for this newly built development executable; no live catalog result is yet
-recorded while that system approval is pending.
+The probe's unit tests (4/4) and strict binary-target clippy pass. The live
+catalog completed and a Qwen3 0.6B embedding response passed validation. The
+first Voyage Lite reranking request returned HTTP 400 as recorded above. No
+additional Keychain-reading lab executable should be launched during this
+refinement loop; continue only after establishing a stable direct-request
+authentication path.
 
 ## Isolated production-integrity refinement
 
 The Claude audit was followed by direct source review and a bounded
 implementation in this experiment branch. Claude's partial implementation was
-not accepted on trust: it was completed and tested locally. The current dirty
-worktree (not committed, merged, or released) now does the following:
+not accepted on trust: it was completed and tested locally. The isolated
+implementation is committed locally, not pushed, merged, or released, and now
+does the following:
 
 - `EmbedBackend` exposes a backend-known identity, and ingest/re-analysis bind
   stored vectors to that identity plus their measured dimension count. The
@@ -423,12 +470,15 @@ activation, or consent for production cloud egress.
 
 ## Next actions
 
-1. Complete the already-pending authenticated Vercel v4 catalog request after
-   the one-time macOS Keychain approval; do not start duplicate requests.
-2. Run the direct seven-query synthetic benchmark first with
-   `alibaba/qwen3-embedding-0.6b` plus `voyage/rerank-2.5-lite`, then compare a
-   second economical available pair only if the catalog/first contract passes.
-3. Record model identity, vector dimensions, response indices, scores,
+1. Do not launch another Keychain-reading development executable. Choose an
+   owner-approved stable direct-request authentication loop, preferably a
+   short-lived Vercel OIDC token from a linked development project.
+2. Use that stable loop to isolate the Voyage HTTP 400 with a two-document
+   request, then vary only document count, `topN`, and reranker model. Compare
+   Cohere Rerank 4 Fast only after the common request shape is proven.
+3. Run the direct seven-query synthetic benchmark with
+   `alibaba/qwen3-embedding-0.6b` plus the first proven economical reranker.
+   Record model identity, vector dimensions, response indices, scores,
    latency, calls, usage, and bounded quality aggregates without recording
    vectors, request text, credentials, or provider error bodies.
 4. Use those results to select query/document shape and shortlist size, then
