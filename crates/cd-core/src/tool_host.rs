@@ -9589,6 +9589,95 @@ mod tests {
     }
 
     #[test]
+    fn broad_triage_prefixed_cause_cannot_evict_rare_error_candidate() {
+        const PREFIXED_CAUSE: u64 = 43;
+        let (_dir, corpus, mut host) = broad_triage_fixture(crate::log_analysis::TimeQuality::Wall);
+        let base = 1_700_000_100_i64;
+        let added = [
+            (
+                PREFIXED_CAUSE,
+                "unit-7 Caused by: opaque condition <*>",
+                9_u64,
+            ),
+            (41, "unit-4 boundary state rejected code <*>", 7_u64),
+            (42, "unit-5 operation response unavailable code <*>", 6_u64),
+        ];
+        corpus
+            .upsert_templates(added.iter().map(|(template_id, pattern, count)| {
+                crate::log_analysis::TemplateRow {
+                    info: crate::log_analysis::TemplateInfo {
+                        template_id: *template_id,
+                        pattern: (*pattern).into(),
+                        token_count: pattern.split_whitespace().count(),
+                        count: *count,
+                        first_seen: base,
+                        last_seen: base + *count as i64,
+                        severity: 4,
+                        example: (*pattern).into(),
+                    },
+                    content_hash: format!("prefixed-cause-cap-{template_id}"),
+                    vector: None,
+                }
+            }))
+            .unwrap();
+        let mut seq = 10_000_u64;
+        let mut events = Vec::new();
+        for (template_id, pattern, count) in added {
+            for index in 0..count {
+                events.push(crate::log_analysis::LogEvent {
+                    seq,
+                    ts: base + seq as i64,
+                    timestamp_provenance:
+                        crate::log_analysis::TimestampProvenance::ExplicitWallClock,
+                    active_timestamp_basis: crate::log_analysis::ActiveTimestampBasis::ExplicitWall,
+                    unresolved_local_timestamp: None,
+                    level: "ERROR".into(),
+                    service: Some("opaque-service".into()),
+                    host: Some("opaque-host".into()),
+                    template_id,
+                    params: vec![],
+                    trace_id: None,
+                    message: pattern.replace("<*>", &index.to_string()),
+                    source: "opaque-cap.log".into(),
+                });
+                seq += 1;
+            }
+        }
+        corpus.push_events(&events).unwrap();
+        corpus
+            .with_connection(|connection| {
+                connection
+                    .execute("UPDATE events SET trace_id = NULL", [])
+                    .map_err(|error| {
+                        CoreError::Message(format!("clear test trace ids: {error}"))
+                    })?;
+                Ok(())
+            })
+            .unwrap();
+        corpus.flush().unwrap();
+        host.pin_log_suppression_lens(corpus.id()).unwrap();
+
+        let brief = host.build_broad_log_triage_brief().unwrap();
+        assert_eq!(
+            brief
+                .candidate_groups
+                .iter()
+                .map(|candidate| candidate.group_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["template:21", "template:41", "template:42", "template:22"],
+            "supporting cause volume must not consume the slot reserved for the rare singleton"
+        );
+        assert!(!brief
+            .candidate_groups
+            .iter()
+            .any(|candidate| candidate.group_id == format!("template:{PREFIXED_CAUSE}")));
+        assert!(brief
+            .evidence
+            .iter()
+            .any(|identity| identity.template_id == PREFIXED_CAUSE));
+    }
+
+    #[test]
     fn broad_triage_stages_lead_with_correlated_support_but_not_support_or_unknown_groups() {
         // Opaque structural adversary: raw ERROR volume ranks the unknown and
         // generalized support templates ahead of the rendering lead. Admission

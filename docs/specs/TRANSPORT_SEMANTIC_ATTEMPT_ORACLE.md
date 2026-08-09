@@ -35,8 +35,8 @@ never classify" implementation cannot pass the pair.
 | **Semantic attempt** | one `ChatBackend::complete/complete_streaming` invocation observed by `TracingChatBackend` (`crates/cd-core/src/turn_trace.rs:2178`) | one `TracedCall` per invocation; `TracedOutcome::Completed` = evaluable analysis arrived |
 | **Application model round** | one iteration of the agent loop that reached the backend (`crates/cd-core/src/agent.rs:3771`) | `ProviderTurnTelemetry.provider_round_count`; Activity `provider-round-{n}` events |
 | **Application retry** | host decision to re-enter the provider with a stable reason (`tools_unsupported`, `context_compacted`) via `TurnTraceObserver::note_application_retry` | `ProviderTurnTelemetry.application_retry_reasons` (typed `{round, reason}`) |
-| **Candidate-analysis attempt** | one provider call per candidate inside `run_multi_stage_broad_triage` (`agent.rs:1098`); cap `MULTI_STAGE_CANDIDATE_ATTEMPT_CAP = 2` (initial + one correction) | `used_rounds` increments ONLY after `Ok(completion)` (`agent.rs:1162`) |
-| **Comparison attempt** | one provider call in the final-comparison stage; cap `MULTI_STAGE_COMPARISON_ATTEMPT_CAP = 2` | same `used_rounds`; surfaced as `provider_rounds` in the `contextdesk.multi_stage_triage.v1` tool detail |
+| **Candidate-analysis attempt** | one provider call per candidate inside `run_multi_stage_broad_triage`; cap `MULTI_STAGE_CANDIDATE_ATTEMPT_CAP = 1` | `used_rounds` increments ONLY after `Ok(completion)` |
+| **Comparison attempt** | one initial provider call in the final-comparison stage plus at most one content-free semantic correction selected by `MULTI_STAGE_SEMANTIC_CORRECTION_CAP = 1` | same `used_rounds`; surfaced as `provider_rounds` in the `contextdesk.multi_stage_triage.v1` tool detail |
 
 ## 2. Verified retry/attempt state machine
 

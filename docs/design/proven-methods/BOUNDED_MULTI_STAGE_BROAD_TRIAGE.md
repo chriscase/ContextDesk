@@ -10,7 +10,7 @@ continues unchanged.
 flowchart TD
     H["Host: pin corpus + suppression revision"] --> B["Host: bounded broad brief"]
     B --> C["Host: <=4 structural candidates"]
-    C --> S["LLM: candidate-only synthesis\n(max 2 attempts each)"]
+    C --> S["LLM: candidate-only synthesis\n(1 attempt each)"]
     S --> V["Host: validate citations against that candidate only"]
     V -->|"valid groups >=2"| F["LLM: strict investigation_answer.v1 proposal"]
     V -->|"no groups / insufficient starting budget"| L["Existing single-stage path"]
@@ -31,9 +31,17 @@ create groups, or move citations between groups.
 
 Each candidate has a stable `group_id`, a small structural brief, and its own
 trusted identity ledger (`seq`, `source`, `template_id`). A candidate response
-must cite an identity from its own ledger. Invalid responses receive at most
-one correction attempt and are then withheld. This avoids a global evidence
-set incorrectly validating a decoy's citation from another incident.
+must cite an identity from its own ledger. Each candidate receives one attempt;
+an invalid response is withheld. This avoids a global evidence set incorrectly
+validating a decoy's citation from another incident.
+
+Persisted structural support (`Caused by:`, `Suppressed:`, stack frames, and
+wrappers) stays in the deterministic brief and trusted global evidence channel
+but does not consume a separate candidate round. The classifier recognizes
+those markers after bounded level, stream, thread, logger, wildcard, or single
+service-token envelopes. A typed exception header that merely mentions a cause
+marker later remains a lead. This rule is structural and vocabulary-neutral;
+raw ERROR volume cannot promote support into an incident candidate.
 
 ## Two contracts: authority and display
 
@@ -54,15 +62,19 @@ digest. The initial prompt requires every manifest candidate exactly once and
 candidate-scoped citations only. If the strict validator rejects that proposal,
 the one semantic correction repeats the same bounded contract, user question,
 candidate drafts, and unchanged manifest, plus only the stable validation
-category (for example `wrong_scope`). It never replays the rejected proposal or
-adds raw log/source/locator data, binding/digest, provider errors, or any other
-host-owned envelope data. In other words, correction repeats the same bounded
-initial-comparison context rather than adding or subtracting evidence. The
-manifest remains the only permitted final `evidence_id` boundary, and the
-validator remains the authority. The manifest itself is included in the same
-context estimate and hard packing gate as every other final-comparison message.
-This improves provider interoperability without weakening parsing, schema,
-unknown-id, cross-candidate, or host-authority checks.
+category (for example `wrong_scope`) and a fixed, content-free host-authored
+repair instruction for that category. It never replays the rejected proposal
+or adds raw log/source/locator data, binding/digest, provider errors, or any
+other host-owned envelope data. The initial and correction prompts also carry
+an exact content-free output scaffold derived from the manifest. The contract
+requires globally unique claim ids, candidate-scoped evidence ids, and a single
+bare JSON object; parsing remains strict. In other words, correction repeats
+the same bounded initial-comparison context rather than adding or subtracting
+evidence. The manifest remains the only permitted final `evidence_id` boundary,
+and the validator remains the authority. The manifest and scaffold are included
+in the same context estimate and hard packing gate as every other
+final-comparison message. This improves provider interoperability without
+weakening parsing, schema, unknown-id, cross-candidate, or host-authority checks.
 
 What a person reads is a **separate, deterministic host projection**:
 `render_answer_markdown` renders the validated envelope as Markdown and that
@@ -169,6 +181,14 @@ Candidate grouping is intentionally structural, not a root-cause verdict.
 Cross-source trace identity is only parser-populated `trace_id`; no request,
 span, or message token is promoted to a trace key. A no-trace corpus uses the
 ERROR/FATAL template fallback and may not capture multi-template incidents.
+The final typed ledger currently contains candidate-owned ERROR/FATAL evidence,
+not the full deterministic timeline. Global WARN/INFO state transitions such as
+deployment, rollback, restoration, and recovery can therefore appear in the
+broad brief yet remain unavailable to final comparison. V1 also has no
+host-validated cross-candidate causal-chain section. Embedding or reranking does
+not repair this handoff: this broad brief is deterministic and already found
+those records. Cross-candidate evidence synthesis needs a separately reviewed
+typed contract rather than citation transfer between existing candidates.
 The bounded sequential executor favors predictable cancellation, cost, and
 telemetry over latency; live-provider quality and safe parallelism remain
 separate acceptance work.

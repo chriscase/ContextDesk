@@ -788,8 +788,9 @@ describe a plan, or substitute another tool.";
 
 const BROAD_TRIAGE_MAX_SEARCH_RESULTS: usize = 20;
 const BROAD_TRIAGE_BRIEF_ERROR_TEMPLATE_CAP: usize = 16;
-/// A candidate gets one correction attempt and the comparison gets one. The
-/// shared `max_rounds` budget may reduce this further, but never increase it.
+/// Each candidate gets one attempt. The final comparison may receive one
+/// content-free semantic correction. The shared `max_rounds` budget may reduce
+/// these bounds further, but never increase them.
 const MULTI_STAGE_CANDIDATE_ATTEMPT_CAP: usize = 1;
 /// One semantic repair is permitted for the entire user turn. Transport
 /// retries are performed below this boundary and do not consume it.
