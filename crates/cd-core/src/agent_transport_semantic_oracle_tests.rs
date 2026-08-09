@@ -106,8 +106,8 @@ fn oracle_candidate(group_id: &str, seq: u64) -> crate::tool_host::BroadLogTriag
     }
 }
 
-const DRAFT_ALPHA: &str = "trace:alpha is an operational incident";
-const DRAFT_BRAVO: &str = "trace:bravo is an operational incident";
+const DRAFT_ALPHA: &str = r#"{"schema":"contextdesk.candidate_assessment.v1","candidate_id":"trace:alpha","classification":"supporting_evidence","analysis":"trace alpha is an operational incident","evidence_seqs":[11]}"#;
+const DRAFT_BRAVO: &str = r#"{"schema":"contextdesk.candidate_assessment.v1","candidate_id":"trace:bravo","classification":"supporting_evidence","analysis":"trace bravo is an operational incident","evidence_seqs":[22]}"#;
 const COMPARISON_VALID: &str = r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"trace:alpha","observations":[{"claim_id":"a","text":"observed","evidence_ids":["e:trace:alpha:11"]}]},{"candidate_id":"trace:bravo","observations":[{"claim_id":"b","text":"observed","evidence_ids":["e:trace:bravo:22"]}]}]}"#;
 
 fn two_candidates() -> Vec<crate::tool_host::BroadLogTriageCandidate> {
