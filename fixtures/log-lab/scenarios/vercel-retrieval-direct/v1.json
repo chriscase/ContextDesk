@@ -1,0 +1,277 @@
+{
+  "name": "contextdesk-vercel-retrieval-direct-v1",
+  "documents": [
+    {
+      "id": "a-change-r17",
+      "text": "kind=deployment_event level=info service=qv-control pattern=deployment revision=<value> started cause=unset"
+    },
+    {
+      "id": "a-invalid-boundary",
+      "text": "kind=config_error level=error service=qv-control pattern=BoundaryInvariantViolation lease window 250 below supported minimum 1000 revision r17 cause=unset"
+    },
+    {
+      "id": "a-active-contradiction",
+      "text": "kind=state_event level=info service=qv-control pattern=deployment revision r17 marked active cause=unset"
+    },
+    {
+      "id": "a-worker-mismatch",
+      "text": "kind=exception_header level=error service=qv-worker pattern=LeaseEpochMismatch expected epoch differs from observed epoch cause=LeaseWindowExpired"
+    },
+    {
+      "id": "a-expired-cause",
+      "text": "kind=cause_record level=error service=qv-worker pattern=lease acquisition elapsed 391 ms beyond configured 250 ms window cause=LeaseWindowExpired"
+    },
+    {
+      "id": "a-api-aborted",
+      "text": "kind=exception_header level=error service=qv-api pattern=RequestAborted operation amber-sync reason worker unavailable cause=unset"
+    },
+    {
+      "id": "a-telemetry-timeout",
+      "text": "kind=exception_header level=error service=hx-telemetry pattern=TelemetrySinkTimeout exporter archive cause=unset"
+    },
+    {
+      "id": "a-rollback",
+      "text": "kind=deployment_event level=warn service=qv-control pattern=rollback revision r17 requested reason boundary invariant cause=unset"
+    },
+    {
+      "id": "a-restored-config",
+      "text": "kind=config_event level=info service=qv-control pattern=restored revision r16 lease window 4000 cause=unset"
+    },
+    {
+      "id": "a-worker-recovery",
+      "text": "kind=status_event level=info service=qv-worker pattern=lease acquisition recovered shard amber epoch 42 cause=unset"
+    },
+    {
+      "id": "a-api-recovery",
+      "text": "kind=status_event level=info service=qv-api pattern=amber-sync completed status ok cause=unset"
+    },
+    {
+      "id": "a-telemetry-persists",
+      "text": "kind=exception_header level=error service=hx-telemetry pattern=TelemetrySinkTimeout exporter archive cause=unset"
+    },
+    {
+      "id": "a-noise-health-1",
+      "text": "kind=status_event level=info service=qv-api pattern=health probe status ok cause=unset"
+    },
+    {
+      "id": "a-noise-health-2",
+      "text": "kind=status_event level=debug service=qv-control pattern=configuration scan completed cause=unset"
+    },
+    {
+      "id": "a-noise-health-3",
+      "text": "kind=status_event level=info service=qv-worker pattern=queue sample within target cause=unset"
+    },
+    {
+      "id": "a-noise-health-4",
+      "text": "kind=status_event level=info service=hx-telemetry pattern=batch accepted by live exporter cause=unset"
+    },
+    {
+      "id": "b-pool-exhausted",
+      "text": "kind=resource_error level=error service=app-server pattern=managed connection reservoir has no borrowable handles and waiters exceeded acquisition deadline cause=unset"
+    },
+    {
+      "id": "b-managed-connection",
+      "text": "kind=cause_record level=error service=app-server pattern=JDBC managed connection validation failed because all data source handles are occupied cause=pool exhaustion"
+    },
+    {
+      "id": "b-persistence-failed",
+      "text": "kind=application_error level=error service=orders pattern=order transaction could not persist because no managed connection was available cause=unset"
+    },
+    {
+      "id": "b-db-ready",
+      "text": "kind=status_event level=info service=database pattern=accepting client connections after capacity restored cause=unset"
+    },
+    {
+      "id": "b-pool-recovery",
+      "text": "kind=status_event level=info service=app-server pattern=managed connection reservoir idle handles restored and waiters cleared cause=unset"
+    },
+    {
+      "id": "b-network-clean",
+      "text": "kind=status_event level=info service=network pattern=no packet loss and route checks healthy cause=unset"
+    },
+    {
+      "id": "b-memory-normal",
+      "text": "kind=status_event level=info service=app-server pattern=heap occupancy normal with no memory pressure cause=unset"
+    },
+    {
+      "id": "b-session-noise",
+      "text": "kind=status_event level=info service=app-server pattern=user session touched cause=unset"
+    },
+    {
+      "id": "c-trigger-de",
+      "text": "kind=config_error level=error service=steuerung pattern=ungueltige obere grenze fuer die warteschlange nach konfigurationsaenderung cause=unset"
+    },
+    {
+      "id": "c-propagation-es",
+      "text": "kind=cause_record level=error service=trabajador pattern=la cola rechazo nuevos trabajos porque supero el limite configurado cause=limite invalido"
+    },
+    {
+      "id": "c-symptom-en",
+      "text": "kind=application_error level=error service=api pattern=customer jobs were rejected because the worker queue was unavailable cause=unset"
+    },
+    {
+      "id": "c-recovery-fr",
+      "text": "kind=status_event level=info service=controle pattern=ancienne limite restauree et file de travail de nouveau disponible cause=unset"
+    },
+    {
+      "id": "c-noise-1",
+      "text": "kind=status_event level=info service=api pattern=requete de controle reussie cause=unset"
+    },
+    {
+      "id": "c-noise-2",
+      "text": "kind=status_event level=debug service=trabajador pattern=muestra periodica completada cause=unset"
+    },
+    {
+      "id": "c-noise-3",
+      "text": "kind=application_error level=error service=correo pattern=zeitueberschreitung beim versand einer benachrichtigung cause=unset"
+    },
+    {
+      "id": "c-noise-4",
+      "text": "kind=status_event level=info service=steuerung pattern=certificado interno valido cause=unset"
+    },
+    {
+      "id": "d-cache-deploy",
+      "text": "kind=deployment_event level=info service=catalog pattern=release c42 enabled cache shard count 1 cause=unset"
+    },
+    {
+      "id": "d-cache-thrash",
+      "text": "kind=resource_error level=error service=cache pattern=eviction churn because working set exceeds the single shard capacity cause=unset"
+    },
+    {
+      "id": "d-catalog-latency",
+      "text": "kind=application_error level=error service=catalog-api pattern=request deadline exceeded while waiting for cache refill cause=cache eviction churn"
+    },
+    {
+      "id": "d-cache-rollback",
+      "text": "kind=deployment_event level=warn service=catalog pattern=release c42 rolled back and cache shard count restored to 8 cause=unset"
+    },
+    {
+      "id": "d-cache-recovery",
+      "text": "kind=status_event level=info service=catalog-api pattern=request latency returned to normal after cache refill stabilized cause=unset"
+    },
+    {
+      "id": "d-payment-cert",
+      "text": "kind=tls_error level=error service=payments pattern=upstream TLS certificate expired and handshake validation failed cause=expired certificate"
+    },
+    {
+      "id": "d-payment-symptom",
+      "text": "kind=application_error level=error service=checkout pattern=payment authorization unavailable after TLS handshake rejection cause=unset"
+    },
+    {
+      "id": "d-payment-recovery",
+      "text": "kind=status_event level=info service=payments pattern=certificate rotated and authorization handshakes succeeding cause=unset"
+    },
+    {
+      "id": "d-unrelated-fatal",
+      "text": "kind=process_error level=fatal service=image-worker pattern=process terminated unexpectedly cause=unset"
+    }
+  ],
+  "queries": [
+    {
+      "id": "q-opaque-root-chain",
+      "query": "What directly initiated the amber-sync failures, how did the failure propagate, and what correction and recovery prove the explanation?",
+      "relevantIds": [
+        "a-invalid-boundary",
+        "a-worker-mismatch",
+        "a-expired-cause",
+        "a-api-aborted",
+        "a-rollback",
+        "a-restored-config",
+        "a-worker-recovery",
+        "a-api-recovery"
+      ],
+      "mustIncludeIds": [
+        "a-invalid-boundary",
+        "a-expired-cause",
+        "a-rollback",
+        "a-restored-config"
+      ],
+      "topK": 10
+    },
+    {
+      "id": "q-opaque-independent",
+      "query": "Which failure remains independent from the amber-sync causal chain and what persistence evidence separates it?",
+      "relevantIds": [
+        "a-telemetry-timeout",
+        "a-telemetry-persists"
+      ],
+      "mustIncludeIds": [
+        "a-telemetry-persists"
+      ],
+      "topK": 5
+    },
+    {
+      "id": "q-semantic-database-gap",
+      "query": "Why did the database become unavailable to order writes, and what evidence shows recovery?",
+      "relevantIds": [
+        "b-pool-exhausted",
+        "b-managed-connection",
+        "b-persistence-failed",
+        "b-db-ready",
+        "b-pool-recovery"
+      ],
+      "mustIncludeIds": [
+        "b-pool-exhausted",
+        "b-persistence-failed"
+      ],
+      "topK": 7
+    },
+    {
+      "id": "q-multilingual-chain",
+      "query": "What configuration change caused customer jobs to be rejected, and which records show the mechanism and recovery?",
+      "relevantIds": [
+        "c-trigger-de",
+        "c-propagation-es",
+        "c-symptom-en",
+        "c-recovery-fr"
+      ],
+      "mustIncludeIds": [
+        "c-trigger-de",
+        "c-recovery-fr"
+      ],
+      "topK": 6
+    },
+    {
+      "id": "q-concurrent-cache",
+      "query": "What caused the catalog latency incident, and which rollback and recovery evidence supports that chain without mixing in payments?",
+      "relevantIds": [
+        "d-cache-deploy",
+        "d-cache-thrash",
+        "d-catalog-latency",
+        "d-cache-rollback",
+        "d-cache-recovery"
+      ],
+      "mustIncludeIds": [
+        "d-cache-thrash",
+        "d-cache-rollback",
+        "d-cache-recovery"
+      ],
+      "topK": 7
+    },
+    {
+      "id": "q-concurrent-payments",
+      "query": "Why were payment authorizations unavailable, and what proves that separate incident recovered?",
+      "relevantIds": [
+        "d-payment-cert",
+        "d-payment-symptom",
+        "d-payment-recovery"
+      ],
+      "mustIncludeIds": [
+        "d-payment-cert",
+        "d-payment-recovery"
+      ],
+      "topK": 5
+    },
+    {
+      "id": "q-insufficient-fatal",
+      "query": "What evidence exists for the image worker fatal event, and do the records establish its initiating mechanism or recovery?",
+      "relevantIds": [
+        "d-unrelated-fatal"
+      ],
+      "mustIncludeIds": [
+        "d-unrelated-fatal"
+      ],
+      "topK": 3
+    }
+  ]
+}
