@@ -96,6 +96,23 @@ entailment. Host identity rules, required/forbidden citations, decisive facts,
 and causal roles are authoritative; later blinded review may assess prose
 support but cannot replace those checks.
 
+### Known semantic boundary and mutation follow-up
+
+The deterministic scorer does not understand arbitrary prose. A deliberately
+self-contradictory answer can combine a valid abstention marker and cautious
+structured fields with an unsupported causal sentence that uses an unforeseen
+paraphrase. This is a disclosed P3 limitation, not deterministic semantic
+credit. Before attaching live usefulness claims, add blinded semantic review
+and adversarial “hedged certainty” candidates; judge failure may veto a
+deterministic pass in that future lane but must never rescue a deterministic
+failure.
+
+After the gateway-contract and orchestration branches stabilize, run targeted
+code mutation testing over `quality_eval::{answer_score,metrics,suite}` and the
+gateway discovery/specialty-adapter validators. Prioritize surviving mutations
+that remove fail-closed checks, alter truth authority, shrink scoring windows,
+or weaken identity/privacy isolation rather than mutating the whole workspace.
+
 ## Fixture layout
 
 ```text
