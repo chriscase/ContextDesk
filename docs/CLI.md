@@ -768,6 +768,15 @@ consumers should use the explicitly named fields.
   full trace exposes. Raw JSON tool-call *arguments* are not part of any
   trace level — only the outcome (summary/detail) already surfaced to a UI.
 
+  When bounded multi-stage comparison exhausts its one semantic correction,
+  the finished `broad_log_triage_multi_stage` tool detail is a JSON object with
+  schema `contextdesk.multi_stage_triage.v1`, stage `final_comparison`, outcome
+  `validation_failed`, ordered content-free `validation_errors`, and the
+  host-counted `semantic_attempts` and `provider_rounds`. These categories
+  identify failures such as `parse`, `wrong_scope`, or `unknown_evidence`
+  without retaining the rejected model proposal, evidence text, paths,
+  headers, credentials, or provider error bodies.
+
 No trace level, at any depth, ever includes a credential, an HTTP
 authorization header, or pre-redaction content. Every captured message is
 passed through the same secret-scrubbing pass memory writes use
