@@ -130,6 +130,31 @@ pub struct HostEvidenceEntry {
     /// Host-owned bounded excerpt; never supplied by the model.
     pub content: String,
 }
+
+/// Content-free, host-authored final-answer boundary for one candidate.
+///
+/// This is deliberately narrower than [`HostEvidenceEntry`]: a final-answer
+/// prompt needs to know exactly which candidate and evidence identifiers it
+/// may reference, but it must not receive source labels, locators, excerpts,
+/// corpus/revision metadata, ledger digests, or canonical citations through
+/// this boundary.  The manifest is always derived from the immutable
+/// [`HostEvidenceLedger`], never reconstructed by a caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FinalAnswerCandidateManifestV1 {
+    pub(crate) candidate_id: String,
+    pub(crate) evidence_ids: Vec<String>,
+}
+
+/// Content-free, candidate-scoped identifier manifest for one final proposal.
+///
+/// Candidate and evidence ids are host-minted.  This type is intentionally not
+/// serializable as an answer/envelope: it is prompt-scaffolding only and has no
+/// authority outside the existing host validator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FinalAnswerManifestV1 {
+    pub(crate) candidates: Vec<FinalAnswerCandidateManifestV1>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnswerBindingV1 {
     pub session_id: String,
@@ -274,6 +299,31 @@ impl HostEvidenceLedger {
             .values()
             .map(|entry| entry.candidate_id.clone())
             .collect()
+    }
+
+    /// Derive the complete, candidate-scoped final-answer identifier boundary
+    /// from this ledger's exact rows. The `BTreeMap` ledger gives deterministic
+    /// candidate and evidence ordering, while preserving every entry that the
+    /// final validator permits.
+    pub(crate) fn final_answer_manifest(&self) -> FinalAnswerManifestV1 {
+        let mut candidates: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for entry in self.entries.values() {
+            candidates
+                .entry(entry.candidate_id.clone())
+                .or_default()
+                .push(entry.evidence_id.clone());
+        }
+        FinalAnswerManifestV1 {
+            candidates: candidates
+                .into_iter()
+                .map(
+                    |(candidate_id, evidence_ids)| FinalAnswerCandidateManifestV1 {
+                        candidate_id,
+                        evidence_ids,
+                    },
+                )
+                .collect(),
+        }
     }
 }
 
@@ -796,6 +846,44 @@ mod tests {
                 "digest_mismatch",
             ]
         );
+    }
+
+    #[test]
+    fn final_answer_manifest_is_complete_candidate_scoped_and_content_free() {
+        let manifest = ledger().final_answer_manifest();
+        assert_eq!(
+            manifest,
+            FinalAnswerManifestV1 {
+                candidates: vec![
+                    FinalAnswerCandidateManifestV1 {
+                        candidate_id: "a".into(),
+                        evidence_ids: vec!["e-a".into()],
+                    },
+                    FinalAnswerCandidateManifestV1 {
+                        candidate_id: "b".into(),
+                        evidence_ids: vec!["e-b".into()],
+                    },
+                ],
+            }
+        );
+        // The manifest type has no source, locator, corpus, revision, role,
+        // excerpt, binding, digest, or citation fields to leak into a prompt.
+        let debug = format!("{manifest:?}");
+        for forbidden in [
+            "source_label",
+            "locator",
+            "corpus_id",
+            "revision",
+            "role",
+            "content",
+            "binding",
+            "digest",
+            "citation",
+            "host excerpt one",
+            "line 1",
+        ] {
+            assert!(!debug.contains(forbidden), "manifest leaked {forbidden}");
+        }
     }
 
     #[test]

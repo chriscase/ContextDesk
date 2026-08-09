@@ -983,35 +983,87 @@ fn multi_stage_candidate_messages(
     ]
 }
 
+/// Encode the content-free final-answer identifier boundary from the immutable
+/// host ledger. This is the only source of candidate/evidence ids for the
+/// final comparison: callers must not recreate ids from draft text or log
+/// identities, which could drift from the validator's ledger.
+///
+/// JSON is deliberate prompt scaffolding here. It gives every host-minted id
+/// an unambiguous quoted boundary, so punctuation in an id cannot change the
+/// apparent candidate/evidence structure seen by the provider.
+fn final_answer_manifest_json(
+    manifest: &crate::investigation_answer::FinalAnswerManifestV1,
+) -> String {
+    serde_json::json!({
+        "schema": "contextdesk.final_answer_manifest.v1",
+        "candidates": manifest.candidates.iter().map(|candidate| {
+            serde_json::json!({
+                "candidate_id": candidate.candidate_id,
+                "permitted_evidence_ids": candidate.evidence_ids,
+            })
+        }).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
+/// Render the content-free final-answer identifier boundary from the immutable
+/// host ledger as unambiguous JSON.
+fn final_answer_manifest_block(
+    manifest: &crate::investigation_answer::FinalAnswerManifestV1,
+) -> String {
+    format!(
+        "HOST-AUTHORED FINAL-ANSWER MANIFEST (the complete permitted identifier boundary; JSON):\n{}",
+        final_answer_manifest_json(manifest)
+    )
+}
+
+/// Stable strict contract shared by an initial final proposal and its bounded
+/// semantic correction. Keeping it in one builder prevents a correction from
+/// silently becoming a looser schema path.
+fn final_comparison_system_contract() -> String {
+    "You are completing a bounded comparison of separately scoped evidence/correlation groups. Their \\
+     independence is unverified. Do not transfer evidence. Return \\
+     exactly one JSON object with schema `contextdesk.investigation_answer.v1`. Each candidate has only \\
+     `candidate_id` and optional `observations`, `symptoms`, `causal_candidates`, `initiating_causes`, \\
+     `competing_explanations`, or `missing_evidence`; each claim has only `claim_id`, `text`, and \\
+     `evidence_ids`. Include every manifest candidate_id exactly once. Cite only permitted evidence ids \\
+     belonging to that candidate. Do not include host-owned canonical_citations, status, \\
+     confidence, corpus, revision, session, binding, digest, or prose outside JSON."
+        .into()
+}
+
+/// Serialize the already bounded, model-authored candidate drafts and their
+/// host-attached canonical evidence identities as an untrusted data block. The
+/// raw candidate briefs remain omitted; final evidence-id authority comes only
+/// from the ledger manifest and validator.
+fn final_comparison_drafts_block(drafts: &[CandidateSynthesisDraft]) -> String {
+    let drafts = serde_json::json!({
+        "candidates": drafts.iter().map(|draft| serde_json::json!({
+            "candidate_id": draft.group_id,
+            "draft": draft.text,
+        })).collect::<Vec<_>>(),
+    });
+    format!("CANDIDATE-SCOPED DRAFTS (untrusted; not new evidence):\n{drafts}")
+}
+
+/// Final comparison prompt. A semantic correction repeats every authorized
+/// input from the initial request (contract, question, drafts, and manifest),
+/// plus only the stable validation category. It never receives the rejected
+/// proposal or any new raw log/source/locator/binding/digest/provider data.
 fn multi_stage_comparison_messages(
     user_text: &str,
     drafts: &[CandidateSynthesisDraft],
-    correction: bool,
+    manifest: &crate::investigation_answer::FinalAnswerManifestV1,
+    correction_category: Option<&str>,
 ) -> Vec<ChatMessage> {
-    let correction_text = if correction {
-        "Your previous answer failed host validation. Return exactly one corrected JSON object and use only supplied evidence ids."
-    } else {
-        ""
-    };
-    let mut groups = String::new();
-    for draft in drafts {
-        groups.push_str(&format!(
-            "\n<CANDIDATE group_id={}>\n{}\n</CANDIDATE>\n",
-            draft.group_id, draft.text
-        ));
-    }
+    let manifest = final_answer_manifest_block(manifest);
+    let correction = correction_category
+        .map(|category| format!("HOST VALIDATION CATEGORY: {category}\n"))
+        .unwrap_or_default();
     vec![
         ChatMessage {
             role: Role::System,
-            content: format!(
-                "You are completing a bounded comparison of separately scoped evidence/correlation groups. Their \\
-                 independence is unverified. Do not transfer evidence. Return \\
-                 exactly one JSON object with schema `contextdesk.investigation_answer.v1`. Each candidate has only \\
-                 `candidate_id` and optional `observations`, `symptoms`, `causal_candidates`, `initiating_causes`, \\
-                 `competing_explanations`, or `missing_evidence`; each claim has only `claim_id`, `text`, and \\
-                 `evidence_ids`. Cite only supplied host ids belonging to that candidate. Do not include citations, \\
-                 status, confidence, corpus, revision, session, or prose outside JSON. {correction_text}"
-            ),
+            content: final_comparison_system_contract(),
             tool_call_id: None,
             tool_calls: None,
         },
@@ -1023,7 +1075,10 @@ fn multi_stage_comparison_messages(
         },
         ChatMessage {
             role: Role::User,
-            content: format!("CANDIDATE-SCOPED DRAFTS (not new evidence):{groups}"),
+            content: format!(
+                "{correction}{manifest}\n{}\nReturn only the JSON object.",
+                final_comparison_drafts_block(drafts),
+            ),
             tool_call_id: None,
             tool_calls: None,
         },
@@ -1232,13 +1287,6 @@ async fn run_multi_stage_broad_triage(
             provider_rounds: used_rounds,
         });
     }
-    if estimate_context_chars(&multi_stage_comparison_messages(user_text, &drafts, false))
-        > crate::context_budgeting::synthesis_packing_budget(hard_budget)
-    {
-        return Ok(MultiStageTriageOutcome::Fallback(
-            "comparison_context_budget_insufficient",
-        ));
-    }
     let ledger = match multi_stage_ledger(&drafts, binding) {
         Ok(ledger) => ledger,
         Err(_) => {
@@ -1250,13 +1298,38 @@ async fn run_multi_stage_broad_triage(
             })
         }
     };
+    // The manifest comes from the exact ledger the final validator uses, so
+    // prompt scope cannot drift from validation scope. Construct it before the
+    // comparison budget gate: its identifiers are real prompt content and must
+    // count against the same hard packing ceiling as every other message.
+    let manifest = ledger.final_answer_manifest();
+    if estimate_context_chars(&multi_stage_comparison_messages(
+        user_text, &drafts, &manifest, None,
+    )) > crate::context_budgeting::synthesis_packing_budget(hard_budget)
+    {
+        return Ok(MultiStageTriageOutcome::Fallback(
+            "comparison_context_budget_insufficient",
+        ));
+    }
     let mut semantic_attempts = 0usize;
     let mut validation_errors = Vec::new();
+    let mut correction_category: Option<&str> = None;
     loop {
         if used_rounds >= opts.max_rounds {
             break;
         }
-        let messages = multi_stage_comparison_messages(user_text, &drafts, semantic_attempts > 0);
+        let messages =
+            multi_stage_comparison_messages(user_text, &drafts, &manifest, correction_category);
+        // Both initial and correction prompts are bounded. This is normally
+        // redundant after the initial check, but keeps the invariant true if a
+        // future correction envelope grows independently.
+        if estimate_context_chars(&messages)
+            > crate::context_budgeting::synthesis_packing_budget(hard_budget)
+        {
+            return Ok(MultiStageTriageOutcome::Fallback(
+                "comparison_context_budget_insufficient",
+            ));
+        }
         let comparison_evidence = messages
             .last()
             .map(|message| message.content.as_str())
@@ -1304,7 +1377,10 @@ async fn run_multi_stage_broad_triage(
                     provider_rounds: used_rounds,
                 });
             }
-            Err(error) => validation_errors.push(error),
+            Err(error) => {
+                correction_category = Some(error.as_str());
+                validation_errors.push(error);
+            }
         }
         if semantic_attempts >= MULTI_STAGE_SEMANTIC_CORRECTION_CAP {
             break;
@@ -13005,15 +13081,58 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             text: "likely noise".into(),
             evidence: candidate.evidence.into_iter().collect(),
         };
-        let comparison_prompt = multi_stage_comparison_messages("triage", &[draft], false)[0]
-            .content
-            .clone();
+        let manifest = multi_stage_ledger(
+            std::slice::from_ref(&draft),
+            crate::investigation_answer::AnswerBindingV1 {
+                session_id: "s".into(),
+                turn_id: "t".into(),
+                corpus_id: "c".into(),
+                revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                    event_revision: 1,
+                    template_analysis_revision: 2,
+                    suppression_revision: 3,
+                },
+                ledger_digest: String::new(),
+            },
+        )
+        .unwrap()
+        .final_answer_manifest();
+        let comparison_prompt =
+            multi_stage_comparison_messages("triage", &[draft], &manifest, None)[0]
+                .content
+                .clone();
         assert!(comparison_prompt.contains("independence is unverified"));
         assert!(!comparison_prompt.contains("independent candidates"));
         assert!(comparison_prompt.contains("exactly one JSON object"));
         assert!(comparison_prompt.contains("contextdesk.investigation_answer.v1"));
-        assert!(comparison_prompt.contains("only supplied host ids"));
+        assert!(comparison_prompt.contains("every manifest candidate_id exactly once"));
         assert!(!comparison_prompt.contains("Markdown headings"));
+    }
+
+    #[test]
+    fn final_answer_manifest_json_round_trips_punctuation_exactly() {
+        use crate::investigation_answer::{FinalAnswerCandidateManifestV1, FinalAnswerManifestV1};
+
+        let manifest = FinalAnswerManifestV1 {
+            candidates: vec![FinalAnswerCandidateManifestV1 {
+                candidate_id: "qv,\n\"17".into(),
+                evidence_ids: vec!["e:qv,17:\"41".into(), "e:line\n88".into()],
+            }],
+        };
+        let encoded = final_answer_manifest_json(&manifest);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&encoded).unwrap(),
+            serde_json::json!({
+                "schema": "contextdesk.final_answer_manifest.v1",
+                "candidates": [{
+                    "candidate_id": "qv,\n\"17",
+                    "permitted_evidence_ids": ["e:qv,17:\"41", "e:line\n88"],
+                }],
+            })
+        );
+        let block = final_answer_manifest_block(&manifest);
+        assert!(block.ends_with(&encoded));
+        assert!(!encoded.contains("qv,\n\"17"));
     }
 
     #[tokio::test]
@@ -13377,6 +13496,149 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 assert_eq!(contexts.len(), provider_rounds);
             }
             other => panic!("expected host-cited corrected comparison, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_stage_final_manifest_repairs_scope_without_rejected_proposal_replay() {
+        struct CapturingBackend {
+            responses: std::sync::Mutex<std::collections::VecDeque<ChatCompletion>>,
+            requests: std::sync::Mutex<Vec<Vec<ChatMessage>>>,
+        }
+
+        #[async_trait]
+        impl ChatBackend for CapturingBackend {
+            async fn complete(
+                &self,
+                messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                self.requests.lock().unwrap().push(messages.to_vec());
+                self.responses
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .ok_or_else(|| CoreError::Message("script exhausted".into()))
+            }
+        }
+
+        // These opaque tokens deliberately carry no incident vocabulary. The
+        // Sentinel values model already-authorized initial comparison context,
+        // raw candidate brief text, and host-owned data that must never be
+        // newly added during correction.
+        let mut candidates = vec![
+            multi_stage_candidate("qv-17", 41),
+            multi_stage_candidate("hx-44", 88),
+        ];
+        candidates[0].model_text = "UNTRUSTED_LOG_SENTINEL_A".into();
+        candidates[1].model_text = "UNTRUSTED_LOG_SENTINEL_B".into();
+        candidates[0].evidence[0].source = "PRIVATE_SOURCE_SENTINEL_A".into();
+        candidates[1].evidence[0].source = "PRIVATE_SOURCE_SENTINEL_B".into();
+
+        let backend = CapturingBackend {
+            responses: std::sync::Mutex::new(
+                vec![
+                    multi_stage_completion("DRAFT_SENTINEL_A"),
+                    multi_stage_completion("DRAFT_SENTINEL_B"),
+                    // First final proposal crosses the candidate scopes.
+                    multi_stage_completion(
+                        r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"qv-17","observations":[{"claim_id":"a","text":"REJECTED_PROPOSAL_SENTINEL","evidence_ids":["e:hx-44:88"]}]},{"candidate_id":"hx-44","observations":[{"claim_id":"b","text":"x","evidence_ids":["e:hx-44:88"]}]}]}"#,
+                    ),
+                    // The one bounded correction repairs against the manifest.
+                    multi_stage_completion(
+                        r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"qv-17","observations":[{"claim_id":"a","text":"x","evidence_ids":["e:qv-17:41"]}]},{"candidate_id":"hx-44","observations":[{"claim_id":"b","text":"x","evidence_ids":["e:hx-44:88"]}]}]}"#,
+                    ),
+                ]
+                .into(),
+            ),
+            requests: std::sync::Mutex::new(Vec::new()),
+        };
+        let opts = AgentOptions {
+            max_rounds: 5,
+            ..Default::default()
+        };
+        let clock = TurnClock::new(opts.effective_deadline_plan(), None);
+        let outcome = run_multi_stage_broad_triage(
+            &backend,
+            "PRIVATE_USER_SENTINEL",
+            &opts,
+            &clock,
+            &candidates,
+            crate::investigation_answer::AnswerBindingV1 {
+                session_id: "PRIVATE_SESSION_SENTINEL".into(),
+                turn_id: "PRIVATE_TURN_SENTINEL".into(),
+                corpus_id: "PRIVATE_CORPUS_SENTINEL".into(),
+                revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                    event_revision: 1,
+                    template_analysis_revision: 2,
+                    suppression_revision: 3,
+                },
+                ledger_digest: String::new(),
+            },
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        let MultiStageTriageOutcome::Completed {
+            envelope,
+            provider_rounds,
+            ..
+        } = outcome
+        else {
+            panic!("scope repair must produce a validated answer");
+        };
+        assert_eq!(envelope.semantic_attempts, 1);
+        assert_eq!(provider_rounds, 4);
+
+        let requests = backend.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[2][0].content, requests[3][0].content);
+        assert!(requests[3][0].content.contains("initiating_causes"));
+        assert_eq!(requests[2][1].content, requests[3][1].content);
+        let initial_context = &requests[2][2].content;
+        let correction_context = &requests[3][2].content;
+        assert_eq!(
+            correction_context,
+            &format!("HOST VALIDATION CATEGORY: wrong_scope\n{initial_context}"),
+            "correction may add only its stable validation category"
+        );
+        assert!(initial_context.contains("PRIVATE_SOURCE_SENTINEL_A"));
+        assert!(initial_context.contains("seq=41"));
+        let correction = requests[3]
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(correction.contains("HOST VALIDATION CATEGORY: wrong_scope"));
+        for permitted in ["qv-17", "hx-44", "e:qv-17:41", "e:hx-44:88"] {
+            assert!(
+                correction.contains(permitted),
+                "manifest omitted {permitted}"
+            );
+        }
+        for authorized in [
+            "DRAFT_SENTINEL_A",
+            "DRAFT_SENTINEL_B",
+            "PRIVATE_USER_SENTINEL",
+        ] {
+            assert!(
+                correction.contains(authorized),
+                "semantic correction lost authorized context {authorized}"
+            );
+        }
+        for forbidden in [
+            "UNTRUSTED_LOG_SENTINEL",
+            "REJECTED_PROPOSAL_SENTINEL",
+            "PRIVATE_SESSION_SENTINEL",
+            "PRIVATE_TURN_SENTINEL",
+            "PRIVATE_CORPUS_SENTINEL",
+            "ledger_digest",
+        ] {
+            assert!(
+                !correction.contains(forbidden),
+                "semantic correction leaked {forbidden}"
+            );
         }
     }
 }

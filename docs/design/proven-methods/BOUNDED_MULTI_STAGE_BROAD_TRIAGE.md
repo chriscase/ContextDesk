@@ -45,6 +45,25 @@ corpus, revision, session, turn — is refused on input and derived by
 result is an `AnswerEnvelopeV1`, emitted as `StreamEvent::InvestigationAnswer`.
 That envelope is the sole authority and the only persistence path.
 
+Before the initial final-comparison request, the host derives a **content-free
+final-answer manifest** from that same immutable ledger. It lists every
+required `candidate_id` exactly once and, beneath it, the exact `evidence_ids`
+the validator permits for that candidate. It contains no source label,
+locator, excerpt, corpus/revision, role, canonical citation, binding, or
+digest. The initial prompt requires every manifest candidate exactly once and
+candidate-scoped citations only. If the strict validator rejects that proposal,
+the one semantic correction repeats the same bounded contract, user question,
+candidate drafts, and unchanged manifest, plus only the stable validation
+category (for example `wrong_scope`). It never replays the rejected proposal or
+adds raw log/source/locator data, binding/digest, provider errors, or any other
+host-owned envelope data. In other words, correction repeats the same bounded
+initial-comparison context rather than adding or subtracting evidence. The
+manifest remains the only permitted final `evidence_id` boundary, and the
+validator remains the authority. The manifest itself is included in the same
+context estimate and hard packing gate as every other final-comparison message.
+This improves provider interoperability without weakening parsing, schema,
+unknown-id, cross-candidate, or host-authority checks.
+
 What a person reads is a **separate, deterministic host projection**:
 `render_answer_markdown` renders the validated envelope as Markdown and that
 text is what the visible `TextDelta` and transcript history carry. The
