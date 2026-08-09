@@ -217,6 +217,57 @@ non-Keychain credential path or an explicitly approved interactive run.
 Query-time cloud embedding/reranking remains inactive; this work does not grant
 content-egress consent.
 
+### Live local embedding observation
+
+The already-running local Ollama service exposed a real embedding-capable
+`nomic-embed-text:latest` model. No process or model download was started. On
+the seven-query direct fixture, the exact single-prompt `/api/embeddings` wire
+used by ContextDesk completed 62 calls in 1,738 ms, returned consistently
+finite 768-dimensional vectors, and produced these deterministic host scores:
+
+| Query shape | Mean relevant recall@K | Mean must-include recall@K | Explicit must-exclude hits |
+|---|---:|---:|---:|
+| plain | 0.592 | 0.524 | 0 |
+| generic evidence prefix | 0.481 | 0.417 | 1 |
+| generic structural prefix | 0.535 | 0.452 | 1 |
+
+The generic prefixes are therefore harmful for this model and dataset. A
+second 192-call / 3,615-ms request-shape comparison tested `search_query:` and
+`search_document:` markers without changing truth:
+
+| Marker shape | Mean relevant recall@K | Mean must-include recall@K | Explicit must-exclude hits |
+|---|---:|---:|---:|
+| none | 0.592 | 0.524 | 0 |
+| query only | 0.592 | 0.524 | 0 |
+| document only | 0.610 | 0.560 | 0 |
+| matched document/query | 0.610 | 0.560 | 0 |
+
+The small gain came from better opaque rollback/configuration coverage. It did
+not recover either telemetry record for the independent-failure query or the
+decisive multilingual trigger/recovery rows. Do not hard-code model-name
+behavior from this result. If configurable asymmetric shaping is later added,
+the shaping contract must be part of the stored vector-space identity so an
+old document index cannot appear compatible with differently shaped query
+vectors merely because the configured model name matches.
+
+Direct Grok reviewed the actual top-K text packets after host scoring. It found
+the database packet useful; the cache packet lacked the explicit cache-thrash
+row; the payments packet lacked the expired-certificate initiating record; the
+fatal-only packet correctly left mechanism/correction/recovery unknown; and the
+root-chain, independent-telemetry, and multilingual packets were materially
+incomplete. Grok also mislabeled the downstream catalog-latency record as an
+initiating mechanism before acknowledging that the cache-thrash record was
+missing. That internal category error is retained as evaluator evidence: Grok
+is valuable for packet critique, but cannot replace typed roles or the host
+truth key.
+
+No local reranker model is installed, and completion model `mistral:latest` was
+not relabeled or used as one. This local embedding result is not good enough to
+activate a semantic-only path. The next meaningful quality comparison is the
+same combined-shortlist experiment with a genuinely multilingual embedding
+model such as the employer-provided BGE-M3 and a proven reranker, while keeping
+the structured/timeline lane and explicit foreign-incident scoring.
+
 ## Prompt experiments and current winning request shape
 
 Four initial GPT-OSS prompt strategies were compared:
