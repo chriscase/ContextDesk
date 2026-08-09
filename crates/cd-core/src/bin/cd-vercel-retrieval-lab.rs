@@ -1059,6 +1059,83 @@ mod tests {
     }
 
     #[test]
+    fn embedding_response_matches_observed_gateway_v4_contract() {
+        let response: EmbeddingResponse = serde_json::from_value(serde_json::json!({
+            "embeddings": [[0.6, 0.8], [0.0, 1.0]],
+            "usage": { "tokens": 17 },
+            "warnings": [{ "type": "other", "message": "synthetic warning" }]
+        }))
+        .unwrap();
+
+        validate_embeddings(2, &response.embeddings).unwrap();
+        assert_eq!(response.usage.and_then(|usage| usage.tokens), Some(17));
+        assert_eq!(response.warnings.len(), 1);
+        assert!((vector_norm(&response.embeddings[0]) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn reranking_response_maps_gateway_indices_to_host_ids() {
+        let response: RerankResponse = serde_json::from_value(serde_json::json!({
+            "ranking": [
+                { "index": 1, "relevanceScore": 0.91 },
+                { "index": 0, "relevanceScore": 0.22 }
+            ],
+            "warnings": []
+        }))
+        .unwrap();
+        validate_ranking(2, 2, &response.ranking).unwrap();
+
+        let documents = vec![
+            LabDocument {
+                id: "host-cause-id".into(),
+                text: "cause text".into(),
+            },
+            LabDocument {
+                id: "host-noise-id".into(),
+                text: "noise text".into(),
+            },
+        ];
+        let mapped = map_ranking(&documents, &response.ranking).unwrap();
+        assert_eq!(mapped[0].id, "host-noise-id");
+        assert_eq!(mapped[1].id, "host-cause-id");
+        assert!(response.warnings.is_empty());
+    }
+
+    #[test]
+    fn catalog_response_keeps_retrieval_type_and_provider_separate() {
+        let response: CatalogResponse = serde_json::from_value(serde_json::json!({
+            "models": [
+                {
+                    "id": "creator/embed-small",
+                    "name": "Embed Small",
+                    "modelType": "embedding",
+                    "pricing": { "input": "0.00000001" },
+                    "specification": { "provider": "provider-a" }
+                },
+                {
+                    "id": "creator/rerank-lite",
+                    "name": "Rerank Lite",
+                    "modelType": "reranking",
+                    "pricing": null,
+                    "specification": { "provider": "provider-b" }
+                }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(response.models[0].model_type.as_deref(), Some("embedding"));
+        assert_eq!(
+            response.models[0]
+                .specification
+                .as_ref()
+                .map(|specification| specification.provider.as_str()),
+            Some("provider-a")
+        );
+        assert_eq!(response.models[1].model_type.as_deref(), Some("reranking"));
+        assert_eq!(response.models[1].id, "creator/rerank-lite");
+    }
+
+    #[test]
     fn cosine_and_recall_are_stable() {
         assert!((cosine(&[1.0, 0.0], &[1.0, 0.0]).unwrap() - 1.0).abs() < 1e-9);
         assert!((cosine(&[1.0, 0.0], &[0.0, 1.0]).unwrap()).abs() < 1e-9);

@@ -223,11 +223,12 @@ Official model-page evidence:
   header, query, and camel-case `topN` were otherwise correct. This was a lab
   request-contract failure, not a reranker-quality failure.
 - The isolated source now emits the official nested document envelope. Its
-  five focused tests, including a hermetic serialization regression, pass and
-  strict binary-target clippy remains clean. These checks did not launch the
-  lab, read Keychain, contact Vercel, or change the preserved stable launch
-  executable. A stable direct-request authentication path remains a
-  prerequisite for live confirmation.
+  eight focused tests cover the live catalog shape, embedding response and
+  usage parsing, the exact rerank request envelope, rerank response validation,
+  and stable host-id mapping; all pass, and strict binary-target clippy remains
+  clean. These checks did not launch the lab, read Keychain, contact Vercel, or
+  change the preserved stable launch executable. A stable direct-request
+  authentication path remains a prerequisite for live confirmation.
 - A two-document isolation probe was prepared, but repeated macOS Keychain
   dialogs made further executable launches a worse diagnostic path than the
   contract question warranted. The orphaned lab and SecurityAgent processes
@@ -415,7 +416,7 @@ terms. Reports include per-shape mean relevant recall, must-include recall,
 non-relevant share, bounded top rankings, dimensions, usage, warnings, and
 latency.
 
-The probe's unit tests (5/5) and strict binary-target clippy pass. The live
+The probe's unit tests (8/8) and strict binary-target clippy pass. The live
 catalog completed and a Qwen3 0.6B embedding response passed validation. The
 first Voyage Lite reranking request returned HTTP 400 as recorded above. No
 additional Keychain-reading lab executable should be launched during this
