@@ -7,8 +7,8 @@ use cd_core::quality_eval::{
     apply_judge_cannot_override, assert_suite_digest, gate_export_text, load_suite,
     quality_units_are_gateway_scoped, run_hermetic_suite, scan_privacy_text,
     scan_runtime_isolation, score_retrieval, serialize_json, validate_ranking, write_export,
-    HermeticRunOptions, LaneStatus, ModelSubject, QUALITY_EVAL_SCHEMA_VERSION,
-    RUNTIME_FORBIDDEN_EVALUATOR_TOKENS,
+    CandidateExpectation, HermeticRunOptions, LaneStatus, ModelSubject,
+    QUALITY_EVAL_SCHEMA_VERSION, RUNTIME_FORBIDDEN_EVALUATOR_TOKENS,
 };
 use cd_core::quality_eval::{failure_reason, EvidenceDocument, QueryTruth, RetrievalRanking};
 use std::collections::{BTreeMap, BTreeSet};
@@ -53,28 +53,104 @@ fn hermetic_run_executes_and_enforces_good_versus_mutation_contract() {
     let mut saw_mut = false;
     for case in &record.cases {
         assert_eq!(case.status, LaneStatus::Executed, "{}", case.case_id);
+        let truth = &suite
+            .cases
+            .iter()
+            .find(|loaded| loaded.truth.case_id == case.case_id)
+            .expect("case truth")
+            .truth;
         for ans in &case.answers {
-            if ans.candidate_id.starts_with("good") {
-                saw_good = true;
-                assert!(
-                    ans.passed,
-                    "good {} failed on {}: {:?}",
-                    ans.candidate_id,
-                    case.case_id,
-                    ans.failed_ids()
-                );
-            }
-            if ans.candidate_id.starts_with("mut_") || ans.candidate_id.starts_with("bad_") {
-                saw_mut = true;
-                assert!(
-                    !ans.passed,
-                    "mutation {} passed on {}",
-                    ans.candidate_id, case.case_id
-                );
+            match truth.candidate_expectations.get(&ans.candidate_id) {
+                Some(CandidateExpectation::Pass) => {
+                    saw_good = true;
+                    assert_eq!(ans.expected_outcome, Some(CandidateExpectation::Pass));
+                    assert_eq!(ans.expectation_met, Some(true));
+                    assert!(
+                        ans.passed,
+                        "expected pass {} failed on {}: {:?}",
+                        ans.candidate_id,
+                        case.case_id,
+                        ans.failed_ids()
+                    );
+                }
+                Some(CandidateExpectation::Fail) => {
+                    saw_mut = true;
+                    assert_eq!(ans.expected_outcome, Some(CandidateExpectation::Fail));
+                    assert_eq!(ans.expectation_met, Some(true));
+                    assert!(
+                        !ans.passed,
+                        "expected failure {} passed on {}",
+                        ans.candidate_id, case.case_id
+                    );
+                }
+                None => panic!("missing expectation for {}", ans.candidate_id),
             }
         }
     }
     assert!(saw_good && saw_mut);
+}
+
+#[test]
+fn incomplete_product_packets_can_receive_correct_abstention_credit() {
+    let suite = load_suite(&suite_root()).expect("load");
+    let record = run_hermetic_suite(&suite, &HermeticRunOptions::default());
+    let abstentions: Vec<_> = record
+        .cases
+        .iter()
+        .flat_map(|case| case.answers.iter())
+        .filter(|answer| answer.candidate_id == "good_product_path_abstention")
+        .collect();
+
+    assert_eq!(abstentions.len(), 2);
+    assert!(abstentions.iter().all(|answer| {
+        answer.packet_id == "product_path" && answer.passed && answer.expectation_met == Some(true)
+    }));
+}
+
+#[test]
+fn candidate_expectations_do_not_depend_on_id_prefixes() {
+    let mut suite = load_suite(&suite_root()).expect("load");
+    let case = &mut suite.cases[0];
+    let renames = [
+        ("good_fixed", "candidate_a"),
+        ("mut_missing_citation", "candidate_b"),
+        ("good_oracle", "candidate_c"),
+    ];
+    for (from, to) in renames {
+        case.runtime
+            .candidates
+            .iter_mut()
+            .find(|candidate| candidate.candidate_id == from)
+            .expect("candidate")
+            .candidate_id = to.into();
+        let expectation = case
+            .truth
+            .candidate_expectations
+            .remove(from)
+            .expect("expectation");
+        case.truth
+            .candidate_expectations
+            .insert(to.into(), expectation);
+    }
+
+    let record = run_hermetic_suite(&suite, &HermeticRunOptions::default());
+
+    assert_eq!(record.status, LaneStatus::Executed);
+    assert_eq!(record.cases[0].status, LaneStatus::Executed);
+}
+
+#[test]
+fn missing_candidate_expectation_fails_closed() {
+    let mut suite = load_suite(&suite_root()).expect("load");
+    suite.cases[0]
+        .truth
+        .candidate_expectations
+        .remove("good_fixed");
+
+    let record = run_hermetic_suite(&suite, &HermeticRunOptions::default());
+
+    assert_eq!(record.status, LaneStatus::Failed);
+    assert_eq!(record.cases[0].status, LaneStatus::Failed);
 }
 
 #[test]
@@ -156,6 +232,23 @@ fn mutation_unsupported_certainty_has_typed_reason() {
         .find(|a| a.candidate_id == "mut_unsupported_certainty")
         .expect("mut");
     assert!(ans.failed_ids().contains(&"honest_abstention"));
+}
+
+#[test]
+fn mutation_generic_abstention_has_typed_reason() {
+    let suite = load_suite(&suite_root()).unwrap();
+    let record = run_hermetic_suite(&suite, &HermeticRunOptions::default());
+    let answer = record
+        .cases
+        .iter()
+        .flat_map(|case| case.answers.iter())
+        .find(|answer| answer.candidate_id == "mut_generic_abstention")
+        .expect("generic abstention mutation");
+
+    assert!(!answer.passed);
+    assert!(answer.failed_ids().contains(&"abstention_evidence_basis"));
+    assert_eq!(answer.expected_outcome, Some(CandidateExpectation::Fail));
+    assert_eq!(answer.expectation_met, Some(true));
 }
 
 #[test]
@@ -262,6 +355,55 @@ fn same_model_id_two_gateways_do_not_share_quality_unit() {
     };
     // storage_id includes gateway so this remains distinct — prove the formula.
     assert_ne!(collapsed.storage_id(), bad.storage_id());
+}
+
+#[test]
+fn quality_unit_reuses_compatibility_endpoint_fingerprint() {
+    let suite = load_suite(&suite_root()).unwrap();
+    let endpoint = "https://Gateway.Example/CaseSensitive/v1/";
+    let opts = HermeticRunOptions {
+        endpoint_for_fingerprint: endpoint.into(),
+        ..Default::default()
+    };
+
+    let unit = cd_core::quality_eval::hermetic_quality_unit(&suite, &opts);
+    let qualification = QualificationKey::new("profile", endpoint, "model");
+
+    assert_eq!(
+        unit.subject.endpoint_fingerprint,
+        qualification.endpoint_fingerprint
+    );
+}
+
+#[test]
+fn quality_unit_preserves_the_full_build_identity() {
+    let suite = load_suite(&suite_root()).unwrap();
+    let full_identity = "0123456789abcdef0123456789abcdef01234567";
+    let opts = HermeticRunOptions {
+        build_identity: full_identity.into(),
+        ..Default::default()
+    };
+
+    let unit = cd_core::quality_eval::hermetic_quality_unit(&suite, &opts);
+
+    assert_eq!(unit.build_identity, full_identity);
+    assert!(unit.storage_id().contains(full_identity));
+}
+
+#[test]
+fn storage_ids_length_frame_delimiter_bearing_components() {
+    let a = ModelSubject {
+        gateway_profile_id: "gateway::alpha".into(),
+        endpoint_fingerprint: "fingerprint".into(),
+        model_id: "model".into(),
+    };
+    let b = ModelSubject {
+        gateway_profile_id: "gateway".into(),
+        endpoint_fingerprint: "alpha::fingerprint".into(),
+        model_id: "model".into(),
+    };
+
+    assert_ne!(a.storage_id(), b.storage_id());
 }
 
 #[test]

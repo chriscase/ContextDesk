@@ -30,7 +30,8 @@ pub use export::{
 };
 pub use metrics::{round6, score_retrieval, validate_ranking};
 pub use run::{
-    hermetic_quality_unit, quality_units_are_gateway_scoped, run_hermetic_suite, HermeticRunOptions,
+    hermetic_quality_unit, judge_is_not_scheduled_pass, quality_units_are_gateway_scoped,
+    run_hermetic_suite, HermeticRunOptions,
 };
 pub use suite::{
     assert_suite_digest, hex_sha256, known_document_ids, load_suite, resolve_suite_path,

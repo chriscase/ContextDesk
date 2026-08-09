@@ -3,27 +3,27 @@
   "case_id": "qe05-trigger-and-recovery",
   "documents": [
     {
-      "id": "t-change",
+      "id": "d01",
       "text": "kind=deployment_event level=info service=control pattern=deployment revision r17 started"
     },
     {
-      "id": "t-bad",
+      "id": "d02",
       "text": "kind=config_error level=error service=control pattern=lease window 250 below supported minimum 1000"
     },
     {
-      "id": "t-fail",
+      "id": "d03",
       "text": "kind=exception_header level=error service=worker pattern=LeaseWindowExpired during acquisition"
     },
     {
-      "id": "t-rollback",
+      "id": "d04",
       "text": "kind=deployment_event level=warn service=control pattern=rollback revision r17 requested"
     },
     {
-      "id": "t-restore",
+      "id": "d05",
       "text": "kind=config_event level=info service=control pattern=restored revision r16 lease window 4000"
     },
     {
-      "id": "t-ok",
+      "id": "d06",
       "text": "kind=status_event level=info service=worker pattern=lease acquisition recovered shard amber"
     }
   ],
@@ -35,19 +35,19 @@
       "packet_id": "fixed",
       "documents": [
         {
-          "id": "t-bad",
+          "id": "d02",
           "text": "kind=config_error level=error service=control pattern=lease window 250 below supported minimum 1000"
         },
         {
-          "id": "t-fail",
+          "id": "d03",
           "text": "kind=exception_header level=error service=worker pattern=LeaseWindowExpired during acquisition"
         },
         {
-          "id": "t-restore",
+          "id": "d05",
           "text": "kind=config_event level=info service=control pattern=restored revision r16 lease window 4000"
         },
         {
-          "id": "t-ok",
+          "id": "d06",
           "text": "kind=status_event level=info service=worker pattern=lease acquisition recovered shard amber"
         }
       ]
@@ -56,11 +56,11 @@
       "packet_id": "oracle",
       "documents": [
         {
-          "id": "t-bad",
+          "id": "d02",
           "text": "kind=config_error level=error service=control pattern=lease window 250 below supported minimum 1000"
         },
         {
-          "id": "t-restore",
+          "id": "d05",
           "text": "kind=config_event level=info service=control pattern=restored revision r16 lease window 4000"
         }
       ]
@@ -69,11 +69,11 @@
       "packet_id": "product_path",
       "documents": [
         {
-          "id": "t-fail",
+          "id": "d03",
           "text": "kind=exception_header level=error service=worker pattern=LeaseWindowExpired during acquisition"
         },
         {
-          "id": "t-ok",
+          "id": "d06",
           "text": "kind=status_event level=info service=worker pattern=lease acquisition recovered shard amber"
         }
       ]
@@ -82,7 +82,7 @@
   "rankings": [
     {
       "query_id": "q1",
-      "ranked_ids": ["t-bad", "t-fail", "t-restore", "t-ok", "t-change", "t-rollback"],
+      "ranked_ids": ["d02", "d03", "d05", "d06", "d01", "d04"],
       "k": 6
     }
   ],
@@ -95,17 +95,17 @@
       "claims": [
         {
           "text": "lease window 250 below supported minimum 1000",
-          "evidence_ids": ["t-bad"],
+          "evidence_ids": ["d02"],
           "role": "trigger"
         },
         {
           "text": "restored revision r16 lease window 4000",
-          "evidence_ids": ["t-restore"],
+          "evidence_ids": ["d05"],
           "role": "recovery"
         },
         {
           "text": "lease acquisition recovered shard amber",
-          "evidence_ids": ["t-ok"],
+          "evidence_ids": ["d06"],
           "role": "recovery"
         }
       ],
@@ -120,7 +120,7 @@
       "claims": [
         {
           "text": "lease acquisition recovered shard amber",
-          "evidence_ids": ["t-ok"],
+          "evidence_ids": ["d06"],
           "role": "trigger"
         }
       ],

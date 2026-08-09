@@ -15,6 +15,9 @@ It does **not** claim any live model is useful or verified.
 | **Live optional** | Real gateway experiments | Defaults to `not_scheduled` |
 
 Quality results must never alter model compatibility/readiness stores.
+Evidence-class markers are derived from rows actually present in the run;
+their defaults are false, and an empty suite is rejected rather than reported
+as executed quality evidence.
 
 ## Quality-unit identity
 
@@ -34,6 +37,13 @@ Fields (see `QualityUnit` in `cd_core::quality_eval::types`):
 - quality-eval schema version
 
 **Same model id on two gateways = two subjects.** Storage ids include the gateway profile id.
+Storage-id components are length-framed, so provider/model strings containing
+separator characters cannot collide with a different component split.
+When `CD_GIT_SHA` is supplied, the full value is retained rather than a
+display-shortened prefix so distinct builds cannot collapse into one quality
+unit.
+Suite digests use length-framed manifest, case-id, runtime, and truth segments,
+so byte shifts between adjacent files cannot preserve the same digest.
 
 ## Lanes
 
@@ -44,7 +54,10 @@ Fields (see `QualityUnit` in `cd_core::quality_eval::types`):
 | `product_path_fixture` | Frozen retrieval shortlist through answer scoring | Product handoff vs answer defects |
 | `lexical_retrieval` / `embedding_*` / `product_hybrid` | Schema reserved | Live runners add rankings only |
 
-Unrun lanes use `not_scheduled` / `blocked` / `cancelled` / `failed` — never silent pass.
+The optional judge lane is recorded as `not_scheduled` in hermetic runs.
+Reserved retrieval lanes are absent until a runner invokes them; once a lane
+is represented, `not_scheduled` / `blocked` / `cancelled` / `failed` never
+count as a pass.
 
 ## Deterministic authority order
 
@@ -54,6 +67,35 @@ Unrun lanes use `not_scheduled` / `blocked` / `cancelled` / `failed` — never s
 
 Prose style / subjective usefulness is not a deterministic pass/fail in this milestone.
 
+`LaneStatus::Executed` means the lane ran; it is not itself a quality pass.
+`AnswerScore.passed` records the deterministic answer verdict. For the
+hermetic cage, the overall run is `executed` only when every host-declared
+expected-pass candidate passes and every host-declared mutation fails. Those
+expectations live in `truth.json`; candidate names carry no evaluator authority.
+The exported hermetic answer row carries the expected outcome and whether the
+score matched it, so a deliberately failing mutation is not confused with a
+failed expected-good candidate. Live answer scores omit those fixture fields.
+
+An establishable case cannot pass through generic caution: the answer must
+identify an established cause, cite the required identities, cover the
+decisive facts, and provide a typed trigger claim. Unknown claim roles or
+confidence labels fail the answer schema.
+When the correct outcome is abstention, a generic “not enough information” is
+also insufficient: the answer must identify and cite the observed condition
+that the evidence does establish. It must explicitly state that the causal
+evidence is insufficient, use cautious confidence, and contain no typed trigger
+claim; a candidate cannot earn abstention credit merely by setting its
+`asserts_root_cause_established` flag to false.
+
+Establishability is resolved per evidence packet. A fixed or oracle packet may
+establish a cause while an incomplete product-path packet for the same task
+correctly requires abstention.
+
+The citation text check is explicitly lexical overlap, not semantic
+entailment. Host identity rules, required/forbidden citations, decisive facts,
+and causal roles are authoritative; later blinded review may assess prose
+support but cannot replace those checks.
+
 ## Fixture layout
 
 ```text
@@ -61,7 +103,7 @@ fixtures/quality-eval/open-v1/
   suite.json
   cases/<case-id>/
     runtime.json   # model-visible documents, packets, rankings, scripted candidates
-    truth.json     # host-only relevance, roles, required/forbidden ids
+    truth.json     # host-only relevance, roles, required/forbidden ids and candidate expectations
 ```
 
 Isolation rules:
@@ -69,7 +111,14 @@ Isolation rules:
 - Evaluator tokens (`must_include`, `root cause`, `decoy:`, …) must not appear in
   document text, questions, or candidate prose.
 - Schema field names are not searchable document content.
+- Fixture schemas reject unknown fields before scanning, so evaluator content
+  cannot hide in a field that deserialization would otherwise discard.
 - No employer data, credentials, private endpoints, usernames, or absolute paths.
+- Model-visible evidence ids are opaque (`d01`, `d02`, …), never role or answer
+  hints such as `trigger`, `foreign`, `noise`, or `bad`.
+- Case directories, document/query/task/packet ids, packet contents, and all
+  truth references are validated before scoring. Packet rows must be exact
+  copies of corpus rows; a malformed fixture is not credited as model failure.
 
 ## Retrieval metrics
 
@@ -85,6 +134,11 @@ Implemented in `cd_core::quality_eval::metrics`:
 
 Invalid rankings (empty when required structure fails, duplicate ids, unknown ids)
 **fail closed** with typed reasons — no manufactured credit.
+The truth manifest fixes the scoring K. A runtime ranking cannot declare a
+smaller K to hide a later decoy or inflate nDCG; a conflicting K fails the
+ranking contract. A short returned list is also scored against the full
+host-fixed ideal window, so returning one relevant result cannot receive
+perfect nDCG when additional relevant results were expected.
 
 ## Optional blinded Grok / reference judging
 
@@ -115,8 +169,11 @@ Live DeepSeek / Grok / Vercel / embedding / rerank runners should:
 ## Security and privacy
 
 - Default tests: zero network, Keychain, Grok session, or external model calls.
-- Export gate rejects `sk-`, `Bearer `, home paths, etc.
+- Export gate rejects credential shapes and macOS, Linux, or Windows home paths
+  case-insensitively.
 - Lab refuses overwrite without `--force`.
+- The no-overwrite open is atomic; a concurrent creator cannot turn the check
+  into an accidental replacement.
 - Lab stdout/stderr never prints absolute suite paths in success summaries when writing
   (basename only for `--output`).
 

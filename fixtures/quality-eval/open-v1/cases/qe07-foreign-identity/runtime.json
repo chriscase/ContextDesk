@@ -3,11 +3,11 @@
   "case_id": "qe07-foreign-identity",
   "documents": [
     {
-      "id": "real-1",
+      "id": "d01",
       "text": "kind=config_error level=error service=auth pattern=signing key rotation rejected for realm alpha"
     },
     {
-      "id": "real-2",
+      "id": "d02",
       "text": "kind=application_error level=error service=auth pattern=token mint failed after signing key rejection"
     }
   ],
@@ -19,11 +19,11 @@
       "packet_id": "fixed",
       "documents": [
         {
-          "id": "real-1",
+          "id": "d01",
           "text": "kind=config_error level=error service=auth pattern=signing key rotation rejected for realm alpha"
         },
         {
-          "id": "real-2",
+          "id": "d02",
           "text": "kind=application_error level=error service=auth pattern=token mint failed after signing key rejection"
         }
       ]
@@ -32,7 +32,7 @@
       "packet_id": "oracle",
       "documents": [
         {
-          "id": "real-1",
+          "id": "d01",
           "text": "kind=config_error level=error service=auth pattern=signing key rotation rejected for realm alpha"
         }
       ]
@@ -41,7 +41,7 @@
       "packet_id": "product_path",
       "documents": [
         {
-          "id": "real-2",
+          "id": "d02",
           "text": "kind=application_error level=error service=auth pattern=token mint failed after signing key rejection"
         }
       ]
@@ -50,7 +50,7 @@
   "rankings": [
     {
       "query_id": "q1",
-      "ranked_ids": ["real-1", "real-2"],
+      "ranked_ids": ["d01", "d02"],
       "k": 2
     }
   ],
@@ -63,12 +63,12 @@
       "claims": [
         {
           "text": "signing key rotation rejected for realm alpha",
-          "evidence_ids": ["real-1"],
+          "evidence_ids": ["d01"],
           "role": "trigger"
         },
         {
           "text": "token mint failed after signing key rejection",
-          "evidence_ids": ["real-2"],
+          "evidence_ids": ["d02"],
           "role": "symptom"
         }
       ],
@@ -83,7 +83,7 @@
       "claims": [
         {
           "text": "signing key rotation rejected for realm alpha",
-          "evidence_ids": ["real-1", "doc-from-other-corpus"],
+          "evidence_ids": ["d01", "doc-from-other-corpus"],
           "role": "trigger"
         }
       ],

@@ -6,7 +6,7 @@ use super::types::{
 };
 use crate::error::{CoreError, CoreResult};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -30,8 +30,15 @@ pub const RUNTIME_FORBIDDEN_EVALUATOR_TOKENS: &[&str] = &[
 ];
 
 /// Credential / path shapes forbidden in fixtures and exports.
-pub const PRIVACY_FORBIDDEN_SUBSTRINGS: &[&str] =
-    &["/Users/", "C:\\Users", "sk-", "Bearer ", "xai-", "ghp_"];
+pub const PRIVACY_FORBIDDEN_SUBSTRINGS: &[&str] = &[
+    "/users/",
+    "/home/",
+    "c:\\users",
+    "sk-",
+    "bearer ",
+    "xai-",
+    "ghp_",
+];
 
 /// One loaded case with runtime/truth separation enforced.
 #[derive(Debug, Clone)]
@@ -77,20 +84,37 @@ pub fn load_suite(suite_root: &Path) -> CoreResult<LoadedSuite> {
             manifest.schema_version
         )));
     }
+    if manifest.cases.is_empty() {
+        return Err(CoreError::Config(format!(
+            "{}: suite must contain at least one case",
+            failure_reason::INVALID_FIXTURE_CONTRACT
+        )));
+    }
 
     let mut cases = Vec::new();
     let mut digest_input = Vec::new();
-    digest_input.extend_from_slice(raw.as_bytes());
+    extend_digest_segment(&mut digest_input, raw.as_bytes());
 
+    let mut seen_case_dirs = BTreeSet::new();
     for case_dir in &manifest.cases {
+        let mut components = Path::new(case_dir).components();
+        let single_normal_component =
+            matches!(components.next(), Some(std::path::Component::Normal(_)))
+                && components.next().is_none();
+        if !single_normal_component || !seen_case_dirs.insert(case_dir.as_str()) {
+            return Err(CoreError::Config(format!(
+                "{}: case entries must be unique direct child names",
+                failure_reason::INVALID_FIXTURE_CONTRACT
+            )));
+        }
         let case_path = suite_root.join("cases").join(case_dir);
         let runtime_raw = fs::read_to_string(case_path.join("runtime.json"))
             .map_err(|e| CoreError::Config(format!("read cases/{case_dir}/runtime.json: {e}")))?;
         let truth_raw = fs::read_to_string(case_path.join("truth.json"))
             .map_err(|e| CoreError::Config(format!("read cases/{case_dir}/truth.json: {e}")))?;
-        digest_input.extend_from_slice(case_dir.as_bytes());
-        digest_input.extend_from_slice(runtime_raw.as_bytes());
-        digest_input.extend_from_slice(truth_raw.as_bytes());
+        extend_digest_segment(&mut digest_input, case_dir.as_bytes());
+        extend_digest_segment(&mut digest_input, runtime_raw.as_bytes());
+        extend_digest_segment(&mut digest_input, truth_raw.as_bytes());
 
         let runtime: CaseRuntime = serde_json::from_str(&runtime_raw)
             .map_err(|e| CoreError::Config(format!("parse runtime {case_dir}: {e}")))?;
@@ -146,6 +170,183 @@ fn validate_case_pair(case_dir: &str, runtime: &CaseRuntime, truth: &CaseTruth) 
             runtime.case_id, truth.case_id
         )));
     }
+    if runtime.case_id != case_dir {
+        return Err(fixture_error(case_dir, "case directory must equal case_id"));
+    }
+    if runtime.rankings.is_empty() && runtime.candidates.is_empty() {
+        return Err(fixture_error(
+            case_dir,
+            "case must contain at least one retrieval ranking or candidate answer",
+        ));
+    }
+
+    let mut documents = BTreeMap::new();
+    for document in &runtime.documents {
+        if document.id.trim().is_empty()
+            || !is_opaque_document_id(&document.id)
+            || documents
+                .insert(document.id.as_str(), document.text.as_str())
+                .is_some()
+        {
+            return Err(fixture_error(
+                case_dir,
+                "document ids must be unique opaque values such as d01",
+            ));
+        }
+    }
+
+    let truth_query_ids: BTreeSet<&str> = truth
+        .queries
+        .iter()
+        .map(|query| query.query_id.as_str())
+        .collect();
+    if truth_query_ids.len() != truth.queries.len()
+        || truth_query_ids
+            != runtime
+                .questions
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>()
+    {
+        return Err(fixture_error(
+            case_dir,
+            "runtime questions and truth query ids must be unique and identical",
+        ));
+    }
+    for query in &truth.queries {
+        if runtime.questions.get(&query.query_id) != Some(&query.question) || query.top_k == 0 {
+            return Err(fixture_error(
+                case_dir,
+                "truth questions must match runtime text and use top_k greater than zero",
+            ));
+        }
+        let relevant: BTreeSet<&str> = query.relevant_ids.iter().map(String::as_str).collect();
+        let referenced_ids = query
+            .relevant_ids
+            .iter()
+            .chain(&query.must_include_ids)
+            .chain(&query.must_exclude_ids)
+            .chain(&query.foreign_incident_ids);
+        if referenced_ids
+            .into_iter()
+            .any(|id| !documents.contains_key(id.as_str()))
+            || query
+                .graded_gains
+                .keys()
+                .any(|id| !relevant.contains(id.as_str()))
+            || query
+                .must_include_ids
+                .iter()
+                .any(|id| !relevant.contains(id.as_str()))
+            || query
+                .must_exclude_ids
+                .iter()
+                .any(|id| relevant.contains(id.as_str()))
+        {
+            return Err(fixture_error(
+                case_dir,
+                "query truth contains unknown or contradictory evidence identities",
+            ));
+        }
+    }
+
+    let mut packet_ids = BTreeSet::new();
+    for packet in &runtime.packets {
+        if packet.packet_id.trim().is_empty() || !packet_ids.insert(packet.packet_id.as_str()) {
+            return Err(fixture_error(
+                case_dir,
+                "packet ids must be non-empty and unique",
+            ));
+        }
+        let mut seen_packet_docs = BTreeSet::new();
+        for document in &packet.documents {
+            if !seen_packet_docs.insert(document.id.as_str())
+                || documents.get(document.id.as_str()).copied() != Some(document.text.as_str())
+            {
+                return Err(fixture_error(
+                    case_dir,
+                    "packet documents must be unique exact copies of corpus documents",
+                ));
+            }
+        }
+    }
+
+    let answer_task_ids: BTreeSet<&str> = truth
+        .answers
+        .iter()
+        .map(|answer| answer.task_id.as_str())
+        .collect();
+    if answer_task_ids.len() != truth.answers.len() {
+        return Err(fixture_error(case_dir, "answer task ids must be unique"));
+    }
+    for answer in &truth.answers {
+        if answer.requires_abstention && answer.root_cause_establishable {
+            return Err(fixture_error(
+                case_dir,
+                "answer truth cannot require abstention when the cause is establishable",
+            ));
+        }
+        if answer
+            .packet_overrides
+            .iter()
+            .any(|(packet_id, override_truth)| {
+                !packet_ids.contains(packet_id.as_str())
+                    || (override_truth.requires_abstention
+                        && override_truth.root_cause_establishable)
+            })
+        {
+            return Err(fixture_error(
+                case_dir,
+                "packet answer overrides must reference known packets and use consistent truth",
+            ));
+        }
+        if answer
+            .required_evidence_ids
+            .iter()
+            .chain(&answer.forbidden_evidence_ids)
+            .any(|id| !documents.contains_key(id.as_str()))
+        {
+            return Err(fixture_error(
+                case_dir,
+                "answer truth contains unknown evidence identities",
+            ));
+        }
+    }
+    if runtime.candidates.iter().any(|candidate| {
+        !answer_task_ids.contains(candidate.task_id.as_str())
+            || !packet_ids.contains(candidate.packet_id.as_str())
+    }) || runtime
+        .rankings
+        .iter()
+        .any(|ranking| !truth_query_ids.contains(ranking.query_id.as_str()))
+    {
+        return Err(fixture_error(
+            case_dir,
+            "candidate or ranking references an unknown task, packet, or query",
+        ));
+    }
+    let candidate_ids: BTreeSet<&str> = runtime
+        .candidates
+        .iter()
+        .map(|candidate| candidate.candidate_id.as_str())
+        .collect();
+    if candidate_ids.len() != runtime.candidates.len() {
+        return Err(CoreError::Config(format!(
+            "{case_dir}: {}: duplicate scripted candidate id",
+            failure_reason::CANDIDATE_EXPECTATION_MISMATCH
+        )));
+    }
+    let expected_ids: BTreeSet<&str> = truth
+        .candidate_expectations
+        .keys()
+        .map(String::as_str)
+        .collect();
+    if candidate_ids != expected_ids {
+        return Err(CoreError::Config(format!(
+            "{case_dir}: {}: every scripted candidate needs one host-only expectation",
+            failure_reason::CANDIDATE_EXPECTATION_MISMATCH
+        )));
+    }
     // Silence unused CASE_SCHEMA_ID without exporting a case.json requirement.
     let _ = CASE_SCHEMA_ID;
 
@@ -174,6 +375,13 @@ fn validate_case_pair(case_dir: &str, runtime: &CaseRuntime, truth: &CaseTruth) 
         )));
     }
     Ok(())
+}
+
+fn fixture_error(case_dir: &str, detail: &str) -> CoreError {
+    CoreError::Config(format!(
+        "{case_dir}: {}: {detail}",
+        failure_reason::INVALID_FIXTURE_CONTRACT
+    ))
 }
 
 /// Scan **model-visible text surfaces** for evaluator labels.
@@ -229,12 +437,23 @@ pub fn scan_runtime_isolation(runtime: &CaseRuntime) -> Vec<String> {
 /// Scan text for absolute paths and credential-shaped substrings.
 pub fn scan_privacy_text(text: &str) -> Vec<String> {
     let mut findings = Vec::new();
+    let normalized = text.to_ascii_lowercase();
     for token in PRIVACY_FORBIDDEN_SUBSTRINGS {
-        if text.contains(token) {
+        if normalized.contains(token) {
             findings.push(format!("forbidden substring `{token}`"));
         }
     }
     findings
+}
+
+fn is_opaque_document_id(id: &str) -> bool {
+    id.strip_prefix('d')
+        .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn extend_digest_segment(buffer: &mut Vec<u8>, segment: &[u8]) {
+    buffer.extend_from_slice(&(segment.len() as u64).to_be_bytes());
+    buffer.extend_from_slice(segment);
 }
 
 /// Document id universe for a case runtime.
@@ -286,7 +505,73 @@ pub fn resolve_suite_path(explicit: Option<&Path>) -> CoreResult<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::{
+        AnswerTruth, CandidateAnswer, CandidateExpectation, EvidenceDocument, EvidencePacket,
+        QueryTruth,
+    };
     use super::*;
+
+    fn valid_pair() -> (CaseRuntime, CaseTruth) {
+        let document = EvidenceDocument {
+            id: "d1".into(),
+            text: "service changed its configured boundary".into(),
+        };
+        let runtime = CaseRuntime {
+            schema_id: RUNTIME_SCHEMA_ID.into(),
+            case_id: "case".into(),
+            documents: vec![document.clone()],
+            questions: BTreeMap::from([("q1".into(), "What changed?".into())]),
+            packets: vec![EvidencePacket {
+                packet_id: "fixed".into(),
+                documents: vec![document],
+            }],
+            rankings: vec![],
+            candidates: vec![CandidateAnswer {
+                candidate_id: "candidate".into(),
+                task_id: "t1".into(),
+                packet_id: "fixed".into(),
+                asserts_root_cause_established: true,
+                claims: vec![],
+                conclusion: "configured boundary changed".into(),
+                confidence: "medium".into(),
+            }],
+        };
+        let truth = CaseTruth {
+            schema_id: TRUTH_SCHEMA_ID.into(),
+            case_id: "case".into(),
+            title: "case".into(),
+            queries: vec![QueryTruth {
+                query_id: "q1".into(),
+                question: "What changed?".into(),
+                relevant_ids: vec!["d1".into()],
+                graded_gains: BTreeMap::new(),
+                must_include_ids: vec!["d1".into()],
+                must_exclude_ids: vec![],
+                foreign_incident_ids: vec![],
+                top_k: 1,
+            }],
+            answers: vec![AnswerTruth {
+                task_id: "t1".into(),
+                root_cause_establishable: true,
+                required_fact_tokens: vec!["boundary".into()],
+                trigger_tokens: vec!["boundary".into()],
+                symptom_tokens: vec![],
+                recovery_tokens: vec![],
+                independent_incident_tokens: vec![],
+                required_evidence_ids: vec!["d1".into()],
+                forbidden_evidence_ids: vec![],
+                requires_abstention: false,
+                packet_overrides: BTreeMap::new(),
+                forbidden_conclusion_tokens: vec![],
+            }],
+            candidate_expectations: BTreeMap::from([(
+                "candidate".into(),
+                CandidateExpectation::Pass,
+            )]),
+            incidents: BTreeMap::new(),
+        };
+        (runtime, truth)
+    }
 
     #[test]
     fn forbidden_tokens_detected() {
@@ -310,5 +595,105 @@ mod tests {
     fn privacy_scan_catches_home_paths() {
         let findings = scan_privacy_text("file is under /Users/nobody/secret");
         assert!(!findings.is_empty());
+        assert!(!scan_privacy_text("file is under /home/nobody/secret").is_empty());
+        assert!(!scan_privacy_text("BEARER not-a-real-token").is_empty());
+    }
+
+    #[test]
+    fn descriptive_document_ids_are_rejected_as_truth_leakage() {
+        let (mut runtime, truth) = valid_pair();
+        runtime.documents[0].id = "d-trigger".into();
+        runtime.packets[0].documents[0].id = "d-trigger".into();
+        runtime.candidates[0].claims.clear();
+
+        let error = validate_case_pair("case", &runtime, &truth).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains(failure_reason::INVALID_FIXTURE_CONTRACT));
+    }
+
+    #[test]
+    fn packet_rows_must_match_the_corpus_exactly() {
+        let (mut runtime, truth) = valid_pair();
+        runtime.packets[0].documents[0].text = "invented packet row".into();
+
+        let error = validate_case_pair("case", &runtime, &truth).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains(failure_reason::INVALID_FIXTURE_CONTRACT));
+    }
+
+    #[test]
+    fn candidate_expectations_are_exact_host_only_coverage() {
+        let (runtime, mut truth) = valid_pair();
+        truth.candidate_expectations.clear();
+
+        let error = validate_case_pair("case", &runtime, &truth).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains(failure_reason::CANDIDATE_EXPECTATION_MISMATCH));
+    }
+
+    #[test]
+    fn manifest_case_paths_cannot_escape_the_suite() {
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = SuiteManifest {
+            schema_id: SUITE_SCHEMA_ID.into(),
+            suite_id: "test".into(),
+            title: "test".into(),
+            schema_version: QUALITY_EVAL_SCHEMA_VERSION.into(),
+            cases: vec!["../outside".into()],
+        };
+        fs::write(
+            directory.path().join("suite.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let error = load_suite(directory.path()).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains(failure_reason::INVALID_FIXTURE_CONTRACT));
+    }
+
+    #[test]
+    fn empty_suite_cannot_claim_executed_quality() {
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = SuiteManifest {
+            schema_id: SUITE_SCHEMA_ID.into(),
+            suite_id: "empty".into(),
+            title: "empty".into(),
+            schema_version: QUALITY_EVAL_SCHEMA_VERSION.into(),
+            cases: vec![],
+        };
+        fs::write(
+            directory.path().join("suite.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let error = load_suite(directory.path()).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains(failure_reason::INVALID_FIXTURE_CONTRACT));
+    }
+
+    #[test]
+    fn unknown_runtime_fields_cannot_bypass_isolation_scanning() {
+        let (runtime, _) = valid_pair();
+        let mut value = serde_json::to_value(runtime).unwrap();
+        value.as_object_mut().unwrap().insert(
+            "root_cause".into(),
+            serde_json::json!("hidden evaluator truth"),
+        );
+
+        let error = serde_json::from_value::<CaseRuntime>(value).unwrap_err();
+
+        assert!(error.to_string().contains("unknown field"));
     }
 }

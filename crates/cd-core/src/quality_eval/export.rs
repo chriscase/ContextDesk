@@ -6,7 +6,7 @@
 use super::suite::scan_privacy_text;
 use super::types::{failure_reason, QualityRunRecord};
 use crate::error::{CoreError, CoreResult};
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
@@ -90,22 +90,31 @@ pub fn gate_export_text(text: &str) -> CoreResult<()> {
 /// Write export to path. Refuses to overwrite an existing file unless `force`.
 pub fn write_export(path: &Path, body: &str, force: bool) -> CoreResult<()> {
     gate_export_text(body)?;
-    if path.exists() && !force {
-        return Err(CoreError::Config(format!(
-            "output path already exists (pass --force to replace): {}",
-            path.file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("output")
-        )));
-    }
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)
                 .map_err(|e| CoreError::Message(format!("create output parent: {e}")))?;
         }
     }
-    let mut file =
-        fs::File::create(path).map_err(|e| CoreError::Message(format!("create output: {e}")))?;
+    let mut options = OpenOptions::new();
+    options.write(true);
+    if force {
+        options.create(true).truncate(true);
+    } else {
+        options.create_new(true);
+    }
+    let mut file = options.open(path).map_err(|error| {
+        if !force && error.kind() == std::io::ErrorKind::AlreadyExists {
+            CoreError::Config(format!(
+                "output path already exists (pass --force to replace): {}",
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("output")
+            ))
+        } else {
+            CoreError::Message(format!("create output: {error}"))
+        }
+    })?;
     file.write_all(body.as_bytes())
         .map_err(|e| CoreError::Message(format!("write output: {e}")))?;
     Ok(())

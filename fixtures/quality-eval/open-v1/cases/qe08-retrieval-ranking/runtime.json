@@ -3,31 +3,31 @@
   "case_id": "qe08-retrieval-ranking",
   "documents": [
     {
-      "id": "r-trigger",
+      "id": "d01",
       "text": "kind=config_error level=error service=queue pattern=invalid upper bound for worker queue after configuration change"
     },
     {
-      "id": "r-prop",
+      "id": "d02",
       "text": "kind=cause_record level=error service=worker pattern=queue rejected new jobs because limit was exceeded"
     },
     {
-      "id": "r-symptom",
+      "id": "d03",
       "text": "kind=application_error level=error service=api pattern=customer jobs were rejected because worker queue was unavailable"
     },
     {
-      "id": "r-recover",
+      "id": "d04",
       "text": "kind=status_event level=info service=control pattern=previous limit restored and worker queue available again"
     },
     {
-      "id": "r-noise1",
+      "id": "d05",
       "text": "kind=status_event level=info service=api pattern=control request succeeded"
     },
     {
-      "id": "r-noise2",
+      "id": "d06",
       "text": "kind=status_event level=debug service=worker pattern=periodic sample completed"
     },
     {
-      "id": "r-foreign",
+      "id": "d07",
       "text": "kind=application_error level=error service=mail pattern=notification send timeout on secondary region"
     }
   ],
@@ -39,15 +39,15 @@
       "packet_id": "fixed",
       "documents": [
         {
-          "id": "r-trigger",
+          "id": "d01",
           "text": "kind=config_error level=error service=queue pattern=invalid upper bound for worker queue after configuration change"
         },
         {
-          "id": "r-prop",
+          "id": "d02",
           "text": "kind=cause_record level=error service=worker pattern=queue rejected new jobs because limit was exceeded"
         },
         {
-          "id": "r-recover",
+          "id": "d04",
           "text": "kind=status_event level=info service=control pattern=previous limit restored and worker queue available again"
         }
       ]
@@ -56,11 +56,11 @@
       "packet_id": "oracle",
       "documents": [
         {
-          "id": "r-trigger",
+          "id": "d01",
           "text": "kind=config_error level=error service=queue pattern=invalid upper bound for worker queue after configuration change"
         },
         {
-          "id": "r-recover",
+          "id": "d04",
           "text": "kind=status_event level=info service=control pattern=previous limit restored and worker queue available again"
         }
       ]
@@ -69,11 +69,11 @@
       "packet_id": "product_path",
       "documents": [
         {
-          "id": "r-symptom",
+          "id": "d03",
           "text": "kind=application_error level=error service=api pattern=customer jobs were rejected because worker queue was unavailable"
         },
         {
-          "id": "r-noise1",
+          "id": "d05",
           "text": "kind=status_event level=info service=api pattern=control request succeeded"
         }
       ]
@@ -82,8 +82,8 @@
   "rankings": [
     {
       "query_id": "q1",
-      "ranked_ids": ["r-trigger", "r-prop", "r-recover", "r-symptom", "r-noise1", "r-noise2", "r-foreign"],
-      "upstream_ranked_ids": ["r-noise1", "r-trigger", "r-prop", "r-recover", "r-symptom", "r-noise2", "r-foreign"],
+      "ranked_ids": ["d01", "d02", "d04", "d03", "d05", "d06", "d07"],
+      "upstream_ranked_ids": ["d05", "d01", "d02", "d04", "d03", "d06", "d07"],
       "k": 5
     }
   ],
@@ -96,12 +96,12 @@
       "claims": [
         {
           "text": "invalid upper bound for worker queue after configuration change",
-          "evidence_ids": ["r-trigger"],
+          "evidence_ids": ["d01"],
           "role": "trigger"
         },
         {
           "text": "previous limit restored and worker queue available again",
-          "evidence_ids": ["r-recover"],
+          "evidence_ids": ["d04"],
           "role": "recovery"
         }
       ],
@@ -116,12 +116,27 @@
       "claims": [
         {
           "text": "customer jobs were rejected because worker queue was unavailable",
-          "evidence_ids": ["r-symptom"],
+          "evidence_ids": ["d03"],
           "role": "trigger"
         }
       ],
       "conclusion": "Jobs were rejected because the worker queue was unavailable.",
       "confidence": "high"
+    },
+    {
+      "candidate_id": "good_product_path_abstention",
+      "task_id": "t1",
+      "packet_id": "product_path",
+      "asserts_root_cause_established": false,
+      "claims": [
+        {
+          "text": "customer jobs were rejected because worker queue was unavailable",
+          "evidence_ids": ["d03"],
+          "role": "symptom"
+        }
+      ],
+      "conclusion": "Customer job rejection is established, but the initiating configuration is not established from this packet.",
+      "confidence": "low"
     }
   ]
 }

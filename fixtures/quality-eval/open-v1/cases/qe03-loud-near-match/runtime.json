@@ -3,19 +3,19 @@
   "case_id": "qe03-loud-near-match",
   "documents": [
     {
-      "id": "pay-cert",
+      "id": "d01",
       "text": "kind=tls_error level=error service=payments pattern=upstream TLS certificate expired and handshake validation failed"
     },
     {
-      "id": "pay-symptom",
+      "id": "d02",
       "text": "kind=application_error level=error service=checkout pattern=payment authorization unavailable after TLS handshake rejection"
     },
     {
-      "id": "cache-thrash",
+      "id": "d03",
       "text": "kind=resource_error level=error service=cache pattern=eviction churn because working set exceeds the single shard capacity"
     },
     {
-      "id": "cache-latency",
+      "id": "d04",
       "text": "kind=application_error level=error service=catalog-api pattern=request deadline exceeded while waiting for cache refill"
     }
   ],
@@ -27,15 +27,15 @@
       "packet_id": "fixed",
       "documents": [
         {
-          "id": "pay-cert",
+          "id": "d01",
           "text": "kind=tls_error level=error service=payments pattern=upstream TLS certificate expired and handshake validation failed"
         },
         {
-          "id": "pay-symptom",
+          "id": "d02",
           "text": "kind=application_error level=error service=checkout pattern=payment authorization unavailable after TLS handshake rejection"
         },
         {
-          "id": "cache-thrash",
+          "id": "d03",
           "text": "kind=resource_error level=error service=cache pattern=eviction churn because working set exceeds the single shard capacity"
         }
       ]
@@ -44,7 +44,7 @@
       "packet_id": "oracle",
       "documents": [
         {
-          "id": "pay-cert",
+          "id": "d01",
           "text": "kind=tls_error level=error service=payments pattern=upstream TLS certificate expired and handshake validation failed"
         }
       ]
@@ -53,11 +53,11 @@
       "packet_id": "product_path",
       "documents": [
         {
-          "id": "cache-thrash",
+          "id": "d03",
           "text": "kind=resource_error level=error service=cache pattern=eviction churn because working set exceeds the single shard capacity"
         },
         {
-          "id": "pay-symptom",
+          "id": "d02",
           "text": "kind=application_error level=error service=checkout pattern=payment authorization unavailable after TLS handshake rejection"
         }
       ]
@@ -66,7 +66,7 @@
   "rankings": [
     {
       "query_id": "q1",
-      "ranked_ids": ["cache-thrash", "cache-latency", "pay-cert", "pay-symptom"],
+      "ranked_ids": ["d03", "d04", "d01", "d02"],
       "k": 4
     }
   ],
@@ -79,12 +79,12 @@
       "claims": [
         {
           "text": "upstream TLS certificate expired and handshake validation failed",
-          "evidence_ids": ["pay-cert"],
+          "evidence_ids": ["d01"],
           "role": "trigger"
         },
         {
           "text": "payment authorization unavailable after TLS handshake rejection",
-          "evidence_ids": ["pay-symptom"],
+          "evidence_ids": ["d02"],
           "role": "symptom"
         }
       ],
@@ -99,7 +99,7 @@
       "claims": [
         {
           "text": "eviction churn because working set exceeds the single shard capacity",
-          "evidence_ids": ["cache-thrash"],
+          "evidence_ids": ["d03"],
           "role": "trigger"
         }
       ],

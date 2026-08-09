@@ -3,19 +3,19 @@
   "case_id": "qe04-independent-incidents",
   "documents": [
     {
-      "id": "a-lease",
+      "id": "d01",
       "text": "kind=config_error level=error service=qv-control pattern=lease window 250 below supported minimum 1000"
     },
     {
-      "id": "a-abort",
+      "id": "d02",
       "text": "kind=application_error level=error service=qv-api pattern=amber-sync aborted worker unavailable"
     },
     {
-      "id": "b-tele",
+      "id": "d03",
       "text": "kind=exception_header level=error service=hx-telemetry pattern=TelemetrySinkTimeout exporter archive"
     },
     {
-      "id": "b-tele2",
+      "id": "d04",
       "text": "kind=exception_header level=error service=hx-telemetry pattern=TelemetrySinkTimeout exporter archive after api recovery"
     }
   ],
@@ -27,19 +27,19 @@
       "packet_id": "fixed",
       "documents": [
         {
-          "id": "a-lease",
+          "id": "d01",
           "text": "kind=config_error level=error service=qv-control pattern=lease window 250 below supported minimum 1000"
         },
         {
-          "id": "a-abort",
+          "id": "d02",
           "text": "kind=application_error level=error service=qv-api pattern=amber-sync aborted worker unavailable"
         },
         {
-          "id": "b-tele",
+          "id": "d03",
           "text": "kind=exception_header level=error service=hx-telemetry pattern=TelemetrySinkTimeout exporter archive"
         },
         {
-          "id": "b-tele2",
+          "id": "d04",
           "text": "kind=exception_header level=error service=hx-telemetry pattern=TelemetrySinkTimeout exporter archive after api recovery"
         }
       ]
@@ -48,11 +48,11 @@
       "packet_id": "oracle",
       "documents": [
         {
-          "id": "a-lease",
+          "id": "d01",
           "text": "kind=config_error level=error service=qv-control pattern=lease window 250 below supported minimum 1000"
         },
         {
-          "id": "b-tele2",
+          "id": "d04",
           "text": "kind=exception_header level=error service=hx-telemetry pattern=TelemetrySinkTimeout exporter archive after api recovery"
         }
       ]
@@ -61,11 +61,11 @@
       "packet_id": "product_path",
       "documents": [
         {
-          "id": "a-abort",
+          "id": "d02",
           "text": "kind=application_error level=error service=qv-api pattern=amber-sync aborted worker unavailable"
         },
         {
-          "id": "b-tele",
+          "id": "d03",
           "text": "kind=exception_header level=error service=hx-telemetry pattern=TelemetrySinkTimeout exporter archive"
         }
       ]
@@ -74,7 +74,7 @@
   "rankings": [
     {
       "query_id": "q1",
-      "ranked_ids": ["a-lease", "a-abort", "b-tele", "b-tele2"],
+      "ranked_ids": ["d01", "d02", "d03", "d04"],
       "k": 4
     }
   ],
@@ -87,17 +87,17 @@
       "claims": [
         {
           "text": "lease window 250 below supported minimum 1000",
-          "evidence_ids": ["a-lease"],
+          "evidence_ids": ["d01"],
           "role": "trigger"
         },
         {
           "text": "amber-sync aborted worker unavailable",
-          "evidence_ids": ["a-abort"],
+          "evidence_ids": ["d02"],
           "role": "symptom"
         },
         {
           "text": "TelemetrySinkTimeout persists after api recovery",
-          "evidence_ids": ["b-tele2"],
+          "evidence_ids": ["d04"],
           "role": "independent"
         }
       ],
@@ -112,7 +112,7 @@
       "claims": [
         {
           "text": "lease window 250 and TelemetrySinkTimeout are one chain",
-          "evidence_ids": ["a-lease", "b-tele"],
+          "evidence_ids": ["d01", "d03"],
           "role": "trigger"
         }
       ],

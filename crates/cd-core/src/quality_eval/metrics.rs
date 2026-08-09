@@ -24,6 +24,9 @@ fn dcg(gains: &[u8]) -> f64 {
 /// Returns typed failure reasons; empty means the ranking is structurally valid.
 pub fn validate_ranking(ranking: &RetrievalRanking, known_ids: &BTreeSet<String>) -> Vec<String> {
     let mut reasons = Vec::new();
+    if ranking.k == Some(0) {
+        reasons.push(failure_reason::INVALID_RANKING.to_string());
+    }
     if ranking.ranked_ids.is_empty() {
         reasons.push(failure_reason::EMPTY_RANKING.to_string());
         return reasons;
@@ -161,6 +164,9 @@ pub fn score_retrieval(
     if ranking.query_id != truth.query_id {
         failure_reasons.push(failure_reason::INVALID_RANKING.to_string());
     }
+    if ranking.k.is_some_and(|declared| declared != truth.top_k) {
+        failure_reasons.push(failure_reason::INVALID_RANKING.to_string());
+    }
     failure_reasons.sort();
     failure_reasons.dedup();
 
@@ -180,8 +186,9 @@ pub fn score_retrieval(
         };
     }
 
-    let k = ranking.k.unwrap_or(truth.top_k).max(1) as usize;
-    let k = k.min(ranking.ranked_ids.len().max(1));
+    // The host truth fixes the scoring window. A candidate/runtime ranking
+    // cannot shrink K to hide later decoys or inflate nDCG.
+    let k = truth.top_k as usize;
     let relevant: BTreeSet<&str> = truth.relevant_ids.iter().map(String::as_str).collect();
 
     // Empty relevant + non-empty ranking is valid (negative query); recall=1, mrr=0.
@@ -193,8 +200,7 @@ pub fn score_retrieval(
     let foreign = foreign_hits(&ranking.ranked_ids, &truth.foreign_incident_ids, k);
 
     let (upstream_recall, final_recall) = if let Some(upstream) = &ranking.upstream_ranked_ids {
-        let uk = k.min(upstream.len().max(1));
-        (Some(recall_at(upstream, &relevant, uk)), Some(recall))
+        (Some(recall_at(upstream, &relevant, k)), Some(recall))
     } else {
         (None, None)
     };
@@ -254,6 +260,23 @@ mod tests {
     }
 
     #[test]
+    fn short_result_list_cannot_receive_perfect_ndcg_for_a_larger_truth_window() {
+        let t = truth_with(&["a", "b", "c"], &[], &[]);
+        let r = RetrievalRanking {
+            query_id: "q1".into(),
+            ranked_ids: vec!["a".into()],
+            upstream_ranked_ids: None,
+            k: Some(3),
+        };
+
+        let m = score_retrieval(&t, &r, &known(&["a", "b", "c"]));
+
+        assert_eq!(m.status, LaneStatus::Executed);
+        assert_eq!(m.recall_at_k, 0.333333);
+        assert!(m.ndcg_at_k < 1.0, "short ranking received perfect nDCG");
+    }
+
+    #[test]
     fn duplicate_ids_fail_closed() {
         let t = truth_with(&["a"], &["a"], &[]);
         let r = RetrievalRanking {
@@ -306,8 +329,49 @@ mod tests {
     }
 
     #[test]
+    fn zero_k_fails_instead_of_receiving_top_one_credit() {
+        let truth = truth_with(&["a"], &["a"], &[]);
+        let ranking = RetrievalRanking {
+            query_id: "q1".into(),
+            ranked_ids: vec!["a".into()],
+            upstream_ranked_ids: None,
+            k: Some(0),
+        };
+
+        let metrics = score_retrieval(&truth, &ranking, &known(&["a"]));
+
+        assert_eq!(metrics.status, LaneStatus::Failed);
+        assert_eq!(metrics.recall_at_k, 0.0);
+        assert!(metrics
+            .failure_reasons
+            .iter()
+            .any(|reason| reason == failure_reason::INVALID_RANKING));
+    }
+
+    #[test]
+    fn ranking_cannot_shrink_the_host_k_window_to_hide_a_decoy() {
+        let truth = truth_with(&["a"], &["a"], &["decoy"]);
+        let ranking = RetrievalRanking {
+            query_id: "q1".into(),
+            ranked_ids: vec!["a".into(), "decoy".into(), "noise".into()],
+            upstream_ranked_ids: None,
+            k: Some(1),
+        };
+
+        let metrics = score_retrieval(&truth, &ranking, &known(&["a", "decoy", "noise"]));
+
+        assert_eq!(metrics.status, LaneStatus::Failed);
+        assert_eq!(metrics.recall_at_k, 0.0);
+        assert!(metrics
+            .failure_reasons
+            .iter()
+            .any(|reason| reason == failure_reason::INVALID_RANKING));
+    }
+
+    #[test]
     fn empty_truth_recall_is_one_on_valid_list() {
-        let t = truth_with(&[], &[], &[]);
+        let mut t = truth_with(&[], &[], &[]);
+        t.top_k = 1;
         let r = RetrievalRanking {
             query_id: "q1".into(),
             ranked_ids: vec!["noise".into()],
@@ -322,7 +386,8 @@ mod tests {
 
     #[test]
     fn upstream_versus_final_recall_separated() {
-        let t = truth_with(&["a", "b"], &["a"], &[]);
+        let mut t = truth_with(&["a", "b"], &["a"], &[]);
+        t.top_k = 2;
         let r = RetrievalRanking {
             query_id: "q1".into(),
             ranked_ids: vec!["a".into(), "c".into()],
@@ -340,7 +405,8 @@ mod tests {
 
     #[test]
     fn foreign_incident_hits_counted() {
-        let t = truth_with(&["a"], &["a"], &["x"]);
+        let mut t = truth_with(&["a"], &["a"], &["x"]);
+        t.top_k = 2;
         let r = RetrievalRanking {
             query_id: "q1".into(),
             ranked_ids: vec!["a".into(), "x".into()],

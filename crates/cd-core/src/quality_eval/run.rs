@@ -5,18 +5,13 @@
 
 use super::answer_score::score_answer;
 use super::metrics::score_retrieval;
-use super::suite::{hex_sha256, known_document_ids, LoadedSuite};
+use super::suite::{known_document_ids, LoadedSuite};
 use super::types::{
-    CaseRunResult, EvaluationLane, EvidenceClassMarkers, JudgeMetadata, LaneStatus, ModelSubject,
-    QualityRunRecord, QualityUnit, TaskMode, QUALITY_EVAL_SCHEMA_VERSION, RUN_RECORD_SCHEMA_ID,
+    CandidateExpectation, CaseRunResult, EvaluationLane, EvidenceClassMarkers, JudgeMetadata,
+    LaneStatus, ModelSubject, QualityRunRecord, QualityUnit, TaskMode, QUALITY_EVAL_SCHEMA_VERSION,
+    RUN_RECORD_SCHEMA_ID,
 };
-
-/// Endpoint fingerprint for quality units (secret-free). Matches the spirit of
-/// readiness keys without importing the readiness store module.
-fn fingerprint_endpoint(base_url: &str) -> String {
-    let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
-    hex_sha256(normalized.as_bytes())
-}
+use crate::capability_qualification::fingerprint_endpoint;
 
 /// Options for a hermetic run.
 #[derive(Debug, Clone)]
@@ -88,7 +83,7 @@ pub fn quality_units_are_gateway_scoped(a: &QualityUnit, b: &QualityUnit) -> Res
 pub fn run_hermetic_suite(suite: &LoadedSuite, opts: &HermeticRunOptions) -> QualityRunRecord {
     let quality_unit = hermetic_quality_unit(suite, opts);
     let mut case_results = Vec::new();
-    let mut any_failed = false;
+    let mut any_failed = suite.cases.is_empty();
 
     for case in &suite.cases {
         let known = known_document_ids(&case.runtime);
@@ -124,7 +119,13 @@ pub fn run_hermetic_suite(suite: &LoadedSuite, opts: &HermeticRunOptions) -> Qua
         }
 
         let mut answers = Vec::new();
+        let mut answer_contract_failed = false;
         for candidate in &case.runtime.candidates {
+            let expectation = case
+                .truth
+                .candidate_expectations
+                .get(&candidate.candidate_id)
+                .copied();
             let Some(atruth) = case
                 .truth
                 .answers
@@ -142,6 +143,8 @@ pub fn run_hermetic_suite(suite: &LoadedSuite, opts: &HermeticRunOptions) -> Qua
                         reason: "missing_answer_truth".into(),
                     }],
                     status: LaneStatus::Blocked,
+                    expected_outcome: expectation,
+                    expectation_met: Some(false),
                 });
                 any_failed = true;
                 continue;
@@ -163,25 +166,38 @@ pub fn run_hermetic_suite(suite: &LoadedSuite, opts: &HermeticRunOptions) -> Qua
                         reason: "missing_packet".into(),
                     }],
                     status: LaneStatus::Blocked,
+                    expected_outcome: expectation,
+                    expectation_met: Some(false),
                 });
                 any_failed = true;
                 continue;
             };
-            let score = score_answer(candidate, atruth, packet);
-            // Expected-good candidates must pass; expected-bad are part of the suite
-            // contract and do not fail the suite merely by scoring failed.
+            let mut score = score_answer(candidate, atruth, packet);
+            let expectation_met = matches!(
+                (expectation, score.passed),
+                (Some(CandidateExpectation::Pass), true)
+                    | (Some(CandidateExpectation::Fail), false)
+            );
+            score.expected_outcome = expectation;
+            score.expectation_met = Some(expectation_met);
+            if !expectation_met {
+                answer_contract_failed = true;
+                any_failed = true;
+            }
             answers.push(score);
         }
 
-        // Case status: structural retrieval failures fail the case; answer
-        // mutations that are intentionally labeled `mut_*` or `bad_*` do not.
+        // Case status separates structural failures from host-declared answer
+        // expectations. An expected mutation failure is a successful cage
+        // check; any expectation mismatch fails the case.
         let retrieval_failed = retrieval.iter().any(|r| r.status == LaneStatus::Failed);
+        let no_evidence_rows = retrieval.is_empty() && answers.is_empty();
         let blocked = retrieval.iter().any(|r| r.status == LaneStatus::Blocked)
             || answers.iter().any(|a| a.status == LaneStatus::Blocked);
         let case_status = if blocked {
             any_failed = true;
             LaneStatus::Blocked
-        } else if retrieval_failed {
+        } else if retrieval_failed || answer_contract_failed || no_evidence_rows {
             any_failed = true;
             LaneStatus::Failed
         } else {
@@ -198,22 +214,8 @@ pub fn run_hermetic_suite(suite: &LoadedSuite, opts: &HermeticRunOptions) -> Qua
         });
     }
 
-    // Verify expected-good candidates pass (candidate_id starts with `good`).
-    for case in &case_results {
-        for ans in &case.answers {
-            if ans.candidate_id.starts_with("good") && !ans.passed {
-                any_failed = true;
-            }
-        }
-        // Verify expected-bad candidates fail with typed reasons.
-        for ans in &case.answers {
-            if (ans.candidate_id.starts_with("mut_") || ans.candidate_id.starts_with("bad_"))
-                && ans.passed
-            {
-                any_failed = true;
-            }
-        }
-    }
+    let retrieval_quality = case_results.iter().any(|case| !case.retrieval.is_empty());
+    let answer_quality = case_results.iter().any(|case| !case.answers.is_empty());
 
     QualityRunRecord {
         schema_id: RUN_RECORD_SCHEMA_ID.into(),
@@ -228,7 +230,13 @@ pub fn run_hermetic_suite(suite: &LoadedSuite, opts: &HermeticRunOptions) -> Qua
         },
         cases: case_results,
         judge: JudgeMetadata::default(),
-        evidence_classes: EvidenceClassMarkers::default(),
+        evidence_classes: EvidenceClassMarkers {
+            compatibility_untouched: true,
+            retrieval_quality,
+            answer_quality,
+            orchestration_quality: false,
+            live_optional: false,
+        },
     }
 }
 

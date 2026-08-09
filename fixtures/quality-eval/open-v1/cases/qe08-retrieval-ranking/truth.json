@@ -6,16 +6,16 @@
     {
       "query_id": "q1",
       "question": "What configuration change caused customer jobs to be rejected, and which records show recovery?",
-      "relevant_ids": ["r-trigger", "r-prop", "r-symptom", "r-recover"],
+      "relevant_ids": ["d01", "d02", "d03", "d04"],
       "graded_gains": {
-        "r-trigger": 3,
-        "r-prop": 2,
-        "r-symptom": 1,
-        "r-recover": 3
+        "d01": 3,
+        "d02": 2,
+        "d03": 1,
+        "d04": 3
       },
-      "must_include_ids": ["r-trigger", "r-recover"],
-      "must_exclude_ids": ["r-foreign"],
-      "foreign_incident_ids": ["r-foreign"],
+      "must_include_ids": ["d01", "d04"],
+      "must_exclude_ids": ["d07"],
+      "foreign_incident_ids": ["d07"],
       "top_k": 5
     }
   ],
@@ -28,14 +28,25 @@
       "symptom_tokens": ["customer jobs were rejected"],
       "recovery_tokens": ["previous limit restored", "restored"],
       "independent_incident_tokens": [],
-      "required_evidence_ids": ["r-trigger"],
-      "forbidden_evidence_ids": ["r-foreign", "r-noise1"],
+      "required_evidence_ids": ["d01"],
+      "forbidden_evidence_ids": ["d07", "d05"],
       "requires_abstention": false,
+      "packet_overrides": {
+        "product_path": {
+          "root_cause_establishable": false,
+          "requires_abstention": true
+        }
+      },
       "forbidden_conclusion_tokens": []
     }
   ],
+  "candidate_expectations": {
+    "good_fixed": "pass",
+    "bad_product_path_incomplete": "fail",
+    "good_product_path_abstention": "pass"
+  },
   "incidents": {
-    "queue-bound": ["r-trigger", "r-prop", "r-symptom", "r-recover"],
-    "mail-foreign": ["r-foreign"]
+    "queue-bound": ["d01", "d02", "d03", "d04"],
+    "mail-foreign": ["d07"]
   }
 }

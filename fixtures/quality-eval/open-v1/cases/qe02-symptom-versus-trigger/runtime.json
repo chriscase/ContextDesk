@@ -3,15 +3,15 @@
   "case_id": "qe02-symptom-versus-trigger",
   "documents": [
     {
-      "id": "ev-pool",
+      "id": "d01",
       "text": "kind=resource_error level=error service=app-server pattern=managed connection reservoir has no borrowable handles"
     },
     {
-      "id": "ev-order",
+      "id": "d02",
       "text": "kind=application_error level=error service=orders pattern=order transaction could not persist because no managed connection was available"
     },
     {
-      "id": "ev-noise",
+      "id": "d03",
       "text": "kind=status_event level=info service=orders pattern=user session touched"
     }
   ],
@@ -23,11 +23,11 @@
       "packet_id": "fixed",
       "documents": [
         {
-          "id": "ev-pool",
+          "id": "d01",
           "text": "kind=resource_error level=error service=app-server pattern=managed connection reservoir has no borrowable handles"
         },
         {
-          "id": "ev-order",
+          "id": "d02",
           "text": "kind=application_error level=error service=orders pattern=order transaction could not persist because no managed connection was available"
         }
       ]
@@ -36,7 +36,7 @@
       "packet_id": "oracle",
       "documents": [
         {
-          "id": "ev-pool",
+          "id": "d01",
           "text": "kind=resource_error level=error service=app-server pattern=managed connection reservoir has no borrowable handles"
         }
       ]
@@ -45,7 +45,7 @@
       "packet_id": "product_path",
       "documents": [
         {
-          "id": "ev-order",
+          "id": "d02",
           "text": "kind=application_error level=error service=orders pattern=order transaction could not persist because no managed connection was available"
         }
       ]
@@ -54,7 +54,7 @@
   "rankings": [
     {
       "query_id": "q1",
-      "ranked_ids": ["ev-order", "ev-pool", "ev-noise"],
+      "ranked_ids": ["d02", "d01", "d03"],
       "k": 3
     }
   ],
@@ -67,12 +67,12 @@
       "claims": [
         {
           "text": "managed connection reservoir has no borrowable handles",
-          "evidence_ids": ["ev-pool"],
+          "evidence_ids": ["d01"],
           "role": "trigger"
         },
         {
           "text": "order transaction could not persist",
-          "evidence_ids": ["ev-order"],
+          "evidence_ids": ["d02"],
           "role": "symptom"
         }
       ],
@@ -87,7 +87,7 @@
       "claims": [
         {
           "text": "order transaction could not persist",
-          "evidence_ids": ["ev-order"],
+          "evidence_ids": ["d02"],
           "role": "trigger"
         }
       ],

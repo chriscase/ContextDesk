@@ -6,12 +6,12 @@
     {
       "query_id": "q1",
       "question": "Why did token minting fail?",
-      "relevant_ids": ["real-1", "real-2"],
+      "relevant_ids": ["d01", "d02"],
       "graded_gains": {
-        "real-1": 3,
-        "real-2": 2
+        "d01": 3,
+        "d02": 2
       },
-      "must_include_ids": ["real-1"],
+      "must_include_ids": ["d01"],
       "must_exclude_ids": [],
       "foreign_incident_ids": [],
       "top_k": 2
@@ -26,13 +26,17 @@
       "symptom_tokens": ["token mint failed"],
       "recovery_tokens": [],
       "independent_incident_tokens": [],
-      "required_evidence_ids": ["real-1"],
+      "required_evidence_ids": ["d01"],
       "forbidden_evidence_ids": [],
       "requires_abstention": false,
       "forbidden_conclusion_tokens": []
     }
   ],
+  "candidate_expectations": {
+    "good_fixed": "pass",
+    "mut_fabricated_citation": "fail"
+  },
   "incidents": {
-    "auth-signing": ["real-1", "real-2"]
+    "auth-signing": ["d01", "d02"]
   }
 }

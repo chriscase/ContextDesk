@@ -6,14 +6,14 @@
     {
       "query_id": "q1",
       "question": "Explain the amber-sync outage and any separate ongoing failures.",
-      "relevant_ids": ["a-lease", "a-abort", "b-tele", "b-tele2"],
+      "relevant_ids": ["d01", "d02", "d03", "d04"],
       "graded_gains": {
-        "a-lease": 3,
-        "a-abort": 2,
-        "b-tele": 2,
-        "b-tele2": 3
+        "d01": 3,
+        "d02": 2,
+        "d03": 2,
+        "d04": 3
       },
-      "must_include_ids": ["a-lease", "b-tele2"],
+      "must_include_ids": ["d01", "d04"],
       "must_exclude_ids": [],
       "foreign_incident_ids": [],
       "top_k": 4
@@ -28,14 +28,18 @@
       "symptom_tokens": ["amber-sync aborted"],
       "recovery_tokens": [],
       "independent_incident_tokens": ["TelemetrySinkTimeout"],
-      "required_evidence_ids": ["a-lease"],
+      "required_evidence_ids": ["d01"],
       "forbidden_evidence_ids": [],
       "requires_abstention": false,
       "forbidden_conclusion_tokens": []
     }
   ],
+  "candidate_expectations": {
+    "good_fixed": "pass",
+    "mut_merged_incidents": "fail"
+  },
   "incidents": {
-    "amber-sync": ["a-lease", "a-abort"],
-    "telemetry": ["b-tele", "b-tele2"]
+    "amber-sync": ["d01", "d02"],
+    "telemetry": ["d03", "d04"]
   }
 }

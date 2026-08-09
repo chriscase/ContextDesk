@@ -6,14 +6,14 @@
     {
       "query_id": "q1",
       "question": "What caused payment authorization failures?",
-      "relevant_ids": ["pay-cert", "pay-symptom"],
+      "relevant_ids": ["d01", "d02"],
       "graded_gains": {
-        "pay-cert": 3,
-        "pay-symptom": 2
+        "d01": 3,
+        "d02": 2
       },
-      "must_include_ids": ["pay-cert"],
-      "must_exclude_ids": ["cache-thrash", "cache-latency"],
-      "foreign_incident_ids": ["cache-thrash", "cache-latency"],
+      "must_include_ids": ["d01"],
+      "must_exclude_ids": ["d03", "d04"],
+      "foreign_incident_ids": ["d03", "d04"],
       "top_k": 4
     }
   ],
@@ -26,14 +26,18 @@
       "symptom_tokens": ["payment authorization unavailable"],
       "recovery_tokens": [],
       "independent_incident_tokens": ["eviction churn", "cache"],
-      "required_evidence_ids": ["pay-cert"],
-      "forbidden_evidence_ids": ["cache-thrash", "cache-latency"],
+      "required_evidence_ids": ["d01"],
+      "forbidden_evidence_ids": ["d03", "d04"],
       "requires_abstention": false,
       "forbidden_conclusion_tokens": []
     }
   ],
+  "candidate_expectations": {
+    "good_fixed": "pass",
+    "mut_near_match_selected": "fail"
+  },
   "incidents": {
-    "payments": ["pay-cert", "pay-symptom"],
-    "catalog-cache": ["cache-thrash", "cache-latency"]
+    "payments": ["d01", "d02"],
+    "catalog-cache": ["d03", "d04"]
   }
 }

@@ -142,12 +142,11 @@ pub struct ModelSubject {
 impl ModelSubject {
     /// Compact storage id — two gateways never collapse.
     pub fn storage_id(&self) -> String {
-        format!(
-            "{}::{}::{}",
+        framed_storage_id(&[
             self.gateway_profile_id.trim(),
             self.endpoint_fingerprint.trim(),
-            self.model_id.trim()
-        )
+            self.model_id.trim(),
+        ])
     }
 }
 
@@ -181,24 +180,34 @@ pub struct QualityUnit {
 impl QualityUnit {
     /// Compact storage id for evidence isolation.
     pub fn storage_id(&self) -> String {
-        format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-            self.build_identity,
-            self.subject.storage_id(),
+        let subject_id = self.subject.storage_id();
+        framed_storage_id(&[
+            self.build_identity.as_str(),
+            subject_id.as_str(),
             self.task_mode.as_str(),
-            self.prompt_set_hash,
-            self.answer_schema_version,
-            self.suite_digest,
-            self.retrieval_mode,
-            self.sampling_config,
-            self.orchestration_policy_fingerprint,
-            self.quality_eval_schema_version
-        )
+            self.prompt_set_hash.as_str(),
+            self.answer_schema_version.as_str(),
+            self.suite_digest.as_str(),
+            self.retrieval_mode.as_str(),
+            self.sampling_config.as_str(),
+            self.orchestration_policy_fingerprint.as_str(),
+            self.quality_eval_schema_version.as_str(),
+        ])
     }
+}
+
+fn framed_storage_id(parts: &[&str]) -> String {
+    let mut output = String::new();
+    for part in parts {
+        use std::fmt::Write as _;
+        let _ = write!(output, "{}:{part}", part.len());
+    }
+    output
 }
 
 /// One model-visible evidence document (stable id outside text when possible).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EvidenceDocument {
     /// Stable host identity (never an evaluator role label).
     pub id: String,
@@ -208,6 +217,7 @@ pub struct EvidenceDocument {
 
 /// Frozen ranked retrieval list for hermetic or later live runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RetrievalRanking {
     /// Query id within the case.
     pub query_id: String,
@@ -223,6 +233,7 @@ pub struct RetrievalRanking {
 
 /// Model-visible evidence packet handed to answer scoring.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EvidencePacket {
     /// Packet id (e.g. `fixed`, `oracle`, `product_path`).
     pub packet_id: String,
@@ -232,6 +243,7 @@ pub struct EvidencePacket {
 
 /// Host-only relevance / role truth for one query (never imported into runtime).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueryTruth {
     /// Query id.
     pub query_id: String,
@@ -263,6 +275,7 @@ fn default_k() -> u32 {
 
 /// Host-only answer key for one task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AnswerTruth {
     /// Task id within the case.
     pub task_id: String,
@@ -292,13 +305,29 @@ pub struct AnswerTruth {
     /// When true, a correct answer must abstain (cause not established).
     #[serde(default)]
     pub requires_abstention: bool,
+    /// Packet-specific establishability overrides. The same task can be
+    /// answerable from a fixed/oracle packet but require abstention from an
+    /// incomplete product-path packet.
+    #[serde(default)]
+    pub packet_overrides: BTreeMap<String, PacketAnswerTruth>,
     /// Forbidden conclusion tokens (fabrications).
     #[serde(default)]
     pub forbidden_conclusion_tokens: Vec<String>,
 }
 
+/// Host-only establishability truth for one evidence packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PacketAnswerTruth {
+    /// Whether this packet establishes the initiating cause.
+    pub root_cause_establishable: bool,
+    /// Whether a correct answer must explicitly abstain from naming a cause.
+    pub requires_abstention: bool,
+}
+
 /// Full host-only truth for one case.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CaseTruth {
     /// Schema identity.
     pub schema_id: String,
@@ -312,13 +341,30 @@ pub struct CaseTruth {
     /// Per-task answer truth.
     #[serde(default)]
     pub answers: Vec<AnswerTruth>,
+    /// Host-only expected outcome for every scripted candidate id.
+    ///
+    /// This keeps mutation/good-fixture authority out of model-visible ids and
+    /// avoids inferring evaluator intent from naming conventions.
+    pub candidate_expectations: BTreeMap<String, CandidateExpectation>,
     /// Incident ids used for foreign-leakage labeling (host-only names).
     #[serde(default)]
     pub incidents: BTreeMap<String, Vec<String>>,
 }
 
+/// Host-only expected outcome for one scripted candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateExpectation {
+    /// The candidate must satisfy every deterministic answer dimension.
+    Pass,
+    /// The candidate is an intentional mutation and must fail at least one
+    /// deterministic answer dimension.
+    Fail,
+}
+
 /// Scripted candidate answer for hermetic evaluation (not live model output).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CandidateAnswer {
     /// Candidate id (e.g. `good`, `missing_citation`, `merged_incidents`).
     pub candidate_id: String,
@@ -342,6 +388,7 @@ pub struct CandidateAnswer {
 
 /// One structured claim in a candidate answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AnswerClaim {
     /// Claim text.
     pub text: String,
@@ -355,6 +402,7 @@ pub struct AnswerClaim {
 
 /// Model-visible runtime for one case (importable / scorable without truth).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CaseRuntime {
     /// Schema identity.
     pub schema_id: String,
@@ -376,6 +424,7 @@ pub struct CaseRuntime {
 
 /// Suite manifest listing cases.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SuiteManifest {
     /// Schema identity.
     pub schema_id: String,
@@ -445,6 +494,14 @@ pub struct AnswerScore {
     pub dimensions: Vec<AnswerDimension>,
     /// Lane status.
     pub status: LaneStatus,
+    /// Host-only scripted expectation when this score came from the hermetic
+    /// fixture cage. Live candidate scores leave this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_outcome: Option<CandidateExpectation>,
+    /// Whether the scripted score matched the host-only expectation. Live
+    /// candidate scores leave this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expectation_met: Option<bool>,
 }
 
 impl AnswerScore {
@@ -523,8 +580,8 @@ impl Default for EvidenceClassMarkers {
     fn default() -> Self {
         Self {
             compatibility_untouched: true,
-            retrieval_quality: true,
-            answer_quality: true,
+            retrieval_quality: false,
+            answer_quality: false,
             orchestration_quality: false,
             live_optional: false,
         }
@@ -577,8 +634,17 @@ pub mod failure_reason {
     pub const SYMPTOM_AS_SOLE_CAUSE: &str = "symptom_as_sole_cause";
     /// Unsupported certainty / failed abstention.
     pub const UNSUPPORTED_CERTAINTY: &str = "unsupported_certainty";
+    /// An abstention did not identify and cite the observed condition.
+    pub const UNSUPPORTED_ABSTENTION: &str = "unsupported_abstention";
+    /// An abstention used contradictory structured fields, confidence, or
+    /// conclusion language instead of clearly stating the evidence limit.
+    pub const INVALID_ABSTENTION_CONTRACT: &str = "invalid_abstention_contract";
     /// Missing required decisive facts.
     pub const MISSING_DECISIVE_FACTS: &str = "missing_decisive_facts";
+    /// An establishable case received an answer that declined to identify it.
+    pub const MISSED_ESTABLISHABLE_CAUSE: &str = "missed_establishable_cause";
+    /// An asserted cause omitted a typed trigger claim.
+    pub const MISSING_TRIGGER_ROLE: &str = "missing_trigger_role";
     /// Forbidden fabricated conclusion.
     pub const FORBIDDEN_CONCLUSION: &str = "forbidden_conclusion";
     /// Answer schema / contract incomplete.
@@ -593,6 +659,11 @@ pub mod failure_reason {
     pub const JUDGE_OVERRIDE_REJECTED: &str = "judge_override_rejected";
     /// Absolute path or credential-shaped material in export.
     pub const EXPORT_PRIVACY_VIOLATION: &str = "export_privacy_violation";
-    /// Citation fidelity: claim text unsupported by cited row.
-    pub const CITATION_FIDELITY: &str = "citation_fidelity";
+    /// Claim text had no significant lexical overlap with any cited row.
+    pub const CITATION_LACKS_LEXICAL_OVERLAP: &str = "citation_lacks_lexical_overlap";
+    /// Scripted candidate expectations were missing, duplicated, or did not
+    /// match the deterministic score.
+    pub const CANDIDATE_EXPECTATION_MISMATCH: &str = "candidate_expectation_mismatch";
+    /// Runtime/truth fixture identities or references were structurally invalid.
+    pub const INVALID_FIXTURE_CONTRACT: &str = "invalid_fixture_contract";
 }

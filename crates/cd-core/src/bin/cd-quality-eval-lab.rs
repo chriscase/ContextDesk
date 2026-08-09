@@ -161,7 +161,7 @@ fn run_suite(
     let mut opts = HermeticRunOptions::default();
     if let Ok(sha) = env::var("CD_GIT_SHA") {
         if !sha.trim().is_empty() {
-            opts.build_identity = sha.chars().take(12).collect();
+            opts.build_identity = sha.trim().to_string();
         }
     }
     let record = run_hermetic_suite(&loaded, &opts);
@@ -169,11 +169,15 @@ fn run_suite(
         ExportFormat::Json => serialize_json(&record).map_err(|e| e.to_string())?,
         ExportFormat::Jsonl => serialize_jsonl(&record).map_err(|e| e.to_string())?,
     };
-    // Stability check: re-normalize must match for JSON.
+    // Stability check: the bytes actually selected for emission must reparse
+    // to the same normalized value as the run record.
     if matches!(format, ExportFormat::Json) {
-        let again = normalize_for_stability(&record).map_err(|e| e.to_string())?;
-        let first = normalize_for_stability(&record).map_err(|e| e.to_string())?;
-        if again != first {
+        let emitted: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| format!("reparse emitted JSON: {e}"))?;
+        let expected_text = normalize_for_stability(&record).map_err(|e| e.to_string())?;
+        let expected: serde_json::Value = serde_json::from_str(&expected_text)
+            .map_err(|e| format!("reparse normalized JSON: {e}"))?;
+        if emitted != expected {
             return Err("non-deterministic serialization".into());
         }
     }
@@ -198,35 +202,5 @@ fn run_suite(
         );
     }
 
-    // Summarize expected mutation failures vs good passes.
-    let mut good_fail = 0u32;
-    let mut mut_pass = 0u32;
-    for case in &record.cases {
-        for ans in &case.answers {
-            if ans.candidate_id.starts_with("good") && !ans.passed {
-                good_fail += 1;
-                eprintln!(
-                    "good_candidate_failed case={} id={} dims={:?}",
-                    case.case_id,
-                    ans.candidate_id,
-                    ans.failed_ids()
-                );
-            }
-            if (ans.candidate_id.starts_with("mut_") || ans.candidate_id.starts_with("bad_"))
-                && ans.passed
-            {
-                mut_pass += 1;
-                eprintln!(
-                    "mutation_vacuously_passed case={} id={}",
-                    case.case_id, ans.candidate_id
-                );
-            }
-        }
-    }
-    if good_fail > 0 || mut_pass > 0 {
-        return Err(format!(
-            "contract failures: good_fail={good_fail} mut_pass={mut_pass}"
-        ));
-    }
     Ok(record.status)
 }

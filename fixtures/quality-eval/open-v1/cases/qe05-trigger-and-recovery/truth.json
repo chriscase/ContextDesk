@@ -6,15 +6,15 @@
     {
       "query_id": "q1",
       "question": "What started the outage and what evidence shows correction?",
-      "relevant_ids": ["t-bad", "t-fail", "t-restore", "t-ok", "t-rollback"],
+      "relevant_ids": ["d02", "d03", "d05", "d06", "d04"],
       "graded_gains": {
-        "t-bad": 3,
-        "t-fail": 2,
-        "t-restore": 3,
-        "t-ok": 2,
-        "t-rollback": 2
+        "d02": 3,
+        "d03": 2,
+        "d05": 3,
+        "d06": 2,
+        "d04": 2
       },
-      "must_include_ids": ["t-bad", "t-restore"],
+      "must_include_ids": ["d02", "d05"],
       "must_exclude_ids": [],
       "foreign_incident_ids": [],
       "top_k": 6
@@ -29,13 +29,17 @@
       "symptom_tokens": ["LeaseWindowExpired"],
       "recovery_tokens": ["restored", "recovered", "4000"],
       "independent_incident_tokens": [],
-      "required_evidence_ids": ["t-bad"],
+      "required_evidence_ids": ["d02"],
       "forbidden_evidence_ids": [],
       "requires_abstention": false,
       "forbidden_conclusion_tokens": []
     }
   ],
+  "candidate_expectations": {
+    "good_fixed": "pass",
+    "mut_recovery_as_cause": "fail"
+  },
   "incidents": {
-    "lease-window": ["t-change", "t-bad", "t-fail", "t-rollback", "t-restore", "t-ok"]
+    "lease-window": ["d01", "d02", "d03", "d04", "d05", "d06"]
   }
 }

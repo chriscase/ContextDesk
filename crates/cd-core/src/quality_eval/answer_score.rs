@@ -17,15 +17,29 @@ pub fn score_answer(
 ) -> AnswerScore {
     let packet_ids: BTreeSet<&str> = packet.documents.iter().map(|d| d.id.as_str()).collect();
     let mut dimensions = Vec::new();
+    let packet_truth = truth.packet_overrides.get(&packet.packet_id);
+    let root_cause_establishable = packet_truth
+        .map(|override_truth| override_truth.root_cause_establishable)
+        .unwrap_or(truth.root_cause_establishable);
+    let requires_abstention = packet_truth
+        .map(|override_truth| override_truth.requires_abstention)
+        .unwrap_or(truth.requires_abstention);
 
     // 1) Schema / contract shape
-    let schema_ok = !answer.conclusion.trim().is_empty()
-        || !answer.claims.is_empty()
-        || answer.asserts_root_cause_established
-        || truth.requires_abstention;
-    // Require at least one claim or a non-empty conclusion for structured answers.
+    // Require a body plus the declared confidence/claim vocabulary. Unknown
+    // role strings must not bypass the typed causal checks below.
     let has_body = !answer.claims.is_empty() || !answer.conclusion.trim().is_empty();
-    let schema_passed = has_body;
+    let confidence_ok = matches!(answer.confidence.as_str(), "high" | "medium" | "low");
+    let claims_well_formed = answer.claims.iter().all(|claim| {
+        !claim.text.trim().is_empty()
+            && claim.role.as_deref().is_none_or(|role| {
+                matches!(
+                    role,
+                    "trigger" | "symptom" | "recovery" | "independent" | "observation" | "other"
+                )
+            })
+    });
+    let schema_passed = has_body && confidence_ok && claims_well_formed;
     dimensions.push(dim(
         "answer_schema_validity",
         schema_passed,
@@ -96,7 +110,9 @@ pub fn score_answer(
         },
     ));
 
-    // 4) Citation fidelity: claim text shares a token with cited document text
+    // 4) Citation lexical overlap. This is deliberately a structural smoke
+    // check, not semantic entailment or a claim that the citation proves the
+    // prose.
     let mut fidelity_ok = true;
     for claim in &answer.claims {
         if claim.evidence_ids.is_empty() {
@@ -122,12 +138,12 @@ pub fn score_answer(
         }
     }
     dimensions.push(dim(
-        "citation_fidelity",
+        "citation_lexical_overlap",
         fidelity_ok,
         if fidelity_ok {
-            "cited rows support claim text tokens"
+            "claim and a cited row share a significant token; entailment not evaluated"
         } else {
-            failure_reason::CITATION_FIDELITY
+            failure_reason::CITATION_LACKS_LEXICAL_OVERLAP
         },
     ));
 
@@ -138,14 +154,14 @@ pub fn score_answer(
         .iter()
         .all(|tok| contains_ci(&blob, tok));
     // Only require facts when asserting cause or when establishable good path expected.
-    let facts_passed = if answer.asserts_root_cause_established || !truth.requires_abstention {
-        if truth.requires_abstention && !answer.asserts_root_cause_established {
+    let facts_passed = if answer.asserts_root_cause_established || !requires_abstention {
+        if requires_abstention && !answer.asserts_root_cause_established {
             true
         } else if answer.asserts_root_cause_established {
             facts_ok || truth.required_fact_tokens.is_empty()
         } else {
             // Non-asserting answers on establishable cases may still need facts if they name a trigger.
-            if truth.root_cause_establishable
+            if root_cause_establishable
                 && answer
                     .claims
                     .iter()
@@ -169,7 +185,36 @@ pub fn score_answer(
         },
     ));
 
-    // 6) Cause vs symptom: symptom not sole causal claim
+    // 6) Recall of an establishable cause. A generic non-answer must not earn
+    // quality credit merely because it avoided every forbidden assertion.
+    let establishable_recalled =
+        !root_cause_establishable || requires_abstention || answer.asserts_root_cause_established;
+    dimensions.push(dim(
+        "establishable_cause_recall",
+        establishable_recalled,
+        if establishable_recalled {
+            "establishable cause identified"
+        } else {
+            failure_reason::MISSED_ESTABLISHABLE_CAUSE
+        },
+    ));
+
+    let causal_role_ok = !answer.asserts_root_cause_established
+        || answer
+            .claims
+            .iter()
+            .any(|claim| claim.role.as_deref() == Some("trigger"));
+    dimensions.push(dim(
+        "causal_role_contract",
+        causal_role_ok,
+        if causal_role_ok {
+            "established cause has a typed trigger claim"
+        } else {
+            failure_reason::MISSING_TRIGGER_ROLE
+        },
+    ));
+
+    // 8) Cause vs symptom: symptom not sole causal claim
     let trigger_cited = truth.trigger_tokens.iter().any(|t| contains_ci(&blob, t))
         || answer.claims.iter().any(|c| {
             c.role.as_deref() == Some("trigger")
@@ -198,7 +243,7 @@ pub fn score_answer(
         },
     ));
 
-    // 7) Independent incident separation
+    // 9) Independent incident separation
     let indep_merged = !truth.independent_incident_tokens.is_empty()
         && answer.asserts_root_cause_established
         && truth
@@ -237,7 +282,7 @@ pub fn score_answer(
         },
     ));
 
-    // 8) Trigger vs recovery
+    // 10) Trigger vs recovery
     let recovery_as_cause = answer.asserts_root_cause_established
         && answer.claims.iter().any(|c| {
             c.role.as_deref() == Some("trigger")
@@ -265,8 +310,9 @@ pub fn score_answer(
         },
     ));
 
-    // 9) Honest abstention
-    let abstention_ok = if truth.requires_abstention || !truth.root_cause_establishable {
+    // 11) Honest abstention
+    let must_abstain = requires_abstention || !root_cause_establishable;
+    let abstention_ok = if must_abstain {
         !answer.asserts_root_cause_established
     } else {
         true
@@ -281,7 +327,69 @@ pub fn score_answer(
         },
     ));
 
-    // 10) Forbidden conclusions
+    let abstention_contract_ok = if must_abstain {
+        let conclusion = answer.conclusion.to_ascii_lowercase();
+        let explicitly_states_limit = [
+            "not established",
+            "cannot establish",
+            "can't establish",
+            "unable to establish",
+            "insufficient evidence",
+            "not enough evidence",
+            "not enough information",
+            "cannot determine",
+            "can't determine",
+            "inconclusive",
+        ]
+        .iter()
+        .any(|marker| conclusion.contains(marker));
+        let confidence_is_cautious = matches!(answer.confidence.as_str(), "low" | "medium");
+        let has_no_trigger_claim = answer
+            .claims
+            .iter()
+            .all(|claim| claim.role.as_deref() != Some("trigger"));
+        !answer.asserts_root_cause_established
+            && explicitly_states_limit
+            && confidence_is_cautious
+            && has_no_trigger_claim
+    } else {
+        true
+    };
+    dimensions.push(dim(
+        "abstention_contract",
+        abstention_contract_ok,
+        if abstention_contract_ok {
+            "abstention explicitly states the evidence limit with cautious confidence"
+        } else {
+            failure_reason::INVALID_ABSTENTION_CONTRACT
+        },
+    ));
+
+    let abstention_basis_ok = if must_abstain {
+        let has_cited_observation = answer
+            .claims
+            .iter()
+            .any(|claim| !claim.evidence_ids.is_empty());
+        let names_observed_condition = truth.symptom_tokens.is_empty()
+            || truth
+                .symptom_tokens
+                .iter()
+                .any(|token| contains_ci(&blob, token));
+        has_cited_observation && names_observed_condition
+    } else {
+        true
+    };
+    dimensions.push(dim(
+        "abstention_evidence_basis",
+        abstention_basis_ok,
+        if abstention_basis_ok {
+            "abstention identifies and cites the observed condition"
+        } else {
+            failure_reason::UNSUPPORTED_ABSTENTION
+        },
+    ));
+
+    // 13) Forbidden conclusions
     let forbidden_ok = truth
         .forbidden_conclusion_tokens
         .iter()
@@ -296,7 +404,7 @@ pub fn score_answer(
         },
     ));
 
-    // 11) Decoy selection via forbidden evidence as causal support
+    // 14) Decoy selection via forbidden evidence as causal support
     let decoy_ok = !answer.asserts_root_cause_established
         || answer.claims.iter().all(|c| {
             if c.role.as_deref() == Some("trigger") {
@@ -317,7 +425,6 @@ pub fn score_answer(
         },
     ));
 
-    let _ = schema_ok;
     let passed = dimensions.iter().all(|d| d.passed);
     AnswerScore {
         candidate_id: answer.candidate_id.clone(),
@@ -326,6 +433,8 @@ pub fn score_answer(
         passed,
         dimensions,
         status: LaneStatus::Executed,
+        expected_outcome: None,
+        expectation_met: None,
     }
 }
 
@@ -371,7 +480,7 @@ fn significant_tokens(text: &str) -> BTreeSet<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::types::{AnswerClaim, EvidenceDocument};
+    use super::super::types::{AnswerClaim, EvidenceDocument, PacketAnswerTruth};
     use super::*;
 
     fn packet(ids: &[&str]) -> EvidencePacket {
@@ -399,6 +508,7 @@ mod tests {
             required_evidence_ids: vec!["e-trigger".into()],
             forbidden_evidence_ids: vec!["e-decoy".into()],
             requires_abstention: false,
+            packet_overrides: Default::default(),
             forbidden_conclusion_tokens: vec!["validation bypass".into()],
         }
     }
@@ -447,6 +557,102 @@ mod tests {
     }
 
     #[test]
+    fn generic_non_answer_fails_when_cause_is_establishable() {
+        let truth = base_truth();
+        let pkt = packet(&["e-trigger", "e-symptom"]);
+        let ans = CandidateAnswer {
+            candidate_id: "generic".into(),
+            task_id: "t1".into(),
+            packet_id: "fixed".into(),
+            asserts_root_cause_established: false,
+            claims: vec![],
+            conclusion: "The available evidence is inconclusive.".into(),
+            confidence: "low".into(),
+        };
+
+        let score = score_answer(&ans, &truth, &pkt);
+
+        assert!(!score.passed);
+        assert!(score.failed_ids().contains(&"establishable_cause_recall"));
+        assert!(score
+            .dimensions
+            .iter()
+            .any(|d| d.reason == failure_reason::MISSED_ESTABLISHABLE_CAUSE));
+    }
+
+    #[test]
+    fn establishability_is_resolved_per_packet() {
+        let mut truth = base_truth();
+        truth.packet_overrides.insert(
+            "product_path".into(),
+            PacketAnswerTruth {
+                root_cause_establishable: false,
+                requires_abstention: true,
+            },
+        );
+        truth.symptom_tokens = vec!["lease".into()];
+        let mut pkt = packet(&["e-symptom"]);
+        let mut ans = CandidateAnswer {
+            candidate_id: "packet-abstention".into(),
+            task_id: "t1".into(),
+            packet_id: "fixed".into(),
+            asserts_root_cause_established: false,
+            claims: vec![AnswerClaim {
+                text: "lease symptom observation".into(),
+                evidence_ids: vec!["e-symptom".into()],
+                role: Some("symptom".into()),
+            }],
+            conclusion: "The initiating cause is not established from this packet.".into(),
+            confidence: "low".into(),
+        };
+
+        let fixed = score_answer(&ans, &truth, &pkt);
+        assert!(!fixed.passed);
+        assert!(fixed.failed_ids().contains(&"establishable_cause_recall"));
+
+        pkt.packet_id = "product_path".into();
+        ans.packet_id = "product_path".into();
+        let product = score_answer(&ans, &truth, &pkt);
+        assert!(product.passed, "failed: {:?}", product.failed_ids());
+    }
+
+    #[test]
+    fn asserted_cause_requires_known_roles_and_a_trigger_claim() {
+        let truth = base_truth();
+        let pkt = packet(&["e-trigger", "e-symptom"]);
+        let mut ans = CandidateAnswer {
+            candidate_id: "roleless".into(),
+            task_id: "t1".into(),
+            packet_id: "fixed".into(),
+            asserts_root_cause_established: true,
+            claims: vec![AnswerClaim {
+                text: "boundary violation of lease window".into(),
+                evidence_ids: vec!["e-trigger".into()],
+                role: Some("banana".into()),
+            }],
+            conclusion: "Invalid lease boundary caused the failure".into(),
+            confidence: "medium".into(),
+        };
+
+        let unknown_role = score_answer(&ans, &truth, &pkt);
+        assert!(!unknown_role.passed);
+        assert!(unknown_role
+            .failed_ids()
+            .contains(&"answer_schema_validity"));
+        assert!(unknown_role.failed_ids().contains(&"causal_role_contract"));
+
+        ans.claims[0].role = Some("other".into());
+        let missing_trigger = score_answer(&ans, &truth, &pkt);
+        assert!(!missing_trigger.passed);
+        assert!(!missing_trigger
+            .failed_ids()
+            .contains(&"answer_schema_validity"));
+        assert!(missing_trigger
+            .failed_ids()
+            .contains(&"causal_role_contract"));
+    }
+
+    #[test]
     fn fabricated_citation_fails() {
         let truth = base_truth();
         let pkt = packet(&["e-trigger"]);
@@ -466,6 +672,33 @@ mod tests {
         let score = score_answer(&ans, &truth, &pkt);
         assert!(!score.passed);
         assert!(score.failed_ids().contains(&"no_fabricated_citations"));
+    }
+
+    #[test]
+    fn citation_overlap_is_a_named_structural_check_not_entailment() {
+        let truth = base_truth();
+        let pkt = packet(&["e-trigger"]);
+        let ans = CandidateAnswer {
+            candidate_id: "no-overlap".into(),
+            task_id: "t1".into(),
+            packet_id: "fixed".into(),
+            asserts_root_cause_established: true,
+            claims: vec![AnswerClaim {
+                text: "zebra orchard quartz".into(),
+                evidence_ids: vec!["e-trigger".into()],
+                role: Some("trigger".into()),
+            }],
+            conclusion: "Invalid lease boundary caused the failure".into(),
+            confidence: "medium".into(),
+        };
+
+        let score = score_answer(&ans, &truth, &pkt);
+
+        assert!(!score.passed);
+        assert!(score.failed_ids().contains(&"citation_lexical_overlap"));
+        assert!(score.dimensions.iter().any(|dimension| {
+            dimension.reason == failure_reason::CITATION_LACKS_LEXICAL_OVERLAP
+        }));
     }
 
     #[test]
@@ -491,6 +724,69 @@ mod tests {
         let score = score_answer(&ans, &truth, &pkt);
         assert!(!score.passed);
         assert!(score.failed_ids().contains(&"honest_abstention"));
+    }
+
+    #[test]
+    fn generic_abstention_without_an_evidence_basis_fails() {
+        let mut truth = base_truth();
+        truth.root_cause_establishable = false;
+        truth.requires_abstention = true;
+        truth.required_evidence_ids.clear();
+        let pkt = packet(&["e-symptom"]);
+        let ans = CandidateAnswer {
+            candidate_id: "generic-abstention".into(),
+            task_id: "t1".into(),
+            packet_id: "fixed".into(),
+            asserts_root_cause_established: false,
+            claims: vec![],
+            conclusion: "There is not enough information.".into(),
+            confidence: "low".into(),
+        };
+
+        let score = score_answer(&ans, &truth, &pkt);
+
+        assert!(!score.passed);
+        assert!(score.failed_ids().contains(&"abstention_evidence_basis"));
+        assert!(score
+            .dimensions
+            .iter()
+            .any(|dimension| dimension.reason == failure_reason::UNSUPPORTED_ABSTENTION));
+    }
+
+    #[test]
+    fn confident_causal_prose_cannot_hide_behind_a_false_assertion_flag() {
+        let mut truth = base_truth();
+        truth.root_cause_establishable = false;
+        truth.requires_abstention = true;
+        truth.required_evidence_ids.clear();
+        truth.required_fact_tokens.clear();
+        truth.trigger_tokens.clear();
+        truth.symptom_tokens = vec!["aborted".into()];
+        let pkt = packet(&["e-symptom"]);
+        let ans = CandidateAnswer {
+            candidate_id: "hidden-certainty".into(),
+            task_id: "t1".into(),
+            packet_id: "fixed".into(),
+            asserts_root_cause_established: false,
+            claims: vec![AnswerClaim {
+                text: "aborted requests".into(),
+                evidence_ids: vec!["e-symptom".into()],
+                role: Some("symptom".into()),
+            }],
+            conclusion:
+                "The database pool was certainly misconfigured; that caused the aborted requests."
+                    .into(),
+            confidence: "high".into(),
+        };
+
+        let score = score_answer(&ans, &truth, &pkt);
+
+        assert!(!score.passed);
+        assert!(score.failed_ids().contains(&"abstention_contract"));
+        assert!(score
+            .dimensions
+            .iter()
+            .any(|dimension| { dimension.reason == failure_reason::INVALID_ABSTENTION_CONTRACT }));
     }
 
     #[test]

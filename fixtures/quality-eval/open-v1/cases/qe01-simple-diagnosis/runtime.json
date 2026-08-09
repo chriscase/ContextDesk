@@ -3,19 +3,19 @@
   "case_id": "qe01-simple-diagnosis",
   "documents": [
     {
-      "id": "doc-cfg",
+      "id": "d01",
       "text": "kind=config_error level=error service=control pattern=BoundaryInvariantViolation lease window 250 below supported minimum 1000 revision r17"
     },
     {
-      "id": "doc-worker",
+      "id": "d02",
       "text": "kind=exception_header level=error service=worker pattern=LeaseEpochMismatch expected epoch differs from observed epoch"
     },
     {
-      "id": "doc-api",
+      "id": "d03",
       "text": "kind=application_error level=error service=api pattern=RequestAborted operation amber-sync reason worker unavailable"
     },
     {
-      "id": "doc-noise",
+      "id": "d04",
       "text": "kind=status_event level=info service=api pattern=health probe status ok"
     }
   ],
@@ -27,15 +27,15 @@
       "packet_id": "fixed",
       "documents": [
         {
-          "id": "doc-cfg",
+          "id": "d01",
           "text": "kind=config_error level=error service=control pattern=BoundaryInvariantViolation lease window 250 below supported minimum 1000 revision r17"
         },
         {
-          "id": "doc-worker",
+          "id": "d02",
           "text": "kind=exception_header level=error service=worker pattern=LeaseEpochMismatch expected epoch differs from observed epoch"
         },
         {
-          "id": "doc-api",
+          "id": "d03",
           "text": "kind=application_error level=error service=api pattern=RequestAborted operation amber-sync reason worker unavailable"
         }
       ]
@@ -44,7 +44,7 @@
       "packet_id": "oracle",
       "documents": [
         {
-          "id": "doc-cfg",
+          "id": "d01",
           "text": "kind=config_error level=error service=control pattern=BoundaryInvariantViolation lease window 250 below supported minimum 1000 revision r17"
         }
       ]
@@ -53,11 +53,11 @@
       "packet_id": "product_path",
       "documents": [
         {
-          "id": "doc-worker",
+          "id": "d02",
           "text": "kind=exception_header level=error service=worker pattern=LeaseEpochMismatch expected epoch differs from observed epoch"
         },
         {
-          "id": "doc-api",
+          "id": "d03",
           "text": "kind=application_error level=error service=api pattern=RequestAborted operation amber-sync reason worker unavailable"
         }
       ]
@@ -66,7 +66,7 @@
   "rankings": [
     {
       "query_id": "q1",
-      "ranked_ids": ["doc-cfg", "doc-worker", "doc-api", "doc-noise"],
+      "ranked_ids": ["d01", "d02", "d03", "d04"],
       "k": 4
     }
   ],
@@ -79,12 +79,12 @@
       "claims": [
         {
           "text": "BoundaryInvariantViolation lease window 250 below minimum 1000",
-          "evidence_ids": ["doc-cfg"],
+          "evidence_ids": ["d01"],
           "role": "trigger"
         },
         {
           "text": "RequestAborted amber-sync after worker unavailable",
-          "evidence_ids": ["doc-api"],
+          "evidence_ids": ["d03"],
           "role": "symptom"
         }
       ],
@@ -114,12 +114,27 @@
       "claims": [
         {
           "text": "BoundaryInvariantViolation lease window 250 below minimum",
-          "evidence_ids": ["doc-cfg"],
+          "evidence_ids": ["d01"],
           "role": "trigger"
         }
       ],
       "conclusion": "Lease window boundary violation on r17 is the initiating configuration fault.",
       "confidence": "medium"
+    },
+    {
+      "candidate_id": "good_product_path_abstention",
+      "task_id": "t1",
+      "packet_id": "product_path",
+      "asserts_root_cause_established": false,
+      "claims": [
+        {
+          "text": "RequestAborted amber-sync after worker unavailable",
+          "evidence_ids": ["d03"],
+          "role": "symptom"
+        }
+      ],
+      "conclusion": "RequestAborted for amber-sync is established, but the initiating configuration is not established from this packet.",
+      "confidence": "low"
     }
   ]
 }
