@@ -56,6 +56,8 @@ pub mod model_role_hints;
 pub mod module_registry;
 pub mod modules;
 pub mod multi_model;
+/// Multi-stage candidate admission budget (synthesis reserve, issue #869).
+pub mod multi_stage_budget;
 pub mod normalized_log_events;
 pub mod object_store;
 pub mod paths;

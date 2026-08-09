@@ -147,7 +147,11 @@ async fn run_two_candidate_triage(
                 ledger_digest: String::new(),
             },
         },
-        &mut |telemetry| contexts.push(telemetry),
+        &mut |signal| {
+            if let MultiStageHostSignal::Context(telemetry) = signal {
+                contexts.push(telemetry);
+            }
+        },
     )
     .await;
     (outcome, contexts)

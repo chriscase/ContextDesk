@@ -6,6 +6,30 @@ groups and the ordinary turn's provider-round and context budgets can reserve a
 final comparison. Otherwise the established single-stage broad-log synthesis
 continues unchanged.
 
+### Multi-stage budget policy (`contextdesk.multi_stage_budget.v1`)
+
+Issue **#869**. The host admits each candidate investigation only when the
+**monotonic whole-turn deadline** and **provider-round ceiling** still leave a
+protected final-comparison reserve. Admission is provider-agnostic (no model
+names). Policy identity:
+`cd_core::multi_stage_budget::MULTI_STAGE_BUDGET_POLICY_V1`.
+
+- **Time reserve:** half the synthesizing-phase budget, floored by one quarter
+  of the whole turn, never more than half the turn (see `synthesis_reserve`).
+- **Round reserve:** one provider round held for final comparison.
+- **Candidate operation cap:** `min(phase_cap, remaining_total − time_reserve)`
+  so a slow or verbose candidate cannot spend the protected budget.
+- **Early stop:** when another candidate would violate the reserve, completed
+  drafts are kept; comparison runs if at least two drafts remain, else the
+  path fails closed with an honest budget reason (not a silent success).
+- **Compatibility:** an orchestration timeout or reserve stop does **not**
+  clear measured model readiness. Compatibility probes and quality/orchestration
+  evidence remain separate classes.
+- **Progress:** candidate index/count, comparison start/finish, and admission
+  skips emit `StreamEvent::MultiModelStage` from the same core loop; CLI text,
+  JSONL, Desktop, linked chat, and activity tracing all project that event
+  through `progress_for_stream_event`.
+
 ```mermaid
 flowchart TD
     H["Host: pin corpus + suppression revision"] --> B["Host: bounded broad brief"]

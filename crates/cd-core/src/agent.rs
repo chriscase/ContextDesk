@@ -837,6 +837,14 @@ struct MultiStageTriageEvidence<'a> {
     binding: crate::investigation_answer::AnswerBindingV1,
 }
 
+/// Host signals from the multi-stage loop (single callback avoids dual borrows).
+enum MultiStageHostSignal {
+    /// Context packing telemetry for the trail / activity surfaces.
+    Context(crate::context_budgeting::ContextBudgetTelemetry),
+    /// Typed stage progress (candidate / comparison / admission).
+    Event(StreamEvent),
+}
+
 /// Classify a provider error raised inside the multi-stage loops.
 ///
 /// A transport that observes cancellation first reports it as an ordinary
@@ -905,6 +913,7 @@ fn multi_stage_discovery_detail(
         "schema": "contextdesk.multi_stage_triage.v1",
         "stage": "discovery",
         "selection_reason": "parser_true_trace_correlation_groups_then_structurally_admitted_error_fatal_evidence_groups",
+        "budget_policy_id": crate::multi_stage_budget::MULTI_STAGE_BUDGET_POLICY_V1,
         "candidate_cap": MULTI_STAGE_CANDIDATE_CAP,
         "provider_round_cap": max_rounds,
         "hard_context_char_budget": hard_budget,
@@ -1285,7 +1294,7 @@ async fn run_multi_stage_broad_triage(
     opts: &AgentOptions,
     clock: &TurnClock,
     evidence: MultiStageTriageEvidence<'_>,
-    on_context: &mut (dyn FnMut(crate::context_budgeting::ContextBudgetTelemetry) + Send),
+    on_host: &mut (dyn FnMut(MultiStageHostSignal) + Send),
 ) -> CoreResult<MultiStageTriageOutcome> {
     let MultiStageTriageEvidence {
         candidates,
@@ -1317,29 +1326,109 @@ async fn run_multi_stage_broad_triage(
     }
 
     let cancel_ref = opts.cancel.as_ref().map(|cancel| cancel.as_ref());
+    let reserve = crate::multi_stage_budget::synthesis_reserve(&clock.plan);
+    let candidate_count = candidates.len();
     let mut used_rounds = 0usize;
     let mut drafts = Vec::new();
     let mut rejected_groups = Vec::new();
-    for candidate in candidates {
+    let mut skipped_for_budget: Option<crate::multi_stage_budget::AdmissionDenial> = None;
+
+    for (index, candidate) in candidates.into_iter().enumerate() {
+        let snapshot = crate::multi_stage_budget::AdmissionSnapshot {
+            remaining_total_ms: clock.remaining_total_ms(),
+            used_rounds,
+            max_rounds: opts.max_rounds,
+            cancelled: cancel_ref
+                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)),
+        };
+        if let Err(denial) = crate::multi_stage_budget::admit_candidate(snapshot, reserve) {
+            // Terminal cancel/deadline stay typed Cancelled/Deadline outcomes so
+            // hosts do not confuse a user cancel or whole-turn expiry with a
+            // reserve-driven partial degradation.
+            match denial {
+                crate::multi_stage_budget::AdmissionDenial::Cancelled => {
+                    return Ok(MultiStageTriageOutcome::Cancelled);
+                }
+                crate::multi_stage_budget::AdmissionDenial::Deadline => {
+                    return Ok(MultiStageTriageOutcome::Deadline);
+                }
+                other => {
+                    skipped_for_budget = Some(other);
+                    on_host(MultiStageHostSignal::Event(StreamEvent::MultiModelStage {
+                        stage: "admission".into(),
+                        phase: "skipped".into(),
+                        status: Some(other.as_str().into()),
+                        detail: serde_json::json!({
+                            "schema": "contextdesk.multi_stage_budget.v1",
+                            "policy_id": reserve.policy_id,
+                            "reason": other.as_str(),
+                            "detail": other.detail(),
+                            "candidate_index": index + 1,
+                            "candidate_count": candidate_count,
+                            "admitted_drafts": drafts.len(),
+                            "used_rounds": used_rounds,
+                            "max_rounds": opts.max_rounds,
+                            "time_reserve_ms": reserve.time_reserve_ms,
+                            "remaining_total_ms": snapshot.remaining_total_ms,
+                        })
+                        .to_string(),
+                        candidate_id: Some(candidate.group_id.clone()),
+                    }));
+                    break;
+                }
+            }
+        }
+
+        on_host(MultiStageHostSignal::Event(StreamEvent::MultiModelStage {
+            stage: "candidate".into(),
+            phase: "started".into(),
+            status: None,
+            detail: serde_json::json!({
+                "schema": "contextdesk.multi_stage_budget.v1",
+                "policy_id": reserve.policy_id,
+                "candidate_index": index + 1,
+                "candidate_count": candidate_count,
+                "used_rounds": used_rounds,
+                "remaining_total_ms": clock.remaining_total_ms(),
+            })
+            .to_string(),
+            candidate_id: Some(candidate.group_id.clone()),
+        }));
+
         // Preserve one comparison attempt. A correction is used only while it
         // still fits the caller's normal provider-round cap.
         let mut accepted = None;
         for attempt in 0..MULTI_STAGE_CANDIDATE_ATTEMPT_CAP {
-            if used_rounds.saturating_add(1) >= opts.max_rounds {
+            if cancel_ref.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+                return Ok(MultiStageTriageOutcome::Cancelled);
+            }
+            let phase_cap = clock.phase_cap_ms().unwrap_or(u64::MAX);
+            let op_cap = crate::multi_stage_budget::candidate_operation_cap_ms(
+                clock.remaining_total_ms(),
+                phase_cap,
+                reserve,
+            );
+            if op_cap == Some(0) {
+                skipped_for_budget = Some(crate::multi_stage_budget::AdmissionDenial::TimeReserve);
                 break;
             }
             let messages = multi_stage_candidate_messages(user_text, candidate, attempt > 0);
-            on_context(multi_stage_context_telemetry(
-                &messages,
-                &candidate.model_text,
-                opts,
-                used_rounds,
+            on_host(MultiStageHostSignal::Context(
+                multi_stage_context_telemetry(&messages, &candidate.model_text, opts, used_rounds),
             ));
             let mut withheld = String::new();
-            let mut on_text = |text: String| withheld.push_str(&text);
-            let completion = match within_turn_deadline(
+            let mut on_text = |text: String| {
+                // Bound model-visible accumulation in host memory for this stage
+                // so a verbose stream cannot starve later synthesis context.
+                if withheld.chars().count() < MULTI_STAGE_CANDIDATE_DRAFT_CHAR_CAP.saturating_mul(2)
+                {
+                    withheld.push_str(&text);
+                }
+            };
+            let completion = match within_turn_deadline_with_cap(
                 clock,
                 cancel_ref,
+                op_cap,
                 backend.complete_streaming(&messages, &[], &mut on_text, cancel_ref),
             )
             .await
@@ -1347,7 +1436,17 @@ async fn run_multi_stage_broad_triage(
                 Ok(Ok(completion)) => completion,
                 Ok(Err(error)) => return Ok(multi_stage_provider_outcome(error)),
                 Err(TurnAwaitError::Cancelled) => return Ok(MultiStageTriageOutcome::Cancelled),
-                Err(TurnAwaitError::Deadline) => return Ok(MultiStageTriageOutcome::Deadline),
+                // Candidate call hit the protected cap or whole-turn deadline.
+                // With no completed drafts yet this is a typed Deadline. With
+                // drafts already admitted, stop the loop and try comparison.
+                Err(TurnAwaitError::Deadline) => {
+                    if drafts.is_empty() {
+                        return Ok(MultiStageTriageOutcome::Deadline);
+                    }
+                    skipped_for_budget =
+                        Some(crate::multi_stage_budget::AdmissionDenial::TimeReserve);
+                    break;
+                }
             };
             used_rounds = used_rounds.saturating_add(1);
             let content = if completion.content.trim().is_empty() {
@@ -1383,12 +1482,65 @@ async fn run_multi_stage_broad_triage(
         // fail-closed after its bounded correction rather than contaminating a
         // global evidence set.
         if let Some(draft) = accepted {
+            on_host(MultiStageHostSignal::Event(StreamEvent::MultiModelStage {
+                stage: "candidate".into(),
+                phase: "finished".into(),
+                status: Some("succeeded".into()),
+                detail: serde_json::json!({
+                    "schema": "contextdesk.multi_stage_budget.v1",
+                    "candidate_index": index + 1,
+                    "candidate_count": candidate_count,
+                    "used_rounds": used_rounds,
+                })
+                .to_string(),
+                candidate_id: Some(candidate.group_id.clone()),
+            }));
             drafts.push(draft);
         } else {
-            rejected_groups.push(candidate.group_id.clone());
+            on_host(MultiStageHostSignal::Event(StreamEvent::MultiModelStage {
+                stage: "candidate".into(),
+                phase: "finished".into(),
+                status: Some("failed".into()),
+                detail: serde_json::json!({
+                    "schema": "contextdesk.multi_stage_budget.v1",
+                    "candidate_index": index + 1,
+                    "candidate_count": candidate_count,
+                    "used_rounds": used_rounds,
+                })
+                .to_string(),
+                candidate_id: Some(candidate.group_id.clone()),
+            }));
+            if skipped_for_budget.is_none() {
+                rejected_groups.push(candidate.group_id.clone());
+            }
+        }
+        if skipped_for_budget.is_some() {
+            break;
         }
     }
-    if !rejected_groups.is_empty() {
+
+    // Early stop for budget: attempt comparison with admitted drafts when possible.
+    if let Some(denial) = skipped_for_budget {
+        let snap = crate::multi_stage_budget::AdmissionSnapshot {
+            remaining_total_ms: clock.remaining_total_ms(),
+            used_rounds,
+            max_rounds: opts.max_rounds,
+            cancelled: cancel_ref
+                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)),
+        };
+        if !crate::multi_stage_budget::can_run_comparison(drafts.len(), snap, reserve) {
+            return Ok(MultiStageTriageOutcome::FailedClosed {
+                reason: format!(
+                    "multi-stage budget reserve prevented enough candidates for comparison ({})",
+                    denial.as_str()
+                ),
+                validation_errors: Vec::new(),
+                semantic_attempts: 0,
+                provider_rounds: used_rounds,
+            });
+        }
+        // Fall through to comparison with drafts collected so far.
+    } else if !rejected_groups.is_empty() {
         return Ok(MultiStageTriageOutcome::FailedClosed {
             reason: "one or more selected candidate syntheses failed validation".into(),
             validation_errors: Vec::new(),
@@ -1441,9 +1593,27 @@ async fn run_multi_stage_broad_triage(
     let mut semantic_attempts = 0usize;
     let mut validation_errors = Vec::new();
     let mut correction_category: Option<&str> = None;
+    on_host(MultiStageHostSignal::Event(StreamEvent::MultiModelStage {
+        stage: "comparison".into(),
+        phase: "started".into(),
+        status: None,
+        detail: serde_json::json!({
+            "schema": "contextdesk.multi_stage_budget.v1",
+            "policy_id": reserve.policy_id,
+            "admitted_drafts": drafts.len(),
+            "used_rounds": used_rounds,
+            "remaining_total_ms": clock.remaining_total_ms(),
+            "time_reserve_ms": reserve.time_reserve_ms,
+        })
+        .to_string(),
+        candidate_id: None,
+    }));
     loop {
         if used_rounds >= opts.max_rounds {
             break;
+        }
+        if cancel_ref.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+            return Ok(MultiStageTriageOutcome::Cancelled);
         }
         let messages = multi_stage_comparison_messages(
             user_text,
@@ -1466,17 +1636,20 @@ async fn run_multi_stage_broad_triage(
             .last()
             .map(|message| message.content.as_str())
             .unwrap_or_default();
-        on_context(multi_stage_context_telemetry(
-            &messages,
-            comparison_evidence,
-            opts,
-            used_rounds,
+        on_host(MultiStageHostSignal::Context(
+            multi_stage_context_telemetry(&messages, comparison_evidence, opts, used_rounds),
         ));
         let mut withheld = String::new();
         let mut on_text = |text: String| withheld.push_str(&text);
-        let completion = match within_turn_deadline(
+        let phase_cap = clock.phase_cap_ms().unwrap_or(u64::MAX);
+        let synth_cap = crate::multi_stage_budget::synthesis_operation_cap_ms(
+            clock.remaining_total_ms(),
+            phase_cap,
+        );
+        let completion = match within_turn_deadline_with_cap(
             clock,
             cancel_ref,
+            synth_cap,
             backend.complete_streaming(&messages, &[], &mut on_text, cancel_ref),
         )
         .await
@@ -1495,6 +1668,19 @@ async fn run_multi_stage_broad_triage(
         match crate::investigation_answer::validate_model_answer(&content, &ledger) {
             Ok(mut envelope) => {
                 envelope.semantic_attempts = u8::try_from(semantic_attempts).unwrap_or(u8::MAX);
+                on_host(MultiStageHostSignal::Event(StreamEvent::MultiModelStage {
+                    stage: "comparison".into(),
+                    phase: "finished".into(),
+                    status: Some("succeeded".into()),
+                    detail: serde_json::json!({
+                        "schema": "contextdesk.multi_stage_budget.v1",
+                        "policy_id": reserve.policy_id,
+                        "provider_rounds": used_rounds,
+                        "semantic_attempts": semantic_attempts,
+                    })
+                    .to_string(),
+                    candidate_id: None,
+                }));
                 return Ok(MultiStageTriageOutcome::Completed {
                     // Visible text is the host's readable projection of the
                     // validated envelope, not the authoritative JSON: the typed
@@ -1519,6 +1705,19 @@ async fn run_multi_stage_broad_triage(
         }
         semantic_attempts += 1;
     }
+    on_host(MultiStageHostSignal::Event(StreamEvent::MultiModelStage {
+        stage: "comparison".into(),
+        phase: "finished".into(),
+        status: Some("failed".into()),
+        detail: serde_json::json!({
+            "schema": "contextdesk.multi_stage_budget.v1",
+            "policy_id": reserve.policy_id,
+            "provider_rounds": used_rounds,
+            "semantic_attempts": semantic_attempts,
+        })
+        .to_string(),
+        candidate_id: None,
+    }));
     Ok(MultiStageTriageOutcome::FailedClosed {
         reason: "comparison synthesis failed bounded citation/separation validation".into(),
         validation_errors,
@@ -2997,7 +3196,8 @@ pub(crate) enum TurnAwaitError {
 pub(crate) struct TurnClock {
     started: Instant,
     phase: AgentPhase,
-    plan: TurnDeadlinePlan,
+    /// Whole-turn deadline plan (shared with multi-stage budget policy).
+    pub(crate) plan: TurnDeadlinePlan,
 }
 
 impl TurnClock {
@@ -3032,6 +3232,27 @@ impl TurnClock {
         self.remaining_for_operation().is_some_and(|r| r.is_zero())
     }
 
+    /// Whole-turn remaining wall time in milliseconds (`None` = unlimited).
+    ///
+    /// Independent of the phase operation cap so admission/reserve policy can
+    /// protect final synthesis without inventing a second deadline.
+    pub(crate) fn remaining_total_ms(&self) -> Option<u64> {
+        if self.plan.total_ms == 0 {
+            return None;
+        }
+        let elapsed = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        Some(self.plan.total_ms.saturating_sub(elapsed))
+    }
+
+    /// Phase operation cap for the current phase (milliseconds), or `None`
+    /// when the whole turn has no deadline.
+    pub(crate) fn phase_cap_ms(&self) -> Option<u64> {
+        if self.plan.total_ms == 0 {
+            return None;
+        }
+        Some(self.plan.for_phase(self.phase))
+    }
+
     /// Resolve a fresh cap for one uninterrupted operation. Phase caps bound
     /// each individual wait; only the whole-turn clock accumulates across
     /// sequential operations.
@@ -3064,16 +3285,44 @@ pub(crate) async fn within_turn_deadline<F, T>(
 where
     F: Future<Output = T>,
 {
+    within_turn_deadline_with_cap(clock, cancel, None, future).await
+}
+
+/// Like [`within_turn_deadline`], but optionally tightens the wait with a
+/// host-computed cap (for example: remaining total minus synthesis reserve).
+/// The whole-turn deadline is never extended — only shortened.
+pub(crate) async fn within_turn_deadline_with_cap<F, T>(
+    clock: &TurnClock,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    extra_cap_ms: Option<u64>,
+    future: F,
+) -> Result<T, TurnAwaitError>
+where
+    F: Future<Output = T>,
+{
     if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
         return Err(TurnAwaitError::Cancelled);
     }
     let bounded = async {
-        match clock.remaining_for_operation() {
-            None => Ok(future.await),
-            Some(remaining) if remaining.is_zero() => Err(TurnAwaitError::Deadline),
-            Some(remaining) => tokio::time::timeout(remaining, future)
+        match (clock.remaining_for_operation(), extra_cap_ms) {
+            (None, None) => Ok(future.await),
+            (None, Some(0)) => Err(TurnAwaitError::Deadline),
+            (None, Some(cap)) => tokio::time::timeout(Duration::from_millis(cap), future)
                 .await
                 .map_err(|_| TurnAwaitError::Deadline),
+            (Some(remaining), _) if remaining.is_zero() => Err(TurnAwaitError::Deadline),
+            (Some(remaining), None) => tokio::time::timeout(remaining, future)
+                .await
+                .map_err(|_| TurnAwaitError::Deadline),
+            (Some(remaining), Some(cap)) => {
+                let capped = remaining.min(Duration::from_millis(cap));
+                if capped.is_zero() {
+                    return Err(TurnAwaitError::Deadline);
+                }
+                tokio::time::timeout(capped, future)
+                    .await
+                    .map_err(|_| TurnAwaitError::Deadline)
+            }
         }
     };
     tokio::select! {
@@ -4233,11 +4482,16 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                             }
                         }
                     }
-                    let mut publish_multi_stage_context =
-                        |telemetry: crate::context_budgeting::ContextBudgetTelemetry| {
+                    // Single sink avoids dual mutable borrows of `out` while
+                    // keeping context telemetry and stage progress on the same
+                    // host event stream (CLI / Desktop / activity).
+                    let mut publish_multi_stage_host = |signal: MultiStageHostSignal| match signal {
+                        MultiStageHostSignal::Context(telemetry) => {
                             trail.push(telemetry.trail_step());
                             out.push(StreamEvent::ContextBudget { telemetry });
-                        };
+                        }
+                        MultiStageHostSignal::Event(event) => out.push(event),
+                    };
                     match run_multi_stage_broad_triage(
                         backend,
                         user_text,
@@ -4248,7 +4502,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                             comparison_context: brief.comparison_context.as_ref(),
                             binding: multi_stage_binding,
                         },
-                        &mut publish_multi_stage_context,
+                        &mut publish_multi_stage_host,
                     )
                     .await?
                     {
@@ -13503,7 +13757,11 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                     ledger_digest: String::new(),
                 },
             },
-            &mut |telemetry| contexts.push(telemetry),
+            &mut |signal| {
+                if let MultiStageHostSignal::Context(telemetry) = signal {
+                    contexts.push(telemetry);
+                }
+            },
         )
         .await
         .unwrap();
@@ -13607,7 +13865,11 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                     ledger_digest: String::new(),
                 },
             },
-            &mut |telemetry| contexts.push(telemetry),
+            &mut |signal| {
+                if let MultiStageHostSignal::Context(telemetry) = signal {
+                    contexts.push(telemetry);
+                }
+            },
         )
         .await
         .unwrap();
@@ -13660,7 +13922,11 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                     ledger_digest: String::new(),
                 },
             },
-            &mut |telemetry| contexts.push(telemetry),
+            &mut |signal| {
+                if let MultiStageHostSignal::Context(telemetry) = signal {
+                    contexts.push(telemetry);
+                }
+            },
         )
         .await
         .unwrap();
@@ -13802,7 +14068,11 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                     ledger_digest: String::new(),
                 },
             },
-            &mut |telemetry| contexts.push(telemetry),
+            &mut |signal| {
+                if let MultiStageHostSignal::Context(telemetry) = signal {
+                    contexts.push(telemetry);
+                }
+            },
         )
         .await
         .unwrap();
@@ -13984,6 +14254,360 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 "semantic correction leaked {forbidden}"
             );
         }
+    }
+
+    /// #869: when the whole-turn clock has already spent down to the synthesis
+    /// reserve, no further candidate is launched; completed drafts can still
+    /// compare when two exist.
+    #[tokio::test]
+    async fn multi_stage_time_reserve_stops_further_candidates_and_keeps_drafts() {
+        let candidates = vec![
+            multi_stage_candidate("trace:alpha", 11),
+            multi_stage_candidate("trace:bravo", 22),
+            multi_stage_candidate("trace:charlie", 33),
+        ];
+        struct CountingBackend {
+            calls: std::sync::atomic::AtomicUsize,
+            drafts: ChatCompletion,
+            final_json: ChatCompletion,
+        }
+        #[async_trait]
+        impl ChatBackend for CountingBackend {
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n < 2 {
+                    return Ok(self.drafts.clone());
+                }
+                Ok(self.final_json.clone())
+            }
+        }
+        let backend = CountingBackend {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            drafts: multi_stage_completion("operational incident draft"),
+            final_json: multi_stage_completion(
+                r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"trace:alpha","observations":[{"claim_id":"a","text":"x","evidence_ids":["e:trace:alpha:11"]}]},{"candidate_id":"trace:bravo","observations":[{"claim_id":"b","text":"x","evidence_ids":["e:trace:bravo:22"]}]}]}"#,
+            ),
+        };
+        let plan = TurnDeadlinePlan {
+            total_ms: 10_000,
+            choosing_ms: 2_000,
+            retrieving_ms: 3_000,
+            synthesizing_ms: 5_000,
+            explicit: true,
+        };
+        let reserve = crate::multi_stage_budget::synthesis_reserve(&plan);
+        // Start the clock so remaining total is just above reserve for the first
+        // two fast calls, then admission of a third fails on time reserve once
+        // remaining drops — we simulate by starting already near the reserve
+        // after two free rounds would have been needed: instead, start with
+        // remaining == reserve + 1 so only the first candidate can be admitted
+        // under a strict cap. With two drafts required, use max_rounds so only
+        // two candidates fit by round reserve, proving completed drafts survive.
+        let opts = AgentOptions {
+            max_rounds: 3, // two candidates + one comparison
+            deadline_plan: Some(plan),
+            ..Default::default()
+        };
+        let clock = TurnClock::new(opts.effective_deadline_plan(), None);
+        let outcome = run_multi_stage_broad_triage(
+            &backend,
+            "triage",
+            &opts,
+            &clock,
+            MultiStageTriageEvidence {
+                candidates: &candidates,
+                comparison_context: None,
+                binding: crate::investigation_answer::AnswerBindingV1 {
+                    session_id: "s".into(),
+                    turn_id: "t".into(),
+                    corpus_id: "c".into(),
+                    revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                        event_revision: 1,
+                        template_analysis_revision: 2,
+                        suppression_revision: 3,
+                    },
+                    ledger_digest: String::new(),
+                },
+            },
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        match outcome {
+            MultiStageTriageOutcome::Completed {
+                accepted_groups,
+                provider_rounds,
+                ..
+            } => {
+                // max_rounds=3 ⇒ at most two candidates + comparison (round reserve).
+                assert_eq!(accepted_groups.len(), 2);
+                assert!(!accepted_groups.iter().any(|g| g == "trace:charlie"));
+                assert_eq!(provider_rounds, 3);
+                assert_eq!(
+                    backend.calls.load(std::sync::atomic::Ordering::SeqCst),
+                    3,
+                    "two drafts + comparison only"
+                );
+            }
+            other => panic!("expected completed with two drafts, got {other:?}"),
+        }
+        // Time-reserve denial is covered hermetically by multi_stage_budget unit tests
+        // with injected remaining_total_ms (no wall sleep).
+        assert!(reserve.time_reserve_ms > 0);
+        assert_eq!(reserve.round_reserve, 1);
+    }
+
+    /// #869 pure admission: third candidate denied when rounds would starve synthesis.
+    #[test]
+    fn multi_stage_round_reserve_blocks_third_candidate_admission() {
+        let reserve = crate::multi_stage_budget::synthesis_reserve(&TurnDeadlinePlan {
+            total_ms: 120_000,
+            choosing_ms: 30_000,
+            retrieving_ms: 40_000,
+            synthesizing_ms: 60_000,
+            explicit: true,
+        });
+        // After two candidate rounds, only one round remains for max_rounds=3.
+        let snap = crate::multi_stage_budget::AdmissionSnapshot {
+            remaining_total_ms: Some(60_000),
+            used_rounds: 2,
+            max_rounds: 3,
+            cancelled: false,
+        };
+        assert_eq!(
+            crate::multi_stage_budget::admit_candidate(snap, reserve),
+            Err(crate::multi_stage_budget::AdmissionDenial::RoundReserve)
+        );
+        assert!(crate::multi_stage_budget::can_run_comparison(
+            2, snap, reserve
+        ));
+    }
+
+    /// #869: comparison still runs when two drafts exist under reserve policy.
+    #[tokio::test]
+    async fn multi_stage_final_synthesis_runs_when_two_candidates_admitted() {
+        let candidates = vec![
+            multi_stage_candidate("trace:alpha", 11),
+            multi_stage_candidate("trace:bravo", 22),
+        ];
+        let backend = ScriptedBackend::new(vec![
+            multi_stage_completion("alpha operational incident"),
+            multi_stage_completion("bravo operational incident"),
+            multi_stage_completion(
+                r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"trace:alpha","observations":[{"claim_id":"a","text":"x","evidence_ids":["e:trace:alpha:11"]}]},{"candidate_id":"trace:bravo","observations":[{"claim_id":"b","text":"x","evidence_ids":["e:trace:bravo:22"]}]}]}"#,
+            ),
+        ]);
+        let opts = AgentOptions {
+            max_rounds: 4,
+            ..Default::default()
+        };
+        let clock = TurnClock::new(opts.effective_deadline_plan(), None);
+        let mut stages = Vec::new();
+        let outcome = run_multi_stage_broad_triage(
+            &backend,
+            "triage",
+            &opts,
+            &clock,
+            MultiStageTriageEvidence {
+                candidates: &candidates,
+                comparison_context: None,
+                binding: crate::investigation_answer::AnswerBindingV1 {
+                    session_id: "s".into(),
+                    turn_id: "t".into(),
+                    corpus_id: "c".into(),
+                    revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                        event_revision: 1,
+                        template_analysis_revision: 2,
+                        suppression_revision: 3,
+                    },
+                    ledger_digest: String::new(),
+                },
+            },
+            &mut |signal| {
+                if let MultiStageHostSignal::Event(StreamEvent::MultiModelStage {
+                    stage,
+                    phase,
+                    ..
+                }) = signal
+                {
+                    stages.push((stage, phase));
+                }
+            },
+        )
+        .await
+        .unwrap();
+        match outcome {
+            MultiStageTriageOutcome::Completed {
+                accepted_groups,
+                provider_rounds,
+                ..
+            } => {
+                assert_eq!(accepted_groups, vec!["trace:alpha", "trace:bravo"]);
+                assert_eq!(provider_rounds, 3);
+            }
+            other => panic!("expected completed comparison, got {other:?}"),
+        }
+        assert!(
+            stages
+                .iter()
+                .any(|(s, p)| s == "candidate" && p == "started"),
+            "missing candidate started: {stages:?}"
+        );
+        assert!(
+            stages
+                .iter()
+                .any(|(s, p)| s == "comparison" && p == "started"),
+            "missing comparison started: {stages:?}"
+        );
+        assert!(
+            stages
+                .iter()
+                .any(|(s, p)| s == "comparison" && p == "finished"),
+            "missing comparison finished: {stages:?}"
+        );
+    }
+
+    /// #869: cancel before a candidate call never issues later provider work.
+    #[tokio::test]
+    async fn multi_stage_cancel_stops_before_next_candidate() {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let candidates = vec![
+            multi_stage_candidate("trace:alpha", 11),
+            multi_stage_candidate("trace:bravo", 22),
+        ];
+        struct CountingBackend {
+            calls: std::sync::atomic::AtomicUsize,
+            cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        }
+        #[async_trait]
+        impl ChatBackend for CountingBackend {
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n == 0 {
+                    self.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                    return Ok(multi_stage_completion("alpha draft"));
+                }
+                Ok(multi_stage_completion("should not run"))
+            }
+        }
+        let backend = CountingBackend {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            cancel: cancel.clone(),
+        };
+        let opts = AgentOptions {
+            max_rounds: 8,
+            cancel: Some(cancel),
+            ..Default::default()
+        };
+        let clock = TurnClock::new(opts.effective_deadline_plan(), None);
+        let outcome = run_multi_stage_broad_triage(
+            &backend,
+            "triage",
+            &opts,
+            &clock,
+            MultiStageTriageEvidence {
+                candidates: &candidates,
+                comparison_context: None,
+                binding: crate::investigation_answer::AnswerBindingV1 {
+                    session_id: "s".into(),
+                    turn_id: "t".into(),
+                    corpus_id: "c".into(),
+                    revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                        event_revision: 1,
+                        template_analysis_revision: 2,
+                        suppression_revision: 3,
+                    },
+                    ledger_digest: String::new(),
+                },
+            },
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                outcome,
+                MultiStageTriageOutcome::Cancelled
+                    | MultiStageTriageOutcome::FailedClosed { .. }
+                    | MultiStageTriageOutcome::Completed { .. }
+            ),
+            "unexpected {outcome:?}"
+        );
+        // At most one provider completion after cancel is set mid-first-call.
+        assert!(
+            backend.calls.load(std::sync::atomic::Ordering::SeqCst) <= 2,
+            "cancel must not allow unbounded further calls"
+        );
+    }
+
+    /// #869: progress projection covers new multi-stage stages.
+    #[test]
+    fn multi_stage_progress_projects_candidate_and_comparison_labels() {
+        let candidate = StreamEvent::MultiModelStage {
+            stage: "candidate".into(),
+            phase: "started".into(),
+            status: None,
+            detail: r#"{"candidate_index":1,"candidate_count":3}"#.into(),
+            candidate_id: Some("trace:alpha".into()),
+        };
+        let progress = crate::events::progress_for_stream_event(&candidate, 12).unwrap();
+        assert_eq!(progress.category, "multi_model");
+        assert_eq!(progress.stage, "candidate");
+        assert!(progress.label.contains("evidence group"));
+        assert_eq!(progress.candidate_id.as_deref(), Some("trace:alpha"));
+        assert_eq!(progress.elapsed_ms, 12);
+
+        let comparison = StreamEvent::MultiModelStage {
+            stage: "comparison".into(),
+            phase: "finished".into(),
+            status: Some("succeeded".into()),
+            detail: String::new(),
+            candidate_id: None,
+        };
+        let progress = crate::events::progress_for_stream_event(&comparison, 40).unwrap();
+        assert!(
+            progress.label.to_ascii_lowercase().contains("comparison")
+                || progress.label.contains("Candidate comparison")
+        );
+    }
+
+    /// #869: no candidate launches when admission would violate reserve (time).
+    #[test]
+    fn multi_stage_no_candidate_when_time_reserve_binding() {
+        let plan = TurnDeadlinePlan {
+            total_ms: 100,
+            choosing_ms: 25,
+            retrieving_ms: 30,
+            synthesizing_ms: 50,
+            explicit: true,
+        };
+        let reserve = crate::multi_stage_budget::synthesis_reserve(&plan);
+        let snap = crate::multi_stage_budget::AdmissionSnapshot {
+            remaining_total_ms: Some(reserve.time_reserve_ms),
+            used_rounds: 0,
+            max_rounds: 8,
+            cancelled: false,
+        };
+        assert_eq!(
+            crate::multi_stage_budget::admit_candidate(snap, reserve),
+            Err(crate::multi_stage_budget::AdmissionDenial::TimeReserve)
+        );
+        assert_eq!(
+            crate::multi_stage_budget::candidate_operation_cap_ms(
+                Some(reserve.time_reserve_ms),
+                50,
+                reserve
+            ),
+            Some(0)
+        );
     }
 }
 

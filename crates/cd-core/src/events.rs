@@ -59,9 +59,18 @@ fn multi_model_label(stage: &str, phase: &str) -> String {
         ("reviewer", "finished") => "Review finished",
         ("synthesizer", "started") => "Synthesizing the reviewed answer",
         ("synthesizer", "finished") => "Reviewed synthesis finished",
+        // Multi-stage broad-triage candidate loop (#869) — same vocabulary so
+        // CLI/Desktop/activity share one projection path.
+        ("candidate", "started") => "Investigating evidence group",
+        ("candidate", "finished") => "Evidence group investigation finished",
+        ("candidate", "skipped") => "Further candidates not admitted",
+        ("comparison", "started") => "Comparing admitted candidates",
+        ("comparison", "finished") => "Candidate comparison finished",
+        ("admission", "skipped") => "Candidate admission stopped",
         ("summary", _) => "Multi-model review summary",
         (_, "started") => "Starting model stage",
         (_, "finished") => "Model stage finished",
+        (_, "skipped") => "Stage skipped",
         _ => "Multi-model activity",
     };
     action.to_string()
