@@ -9,6 +9,34 @@ export const MODEL_AVAILABILITY = [
 ] as const;
 export type ModelAvailability = (typeof MODEL_AVAILABILITY)[number];
 
+export const MODEL_READINESS_ROLES = [
+  "chat",
+  "embedding",
+  "reranker",
+  "unknown",
+] as const;
+export type ModelReadinessRole = (typeof MODEL_READINESS_ROLES)[number];
+
+export const MODEL_READINESS_STATES = [
+  "verified",
+  "limited",
+  "failed",
+  "stale",
+  "unverified",
+] as const;
+export type ModelReadinessState = (typeof MODEL_READINESS_STATES)[number];
+
+export const MODEL_READINESS_BASES = ["measured", "name_hint"] as const;
+export type ModelReadinessBasis = (typeof MODEL_READINESS_BASES)[number];
+
+export type ModelReadiness = {
+  role: ModelReadinessRole;
+  state: ModelReadinessState;
+  basis: ModelReadinessBasis;
+  tested_at: number | null;
+  detail: string;
+};
+
 export type ModelSelection = { providerId: string | null; modelId: string };
 
 export type ModelOptionDto = {
@@ -23,6 +51,8 @@ export type ModelOptionDto = {
   tools_disabled_reason: string | null;
   availability: ModelAvailability;
   availability_detail: string | null;
+  /** Optional only for rolling compatibility with older desktop hosts. */
+  readiness?: ModelReadiness;
   hidden: boolean;
   hidden_by: string | null;
   pinned_rank: number | null;
@@ -112,6 +142,15 @@ const modelOptionShape: ObjectShape = {
   tools_disabled_reason: f.nul(f.str),
   availability: f.req(f.en(...MODEL_AVAILABILITY)),
   availability_detail: f.nul(f.str),
+  readiness: f.opt(
+    f.obj({
+      role: f.req(f.en(...MODEL_READINESS_ROLES)),
+      state: f.req(f.en(...MODEL_READINESS_STATES)),
+      basis: f.req(f.en(...MODEL_READINESS_BASES)),
+      tested_at: f.nul(f.i64),
+      detail: f.req(f.str),
+    }),
+  ),
   hidden: f.req(f.bool),
   hidden_by: f.nul(f.str),
   pinned_rank: f.nul(f.u64),

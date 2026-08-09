@@ -31,6 +31,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::capability_qualification::ModelReadiness;
 use crate::providers::{ProviderKind, ProviderProfile};
 
 /// Schema version written by this build.
@@ -351,6 +352,9 @@ pub struct ModelOptionDto {
     pub availability: ModelAvailability,
     /// Honest human explanation when discovery did not verify the model.
     pub availability_detail: Option<String>,
+    /// Role-specific, evidence-backed compatibility with ContextDesk.
+    #[serde(default)]
+    pub readiness: ModelReadiness,
     /// Whether ordinary pickers omit this choice.
     pub hidden: bool,
     /// Whether a provider or model rule hid the choice.

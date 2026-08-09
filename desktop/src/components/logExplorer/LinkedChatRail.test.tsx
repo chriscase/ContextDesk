@@ -575,7 +575,7 @@ describe("LinkedChatRail", () => {
     expect(
       (
         within(selector).getByRole("option", {
-          name: "chat-only · tools unavailable",
+          name: /chat-only.*not verified.*tools unavailable/,
         }) as HTMLOptionElement
       ).disabled,
     ).toBe(true);

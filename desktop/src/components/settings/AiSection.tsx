@@ -4,6 +4,7 @@ import {
   saveLastGatewayUrl,
 } from "../../lib/aiGatewayPrefs";
 import type { LocalCandidateDto } from "../../lib/host";
+import type { ModelReadinessUpdate } from "../../lib/modelReadiness";
 import {
   hostListModelsForDraft,
   hostSetProviderToolsEnabled,
@@ -47,6 +48,8 @@ export type AiSectionProps = {
   recheck: () => void | Promise<void>;
   /** Curated visibility changed — parent re-lists the pickers (#678). */
   onCurationChanged?: () => void | Promise<void>;
+  /** Apply a qualification result to existing picker rows without re-listing. */
+  onModelReadinessChanged?: ModelReadinessUpdate;
   checking: boolean;
   onApplyAndSave?: (payload: WizardApplyPayload) => void | Promise<void>;
 };
@@ -63,6 +66,7 @@ export function AiSection({
   urlError,
   recheck,
   onCurationChanged,
+  onModelReadinessChanged,
   checking,
   onApplyAndSave,
 }: AiSectionProps) {
@@ -756,6 +760,7 @@ export function AiSection({
       baseUrl={draft.baseUrl}
       apiKeyDraft={apiKeyDraft}
       enabled
+      onReadinessChanged={onModelReadinessChanged}
     />
   ) : null}
 </div>

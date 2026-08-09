@@ -11,6 +11,13 @@
     "pinned_rank": 0,
     "provider_id": "account::west",
     "provider_label": "Gateway west",
+    "readiness": {
+      "basis": "name_hint",
+      "detail": "Role and ContextDesk compatibility have not been verified.",
+      "role": "unknown",
+      "state": "unverified",
+      "tested_at": null
+    },
     "selection_key": "cd.model.v1:13:account::west13:model::latest",
     "tools_disabled_reason": null,
     "tools_enabled": true

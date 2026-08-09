@@ -13,6 +13,7 @@
 //! (config-dir resolution, progress rendering, permission prompts) and this
 //! crate does the rest identically for every host.
 
+pub mod capability_qualification;
 pub mod chat;
 pub mod import;
 pub mod logging_quality;

@@ -9,6 +9,7 @@ pub mod exception_episodes;
 pub mod explore;
 pub mod import;
 pub mod logging_assessment;
+pub mod models;
 pub mod normalize;
 pub mod normalized;
 pub mod retrieval_status;

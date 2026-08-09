@@ -1,11 +1,14 @@
 # Vercel refinement lab notes
 
+The durable next-stage quality-evaluation design, including multiple gateways
+and multiple models per role, is captured in
+[`QUALITY_EVAL_HARNESS.md`](../benchmarks/QUALITY_EVAL_HARNESS.md).
+
 Status: active experiment journal; not a release claim
 Last updated: 2026-08-09
 Experiment branch: `fix/vercel-basics-refinement-v1`
 Branch base: exact RC `37905a3788f02b5069767a2bf70b946e0f33f945`
-Current committed branch head: `b6f5fefd` (later global-timeline refinement is
-still uncommitted and under validation)
+Current committed branch head before the model-readiness work: `22ec05f2`
 
 This file preserves live-gateway findings across task compaction. It records
 observations, not qualification claims. No API key, authorization header, raw
@@ -30,6 +33,52 @@ credential, or Keychain value belongs in this file.
   provider round, no broad-triage orchestration. Use a separate temporary data
   directory per concurrent process to avoid DuckDB/session-state lock
   collisions while pointing each process at the same safe AppConfig.
+
+## Model-readiness integration lessons
+
+- “Verified” must be scoped to exact profile + endpoint fingerprint + model id
+  + role contract + probe schema. It is not a global badge on a model name and
+  is not an answer-quality claim.
+- A completed chat verification requires basic generation, native tool calls,
+  tool-result continuation, and structured output. Basic text generation with
+  a failed investigation contract is “limited,” not verified.
+- Embedding and reranking passes remain labeled for those roles and never make
+  a specialty model preferred in an ordinary chat picker.
+- Explicit pins and defaults remain ahead of recommendations. Verified current
+  chat evidence only orders otherwise ordinary choices; it never silently
+  rewrites the selected/default model.
+- Qualification evidence contains endpoint fingerprints and secret-free probe
+  reasons, not raw endpoints or credentials. Persist it under the shared data
+  directory so GUI and CLI can report the same result across restarts.
+- Cached status, clear, GUI labels, and `contextdesk models` must not resolve a
+  credential or contact a provider. Credential lookup belongs only to the
+  explicit user-triggered live qualification action.
+- The product flow is one shared `Discover → Verify → Choose` model in GUI and
+  CLI. Discovery is a catalog request; verification is a separately confirmed,
+  token-spending action; re-verification is the same Verify action again.
+- Multiple saved gateways are first-class provider profiles. Catalogs and
+  evidence stay scoped to exact profile + endpoint fingerprint + model, so one
+  employer, Vercel, Ollama, or Grok result cannot leak into another. Protocol
+  and authentication differences belong behind adapters; Grok's session-file
+  authentication is not a reason for a separate model-readiness architecture.
+- Future per-mode routing may bind triage, ordinary chat, embeddings,
+  reranking, and attachments to different gateway/model pairs. Keep one simple
+  default with optional overrides, and never silently fail over across
+  gateways because privacy, egress, retention, and cost policy can change.
+- Catalog snapshots retain local model ids plus profile/endpoint fingerprints.
+  Added siblings appear unverified, removed exact models become stale, and
+  unchanged exact-model evidence survives startup/pre-flight drift checks.
+- Large gateways require subset-first UX. Exact ids, role filters, id-text
+  filters, and interactive narrowing are the normal CLI path; `--all` is
+  sequential, confirmed, paced, cancellable, stops on rate limiting, and is not
+  the default. Empty catalog responses are non-observations and must never
+  replace the last good snapshot or stale all evidence.
+- The current chat-role probe is a triage/investigation compatibility suite.
+  It must not claim ordinary-chat quality, attachment/multimodal support,
+  answer quality, context length, or value/cost verification.
+- Vercel catalog discovery and specialty probes must use the authenticated v4
+  `/config`, `/embedding-model`, and `/reranking-model` contracts. A successful
+  OpenAI-compatible chat catalog does not prove those specialty wire shapes.
 
 ## Synthetic incident truth used so far
 
@@ -376,8 +425,9 @@ model and must not be represented as the employer build.
   call support.
 - Reranking is `POST /v4/ai/reranking-model` with headers
   `ai-reranking-model-specification-version: 4` and
-  `ai-model-id: <model>`. The body is
-  `{"documents":[...],"query":"...","topN":...}` and the response contains
+  `ai-model-id: <model>`. The body uses the v4 document envelope
+  `{"documents":{"type":"text","values":[...]},"query":"...","topN":...}`
+  and the response contains
   `{"ranking":[{"index":...,"relevanceScore":...}]}` plus optional warnings
   and provider metadata.
 - Live embedding choices include Qwen3 0.6B/4B/8B, Amazon Titan, Cohere Embed,

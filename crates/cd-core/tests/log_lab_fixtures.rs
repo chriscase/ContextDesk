@@ -155,6 +155,9 @@ fn generated_subset_hashes(root: &Path) -> BTreeMap<String, String> {
     // their own regeneration test (retrieval_ablation_lab.rs); they are not
     // generate_compact products.
     hashes.retain(|path, _| !path.starts_with("scenarios/retrieval-ablation/"));
+    // The direct Vercel contract dataset is independently parsed and validated
+    // by cd-vercel-retrieval-lab; it is not a generated compact Log Lab case.
+    hashes.retain(|path, _| !path.starts_with("scenarios/vercel-retrieval-direct/"));
     hashes.retain(|path, _| {
         !(path.starts_with("schema/retrieval-") && path.ends_with(".schema.json"))
     });

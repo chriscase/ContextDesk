@@ -333,6 +333,19 @@ async fn dispatch(
             );
             emit(format, resolved.color.value, "retrieval_status", result)
         }
+        Command::Models(args) => {
+            let secrets = adapters::secret_store();
+            let result = commands::models::run(
+                args,
+                paths,
+                app_cfg,
+                resolved.default_provider_profile.value.as_deref(),
+                resolved.default_chat_model.value.as_deref(),
+                &secrets,
+            )
+            .await;
+            emit(format, resolved.color.value, "models", result)
+        }
     }
 }
 

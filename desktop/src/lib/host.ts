@@ -8,12 +8,14 @@ import {
   type CurationImpactDto,
   type CurationSummaryDto,
   type ModelOptionDto,
+  type ModelReadiness,
 } from "@contextdesk/contracts";
 export { modelSelectionKey, parseModelSelectionKey } from "@contextdesk/contracts";
 export type {
   CurationImpactDto,
   CurationSummaryDto,
   ModelOptionDto,
+  ModelReadiness,
 } from "@contextdesk/contracts";
 // Type-only (erased at build time): logDiagnosticReport imports types from here
 // as well, so this cannot create a runtime cycle.
@@ -1322,6 +1324,7 @@ export type QualificationReportDto = {
   cancelled: boolean;
   stale: boolean;
   finished_at: number;
+  readiness: ModelReadiness;
   checks: CapabilityCheckDto[];
 };
 
@@ -1332,12 +1335,15 @@ export type QualificationSelectArgs = {
   apiKey?: string | null;
 };
 
-function qualificationReq(args: QualificationSelectArgs = {}) {
+function qualificationReq(
+  args: QualificationSelectArgs = {},
+  includeApiKey = false,
+) {
   return {
     profile_id: args.profileId ?? null,
     model_id: args.modelId ?? null,
     base_url: args.baseUrl ?? null,
-    api_key: args.apiKey ?? null,
+    ...(includeApiKey ? { api_key: args.apiKey ?? null } : {}),
   };
 }
 
@@ -1364,7 +1370,7 @@ export async function hostStartCapabilityQualification(
     throw new Error("Capability qualification requires the desktop host");
   }
   return invoke<QualificationReportDto>("start_capability_qualification", {
-    req: qualificationReq(args),
+    req: qualificationReq(args, true),
   });
 }
 

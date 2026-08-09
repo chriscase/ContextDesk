@@ -1,9 +1,7 @@
-/**
- * Settings shell (#147): routes NAV sections, owns draft/dirty/save via controller.
- * Section UI lives under `./settings/*`.
- */
+/** Settings shell (#147); section UI lives under `./settings/*`. */
 import type { ReactNode } from "react";
 import type { AppSetupState, PreflightReport } from "../lib/preflight";
+import type { ModelReadinessUpdate } from "../lib/modelReadiness";
 import type { SkinId } from "../lib/skins";
 import { helpPageForSettingsSection } from "../lib/help";
 import { AppearanceSection } from "./settings/AppearanceSection";
@@ -30,7 +28,6 @@ import {
   IconSliders,
   IconWorkspace,
 } from "./icons";
-
 export type { SettingsSection };
 
 type Props = {
@@ -47,6 +44,7 @@ type Props = {
   onRecheckHost?: () => void | Promise<void>;
   /** Curated model visibility changed — re-list the pickers (#678). */
   onCurationChanged?: () => void | Promise<void>;
+  onModelReadinessChanged?: ModelReadinessUpdate;
   hostReport?: PreflightReport | null;
   /** Leave Settings and open a contextual bundled Help page. */
   onOpenHelp?: (pageId: string) => void;
@@ -97,6 +95,7 @@ export function SettingsModal({
   onSaveSetup,
   onRecheckHost,
   onCurationChanged,
+  onModelReadinessChanged,
   hostReport,
   onOpenHelp,
 }: Props) {
@@ -217,6 +216,7 @@ export function SettingsModal({
                 checking={c.checking}
                 onApplyAndSave={c.applyAndSaveAi}
                 onCurationChanged={onCurationChanged}
+                onModelReadinessChanged={onModelReadinessChanged}
               />
             ) : null}
 

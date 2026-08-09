@@ -71,6 +71,7 @@ import type {
   ActivityTurn,
   HostTurnActivityRecord,
 } from "../../lib/activity/types";
+import { modelReadinessLabel } from "../../lib/modelReadiness";
 import { fetchTurnActivity } from "../../lib/engine/turnActivity";
 import { useActivityInspector } from "../../hooks/useActivityInspector";
 import {
@@ -2035,6 +2036,7 @@ export function LinkedChatRail({
                     >
                       {option.label}
                       {option.is_default ? " · default" : ""}
+                      {` · ${modelReadinessLabel(option)}`}
                       {!option.tools_enabled ? " · tools unavailable" : ""}
                       {option.availability === "configured_unverified"
                         ? " · availability unverified"
@@ -2062,7 +2064,7 @@ export function LinkedChatRail({
                   selectedModel.tools_enabled
                     ? "linked tools available"
                     : "linked tools unavailable"
-                }`
+                } · ${modelReadinessLabel(selectedModel)}`
               : "Configure a tools-enabled provider in Settings → AI."}
           {selectedModel?.tools_disabled_reason === "model" ? (
             <>

@@ -147,6 +147,72 @@ pub enum Command {
     /// configured state, optional live health probe, and the retrieval mode
     /// configuration would select (no provider / LLM).
     RetrievalStatus(RetrievalStatusArgs),
+    /// Discover gateway models and show or verify role-specific compatibility.
+    /// Bare `models` is entirely offline and never reads credentials.
+    Models(ModelsArgs),
+}
+
+/// Model discovery and compatibility actions.
+#[derive(Debug, clap::Args)]
+pub struct ModelsArgs {
+    #[command(subcommand)]
+    pub action: Option<ModelsAction>,
+}
+
+/// Explicit live operations under `contextdesk models`.
+#[derive(Debug, Subcommand)]
+pub enum ModelsAction {
+    /// Refresh the gateway catalog and save its secret-free inventory.
+    Discover(ModelsDiscoverArgs),
+    /// Run synthetic compatibility probes for selected or all catalog models.
+    Verify(ModelsVerifyArgs),
+}
+
+/// Options for live catalog discovery.
+#[derive(Debug, clap::Args)]
+pub struct ModelsDiscoverArgs {
+    /// After discovery, verify every returned model. Confirmation is still
+    /// required unless `--yes` is also supplied.
+    #[arg(long)]
+    pub verify_all: bool,
+    /// Confirm the token-spending `--verify-all` operation non-interactively.
+    #[arg(long, requires = "verify_all")]
+    pub yes: bool,
+}
+
+/// Options for explicit compatibility verification.
+#[derive(Debug, clap::Args)]
+pub struct ModelsVerifyArgs {
+    /// Exact model ids to verify. Omit in an interactive terminal to choose
+    /// from the discovered catalog.
+    pub model_ids: Vec<String>,
+    /// Verify every model in the discovered catalog.
+    #[arg(long, conflicts_with = "model_ids")]
+    pub all: bool,
+    /// Restrict catalog selection to one suggested role. The suggestion
+    /// narrows candidates; verification still determines actual support.
+    #[arg(long, value_enum, conflicts_with = "model_ids")]
+    pub role: Option<ModelRoleArg>,
+    /// Restrict catalog selection to model ids containing this text
+    /// (case-insensitive). Useful with large gateways such as Vercel.
+    #[arg(long = "match", conflicts_with = "model_ids")]
+    pub id_match: Option<String>,
+    /// Skip the confirmation prompt. Required for `--all` without a terminal.
+    #[arg(long)]
+    pub yes: bool,
+    /// Refresh the live gateway catalog before choosing models.
+    #[arg(long)]
+    pub refresh: bool,
+}
+
+/// CLI-only role filter; conversion stays in the command adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum ModelRoleArg {
+    Chat,
+    Embedding,
+    Reranker,
+    Unknown,
 }
 
 #[derive(Debug, clap::Args)]
@@ -506,6 +572,7 @@ where
         "exception-episodes",
         "episodes",
         "retrieval-status",
+        "models",
     ];
     let value_options = [
         "--format",
@@ -781,5 +848,52 @@ mod tests {
         assert_eq!(chat.question, vec!["question"]);
         assert!(chat.dry_run);
         assert_eq!(chat.trace, Some(TraceLevel::Summary));
+    }
+
+    #[test]
+    fn models_supports_offline_status_and_filtered_or_exact_verification() {
+        let status = Cli::try_parse_from(["contextdesk", "models"]).unwrap();
+        assert!(matches!(
+            status.command,
+            Command::Models(ModelsArgs { action: None })
+        ));
+
+        let filtered = Cli::try_parse_from([
+            "contextdesk",
+            "models",
+            "verify",
+            "--all",
+            "--role",
+            "chat",
+            "--match",
+            "deepseek",
+            "--yes",
+        ])
+        .unwrap();
+        let Command::Models(ModelsArgs {
+            action: Some(ModelsAction::Verify(args)),
+        }) = filtered.command
+        else {
+            panic!("filtered verification did not parse")
+        };
+        assert!(args.all);
+        assert_eq!(args.role, Some(ModelRoleArg::Chat));
+        assert_eq!(args.id_match.as_deref(), Some("deepseek"));
+
+        let exact = Cli::try_parse_from([
+            "contextdesk",
+            "models",
+            "verify",
+            "deepseek-v4-flash",
+            "bge-m3",
+        ])
+        .unwrap();
+        let Command::Models(ModelsArgs {
+            action: Some(ModelsAction::Verify(args)),
+        }) = exact.command
+        else {
+            panic!("exact verification did not parse")
+        };
+        assert_eq!(args.model_ids, ["deepseek-v4-flash", "bge-m3"]);
     }
 }

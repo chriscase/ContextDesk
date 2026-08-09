@@ -8,6 +8,7 @@ mod log_diagnostics;
 mod logging_quality_host;
 
 use cd_core::branding::Branding;
+use cd_core::capability_qualification::CatalogChange;
 use cd_core::chat::{ChatMessage, Role as ChatRole};
 use cd_core::config::{
     config_path, ensure_config_dir, load_config, save_config, AppConfig, ConfluenceSettings,
@@ -25,7 +26,10 @@ use cd_core::model_curation::{
     CurationImpactDto, CurationSummaryDto, ModelAvailability, ModelOptionDto,
 };
 use cd_core::permissions::PermissionDecision;
-use cd_core::preflight::{run_preflight, PreflightInput, PreflightReport};
+use cd_core::preflight::{
+    run_preflight, PreflightCategory, PreflightInput, PreflightItem, PreflightLevel,
+    PreflightReport,
+};
 use cd_core::probe::{expand_base_candidates, normalize_gateway_input};
 use cd_core::providers::{
     ProviderConfig, ProviderDeadlinePreference, ProviderKind, ProviderProfile,
@@ -430,9 +434,11 @@ struct AppState {
     help: Mutex<Option<Arc<HelpIndex>>>,
     /// Read-only engineering docs. Deliberately separate from Help and ToolHost.
     handbook: Mutex<Option<Arc<HandbookIndex>>>,
-    /// In-process capability qualification cache (#724). Memory-only; absent after restart.
+    /// Explicit capability qualification evidence (#724), shared with the CLI.
     /// Keyed by profile + endpoint fingerprint + exact model + schema version (#650 isolation).
     qualification_store: Mutex<cd_core::capability_qualification::QualificationStore>,
+    /// Secret-free evidence file. Viewing it never resolves credentials or contacts a provider.
+    qualification_store_path: PathBuf,
     /// One-shot exact Log Explorer navigation targets (#698 exact-nav).
     /// Keyed by corpus id. `take` delivers once; cleared on take, discard, or window destroy.
     log_explorer_nav_targets: Mutex<LogExplorerNavTargetStore>,
@@ -2691,41 +2697,48 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
     let mut ollama_ok = None;
     let mut provider_ok = None;
     let mut provider_probe_detail = None;
+    let mut catalog_change = None;
     let mut key_present = None;
     if let Some(p) = &active {
         let desc = cd_core::providers::descriptor_for(p.kind);
         if p.kind == ProviderKind::Ollama {
-            ollama_ok = Some(ollama_reachable(&p.base_url).await);
-        } else if p.kind == ProviderKind::XaiGrokBuild {
-            key_present = Some(cd_core::grok_auth::detect_grok_session().is_some());
-            // #126: real probe (session + models list), not structural URL only.
-            let outcome = cd_core::discovery::probe_provider(p, None).await;
-            provider_ok = Some(outcome.is_reachable());
-            provider_probe_detail = Some(match &outcome {
+            let probe = cd_core::discovery::probe_provider_catalog(p, None).await;
+            let reachable = probe.outcome.is_reachable();
+            ollama_ok = Some(reachable);
+            provider_ok = Some(reachable);
+            provider_probe_detail = Some(match &probe.outcome {
                 cd_core::discovery::ProbeOutcome::Reachable { reason }
                 | cd_core::discovery::ProbeOutcome::KeyRejected { reason }
                 | cd_core::discovery::ProbeOutcome::Unreachable { reason } => reason.clone(),
             });
+            catalog_change = record_preflight_catalog(&state, p, &probe)?;
+        } else if p.kind == ProviderKind::XaiGrokBuild {
+            key_present = Some(cd_core::grok_auth::detect_grok_session().is_some());
+            // #126: real probe (session + models list), not structural URL only.
+            let probe = cd_core::discovery::probe_provider_catalog(p, None).await;
+            provider_ok = Some(probe.outcome.is_reachable());
+            provider_probe_detail = Some(match &probe.outcome {
+                cd_core::discovery::ProbeOutcome::Reachable { reason }
+                | cd_core::discovery::ProbeOutcome::KeyRejected { reason }
+                | cd_core::discovery::ProbeOutcome::Unreachable { reason } => reason.clone(),
+            });
+            catalog_change = record_preflight_catalog(&state, p, &probe)?;
         } else if desc.needs_api_key {
             let ref_id = p
                 .api_key_ref
                 .clone()
                 .unwrap_or_else(|| key_ref_for_profile(&p.id));
-            let has = state.secrets.has(&ref_id).unwrap_or(false);
-            key_present = Some(has);
+            let api_key = state.secrets.get(&ref_id).ok().flatten();
+            key_present = Some(api_key.is_some());
             // #126: live HTTP probe — same TriageTool-parity path as Discover (corp private OK).
-            let api_key = if has {
-                state.secrets.get(&ref_id).ok().flatten()
-            } else {
-                None
-            };
-            let outcome = cd_core::discovery::probe_provider(p, api_key).await;
-            provider_ok = Some(outcome.is_reachable());
-            provider_probe_detail = Some(match &outcome {
+            let probe = cd_core::discovery::probe_provider_catalog(p, api_key).await;
+            provider_ok = Some(probe.outcome.is_reachable());
+            provider_probe_detail = Some(match &probe.outcome {
                 cd_core::discovery::ProbeOutcome::Reachable { reason }
                 | cd_core::discovery::ProbeOutcome::KeyRejected { reason }
                 | cd_core::discovery::ProbeOutcome::Unreachable { reason } => reason.clone(),
             });
+            catalog_change = record_preflight_catalog(&state, p, &probe)?;
         }
     }
     let data_ok = ensure_config_dir(&state.branding).is_ok();
@@ -2746,7 +2759,7 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
             .map(|h| h.durable_memory_active())
             .unwrap_or(false)
     };
-    Ok(run_preflight(PreflightInput {
+    let mut report = run_preflight(PreflightInput {
         workspace: ws.as_ref(),
         providers: &cfg.providers,
         data_dir_writable: data_ok,
@@ -2759,7 +2772,69 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
         grok_session_present,
         connectors: &cfg.connectors,
         durable_memory_active: Some(mem_active),
-    }))
+    });
+    if let Some(change) = catalog_change.filter(CatalogChange::changed) {
+        let added_preview = catalog_model_preview(&change.added);
+        let detail = if change.added.is_empty() {
+            format!(
+                "{} model(s) were removed. Existing evidence for unchanged models was preserved.",
+                change.removed.len()
+            )
+        } else {
+            format!(
+                "{} added ({}); {} removed. Review the additions and qualify only the models you may use. Existing evidence for unchanged models was preserved.",
+                change.added.len(),
+                added_preview,
+                change.removed.len()
+            )
+        };
+        report.items.push(PreflightItem {
+            id: "provider.catalog_changed".into(),
+            title: "Model catalog changed".into(),
+            level: PreflightLevel::Warn,
+            detail,
+            fix_action: Some("ai".into()),
+            category: PreflightCategory::Launch,
+        });
+    }
+    Ok(report)
+}
+
+/// Reuse startup/pre-flight discovery as a zero-extra-request catalog drift
+/// detector. Behavioral qualification remains an explicit user action.
+fn record_preflight_catalog(
+    state: &AppState,
+    profile: &ProviderProfile,
+    probe: &cd_core::discovery::ProviderCatalogProbe,
+) -> Result<Option<CatalogChange>, String> {
+    if !probe.outcome.is_reachable() || probe.model_ids.is_empty() {
+        return Ok(None);
+    }
+    let mut store = state
+        .qualification_store
+        .lock()
+        .expect("qualification_store");
+    let change = store.note_catalog(
+        &profile.id,
+        &profile.base_url,
+        probe.model_ids.iter().cloned(),
+    );
+    cd_core::capability_qualification::save_qualification_store(
+        &state.qualification_store_path,
+        &store,
+    )
+    .map_err(|error| format!("save discovered model catalog: {error}"))?;
+    Ok(Some(change))
+}
+
+fn catalog_model_preview(model_ids: &[String]) -> String {
+    const LIMIT: usize = 5;
+    let shown = model_ids.iter().take(LIMIT).cloned().collect::<Vec<_>>();
+    if model_ids.len() > LIMIT {
+        format!("{} and {} more", shown.join(", "), model_ids.len() - LIMIT)
+    } else {
+        shown.join(", ")
+    }
 }
 
 #[tauri::command]
@@ -6117,30 +6192,6 @@ fn provider_group_label(p: &ProviderProfile) -> String {
     desc.group_label.to_string()
 }
 
-/// Keep almost everything for the picker (TriageTool shows full catalogs).
-/// Only drop clear non-chat tooling entries.
-fn looks_like_chat_model_id(id: &str) -> bool {
-    let l = id.to_ascii_lowercase();
-    if l.contains("embed")
-        || l.contains("text-embedding")
-        || l.contains("whisper")
-        || l.contains("tts-")
-        || l.contains("dall-e")
-        || l.contains("moderation")
-        || l.contains("realtime")
-        || l.contains("transcri")
-        || l.contains("speech")
-    {
-        return false;
-    }
-    // "image" alone is too aggressive (filters valid vision/chat names);
-    // only drop explicit image-generation product ids.
-    if l.contains("dall") || l.starts_with("image-") || l.contains("-image-") {
-        return false;
-    }
-    true
-}
-
 fn resolve_default_model(cfg: &AppConfig) -> String {
     if let Some(m) = cfg
         .default_chat_model
@@ -6307,6 +6358,40 @@ async fn list_models_for_draft(
         ProviderKind::OpenAiCompatible | ProviderKind::Anthropic | ProviderKind::Ollama
     ) {
         let key = resolve_draft_api_key(&state, kind, req.api_key.as_deref());
+        if kind == ProviderKind::OpenAiCompatible
+            && cd_core::discovery::is_vercel_ai_gateway(&req.base_url)
+        {
+            let profile = ProviderProfile {
+                id: "vercel-draft".into(),
+                label: "Vercel AI Gateway".into(),
+                kind,
+                base_url: req.base_url.clone(),
+                api_key_ref: None,
+                chat_model: req.chat_model.clone().unwrap_or_default(),
+                embedding_model: None,
+                embedding_base_url: None,
+                capabilities: cd_core::providers::descriptor_for(kind).default_capabilities,
+                local_only: false,
+                deadline_preference: Default::default(),
+            };
+            let probe = cd_core::discovery::probe_provider_catalog(&profile, key.clone()).await;
+            if probe.outcome.is_reachable() {
+                let mut ids = probe.model_ids;
+                if let Some(configured) = req
+                    .chat_model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+                {
+                    if !ids.iter().any(|model| model == configured) {
+                        ids.push(configured.to_string());
+                    }
+                }
+                ids = cd_core::model_role_hints::sort_ids_for_chat_picker(&ids);
+                ids.dedup();
+                return Ok(ids);
+            }
+        }
         let probe_local = matches!(kind, ProviderKind::Ollama)
             || req.base_url.contains("127.0.0.1")
             || req.base_url.to_lowercase().contains("localhost");
@@ -6689,7 +6774,7 @@ async fn curation_impact(
     secrets: &KeychainSecretStore,
     next: &AppConfig,
 ) -> Result<CurationImpactDto, String> {
-    let before = build_model_options(cfg, secrets).await;
+    let before = build_model_options(cfg, secrets, None).await;
     let default_key = before
         .iter()
         .find(|m| m.is_default)
@@ -6704,7 +6789,7 @@ async fn curation_impact(
         .map(|k| before.iter().any(|m| &m.selection_key == k && !m.hidden))
         .unwrap_or(false);
 
-    let after = build_model_options(next, secrets).await;
+    let after = build_model_options(next, secrets, None).await;
     let visible: Vec<&ModelOptionDto> = after.iter().filter(|m| !m.hidden).collect();
     let default_still_visible = default_key
         .as_ref()
@@ -6937,10 +7022,12 @@ struct QualificationSelectReq {
     api_key: Option<String>,
 }
 
-fn resolve_qualification_target(
+/// Resolve only non-secret identity fields for cached status and clear actions.
+/// This path must never touch Keychain merely because Settings or a picker renders.
+fn resolve_qualification_identity_target(
     state: &AppState,
     req: &QualificationSelectReq,
-) -> Result<(ProviderProfile, String, Option<String>), String> {
+) -> Result<(ProviderProfile, String), String> {
     let cfg = state.config.lock().expect("config").clone();
     let profile = if let Some(pid) = req
         .profile_id
@@ -6991,21 +7078,25 @@ fn resolve_qualification_target(
     if matches!(profile.kind, ProviderKind::XaiGrokBuild) && profile.base_url.trim().is_empty() {
         profile.base_url = "https://api.x.ai/v1".into();
     }
+    Ok((profile, model))
+}
+
+/// Resolve a live probe target. Credential lookup is confined to this explicit
+/// user-triggered path and never used by cached status, clear, GUI labels, or CLI status.
+fn resolve_qualification_target(
+    state: &AppState,
+    req: &QualificationSelectReq,
+) -> Result<(ProviderProfile, String, Option<String>), String> {
+    let (profile, model) = resolve_qualification_identity_target(state, req)?;
     let api_key = if matches!(profile.kind, ProviderKind::XaiGrokBuild) {
         None
     } else {
         resolve_draft_api_key(state, profile.kind, req.api_key.as_deref()).or_else(|| {
-            profile
+            let reference = profile
                 .api_key_ref
-                .as_ref()
-                .and_then(|r| state.secrets.get(r).ok().flatten())
-                .or_else(|| {
-                    state
-                        .secrets
-                        .get(&key_ref_for_profile(&profile.id))
-                        .ok()
-                        .flatten()
-                })
+                .clone()
+                .unwrap_or_else(|| key_ref_for_profile(&profile.id));
+            state.secrets.get(&reference).ok().flatten()
         })
     };
     Ok((profile, model, api_key))
@@ -7017,7 +7108,7 @@ fn get_capability_qualification(
     state: State<'_, AppState>,
     req: QualificationSelectReq,
 ) -> Result<Option<capability_qualification_host::QualificationReportDto>, String> {
-    let (profile, model, _) = resolve_qualification_target(&state, &req)?;
+    let (profile, model) = resolve_qualification_identity_target(&state, &req)?;
     let key =
         capability_qualification_host::qualification_key(&profile.id, &profile.base_url, &model);
     let mut store = state
@@ -7038,7 +7129,7 @@ async fn start_capability_qualification(
     let (profile, model, api_key) = resolve_qualification_target(&state, &req)?;
     let cfg = state.config.lock().expect("config").clone();
     let tools_for_model = model_tools_enabled(&cfg, &profile, &model);
-    let gate = capability_qualification_host::gate_from_profile(&profile, tools_for_model);
+    let gate = capability_qualification_host::gate_for_model(&profile, tools_for_model, &model);
     let key =
         capability_qualification_host::qualification_key(&profile.id, &profile.base_url, &model);
 
@@ -7102,9 +7193,13 @@ async fn start_capability_qualification(
         .qualification_store
         .lock()
         .expect("qualification_store");
-    Ok(capability_qualification_host::put_report(
-        &mut store, report,
-    ))
+    let dto = capability_qualification_host::put_report(&mut store, report);
+    cd_core::capability_qualification::save_qualification_store(
+        &state.qualification_store_path,
+        &store,
+    )
+    .map_err(|error| format!("save qualification evidence: {error}"))?;
+    Ok(dto)
 }
 
 /// Cooperative cancel for the in-flight qualification run.
@@ -7125,16 +7220,22 @@ fn clear_capability_qualification(
     state: State<'_, AppState>,
     req: QualificationSelectReq,
 ) -> Result<bool, String> {
-    let (profile, model, _) = resolve_qualification_target(&state, &req)?;
+    let (profile, model) = resolve_qualification_identity_target(&state, &req)?;
     let key =
         capability_qualification_host::qualification_key(&profile.id, &profile.base_url, &model);
     let mut store = state
         .qualification_store
         .lock()
         .expect("qualification_store");
-    Ok(capability_qualification_host::clear_report(
-        &mut store, &key,
-    ))
+    let changed = capability_qualification_host::clear_report(&mut store, &key);
+    if changed {
+        cd_core::capability_qualification::save_qualification_store(
+            &state.qualification_store_path,
+            &store,
+        )
+        .map_err(|error| format!("save qualification evidence: {error}"))?;
+    }
+    Ok(changed)
 }
 
 /// Like `models_for_profile` but accepts an already-resolved API key (draft paste).
@@ -7155,7 +7256,7 @@ async fn models_for_profile_with_key(
             {
                 if let Ok(tags) = client.list_tags().await {
                     discovery_succeeded = true;
-                    discovered_ids.extend(tags.into_iter().filter(|m| looks_like_chat_model_id(m)));
+                    discovered_ids.extend(tags);
                 }
             }
         }
@@ -7177,12 +7278,8 @@ async fn models_for_profile_with_key(
                 ) {
                     if let Ok(listed) = client.list_models().await {
                         discovery_succeeded = true;
-                        let filtered: Vec<String> = listed
-                            .into_iter()
-                            .filter(|m| looks_like_chat_model_id(m))
-                            .collect();
-                        if filtered.len() > best.len() {
-                            best = filtered;
+                        if listed.len() > best.len() {
+                            best = listed;
                         }
                     }
                 }
@@ -7211,7 +7308,7 @@ async fn models_for_profile_with_key(
                         let client = client.with_extra_headers(creds.request_headers());
                         if let Ok(listed) = client.list_models().await {
                             discovery_succeeded = true;
-                            for m in listed.into_iter().filter(|m| looks_like_chat_model_id(m)) {
+                            for m in listed {
                                 if !discovered_ids.iter().any(|x| x == &m) {
                                     discovered_ids.push(m);
                                 }
@@ -7238,12 +7335,8 @@ async fn models_for_profile_with_key(
                 ) {
                     if let Ok(listed) = client.list_models().await {
                         discovery_succeeded = true;
-                        let filtered: Vec<String> = listed
-                            .into_iter()
-                            .filter(|m| looks_like_chat_model_id(m))
-                            .collect();
-                        if filtered.len() > best.len() {
-                            best = filtered;
+                        if listed.len() > best.len() {
+                            best = listed;
                         }
                     }
                 }
@@ -7302,7 +7395,7 @@ async fn list_chat_models(
     keep_keys: Option<Vec<String>>,
 ) -> Result<Vec<ModelOptionDto>, String> {
     let cfg = state.config.lock().expect("config").clone();
-    let mut out = build_model_options(&cfg, &state.secrets).await;
+    let mut out = build_model_options(&cfg, &state.secrets, Some(&state.qualification_store)).await;
     retain_picker_visible(&mut out, include_hidden.unwrap_or(false), keep_keys);
     Ok(out)
 }
@@ -7351,6 +7444,7 @@ fn retain_picker_visible(
 async fn build_model_options(
     cfg: &AppConfig,
     secrets: &KeychainSecretStore,
+    qualification_store: Option<&Mutex<cd_core::capability_qualification::QualificationStore>>,
 ) -> Vec<ModelOptionDto> {
     let default_model = resolve_default_model(cfg);
     let default_pid = cfg
@@ -7381,6 +7475,7 @@ async fn build_model_options(
                     .map(str::to_string),
                 availability: candidate.availability,
                 availability_detail: candidate.availability_detail,
+                readiness: cd_core::capability_qualification::ModelReadiness::unverified(&id),
                 hidden: hidden_by.is_some(),
                 hidden_by: hidden_by.map(|h| match h {
                     cd_core::model_curation::HiddenBy::Provider => "provider".to_string(),
@@ -7426,6 +7521,9 @@ async fn build_model_options(
                 availability_detail: Some(
                     "The configured default was not confirmed by model discovery.".into(),
                 ),
+                readiness: cd_core::capability_qualification::ModelReadiness::unverified(
+                    &default_model,
+                ),
                 // The default is always offered: it is what a new chat uses.
                 hidden: false,
                 hidden_by: None,
@@ -7437,9 +7535,31 @@ async fn build_model_options(
         );
     }
 
-    // Pinned first in explicit user order, then active provider, then alpha by
-    // group, then model id. Hidden entries sort last so a management view that
-    // asks for them still reads as a curated list.
+    if let Some(store) = qualification_store {
+        let mut store = store.lock().expect("qualification_store");
+        for option in &mut out {
+            let Some(profile) = cfg
+                .providers
+                .profiles
+                .iter()
+                .find(|profile| profile.id == option.provider_id)
+            else {
+                continue;
+            };
+            let key = cd_core::capability_qualification::QualificationKey::new(
+                &profile.id,
+                &profile.base_url,
+                &option.id,
+            );
+            option.readiness =
+                cd_core::capability_qualification::model_readiness_for_selection(&mut store, &key);
+        }
+    }
+
+    // Hidden entries last. Explicit pins keep their exact order, and an
+    // explicit default stays ahead of recommendations. Within ordinary
+    // choices, current verified chat evidence is preferred without silently
+    // changing the selected/default model.
     let active_id = cfg.providers.active_id.clone().unwrap_or_default();
     out.sort_by(|a, b| {
         let a_act = a.provider_id == active_id;
@@ -7451,6 +7571,12 @@ async fn build_model_options(
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
                 (None, None) => std::cmp::Ordering::Equal,
+            })
+            .then_with(|| b.is_default.cmp(&a.is_default))
+            .then_with(|| {
+                a.readiness
+                    .chat_preference_rank()
+                    .cmp(&b.readiness.chat_preference_rank())
             })
             .then_with(|| b_act.cmp(&a_act))
             .then_with(|| a.group.cmp(&b.group))
@@ -13358,6 +13484,15 @@ pub fn run() {
     let audit_log = ensure_config_dir(&branding)
         .ok()
         .map(|dir| cd_core::audit::AuditLog::new(dir.join("audit.jsonl")));
+    let qualification_store_path = cd_core::capability_qualification::qualification_store_path(
+        path.parent().expect("config directory"),
+    );
+    let qualification_store =
+        cd_core::capability_qualification::load_qualification_store(&qualification_store_path)
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "qualification evidence could not be loaded");
+                cd_core::capability_qualification::QualificationStore::default()
+            });
 
     let state = AppState {
         branding,
@@ -13402,9 +13537,8 @@ pub fn run() {
         })),
         help: Mutex::new(None),
         handbook: Mutex::new(None),
-        qualification_store: Mutex::new(
-            cd_core::capability_qualification::QualificationStore::default(),
-        ),
+        qualification_store: Mutex::new(qualification_store),
+        qualification_store_path,
         log_explorer_nav_targets: Mutex::new(LogExplorerNavTargetStore::default()),
     };
     tauri::Builder::default()
@@ -18857,6 +18991,7 @@ mod chat_session_host_tests {
             tools_disabled_reason: None,
             availability: ModelAvailability::Discovered,
             availability_detail: None,
+            readiness: cd_core::capability_qualification::ModelReadiness::unverified(key),
             hidden,
             hidden_by: hidden.then(|| "model".to_string()),
             pinned_rank: None,

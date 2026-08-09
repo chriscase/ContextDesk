@@ -69,6 +69,7 @@ metacharacters literal. If a question begins with a command name such as
 | `confluence …` | Optional Confluence connector |
 | `capabilities` | Machine-readable build surface |
 | `doctor` | Demo readiness |
+| `models [discover\|verify]` | Offline model readiness by default; explicit catalog discovery and selected/all role verification when requested |
 | `logging-assessment [corpus-id]` (alias `assess`) | Deterministic logging-quality assessment with fixed finding-code improvement hints (no provider); defaults to the current corpus. |
 | `exception-episodes [corpus-id]` | Deterministic exception episode correlation (occurrence vs raw records; no provider). |
 
@@ -563,6 +564,10 @@ contextdesk config init [--project] [--interactive|--non-interactive] [--force]
 contextdesk config validate|show|path
 contextdesk capabilities
 contextdesk doctor [--timeout <seconds>] [--skip-live-turn]
+contextdesk models
+contextdesk models discover
+contextdesk models verify <model-id> [<model-id> ...]
+contextdesk models verify --all [--role chat|embedding|reranker|unknown] [--match <text>] --yes
 contextdesk logging-assessment [corpus-id] [--report-format json|markdown] [--output <file>]
 contextdesk exception-episodes [corpus-id]
 # Friendly aliases: ask=chat, search=explore, assess=logging-assessment,
@@ -573,6 +578,45 @@ Global flags (available on every subcommand): `--format`, `--json`,
 `--jsonl`, `--color`, `--config <path>`, `--app-config <path>`,
 `--data-dir <path>` (alias `--profile-dir`), `--profile <id>`, `--model
 <id>`.
+
+## Model readiness
+
+`contextdesk models` is an offline view of the same role-specific readiness
+shown in GUI model pickers. It reads AppConfig and the secret-free local
+qualification evidence file; it does not contact a provider, enumerate a live
+catalog, or read Keychain. JSON output reports `offline: true` and
+`credentials_read: false` explicitly.
+
+`contextdesk models discover` explicitly resolves the selected profile's
+credential once, fetches its live catalog, classifies each id as a **name hint**
+for chat, embedding, reranking, or unknown, and saves the secret-free inventory
+for both the CLI and desktop app. Interactive `config init` offers this catalog
+request immediately after gateway and credential entry, then lets the user
+choose a chat candidate instead of requiring a memorized model id.
+
+`contextdesk models verify` runs only synthetic compatibility requests. Exact
+ids are the simplest way to test a handful on a large gateway. `--all` applies
+after optional `--role` and `--match` filters, is sequential and cancellable,
+and requires confirmation (`--yes` in non-interactive use). Bare interactive
+selection narrows catalogs over 30 entries before showing numbered choices.
+Completed results are saved after each model, so cancellation preserves useful
+partial evidence. Multi-model runs are paced between models and stop if a
+gateway reports rate limiting; an empty discovery response never replaces the
+last good catalog or stales its evidence.
+
+Startup/pre-flight reuses the catalog request it already performs as a drift
+check. Added models appear unverified; removed models' prior evidence becomes
+stale; unchanged exact-model evidence remains current. A changed catalog gets
+its own preflight warning with an **Open AI settings** action. Catalog change
+never silently starts token-spending verification.
+
+`verified` means the current exact profile, endpoint fingerprint, model id,
+role contract, and probe schema passed synthetic compatibility checks. The
+current chat-role suite is specifically a **triage/investigation compatibility**
+suite. It is not a claim about answer quality, ordinary-chat quality, text or
+multimodal attachments, context length, or cost. Use CLI Verify or GUI
+**Qualify selected model…** to create or refresh evidence. Pins and defaults
+remain user-controlled even when another model is verified.
 
 ## Exception episodes and duplicate renderings
 

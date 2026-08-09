@@ -9,6 +9,7 @@ import {
 import { IconClose, IconExpand, IconSend } from "./icons";
 import type { ModelOptionDto } from "../lib/host";
 import { curateModels } from "../lib/modelCuration";
+import { modelReadinessLabel } from "../lib/modelReadiness";
 
 type Props = {
   /** Return `false` to reject the send (draft is preserved). */
@@ -326,6 +327,7 @@ export function Composer({
                         >
                           {m.label}
                           {m.is_default ? " · default" : ""}
+                          {` · ${modelReadinessLabel(m)}`}
                           {!m.tools_enabled ? " · tools unavailable" : ""}
                           {m.availability === "configured_unverified"
                             ? " · availability unverified"

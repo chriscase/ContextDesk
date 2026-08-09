@@ -151,6 +151,17 @@ pub fn classify_probe_http_status(status: u16) -> ProbeOutcome {
     }
 }
 
+/// Live provider probe plus the complete model ids returned by its catalog.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderCatalogProbe {
+    /// Reachability/auth verdict.
+    pub outcome: ProbeOutcome,
+    /// Sorted, de-duplicated provider model ids. Empty when discovery failed.
+    pub model_ids: Vec<String>,
+    /// Effective API base selected by discovery, when known.
+    pub effective_base_url: String,
+}
+
 /// Live probe for a profile (host-invoked only — not called from default unit tests).
 ///
 /// Uses models-list / health endpoints with bounded timeouts via existing clients.
@@ -161,6 +172,16 @@ pub async fn probe_provider(
     profile: &crate::providers::ProviderProfile,
     api_key: Option<String>,
 ) -> ProbeOutcome {
+    probe_provider_catalog(profile, api_key).await.outcome
+}
+
+/// Probe reachability and return the catalog obtained by the same request.
+/// Callers can persist a secret-free inventory fingerprint without making a
+/// second network request or resolving the credential again.
+pub async fn probe_provider_catalog(
+    profile: &crate::providers::ProviderProfile,
+    api_key: Option<String>,
+) -> ProviderCatalogProbe {
     let policy = if profile.local_only {
         crate::ssrf::SsrfPolicy::local_only()
     } else {
@@ -169,31 +190,75 @@ pub async fn probe_provider(
 
     match profile.kind {
         ProviderKind::Ollama => {
-            if ollama_reachable(&profile.base_url).await {
-                ProbeOutcome::Reachable {
-                    reason: "Ollama health ok".into(),
+            let listed =
+                match crate::chat::OllamaClient::new(&profile.base_url, &profile.chat_model) {
+                    Ok(client) => client.list_tags().await.ok(),
+                    Err(_) => None,
+                };
+            match listed {
+                Some(mut model_ids) => {
+                    model_ids.sort();
+                    model_ids.dedup();
+                    ProviderCatalogProbe {
+                        outcome: ProbeOutcome::Reachable {
+                            reason: format!("Ollama models list ok ({} model(s))", model_ids.len()),
+                        },
+                        model_ids,
+                        effective_base_url: profile.base_url.clone(),
+                    }
                 }
-            } else {
-                ProbeOutcome::Unreachable {
-                    reason: format!("Ollama not reachable at {}", profile.base_url),
-                }
+                None if ollama_reachable(&profile.base_url).await => ProviderCatalogProbe {
+                    outcome: ProbeOutcome::Reachable {
+                        reason: "Ollama health check passed, but its model catalog was unavailable"
+                            .into(),
+                    },
+                    model_ids: Vec::new(),
+                    effective_base_url: profile.base_url.clone(),
+                },
+                None => ProviderCatalogProbe {
+                    outcome: ProbeOutcome::Unreachable {
+                        reason: format!("Ollama not reachable at {}", profile.base_url),
+                    },
+                    model_ids: Vec::new(),
+                    effective_base_url: profile.base_url.clone(),
+                },
             }
         }
         // Prefer TriageTool-parity multi-path probe (plain HTTP, no SSRF pin) so preflight
         // matches Discover / list_models_for_draft for corporate gateways.
         ProviderKind::OpenAiCompatible | ProviderKind::Anthropic => {
+            if profile.kind == ProviderKind::OpenAiCompatible
+                && is_vercel_ai_gateway(&profile.base_url)
+            {
+                return probe_vercel_catalog(api_key.as_deref()).await;
+            }
             let result =
                 crate::ai_probe::probe_ai_gateway(&profile.base_url, api_key.as_deref(), false)
                     .await;
             if result.ok {
-                let n = result.models.len();
+                let mut model_ids = result
+                    .models
+                    .iter()
+                    .map(|model| model.id.clone())
+                    .collect::<Vec<_>>();
+                if model_ids.is_empty() {
+                    model_ids.extend(result.chat_candidates.iter().map(|model| model.id.clone()));
+                    model_ids.extend(result.embed_candidates.iter().map(|model| model.id.clone()));
+                }
+                model_ids.sort();
+                model_ids.dedup();
+                let n = model_ids.len();
                 let path = if result.effective_base_url.is_empty() {
                     profile.base_url.clone()
                 } else {
-                    result.effective_base_url
+                    result.effective_base_url.clone()
                 };
-                return ProbeOutcome::Reachable {
-                    reason: format!("models list ok ({n} model(s) via {path})"),
+                return ProviderCatalogProbe {
+                    outcome: ProbeOutcome::Reachable {
+                        reason: format!("models list ok ({n} model(s) via {path})"),
+                    },
+                    model_ids,
+                    effective_base_url: path,
                 };
             }
             let err_blob = result.errors.join("; ");
@@ -204,12 +269,16 @@ pub async fn probe_provider(
                 || combined.contains("auth failed")
                 || combined.contains("no api key")
             {
-                ProbeOutcome::KeyRejected {
-                    reason: if err_blob.is_empty() {
-                        "credentials rejected or missing".into()
-                    } else {
-                        err_blob.chars().take(180).collect()
+                ProviderCatalogProbe {
+                    outcome: ProbeOutcome::KeyRejected {
+                        reason: if err_blob.is_empty() {
+                            "credentials rejected or missing".into()
+                        } else {
+                            err_blob.chars().take(180).collect()
+                        },
                     },
+                    model_ids: Vec::new(),
+                    effective_base_url: profile.base_url.clone(),
                 }
             } else {
                 let reason = if !err_blob.is_empty() {
@@ -219,14 +288,22 @@ pub async fn probe_provider(
                 } else {
                     "gateway probe failed".into()
                 };
-                ProbeOutcome::Unreachable { reason }
+                ProviderCatalogProbe {
+                    outcome: ProbeOutcome::Unreachable { reason },
+                    model_ids: Vec::new(),
+                    effective_base_url: profile.base_url.clone(),
+                }
             }
         }
         ProviderKind::XaiGrokBuild => {
             // Session-based: presence + base allowlist; optional models list if session loads.
             if crate::grok_auth::detect_grok_session().is_none() {
-                return ProbeOutcome::KeyRejected {
-                    reason: "no Grok session file".into(),
+                return ProviderCatalogProbe {
+                    outcome: ProbeOutcome::KeyRejected {
+                        reason: "no Grok session file".into(),
+                    },
+                    model_ids: Vec::new(),
+                    effective_base_url: profile.base_url.clone(),
                 };
             }
             let base = if profile.base_url.trim().is_empty() {
@@ -235,8 +312,12 @@ pub async fn probe_provider(
                 profile.base_url.trim()
             };
             if let Err(e) = crate::grok_auth::assert_grok_base_allowed(base) {
-                return ProbeOutcome::Unreachable {
-                    reason: e.to_string(),
+                return ProviderCatalogProbe {
+                    outcome: ProbeOutcome::Unreachable {
+                        reason: e.to_string(),
+                    },
+                    model_ids: Vec::new(),
+                    effective_base_url: base.to_string(),
                 };
             }
             match crate::grok_auth::load_grok_session_credentials() {
@@ -251,22 +332,137 @@ pub async fn probe_provider(
                         Ok(client) => {
                             let client = client.with_extra_headers(headers);
                             match client.list_models().await {
-                                Ok(_) => ProbeOutcome::Reachable {
-                                    reason: "Grok models list ok".into(),
+                                Ok(mut model_ids) => {
+                                    model_ids.sort();
+                                    model_ids.dedup();
+                                    ProviderCatalogProbe {
+                                        outcome: ProbeOutcome::Reachable {
+                                            reason: format!(
+                                                "Grok models list ok ({} model(s))",
+                                                model_ids.len()
+                                            ),
+                                        },
+                                        model_ids,
+                                        effective_base_url: base.to_string(),
+                                    }
+                                }
+                                Err(e) => ProviderCatalogProbe {
+                                    outcome: classify_list_err(&e.to_string()),
+                                    model_ids: Vec::new(),
+                                    effective_base_url: base.to_string(),
                                 },
-                                Err(e) => classify_list_err(&e.to_string()),
                             }
                         }
-                        Err(e) => ProbeOutcome::Unreachable {
-                            reason: e.to_string(),
+                        Err(e) => ProviderCatalogProbe {
+                            outcome: ProbeOutcome::Unreachable {
+                                reason: e.to_string(),
+                            },
+                            model_ids: Vec::new(),
+                            effective_base_url: base.to_string(),
                         },
                     }
                 }
-                Err(e) => ProbeOutcome::KeyRejected {
-                    reason: e.to_string(),
+                Err(e) => ProviderCatalogProbe {
+                    outcome: ProbeOutcome::KeyRejected {
+                        reason: e.to_string(),
+                    },
+                    model_ids: Vec::new(),
+                    effective_base_url: base.to_string(),
                 },
             }
         }
+    }
+}
+
+/// Whether a configured base belongs to the public Vercel AI Gateway.
+pub fn is_vercel_ai_gateway(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .is_some_and(|host| host == "ai-gateway.vercel.sh")
+}
+
+async fn probe_vercel_catalog(api_key: Option<&str>) -> ProviderCatalogProbe {
+    let endpoint = "https://ai-gateway.vercel.sh/v4/ai/config";
+    let client = match crate::ssrf::build_pinned_client_for_url(
+        endpoint,
+        &crate::ssrf::SsrfPolicy::default(),
+        &crate::ssrf::SystemResolver,
+        std::time::Duration::from_secs(15),
+    ) {
+        Ok((_, client)) => client,
+        Err(error) => {
+            return ProviderCatalogProbe {
+                outcome: ProbeOutcome::Unreachable {
+                    reason: error.to_string(),
+                },
+                model_ids: Vec::new(),
+                effective_base_url: "https://ai-gateway.vercel.sh/v4/ai".into(),
+            };
+        }
+    };
+    let mut request = client
+        .get(endpoint)
+        .header("ai-gateway-protocol-version", "0.0.1")
+        .header("ai-gateway-auth-method", "api-key");
+    if let Some(key) = api_key {
+        request = request.bearer_auth(key);
+    }
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return ProviderCatalogProbe {
+                outcome: ProbeOutcome::Unreachable {
+                    reason: error.to_string(),
+                },
+                model_ids: Vec::new(),
+                effective_base_url: "https://ai-gateway.vercel.sh/v4/ai".into(),
+            };
+        }
+    };
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        return ProviderCatalogProbe {
+            outcome: classify_probe_http_status(status),
+            model_ids: Vec::new(),
+            effective_base_url: "https://ai-gateway.vercel.sh/v4/ai".into(),
+        };
+    }
+    let value: serde_json::Value = match response.json().await {
+        Ok(value) => value,
+        Err(error) => {
+            return ProviderCatalogProbe {
+                outcome: ProbeOutcome::Unreachable {
+                    reason: format!("Vercel model catalog response: {error}"),
+                },
+                model_ids: Vec::new(),
+                effective_base_url: "https://ai-gateway.vercel.sh/v4/ai".into(),
+            };
+        }
+    };
+    let mut model_ids = value
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row.get("id").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    model_ids.sort();
+    model_ids.dedup();
+    let outcome = if model_ids.is_empty() {
+        ProbeOutcome::Unreachable {
+            reason: "Vercel model catalog was empty or malformed".into(),
+        }
+    } else {
+        ProbeOutcome::Reachable {
+            reason: format!("Vercel v4 catalog ok ({} model(s))", model_ids.len()),
+        }
+    };
+    ProviderCatalogProbe {
+        outcome,
+        model_ids,
+        effective_base_url: "https://ai-gateway.vercel.sh/v4/ai".into(),
     }
 }
 

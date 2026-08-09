@@ -43,6 +43,13 @@ function sampleReport(
     cancelled: false,
     stale: false,
     finished_at: 1,
+    readiness: {
+      role: "chat",
+      state: "limited",
+      basis: "measured",
+      tested_at: 1,
+      detail: "Basic chat works, but tool use did not pass.",
+    },
     checks: [
       {
         kind: "basic_generation",
@@ -86,12 +93,16 @@ describe("CapabilityQualificationPanel (#724)", () => {
       />,
     );
     await waitFor(() => expect(getQual).toHaveBeenCalled());
+    expect(getQual).toHaveBeenCalledWith(
+      expect.not.objectContaining({ apiKey: expect.anything() }),
+    );
     expect(startQual).not.toHaveBeenCalled();
     const btn = screen.getByTestId("cap-qual-start");
     expect(btn.textContent).toContain("Qualify selected model");
   });
 
   it("starts on explicit click and shows per-check status", async () => {
+    const onReadinessChanged = vi.fn();
     render(
       <CapabilityQualificationPanel
         baseId="t"
@@ -99,6 +110,7 @@ describe("CapabilityQualificationPanel (#724)", () => {
         baseUrl="https://gateway.example/v1"
         apiKeyDraft="sk-test"
         enabled
+        onReadinessChanged={onReadinessChanged}
       />,
     );
     await waitFor(() => expect(getQual).toHaveBeenCalled());
@@ -108,6 +120,7 @@ describe("CapabilityQualificationPanel (#724)", () => {
       expect.objectContaining({
         modelId: "gpt-4o",
         baseUrl: "https://gateway.example/v1",
+        apiKey: "sk-test",
       }),
     );
     await waitFor(() => screen.getByTestId("cap-qual-report"));
@@ -116,6 +129,15 @@ describe("CapabilityQualificationPanel (#724)", () => {
     const basis = screen.getByTestId("cap-qual-basis");
     expect(basis.textContent).toMatch(/Name hint/);
     expect(basis.textContent).toMatch(/Measured locally/);
+    expect(screen.getByTestId("cap-qual-summary").textContent).toMatch(
+      /limited for chat/i,
+    );
+    expect(onReadinessChanged).toHaveBeenCalledWith(
+      "p1",
+      "gpt-4o",
+      expect.objectContaining({ state: "limited", basis: "measured" }),
+    );
+    expect(getQual).toHaveBeenCalledTimes(1);
   });
 
   it("shows cancel while running and supports clear", async () => {
@@ -150,6 +172,9 @@ describe("CapabilityQualificationPanel (#724)", () => {
     });
     fireEvent.click(screen.getByTestId("cap-qual-clear"));
     await waitFor(() => expect(clearQual).toHaveBeenCalled());
+    expect(clearQual).toHaveBeenCalledWith(
+      expect.not.objectContaining({ apiKey: expect.anything() }),
+    );
     await waitFor(() =>
       expect(screen.queryByTestId("cap-qual-report")).toBeNull(),
     );

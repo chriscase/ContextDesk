@@ -64,6 +64,9 @@ pub struct InitOutput {
     /// accepted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connectivity_check: Option<String>,
+    /// Number of model ids saved from the setup catalog request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discovered_models: Option<usize>,
 }
 
 impl Render for InitOutput {
@@ -103,6 +106,11 @@ impl Render for InitOutput {
         }
         if let Some(check) = &self.connectivity_check {
             lines.push(format!("connectivity check: {check}"));
+        }
+        if let Some(count) = self.discovered_models {
+            lines.push(format!(
+                "model catalog: {count} discovered (run `contextdesk models` for role/readiness details)"
+            ));
         }
         lines.join("\n")
     }
@@ -321,6 +329,30 @@ async fn run_init(
         save_app_config(paths, &cfg)?;
     }
 
+    // Save the catalog before the credential, preserving the credential write
+    // as the command's final fallible step. The snapshot contains model ids
+    // plus endpoint/profile fingerprints only, never the key or raw endpoint.
+    if let Some(setup) = &provider_setup {
+        if !setup.catalog_models.is_empty() {
+            let profile =
+                setup.cfg.providers.active().ok_or_else(|| {
+                    CliError::internal("configured provider has no active profile")
+                })?;
+            let store_path =
+                cd_core::capability_qualification::qualification_store_path(&paths.config_dir);
+            let mut store =
+                cd_core::capability_qualification::load_qualification_store(&store_path)
+                    .map_err(|error| CliError::internal(format!("load model catalog: {error}")))?;
+            store.note_catalog(
+                &profile.id,
+                &profile.base_url,
+                setup.catalog_models.iter().cloned(),
+            );
+            cd_core::capability_qualification::save_qualification_store(&store_path, &store)
+                .map_err(|error| CliError::internal(format!("save model catalog: {error}")))?;
+        }
+    }
+
     // The one remaining fallible step, deliberately last: see this
     // function's doc comment for why the credential is stored here and not
     // inside `configure_provider_profile`.
@@ -345,6 +377,10 @@ async fn run_init(
         connectivity_check: provider_setup
             .as_ref()
             .and_then(|s| s.probe_summary.clone()),
+        discovered_models: provider_setup
+            .as_ref()
+            .map(|setup| setup.catalog_models.len())
+            .filter(|count| *count > 0),
     }))
 }
 
@@ -457,6 +493,7 @@ struct ProviderSetupResult {
     secret: Option<String>,
     timezone: Option<String>,
     probe_summary: Option<String>,
+    catalog_models: Vec<String>,
 }
 
 async fn configure_provider_profile(
@@ -516,35 +553,7 @@ async fn configure_provider_profile(
     validate_provider_url(&base_url, &policy)
         .map_err(|e| CliError::user(format!("invalid base URL: {e}")))?;
 
-    let chat_model = if let Some(m) = &args.chat_model {
-        m.clone()
-    } else if interactive {
-        let default = if matches!(kind, ProviderKind::Ollama) {
-            "mistral"
-        } else {
-            ""
-        };
-        let prompt = if default.is_empty() {
-            "Chat model".to_string()
-        } else {
-            format!("Chat model (default {default})")
-        };
-        let raw = ask_line(stdin, stderr, &prompt)?;
-        if raw.is_empty() {
-            default.to_string()
-        } else {
-            raw
-        }
-    } else if matches!(kind, ProviderKind::Ollama) {
-        "mistral".to_string()
-    } else {
-        return Err(CliError::user(
-            "--chat-model is required for this provider kind in --non-interactive mode",
-        ));
-    };
-    if chat_model.trim().is_empty() {
-        return Err(CliError::user("a chat model id is required"));
-    }
+    let requested_chat_model = args.chat_model.clone();
 
     // An isolated profile must never collide with the desktop-shared
     // keychain entry for the same provider kind: the default id, unlike an
@@ -573,6 +582,59 @@ async fn configure_provider_profile(
     let secret = resolve_credential(args, descriptor.needs_api_key, interactive, stdin, stderr)?;
     let credential_configured = secret.is_some();
 
+    let want_check = if args.check_connection {
+        true
+    } else if interactive {
+        ask_yes_no(
+            stdin,
+            stderr,
+            "Discover available models and test the connection now? (catalog request only; never corpus content)",
+            true,
+        )?
+    } else {
+        false
+    };
+
+    // The keychain ref this profile WILL be stored under — computed here,
+    // deterministically, from the profile id alone. Nothing is written to
+    // the keychain yet (see `run_init`).
+    let api_key_ref = secret.as_ref().map(|_| key_ref_for_profile(&profile_id));
+    let provisional_model = requested_chat_model.clone().unwrap_or_else(|| {
+        if matches!(kind, ProviderKind::Ollama) {
+            "mistral".into()
+        } else {
+            "catalog-probe".into()
+        }
+    });
+    let mut profile = ProviderProfile {
+        id: profile_id.clone(),
+        label: profile_label,
+        kind,
+        base_url,
+        api_key_ref,
+        chat_model: provisional_model,
+        embedding_model: None,
+        embedding_base_url: None,
+        capabilities: descriptor.default_capabilities,
+        local_only: descriptor.is_local,
+        deadline_preference: ProviderDeadlinePreference::Auto,
+    };
+    let (probe_summary, catalog_models) = if want_check {
+        let (verdict, models) =
+            provider_probe::probe_provider_catalog(&profile, secret.clone(), paths.isolated).await;
+        (Some(verdict.summary()), models)
+    } else {
+        (None, Vec::new())
+    };
+    profile.chat_model = choose_setup_chat_model(
+        requested_chat_model,
+        kind,
+        interactive,
+        &catalog_models,
+        stdin,
+        stderr,
+    )?;
+
     let timezone = if let Some(tz) = &args.default_timezone {
         if !is_valid_iana_timezone(tz) {
             return Err(CliError::user(format!(
@@ -599,39 +661,6 @@ async fn configure_provider_profile(
         None
     };
 
-    let want_check = if args.check_connection {
-        true
-    } else if interactive {
-        ask_yes_no(
-            stdin,
-            stderr,
-            "Test connection now? (sends only the base URL and, if configured, the key — never corpus content)",
-            false,
-        )?
-    } else {
-        false
-    };
-
-    // The keychain ref this profile WILL be stored under — computed here,
-    // deterministically, from the profile id alone. Nothing is written to
-    // the keychain yet (see `run_init`); the profile can already carry the
-    // reference it will resolve to once it lands.
-    let api_key_ref = secret.as_ref().map(|_| key_ref_for_profile(&profile_id));
-
-    let profile = ProviderProfile {
-        id: profile_id.clone(),
-        label: profile_label,
-        kind,
-        base_url,
-        api_key_ref,
-        chat_model,
-        embedding_model: None,
-        embedding_base_url: None,
-        capabilities: descriptor.default_capabilities,
-        local_only: descriptor.is_local,
-        deadline_preference: ProviderDeadlinePreference::Auto,
-    };
-
     let mut cfg = app_cfg.clone();
     cfg.providers.profiles.retain(|p| p.id != profile.id);
     cfg.providers.profiles.push(profile.clone());
@@ -639,16 +668,6 @@ async fn configure_provider_profile(
     if let Some(tz) = &timezone {
         cfg.default_timezone = Some(tz.clone());
     }
-
-    let probe_summary = if want_check {
-        Some(
-            provider_probe::probe_provider(&profile, secret.clone(), paths.isolated)
-                .await
-                .summary(),
-        )
-    } else {
-        None
-    };
 
     Ok(ProviderSetupResult {
         cfg,
@@ -658,7 +677,103 @@ async fn configure_provider_profile(
         secret,
         timezone,
         probe_summary,
+        catalog_models,
     })
+}
+
+fn choose_setup_chat_model(
+    requested: Option<String>,
+    kind: ProviderKind,
+    interactive: bool,
+    catalog_models: &[String],
+    stdin: &io::Stdin,
+    stderr: &mut io::Stderr,
+) -> CliResult<String> {
+    if let Some(model) = requested.map(|model| model.trim().to_string()) {
+        if model.is_empty() {
+            return Err(CliError::user("a chat model id is required"));
+        }
+        return Ok(model);
+    }
+    if !interactive {
+        if matches!(kind, ProviderKind::Ollama) {
+            return Ok("mistral".into());
+        }
+        return Err(CliError::user(
+            "--chat-model is required in --non-interactive mode; run `contextdesk models discover` to inspect the catalog",
+        ));
+    }
+
+    let mut candidates = catalog_models
+        .iter()
+        .filter(|model| {
+            matches!(
+                cd_core::model_role_hints::classify_model_role(model).role,
+                cd_core::model_role_hints::ModelRoleHint::Investigator
+                    | cd_core::model_role_hints::ModelRoleHint::Unknown
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    candidates = cd_core::model_role_hints::sort_ids_for_chat_picker(&candidates);
+    if !candidates.is_empty() {
+        if candidates.len() > 20 {
+            let filter = ask_line(
+                stdin,
+                stderr,
+                "The gateway has many chat candidates. Filter model ids (blank = first 20 recommended)",
+            )?;
+            if !filter.is_empty() {
+                let needle = filter.to_ascii_lowercase();
+                candidates.retain(|model| model.to_ascii_lowercase().contains(&needle));
+            }
+            candidates.truncate(20);
+        }
+        if !candidates.is_empty() {
+            writeln!(
+                stderr,
+                "Available chat candidates (role suggested by name):"
+            )
+            .map_err(|error| CliError::internal(error.to_string()))?;
+            for (index, model) in candidates.iter().enumerate() {
+                writeln!(stderr, "  {}) {model}", index + 1)
+                    .map_err(|error| CliError::internal(error.to_string()))?;
+            }
+            let answer = ask_line(
+                stdin,
+                stderr,
+                "Choose a model number or enter an exact model id",
+            )?;
+            if let Ok(index) = answer.parse::<usize>() {
+                if let Some(model) = index.checked_sub(1).and_then(|index| candidates.get(index)) {
+                    return Ok(model.clone());
+                }
+                return Err(CliError::user(
+                    "model selection is outside the displayed list",
+                ));
+            }
+            if !answer.is_empty() {
+                return Ok(answer);
+            }
+        }
+    }
+
+    let default = if matches!(kind, ProviderKind::Ollama) {
+        "mistral"
+    } else {
+        ""
+    };
+    let prompt = if default.is_empty() {
+        "Chat model id"
+    } else {
+        "Chat model id (default mistral)"
+    };
+    let answer = ask_line(stdin, stderr, prompt)?;
+    let model = if answer.is_empty() { default } else { &answer };
+    if model.trim().is_empty() {
+        return Err(CliError::user("a chat model id is required"));
+    }
+    Ok(model.trim().to_string())
 }
 
 /// A deterministic id suffix scoped to `config_dir`, so an isolated

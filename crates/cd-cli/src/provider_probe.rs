@@ -63,17 +63,32 @@ pub(crate) async fn probe_provider(
     secret: Option<String>,
     isolated: bool,
 ) -> ProviderProbeVerdict {
+    probe_provider_catalog(profile, secret, isolated).await.0
+}
+
+/// Same safe operation as [`probe_provider`], retaining the catalog returned
+/// by that one request for first-run model selection and drift snapshots.
+pub(crate) async fn probe_provider_catalog(
+    profile: &ProviderProfile,
+    secret: Option<String>,
+    isolated: bool,
+) -> (ProviderProbeVerdict, Vec<String>) {
     if isolated && matches!(profile.kind, ProviderKind::XaiGrokBuild) {
-        return ProviderProbeVerdict::Skipped {
-            reason: "a Grok Build session is read from the real ~/.grok/auth.json, \
+        return (
+            ProviderProbeVerdict::Skipped {
+                reason: "a Grok Build session is read from the real ~/.grok/auth.json, \
                 which an isolated --data-dir profile cannot probe without breaking isolation — \
                 rerun this check outside an isolated profile"
-                .to_string(),
-        };
+                    .to_string(),
+            },
+            Vec::new(),
+        );
     }
-    match discovery::probe_provider(profile, secret).await {
+    let probe = discovery::probe_provider_catalog(profile, secret).await;
+    let verdict = match probe.outcome {
         ProbeOutcome::Reachable { reason } => ProviderProbeVerdict::Reachable { reason },
         ProbeOutcome::KeyRejected { reason } => ProviderProbeVerdict::KeyRejected { reason },
         ProbeOutcome::Unreachable { reason } => ProviderProbeVerdict::Unreachable { reason },
-    }
+    };
+    (verdict, probe.model_ids)
 }

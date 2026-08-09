@@ -693,13 +693,14 @@ export function App() {
             onClose={() => shell.closeSettings(() => {})}
             onSaveSetup={shell.onSaveSetup}
             onRecheckHost={shell.refreshHostPreflight}
-          onCurationChanged={() =>
-            // Keep the conversation's own model listed even if it was just
-            // curated away, so the picker never silently shows a different one.
-            shell.refreshChatModels(
-              effectiveModelKey ? [effectiveModelKey] : undefined,
-            )
-          }
+            onCurationChanged={() =>
+              // Keep the conversation's own model listed even if it was just
+              // curated away, so the picker never silently shows a different one.
+              shell.refreshChatModels(
+                effectiveModelKey ? [effectiveModelKey] : undefined,
+              )
+            }
+            onModelReadinessChanged={shell.updateModelReadiness}
             hostReport={shell.hostPreflightReport}
           />
         </div>
@@ -752,6 +753,7 @@ export function App() {
           }
           onSaveSetup={shell.onSaveSetup}
           onRecheckHost={shell.refreshHostPreflight}
+          onModelReadinessChanged={shell.updateModelReadiness}
           hostReport={shell.hostPreflightReport}
           onOpenHelp={(pageId) => {
             shell.closeSettings(() => {});
