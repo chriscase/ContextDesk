@@ -1,8 +1,8 @@
 # Gateway contract fixtures — live-evidence coverage matrix
 
-Status: durable test-evidence map (not a product capability claim)  
-Branch: `test/gateway-contract-fixtures-v1`  
-Base: `d17a120d`  
+Status: durable test-evidence map (not a product capability claim)
+Branch: `test/gateway-contract-fixtures-v1`
+Base: `d17a120d`
 Last updated: 2026-08-09
 
 This matrix converts **verified live gateway observations** into **sanitized,
