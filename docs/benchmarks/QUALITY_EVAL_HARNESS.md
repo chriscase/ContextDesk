@@ -204,24 +204,51 @@ Live DeepSeek / Grok / Vercel / embedding / rerank runners should:
 
 ## Commands
 
-From the repository root (or any cwd that can walk to `fixtures/quality-eval/open-v1`):
+### User CLI (product surface)
+
+From a ContextDesk checkout (or with `--suite` / `CONTEXTDESK_QUALITY_EVAL_SUITE`):
 
 ```bash
-# Validate fixture isolation + digest
+# List bundled OPEN suites (relative path labels only)
+contextdesk eval suites
+
+# Validate fixture isolation + content digest
+contextdesk eval validate
+contextdesk eval validate --suite fixtures/quality-eval/open-v1
+
+# Hermetic run — concise nontechnical text by default
+contextdesk eval run
+
+# Machine envelopes (global format flags)
+contextdesk --json eval run
+contextdesk --jsonl eval run
+
+# Write a machine report (no clobber without --force)
+contextdesk eval run --report-format json --output report.json
+contextdesk eval run --report-format json --output report.json --force
+```
+
+`contextdesk eval` is **state-free**: it does not read app config, Keychain,
+gateways, sessions, corpora, or `model-qualifications.json`, and it never
+writes readiness or preference state. Outcomes always label:
+
+- compatibility/readiness: **not evaluated**
+- retrieval/answer quality: **hermetic fixture evidence only**
+- live usefulness: **not evaluated**
+
+This command does **not** prove live model usefulness, gateway verification,
+embeddings, reranking, or optional judge results.
+
+### Development lab binary
+
+Still available for focused harness work:
+
+```bash
 cargo run -p cd-core --bin cd-quality-eval-lab -- validate
-
-# Hermetic run → JSON on stdout
 cargo run -p cd-core --bin cd-quality-eval-lab -- run
-
-# Explicit suite path + write (no overwrite without --force)
-cargo run -p cd-core --bin cd-quality-eval-lab -- run \
-  --suite fixtures/quality-eval/open-v1 \
-  --format json \
-  --output /tmp/quality-eval-report.json
-
-# Focused tests
 cargo test -p cd-core --lib quality_eval
 cargo test -p cd-core --test quality_eval_lab
+cargo test -p cd-cli --test eval_cli
 ```
 
 Environment:
@@ -236,9 +263,10 @@ Environment:
 | Types / schemas | `crates/cd-core/src/quality_eval/types.rs` |
 | Retrieval metrics | `…/metrics.rs` |
 | Answer scoring | `…/answer_score.rs` |
-| Suite load / isolation | `…/suite.rs` |
+| Suite load / isolation / catalog | `…/suite.rs` |
 | Hermetic runner | `…/run.rs` |
 | Export | `…/export.rs` |
 | Lab binary | `crates/cd-core/src/bin/cd-quality-eval-lab.rs` |
-| Integration tests | `crates/cd-core/tests/quality_eval_lab.rs` |
+| Product CLI | `crates/cd-cli/src/commands/eval.rs` |
+| Integration tests | `crates/cd-core/tests/quality_eval_lab.rs`, `crates/cd-cli/tests/eval_cli.rs` |
 | OPEN fixtures | `fixtures/quality-eval/open-v1/` |

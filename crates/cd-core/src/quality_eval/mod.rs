@@ -34,8 +34,9 @@ pub use run::{
     run_hermetic_suite, HermeticRunOptions,
 };
 pub use suite::{
-    assert_suite_digest, hex_sha256, known_document_ids, load_suite, resolve_suite_path,
-    scan_privacy_text, scan_runtime_isolation, LoadedCase, LoadedSuite,
-    PRIVACY_FORBIDDEN_SUBSTRINGS, RUNTIME_FORBIDDEN_EVALUATOR_TOKENS,
+    assert_suite_digest, default_suite_path_from_manifest_dir, expectation_accounting, hex_sha256,
+    known_document_ids, list_bundled_suites, load_suite, resolve_suite_path, scan_privacy_text,
+    scan_runtime_isolation, ExpectationAccounting, LoadedCase, LoadedSuite, SuiteCatalogEntry,
+    BUNDLED_OPEN_V1_RELATIVE, PRIVACY_FORBIDDEN_SUBSTRINGS, RUNTIME_FORBIDDEN_EVALUATOR_TOKENS,
 };
 pub use types::*;

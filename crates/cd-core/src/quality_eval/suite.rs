@@ -477,19 +477,55 @@ pub fn default_suite_path_from_manifest_dir(manifest_dir: &Path) -> PathBuf {
         .unwrap_or_else(|_| manifest_dir.join("../../fixtures/quality-eval/open-v1"))
 }
 
+/// Relative label for the bundled OPEN v1 suite (never an absolute path).
+pub const BUNDLED_OPEN_V1_RELATIVE: &str = "fixtures/quality-eval/open-v1";
+
+/// One catalog entry for a bundled or discovered OPEN quality-eval suite.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SuiteCatalogEntry {
+    /// Suite id from suite.json when readable; otherwise directory name.
+    pub suite_id: String,
+    /// Human title when the manifest loads.
+    pub title: String,
+    /// Repo-relative path label only (never absolute).
+    pub relative_path: String,
+    /// Case count from the manifest when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub case_count: Option<usize>,
+    /// True when this is the default OPEN suite for `eval run`.
+    pub is_default: bool,
+}
+
 /// Resolve suite path from CLI argument or environment / default.
+///
+/// Does not read app config, Keychain, or network. Explicit paths may be
+/// absolute (caller-supplied); default discovery never *emits* absolute paths
+/// into records.
 pub fn resolve_suite_path(explicit: Option<&Path>) -> CoreResult<PathBuf> {
     if let Some(p) = explicit {
-        return Ok(p.to_path_buf());
+        let path = p.to_path_buf();
+        if !path.join("suite.json").is_file() {
+            return Err(CoreError::Config(format!(
+                "suite path has no suite.json: {}",
+                path.file_name().and_then(|n| n.to_str()).unwrap_or("suite")
+            )));
+        }
+        return Ok(path);
     }
     if let Ok(env) = std::env::var("CONTEXTDESK_QUALITY_EVAL_SUITE") {
-        return Ok(PathBuf::from(env));
+        let path = PathBuf::from(env);
+        if path.join("suite.json").is_file() {
+            return Ok(path);
+        }
+        return Err(CoreError::Config(
+            "CONTEXTDESK_QUALITY_EVAL_SUITE does not contain suite.json".into(),
+        ));
     }
     // Walk up from cwd looking for fixtures/quality-eval/open-v1
     let cwd = std::env::current_dir().map_err(|e| CoreError::Config(format!("cwd: {e}")))?;
     let mut cur = cwd.as_path();
     loop {
-        let candidate = cur.join("fixtures/quality-eval/open-v1");
+        let candidate = cur.join(BUNDLED_OPEN_V1_RELATIVE);
         if candidate.join("suite.json").is_file() {
             return Ok(candidate);
         }
@@ -499,8 +535,110 @@ pub fn resolve_suite_path(explicit: Option<&Path>) -> CoreResult<PathBuf> {
         }
     }
     Err(CoreError::Config(
-        "could not locate fixtures/quality-eval/open-v1; pass --suite".into(),
+        "could not locate fixtures/quality-eval/open-v1; pass --suite or set CONTEXTDESK_QUALITY_EVAL_SUITE".into(),
     ))
+}
+
+/// List known OPEN quality-eval suites under `fixtures/quality-eval/` (cwd walk).
+///
+/// State-free: filesystem read of committed fixtures only. Never returns absolute
+/// path strings in the catalog entries.
+pub fn list_bundled_suites() -> CoreResult<Vec<SuiteCatalogEntry>> {
+    let cwd = std::env::current_dir().map_err(|e| CoreError::Config(format!("cwd: {e}")))?;
+    let mut cur = cwd.as_path();
+    let root = loop {
+        let candidate = cur.join("fixtures/quality-eval");
+        if candidate.is_dir() {
+            break candidate;
+        }
+        match cur.parent() {
+            Some(p) => cur = p,
+            None => {
+                return Err(CoreError::Config(
+                    "could not locate fixtures/quality-eval; run from a ContextDesk checkout"
+                        .into(),
+                ));
+            }
+        }
+    };
+
+    let mut entries = Vec::new();
+    let read =
+        fs::read_dir(&root).map_err(|e| CoreError::Config(format!("read quality-eval: {e}")))?;
+    for entry in read {
+        let entry =
+            entry.map_err(|e| CoreError::Config(format!("read quality-eval entry: {e}")))?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if !path.join("suite.json").is_file() {
+            continue;
+        }
+        let dir_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("suite")
+            .to_string();
+        let relative = format!("fixtures/quality-eval/{dir_name}");
+        let is_default = dir_name == "open-v1";
+        match load_suite(&path) {
+            Ok(loaded) => entries.push(SuiteCatalogEntry {
+                suite_id: loaded.manifest.suite_id,
+                title: loaded.manifest.title,
+                relative_path: relative,
+                case_count: Some(loaded.cases.len()),
+                is_default,
+            }),
+            Err(_) => entries.push(SuiteCatalogEntry {
+                suite_id: dir_name,
+                title: "(unreadable suite.json)".into(),
+                relative_path: relative,
+                case_count: None,
+                is_default,
+            }),
+        }
+    }
+    entries.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    if entries.is_empty() {
+        return Err(CoreError::Config(
+            "no quality-eval suites with suite.json found under fixtures/quality-eval".into(),
+        ));
+    }
+    Ok(entries)
+}
+
+/// Count expected-pass / expected-fail answer outcomes for honest CLI text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExpectationAccounting {
+    /// Host-declared expected-pass candidates that passed.
+    pub expected_pass_met: u32,
+    /// Host-declared expected-pass candidates that failed.
+    pub expected_pass_missed: u32,
+    /// Host-declared expected-fail candidates that failed (cage success).
+    pub expected_fail_met: u32,
+    /// Host-declared expected-fail candidates that passed (vacuous green).
+    pub expected_fail_missed: u32,
+    /// Candidates without a declared expectation.
+    pub undeclared: u32,
+}
+
+/// Summarize expectation accounting from a run record (no truth files required).
+pub fn expectation_accounting(record: &super::types::QualityRunRecord) -> ExpectationAccounting {
+    use super::types::CandidateExpectation;
+    let mut acc = ExpectationAccounting::default();
+    for case in &record.cases {
+        for answer in &case.answers {
+            match (answer.expected_outcome, answer.expectation_met) {
+                (Some(CandidateExpectation::Pass), Some(true)) => acc.expected_pass_met += 1,
+                (Some(CandidateExpectation::Pass), _) => acc.expected_pass_missed += 1,
+                (Some(CandidateExpectation::Fail), Some(true)) => acc.expected_fail_met += 1,
+                (Some(CandidateExpectation::Fail), _) => acc.expected_fail_missed += 1,
+                (None, _) => acc.undeclared += 1,
+            }
+        }
+    }
+    acc
 }
 
 #[cfg(test)]

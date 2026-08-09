@@ -150,6 +150,51 @@ pub enum Command {
     /// Discover gateway models and show or verify role-specific compatibility.
     /// Bare `models` is entirely offline and never reads credentials.
     Models(ModelsArgs),
+    /// Hermetic quality-evaluation fixtures (offline, no credentials, no network).
+    /// Does not measure live model usefulness or compatibility readiness.
+    Eval {
+        #[command(subcommand)]
+        action: EvalAction,
+    },
+}
+
+/// Subcommands under `contextdesk eval`.
+#[derive(Debug, Subcommand)]
+pub enum EvalAction {
+    /// List bundled OPEN quality-evaluation suites (paths relative only).
+    Suites,
+    /// Validate suite isolation and compute the content digest.
+    Validate(EvalValidateArgs),
+    /// Run the hermetic suite and print a report (optionally write JSON/JSONL).
+    Run(EvalRunArgs),
+}
+
+/// Options for `contextdesk eval validate`.
+#[derive(Debug, clap::Args)]
+pub struct EvalValidateArgs {
+    /// Suite directory containing suite.json (default: bundled OPEN v1).
+    #[arg(long)]
+    pub suite: Option<PathBuf>,
+}
+
+/// Options for `contextdesk eval run`.
+#[derive(Debug, clap::Args)]
+pub struct EvalRunArgs {
+    /// Suite directory containing suite.json (default: bundled OPEN v1).
+    #[arg(long)]
+    pub suite: Option<PathBuf>,
+    /// File export shape when `--output` is set: `json` or `jsonl`.
+    /// Global `--json` / `--jsonl` / `--format` still control the process
+    /// envelope only and do not write files.
+    #[arg(long = "report-format", value_name = "json|jsonl")]
+    pub report_format: Option<String>,
+    /// Write a machine report to this path (basename only appears in text).
+    /// Refuses to overwrite unless `--force` is set.
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+    /// Replace an existing `--output` file.
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// Model discovery and compatibility actions.
@@ -573,6 +618,7 @@ where
         "episodes",
         "retrieval-status",
         "models",
+        "eval",
     ];
     let value_options = [
         "--format",

@@ -146,6 +146,15 @@ async fn run_state_free(cli: &Cli) -> Option<i32> {
                 &cd_core::branding::Branding::embedded(),
             )),
         )),
+        Command::Eval { action } => {
+            let result = commands::eval::run(action);
+            let verdict = result
+                .as_ref()
+                .ok()
+                .filter(|output| output.failed_verdict())
+                .map(|_| ExitCategory::NotReady);
+            Some(emit_completed(format, color, "eval", result, verdict))
+        }
         _ => None,
     }
 }
@@ -176,7 +185,7 @@ async fn dispatch(
             }
             emit(format, resolved.color.value, "import", result)
         }
-        Command::Normalize(_) | Command::Normalized { .. } => {
+        Command::Normalize(_) | Command::Normalized { .. } | Command::Eval { .. } => {
             unreachable!("state-free commands return before stateful dispatch")
         }
         Command::Corpus { action } => {

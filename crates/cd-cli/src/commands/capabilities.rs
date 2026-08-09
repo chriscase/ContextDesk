@@ -131,6 +131,9 @@ const COMMANDS: &[&str] = &[
     "retrieval-status",
     "logging-assessment",
     "exception-episodes",
+    "eval suites",
+    "eval validate",
+    "eval run",
 ];
 
 pub fn run(branding: &Branding) -> CapabilitiesOutput {

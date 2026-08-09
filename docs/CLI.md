@@ -72,6 +72,7 @@ metacharacters literal. If a question begins with a command name such as
 | `models [discover\|verify]` | Offline model readiness by default; explicit catalog discovery and selected/all role verification when requested |
 | `logging-assessment [corpus-id]` (alias `assess`) | Deterministic logging-quality assessment with fixed finding-code improvement hints (no provider); defaults to the current corpus. |
 | `exception-episodes [corpus-id]` | Deterministic exception episode correlation (occurrence vs raw records; no provider). |
+| `eval suites\|validate\|run` | Offline hermetic quality-evaluation fixtures (no config, Keychain, network, or readiness store). Does **not** measure live model usefulness or compatibility. File export uses `--report-format json\|jsonl` + `--output` (no clobber without `--force`). See [QUALITY_EVAL_HARNESS.md](benchmarks/QUALITY_EVAL_HARNESS.md). |
 
 Drift check: `python3 scripts/cli-release/check_cli_docs.py` compares this list
 to a live binary when `CONTEXTDESK_BIN` is set.
