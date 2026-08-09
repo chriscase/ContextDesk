@@ -273,7 +273,7 @@ async fn candidate_stage_429_exhaustion_never_rejects_the_candidate() {
         "only the one entered candidate call published context telemetry"
     );
     match outcome {
-        Ok(MultiStageTriageOutcome::FailedClosed(reason)) => panic!(
+        Ok(MultiStageTriageOutcome::FailedClosed { reason, .. }) => panic!(
             "an exhausted rate limit must never be classified as failed candidate \
              validation (got FailedClosed({reason:?}))"
         ),

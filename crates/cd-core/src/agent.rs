@@ -806,7 +806,14 @@ enum MultiStageTriageOutcome {
     Fallback(&'static str),
     /// A model response failed citation/separation validation after bounded
     /// correction; it is withheld rather than being mixed into single-stage.
-    FailedClosed(String),
+    FailedClosed {
+        reason: String,
+        /// Ordered final-comparison validator categories. These are host
+        /// labels only; the rejected proposal is never retained here.
+        validation_errors: Vec<crate::investigation_answer::ValidationError>,
+        semantic_attempts: usize,
+        provider_rounds: usize,
+    },
     Completed {
         content: String,
         envelope: Box<crate::investigation_answer::AnswerEnvelopeV1>,
@@ -1208,14 +1215,22 @@ async fn run_multi_stage_broad_triage(
         }
     }
     if !rejected_groups.is_empty() {
-        return Ok(MultiStageTriageOutcome::FailedClosed(
-            "one or more selected candidate syntheses failed validation".into(),
-        ));
+        return Ok(MultiStageTriageOutcome::FailedClosed {
+            reason: "one or more selected candidate syntheses failed validation".into(),
+            validation_errors: Vec::new(),
+            semantic_attempts: 0,
+            provider_rounds: used_rounds,
+        });
     }
     if drafts.len() < 2 {
-        return Ok(MultiStageTriageOutcome::FailedClosed(
-            "fewer than two candidate syntheses passed candidate-scoped citation validation".into(),
-        ));
+        return Ok(MultiStageTriageOutcome::FailedClosed {
+            reason:
+                "fewer than two candidate syntheses passed candidate-scoped citation validation"
+                    .into(),
+            validation_errors: Vec::new(),
+            semantic_attempts: 0,
+            provider_rounds: used_rounds,
+        });
     }
     if estimate_context_chars(&multi_stage_comparison_messages(user_text, &drafts, false))
         > crate::context_budgeting::synthesis_packing_budget(hard_budget)
@@ -1227,12 +1242,16 @@ async fn run_multi_stage_broad_triage(
     let ledger = match multi_stage_ledger(&drafts, binding) {
         Ok(ledger) => ledger,
         Err(_) => {
-            return Ok(MultiStageTriageOutcome::FailedClosed(
-                "host evidence ledger was invalid".into(),
-            ))
+            return Ok(MultiStageTriageOutcome::FailedClosed {
+                reason: "host evidence ledger was invalid".into(),
+                validation_errors: Vec::new(),
+                semantic_attempts: 0,
+                provider_rounds: used_rounds,
+            })
         }
     };
     let mut semantic_attempts = 0usize;
+    let mut validation_errors = Vec::new();
     loop {
         if used_rounds >= opts.max_rounds {
             break;
@@ -1268,32 +1287,58 @@ async fn run_multi_stage_broad_triage(
         } else {
             completion.content
         };
-        if let Ok(mut envelope) =
-            crate::investigation_answer::validate_model_answer(&content, &ledger)
-        {
-            envelope.semantic_attempts = u8::try_from(semantic_attempts).unwrap_or(u8::MAX);
-            return Ok(MultiStageTriageOutcome::Completed {
-                // Visible text is the host's readable projection of the
-                // validated envelope, not the authoritative JSON: the typed
-                // event beside it stays the machine/persistence contract, and
-                // a transcript that shows raw authority invites a caller to
-                // read it back as authority. Both hosts consume this one
-                // projection, so CLI and GUI cannot drift apart.
-                content: crate::investigation_answer::render_answer_markdown(&envelope),
-                envelope: Box::new(envelope),
-                accepted_groups: drafts.into_iter().map(|draft| draft.group_id).collect(),
-                rejected_groups,
-                provider_rounds: used_rounds,
-            });
+        match crate::investigation_answer::validate_model_answer(&content, &ledger) {
+            Ok(mut envelope) => {
+                envelope.semantic_attempts = u8::try_from(semantic_attempts).unwrap_or(u8::MAX);
+                return Ok(MultiStageTriageOutcome::Completed {
+                    // Visible text is the host's readable projection of the
+                    // validated envelope, not the authoritative JSON: the typed
+                    // event beside it stays the machine/persistence contract, and
+                    // a transcript that shows raw authority invites a caller to
+                    // read it back as authority. Both hosts consume this one
+                    // projection, so CLI and GUI cannot drift apart.
+                    content: crate::investigation_answer::render_answer_markdown(&envelope),
+                    envelope: Box::new(envelope),
+                    accepted_groups: drafts.into_iter().map(|draft| draft.group_id).collect(),
+                    rejected_groups,
+                    provider_rounds: used_rounds,
+                });
+            }
+            Err(error) => validation_errors.push(error),
         }
         if semantic_attempts >= MULTI_STAGE_SEMANTIC_CORRECTION_CAP {
             break;
         }
         semantic_attempts += 1;
     }
-    Ok(MultiStageTriageOutcome::FailedClosed(
-        "comparison synthesis failed bounded citation/separation validation".into(),
-    ))
+    Ok(MultiStageTriageOutcome::FailedClosed {
+        reason: "comparison synthesis failed bounded citation/separation validation".into(),
+        validation_errors,
+        semantic_attempts,
+        provider_rounds: used_rounds,
+    })
+}
+
+/// Safe, structured detail for a final-comparison validation failure. This
+/// intentionally contains only host-authored categories and counts, never the
+/// rejected proposal or any evidence/prompt content.
+fn multi_stage_validation_failure_detail(
+    validation_errors: &[crate::investigation_answer::ValidationError],
+    semantic_attempts: usize,
+    provider_rounds: usize,
+) -> String {
+    serde_json::json!({
+        "schema": "contextdesk.multi_stage_triage.v1",
+        "stage": "final_comparison",
+        "outcome": "validation_failed",
+        "validation_errors": validation_errors
+            .iter()
+            .map(crate::investigation_answer::ValidationError::as_str)
+            .collect::<Vec<_>>(),
+        "semantic_attempts": semantic_attempts,
+        "provider_rounds": provider_rounds,
+    })
+    .to_string()
 }
 
 fn linked_broad_log_triage_requested(user_text: &str) -> bool {
@@ -4054,7 +4099,12 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                 &[],
                             );
                         }
-                        MultiStageTriageOutcome::FailedClosed(reason) => {
+                        MultiStageTriageOutcome::FailedClosed {
+                            reason,
+                            validation_errors,
+                            semantic_attempts,
+                            provider_rounds,
+                        } => {
                             trail.push(format!(
                                 "linked_broad_triage_multi_stage_failed_closed:{reason}"
                             ));
@@ -4063,7 +4113,15 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                 name: "broad_log_triage_multi_stage".into(),
                                 phase: crate::events::ToolPhase::Finished,
                                 summary: "Candidate synthesis withheld".into(),
-                                detail: Some(reason),
+                                detail: Some(if validation_errors.is_empty() {
+                                    reason
+                                } else {
+                                    multi_stage_validation_failure_detail(
+                                        &validation_errors,
+                                        semantic_attempts,
+                                        provider_rounds,
+                                    )
+                                }),
                                 ok: Some(false),
                             });
                             out.push(StreamEvent::Error {
@@ -13156,12 +13214,97 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         )
         .await
         .unwrap();
-        assert!(matches!(outcome, MultiStageTriageOutcome::FailedClosed(_)));
+        assert!(matches!(
+            outcome,
+            MultiStageTriageOutcome::FailedClosed { .. }
+        ));
         assert_eq!(
             contexts.len(),
             2,
             "one candidate attempt is permitted per turn"
         );
+    }
+
+    #[tokio::test]
+    async fn multi_stage_final_comparison_preserves_ordered_validation_categories() {
+        use crate::investigation_answer::ValidationError;
+
+        let candidates = vec![
+            multi_stage_candidate("trace:alpha", 11),
+            multi_stage_candidate("trace:bravo", 22),
+        ];
+        let backend = ScriptedBackend::new(vec![
+            multi_stage_completion("trace:alpha is independent"),
+            multi_stage_completion("trace:bravo is independent"),
+            multi_stage_completion("not a JSON proposal"),
+            multi_stage_completion(
+                r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"trace:alpha","observations":[{"claim_id":"a","text":"x","evidence_ids":["forged"]}]},{"candidate_id":"trace:bravo","observations":[{"claim_id":"b","text":"x","evidence_ids":["e:trace:bravo:22"]}]}]}"#,
+            ),
+        ]);
+        let opts = AgentOptions {
+            max_rounds: 4,
+            ..Default::default()
+        };
+        let clock = TurnClock::new(opts.effective_deadline_plan(), None);
+        let outcome = run_multi_stage_broad_triage(
+            &backend,
+            "triage",
+            &opts,
+            &clock,
+            &candidates,
+            crate::investigation_answer::AnswerBindingV1 {
+                session_id: "s".into(),
+                turn_id: "t".into(),
+                corpus_id: "c".into(),
+                revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                    event_revision: 1,
+                    template_analysis_revision: 2,
+                    suppression_revision: 3,
+                },
+                ledger_digest: String::new(),
+            },
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        let MultiStageTriageOutcome::FailedClosed {
+            reason,
+            validation_errors,
+            semantic_attempts,
+            provider_rounds,
+        } = outcome
+        else {
+            panic!("final comparison must fail closed");
+        };
+        assert_eq!(
+            reason,
+            "comparison synthesis failed bounded citation/separation validation"
+        );
+        assert_eq!(
+            validation_errors,
+            vec![ValidationError::Parse, ValidationError::UnknownEvidence]
+        );
+        assert_eq!(semantic_attempts, 1);
+        assert_eq!(provider_rounds, 4);
+
+        let detail = multi_stage_validation_failure_detail(
+            &validation_errors,
+            semantic_attempts,
+            provider_rounds,
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&detail).unwrap(),
+            serde_json::json!({
+                "schema": "contextdesk.multi_stage_triage.v1",
+                "stage": "final_comparison",
+                "outcome": "validation_failed",
+                "validation_errors": ["parse", "unknown_evidence"],
+                "semantic_attempts": 1,
+                "provider_rounds": 4,
+            })
+        );
+        assert!(!detail.contains("forged"));
     }
 
     #[tokio::test]

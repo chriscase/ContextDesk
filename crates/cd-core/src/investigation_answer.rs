@@ -162,6 +162,25 @@ pub enum ValidationError {
     DigestMismatch,
 }
 
+impl ValidationError {
+    /// Stable, content-free category suitable for host diagnostics.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Parse => "parse",
+            Self::Schema => "schema",
+            Self::DuplicateId => "duplicate_id",
+            Self::UnknownEvidence => "unknown_evidence",
+            Self::WrongScope => "wrong_scope",
+            Self::WrongRevision => "wrong_revision",
+            Self::EmptyEvidence => "empty_evidence",
+            Self::RootRole => "root_role",
+            Self::EmptyLedger => "empty_ledger",
+            Self::InvalidBinding => "invalid_binding",
+            Self::DigestMismatch => "digest_mismatch",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HostEvidenceLedger {
     binding: AnswerBindingV1,
@@ -744,6 +763,41 @@ mod tests {
     fn proposal(body: &str) -> String {
         format!(r#"{{"schema":"{SCHEMA_V1}","candidates":[{body}]}}"#)
     }
+
+    #[test]
+    fn validation_error_categories_are_stable_and_content_free() {
+        let categories = [
+            ValidationError::Parse,
+            ValidationError::Schema,
+            ValidationError::DuplicateId,
+            ValidationError::UnknownEvidence,
+            ValidationError::WrongScope,
+            ValidationError::WrongRevision,
+            ValidationError::EmptyEvidence,
+            ValidationError::RootRole,
+            ValidationError::EmptyLedger,
+            ValidationError::InvalidBinding,
+            ValidationError::DigestMismatch,
+        ]
+        .map(|error| error.as_str());
+        assert_eq!(
+            categories,
+            [
+                "parse",
+                "schema",
+                "duplicate_id",
+                "unknown_evidence",
+                "wrong_scope",
+                "wrong_revision",
+                "empty_evidence",
+                "root_role",
+                "empty_ledger",
+                "invalid_binding",
+                "digest_mismatch",
+            ]
+        );
+    }
+
     #[test]
     fn strict_and_host_owned_fields_rejected() {
         assert!(parse_model_json("```json {} ```").is_err());
