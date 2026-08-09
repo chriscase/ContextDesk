@@ -1270,6 +1270,10 @@ fn host_trash_and_delete_commands_call_retire_chat_session_activity() {
     );
     let src =
         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read host lib.rs at {path}: {e}"));
+    // Git may materialize the inspected Rust source with CRLF on Windows.
+    // Normalize only the test's source view so the structural assertions below
+    // retain identical semantics on every checkout platform.
+    let src = src.replace("\r\n", "\n");
     for fname in ["fn trash_chat_session", "fn delete_chat_session"] {
         let idx = src
             .find(fname)
