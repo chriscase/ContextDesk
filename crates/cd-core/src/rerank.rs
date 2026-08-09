@@ -47,6 +47,27 @@ pub fn cap_rerank_document(text: &str) -> String {
     text.chars().take(RERANK_DOC_CHAR_CAP).collect()
 }
 
+/// Validate the provider-neutral score contract at the consumer boundary.
+///
+/// Individual adapters should validate their own wire formats, but callers
+/// must not assume every future or injected [`RerankBackend`] does so. A
+/// partial, oversized, or non-finite score vector cannot be aligned honestly
+/// with the submitted documents and must be withheld in full.
+pub fn validate_rerank_scores(scores: &[f32], expected: usize) -> CoreResult<()> {
+    if scores.len() != expected {
+        return Err(CoreError::Message(format!(
+            "rerank response contract: expected {expected} scores, received {}",
+            scores.len()
+        )));
+    }
+    if scores.iter().any(|score| !score.is_finite()) {
+        return Err(CoreError::Message(
+            "rerank response contract: every score must be finite".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Bridge an async rerank call into synchronous retrieval code with a hard
 /// timeout, mirroring `memory::embed_blocking`. `None` = failed or timed out;
 /// the caller must degrade gracefully (keep pre-rerank order) and record the
@@ -218,6 +239,7 @@ impl RerankBackend for HttpRerankBackend {
             .await
             .map_err(|e| CoreError::Message(format!("rerank response contract: {e}")))?;
         let mut scores = vec![f32::NEG_INFINITY; documents.len()];
+        let mut seen = vec![false; documents.len()];
         for row in parsed.results {
             if row.index >= scores.len() {
                 return Err(CoreError::Message(format!(
@@ -226,14 +248,16 @@ impl RerankBackend for HttpRerankBackend {
                     documents.len()
                 )));
             }
+            if seen[row.index] {
+                return Err(CoreError::Message(format!(
+                    "rerank response contract: duplicate index {}",
+                    row.index
+                )));
+            }
+            seen[row.index] = true;
             scores[row.index] = row.relevance_score;
         }
-        if scores.iter().any(|score| !score.is_finite()) {
-            return Err(CoreError::Message(
-                "rerank response contract: missing or non-finite score for at least one document"
-                    .into(),
-            ));
-        }
+        validate_rerank_scores(&scores, documents.len())?;
         Ok(scores)
     }
 
@@ -327,6 +351,15 @@ mod tests {
     }
 
     #[test]
+    fn score_contract_rejects_cardinality_and_non_finite_values() {
+        assert!(validate_rerank_scores(&[0.2, 0.8], 2).is_ok());
+        assert!(validate_rerank_scores(&[0.2], 2).is_err());
+        assert!(validate_rerank_scores(&[0.2, 0.8, 0.1], 2).is_err());
+        assert!(validate_rerank_scores(&[f32::NAN, 0.8], 2).is_err());
+        assert!(validate_rerank_scores(&[f32::INFINITY, 0.8], 2).is_err());
+    }
+
+    #[test]
     fn rerank_blocking_times_out_to_none() {
         struct Stalling;
         #[async_trait]
@@ -400,6 +433,25 @@ mod tests {
             .mount(&sparse)
             .await;
         let backend = HttpRerankBackend::new(&sparse.uri(), "m", None).expect("backend");
+        assert!(backend.rerank("q", &docs).await.is_err());
+
+        // Duplicate rows fail even when every document index also appears;
+        // silently overwriting a score would accept an ambiguous response.
+        let duplicate = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/rerank"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "results": [
+                        {"index": 0, "relevance_score": 0.5},
+                        {"index": 1, "relevance_score": 0.6},
+                        {"index": 1, "relevance_score": 0.7}
+                    ]
+                })),
+            )
+            .mount(&duplicate)
+            .await;
+        let backend = HttpRerankBackend::new(&duplicate.uri(), "m", None).expect("backend");
         assert!(backend.rerank("q", &docs).await.is_err());
 
         // Provider failure surfaces as a transport-class error (status only).

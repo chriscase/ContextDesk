@@ -28,7 +28,7 @@ use cd_core::log_analysis::{
 };
 use cd_core::memory::embed_blocking;
 use cd_core::process_progress::CancelFlag;
-use cd_core::rerank::{rerank_blocking, HttpRerankBackend, RerankBackend};
+use cd_core::rerank::{rerank_blocking, validate_rerank_scores, HttpRerankBackend, RerankBackend};
 
 /// Wire schema identity for [`RetrievalStatusReport`].
 pub const RETRIEVAL_STATUS_SCHEMA_ID: &str = "contextdesk.retrieval_status.v1";
@@ -287,7 +287,7 @@ fn reranker_role_status(
                         RetrievalRoleState::Unavailable,
                         "probe failed or timed out; pre-rerank order would be kept".into(),
                     ),
-                    Some(scores) if scores.len() != documents.len() => (
+                    Some(scores) if validate_rerank_scores(&scores, documents.len()).is_err() => (
                         RetrievalRoleState::Incompatible,
                         "endpoint answered but violated the one-score-per-document contract".into(),
                     ),

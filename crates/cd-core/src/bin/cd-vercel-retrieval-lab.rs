@@ -361,7 +361,10 @@ struct BenchmarkQuery {
     relevant_ids: Vec<String>,
     #[serde(default)]
     must_include_ids: Vec<String>,
+    #[serde(default)]
+    must_exclude_ids: Vec<String>,
     top_k: usize,
+    shortlist_k: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -373,6 +376,7 @@ struct BenchmarkOutput {
     query_count: usize,
     embedding_runs: Vec<ModelBenchmark>,
     reranking_runs: Vec<ModelBenchmark>,
+    combined_runs: Vec<CombinedBenchmark>,
 }
 
 #[derive(Debug, Serialize)]
@@ -393,6 +397,7 @@ struct QueryShapeBenchmark {
     query_shape: &'static str,
     mean_relevant_recall_at_k: f64,
     mean_must_include_recall_at_k: Option<f64>,
+    mean_must_exclude_share_at_k: Option<f64>,
     mean_non_relevant_share_at_k: f64,
     queries: Vec<QueryBenchmark>,
 }
@@ -404,8 +409,50 @@ struct QueryBenchmark {
     top_k: usize,
     relevant_recall_at_k: f64,
     must_include_recall_at_k: Option<f64>,
+    must_exclude_hits_at_k: usize,
+    must_exclude_share_at_k: Option<f64>,
+    must_exclude_passed: Option<bool>,
     non_relevant_share_at_k: f64,
     ranking: Vec<RankedId>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CombinedBenchmark {
+    embedding_model: String,
+    reranking_model: String,
+    role: &'static str,
+    embedding_latency_ms: u128,
+    reranking_latency_ms: u128,
+    dimensions: usize,
+    usage_tokens: Option<u64>,
+    warning_count: usize,
+    query_shapes: Vec<CombinedQueryShapeBenchmark>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CombinedQueryShapeBenchmark {
+    query_shape: &'static str,
+    mean_upstream_relevant_recall_at_shortlist: f64,
+    mean_upstream_must_include_recall_at_shortlist: Option<f64>,
+    mean_final_relevant_recall_at_k: f64,
+    mean_final_must_include_recall_at_k: Option<f64>,
+    mean_final_must_exclude_share_at_k: Option<f64>,
+    queries: Vec<CombinedQueryBenchmark>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CombinedQueryBenchmark {
+    id: String,
+    top_k: usize,
+    shortlist_k: usize,
+    upstream_relevant_recall_at_shortlist: f64,
+    upstream_must_include_recall_at_shortlist: Option<f64>,
+    upstream_must_exclude_hits_at_shortlist: usize,
+    final_result: QueryBenchmark,
+    shortlist_ranking: Vec<RankedId>,
 }
 
 #[tokio::main]
@@ -703,13 +750,40 @@ fn validate_dataset(dataset: &BenchmarkDataset) -> Result<()> {
         if query.top_k == 0 || query.top_k > dataset.documents.len() {
             bail!("query topK must be between 1 and the document count");
         }
+        if query.shortlist_k < query.top_k || query.shortlist_k >= dataset.documents.len() {
+            bail!("query shortlistK must be at least topK and smaller than the document count");
+        }
         if query.relevant_ids.is_empty() {
             bail!("each benchmark query must declare at least one relevant id");
         }
-        for id in query.relevant_ids.iter().chain(&query.must_include_ids) {
+        for id in query
+            .relevant_ids
+            .iter()
+            .chain(&query.must_include_ids)
+            .chain(&query.must_exclude_ids)
+        {
             if !document_ids.contains(id.as_str()) {
                 bail!("query truth references an unknown document id");
             }
+        }
+        let relevant_ids = query
+            .relevant_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        if query
+            .must_include_ids
+            .iter()
+            .any(|id| !relevant_ids.contains(id.as_str()))
+        {
+            bail!("query mustIncludeIds must be a subset of relevantIds");
+        }
+        if query
+            .must_exclude_ids
+            .iter()
+            .any(|id| relevant_ids.contains(id.as_str()))
+        {
+            bail!("query mustExcludeIds must be disjoint from relevantIds");
         }
     }
     Ok(())
@@ -818,6 +892,7 @@ async fn run_benchmark(
     all_values.extend(structural_query_texts);
 
     let mut embedding_runs = Vec::new();
+    let mut combined_runs = Vec::new();
     for model in embedding_models {
         let observed = gateway.embed(model, &all_values).await?;
         let document_vectors = &observed.embeddings[..dataset.documents.len()];
@@ -835,9 +910,42 @@ async fn run_benchmark(
             ),
         ];
         let mut query_shapes = Vec::new();
+        let mut shaped_rankings = Vec::new();
         for (shape, shaped_query_vectors) in shapes {
-            let queries = rank_embedding_queries(&dataset, document_vectors, shaped_query_vectors)?;
+            let rankings =
+                rank_embedding_candidates(&dataset, document_vectors, shaped_query_vectors)?;
+            let queries = dataset
+                .queries
+                .iter()
+                .zip(&rankings)
+                .map(|(query, ranking)| score_query(query, ranking.clone()))
+                .collect();
             query_shapes.push(summarize_query_shape(shape, queries));
+            shaped_rankings.push((shape, rankings));
+        }
+        for reranking_model in reranking_models {
+            let mut reranking_latency_ms = 0;
+            let mut combined_warning_count = observed.warning_count;
+            let mut combined_shapes = Vec::new();
+            for (shape, rankings) in &shaped_rankings {
+                let (summary, latency_ms, warning_count) =
+                    run_combined_query_shape(gateway, &dataset, reranking_model, shape, rankings)
+                        .await?;
+                reranking_latency_ms += latency_ms;
+                combined_warning_count += warning_count;
+                combined_shapes.push(summary);
+            }
+            combined_runs.push(CombinedBenchmark {
+                embedding_model: model.clone(),
+                reranking_model: reranking_model.clone(),
+                role: "embedding_reranking",
+                embedding_latency_ms: observed.latency_ms,
+                reranking_latency_ms,
+                dimensions: observed.dimensions,
+                usage_tokens: observed.usage_tokens,
+                warning_count: combined_warning_count,
+                query_shapes: combined_shapes,
+            });
         }
         embedding_runs.push(ModelBenchmark {
             model: model.clone(),
@@ -884,7 +992,83 @@ async fn run_benchmark(
         query_count: dataset.queries.len(),
         embedding_runs,
         reranking_runs,
+        combined_runs,
     })
+}
+
+async fn run_combined_query_shape(
+    gateway: &GatewayClient,
+    dataset: &BenchmarkDataset,
+    reranking_model: &str,
+    query_shape: &'static str,
+    embedding_rankings: &[Vec<RankedId>],
+) -> Result<(CombinedQueryShapeBenchmark, u128, usize)> {
+    let documents_by_id = dataset
+        .documents
+        .iter()
+        .map(|document| (document.id.as_str(), document))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut latency_ms = 0;
+    let mut warning_count = 0;
+    let mut queries = Vec::new();
+    for (query, embedding_ranking) in dataset.queries.iter().zip(embedding_rankings) {
+        let shortlist_ranking = embedding_ranking
+            .iter()
+            .take(query.shortlist_k)
+            .cloned()
+            .collect::<Vec<_>>();
+        let shortlist_documents = shortlist_ranking
+            .iter()
+            .map(|row| {
+                documents_by_id
+                    .get(row.id.as_str())
+                    .copied()
+                    .cloned()
+                    .context("embedding ranking referenced an unknown host document id")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let shortlist_texts = shortlist_documents
+            .iter()
+            .map(|document| document.text.clone())
+            .collect::<Vec<_>>();
+        let observed = gateway
+            .rerank(
+                reranking_model,
+                &query.query,
+                &shortlist_texts,
+                shortlist_texts.len(),
+            )
+            .await?;
+        latency_ms += observed.latency_ms;
+        warning_count += observed.warning_count;
+
+        let shortlist_ids = shortlist_ranking
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<HashSet<_>>();
+        let upstream_must_exclude_hits = query
+            .must_exclude_ids
+            .iter()
+            .filter(|id| shortlist_ids.contains(id.as_str()))
+            .count();
+        let final_ranking = map_ranking(&shortlist_documents, &observed.ranking)?;
+        queries.push(CombinedQueryBenchmark {
+            id: query.id.clone(),
+            top_k: query.top_k,
+            shortlist_k: query.shortlist_k,
+            upstream_relevant_recall_at_shortlist: recall(&query.relevant_ids, &shortlist_ids)
+                .unwrap_or(0.0),
+            upstream_must_include_recall_at_shortlist: recall(
+                &query.must_include_ids,
+                &shortlist_ids,
+            ),
+            upstream_must_exclude_hits_at_shortlist: upstream_must_exclude_hits,
+            final_result: score_query(query, final_ranking),
+            shortlist_ranking,
+        });
+    }
+    let summary = summarize_combined_query_shape(query_shape, queries);
+    Ok((summary, latency_ms, warning_count))
 }
 
 fn score_query(query: &BenchmarkQuery, ranking: Vec<RankedId>) -> QueryBenchmark {
@@ -898,26 +1082,34 @@ fn score_query(query: &BenchmarkQuery, ranking: Vec<RankedId>) -> QueryBenchmark
         .iter()
         .filter(|id| top_ids.contains(id.as_str()))
         .count();
+    let must_exclude_hits = query
+        .must_exclude_ids
+        .iter()
+        .filter(|id| top_ids.contains(id.as_str()))
+        .count();
+    let must_exclude_share = (!query.must_exclude_ids.is_empty())
+        .then_some(must_exclude_hits as f64 / query.top_k as f64);
     QueryBenchmark {
         id: query.id.clone(),
         top_k: query.top_k,
         relevant_recall_at_k: recall(&query.relevant_ids, &top_ids).unwrap_or(0.0),
         must_include_recall_at_k: recall(&query.must_include_ids, &top_ids),
+        must_exclude_hits_at_k: must_exclude_hits,
+        must_exclude_share_at_k: must_exclude_share,
+        must_exclude_passed: (!query.must_exclude_ids.is_empty()).then_some(must_exclude_hits == 0),
         non_relevant_share_at_k: 1.0 - relevant_hits as f64 / query.top_k as f64,
         ranking: ranking.into_iter().take(OUTPUT_RANKED_IDS).collect(),
     }
 }
 
-fn rank_embedding_queries(
+fn rank_embedding_candidates(
     dataset: &BenchmarkDataset,
     document_vectors: &[Vec<f32>],
     query_vectors: &[Vec<f32>],
-) -> Result<Vec<QueryBenchmark>> {
-    dataset
-        .queries
+) -> Result<Vec<Vec<RankedId>>> {
+    query_vectors
         .iter()
-        .zip(query_vectors)
-        .map(|(query, query_vector)| {
+        .map(|query_vector| {
             let mut ranking = dataset
                 .documents
                 .iter()
@@ -935,9 +1127,49 @@ fn rank_embedding_queries(
                     .total_cmp(&left.score)
                     .then_with(|| left.id.cmp(&right.id))
             });
-            Ok(score_query(query, ranking))
+            Ok(ranking)
         })
         .collect()
+}
+
+fn summarize_combined_query_shape(
+    query_shape: &'static str,
+    queries: Vec<CombinedQueryBenchmark>,
+) -> CombinedQueryShapeBenchmark {
+    let count = queries.len() as f64;
+    let upstream_must_include = queries
+        .iter()
+        .filter_map(|query| query.upstream_must_include_recall_at_shortlist)
+        .collect::<Vec<_>>();
+    let final_must_include = queries
+        .iter()
+        .filter_map(|query| query.final_result.must_include_recall_at_k)
+        .collect::<Vec<_>>();
+    let final_must_exclude = queries
+        .iter()
+        .filter_map(|query| query.final_result.must_exclude_share_at_k)
+        .collect::<Vec<_>>();
+    CombinedQueryShapeBenchmark {
+        query_shape,
+        mean_upstream_relevant_recall_at_shortlist: queries
+            .iter()
+            .map(|query| query.upstream_relevant_recall_at_shortlist)
+            .sum::<f64>()
+            / count,
+        mean_upstream_must_include_recall_at_shortlist: (!upstream_must_include.is_empty()).then(
+            || upstream_must_include.iter().sum::<f64>() / upstream_must_include.len() as f64,
+        ),
+        mean_final_relevant_recall_at_k: queries
+            .iter()
+            .map(|query| query.final_result.relevant_recall_at_k)
+            .sum::<f64>()
+            / count,
+        mean_final_must_include_recall_at_k: (!final_must_include.is_empty())
+            .then(|| final_must_include.iter().sum::<f64>() / final_must_include.len() as f64),
+        mean_final_must_exclude_share_at_k: (!final_must_exclude.is_empty())
+            .then(|| final_must_exclude.iter().sum::<f64>() / final_must_exclude.len() as f64),
+        queries,
+    }
 }
 
 fn summarize_query_shape(
@@ -949,6 +1181,10 @@ fn summarize_query_shape(
         .iter()
         .filter_map(|query| query.must_include_recall_at_k)
         .collect();
+    let must_exclude_values: Vec<f64> = queries
+        .iter()
+        .filter_map(|query| query.must_exclude_share_at_k)
+        .collect();
     QueryShapeBenchmark {
         query_shape,
         mean_relevant_recall_at_k: queries
@@ -958,6 +1194,8 @@ fn summarize_query_shape(
             / count,
         mean_must_include_recall_at_k: (!must_include_values.is_empty())
             .then(|| must_include_values.iter().sum::<f64>() / must_include_values.len() as f64),
+        mean_must_exclude_share_at_k: (!must_exclude_values.is_empty())
+            .then(|| must_exclude_values.iter().sum::<f64>() / must_exclude_values.len() as f64),
         mean_non_relevant_share_at_k: queries
             .iter()
             .map(|query| query.non_relevant_share_at_k)
@@ -1145,6 +1383,163 @@ mod tests {
     }
 
     #[test]
+    fn score_query_exposes_shortlist_loss_and_explicit_foreign_ids() {
+        let query = BenchmarkQuery {
+            id: "q".into(),
+            query: "cause and recovery".into(),
+            relevant_ids: vec!["cause".into(), "recovery".into()],
+            must_include_ids: vec!["recovery".into()],
+            must_exclude_ids: vec!["foreign".into()],
+            top_k: 2,
+            shortlist_k: 2,
+        };
+        let full_corpus = score_query(
+            &query,
+            vec![
+                RankedId {
+                    id: "recovery".into(),
+                    score: 0.99,
+                },
+                RankedId {
+                    id: "cause".into(),
+                    score: 0.98,
+                },
+                RankedId {
+                    id: "foreign".into(),
+                    score: 0.10,
+                },
+            ],
+        );
+        let bounded_shortlist = score_query(
+            &query,
+            vec![
+                RankedId {
+                    id: "cause".into(),
+                    score: 0.95,
+                },
+                RankedId {
+                    id: "foreign".into(),
+                    score: 0.90,
+                },
+            ],
+        );
+
+        assert_eq!(full_corpus.relevant_recall_at_k, 1.0);
+        assert_eq!(full_corpus.must_include_recall_at_k, Some(1.0));
+        assert_eq!(full_corpus.must_exclude_passed, Some(true));
+        assert_eq!(bounded_shortlist.relevant_recall_at_k, 0.5);
+        assert_eq!(bounded_shortlist.must_include_recall_at_k, Some(0.0));
+        assert_eq!(bounded_shortlist.must_exclude_hits_at_k, 1);
+        assert_eq!(bounded_shortlist.must_exclude_passed, Some(false));
+    }
+
+    #[tokio::test]
+    async fn combined_path_sends_only_the_declared_embedding_shortlist() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/reranking-model"))
+            .and(wiremock::matchers::header("ai-model-id", "rerank-test"))
+            .and(wiremock::matchers::body_json(serde_json::json!({
+                "documents": {
+                    "type": "text",
+                    "values": ["first candidate", "decisive recovery"]
+                },
+                "query": "what proves recovery",
+                "topN": 2
+            })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "ranking": [
+                        {"index": 1, "relevanceScore": 0.9},
+                        {"index": 0, "relevanceScore": 0.2}
+                    ],
+                    "warnings": []
+                })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let gateway = GatewayClient {
+            client: reqwest::Client::new(),
+            base: Url::parse(&format!("{}/", server.uri())).unwrap(),
+            credential: "synthetic-test-credential".into(),
+        };
+        let mut dataset = BenchmarkDataset {
+            name: "combined-shortlist-test".into(),
+            documents: vec![
+                LabDocument {
+                    id: "d1".into(),
+                    text: "first candidate".into(),
+                },
+                LabDocument {
+                    id: "d2".into(),
+                    text: "decisive recovery".into(),
+                },
+                LabDocument {
+                    id: "foreign".into(),
+                    text: "foreign incident".into(),
+                },
+            ],
+            queries: vec![BenchmarkQuery {
+                id: "q1".into(),
+                query: "what proves recovery".into(),
+                relevant_ids: vec!["d2".into()],
+                must_include_ids: vec!["d2".into()],
+                must_exclude_ids: vec!["foreign".into()],
+                top_k: 1,
+                shortlist_k: 2,
+            }],
+        };
+        validate_dataset(&dataset).unwrap();
+        dataset.queries[0].shortlist_k = dataset.documents.len();
+        assert!(
+            validate_dataset(&dataset).is_err(),
+            "a combined shortlist may not alias the full-corpus control"
+        );
+        dataset.queries[0].shortlist_k = 2;
+        let embedding_rankings = vec![vec![
+            RankedId {
+                id: "d1".into(),
+                score: 0.8,
+            },
+            RankedId {
+                id: "d2".into(),
+                score: 0.7,
+            },
+            RankedId {
+                id: "foreign".into(),
+                score: 0.6,
+            },
+        ]];
+
+        let (summary, _, _) = run_combined_query_shape(
+            &gateway,
+            &dataset,
+            "rerank-test",
+            "plain",
+            &embedding_rankings,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            summary.queries[0]
+                .shortlist_ranking
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["d1", "d2"]
+        );
+        assert_eq!(
+            summary.queries[0].final_result.ranking[0].id, "d2",
+            "reranker indices map back through the shortlist, not the corpus"
+        );
+        assert_eq!(
+            summary.queries[0].final_result.must_exclude_passed,
+            Some(true)
+        );
+    }
+
+    #[test]
     fn committed_direct_dataset_is_valid() {
         let dataset: BenchmarkDataset = serde_json::from_str(include_str!(
             "../../../../fixtures/log-lab/scenarios/vercel-retrieval-direct/v1.json"
@@ -1153,6 +1548,11 @@ mod tests {
         validate_dataset(&dataset).unwrap();
         assert_eq!(dataset.queries.len(), 7);
         assert!(dataset.documents.len() >= 40);
+        assert!(dataset.queries.iter().all(|query| {
+            !query.must_exclude_ids.is_empty()
+                && query.shortlist_k >= query.top_k
+                && query.shortlist_k < dataset.documents.len()
+        }));
         let allowed_kinds = HashSet::from([
             "application_error",
             "cause_record",

@@ -111,7 +111,7 @@ candidates. The final manifest had no identity path for ordinary configuration,
 rollback, or observed-recovery rows. Every ledger row was also `Neutral`, so an
 established root-cause boolean was impossible by design.
 
-The current uncommitted refinement adds a separately scoped
+Commit `ca05ea92` adds a separately scoped
 `global_timeline_context` without an extra provider request:
 
 - at most 32 unsuppressed, non-candidate redacted rows;
@@ -175,6 +175,47 @@ not as the retrieval oracle. For each frozen query and answer key:
 Grok judgment never overrides must-include/must-exclude truth or turns a
 plausible answer into a retrieval pass. This loop is specifically intended to
 prevent lexical-overlap and full-corpus rerank false greens.
+
+The first hermetic hardening pass now implements the deterministic half of
+that loop:
+
+- every query in the direct retrieval fixture declares a bounded
+  `shortlistK` and explicit `mustExcludeIds`, including the telemetry-versus-
+  amber-sync and cache-versus-payments incident boundaries;
+- standalone embedding and full-corpus reranker results remain diagnostic
+  controls, while a new combined run sends only the embedding shortlist to the
+  reranker and reports upstream recall, final recall, must-include recall, and
+  foreign-incident leakage separately. Dataset validation requires the
+  shortlist to be smaller than the corpus, and a local mock-gateway test checks
+  the exact two-document request and shortlist-relative index mapping;
+- stable host document ids remain the only identity used to map provider
+  ranking indices back into truth scoring;
+- the hybrid engine now validates exactly one finite score per submitted row
+  at its consumer boundary, independent of adapter behavior. Too few, too many,
+  NaN, or infinite scores produce `rerank_invalid_response`, receive no model
+  credit, and preserve the exact pre-rerank order. The HTTP adapter also
+  rejects duplicate indices, and an empty candidate set makes no call and
+  grants no reranker credit;
+- retrieval status applies the same score-vector contract when classifying a
+  probe response.
+
+Direct Grok ranked response-shape enforcement, shortlist loss, and explicit
+foreign-incident leakage as the leading risks and proposed these same hermetic
+checks. Its suggested numeric recall delta was not adopted as a release
+threshold: thresholds require measured baseline evidence, not evaluator
+preference. A first diff audit then caught an overstated test name and a
+dataset-validation path that still allowed `shortlistK == document_count`;
+both were corrected, and the missing exact-request test was added. Separate
+final Grok audits of the engine and lab diffs reported no actionable findings.
+
+Final hermetic verification for this pass: direct lab 10/10, rerank-focused
+core tests 13/13, full core library 1,827 passed with 0 failed and 5 intentional
+ignores, full workflow library 62/62, strict all-target core/workflow clippy,
+format, and diff checks all pass. No Vercel credential or live retrieval
+endpoint was used. Live combined measurements remain pending a stable
+non-Keychain credential path or an explicitly approved interactive run.
+Query-time cloud embedding/reranking remains inactive; this work does not grant
+content-egress consent.
 
 ## Prompt experiments and current winning request shape
 
@@ -588,28 +629,29 @@ activation, or consent for production cloud egress.
 
 ## Next actions
 
-1. Finish source gates and adversarial review for the uncommitted global
-   timeline-context refinement. Preserve the live acceptance output and do not
-   merge, push, or release it automatically.
-2. Turn the opaque incident into a committed semantic retrieval ablation with
-   must-include lease/configuration/rollback/recovery IDs and must-exclude
-   independent/foreign IDs. Use direct Grok only as the qualitative packet and
-   answer judge after deterministic host scoring.
-3. Do not launch another Keychain-reading development executable. Choose an
+1. Keep the committed global timeline-context refinement and the retrieval
+   hardening pass isolated for owner review. Preserve the live acceptance
+   output and do not merge, push, or release automatically.
+2. Complete full source gates for the combined-shortlist benchmark and strict
+   reranker response validation, then commit the pass locally.
+3. Produce anonymized evidence packets from hermetic/local runs and use direct
+   Grok only as the qualitative packet and answer judge after deterministic
+   host scoring.
+4. Do not launch another Keychain-reading development executable. Choose an
    owner-approved stable direct-request authentication loop, preferably a
    short-lived Vercel OIDC token from a linked development project.
-4. Use that stable loop to confirm the corrected Voyage v4 envelope with a
+5. Use that stable loop to confirm the corrected Voyage v4 envelope with a
    two-document request. Only if it still fails should document count, `topN`,
    and reranker model vary. Compare Cohere Rerank 4 Fast only after the common
    request shape is proven.
-5. Run the direct seven-query synthetic benchmark with
+6. Run the direct seven-query synthetic benchmark with
    `alibaba/qwen3-embedding-0.6b` plus the first proven economical reranker.
    Record model identity, vector dimensions, response indices, scores,
    latency, calls, usage, and bounded quality aggregates without recording
    vectors, request text, credentials, or provider error bodies.
-6. Use those results to select query/document shape and shortlist size, then
+7. Use those results to select query/document shape and shortlist size, then
    run the identical four-mode product ablation on the corrected engine.
-7. Add an explicit query-time content-leaves-machine gate before any remote
+8. Add an explicit query-time content-leaves-machine gate before any remote
    embedding or reranking adapter can be activated outside the isolated lab.
-8. Run focused and full repository gates and hand off the isolated branch for
+9. Run focused and full repository gates and hand off the isolated branch for
    owner review; do not merge or release automatically.

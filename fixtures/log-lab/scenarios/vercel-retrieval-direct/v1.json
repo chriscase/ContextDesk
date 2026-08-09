@@ -186,7 +186,12 @@
         "a-rollback",
         "a-restored-config"
       ],
-      "topK": 10
+      "mustExcludeIds": [
+        "a-telemetry-timeout",
+        "a-telemetry-persists"
+      ],
+      "topK": 10,
+      "shortlistK": 18
     },
     {
       "id": "q-opaque-independent",
@@ -198,7 +203,14 @@
       "mustIncludeIds": [
         "a-telemetry-persists"
       ],
-      "topK": 5
+      "mustExcludeIds": [
+        "a-invalid-boundary",
+        "a-expired-cause",
+        "a-rollback",
+        "a-restored-config"
+      ],
+      "topK": 5,
+      "shortlistK": 10
     },
     {
       "id": "q-semantic-database-gap",
@@ -214,7 +226,12 @@
         "b-pool-exhausted",
         "b-persistence-failed"
       ],
-      "topK": 7
+      "mustExcludeIds": [
+        "b-network-clean",
+        "b-memory-normal"
+      ],
+      "topK": 7,
+      "shortlistK": 14
     },
     {
       "id": "q-multilingual-chain",
@@ -229,7 +246,11 @@
         "c-trigger-de",
         "c-recovery-fr"
       ],
-      "topK": 6
+      "mustExcludeIds": [
+        "c-noise-3"
+      ],
+      "topK": 6,
+      "shortlistK": 12
     },
     {
       "id": "q-concurrent-cache",
@@ -246,7 +267,14 @@
         "d-cache-rollback",
         "d-cache-recovery"
       ],
-      "topK": 7
+      "mustExcludeIds": [
+        "d-payment-cert",
+        "d-payment-symptom",
+        "d-payment-recovery",
+        "d-unrelated-fatal"
+      ],
+      "topK": 7,
+      "shortlistK": 14
     },
     {
       "id": "q-concurrent-payments",
@@ -260,7 +288,15 @@
         "d-payment-cert",
         "d-payment-recovery"
       ],
-      "topK": 5
+      "mustExcludeIds": [
+        "d-cache-deploy",
+        "d-cache-thrash",
+        "d-catalog-latency",
+        "d-cache-rollback",
+        "d-cache-recovery"
+      ],
+      "topK": 5,
+      "shortlistK": 10
     },
     {
       "id": "q-insufficient-fatal",
@@ -271,7 +307,12 @@
       "mustIncludeIds": [
         "d-unrelated-fatal"
       ],
-      "topK": 3
+      "mustExcludeIds": [
+        "d-cache-thrash",
+        "d-payment-cert"
+      ],
+      "topK": 3,
+      "shortlistK": 8
     }
   ]
 }

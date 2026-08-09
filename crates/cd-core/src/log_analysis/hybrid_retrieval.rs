@@ -36,7 +36,8 @@ use crate::embed::EmbedBackend;
 use crate::error::{CoreError, CoreResult};
 use crate::process_progress::CancelFlag;
 use crate::rerank::{
-    rerank_blocking, RerankBackend, RERANK_DEFAULT_TIMEOUT_MS, RERANK_MAX_DOCUMENTS,
+    rerank_blocking, validate_rerank_scores, RerankBackend, RERANK_DEFAULT_TIMEOUT_MS,
+    RERANK_MAX_DOCUMENTS,
 };
 
 use super::query::{search_events_advanced_with_cancel, EventQuery, EventSearchQuery};
@@ -153,7 +154,7 @@ pub struct HybridDegradation {
     /// Stable machine code: `embedding_backend_absent`,
     /// `corpus_not_embedded`, `embedding_model_mismatch`,
     /// `embedding_lane_failed`, `rerank_backend_absent`,
-    /// `rerank_failed_or_timed_out`.
+    /// `rerank_failed_or_timed_out`, `rerank_invalid_response`.
     pub code: String,
     /// Human-readable explanation of what degraded and what still ran.
     pub detail: String,
@@ -594,6 +595,11 @@ pub fn hybrid_search_events(
                 });
             }
         }
+        Some(_) if ordered.is_empty() => {
+            // There is no candidate identity to align with a score. Avoid an
+            // empty provider request and do not credit a reranker for work it
+            // could not contribute.
+        }
         Some(backend) => {
             if cancelled(cancel) {
                 return Err(CoreError::Cancelled);
@@ -619,6 +625,12 @@ pub fn hybrid_search_events(
                         options.rerank_timeout_ms
                     ),
                 }),
+                Some(scores) if validate_rerank_scores(&scores, top.len()).is_err() => {
+                    degradations.push(HybridDegradation {
+                        code: "rerank_invalid_response".into(),
+                        detail: "rerank response did not contain exactly one finite score per submitted document; pre-rerank order kept".into(),
+                    });
+                }
                 Some(scores) => {
                     rerank_ran = true;
                     telemetry.rerank_model = Some(backend.identity());
@@ -721,6 +733,52 @@ mod tests {
         }
         fn identity(&self) -> String {
             "stalling-test".into()
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum InvalidRerankResponse {
+        TooFew,
+        TooMany,
+        NotANumber,
+        Infinite,
+    }
+
+    struct InvalidRerank(InvalidRerankResponse);
+
+    #[async_trait::async_trait]
+    impl RerankBackend for InvalidRerank {
+        async fn rerank(&self, _q: &str, documents: &[String]) -> CoreResult<Vec<f32>> {
+            let mut scores = vec![0.5; documents.len()];
+            match self.0 {
+                InvalidRerankResponse::TooFew => {
+                    scores.pop();
+                }
+                InvalidRerankResponse::TooMany => scores.push(0.4),
+                InvalidRerankResponse::NotANumber => scores[0] = f32::NAN,
+                InvalidRerankResponse::Infinite => scores[0] = f32::INFINITY,
+            }
+            Ok(scores)
+        }
+
+        fn identity(&self) -> String {
+            "invalid-rerank-test".into()
+        }
+    }
+
+    struct CountingRerank {
+        calls: std::sync::atomic::AtomicU64,
+    }
+
+    #[async_trait::async_trait]
+    impl RerankBackend for CountingRerank {
+        async fn rerank(&self, _q: &str, documents: &[String]) -> CoreResult<Vec<f32>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(vec![0.0; documents.len()])
+        }
+
+        fn identity(&self) -> String {
+            "counting-rerank-test".into()
         }
     }
 
@@ -973,6 +1031,80 @@ mod tests {
             degraded.telemetry.rerank_model.is_none(),
             "no model credit on failure"
         );
+    }
+
+    #[test]
+    fn invalid_rerank_shapes_keep_the_exact_pre_rerank_order() {
+        let (cache, corpus_id) = fixture(true);
+        let corpus = LogCorpus::open(cache.path(), &corpus_id).expect("open");
+        let concept = ConceptEmbedBackend::default();
+        let mut opts = options(&["alpha-token"], Some("storage saturation free space"));
+        opts.rerank_top_n = 4;
+        let plain = hybrid_search_events(&corpus, &opts, Some(&concept), None, None)
+            .expect("pre-rerank baseline");
+        let expected_ids = plain
+            .candidates
+            .iter()
+            .map(|candidate| candidate.seq)
+            .collect::<Vec<_>>();
+
+        for invalid in [
+            InvalidRerankResponse::TooFew,
+            InvalidRerankResponse::TooMany,
+            InvalidRerankResponse::NotANumber,
+            InvalidRerankResponse::Infinite,
+        ] {
+            let outcome = hybrid_search_events(
+                &corpus,
+                &opts,
+                Some(&concept),
+                Some(&InvalidRerank(invalid)),
+                None,
+            )
+            .expect("invalid rerank response degrades");
+            assert_eq!(outcome.mode_used, HybridModeUsed::HybridEmbedding);
+            assert_eq!(outcome.telemetry.rerank_calls, Some(1));
+            assert!(outcome.telemetry.rerank_model.is_none());
+            assert!(outcome
+                .degradations
+                .iter()
+                .any(|degradation| degradation.code == "rerank_invalid_response"));
+            assert_eq!(
+                outcome
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate.seq)
+                    .collect::<Vec<_>>(),
+                expected_ids,
+                "an unalignable response must not change candidate order"
+            );
+            assert!(outcome
+                .candidates
+                .iter()
+                .all(|candidate| candidate.rerank_score.is_none()));
+        }
+    }
+
+    #[test]
+    fn empty_candidate_set_never_calls_or_credits_the_reranker() {
+        let (cache, corpus_id) = fixture(false);
+        let corpus = LogCorpus::open(cache.path(), &corpus_id).expect("open");
+        let backend = CountingRerank {
+            calls: std::sync::atomic::AtomicU64::new(0),
+        };
+        let outcome = hybrid_search_events(
+            &corpus,
+            &HybridOptions::default(),
+            None,
+            Some(&backend),
+            None,
+        )
+        .expect("empty retrieval remains usable");
+
+        assert!(outcome.candidates.is_empty());
+        assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(outcome.telemetry.rerank_calls, Some(0));
+        assert!(outcome.telemetry.rerank_model.is_none());
     }
 
     #[test]
