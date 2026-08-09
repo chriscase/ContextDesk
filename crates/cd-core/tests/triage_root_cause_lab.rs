@@ -179,8 +179,8 @@ fn global_timeline_context_preserves_small_corpus_prelude_without_merging_candid
 
 /// Scripted backend for the multi-stage path.
 ///
-/// Candidate rounds stay prose — that stage's contract is candidate-scoped
-/// citation confinement, not V1. The final comparison is a strict
+/// Candidate rounds use the strict candidate-scoped assessment contract. The
+/// final comparison is a strict
 /// `ModelInvestigationAnswerV1` proposal, which is the contract the shipped
 /// comparison prompt now demands, built only from the evidence identities the
 /// host made visible for each candidate. No host-owned field (citations,
@@ -201,14 +201,27 @@ fn scripted_multi_stage_completions(
     );
     let mut completions = candidates
         .iter()
-        .map(|candidate| ChatCompletion {
-            content: format!(
-                "{} is a bounded candidate; observations and causes remain separate.",
-                candidate.group_id
-            ),
-            tool_calls: vec![],
-            finish_reason: "stop".into(),
-            telemetry: Default::default(),
+        .map(|candidate| {
+            let mut evidence_seqs = candidate
+                .evidence
+                .iter()
+                .map(|identity| identity.seq)
+                .collect::<Vec<_>>();
+            evidence_seqs.sort_unstable();
+            evidence_seqs.dedup();
+            ChatCompletion {
+                content: serde_json::json!({
+                    "schema": "contextdesk.candidate_assessment.v1",
+                    "candidate_id": candidate.group_id,
+                    "classification": "supporting_evidence",
+                    "analysis": "bounded candidate; observations and causes remain separate",
+                    "evidence_seqs": evidence_seqs,
+                })
+                .to_string(),
+                tool_calls: vec![],
+                finish_reason: "stop".into(),
+                telemetry: Default::default(),
+            }
         })
         .collect::<Vec<_>>();
     completions.push(ChatCompletion {
