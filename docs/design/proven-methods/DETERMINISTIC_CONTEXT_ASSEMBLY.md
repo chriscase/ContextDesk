@@ -513,6 +513,11 @@ private model inventory in publishable media, or evaluator truth.
 
 - Credentials remain in the trusted host or OS keychain, never the webview or
   model context.
+- The **Local integration** provider path dereferences credentials through a
+  provider-only cache scoped to one admitted turn. Primary and reviewer roles
+  sharing the exact `api_key_ref` reuse that in-memory value; distinct refs are
+  each read once, connector/retrieval/module secret paths do not use the cache,
+  and a later turn starts empty.
 - File roots, database connections, network bases, and connector processes are
   allowlisted and policy checked.
 - Retrieved documents and tool results are prompt-injection-capable untrusted
@@ -612,6 +617,7 @@ assert the sentinel is absent from model-facing messages.
 | Cross-corpus citation identity | **Shipped** | Governed chips retain `(source id, corpus provenance)` and activate the exact citation | Ambiguous bare inline ids fail closed rather than guessing |
 | Model-role guidance         | **Partial** | Versioned name hints are shown with typed basis and confidence; specialty and unknown ids stay selectable | No cross-gateway capability claim |
 | Measured qualification      | **Partial** | Explicit synthetic probes record pass/degraded/fail/untested per profile/endpoint/model/schema (#724) | No quality or permanent reliability claim; real packaged profile proof residual |
+| Provider credential lifetime | **Local integration** | One admitted turn owns an ephemeral provider-only credential cache shared by its primary and reviewer resolution | No process-global retention, no connector/retrieval/module caching, and no claim that macOS authorization dialogs map one-to-one to Rust lookups |
 | Model proposals changing UI | **Partial** | Structured `log_nav` is opt-in                                             | Rich finding proposal/approval lifecycle remains #646                     |
 | Evaluator-truth exclusion   | **Shipped** | Known-truth fixture discipline keeps the answer key outside attached roots | Not a formal noninterference proof                                        |
 

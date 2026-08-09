@@ -1,9 +1,10 @@
 //! Provider profile resolution and turn-input assembly.
 //!
-//! Every function here is pure over `cd_core` types: it takes an
-//! [`cd_core::config::AppConfig`] snapshot and a [`ProviderProfile`] set and
-//! returns a decision, never touching the keychain, a socket, or disk itself.
-//! Extracted from logic that previously lived only inside the Tauri
+//! Profile/model selection and deadline shaping are pure over `cd_core` types.
+//! Turn-input resolvers additionally receive an explicit host-owned
+//! [`SecretStore`]; they never open a socket or disk and never retain provider
+//! credentials beyond the caller-owned turn cache. Extracted from logic that
+//! previously lived only inside the Tauri
 //! `agent_turn` command (`provider_profile_for_turn`,
 //! `model_tools_disabled_reason` / `model_tools_enabled`) — both the Tauri
 //! adapter and the CLI now call these instead of each carrying their own
@@ -14,6 +15,50 @@ use cd_core::keychain_store::SecretStore;
 use cd_core::model_curation::model_selection_key;
 use cd_core::providers::ProviderProfile;
 use cd_core::router::TurnDeadlinePlan;
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+/// Ephemeral provider-credential cache for one admitted turn.
+///
+/// The cache deliberately accepts a [`ProviderProfile`], rather than an
+/// arbitrary secret reference: only that profile's recorded `api_key_ref` can
+/// be cached. Hosts create this after connector/host setup and discard it when
+/// the turn ends, so connector credentials retain their independent lifecycle
+/// and no secret is retained process-wide.
+pub struct TurnProviderCredentialCache<'a> {
+    secrets: &'a dyn SecretStore,
+    values: Mutex<HashMap<String, Option<String>>>,
+}
+
+impl<'a> TurnProviderCredentialCache<'a> {
+    /// Create an empty cache for one admitted chat turn.
+    pub fn new(secrets: &'a dyn SecretStore) -> Self {
+        Self {
+            secrets,
+            values: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Resolve one provider profile's configured credential at most once.
+    ///
+    /// This deliberately preserves the existing fail-closed-to-keyless
+    /// behavior for secret-store failures: callers receive `None`, but a
+    /// repeated primary/reviewer resolution cannot retrigger an interactive
+    /// secret-store request during the same turn.
+    fn api_key_for_provider_profile(&self, profile: &ProviderProfile) -> Option<String> {
+        let reference = profile.api_key_ref.as_deref()?;
+        // A poisoned cache must fail closed without consulting the secret
+        // store again. The turn will surface the same keyless/provider
+        // failure shape as an ordinary secret-store error.
+        let mut values = self.values.lock().ok()?;
+        if let Some(value) = values.get(reference) {
+            return value.clone();
+        }
+        let value = self.secrets.get(reference).ok().flatten();
+        values.insert(reference.to_string(), value.clone());
+        value
+    }
+}
 
 /// Resolve which provider profile a turn should use.
 ///
@@ -97,8 +142,28 @@ pub fn resolve_turn_inputs(
     chat_model_override: Option<&str>,
 ) -> Result<ResolvedTurnInputs, String> {
     let profile = resolve_provider_profile(cfg, explicit_profile_id)?;
-    Ok(resolve_turn_inputs_from_profile(
-        secrets,
+    let api_key = provider_api_key(secrets, &profile);
+    Ok(resolve_turn_inputs_from_profile_with_api_key(
+        cfg,
+        profile,
+        chat_model_override,
+        api_key,
+    ))
+}
+
+/// Resolve primary turn inputs through one turn-scoped provider-only cache.
+///
+/// The same cache must be handed to reviewer resolution for this turn so a
+/// shared primary/reviewer provider reference is read from the OS store once.
+pub fn resolve_turn_inputs_with_credential_cache(
+    credentials: &TurnProviderCredentialCache<'_>,
+    cfg: &AppConfig,
+    explicit_profile_id: Option<&str>,
+    chat_model_override: Option<&str>,
+) -> Result<ResolvedTurnInputs, String> {
+    let profile = resolve_provider_profile(cfg, explicit_profile_id)?;
+    Ok(resolve_turn_inputs_from_profile_with_credential_cache(
+        credentials,
         cfg,
         profile,
         chat_model_override,
@@ -121,8 +186,37 @@ pub fn resolve_turn_inputs(
 pub fn resolve_turn_inputs_from_profile(
     secrets: &dyn SecretStore,
     cfg: &AppConfig,
+    profile: ProviderProfile,
+    chat_model_override: Option<&str>,
+) -> ResolvedTurnInputs {
+    let api_key = provider_api_key(secrets, &profile);
+    resolve_turn_inputs_from_profile_with_api_key(cfg, profile, chat_model_override, api_key)
+}
+
+/// Resolve already-selected provider inputs through one turn-scoped,
+/// provider-only credential cache.
+pub fn resolve_turn_inputs_from_profile_with_credential_cache(
+    credentials: &TurnProviderCredentialCache<'_>,
+    cfg: &AppConfig,
+    profile: ProviderProfile,
+    chat_model_override: Option<&str>,
+) -> ResolvedTurnInputs {
+    let api_key = credentials.api_key_for_provider_profile(&profile);
+    resolve_turn_inputs_from_profile_with_api_key(cfg, profile, chat_model_override, api_key)
+}
+
+fn provider_api_key(secrets: &dyn SecretStore, profile: &ProviderProfile) -> Option<String> {
+    profile
+        .api_key_ref
+        .as_ref()
+        .and_then(|reference| secrets.get(reference).ok().flatten())
+}
+
+fn resolve_turn_inputs_from_profile_with_api_key(
+    cfg: &AppConfig,
     mut profile: ProviderProfile,
     chat_model_override: Option<&str>,
+    api_key: Option<String>,
 ) -> ResolvedTurnInputs {
     if let Some(model) = chat_model_override
         .map(str::trim)
@@ -141,10 +235,6 @@ pub fn resolve_turn_inputs_from_profile(
 
     profile.capabilities.tools = model_tools_enabled(cfg, &profile, &profile.chat_model);
 
-    let api_key = profile
-        .api_key_ref
-        .as_ref()
-        .and_then(|r| secrets.get(r).ok().flatten());
     let deadline_plan = TurnDeadlinePlan::for_profile(&cfg.router, &profile);
 
     ResolvedTurnInputs {

@@ -6,11 +6,16 @@
 //! refused reviewer builds no backend (no network). Opaque identifiers only.
 
 use cd_core::config::{AppConfig, MultiModelBudgetConfig, MultiModelSettings, ReviewerRoleConfig};
-use cd_core::keychain_store::MemorySecretStore;
+use cd_core::error::CoreResult;
+use cd_core::keychain_store::{MemorySecretStore, SecretStore};
 use cd_core::multi_model::{DegradationReason, MultiModelMode};
 use cd_core::providers::{ProviderCapabilities, ProviderConfig, ProviderKind, ProviderProfile};
 use cd_workflow::multi_model::resolve_reviewer_runtime;
-use cd_workflow::provider::{resolve_turn_inputs, ResolvedTurnInputs};
+use cd_workflow::provider::{
+    resolve_turn_inputs_with_credential_cache, TurnProviderCredentialCache,
+};
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 fn local_profile(id: &str) -> ProviderProfile {
     let mut p = ProviderProfile::ollama_local();
@@ -59,10 +64,6 @@ fn config(investigator: ProviderProfile, reviewer: Option<ReviewerRoleConfig>) -
     }
 }
 
-fn investigator_inputs(cfg: &AppConfig, secrets: &MemorySecretStore) -> ResolvedTurnInputs {
-    resolve_turn_inputs(secrets, cfg, None, None).expect("investigator resolves")
-}
-
 fn reviewer(profile_id: &str, allow_remote: bool, require_qualified: bool) -> ReviewerRoleConfig {
     ReviewerRoleConfig {
         profile_id: profile_id.into(),
@@ -74,13 +75,192 @@ fn reviewer(profile_id: &str, allow_remote: bool, require_qualified: bool) -> Re
 
 async fn resolve(
     cfg: &AppConfig,
-    secrets: &MemorySecretStore,
+    secrets: &dyn SecretStore,
     mode: MultiModelMode,
     reviewer_qualified: Option<bool>,
 ) -> (bool, Option<DegradationReason>) {
-    let inv = investigator_inputs(cfg, secrets);
-    let r = resolve_reviewer_runtime(cfg, secrets, mode, &inv, reviewer_qualified, 120_000).await;
+    let credentials = TurnProviderCredentialCache::new(secrets);
+    let inv = resolve_turn_inputs_with_credential_cache(&credentials, cfg, None, None)
+        .expect("investigator resolves");
+    let r =
+        resolve_reviewer_runtime(cfg, &credentials, mode, &inv, reviewer_qualified, 120_000).await;
     (r.runtime.is_some(), r.entry_degradation)
+}
+
+fn credential_config(investigator_ref: Option<&str>, reviewer_ref: Option<&str>) -> AppConfig {
+    // Local profiles keep this proof hermetic. Provider input resolution still
+    // dereferences their configured refs, while backend construction performs
+    // no DNS or remote request.
+    let mut investigator = local_profile("inv-credential");
+    investigator.api_key_ref = investigator_ref.map(str::to_string);
+    let mut reviewer_profile = local_profile("rev-credential");
+    reviewer_profile.api_key_ref = reviewer_ref.map(str::to_string);
+    AppConfig {
+        providers: ProviderConfig {
+            active_id: Some(investigator.id.clone()),
+            profiles: vec![investigator, reviewer_profile],
+        },
+        multi_model: MultiModelSettings {
+            mode: MultiModelMode::Review,
+            reviewer: Some(reviewer("rev-credential", false, false)),
+            budget: MultiModelBudgetConfig::default(),
+        },
+        ..AppConfig::default()
+    }
+}
+
+#[derive(Default)]
+struct CountingSecretStore {
+    values: HashMap<String, String>,
+    reads: Mutex<HashMap<String, usize>>,
+}
+
+impl CountingSecretStore {
+    fn with_values(values: impl IntoIterator<Item = (String, String)>) -> Self {
+        Self {
+            values: values.into_iter().collect(),
+            reads: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn reads_for(&self, reference: &str) -> usize {
+        self.reads
+            .lock()
+            .expect("read counter")
+            .get(reference)
+            .copied()
+            .unwrap_or_default()
+    }
+}
+
+impl SecretStore for CountingSecretStore {
+    fn get(&self, reference: &str) -> CoreResult<Option<String>> {
+        *self
+            .reads
+            .lock()
+            .expect("read counter")
+            .entry(reference.to_string())
+            .or_default() += 1;
+        Ok(self.values.get(reference).cloned())
+    }
+
+    fn set(&self, _reference: &str, _secret: &str) -> CoreResult<()> {
+        unreachable!("turn resolution must not write secrets")
+    }
+
+    fn delete(&self, _reference: &str) -> CoreResult<()> {
+        unreachable!("turn resolution must not delete secrets")
+    }
+}
+
+#[tokio::test]
+async fn a_shared_primary_and_reviewer_provider_ref_is_read_once_per_turn() {
+    let reference = "provider/shared/api_key";
+    let secrets = CountingSecretStore::with_values([(reference.into(), "opaque-secret".into())]);
+    let cfg = credential_config(Some(reference), Some(reference));
+    let credentials = TurnProviderCredentialCache::new(&secrets);
+
+    let investigator = resolve_turn_inputs_with_credential_cache(&credentials, &cfg, None, None)
+        .expect("investigator resolves");
+    assert_eq!(investigator.api_key.as_deref(), Some("opaque-secret"));
+    let review = resolve_reviewer_runtime(
+        &cfg,
+        &credentials,
+        MultiModelMode::Review,
+        &investigator,
+        None,
+        120_000,
+    )
+    .await;
+
+    assert!(review.runtime.is_some(), "reviewer backend should build");
+    assert_eq!(secrets.reads_for(reference), 1);
+}
+
+#[tokio::test]
+async fn distinct_primary_and_reviewer_provider_refs_are_each_read_once() {
+    let investigator_ref = "provider/investigator/api_key";
+    let reviewer_ref = "provider/reviewer/api_key";
+    let secrets = CountingSecretStore::with_values([
+        (investigator_ref.into(), "opaque-investigator".into()),
+        (reviewer_ref.into(), "opaque-reviewer".into()),
+    ]);
+    let cfg = credential_config(Some(investigator_ref), Some(reviewer_ref));
+    let credentials = TurnProviderCredentialCache::new(&secrets);
+
+    let investigator = resolve_turn_inputs_with_credential_cache(&credentials, &cfg, None, None)
+        .expect("investigator resolves");
+    let review = resolve_reviewer_runtime(
+        &cfg,
+        &credentials,
+        MultiModelMode::Review,
+        &investigator,
+        None,
+        120_000,
+    )
+    .await;
+
+    assert!(review.runtime.is_some(), "reviewer backend should build");
+    assert_eq!(secrets.reads_for(investigator_ref), 1);
+    assert_eq!(secrets.reads_for(reviewer_ref), 1);
+}
+
+#[tokio::test]
+async fn provider_resolution_does_not_touch_unrelated_secret_namespaces() {
+    let unrelated = [
+        "connector/confluence/pat",
+        "connector/example/api_key",
+        "retrieval/embedding/api_key",
+        "x/default/api_key",
+        "module/example/secret",
+    ];
+    let secrets = CountingSecretStore::with_values(
+        unrelated
+            .iter()
+            .map(|reference| ((*reference).to_string(), "opaque-secret".to_string())),
+    );
+    let cfg = credential_config(None, None);
+    let credentials = TurnProviderCredentialCache::new(&secrets);
+
+    let investigator = resolve_turn_inputs_with_credential_cache(&credentials, &cfg, None, None)
+        .expect("investigator resolves");
+    let review = resolve_reviewer_runtime(
+        &cfg,
+        &credentials,
+        MultiModelMode::Review,
+        &investigator,
+        None,
+        120_000,
+    )
+    .await;
+
+    assert!(
+        review.runtime.is_some(),
+        "keyless reviewer backend should build"
+    );
+    for reference in unrelated {
+        assert_eq!(
+            secrets.reads_for(reference),
+            0,
+            "unexpected read: {reference}"
+        );
+    }
+}
+
+#[test]
+fn separately_admitted_turns_do_not_share_provider_credentials() {
+    let reference = "provider/repeated/api_key";
+    let secrets = CountingSecretStore::with_values([(reference.into(), "opaque-secret".into())]);
+    let cfg = credential_config(Some(reference), None);
+
+    for _ in 0..2 {
+        let credentials = TurnProviderCredentialCache::new(&secrets);
+        let resolved = resolve_turn_inputs_with_credential_cache(&credentials, &cfg, None, None)
+            .expect("investigator resolves");
+        assert_eq!(resolved.api_key.as_deref(), Some("opaque-secret"));
+    }
+
+    assert_eq!(secrets.reads_for(reference), 2);
 }
 
 #[tokio::test]

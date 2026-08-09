@@ -63,7 +63,9 @@
 //! is the SAME OS keychain access, so a provider configured in the GUI works
 //! immediately from the CLI with no separate credential setup.
 
-use crate::provider::{resolve_turn_inputs, ResolvedTurnInputs};
+use crate::provider::{
+    resolve_turn_inputs_with_credential_cache, ResolvedTurnInputs, TurnProviderCredentialCache,
+};
 use crate::turn::{bind_linked_corpus, run_turn, unbind_linked_corpus, TurnExecutionOptions};
 use cd_core::agent::LogExplorerTurnContext;
 use cd_core::chat::{ChatMessage, Role};
@@ -262,8 +264,12 @@ pub async fn run_chat_workflow(
     live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
     mut decide_permission: impl FnMut(&str, &str, &str, &str, &str) -> PermissionDecision,
 ) -> CoreResult<ChatWorkflowOutcome> {
-    let resolved: ResolvedTurnInputs = resolve_turn_inputs(
-        secrets,
+    // Provider credentials are resolved only for this admitted workflow and
+    // shared with optional reviewer setup. Host/connector initialization
+    // deliberately remains outside this cache.
+    let provider_credentials = TurnProviderCredentialCache::new(secrets);
+    let resolved: ResolvedTurnInputs = resolve_turn_inputs_with_credential_cache(
+        &provider_credentials,
         cfg,
         request.explicit_profile_id,
         request.chat_model_override,
@@ -297,7 +303,7 @@ pub async fn run_chat_workflow(
     };
     let review = crate::multi_model::resolve_reviewer_runtime(
         cfg,
-        secrets,
+        &provider_credentials,
         review_mode,
         &resolved,
         request.reviewer_qualified,
@@ -540,6 +546,7 @@ fn executed_mode_from_events(events: &[StreamEvent]) -> cd_core::multi_model::Ex
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::resolve_turn_inputs;
     use cd_core::index::KeywordIndex;
     use cd_core::keychain_store::MemorySecretStore;
     use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};

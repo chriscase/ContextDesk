@@ -4740,8 +4740,13 @@ async fn agent_turn(
     // The shared workflow resolver owns the exact model override, tools
     // capability, keychain lookup, and deadline sequence used by the CLI.
     // Tauri keeps its host-shaped missing-profile terminal above.
-    let resolved = cd_workflow::provider::resolve_turn_inputs_from_profile(
-        &state.secrets,
+    // Scope provider credentials to this admitted turn and share the cache
+    // with optional reviewer setup. Host connector credentials remain on
+    // their existing independent initialization path.
+    let provider_credentials =
+        cd_workflow::provider::TurnProviderCredentialCache::new(&state.secrets);
+    let resolved = cd_workflow::provider::resolve_turn_inputs_from_profile_with_credential_cache(
+        &provider_credentials,
         &cfg,
         profile,
         req.chat_model.as_deref(),
@@ -4785,7 +4790,7 @@ async fn agent_turn(
         .resolve(Some(resolved.profile.chat_model.as_str()));
     let multi_model_review = cd_workflow::multi_model::resolve_reviewer_runtime(
         &cfg,
-        &state.secrets,
+        &provider_credentials,
         // Review is only meaningful for a corpus-linked investigation turn.
         if req.log_explorer_context.is_some() {
             requested_review_mode

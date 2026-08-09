@@ -16,14 +16,14 @@ use std::sync::Arc;
 
 use cd_core::agent::MultiModelRuntime;
 use cd_core::config::AppConfig;
-use cd_core::keychain_store::SecretStore;
 use cd_core::multi_model::{
     DegradationReason, MultiModelBudget, MultiModelMode, MultiModelRoleIds,
 };
 use cd_core::providers::ProviderProfile;
 
 use crate::provider::{
-    resolve_provider_profile, resolve_turn_inputs_from_profile, ResolvedTurnInputs,
+    resolve_provider_profile, resolve_turn_inputs_from_profile_with_credential_cache,
+    ResolvedTurnInputs, TurnProviderCredentialCache,
 };
 
 /// End-of-resolution outcome. Exactly one of `runtime` / `entry` is set for a
@@ -73,7 +73,7 @@ fn is_remote(profile: &ProviderProfile) -> bool {
 /// name is never a qualification.
 pub async fn resolve_reviewer_runtime(
     cfg: &AppConfig,
-    secrets: &dyn SecretStore,
+    credentials: &TurnProviderCredentialCache<'_>,
     requested_mode: MultiModelMode,
     investigator: &ResolvedTurnInputs,
     reviewer_qualified: Option<bool>,
@@ -108,8 +108,8 @@ pub async fn resolve_reviewer_runtime(
 
     // Resolve the reviewer's model + credential (keychain only) and build its
     // backend. A build failure is an honest provider degradation.
-    let reviewer_inputs = resolve_turn_inputs_from_profile(
-        secrets,
+    let reviewer_inputs = resolve_turn_inputs_from_profile_with_credential_cache(
+        credentials,
         cfg,
         reviewer_profile,
         reviewer_cfg.model.as_deref(),
