@@ -5253,7 +5253,7 @@ mod tests {
         let mut legacy_head = vec![0x93, 0x96, 0xe9];
         legacy_head.extend_from_slice(b"level=info msg=legacy-source-head\n");
         std::fs::write(logs.join("generic-large.jsonl"), &structured).unwrap();
-        std::fs::write(logs.join("nul.log"), nul).unwrap();
+        std::fs::write(logs.join("binary-nul.log"), nul).unwrap();
         std::fs::write(logs.join("invalid.log"), &invalid).unwrap();
         std::fs::write(logs.join("legacy-head.log"), &legacy_head).unwrap();
 
@@ -5262,7 +5262,7 @@ mod tests {
             &archive,
             zip_bytes(&[
                 ("generic-large.jsonl", &structured),
-                ("nul.log", nul),
+                ("binary-nul.log", nul),
                 ("invalid.log", &invalid),
                 ("legacy-head.log", &legacy_head),
             ]),
@@ -5281,7 +5281,7 @@ mod tests {
             assert!(structured_item
                 .reasons
                 .contains(&ImportPreviewReason::StrongFormatMatch));
-            for identity in ["nul.log", "invalid.log"] {
+            for identity in ["binary-nul.log", "invalid.log"] {
                 let item = preview
                     .items
                     .iter()
