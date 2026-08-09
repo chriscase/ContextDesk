@@ -1,0 +1,41 @@
+{
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "qe08-retrieval-ranking",
+  "title": "Retrieval ranking specialty with upstream versus final lists",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "What configuration change caused customer jobs to be rejected, and which records show recovery?",
+      "relevant_ids": ["r-trigger", "r-prop", "r-symptom", "r-recover"],
+      "graded_gains": {
+        "r-trigger": 3,
+        "r-prop": 2,
+        "r-symptom": 1,
+        "r-recover": 3
+      },
+      "must_include_ids": ["r-trigger", "r-recover"],
+      "must_exclude_ids": ["r-foreign"],
+      "foreign_incident_ids": ["r-foreign"],
+      "top_k": 5
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": true,
+      "required_fact_tokens": ["upper bound", "queue"],
+      "trigger_tokens": ["invalid upper bound", "configuration change"],
+      "symptom_tokens": ["customer jobs were rejected"],
+      "recovery_tokens": ["previous limit restored", "restored"],
+      "independent_incident_tokens": [],
+      "required_evidence_ids": ["r-trigger"],
+      "forbidden_evidence_ids": ["r-foreign", "r-noise1"],
+      "requires_abstention": false,
+      "forbidden_conclusion_tokens": []
+    }
+  ],
+  "incidents": {
+    "queue-bound": ["r-trigger", "r-prop", "r-symptom", "r-recover"],
+    "mail-foreign": ["r-foreign"]
+  }
+}

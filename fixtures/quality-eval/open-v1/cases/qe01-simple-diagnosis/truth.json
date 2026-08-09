@@ -1,0 +1,39 @@
+{
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "qe01-simple-diagnosis",
+  "title": "Straightforward single-incident diagnosis",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "What configuration problem initiated the amber-sync failures?",
+      "relevant_ids": ["doc-cfg", "doc-worker", "doc-api"],
+      "graded_gains": {
+        "doc-cfg": 3,
+        "doc-worker": 2,
+        "doc-api": 1
+      },
+      "must_include_ids": ["doc-cfg"],
+      "must_exclude_ids": [],
+      "foreign_incident_ids": [],
+      "top_k": 4
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": true,
+      "required_fact_tokens": ["lease", "boundary", "250"],
+      "trigger_tokens": ["BoundaryInvariant", "lease window"],
+      "symptom_tokens": ["RequestAborted", "amber-sync"],
+      "recovery_tokens": [],
+      "independent_incident_tokens": [],
+      "required_evidence_ids": ["doc-cfg"],
+      "forbidden_evidence_ids": ["doc-noise"],
+      "requires_abstention": false,
+      "forbidden_conclusion_tokens": ["validation bypass"]
+    }
+  ],
+  "incidents": {
+    "amber-sync": ["doc-cfg", "doc-worker", "doc-api"]
+  }
+}

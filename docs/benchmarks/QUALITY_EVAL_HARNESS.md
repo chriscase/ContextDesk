@@ -1,212 +1,170 @@
-# Quality evaluation harness
+# Quality-evaluation harness (hermetic milestone)
 
-**Status:** Accepted design. Compatibility qualification is implemented on the
-current integration branch; the quality harness described here is planned and
-must not be presented as shipped behavior.
+Status: **local integration** on branch `feat/quality-eval-harness-v1` (issue #867).
+This document describes the **cage** for measuring model/retrieval usefulness.
+It does **not** claim any live model is useful or verified.
 
-## Purpose
+## Evidence boundaries
 
-ContextDesk needs to answer two different questions without conflating them:
-
-1. Can an exact gateway/model combination satisfy the wire and behavior
-   contracts for a role?
-2. Does a model and product pipeline produce useful, grounded answers on a
-   frozen task suite?
-
-Capability qualification answers the first question. This harness will answer
-the second. Quality evidence never changes a compatibility result and never
-creates a universal model badge.
-
-## Evidence classes
-
-| Class | Proves | Does not prove |
+| Evidence class | What it is | Written by this harness? |
 | --- | --- | --- |
-| Compatibility | Synthetic contracts for an exact profile, endpoint, model, role, and probe schema | Answer quality, cost value, attachments, or unrelated modes |
-| Retrieval quality | Whether a frozen query ranks and includes the correct evidence identities | Whether a chat model can synthesize a useful answer |
-| Answer quality | Whether a model is grounded, useful, honest, and actionable given a frozen packet or product path | General quality outside the frozen task unit |
-| Live optional | The same named measures against a real provider after explicit consent | A default-test or permanent guarantee |
+| **Compatibility** | Synthetic probe readiness (`capability_qualification`) | **Never** |
+| **Retrieval quality** | Recall@k, MRR, nDCG, must-include/exclude, leakage | Yes (deterministic) |
+| **Answer quality** | Schema, citations, facts, abstention, role separation | Yes (deterministic) |
+| **Orchestration quality** | Multi-model / policy outcomes | Schema-ready only (`none` fingerprint) |
+| **Live optional** | Real gateway experiments | Defaults to `not_scheduled` |
 
-## Role and mode boundaries
+Quality results must never alter model compatibility/readiness stores.
 
-Quality is scoped at least to these separate modes:
+## Quality-unit identity
 
-- `chat.triage_investigation`
-- `chat.ordinary`
-- `chat.with_text_attachments`
-- `embedding`
-- `reranking`
-- future multimodal modes, unavailable until their own contracts exist
+A quality unit is the full subject of a score. Results do not transfer across units.
 
-The current chat compatibility suite measures triage/investigation contracts:
-basic generation, native tool calling, tool-result continuation, and structured
-output. It does not qualify ordinary chat or attachments.
+Fields (see `QualityUnit` in `cd_core::quality_eval::types`):
 
-## Quality unit identity
+- build/commit identity
+- gateway profile id + endpoint fingerprint + exact model id
+- task mode
+- prompt-set hash
+- answer-schema version
+- suite id + suite content digest
+- retrieval mode label
+- sampling configuration
+- orchestration-policy fingerprint
+- quality-eval schema version
 
-A result belongs to an immutable quality unit. The unit includes:
+**Same model id on two gateways = two subjects.** Storage ids include the gateway profile id.
 
-- build or commit identity;
-- provider profile kind and endpoint fingerprint;
-- exact model id;
-- sampling parameters or provider snapshot when available;
-- prompt-set hash and answer-schema version;
-- corpus-suite id and digest;
-- retrieval mode;
-- orchestration-policy identity; and
-- quality-evaluation schema version.
+## Lanes
 
-### Multiple gateways
-
-Each saved gateway remains a separate provider profile. Model names do not join
-evidence across endpoints. Protocol and authentication differences belong
-behind adapters, including Vercel v4, OpenAI-compatible, Ollama, Anthropic, and
-Grok session authentication.
-
-Cross-gateway routing or comparison must make privacy, egress, retention, cost,
-and credential behavior explicit. ContextDesk must not silently fall back from
-one gateway to another.
-
-### Multiple models in one role
-
-The default orchestration policy is one gateway/model pair. Future policies may
-use:
-
-- an ordered fallback list;
-- parallel peer candidates in the same role;
-- candidate plus reviewer;
-- candidate, reviewer, and synthesizer; or
-- a bounded ensemble with a typed aggregation contract.
-
-Every member retains its own compatibility evidence. The orchestration policy
-gets separate quality evidence keyed by the exact ordered members, their stage
-assignments, prompts, strategy, and gateway identities. One verified member
-cannot verify a group, and a group result cannot transfer to a different
-membership or ordering.
-
-The daily GUI should remain single-model by default. Advanced review or
-ensemble policies should be named configurations rather than a visible matrix
-of every gateway, model, role, and stage.
-
-## Frozen evaluation lanes
-
-Retrieval and generation must be independently diagnosable.
-
-| Lane | Input | Measures |
+| Lane | Hermetic form | Later live attachment |
 | --- | --- | --- |
-| No retrieval | Question only | Prior knowledge and hallucination baseline |
-| Lexical | Frozen query through keyword retrieval | Retrieval metrics only |
-| Embedding | Same documents and query through an embedding backend | Semantic recall and leakage |
-| Embedding then rerank | Bounded shortlist, then reranker | Upstream versus final recall and shortlist loss |
-| Product hybrid | Production retrieval path | End-to-end retrieval plus honest degradation |
-| Fixed packet | Identical evidence packet for every model | Generation quality independent of retrieval |
-| Oracle packet | Host-curated decisive rows | Whether the model can solve the task when evidence is present |
-| Product end-to-end | Production triage or review pipeline | Product handoff plus model behavior |
+| `fixed_packet` | Same frozen evidence for every candidate | Live model completes on that packet |
+| `oracle_packet` | Host-curated decisive rows | Upper bound for “can the model solve with evidence?” |
+| `product_path_fixture` | Frozen retrieval shortlist through answer scoring | Product handoff vs answer defects |
+| `lexical_retrieval` / `embedding_*` / `product_hybrid` | Schema reserved | Live runners add rankings only |
 
-Comparing the oracle/fixed-packet lanes with product end-to-end is mandatory
-before concluding that a cheap model is inadequate. A model may be capable
-while the product omits decisive chronology or evidence.
+Unrun lanes use `not_scheduled` / `blocked` / `cancelled` / `failed` — never silent pass.
 
-## Host-authoritative measures
+## Deterministic authority order
 
-Retrieval records should include:
+1. Host-only truth (`truth.json`) — never imported into runtime.
+2. Deterministic retrieval metrics and answer dimensions.
+3. Optional judge metadata — **advisory only**; cannot override deterministic failures (`JUDGE_OVERRIDE_REJECTED`).
 
-- recall at bounded `k` values;
-- must-include and must-exclude identities;
-- foreign-incident leakage;
-- rare-trigger and recovery recall;
-- upstream and final recall for reranking;
-- invalid-score degradation behavior;
-- latency, calls, and available usage; and
-- vector model, dimension, corpus, and query-shape identity.
+Prose style / subjective usefulness is not a deterministic pass/fail in this milestone.
 
-Answer records should include:
+## Fixture layout
 
-- typed schema validity;
-- cause versus symptom separation;
-- correct abstention when evidence is insufficient;
-- recovery versus trigger separation;
-- independent-error isolation;
-- citation identity validity;
-- injection resistance;
-- actionability and readability; and
-- latency and available usage.
+```text
+fixtures/quality-eval/open-v1/
+  suite.json
+  cases/<case-id>/
+    runtime.json   # model-visible documents, packets, rankings, scripted candidates
+    truth.json     # host-only relevance, roles, required/forbidden ids
+```
 
-Do not embed evaluator roles such as `initiating_evidence` in model-visible
-document text. Structural labels remain neutral; truth roles remain host-side.
+Isolation rules:
 
-## Strong reference models
+- Evaluator tokens (`must_include`, `root cause`, `decoy:`, …) must not appear in
+  document text, questions, or candidate prose.
+- Schema field names are not searchable document content.
+- No employer data, credentials, private endpoints, usernames, or absolute paths.
 
-Grok or another strong model may be a secondary judge, never the authority.
-The authority order is:
+## Retrieval metrics
 
-1. host truth keys and identity checks;
-2. deterministic structural scores;
-3. typed validation;
-4. calibrated human review; and
-5. optional blinded model judgment.
+Implemented in `cd_core::quality_eval::metrics`:
 
-Pairwise judging must hide provider/model names and arm labels, swap answer
-positions, and discard inconsistent judgments. A judge cannot override a
-must-include, must-exclude, schema, citation, or security failure. Judge-derived
-dimensions should not set release thresholds until calibrated against human
-review.
+- Recall@K
+- MRR
+- nDCG@K (graded gains; default gain 1)
+- must-include recall
+- must-exclude rate
+- foreign-incident hit count
+- upstream vs final recall when both lists exist
 
-## Product surface
+Invalid rankings (empty when required structure fails, duplicate ids, unknown ids)
+**fail closed** with typed reasons — no manufactured credit.
 
-The simple flow remains:
+## Optional blinded Grok / reference judging
 
-`Discover → Verify → Choose`
+Not scheduled in this milestone. Records always include:
 
-An optional advanced step may later add:
+```json
+"judge": { "status": "not_scheduled", "note": "optional_judge_not_scheduled_in_hermetic_milestone" }
+```
 
-`Evaluate`
+Future policy (non-binding design):
 
-Evaluate must show its synthetic suite, role, models or orchestration policy,
-retrieval mode, expected spend, progress, cancellation, and exact evidence
-identity. It must not silently change defaults or compatibility status.
+1. Host scores first.
+2. Anonymize packets / answers.
+3. Pairwise position-swap; inconsistent pairs discarded.
+4. Judge never sees truth manifests for auto-scored dimensions.
+5. Deterministic failures always win.
 
-The CLI should keep compatibility under `contextdesk models`. A future
-`contextdesk eval` command family may list suites, evaluate retrieval, compare
-answers on a fixed packet, run an optional judge, and render a report. Offline
-status must remain credential-free; live work requires explicit confirmation,
-single-operation credential reuse, pacing, cancellation, and incremental saves.
+## Attaching later live experiments
 
-## Implementation sequence
+Live DeepSeek / Grok / Vercel / embedding / rerank runners should:
 
-1. Add a small OPEN synthetic suite with runtime/truth isolation scanners.
-2. Add immutable quality-unit and run-record schemas in `cd-core`.
-3. Add a fixed-packet answer runner and deterministic structural scoring.
-4. Join existing retrieval-ablation metrics into the run record.
-5. Add hermetic no-retrieval, lexical, embedding, and shortlist-rerank lanes.
-6. Add a thin CLI over shared `cd-workflow` orchestration.
-7. Add optional live multi-model comparison with cost/latency recording.
-8. Add blinded strong-reference judging only after deterministic scoring.
-9. Add product end-to-end single/review lanes with evidence-handoff metrics.
-10. Add a collapsed Advanced GUI only after the CLI and schemas stabilize.
+1. Produce `RetrievalRanking` and/or `CandidateAnswer` records with the same schemas.
+2. Bind a full `QualityUnit` (including real endpoint fingerprint and model id).
+3. Call `score_retrieval` / `score_answer` without changing historical suite digests.
+4. Mark live lanes `executed` only when they ran; leave hermetic-only lanes as-is.
+5. Never write `model-qualifications.json` or readiness badges from quality scores.
 
-Default tests remain network-free. Live lanes are opt-in, synthetic-only, and
-honestly report `not_scheduled`, `blocked`, `cancelled`, or `executed` rather
-than treating an unrun cell as green.
+## Security and privacy
 
-## Non-negotiable safeguards
+- Default tests: zero network, Keychain, Grok session, or external model calls.
+- Export gate rejects `sk-`, `Bearer `, home paths, etc.
+- Lab refuses overwrite without `--force`.
+- Lab stdout/stderr never prints absolute suite paths in success summaries when writing
+  (basename only for `--output`).
 
-- Remote embedding and reranking need query-time content-egress consent.
-- Private logs and company data are not quality-suite inputs.
-- Full-corpus reranking is diagnostic, not the product activation path.
-- Invalid score vectors receive no credit and preserve the pre-rerank order.
-- Query-shape prefixes are part of vector-space identity and are compared, not
-  silently selected by best result.
-- Evaluator truth never enters runtime input, model prompts, searchable text,
-  or exported chat transcripts.
-- Prompt injection, secret echo, false citation, and judge override of host
-  truth are hard failures.
-- Numeric quality thresholds come from measured baselines, not preference.
-- Compatibility, retrieval, answer, and orchestration evidence expire
-  independently when any identity component changes.
+## Non-goals
 
-## First implementation milestone
+- General provider framework / plugin registry
+- Production router or automatic “best model” selection
+- Ensemble consensus engine
+- Claiming live model usefulness
+- Replacing retrieval-ablation or capability qualification
 
-The smallest valuable increment is entirely hermetic: schemas, six to eight
-OPEN cases, fixed-packet structural scoring, and combined retrieval metrics.
-Live gateway spend should resume only after that cage can distinguish model
-quality from retrieval and product-handoff defects.
+## Commands
+
+From the repository root (or any cwd that can walk to `fixtures/quality-eval/open-v1`):
+
+```bash
+# Validate fixture isolation + digest
+cargo run -p cd-core --bin cd-quality-eval-lab -- validate
+
+# Hermetic run → JSON on stdout
+cargo run -p cd-core --bin cd-quality-eval-lab -- run
+
+# Explicit suite path + write (no overwrite without --force)
+cargo run -p cd-core --bin cd-quality-eval-lab -- run \
+  --suite fixtures/quality-eval/open-v1 \
+  --format json \
+  --output /tmp/quality-eval-report.json
+
+# Focused tests
+cargo test -p cd-core --lib quality_eval
+cargo test -p cd-core --test quality_eval_lab
+```
+
+Environment:
+
+- `CONTEXTDESK_QUALITY_EVAL_SUITE` — override suite directory
+- `CD_GIT_SHA` — optional build identity for the quality unit
+
+## Implementation map
+
+| Concern | Location |
+| --- | --- |
+| Types / schemas | `crates/cd-core/src/quality_eval/types.rs` |
+| Retrieval metrics | `…/metrics.rs` |
+| Answer scoring | `…/answer_score.rs` |
+| Suite load / isolation | `…/suite.rs` |
+| Hermetic runner | `…/run.rs` |
+| Export | `…/export.rs` |
+| Lab binary | `crates/cd-core/src/bin/cd-quality-eval-lab.rs` |
+| Integration tests | `crates/cd-core/tests/quality_eval_lab.rs` |
+| OPEN fixtures | `fixtures/quality-eval/open-v1/` |

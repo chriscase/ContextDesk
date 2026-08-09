@@ -1,0 +1,97 @@
+{
+  "schema_id": "contextdesk.quality_eval.runtime.v1",
+  "case_id": "qe06-insufficient-evidence",
+  "documents": [
+    {
+      "id": "s1",
+      "text": "kind=application_error level=error service=gateway pattern=request deadline exceeded for path checkout"
+    },
+    {
+      "id": "s2",
+      "text": "kind=application_error level=error service=gateway pattern=request deadline exceeded for path checkout"
+    },
+    {
+      "id": "s3",
+      "text": "kind=status_event level=info service=gateway pattern=health probe status ok"
+    }
+  ],
+  "questions": {
+    "q1": "What is the initiating configuration fault for the checkout timeouts?"
+  },
+  "packets": [
+    {
+      "packet_id": "fixed",
+      "documents": [
+        {
+          "id": "s1",
+          "text": "kind=application_error level=error service=gateway pattern=request deadline exceeded for path checkout"
+        },
+        {
+          "id": "s2",
+          "text": "kind=application_error level=error service=gateway pattern=request deadline exceeded for path checkout"
+        }
+      ]
+    },
+    {
+      "packet_id": "oracle",
+      "documents": [
+        {
+          "id": "s1",
+          "text": "kind=application_error level=error service=gateway pattern=request deadline exceeded for path checkout"
+        }
+      ]
+    },
+    {
+      "packet_id": "product_path",
+      "documents": [
+        {
+          "id": "s1",
+          "text": "kind=application_error level=error service=gateway pattern=request deadline exceeded for path checkout"
+        },
+        {
+          "id": "s3",
+          "text": "kind=status_event level=info service=gateway pattern=health probe status ok"
+        }
+      ]
+    }
+  ],
+  "rankings": [
+    {
+      "query_id": "q1",
+      "ranked_ids": ["s1", "s2", "s3"],
+      "k": 3
+    }
+  ],
+  "candidates": [
+    {
+      "candidate_id": "good_fixed",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": false,
+      "claims": [
+        {
+          "text": "request deadline exceeded for path checkout",
+          "evidence_ids": ["s1"],
+          "role": "symptom"
+        }
+      ],
+      "conclusion": "Only downstream timeout symptoms are present. The initiating configuration is not established from these records.",
+      "confidence": "low"
+    },
+    {
+      "candidate_id": "mut_unsupported_certainty",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "request deadline exceeded for path checkout",
+          "evidence_ids": ["s1"],
+          "role": "trigger"
+        }
+      ],
+      "conclusion": "Checkout timeouts prove a database pool misconfiguration with certainty.",
+      "confidence": "high"
+    }
+  ]
+}

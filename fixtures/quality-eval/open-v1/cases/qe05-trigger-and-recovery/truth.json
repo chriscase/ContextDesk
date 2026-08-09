@@ -1,0 +1,41 @@
+{
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "qe05-trigger-and-recovery",
+  "title": "Trigger and later recovery must stay distinct",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "What started the outage and what evidence shows correction?",
+      "relevant_ids": ["t-bad", "t-fail", "t-restore", "t-ok", "t-rollback"],
+      "graded_gains": {
+        "t-bad": 3,
+        "t-fail": 2,
+        "t-restore": 3,
+        "t-ok": 2,
+        "t-rollback": 2
+      },
+      "must_include_ids": ["t-bad", "t-restore"],
+      "must_exclude_ids": [],
+      "foreign_incident_ids": [],
+      "top_k": 6
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": true,
+      "required_fact_tokens": ["250", "lease"],
+      "trigger_tokens": ["lease window 250", "250"],
+      "symptom_tokens": ["LeaseWindowExpired"],
+      "recovery_tokens": ["restored", "recovered", "4000"],
+      "independent_incident_tokens": [],
+      "required_evidence_ids": ["t-bad"],
+      "forbidden_evidence_ids": [],
+      "requires_abstention": false,
+      "forbidden_conclusion_tokens": []
+    }
+  ],
+  "incidents": {
+    "lease-window": ["t-change", "t-bad", "t-fail", "t-rollback", "t-restore", "t-ok"]
+  }
+}

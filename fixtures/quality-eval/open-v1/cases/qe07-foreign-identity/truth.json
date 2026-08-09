@@ -1,0 +1,38 @@
+{
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "qe07-foreign-identity",
+  "title": "Fabricated or foreign evidence identity rejection",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "Why did token minting fail?",
+      "relevant_ids": ["real-1", "real-2"],
+      "graded_gains": {
+        "real-1": 3,
+        "real-2": 2
+      },
+      "must_include_ids": ["real-1"],
+      "must_exclude_ids": [],
+      "foreign_incident_ids": [],
+      "top_k": 2
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": true,
+      "required_fact_tokens": ["signing", "key", "rotation"],
+      "trigger_tokens": ["signing key rotation", "rejected"],
+      "symptom_tokens": ["token mint failed"],
+      "recovery_tokens": [],
+      "independent_incident_tokens": [],
+      "required_evidence_ids": ["real-1"],
+      "forbidden_evidence_ids": [],
+      "requires_abstention": false,
+      "forbidden_conclusion_tokens": []
+    }
+  ],
+  "incidents": {
+    "auth-signing": ["real-1", "real-2"]
+  }
+}

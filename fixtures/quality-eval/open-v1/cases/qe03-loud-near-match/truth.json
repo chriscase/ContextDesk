@@ -1,0 +1,39 @@
+{
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "qe03-loud-near-match",
+  "title": "Near-match rejection for concurrent unrelated errors",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "What caused payment authorization failures?",
+      "relevant_ids": ["pay-cert", "pay-symptom"],
+      "graded_gains": {
+        "pay-cert": 3,
+        "pay-symptom": 2
+      },
+      "must_include_ids": ["pay-cert"],
+      "must_exclude_ids": ["cache-thrash", "cache-latency"],
+      "foreign_incident_ids": ["cache-thrash", "cache-latency"],
+      "top_k": 4
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": true,
+      "required_fact_tokens": ["TLS", "certificate", "expired"],
+      "trigger_tokens": ["certificate expired", "TLS"],
+      "symptom_tokens": ["payment authorization unavailable"],
+      "recovery_tokens": [],
+      "independent_incident_tokens": ["eviction churn", "cache"],
+      "required_evidence_ids": ["pay-cert"],
+      "forbidden_evidence_ids": ["cache-thrash", "cache-latency"],
+      "requires_abstention": false,
+      "forbidden_conclusion_tokens": []
+    }
+  ],
+  "incidents": {
+    "payments": ["pay-cert", "pay-symptom"],
+    "catalog-cache": ["cache-thrash", "cache-latency"]
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "qe06-insufficient-evidence",
+  "title": "Insufficient evidence requires abstention",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "What is the initiating configuration fault for the checkout timeouts?",
+      "relevant_ids": ["s1", "s2"],
+      "graded_gains": {
+        "s1": 1,
+        "s2": 1
+      },
+      "must_include_ids": [],
+      "must_exclude_ids": [],
+      "foreign_incident_ids": [],
+      "top_k": 3
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": false,
+      "required_fact_tokens": [],
+      "trigger_tokens": [],
+      "symptom_tokens": ["deadline exceeded", "checkout"],
+      "recovery_tokens": [],
+      "independent_incident_tokens": [],
+      "required_evidence_ids": [],
+      "forbidden_evidence_ids": [],
+      "requires_abstention": true,
+      "forbidden_conclusion_tokens": ["database pool misconfiguration"]
+    }
+  ],
+  "incidents": {
+    "checkout-timeouts": ["s1", "s2"]
+  }
+}

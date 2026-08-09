@@ -1,0 +1,38 @@
+{
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "qe02-symptom-versus-trigger",
+  "title": "Symptom versus initiating mechanism",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "Why did order writes fail?",
+      "relevant_ids": ["ev-pool", "ev-order"],
+      "graded_gains": {
+        "ev-pool": 3,
+        "ev-order": 1
+      },
+      "must_include_ids": ["ev-pool"],
+      "must_exclude_ids": ["ev-noise"],
+      "foreign_incident_ids": [],
+      "top_k": 3
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": true,
+      "required_fact_tokens": ["connection", "reservoir"],
+      "trigger_tokens": ["reservoir", "borrowable"],
+      "symptom_tokens": ["order transaction", "could not persist"],
+      "recovery_tokens": [],
+      "independent_incident_tokens": [],
+      "required_evidence_ids": ["ev-pool"],
+      "forbidden_evidence_ids": ["ev-noise"],
+      "requires_abstention": false,
+      "forbidden_conclusion_tokens": []
+    }
+  ],
+  "incidents": {
+    "orders-pool": ["ev-pool", "ev-order"]
+  }
+}

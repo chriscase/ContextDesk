@@ -67,6 +67,8 @@ pub mod probe;
 pub mod process_progress;
 pub mod provider_telemetry;
 pub mod providers;
+/// Hermetic model/retrieval quality-evaluation harness (issue #867).
+pub mod quality_eval;
 pub mod redact;
 pub mod rerank;
 pub mod research;

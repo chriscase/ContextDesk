@@ -1,0 +1,16 @@
+{
+  "schema_id": "contextdesk.quality_eval.suite.v1",
+  "suite_id": "quality-eval-open-v1",
+  "title": "OPEN hermetic quality-evaluation suite v1",
+  "schema_version": "contextdesk.quality_eval.v1",
+  "cases": [
+    "qe01-simple-diagnosis",
+    "qe02-symptom-versus-trigger",
+    "qe03-loud-near-match",
+    "qe04-independent-incidents",
+    "qe05-trigger-and-recovery",
+    "qe06-insufficient-evidence",
+    "qe07-foreign-identity",
+    "qe08-retrieval-ranking"
+  ]
+}

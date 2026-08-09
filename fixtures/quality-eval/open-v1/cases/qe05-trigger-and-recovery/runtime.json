@@ -1,0 +1,131 @@
+{
+  "schema_id": "contextdesk.quality_eval.runtime.v1",
+  "case_id": "qe05-trigger-and-recovery",
+  "documents": [
+    {
+      "id": "t-change",
+      "text": "kind=deployment_event level=info service=control pattern=deployment revision r17 started"
+    },
+    {
+      "id": "t-bad",
+      "text": "kind=config_error level=error service=control pattern=lease window 250 below supported minimum 1000"
+    },
+    {
+      "id": "t-fail",
+      "text": "kind=exception_header level=error service=worker pattern=LeaseWindowExpired during acquisition"
+    },
+    {
+      "id": "t-rollback",
+      "text": "kind=deployment_event level=warn service=control pattern=rollback revision r17 requested"
+    },
+    {
+      "id": "t-restore",
+      "text": "kind=config_event level=info service=control pattern=restored revision r16 lease window 4000"
+    },
+    {
+      "id": "t-ok",
+      "text": "kind=status_event level=info service=worker pattern=lease acquisition recovered shard amber"
+    }
+  ],
+  "questions": {
+    "q1": "What started the outage and what evidence shows correction?"
+  },
+  "packets": [
+    {
+      "packet_id": "fixed",
+      "documents": [
+        {
+          "id": "t-bad",
+          "text": "kind=config_error level=error service=control pattern=lease window 250 below supported minimum 1000"
+        },
+        {
+          "id": "t-fail",
+          "text": "kind=exception_header level=error service=worker pattern=LeaseWindowExpired during acquisition"
+        },
+        {
+          "id": "t-restore",
+          "text": "kind=config_event level=info service=control pattern=restored revision r16 lease window 4000"
+        },
+        {
+          "id": "t-ok",
+          "text": "kind=status_event level=info service=worker pattern=lease acquisition recovered shard amber"
+        }
+      ]
+    },
+    {
+      "packet_id": "oracle",
+      "documents": [
+        {
+          "id": "t-bad",
+          "text": "kind=config_error level=error service=control pattern=lease window 250 below supported minimum 1000"
+        },
+        {
+          "id": "t-restore",
+          "text": "kind=config_event level=info service=control pattern=restored revision r16 lease window 4000"
+        }
+      ]
+    },
+    {
+      "packet_id": "product_path",
+      "documents": [
+        {
+          "id": "t-fail",
+          "text": "kind=exception_header level=error service=worker pattern=LeaseWindowExpired during acquisition"
+        },
+        {
+          "id": "t-ok",
+          "text": "kind=status_event level=info service=worker pattern=lease acquisition recovered shard amber"
+        }
+      ]
+    }
+  ],
+  "rankings": [
+    {
+      "query_id": "q1",
+      "ranked_ids": ["t-bad", "t-fail", "t-restore", "t-ok", "t-change", "t-rollback"],
+      "k": 6
+    }
+  ],
+  "candidates": [
+    {
+      "candidate_id": "good_fixed",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "lease window 250 below supported minimum 1000",
+          "evidence_ids": ["t-bad"],
+          "role": "trigger"
+        },
+        {
+          "text": "restored revision r16 lease window 4000",
+          "evidence_ids": ["t-restore"],
+          "role": "recovery"
+        },
+        {
+          "text": "lease acquisition recovered shard amber",
+          "evidence_ids": ["t-ok"],
+          "role": "recovery"
+        }
+      ],
+      "conclusion": "Invalid 250ms lease window initiated failures; restoring r16 with 4000ms recovered acquisition.",
+      "confidence": "medium"
+    },
+    {
+      "candidate_id": "mut_recovery_as_cause",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "lease acquisition recovered shard amber",
+          "evidence_ids": ["t-ok"],
+          "role": "trigger"
+        }
+      ],
+      "conclusion": "Recovery of lease acquisition is the initiating configuration fault.",
+      "confidence": "high"
+    }
+  ]
+}

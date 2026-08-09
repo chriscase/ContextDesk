@@ -1,0 +1,41 @@
+{
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "qe04-independent-incidents",
+  "title": "Two independent incidents must not be merged",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "Explain the amber-sync outage and any separate ongoing failures.",
+      "relevant_ids": ["a-lease", "a-abort", "b-tele", "b-tele2"],
+      "graded_gains": {
+        "a-lease": 3,
+        "a-abort": 2,
+        "b-tele": 2,
+        "b-tele2": 3
+      },
+      "must_include_ids": ["a-lease", "b-tele2"],
+      "must_exclude_ids": [],
+      "foreign_incident_ids": [],
+      "top_k": 4
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": true,
+      "required_fact_tokens": ["lease", "250"],
+      "trigger_tokens": ["lease window", "250"],
+      "symptom_tokens": ["amber-sync aborted"],
+      "recovery_tokens": [],
+      "independent_incident_tokens": ["TelemetrySinkTimeout"],
+      "required_evidence_ids": ["a-lease"],
+      "forbidden_evidence_ids": [],
+      "requires_abstention": false,
+      "forbidden_conclusion_tokens": []
+    }
+  ],
+  "incidents": {
+    "amber-sync": ["a-lease", "a-abort"],
+    "telemetry": ["b-tele", "b-tele2"]
+  }
+}
