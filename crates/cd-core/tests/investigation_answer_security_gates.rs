@@ -545,9 +545,9 @@ fn only_explicit_host_cause_establishes_root_despite_order_or_frequency() {
     );
 }
 
-fn collect_files(root: &Path, suffix: &str, output: &mut Vec<PathBuf>) {
+fn collect_files(root: &Path, suffix: &Path, output: &mut Vec<PathBuf>) {
     if root.is_file() {
-        if root.to_string_lossy().ends_with(suffix) {
+        if root.ends_with(suffix) {
             output.push(root.to_path_buf());
         }
         return;
@@ -632,8 +632,9 @@ fn runtime_ranking_and_prompts_do_not_embed_or_import_answer_key_vocabulary() {
     }
 
     let truth_root = manifest_dir.join("../../fixtures/log-lab/scenarios/retrieval-ablation/cases");
+    let truth_manifest_suffix = Path::new("truth").join("manifest.json");
     let mut manifests = Vec::new();
-    collect_files(&truth_root, "/truth/manifest.json", &mut manifests);
+    collect_files(&truth_root, &truth_manifest_suffix, &mut manifests);
     assert!(!manifests.is_empty(), "expected benchmark truth manifests");
     let mut oracle_strings = BTreeSet::new();
     for manifest in manifests {

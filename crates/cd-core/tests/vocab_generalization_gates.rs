@@ -646,7 +646,10 @@ fn derived_fixture_lexicon() -> BTreeSet<String> {
                     message_tokens.push(token.to_string());
                 }
             }
-        } else if path.to_string_lossy().contains("/import/") {
+        } else if path
+            .components()
+            .any(|component| component.as_os_str() == "import")
+        {
             for line in text.lines() {
                 match serde_json::from_str::<serde_json::Value>(line) {
                     Ok(value) => {
