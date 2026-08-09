@@ -111,6 +111,7 @@ models.
 | exact RC `37905a37` | `deepseek/deepseek-v4-flash` | failed twice at the 120 s whole-turn ceiling | deterministic retrieval completed in about 0.4 s, but four candidate rounds consumed about 105 s and left no final-synthesis budget; terminal result was `linked_synthesis_timeout` |
 | exact RC `37905a37` | `openai/gpt-oss-120b` | completed in about 25.1 s, about $0.00268 | grounded and partially useful: found the r17 configuration regression, propagated failures, rollback, and recovery, but withheld the initiating-cause claim, left `root_cause_established=false`, and did not cleanly isolate the telemetry decoy |
 | feature lineage `b2cb84c2` | `openai/gpt-oss-120b` | completed in about 23.6 s, about $0.00265 | improved symptom and unrelated-error classification, but still withheld the correct initiating-cause claim and left `root_cause_established=false` |
+| source build `73143222-dirty` with causal-agreement change later committed as `42ac0ce7` | `deepseek/deepseek-v4-flash` | completed in 74.0 s across five provider rounds, about $0.00346 | passed: established the invalid 250 ms lease window as the initiating cause, classified aborted requests as symptoms, separated telemetry as unrelated, cited rollback and recovery, and returned `root_cause_established=true` |
 
 The diagnostic DeepSeek run reported four provider rounds in about 105.4 s,
 10,867 completion tokens, 11,487 reported reasoning tokens, and approximately
@@ -124,6 +125,52 @@ timeline and several candidate ledgers, while V1 only admits candidate-local
 claims. The safe cross-candidate causal synthesis work is tracked in
 [issue #868](https://github.com/chriscase/ContextDesk/issues/868); existing
 candidate scoping must not be weakened to make this fixture pass.
+
+### 2026-08-09 causal-conclusion acceptance
+
+The first post-budget DeepSeek product run exposed a narrower blocker than
+cross-candidate retrieval: every candidate-stage ledger row was assigned
+`Neutral`, so the final validator was structurally unable to support an
+initiating-cause claim even when both model stages identified the correct
+configuration violation. The answer correctly named the cause but rendered it
+as `[withheld]` and set `root_cause_established=false`.
+
+Commit `42ac0ce7` replaces the free-form candidate draft with a strict
+`contextdesk.candidate_assessment.v1` proposal. It binds one typed
+classification and one or more exact supplied sequence numbers to the
+candidate's immutable evidence scope. Unknown fields, wrong candidate ids,
+empty analysis, missing/duplicate/foreign sequence numbers, fabricated
+code-like identifiers, and malformed JSON fail closed. Only an
+`initiating_cause` candidate assessment grants `Cause` role to the exact
+selected host evidence rows; the final comparison must separately place a
+claim in `initiating_causes` against those same rows before the existing answer
+validator establishes the root. Candidate/final disagreement still produces a
+withheld claim and `root_cause_established=false`.
+
+The same 31-record corpus and same question were rerun through the normal CLI
+product path with `deepseek/deepseek-v4-flash`. The source binary identified
+itself as `73143222-dirty`; the dirty set contained this causal change plus the
+separate protected-file credential work, and the causal file was committed
+immediately afterward as `42ac0ce7`. The run completed all four candidate
+assessments and the final comparison in 74,012 ms, reported approximately
+$0.003455 total cost, and returned:
+
+- supported initiating cause: `lease_window_ms=250` violates the supported
+  minimum of 1000 ms, citing `e:template:2:1`;
+- observed repeated lease expiry and epoch mismatch;
+- supported symptom: `RequestAborted` because the worker was unavailable;
+- competing/unrelated error: `TelemetrySinkTimeout`;
+- rollback to r16 with 4000 ms and worker/API recovery;
+- `root_cause_established=true`, with no `[withheld]` marker.
+
+The complete local JSON result is
+`/tmp/contextdesk-vercel-live.o3oaRs/deepseek-causal-consensus-73143222-dirty.json`.
+It contains no credential or authorization header. This path is temporary and
+is evidence for the refinement session, not a committed golden response. The
+repository's durable tests assert causal facts, evidence binding, stage
+agreement/disagreement, and fail-closed mutations rather than DeepSeek's exact
+wording. The key was read into the child process environment from the protected
+owner-only file; this acceptance run did not access Keychain.
 
 ### Discovery and CLI output lesson
 
